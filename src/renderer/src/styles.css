@@ -99,6 +99,10 @@
     border-bottom: 1px solid var(--color-border);
   }
 
+  .sidebar.app-sidebar > .brand-block {
+    -webkit-app-region: drag;
+  }
+
   .brand-mark {
     display: grid;
     width: 2rem;
@@ -134,10 +138,14 @@
   }
 
   @media (hover: hover) {
-    .app-sidebar .sidebar__menu-item:not([data-current="true"]):hover .sidebar__menu-item-content,
-    .app-sidebar .sidebar__menu-item:not([data-current="true"])[data-hovered="true"] .sidebar__menu-item-content {
+    .app-sidebar .sidebar__menu-item:not([data-current="true"]):not([aria-disabled="true"]):hover .sidebar__menu-item-content,
+    .app-sidebar .sidebar__menu-item:not([data-current="true"]):not([aria-disabled="true"])[data-hovered="true"] .sidebar__menu-item-content {
       background-color: color-mix(in srgb, var(--color-surface-secondary) 28%, transparent);
     }
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] .sidebar__menu-item[aria-disabled="true"] {
+    pointer-events: auto;
   }
 
   .app-header {

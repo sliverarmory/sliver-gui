@@ -34,4 +34,16 @@ describe("sidebar glass styles", () => {
       /\.sidebar__mobile-dialog:has\(>\s*\.sidebar__mobile\.app-sidebar\)\s*\{[^}]*backdrop-filter:\s*blur\(28px\) saturate\(135%\);/s,
     );
   });
+
+  it("keeps the desktop brand header draggable and collapsed disabled items tooltip-capable", () => {
+    expect(styles).toMatch(
+      /\.sidebar\.app-sidebar\s*>\s*\.brand-block\s*\{[^}]*-webkit-app-region:\s*drag;/s,
+    );
+    expect(styles).toMatch(
+      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.sidebar__menu-item\[aria-disabled="true"\]\s*\{[^}]*pointer-events:\s*auto;/s,
+    );
+    expect(styles).toMatch(
+      /button,\s*input,\s*textarea,\s*select\s*\{[^}]*-webkit-app-region:\s*no-drag;/s,
+    );
+  });
 });

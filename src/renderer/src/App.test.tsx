@@ -1,10 +1,11 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Sidebar } from "@heroui-pro/react/sidebar";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot } from "../../shared/contracts";
 import type { OperationResult, SavedConfigSummary, SliverDesktopAPI } from "../../shared/contracts";
-import { App, WindowMenu } from "./App";
+import { App, NavigationContent, WindowMenu } from "./App";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -71,6 +72,45 @@ describe("App startup", () => {
     window.dispatchEvent(new Event("focus"));
     await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Sidebar navigation", () => {
+  function renderNavigation(open: boolean) {
+    const onViewChange = vi.fn();
+    render(
+      <Sidebar.Provider collapsible="icon" open={open}>
+        <Sidebar className="app-sidebar">
+          <NavigationContent
+            snapshot={disconnectedSnapshot()}
+            view="operations"
+            onViewChange={onViewChange}
+          />
+        </Sidebar>
+      </Sidebar.Provider>,
+    );
+    return onViewChange;
+  }
+
+  it("shows labels as tooltips only while collapsed and keeps disabled items inactive", async () => {
+    const user = userEvent.setup();
+    const onViewChange = renderNavigation(false);
+    const generateItem = screen.getByRole("row", { name: "Generate" });
+    const tooltipTrigger = generateItem.querySelector<HTMLElement>("[data-slot=tooltip-trigger]");
+
+    expect(generateItem).toHaveAttribute("aria-disabled", "true");
+    expect(tooltipTrigger).not.toBeNull();
+    await user.hover(tooltipTrigger!);
+    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Generate");
+
+    await user.click(generateItem);
+    expect(onViewChange).not.toHaveBeenCalled();
+
+    cleanup();
+    renderNavigation(true);
+    const expandedItem = screen.getByRole("row", { name: "Generate" });
+    expect(expandedItem.querySelector("[data-slot=tooltip-trigger]")).toBeNull();
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 });
 

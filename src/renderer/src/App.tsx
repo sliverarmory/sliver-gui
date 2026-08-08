@@ -239,7 +239,7 @@ export function App() {
   );
 }
 
-function NavigationContent({
+export function NavigationContent({
   snapshot,
   view,
   onViewChange,
@@ -266,6 +266,7 @@ function NavigationContent({
               <Sidebar.MenuItem
                 key={item.id}
                 id={item.id}
+                aria-label={item.label}
                 textValue={item.label}
                 isCurrent={view === item.id}
                 isDisabled={!connected}

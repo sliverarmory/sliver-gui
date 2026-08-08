@@ -530,7 +530,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
               </div>
             </Modal.Header>
 
-            <Modal.Body className="gap-5">
+            <Modal.Body className="flex flex-col gap-5">
               {draftErrors.form && (
                 <div className="flex gap-2 rounded-xl border border-danger/25 bg-danger-soft px-3 py-2.5 text-sm text-danger-soft-foreground" role="alert">
                   <FontAwesomeIcon aria-hidden icon={faCircleExclamation} className="mt-0.5 size-3.5 shrink-0" />
