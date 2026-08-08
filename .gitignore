@@ -1,0 +1,16 @@
+/sliver/
+/sliver-script/
+/node_modules/
+/dist/
+/release/
+/coverage/
+/artifacts/
+*.tsbuildinfo
+*.log
+*.cfg
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+.DS_Store

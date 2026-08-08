@@ -1,0 +1,29 @@
+appId: io.sliver.client.gui
+productName: Sliver GUI
+asar: true
+directories:
+  output: release
+files:
+  - dist/**
+  - package.json
+extraMetadata:
+  main: dist/main/index.js
+mac:
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  target:
+    - dmg
+    - zip
+win:
+  target:
+    - nsis
+    - portable
+linux:
+  category: Development
+  target:
+    - AppImage
+    - deb
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
