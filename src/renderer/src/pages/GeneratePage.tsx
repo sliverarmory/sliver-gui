@@ -1,23 +1,50 @@
 import { useMemo, useState } from "react";
 import { Button, Card, Chip, toast } from "@heroui/react";
-import { NativeSelect } from "@heroui-pro/react/native-select";
+import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faApple, faLinux, faWindows } from "@fortawesome/free-brands-svg-icons";
 import {
+  faArrowRight,
   faArrowRotateLeft,
+  faBan,
   faBolt,
+  faBoxArchive,
   faChevronRight,
+  faCircleXmark,
   faCode,
+  faCodeBranch,
+  faCopy,
+  faDesktop,
+  faDice,
   faDownload,
+  faEraser,
+  faFileCode,
   faFloppyDisk,
+  faGaugeHigh,
+  faGaugeSimple,
+  faGear,
+  faGears,
   faGlobe,
+  faListOl,
+  faMicrochip,
+  faPuzzlePiece,
+  faSatelliteDish,
   faShieldHalved,
+  faShuffle,
+  faTerminal,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
   ArtifactFormat,
   GenerateInput,
   SliverSnapshot,
 } from "../../../shared/contracts";
-import { AreaField, Field, SelectField, SwitchRow } from "../components/FormControls";
+import {
+  AreaField,
+  Field,
+  SelectField,
+  SwitchRow,
+  type SelectFieldOption,
+} from "../components/FormControls";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cloneGenerateInput, defaultGenerateInput } from "../../../shared/generate-defaults";
 
@@ -42,6 +69,82 @@ const formatLabels: Record<ArtifactFormat, string> = {
   shellcode: "Shellcode",
   archive: "Go archive",
 };
+
+const operatingSystemIcons: Record<string, IconDefinition> = {
+  windows: faWindows,
+  darwin: faApple,
+  linux: faLinux,
+};
+
+const operatingSystemLabels: Record<string, string> = {
+  windows: "Windows",
+  darwin: "macOS",
+  linux: "Linux",
+};
+
+const implantTypeOptions: SelectFieldOption[] = [
+  { value: "session", label: "Interactive session", icon: faTerminal },
+  { value: "beacon", label: "Asynchronous beacon", icon: faSatelliteDish },
+];
+
+const connectionStrategyOptions: SelectFieldOption[] = [
+  { value: "", label: "Sequential", icon: faListOl },
+  { value: "s", label: "Random start", icon: faShuffle },
+  { value: "r", label: "Random", icon: faDice },
+  { value: "rd", label: "Random domain", icon: faGlobe },
+];
+
+const entropyOptions: SelectFieldOption[] = [
+  { value: "1", label: "None", icon: faBan },
+  { value: "2", label: "Low", icon: faGaugeSimple },
+  { value: "3", label: "High", icon: faGaugeHigh },
+];
+
+const exitBehaviorOptions: SelectFieldOption[] = [
+  { value: "1", label: "Thread", icon: faCodeBranch },
+  { value: "2", label: "Process", icon: faGear },
+  { value: "3", label: "SEH", icon: faShieldHalved },
+];
+
+const bypassOptions: SelectFieldOption[] = [
+  { value: "1", label: "None", icon: faBan },
+  { value: "2", label: "Abort on failure", icon: faCircleXmark },
+  { value: "3", label: "Continue on failure", icon: faArrowRight },
+];
+
+const headerOptions: SelectFieldOption[] = [
+  { value: "1", label: "Overwrite", icon: faEraser },
+  { value: "2", label: "Copy", icon: faCopy },
+];
+
+const formatIcons: Record<ArtifactFormat, IconDefinition> = {
+  executable: faFileCode,
+  service: faGears,
+  shared: faPuzzlePiece,
+  shellcode: faCode,
+  archive: faBoxArchive,
+};
+
+function operatingSystemOption(os: string): SelectFieldOption {
+  return {
+    value: os,
+    label: operatingSystemLabels[os] ?? os,
+    icon: operatingSystemIcons[os] ?? faDesktop,
+  };
+}
+
+function architectureOption(arch: string): SelectFieldOption {
+  const normalized = arch.toLowerCase();
+  return {
+    value: arch,
+    label: normalized === "386" ? "x86 (386)" : arch.toUpperCase(),
+    icon: normalized.includes("arm") || normalized.includes("riscv") ? faMicrochip : faDesktop,
+  };
+}
+
+function formatOption(format: ArtifactFormat): SelectFieldOption {
+  return { value: format, label: formatLabels[format], icon: formatIcons[format] };
+}
 
 function unique(values: string[]): string[] {
   return [...new Set(values)].sort();
@@ -149,17 +252,19 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   }
 
   return (
-    <div className="page-stack">
-      <section className="page-heading">
-        <div>
-          <div className="eyebrow"><FontAwesomeIcon icon={faBolt} /> Build pipeline</div>
-          <h1>Generate implant</h1>
-          <p>Configure a reproducible artifact, compile it on the connected server, and save it locally.</p>
-        </div>
-        <Chip size="sm" variant="soft" color="accent">
-          {targets.length} compiler targets
-        </Chip>
-      </section>
+    <div className="generate-page">
+      <div className="generate-page__content">
+        <div className="page-stack">
+          <section className="page-heading">
+            <div>
+              <div className="eyebrow"><FontAwesomeIcon icon={faBolt} /> Build pipeline</div>
+              <h1>Generate implant</h1>
+              <p>Configure a reproducible artifact, compile it on the connected server, and save it locally.</p>
+            </div>
+            <Chip size="sm" variant="soft" color="accent">
+              {targets.length} compiler targets
+            </Chip>
+          </section>
 
       <Card variant="secondary">
         <Card.Header>
@@ -181,25 +286,26 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             label="Implant type"
             value={form.implantType}
             onChange={(value) => update("implantType", value as GenerateInput["implantType"])}
-          >
-            <NativeSelect.Option value="session">Interactive session</NativeSelect.Option>
-            <NativeSelect.Option value="beacon">Asynchronous beacon</NativeSelect.Option>
-          </SelectField>
-          <SelectField label="Operating system" value={form.os} onChange={changeOperatingSystem}>
-            {operatingSystems.map((os) => <NativeSelect.Option key={os} value={os}>{os}</NativeSelect.Option>)}
-          </SelectField>
-          <SelectField label="Architecture" value={form.arch} onChange={changeArchitecture}>
-            {architectures.map((arch) => <NativeSelect.Option key={arch} value={arch}>{arch}</NativeSelect.Option>)}
-          </SelectField>
+            options={implantTypeOptions}
+          />
+          <SelectField
+            label="Operating system"
+            value={form.os}
+            onChange={changeOperatingSystem}
+            options={operatingSystems.map(operatingSystemOption)}
+          />
+          <SelectField
+            label="Architecture"
+            value={form.arch}
+            onChange={changeArchitecture}
+            options={architectures.map(architectureOption)}
+          />
           <SelectField
             label="Output format"
             value={form.format}
             onChange={(value) => update("format", value as ArtifactFormat)}
-          >
-            {formats.map((format) => (
-              <NativeSelect.Option key={format} value={format}>{formatLabels[format]}</NativeSelect.Option>
-            ))}
-          </SelectField>
+            options={formats.map(formatOption)}
+          />
           <Field
             label="Template"
             value={form.templateName}
@@ -233,12 +339,8 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
               value={form.connectionStrategy}
               onChange={(value) => update("connectionStrategy", value as GenerateInput["connectionStrategy"])}
               description="Sequential is the deterministic default."
-            >
-              <NativeSelect.Option value="">Sequential</NativeSelect.Option>
-              <NativeSelect.Option value="s">Random start</NativeSelect.Option>
-              <NativeSelect.Option value="r">Random</NativeSelect.Option>
-              <NativeSelect.Option value="rd">Random domain</NativeSelect.Option>
-            </SelectField>
+              options={connectionStrategyOptions}
+            />
             <Field
               label="Reconnect delay (seconds)"
               type="number"
@@ -280,7 +382,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
           <span><FontAwesomeIcon icon={faShieldHalved} /> Build hardening</span>
           <FontAwesomeIcon icon={faChevronRight} className="advanced-chevron" />
         </summary>
-        <div className="advanced-content grid gap-x-8 md:grid-cols-2">
+        <div className="advanced-content grid gap-x-8 gap-y-4 md:grid-cols-2">
           <SwitchRow label="Obfuscate symbols" description="Randomize identifiers in the generated source." selected={form.obfuscateSymbols} onChange={(value) => update("obfuscateSymbols", value)} />
           <SwitchRow label="Pure Go networking" description="Prefer the portable Go resolver and networking stack." selected={form.netGo} onChange={(value) => update("netGo", value)} />
           <SwitchRow label="Evasion" description="Enable target-specific defensive evasion at compile time." selected={form.evasion} onChange={(value) => update("evasion", value)} />
@@ -315,40 +417,54 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
         </div>
       </details>
 
-      {form.format === "shellcode" ? (
-        <details className="advanced-section" open>
-          <summary>
-            <span><FontAwesomeIcon icon={faCode} /> Shellcode</span>
-            <FontAwesomeIcon icon={faChevronRight} className="advanced-chevron" />
-          </summary>
-          <div className="advanced-content">
-            <div className="grid gap-x-8 md:grid-cols-2">
-              <SwitchRow label="Compress shellcode" description="Reduce the local payload size." selected={form.shellcode.compress} onChange={(value) => updateShellcode("compress", value)} />
-              <SwitchRow label="Run in a new thread" description="Transfer control through a newly created thread." selected={form.shellcode.runInThread} onChange={(value) => updateShellcode("runInThread", value)} />
-              <SwitchRow label="Unicode" description="Use the Unicode-compatible execution path." selected={form.shellcode.unicode} onChange={(value) => updateShellcode("unicode", value)} />
-            </div>
-            <div className="form-grid form-grid--three mt-5">
-              <SelectField label="Entropy" value={String(form.shellcode.entropy)} onChange={(value) => updateShellcode("entropy", Number(value) as 1 | 2 | 3)}>
-                <NativeSelect.Option value="1">None</NativeSelect.Option><NativeSelect.Option value="2">Low</NativeSelect.Option><NativeSelect.Option value="3">High</NativeSelect.Option>
-              </SelectField>
-              <SelectField label="Exit behavior" value={String(form.shellcode.exitOption)} onChange={(value) => updateShellcode("exitOption", Number(value) as 1 | 2 | 3)}>
-                <NativeSelect.Option value="1">Thread</NativeSelect.Option><NativeSelect.Option value="2">Process</NativeSelect.Option><NativeSelect.Option value="3">SEH</NativeSelect.Option>
-              </SelectField>
-              <SelectField label="Bypass" value={String(form.shellcode.bypass)} onChange={(value) => updateShellcode("bypass", Number(value) as 1 | 2 | 3)}>
-                <NativeSelect.Option value="1">None</NativeSelect.Option><NativeSelect.Option value="2">Abort on failure</NativeSelect.Option><NativeSelect.Option value="3">Continue on failure</NativeSelect.Option>
-              </SelectField>
-              <SelectField label="Headers" value={String(form.shellcode.headers)} onChange={(value) => updateShellcode("headers", Number(value) as 1 | 2)}>
-                <NativeSelect.Option value="1">Overwrite</NativeSelect.Option><NativeSelect.Option value="2">Copy</NativeSelect.Option>
-              </SelectField>
-              <Field label="Original entry point" type="number" min={0} value={String(form.shellcode.originalEntryPoint)} onChange={(value) => updateShellcode("originalEntryPoint", Number(value))} />
-            </div>
-          </div>
-        </details>
-      ) : null}
+          {form.format === "shellcode" ? (
+            <details className="advanced-section" open>
+              <summary>
+                <span><FontAwesomeIcon icon={faCode} /> Shellcode</span>
+                <FontAwesomeIcon icon={faChevronRight} className="advanced-chevron" />
+              </summary>
+              <div className="advanced-content">
+                <div className="grid gap-x-8 gap-y-3 md:grid-cols-2">
+                  <SwitchRow label="Compress shellcode" description="Reduce the local payload size." selected={form.shellcode.compress} onChange={(value) => updateShellcode("compress", value)} />
+                  <SwitchRow label="Run in a new thread" description="Transfer control through a newly created thread." selected={form.shellcode.runInThread} onChange={(value) => updateShellcode("runInThread", value)} />
+                  <SwitchRow label="Unicode" description="Use the Unicode-compatible execution path." selected={form.shellcode.unicode} onChange={(value) => updateShellcode("unicode", value)} />
+                </div>
+                <div className="form-grid form-grid--three mt-5">
+                  <SelectField
+                    label="Entropy"
+                    value={String(form.shellcode.entropy)}
+                    onChange={(value) => updateShellcode("entropy", Number(value) as 1 | 2 | 3)}
+                    options={entropyOptions}
+                  />
+                  <SelectField
+                    label="Exit behavior"
+                    value={String(form.shellcode.exitOption)}
+                    onChange={(value) => updateShellcode("exitOption", Number(value) as 1 | 2 | 3)}
+                    options={exitBehaviorOptions}
+                  />
+                  <SelectField
+                    label="Bypass"
+                    value={String(form.shellcode.bypass)}
+                    onChange={(value) => updateShellcode("bypass", Number(value) as 1 | 2 | 3)}
+                    options={bypassOptions}
+                  />
+                  <SelectField
+                    label="Headers"
+                    value={String(form.shellcode.headers)}
+                    onChange={(value) => updateShellcode("headers", Number(value) as 1 | 2)}
+                    options={headerOptions}
+                  />
+                  <Field label="Original entry point" type="number" min={0} value={String(form.shellcode.originalEntryPoint)} onChange={(value) => updateShellcode("originalEntryPoint", Number(value))} />
+                </div>
+              </div>
+            </details>
+          ) : null}
+        </div>
+      </div>
 
-      <Card variant="secondary" className="action-card">
-        <Card.Content className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="min-w-0 flex-1">
+      <footer aria-label="Generate actions" className="generate-page__footer">
+        <div className="generate-page__footer-content">
+          <div className="generate-page__footer-field">
             <Field
               label="Reusable profile name"
               value={profileName}
@@ -357,7 +473,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
               description="Saving an existing name replaces its configuration."
             />
           </div>
-          <div className="flex flex-wrap gap-3 lg:justify-end">
+          <div className="generate-page__footer-actions">
             <Button variant="tertiary" onPress={() => setForm(cloneGenerateInput(defaultGenerateInput))}>
               <FontAwesomeIcon icon={faArrowRotateLeft} /> Reset
             </Button>
@@ -368,8 +484,8 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
               <FontAwesomeIcon icon={faDownload} /> Generate and save
             </Button>
           </div>
-        </Card.Content>
-      </Card>
+        </div>
+      </footer>
 
       <ConfirmDialog
         isOpen={confirmOverwrite}

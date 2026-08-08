@@ -13,7 +13,6 @@ import {
   NumberField,
   ScrollShadow,
   Select,
-  Switch,
   TextField,
   Tooltip,
 } from "@heroui/react";
@@ -51,6 +50,7 @@ import type {
   RecentEventSummary,
   SliverSnapshot,
 } from "../../../shared/contracts";
+import { SwitchRow } from "../components/FormControls";
 import {
   LISTENER_PROTOCOLS,
   createListenerDraft,
@@ -764,15 +764,15 @@ function ProtocolFields({
             onChange={(domains) => setDraft((current) => ({ ...current, domains }))}
           />
           <div className="grid gap-3 sm:grid-cols-2">
-            <SettingSwitch
+            <SwitchRow
               description="Reject callbacks that do not present a valid one-time token."
-              isSelected={draft.enforceOtp}
+              selected={draft.enforceOtp}
               label="Enforce OTP"
               onChange={(enforceOtp) => setDraft((current) => ({ ...current, enforceOtp }))}
             />
-            <SettingSwitch
+            <SwitchRow
               description="Enable DNS canary behavior for this listener."
-              isSelected={draft.canaries}
+              selected={draft.canaries}
               label="DNS canaries"
               onChange={(canaries) => setDraft((current) => ({ ...current, canaries }))}
             />
@@ -825,17 +825,17 @@ function ProtocolFields({
             />
           </div>
           <div className={`grid gap-3 ${draft.kind === "https" ? "sm:grid-cols-3" : "sm:grid-cols-1"}`}>
-            <SettingSwitch
+            <SwitchRow
               description="Require one-time authentication for HTTP callbacks."
-              isSelected={draft.enforceOtp}
+              selected={draft.enforceOtp}
               label="Enforce OTP"
               onChange={(enforceOtp) => setDraft((current) => ({ ...current, enforceOtp }))}
             />
             {draft.kind === "https" && (
               <>
-                <SettingSwitch
+                <SwitchRow
                   description="Request and manage a public TLS certificate with ACME."
-                  isSelected={draft.acme}
+                  selected={draft.acme}
                   label="ACME certificate"
                   onChange={(acme) => {
                     setDraft((current) => ({
@@ -845,9 +845,9 @@ function ProtocolFields({
                     }));
                   }}
                 />
-                <SettingSwitch
+                <SwitchRow
                   description="Randomize the listener's TLS JARM fingerprint."
-                  isSelected={draft.randomizeJarm}
+                  selected={draft.randomizeJarm}
                   label="Randomize JARM"
                   onChange={(randomizeJarm) =>
                     setDraft((current) => ({ ...current, randomizeJarm }))
@@ -1088,39 +1088,6 @@ function NumberControl({
       {description && <Description>{description}</Description>}
       {error && <FieldError>{error}</FieldError>}
     </NumberField>
-  );
-}
-
-interface SettingSwitchProps {
-  description: string;
-  isSelected: boolean;
-  label: string;
-  onChange: (isSelected: boolean) => void;
-}
-
-function SettingSwitch({
-  description,
-  isSelected,
-  label,
-  onChange,
-}: SettingSwitchProps): React.JSX.Element {
-  return (
-    <Switch
-      className="w-full rounded-xl border border-separator bg-default p-3"
-      isSelected={isSelected}
-      size="sm"
-      onChange={onChange}
-    >
-      <Switch.Content className="flex w-full items-start gap-2.5">
-        <Switch.Control className="mt-0.5 shrink-0">
-          <Switch.Thumb />
-        </Switch.Control>
-        <span className="min-w-0">
-          <span className="block text-xs font-medium text-foreground">{label}</span>
-          <span className="mt-0.5 block text-xs leading-relaxed text-muted">{description}</span>
-        </span>
-      </Switch.Content>
-    </Switch>
   );
 }
 

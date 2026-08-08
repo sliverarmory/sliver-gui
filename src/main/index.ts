@@ -5,7 +5,8 @@ import { app, BrowserWindow, Menu, session, shell } from "electron";
 
 import { ConnectionRegistry } from "./connection-registry.js";
 import { registerIpcHandlers } from "./ipc.js";
-import { configureSessionSecurity, hardenWindow, secureWebPreferences } from "./security.js";
+import { configureSessionSecurity, hardenWindow } from "./security.js";
+import { mainWindowOptions } from "./window-options.js";
 
 const registry = new ConnectionRegistry();
 const windows = new Set<BrowserWindow>();
@@ -32,17 +33,9 @@ function readDevelopmentRendererUrl(): string | undefined {
 }
 
 function createWindow(inheritFromContentsId?: number): BrowserWindow {
-  const window = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 960,
-    minHeight: 680,
-    show: false,
-    backgroundColor: "#0b0d10",
-    title: "Sliver GUI",
-    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
-    webPreferences: secureWebPreferences(join(mainBundleDirectory, "../preload/index.cjs")),
-  });
+  const window = new BrowserWindow(
+    mainWindowOptions(join(mainBundleDirectory, "../preload/index.cjs")),
+  );
 
   const contentsId = window.webContents.id;
   windows.add(window);

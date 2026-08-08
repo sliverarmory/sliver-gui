@@ -167,7 +167,7 @@ export function App() {
       <Sidebar.Mobile backdrop="blur" className="app-sidebar">
         <NavigationContent snapshot={snapshot} view={view} onViewChange={setView} />
       </Sidebar.Mobile>
-      <Sidebar.Main className="min-w-0 bg-background">
+      <Sidebar.Main className="app-main min-w-0">
         <header className="app-header">
           <div className="flex min-w-0 items-center gap-3">
             <Sidebar.Trigger aria-label="Toggle navigation">
@@ -202,7 +202,11 @@ export function App() {
             )}
           </div>
         </header>
-        <div className="app-content">
+        <div
+          className={view === "generate" && connected
+            ? "app-content app-content--generate"
+            : "app-content"}
+        >
           {connected ? (
             <>
               {view === "operations" ? <OperationsPage snapshot={snapshot} /> : null}
