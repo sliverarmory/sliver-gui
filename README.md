@@ -44,6 +44,13 @@ The GUI does not import or modify upstream `./sliver/` source. The current
 definitions, so a clean distribution of this repository must pin or include
 that checkout before it is independently reproducible.
 
+All tracked first-party JavaScript and JSX application, test, and tool-config
+source has been converted to strict TypeScript. HTML, CSS, JSON, and packaging
+metadata remain in their native formats. The adjacent `sliver` and
+`sliver-script` checkouts, dependencies, and generated `dist` and `release`
+outputs are ignored repository boundaries and are not part of the GUI's
+TypeScript source project.
+
 Requirements: Node.js 24 or newer and npm.
 
 ```sh

@@ -91,17 +91,17 @@ export function AreaField({
   );
 }
 
-export interface SelectFieldOption {
-  value: string;
+export interface SelectFieldOption<Value extends string = string> {
+  value: Value;
   label: string;
   icon: IconDefinition;
 }
 
-interface SelectFieldProps {
+interface SelectFieldProps<Value extends string> {
   label: string;
-  value: string;
-  onChange: (value: string) => void;
-  options: SelectFieldOption[];
+  value: Value;
+  onChange: (value: Value) => void;
+  options: readonly SelectFieldOption<Value>[];
   description?: string;
   disabled?: boolean;
 }
@@ -112,14 +112,23 @@ function optionKey(value: string): string {
   return value === "" ? EMPTY_SELECT_KEY : value;
 }
 
-export function SelectField({
+export function selectFieldValueFromKey<Value extends string>(
+  options: readonly Pick<SelectFieldOption<Value>, "value">[],
+  key: unknown,
+): Value | undefined {
+  if (typeof key !== "string" && typeof key !== "number") return undefined;
+  const normalizedKey = String(key);
+  return options.find((option) => optionKey(option.value) === normalizedKey)?.value;
+}
+
+export function SelectField<Value extends string>({
   label,
   value,
   onChange,
   options,
   description,
   disabled,
-}: SelectFieldProps) {
+}: SelectFieldProps<Value>) {
   const selectedOption = options.find((option) => option.value === value);
 
   return (
@@ -129,9 +138,8 @@ export function SelectField({
       value={optionKey(value)}
       {...(disabled ? { isDisabled: true } : {})}
       onChange={(nextValue) => {
-        if (nextValue === null || Array.isArray(nextValue)) return;
-        const normalized = String(nextValue);
-        onChange(normalized === EMPTY_SELECT_KEY ? "" : normalized);
+        const selectedValue = selectFieldValueFromKey(options, nextValue);
+        if (selectedValue !== undefined) onChange(selectedValue);
       }}
     >
       <Label>{label}</Label>

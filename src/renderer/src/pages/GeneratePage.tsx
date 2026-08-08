@@ -82,40 +82,54 @@ const operatingSystemLabels: Record<string, string> = {
   linux: "Linux",
 };
 
-const implantTypeOptions: SelectFieldOption[] = [
+const implantTypeOptions = [
   { value: "session", label: "Interactive session", icon: faTerminal },
   { value: "beacon", label: "Asynchronous beacon", icon: faSatelliteDish },
-];
+] satisfies readonly SelectFieldOption<GenerateInput["implantType"]>[];
 
-const connectionStrategyOptions: SelectFieldOption[] = [
+const connectionStrategyOptions = [
   { value: "", label: "Sequential", icon: faListOl },
   { value: "s", label: "Random start", icon: faShuffle },
   { value: "r", label: "Random", icon: faDice },
   { value: "rd", label: "Random domain", icon: faGlobe },
-];
+] satisfies readonly SelectFieldOption<GenerateInput["connectionStrategy"]>[];
 
-const entropyOptions: SelectFieldOption[] = [
+const ONE_TO_THREE_VALUES = {
+  "1": 1,
+  "2": 2,
+  "3": 3,
+} as const;
+
+const ONE_TO_TWO_VALUES = {
+  "1": 1,
+  "2": 2,
+} as const;
+
+type OneToThreeSelection = keyof typeof ONE_TO_THREE_VALUES;
+type OneToTwoSelection = keyof typeof ONE_TO_TWO_VALUES;
+
+const entropyOptions = [
   { value: "1", label: "None", icon: faBan },
   { value: "2", label: "Low", icon: faGaugeSimple },
   { value: "3", label: "High", icon: faGaugeHigh },
-];
+] satisfies readonly SelectFieldOption<OneToThreeSelection>[];
 
-const exitBehaviorOptions: SelectFieldOption[] = [
+const exitBehaviorOptions = [
   { value: "1", label: "Thread", icon: faCodeBranch },
   { value: "2", label: "Process", icon: faGear },
   { value: "3", label: "SEH", icon: faShieldHalved },
-];
+] satisfies readonly SelectFieldOption<OneToThreeSelection>[];
 
-const bypassOptions: SelectFieldOption[] = [
+const bypassOptions = [
   { value: "1", label: "None", icon: faBan },
   { value: "2", label: "Abort on failure", icon: faCircleXmark },
   { value: "3", label: "Continue on failure", icon: faArrowRight },
-];
+] satisfies readonly SelectFieldOption<OneToThreeSelection>[];
 
-const headerOptions: SelectFieldOption[] = [
+const headerOptions = [
   { value: "1", label: "Overwrite", icon: faEraser },
   { value: "2", label: "Copy", icon: faCopy },
-];
+] satisfies readonly SelectFieldOption<OneToTwoSelection>[];
 
 const formatIcons: Record<ArtifactFormat, IconDefinition> = {
   executable: faFileCode,
@@ -142,12 +156,33 @@ function architectureOption(arch: string): SelectFieldOption {
   };
 }
 
-function formatOption(format: ArtifactFormat): SelectFieldOption {
+function formatOption(format: ArtifactFormat): SelectFieldOption<ArtifactFormat> {
   return { value: format, label: formatLabels[format], icon: formatIcons[format] };
 }
 
-function unique(values: string[]): string[] {
+function unique<Value extends string>(values: readonly Value[]): Value[] {
   return [...new Set(values)].sort();
+}
+
+type KeysWithValue<T, Value> = {
+  [Key in keyof T]-?: T[Key] extends Value ? Key : never;
+}[keyof T];
+
+type NumericGenerateInputKey = KeysWithValue<GenerateInput, number>;
+
+export function parseNumberInput(value: string): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function oneToThreeSelection(value: 1 | 2 | 3): OneToThreeSelection {
+  if (value === 1) return "1";
+  if (value === 2) return "2";
+  return "3";
+}
+
+function oneToTwoSelection(value: 1 | 2): OneToTwoSelection {
+  return value === 1 ? "1" : "2";
 }
 
 export function GeneratePage({ snapshot }: GeneratePageProps) {
@@ -170,14 +205,16 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
     targets
       .filter((target) => target.os === form.os && target.arch === form.arch)
       .map((target) => target.format),
-  ) as ArtifactFormat[];
+  );
 
   function update<K extends keyof GenerateInput>(key: K, value: GenerateInput[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
-  function updateNumber<K extends keyof GenerateInput>(key: K, value: string) {
-    update(key, Number(value) as GenerateInput[K]);
+  function updateNumber(key: NumericGenerateInputKey, value: string) {
+    const parsed = parseNumberInput(value);
+    if (parsed === undefined) return;
+    setForm((current) => ({ ...current, [key]: parsed }));
   }
 
   function updateShellcode<K extends keyof GenerateInput["shellcode"]>(
@@ -285,7 +322,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
           <SelectField
             label="Implant type"
             value={form.implantType}
-            onChange={(value) => update("implantType", value as GenerateInput["implantType"])}
+            onChange={(value) => update("implantType", value)}
             options={implantTypeOptions}
           />
           <SelectField
@@ -303,7 +340,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
           <SelectField
             label="Output format"
             value={form.format}
-            onChange={(value) => update("format", value as ArtifactFormat)}
+            onChange={(value) => update("format", value)}
             options={formats.map(formatOption)}
           />
           <Field
@@ -337,7 +374,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             <SelectField
               label="Connection strategy"
               value={form.connectionStrategy}
-              onChange={(value) => update("connectionStrategy", value as GenerateInput["connectionStrategy"])}
+              onChange={(value) => update("connectionStrategy", value)}
               description="Sequential is the deterministic default."
               options={connectionStrategyOptions}
             />
@@ -432,29 +469,38 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
                 <div className="form-grid form-grid--three mt-5">
                   <SelectField
                     label="Entropy"
-                    value={String(form.shellcode.entropy)}
-                    onChange={(value) => updateShellcode("entropy", Number(value) as 1 | 2 | 3)}
+                    value={oneToThreeSelection(form.shellcode.entropy)}
+                    onChange={(value) => updateShellcode("entropy", ONE_TO_THREE_VALUES[value])}
                     options={entropyOptions}
                   />
                   <SelectField
                     label="Exit behavior"
-                    value={String(form.shellcode.exitOption)}
-                    onChange={(value) => updateShellcode("exitOption", Number(value) as 1 | 2 | 3)}
+                    value={oneToThreeSelection(form.shellcode.exitOption)}
+                    onChange={(value) => updateShellcode("exitOption", ONE_TO_THREE_VALUES[value])}
                     options={exitBehaviorOptions}
                   />
                   <SelectField
                     label="Bypass"
-                    value={String(form.shellcode.bypass)}
-                    onChange={(value) => updateShellcode("bypass", Number(value) as 1 | 2 | 3)}
+                    value={oneToThreeSelection(form.shellcode.bypass)}
+                    onChange={(value) => updateShellcode("bypass", ONE_TO_THREE_VALUES[value])}
                     options={bypassOptions}
                   />
                   <SelectField
                     label="Headers"
-                    value={String(form.shellcode.headers)}
-                    onChange={(value) => updateShellcode("headers", Number(value) as 1 | 2)}
+                    value={oneToTwoSelection(form.shellcode.headers)}
+                    onChange={(value) => updateShellcode("headers", ONE_TO_TWO_VALUES[value])}
                     options={headerOptions}
                   />
-                  <Field label="Original entry point" type="number" min={0} value={String(form.shellcode.originalEntryPoint)} onChange={(value) => updateShellcode("originalEntryPoint", Number(value))} />
+                  <Field
+                    label="Original entry point"
+                    type="number"
+                    min={0}
+                    value={String(form.shellcode.originalEntryPoint)}
+                    onChange={(value) => {
+                      const parsed = parseNumberInput(value);
+                      if (parsed !== undefined) updateShellcode("originalEntryPoint", parsed);
+                    }}
+                  />
                 </div>
               </div>
             </details>

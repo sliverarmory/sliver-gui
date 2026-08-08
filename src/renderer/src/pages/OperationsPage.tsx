@@ -53,7 +53,11 @@ import type {
 import { SwitchRow } from "../components/FormControls";
 import {
   LISTENER_PROTOCOLS,
+  LISTENER_PROTOCOL_BY_KIND,
+  STAGE_COMPRESSION_OPTIONS,
   createListenerDraft,
+  isListenerKind,
+  isStageCompression,
   listenerInputFromDraft,
   validateListenerDraft,
   type ListenerDraft,
@@ -271,8 +275,9 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
         }));
         return;
       }
-      setCertificatePair(result.value);
-      setDraft((current) => ({ ...current, certificateToken: result.value?.token ?? "" }));
+      const selectedPair = result.value;
+      setCertificatePair(selectedPair);
+      setDraft((current) => ({ ...current, certificateToken: selectedPair.token }));
     } catch (error: unknown) {
       setDraftErrors((current) => ({ ...current, certificateToken: errorMessage(error) }));
     } finally {
@@ -294,7 +299,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
       }
 
       const jobLabel = result.value ? ` as job #${result.value.id}` : "";
-      const protocol = LISTENER_PROTOCOLS.find((item) => item.id === draft.kind)?.shortLabel ?? draft.kind;
+      const protocol = LISTENER_PROTOCOL_BY_KIND[draft.kind].shortLabel;
       setFeedback({ tone: "success", message: `${protocol} listener started${jobLabel}.` });
       setIsCreateOpen(false);
       setDraftErrors({});
@@ -336,7 +341,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
   }, [confirmation]);
 
   const stream = snapshot.eventStream;
-  const selectedProtocol = LISTENER_PROTOCOLS.find((protocol) => protocol.id === draft.kind)!;
+  const selectedProtocol = LISTENER_PROTOCOL_BY_KIND[draft.kind];
 
   return (
     <section className="page-stack">
@@ -543,7 +548,9 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                   fullWidth
                   value={draft.kind}
                   variant="secondary"
-                  onChange={(value) => changeProtocol(String(value) as ListenerKind)}
+                  onChange={(value) => {
+                    if (isListenerKind(value)) changeProtocol(value);
+                  }}
                 >
                   <Label>Protocol</Label>
                   <Select.Trigger>
@@ -908,9 +915,13 @@ function ProtocolFields({
               placeholder={profiles.length > 0 ? "Choose a profile" : "No profiles available"}
               value={draft.profileName || null}
               variant="secondary"
-              onChange={(value) =>
-                setDraft((current) => ({ ...current, profileName: value === null ? "" : String(value) }))
-              }
+              onChange={(value) => {
+                if (value === null) {
+                  setDraft((current) => ({ ...current, profileName: "" }));
+                } else if (typeof value === "string" && profiles.includes(value)) {
+                  setDraft((current) => ({ ...current, profileName: value }));
+                }
+              }}
             >
               <Label>Implant profile</Label>
               <Select.Trigger>
@@ -933,12 +944,11 @@ function ProtocolFields({
               fullWidth
               value={draft.compression}
               variant="secondary"
-              onChange={(value) =>
-                setDraft((current) => ({
-                  ...current,
-                  compression: String(value) as ListenerDraft["compression"],
-                }))
-              }
+              onChange={(value) => {
+                if (isStageCompression(value)) {
+                  setDraft((current) => ({ ...current, compression: value }));
+                }
+              }}
             >
               <Label>Compression</Label>
               <Select.Trigger>
@@ -948,14 +958,9 @@ function ProtocolFields({
               <Description>Applied before encryption and size prefixing.</Description>
               <Select.Popover>
                 <ListBox>
-                  {[
-                    ["none", "None"],
-                    ["zlib", "Zlib"],
-                    ["gzip", "Gzip"],
-                    ["deflate", "Deflate level 9"],
-                  ].map(([id, label]) => (
-                    <ListBox.Item id={id!} key={id} textValue={label!}>
-                      {label}
+                  {STAGE_COMPRESSION_OPTIONS.map((option) => (
+                    <ListBox.Item id={option.id} key={option.id} textValue={option.label}>
+                      {option.label}
                       <ListBox.ItemIndicator />
                     </ListBox.Item>
                   ))}

@@ -79,7 +79,7 @@ export function App() {
     };
   }, [loadSavedConfigs]);
 
-  const connect = useCallback(async (): Promise<boolean> => {
+  const connect = useCallback(async (): Promise<void> => {
     setIsConnecting(true);
     try {
       const result = await window.sliver.chooseConfig();
@@ -87,39 +87,35 @@ export function App() {
         if (result.error && !/cancel/i.test(result.error)) {
           toast.danger("Connection failed", { description: result.error });
         }
-        return false;
+        return;
       }
       setSnapshot(result.value);
       setIsConfigSelectorOpen(false);
       toast.success("Connected", { description: result.value.connection.server });
-      return true;
     } catch (error) {
       toast.danger("Connection failed", {
         description: error instanceof Error ? error.message : String(error),
       });
-      return false;
     } finally {
       setIsConnecting(false);
     }
   }, []);
 
-  const connectSavedConfig = useCallback(async (config: SavedConfigSummary): Promise<boolean> => {
+  const connectSavedConfig = useCallback(async (config: SavedConfigSummary): Promise<void> => {
     setIsConnecting(true);
     try {
       const result = await window.sliver.connectSavedConfig(config.id);
       if (!result.ok || !result.value) {
         toast.danger("Connection failed", { description: result.error });
-        return false;
+        return;
       }
       setSnapshot(result.value);
       setIsConfigSelectorOpen(false);
       toast.success("Connected", { description: result.value.connection.server });
-      return true;
     } catch (error) {
       toast.danger("Connection failed", {
         description: error instanceof Error ? error.message : String(error),
       });
-      return false;
     } finally {
       setIsConnecting(false);
     }

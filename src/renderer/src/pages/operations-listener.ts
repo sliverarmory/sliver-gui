@@ -31,49 +31,79 @@ export interface ListenerDraft {
 
 export type ListenerDraftErrors = Partial<Record<keyof ListenerDraft | "form", string>>;
 
-export const LISTENER_PROTOCOLS: ReadonlyArray<{
+export interface ListenerProtocolDefinition {
   id: ListenerKind;
   label: string;
   shortLabel: string;
   description: string;
-}> = [
-  {
+}
+
+export const LISTENER_PROTOCOL_BY_KIND = {
+  mtls: {
     id: "mtls",
     label: "Mutual TLS",
     shortLabel: "mTLS",
     description: "Authenticated Sliver transport over mutual TLS.",
   },
-  {
+  wireguard: {
     id: "wireguard",
     label: "WireGuard",
     shortLabel: "WG",
     description: "WireGuard transport with dedicated key exchange and TCP channels.",
   },
-  {
+  dns: {
     id: "dns",
     label: "DNS",
     shortLabel: "DNS",
     description: "DNS tunneling for one or more authoritative domains.",
   },
-  {
+  http: {
     id: "http",
     label: "HTTP",
     shortLabel: "HTTP",
     description: "HTTP C2 listener with website and long-poll controls.",
   },
-  {
+  https: {
     id: "https",
     label: "HTTPS",
     shortLabel: "HTTPS",
     description: "TLS HTTP C2 with ACME, certificate, and JARM controls.",
   },
-  {
+  stage: {
     id: "stage",
     label: "TCP stage",
     shortLabel: "TCP",
     description: "Generate a profile payload and serve it as a size-prefixed TCP stage.",
   },
-];
+} as const satisfies Record<ListenerKind, ListenerProtocolDefinition>;
+
+const LISTENER_PROTOCOL_ORDER = [
+  "mtls",
+  "wireguard",
+  "dns",
+  "http",
+  "https",
+  "stage",
+] as const satisfies readonly ListenerKind[];
+
+export const LISTENER_PROTOCOLS: readonly ListenerProtocolDefinition[] = LISTENER_PROTOCOL_ORDER.map(
+  (kind) => LISTENER_PROTOCOL_BY_KIND[kind],
+);
+
+export const STAGE_COMPRESSION_OPTIONS = [
+  { id: "none", label: "None" },
+  { id: "zlib", label: "Zlib" },
+  { id: "gzip", label: "Gzip" },
+  { id: "deflate", label: "Deflate level 9" },
+] as const satisfies readonly { id: StageCompression; label: string }[];
+
+export function isListenerKind(value: unknown): value is ListenerKind {
+  return typeof value === "string" && Object.hasOwn(LISTENER_PROTOCOL_BY_KIND, value);
+}
+
+export function isStageCompression(value: unknown): value is StageCompression {
+  return typeof value === "string" && STAGE_COMPRESSION_OPTIONS.some((option) => option.id === value);
+}
 
 export function createListenerDraft(kind: ListenerKind = "mtls", profileName = ""): ListenerDraft {
   const defaultPorts: Record<ListenerKind, number> = {

@@ -8,9 +8,9 @@ import { SliverClient, clientpb, parseConfig } from "sliver-script";
 import { artifactFormatFromProto, buildImplantConfig } from "../main/implant-config.js";
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
 
-const configPath = process.env.SLIVER_GUI_E2E_CONFIG;
+const configPath = process.env["SLIVER_GUI_E2E_CONFIG"];
 const describeWithServer = configPath ? describe : describe.skip;
-const listenerPort = Number(process.env.SLIVER_GUI_E2E_LISTENER_PORT ?? 18888);
+const listenerPort = Number(process.env["SLIVER_GUI_E2E_LISTENER_PORT"] ?? 18888);
 
 describeWithServer("real Sliver server", () => {
   let client: SliverClient;

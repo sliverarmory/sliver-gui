@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   LISTENER_PROTOCOLS,
+  LISTENER_PROTOCOL_BY_KIND,
   createListenerDraft,
+  isListenerKind,
+  isStageCompression,
   listenerInputFromDraft,
   validateListenerDraft,
   type ListenerDraft,
@@ -65,6 +68,21 @@ describe("listener input mapping", () => {
       "stage",
     ]);
     expect(new Set(LISTENER_PROTOCOLS.map(({ id }) => id)).size).toBe(LISTENER_PROTOCOLS.length);
+    for (const protocol of LISTENER_PROTOCOLS) {
+      expect(LISTENER_PROTOCOL_BY_KIND[protocol.id]).toBe(protocol);
+    }
+  });
+
+  it("rejects values outside the first-party listener and compression option sets", () => {
+    expect(isListenerKind("https")).toBe(true);
+    expect(isListenerKind("smtp")).toBe(false);
+    expect(isListenerKind(["https"])).toBe(false);
+    expect(isListenerKind(null)).toBe(false);
+
+    expect(isStageCompression("gzip")).toBe(true);
+    expect(isStageCompression("brotli")).toBe(false);
+    expect(isStageCompression(["gzip"])).toBe(false);
+    expect(isStageCompression(undefined)).toBe(false);
   });
 
   it("maps mTLS and WireGuard fields to their typed bridge inputs", () => {

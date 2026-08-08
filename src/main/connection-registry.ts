@@ -17,7 +17,6 @@ import type { Subscription } from "rxjs";
 import {
   IPC,
   disconnectedSnapshot,
-  type ArtifactFormat,
   type BuildSummary,
   type CertificatePairSelection,
   type CompilerTargetSummary,
@@ -27,6 +26,7 @@ import {
   type JobSummary,
   type ListenerInput,
   type OperationResult,
+  type OperationResultWithValue,
   type ProfileSummary,
   type RecentEventSummary,
   type SavedConfigSummary,
@@ -279,6 +279,9 @@ export class ConnectionRegistry {
           jobId = await this.startStageListener(pool, input);
           break;
         }
+        default: {
+          return assertNever(input);
+        }
       }
 
       await pool.refreshAll();
@@ -297,17 +300,16 @@ export class ConnectionRegistry {
   }
 
   async killJob(contentsId: number, jobId: number): Promise<OperationResult> {
-    return this.withPool<undefined>(contentsId, async (pool) => {
+    return this.withPoolWithoutValue(contentsId, async (pool) => {
       if (!Number.isInteger(jobId) || jobId < 0) throw new Error("Invalid job ID");
       const result = await pool.client.killJob(jobId);
       if (!result.Success) throw new Error(`Server did not stop job #${jobId}`);
       await pool.refreshAll();
-      return undefined;
     });
   }
 
   async killAllJobs(contentsId: number): Promise<OperationResult> {
-    return this.withPool<undefined>(contentsId, async (pool) => {
+    return this.withPoolWithoutValue(contentsId, async (pool) => {
       const jobs = [...pool.snapshot.jobs];
       const failures: string[] = [];
       for (const job of jobs) {
@@ -320,7 +322,6 @@ export class ConnectionRegistry {
       }
       await pool.refreshAll();
       if (failures.length) throw new Error(`Failed to stop jobs ${failures.join(", ")}`);
-      return undefined;
     });
   }
 
@@ -375,22 +376,20 @@ export class ConnectionRegistry {
   }
 
   async deleteBuild(contentsId: number, buildName: string): Promise<OperationResult> {
-    return this.withPool<undefined>(contentsId, async (pool) => {
+    return this.withPoolWithoutValue(contentsId, async (pool) => {
       const normalized = requireKnownName(buildName, "Build name");
       if (!pool.hasBuild(normalized)) throw new Error(`Unknown build '${normalized}'`);
       await pool.client.deleteImplantBuild(normalized);
       await pool.refreshAll();
-      return undefined;
     });
   }
 
   async setStagedBuilds(contentsId: number, buildNames: string[]): Promise<OperationResult> {
-    return this.withPool<undefined>(contentsId, async (pool) => {
+    return this.withPoolWithoutValue(contentsId, async (pool) => {
       const unique = [...new Set(buildNames.map((name) => requireKnownName(name, "Build name")))];
       for (const name of unique) if (!pool.hasBuild(name)) throw new Error(`Unknown build '${name}'`);
       await pool.client.stageImplantBuild(unique);
       await pool.refreshAll();
-      return undefined;
     });
   }
 
@@ -409,12 +408,11 @@ export class ConnectionRegistry {
   }
 
   async deleteProfile(contentsId: number, profileName: string): Promise<OperationResult> {
-    return this.withPool<undefined>(contentsId, async (pool) => {
+    return this.withPoolWithoutValue(contentsId, async (pool) => {
       const normalized = requireKnownName(profileName, "Profile name");
       pool.profile(normalized);
       await pool.client.deleteImplantProfile(normalized);
       await pool.refreshAll();
-      return undefined;
     });
   }
 
@@ -476,16 +474,27 @@ export class ConnectionRegistry {
     }
   }
 
-  private async withPool<T>(contentsId: number, operation: (pool: BackendPool) => Promise<T>): Promise<OperationResult<T>> {
+  private async withPool<T>(
+    contentsId: number,
+    operation: (pool: BackendPool) => Promise<T>,
+  ): Promise<OperationResultWithValue<T>> {
     try {
       const context = this.requireWindow(contentsId);
       const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
       if (!pool || pool.snapshot.connection.status !== "connected") throw new Error("Connect to a Sliver server first");
       const value = await operation(pool);
-      return value === undefined ? { ok: true } : { ok: true, value };
+      return { ok: true, value };
     } catch (error) {
       return { ok: false, error: errorMessage(error) };
     }
+  }
+
+  private async withPoolWithoutValue(
+    contentsId: number,
+    operation: (pool: BackendPool) => Promise<void>,
+  ): Promise<OperationResult> {
+    const result = await this.withPool(contentsId, operation);
+    return result.ok ? { ok: true } : result;
   }
 
   private async connectConfig(
@@ -890,6 +899,10 @@ function requireKnownName(name: string, label: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unexpected listener input: ${String(value)}`);
 }
 
 function requireOwnerWindow(sender: WebContents): BrowserWindow {

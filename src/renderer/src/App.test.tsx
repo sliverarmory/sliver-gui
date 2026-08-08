@@ -34,12 +34,28 @@ function deferred<T>() {
 function installSliverAPI(
   listSavedConfigs: SliverDesktopAPI["listSavedConfigs"],
 ): SliverDesktopAPI {
-  const api = {
+  const failedOperation = async () => ({ ok: false as const, error: "Not implemented by this test" });
+  const api: SliverDesktopAPI = {
+    chooseConfig: vi.fn(failedOperation),
+    chooseCertificatePair: vi.fn(failedOperation),
+    connectSavedConfig: vi.fn(failedOperation),
+    deleteBuild: vi.fn(failedOperation),
+    deleteProfile: vi.fn(failedOperation),
+    disconnect: vi.fn(failedOperation),
+    downloadBuild: vi.fn(failedOperation),
+    generate: vi.fn(failedOperation),
+    generateFromProfile: vi.fn(failedOperation),
     getSnapshot: vi.fn().mockResolvedValue(disconnectedSnapshot()),
+    killAllJobs: vi.fn(failedOperation),
+    killJob: vi.fn(failedOperation),
     listSavedConfigs,
     onSnapshotChanged: vi.fn().mockReturnValue(vi.fn()),
-    openWindow: vi.fn().mockResolvedValue({ ok: true }),
-  } as unknown as SliverDesktopAPI;
+    openWindow: vi.fn(failedOperation),
+    refresh: vi.fn(failedOperation),
+    saveProfile: vi.fn(failedOperation),
+    setStagedBuilds: vi.fn(failedOperation),
+    startListener: vi.fn(failedOperation),
+  };
 
   Object.defineProperty(window, "sliver", {
     configurable: true,
@@ -100,7 +116,8 @@ describe("Sidebar navigation", () => {
 
     expect(generateItem).toHaveAttribute("aria-disabled", "true");
     expect(tooltipTrigger).not.toBeNull();
-    await user.hover(tooltipTrigger!);
+    if (!tooltipTrigger) throw new Error("Generate tooltip trigger is missing");
+    await user.hover(tooltipTrigger);
     expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Generate");
 
     await user.click(generateItem);

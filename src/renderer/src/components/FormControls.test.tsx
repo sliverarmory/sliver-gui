@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 
 import { useState } from "react";
 
-import { SelectField, SwitchRow } from "./FormControls";
+import { SelectField, SwitchRow, selectFieldValueFromKey } from "./FormControls";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -25,6 +25,18 @@ afterEach(() => {
 });
 
 describe("SelectField iconography", () => {
+  it("accepts only keys represented by the first-party option set", () => {
+    const options = [
+      { value: "windows", label: "Windows", icon: faWindows },
+      { value: "darwin", label: "macOS", icon: faApple },
+    ] as const;
+
+    expect(selectFieldValueFromKey(options, "darwin")).toBe("darwin");
+    expect(selectFieldValueFromKey(options, "freebsd")).toBeUndefined();
+    expect(selectFieldValueFromKey(options, ["darwin"])).toBeUndefined();
+    expect(selectFieldValueFromKey(options, null)).toBeUndefined();
+  });
+
   it("renders the selected OS brand and the icons for every OS option", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

@@ -1,10 +1,9 @@
-export const IPC = {
+export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
   listSavedConfigs: "sliver:connection:list-saved-configs",
   connectSavedConfig: "sliver:connection:connect-saved-config",
   disconnect: "sliver:connection:disconnect",
   getSnapshot: "sliver:snapshot:get",
-  snapshotChanged: "sliver:snapshot:changed",
   refresh: "sliver:snapshot:refresh",
   openWindow: "sliver:window:open",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
@@ -19,6 +18,17 @@ export const IPC = {
   saveProfile: "sliver:profile:save",
   deleteProfile: "sliver:profile:delete",
 } as const;
+
+export const IPC_EVENTS = {
+  snapshotChanged: "sliver:snapshot:changed",
+} as const;
+
+export const IPC = {
+  ...IPC_INVOKE,
+  ...IPC_EVENTS,
+} as const;
+
+export type IpcInvokeChannel = (typeof IPC_INVOKE)[keyof typeof IPC_INVOKE];
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 export type EventStreamStatus = "stopped" | "connecting" | "connected" | "retrying";
@@ -237,37 +247,129 @@ export type ListenerInput =
   | HTTPListenerInput
   | StageListenerInput;
 
-export interface OperationResult<T = undefined> {
-  ok: boolean;
-  value?: T;
-  error?: string;
+export interface OperationFailure {
+  ok: false;
+  error: string;
+  value?: never;
 }
+
+export interface OperationSuccess<T> {
+  ok: true;
+  value: T;
+  error?: never;
+}
+
+export interface EmptyOperationSuccess {
+  ok: true;
+  value?: never;
+  error?: never;
+}
+
+export type OperationResultWithValue<T> = OperationFailure | OperationSuccess<T>;
+
+export type OperationResult<T = never> = [T] extends [never]
+  ? OperationFailure | EmptyOperationSuccess
+  : OperationResultWithValue<T>;
 
 export interface OpenWindowInput {
   inheritConnection: boolean;
 }
 
-export interface SliverDesktopAPI {
-  chooseConfig(): Promise<OperationResult<SliverSnapshot>>;
-  listSavedConfigs(): Promise<OperationResult<SavedConfigSummary[]>>;
-  connectSavedConfig(id: string): Promise<OperationResult<SliverSnapshot>>;
-  disconnect(): Promise<OperationResult<SliverSnapshot>>;
-  getSnapshot(): Promise<SliverSnapshot>;
-  refresh(): Promise<OperationResult<SliverSnapshot>>;
-  openWindow(input: OpenWindowInput): Promise<OperationResult>;
-  chooseCertificatePair(): Promise<OperationResult<CertificatePairSelection>>;
-  startListener(input: ListenerInput): Promise<OperationResult<JobSummary>>;
-  killJob(jobId: number): Promise<OperationResult>;
-  killAllJobs(): Promise<OperationResult>;
-  generate(input: GenerateInput): Promise<OperationResult<SavedArtifact>>;
-  generateFromProfile(input: GenerateFromProfileInput): Promise<OperationResult<SavedArtifact>>;
-  downloadBuild(buildName: string): Promise<OperationResult<SavedArtifact>>;
-  deleteBuild(buildName: string): Promise<OperationResult>;
-  setStagedBuilds(buildNames: string[]): Promise<OperationResult>;
-  saveProfile(input: SaveProfileInput): Promise<OperationResult<ProfileSummary>>;
-  deleteProfile(profileName: string): Promise<OperationResult>;
-  onSnapshotChanged(listener: (snapshot: SliverSnapshot) => void): () => void;
+interface IpcInvokeDefinition {
+  args: readonly unknown[];
+  result: unknown;
 }
+
+type CompleteIpcInvokeContract<Contract extends Record<IpcInvokeChannel, IpcInvokeDefinition>> = Contract;
+
+export type IpcInvokeContract = CompleteIpcInvokeContract<{
+  [IPC.chooseConfig]: {
+    args: [];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.listSavedConfigs]: {
+    args: [];
+    result: OperationResult<SavedConfigSummary[]>;
+  };
+  [IPC.connectSavedConfig]: {
+    args: [id: string];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.disconnect]: {
+    args: [];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.getSnapshot]: {
+    args: [];
+    result: SliverSnapshot;
+  };
+  [IPC.refresh]: {
+    args: [];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.openWindow]: {
+    args: [input: OpenWindowInput];
+    result: OperationResult;
+  };
+  [IPC.chooseCertificatePair]: {
+    args: [];
+    result: OperationResult<CertificatePairSelection>;
+  };
+  [IPC.startListener]: {
+    args: [input: ListenerInput];
+    result: OperationResult<JobSummary>;
+  };
+  [IPC.killJob]: {
+    args: [jobId: number];
+    result: OperationResult;
+  };
+  [IPC.killAllJobs]: {
+    args: [];
+    result: OperationResult;
+  };
+  [IPC.generate]: {
+    args: [input: GenerateInput];
+    result: OperationResult<SavedArtifact>;
+  };
+  [IPC.generateFromProfile]: {
+    args: [input: GenerateFromProfileInput];
+    result: OperationResult<SavedArtifact>;
+  };
+  [IPC.downloadBuild]: {
+    args: [buildName: string];
+    result: OperationResult<SavedArtifact>;
+  };
+  [IPC.deleteBuild]: {
+    args: [buildName: string];
+    result: OperationResult;
+  };
+  [IPC.setStagedBuilds]: {
+    args: [buildNames: string[]];
+    result: OperationResult;
+  };
+  [IPC.saveProfile]: {
+    args: [input: SaveProfileInput];
+    result: OperationResult<ProfileSummary>;
+  };
+  [IPC.deleteProfile]: {
+    args: [profileName: string];
+    result: OperationResult;
+  };
+}>;
+
+export type IpcInvokeArgs<Channel extends IpcInvokeChannel> = IpcInvokeContract[Channel]["args"];
+export type IpcInvokeResult<Channel extends IpcInvokeChannel> = IpcInvokeContract[Channel]["result"];
+export type IpcInvokeMethod<Channel extends IpcInvokeChannel> = (
+  ...args: IpcInvokeArgs<Channel>
+) => Promise<IpcInvokeResult<Channel>>;
+
+export type SliverDesktopInvokeAPI = {
+  [Method in keyof typeof IPC_INVOKE]: IpcInvokeMethod<(typeof IPC_INVOKE)[Method]>;
+};
+
+export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
+  onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
+};
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {
   return {

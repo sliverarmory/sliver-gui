@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
-import { GeneratePage } from "./GeneratePage";
+import { GeneratePage, parseNumberInput } from "./GeneratePage";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -39,5 +39,14 @@ describe("GeneratePage action footer", () => {
     const scrollingContent = footer.previousElementSibling;
     expect(scrollingContent).toHaveClass("generate-page__content");
     expect(scrollingContent).not.toContainElement(footer);
+  });
+});
+
+describe("GeneratePage numeric input parsing", () => {
+  it("accepts finite numbers and rejects values that would poison typed form state", () => {
+    expect(parseNumberInput("31337")).toBe(31_337);
+    expect(parseNumberInput("1.5")).toBe(1.5);
+    expect(parseNumberInput("not-a-number")).toBeUndefined();
+    expect(parseNumberInput("Infinity")).toBeUndefined();
   });
 });

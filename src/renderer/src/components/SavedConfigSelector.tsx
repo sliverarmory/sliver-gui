@@ -33,9 +33,9 @@ export interface SavedConfigSelectorProps {
   isConnecting?: boolean | undefined;
   error?: string | undefined;
   onOpenChange: (isOpen: boolean) => void;
-  onRefresh: () => unknown | Promise<unknown>;
-  onConnect: (config: SavedConfigSummary) => unknown | Promise<unknown>;
-  onChooseFile: () => unknown | Promise<unknown>;
+  onRefresh: () => void | Promise<void>;
+  onConnect: (config: SavedConfigSummary) => void | Promise<void>;
+  onChooseFile: () => void | Promise<void>;
 }
 
 export function SavedConfigSelector({
