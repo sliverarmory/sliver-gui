@@ -24,7 +24,7 @@ export default defineConfig({
     ],
     build: {
       outDir: resolve("dist/main"),
-      sourcemap: true,
+      sourcemap: false,
       commonjsOptions: {
         include: [/node_modules/, /sliver-script\/lib/],
       },
@@ -37,7 +37,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       outDir: resolve("dist/preload"),
-      sourcemap: true,
+      sourcemap: false,
       rollupOptions: {
         input: resolve("src/preload/index.ts"),
         output: {
@@ -52,7 +52,7 @@ export default defineConfig({
     plugins: [react(), tailwindcss()],
     build: {
       outDir: resolve("dist/renderer"),
-      sourcemap: true,
+      sourcemap: false,
       rollupOptions: {
         input: resolve("src/renderer/index.html"),
       },

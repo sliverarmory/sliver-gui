@@ -1,0 +1,248 @@
+name: Build and release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+jobs:
+  protocol-parity:
+    name: Protocol and parity drift
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+          cache: npm
+
+      - name: Set up exact Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.25.8
+          cache: false
+
+      - name: Set up exact protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "35.1"
+          repo-token: ${{ github.token }}
+
+      - name: Set up exact npm
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Install locked protobuf generator
+        run: npm ci --ignore-scripts --prefix protocol/protobuf-toolchain
+
+      - name: Verify protocol, protobuf, parity, and vendor provenance
+        run: npm run protocol:check
+
+  application-e2e:
+    name: Electron current-slice E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+          cache: npm
+
+      - name: Set up exact npm
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Require HeroUI Pro CI token
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: node -e "if (!process.env.HEROUI_AUTH_TOKEN) { console.error('::error::Add a HEROUI_AUTH_TOKEN Actions secret before running builds.'); process.exit(1); }"
+
+      - name: Install dependencies
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: npm ci --strict-allow-scripts
+
+      - name: Exercise renderer, preload, IPC, and registry
+        run: xvfb-run --auto-servernum npm run test:e2e:electron
+
+      - name: Upload E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sliver-gui-electron-e2e-diagnostics
+          path: artifacts/e2e/
+          if-no-files-found: warn
+          retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs:
+      - protocol-parity
+      - application-e2e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS universal
+            runner: macos-15
+            build_args: --mac --universal
+            packaged_smoke: npm run test:e2e:packaged
+            artifact_name: sliver-gui-macos-universal
+            artifact_paths: |
+              release/*.dmg
+              release/*.zip
+          - platform: Windows x64
+            runner: windows-2022
+            build_args: --win --x64
+            packaged_smoke: npm run test:e2e:packaged
+            artifact_name: sliver-gui-windows-x64
+            artifact_paths: release/*.exe
+          - platform: Linux x64
+            runner: ubuntu-22.04
+            build_args: --linux --x64
+            packaged_smoke: xvfb-run --auto-servernum npm run test:e2e:packaged
+            artifact_name: sliver-gui-linux-x64
+            artifact_paths: |
+              release/*.AppImage
+              release/*.deb
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+          cache: npm
+
+      - name: Set up npm
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Require HeroUI Pro CI token
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: node -e "if (!process.env.HEROUI_AUTH_TOKEN) { console.error('::error::Add a HEROUI_AUTH_TOKEN Actions secret before running builds.'); process.exit(1); }"
+
+      - name: Install dependencies
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: npm ci --strict-allow-scripts
+
+      - name: Record macOS build host
+        if: runner.os == 'macOS'
+        run: |
+          sw_vers
+          uname -m
+
+      - name: Record Windows build host
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ComputerInfo -Property WindowsProductName, WindowsVersion, OsBuildNumber, OsArchitecture
+          [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+
+      - name: Record Linux build host
+        if: runner.os == 'Linux'
+        run: |
+          cat /etc/os-release
+          uname -m
+          ldd --version | head -n 1
+
+      - name: Set version from tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        run: npm version --no-git-tag-version --allow-same-version "${{ github.ref_name }}"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build native packages
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist -- ${{ matrix.build_args }} --publish never
+
+      - name: Exercise packaged mTLS application
+        run: ${{ matrix.packaged_smoke }}
+
+      - name: Upload packaged-smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact_name }}-smoke-diagnostics
+          path: artifacts/e2e/
+          if-no-files-found: warn
+          retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
+
+      - name: Upload native packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
+
+  release:
+    name: Create draft GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download native packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sliver-gui-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS
+
+      - name: Create or update draft GitHub release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --verify-tag \
+              --generate-notes \
+              --title "Sliver GUI $GITHUB_REF_NAME"
+          elif [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::error::Refusing to update a published release with unsigned artifacts."
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber

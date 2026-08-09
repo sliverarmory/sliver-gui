@@ -192,12 +192,12 @@ describe("listener input mapping", () => {
 
 describe("listener validation", () => {
   it("accepts port boundaries and rejects out-of-range or fractional ports", () => {
-    for (const port of [1, 65_534]) {
+    for (const port of [1, 65, 443, 65_535]) {
       expect(validateListenerDraft({ ...validDraft("mtls"), port }).port).toBeUndefined();
     }
 
-    for (const port of [0, 65_535, 1.5, Number.NaN]) {
-      expect(validateListenerDraft({ ...validDraft("mtls"), port }).port).toMatch(/1 to 65534/);
+    for (const port of [0, 65_536, 1.5, Number.NaN]) {
+      expect(validateListenerDraft({ ...validDraft("mtls"), port }).port).toMatch(/1 to 65535/);
     }
   });
 
@@ -205,16 +205,16 @@ describe("listener validation", () => {
     expect(validateListenerDraft({
       ...validDraft("wireguard"),
       tcpCommsPort: 1,
-      keyExchangePort: 65_534,
+      keyExchangePort: 65_535,
     })).toEqual({});
 
     expect(validateListenerDraft({
       ...validDraft("wireguard"),
       tcpCommsPort: 0,
-      keyExchangePort: 65_535,
+      keyExchangePort: 65_536,
     })).toMatchObject({
-      tcpCommsPort: expect.stringMatching(/1 to 65534/),
-      keyExchangePort: expect.stringMatching(/1 to 65534/),
+      tcpCommsPort: expect.stringMatching(/1 to 65535/),
+      keyExchangePort: expect.stringMatching(/1 to 65535/),
     });
 
     expect(validateListenerDraft({

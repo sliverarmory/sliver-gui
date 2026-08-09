@@ -5,11 +5,13 @@ import {
   IPC_INVOKE,
   type GenerateFromProfileInput,
   type GenerateInput,
+  type ImportConfigInput,
   type IpcInvokeArgs,
   type IpcInvokeChannel,
   type IpcInvokeResult,
   type ListenerInput,
   type OpenWindowInput,
+  type RemoveSavedConfigInput,
   type SaveProfileInput,
 } from "../shared/contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
@@ -27,15 +29,18 @@ type IpcArgumentParser<Channel extends IpcInvokeChannel> = (
 export type IpcConnectionRegistry = Pick<
   ConnectionRegistry,
   | "chooseAndConnect"
+  | "importConfig"
   | "listSavedConfigs"
   | "connectSavedConfig"
+  | "removeSavedConfig"
   | "disconnect"
   | "snapshot"
   | "refresh"
   | "chooseCertificatePair"
   | "startListener"
-  | "killJob"
-  | "killAllJobs"
+  | "prepareStopJob"
+  | "prepareStopAllJobs"
+  | "executeStopPlan"
   | "generate"
   | "generateFromProfile"
   | "downloadBuild"
@@ -52,6 +57,10 @@ const LISTENER_KINDS = ["mtls", "wireguard", "dns", "http", "https", "stage"] as
 const STAGE_COMPRESSIONS = ["none", "zlib", "gzip", "deflate"] as const;
 const SHELLCODE_TRIPLE_OPTIONS = [1, 2, 3] as const;
 const SHELLCODE_HEADER_OPTIONS = [1, 2] as const;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const MAX_SHORT_STRING_LENGTH = 256;
+const MAX_LONG_STRING_LENGTH = 32 * 1024;
+const MAX_STRING_ARRAY_ITEMS = 500;
 
 export function registerIpcHandlers(
   registry: IpcConnectionRegistry,
@@ -59,11 +68,17 @@ export function registerIpcHandlers(
   rendererUrl: string,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
+  handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
+    registry.importConfig(sender, input.displayName),
+  );
   handleTrusted(IPC.listSavedConfigs, rendererUrl, parseNoArguments, ({ contentsId }) =>
     registry.listSavedConfigs(contentsId),
   );
   handleTrusted(IPC.connectSavedConfig, rendererUrl, parseSavedConfigIdArguments, ({ contentsId }, id) =>
     registry.connectSavedConfig(contentsId, id),
+  );
+  handleTrusted(IPC.removeSavedConfig, rendererUrl, parseRemoveSavedConfigArguments, ({ contentsId }, input) =>
+    registry.removeSavedConfig(contentsId, input.id),
   );
   handleTrusted(IPC.disconnect, rendererUrl, parseNoArguments, ({ contentsId }) => registry.disconnect(contentsId));
   handleTrusted(IPC.getSnapshot, rendererUrl, parseNoArguments, ({ contentsId }) => registry.snapshot(contentsId));
@@ -78,11 +93,14 @@ export function registerIpcHandlers(
   handleTrusted(IPC.startListener, rendererUrl, parseListenerArguments, ({ contentsId }, input) =>
     registry.startListener(contentsId, input),
   );
-  handleTrusted(IPC.killJob, rendererUrl, parseJobIdArguments, ({ contentsId }, jobId) =>
-    registry.killJob(contentsId, jobId),
+  handleTrusted(IPC.prepareStopJob, rendererUrl, parseJobIdArguments, ({ contentsId }, jobId) =>
+    registry.prepareStopJob(contentsId, jobId),
   );
-  handleTrusted(IPC.killAllJobs, rendererUrl, parseNoArguments, ({ contentsId }) =>
-    registry.killAllJobs(contentsId),
+  handleTrusted(IPC.prepareStopAllJobs, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.prepareStopAllJobs(contentsId),
+  );
+  handleTrusted(IPC.executeStopPlan, rendererUrl, parseOpaqueTokenArguments, ({ contentsId }, token) =>
+    registry.executeStopPlan(contentsId, token),
   );
   handleTrusted(IPC.generate, rendererUrl, parseGenerateArguments, ({ sender }, input) =>
     registry.generate(sender, input),
@@ -168,17 +186,28 @@ function parseNoArguments(args: readonly unknown[]): [] {
 
 function parseSavedConfigIdArguments(args: readonly unknown[]): [id: string] {
   const value = requireSingleArgument(args, "saved configuration ID");
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
-  ) {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
     throw invalidArguments("saved configuration ID");
   }
   return [value];
 }
 
+function parseImportConfigArguments(args: readonly unknown[]): [input: ImportConfigInput] {
+  const value = requireRecord(requireSingleArgument(args, "import-config input"), "import-config input");
+  requireExactKeys(value, ["displayName"], "import-config input");
+  return [{ displayName: requireStringProperty(value, "displayName", "import-config input", 200) }];
+}
+
+function parseRemoveSavedConfigArguments(args: readonly unknown[]): [input: RemoveSavedConfigInput] {
+  const value = requireRecord(requireSingleArgument(args, "remove-config input"), "remove-config input");
+  requireExactKeys(value, ["id"], "remove-config input");
+  const [id] = parseSavedConfigIdArguments([value["id"]]);
+  return [{ id }];
+}
+
 function parseOpenWindowArguments(args: readonly unknown[]): [input: OpenWindowInput] {
   const value = requireRecord(requireSingleArgument(args, "open-window input"), "open-window input");
+  requireExactKeys(value, ["inheritConnection"], "open-window input");
   return [{ inheritConnection: requireBooleanProperty(value, "inheritConnection", "open-window input") }];
 }
 
@@ -194,6 +223,12 @@ function parseJobIdArguments(args: readonly unknown[]): [jobId: number] {
   return [value];
 }
 
+function parseOpaqueTokenArguments(args: readonly unknown[]): [token: string] {
+  const value = requireSingleArgument(args, "operation capability token");
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw invalidArguments("operation capability token");
+  return [value];
+}
+
 function parseGenerateArguments(args: readonly unknown[]): [input: GenerateInput] {
   return [parseGenerateInput(requireSingleArgument(args, "generate input"))];
 }
@@ -203,23 +238,32 @@ function parseGenerateFromProfileArguments(args: readonly unknown[]): [input: Ge
     requireSingleArgument(args, "generate-from-profile input"),
     "generate-from-profile input",
   );
+  requireExactKeys(value, ["profileName", "name"], "generate-from-profile input");
   return [
     {
-      profileName: requireStringProperty(value, "profileName", "generate-from-profile input"),
-      name: requireStringProperty(value, "name", "generate-from-profile input"),
+      profileName: requireStringProperty(value, "profileName", "generate-from-profile input", MAX_SHORT_STRING_LENGTH),
+      name: requireStringProperty(value, "name", "generate-from-profile input", MAX_SHORT_STRING_LENGTH),
     },
   ];
 }
 
 function parseStringArguments(args: readonly unknown[], label: string): [value: string] {
   const value = requireSingleArgument(args, label);
-  if (typeof value !== "string") throw invalidArguments(label);
+  if (typeof value !== "string" || value.length > MAX_SHORT_STRING_LENGTH || value.includes("\0")) {
+    throw invalidArguments(label);
+  }
   return [value];
 }
 
 function parseStringArrayArguments(args: readonly unknown[]): [values: string[]] {
   const value = requireSingleArgument(args, "build-name list");
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_STRING_ARRAY_ITEMS ||
+    !value.every(
+      (item) => typeof item === "string" && item.length <= MAX_SHORT_STRING_LENGTH && !item.includes("\0"),
+    )
+  ) {
     throw invalidArguments("build-name list");
   }
   return [[...value]];
@@ -227,10 +271,12 @@ function parseStringArrayArguments(args: readonly unknown[]): [values: string[]]
 
 function parseSaveProfileArguments(args: readonly unknown[]): [input: SaveProfileInput] {
   const value = requireRecord(requireSingleArgument(args, "save-profile input"), "save-profile input");
+  requireExactKeys(value, ["profileName", "config", "overwrite"], "save-profile input");
   return [
     {
-      profileName: requireStringProperty(value, "profileName", "save-profile input"),
+      profileName: requireStringProperty(value, "profileName", "save-profile input", MAX_SHORT_STRING_LENGTH),
       config: parseGenerateInput(value["config"]),
+      overwrite: requireBooleanProperty(value, "overwrite", "save-profile input"),
     },
   ];
 }
@@ -238,38 +284,66 @@ function parseSaveProfileArguments(args: readonly unknown[]): [input: SaveProfil
 function parseListenerInput(value: unknown): ListenerInput {
   const input = requireRecord(value, "listener input");
   const kind = requireStringLiteralProperty(input, "kind", LISTENER_KINDS, "listener input");
-  const host = requireStringProperty(input, "host", "listener input");
+  const host = requireStringProperty(input, "host", "listener input", MAX_SHORT_STRING_LENGTH);
   const port = requireFiniteNumberProperty(input, "port", "listener input");
 
   switch (kind) {
     case "mtls":
+      requireExactKeys(input, ["kind", "host", "port"], "mTLS listener input");
       return { kind, host, port };
     case "wireguard":
+      requireExactKeys(
+        input,
+        ["kind", "host", "port", "tunnelIp", "tcpCommsPort", "keyExchangePort"],
+        "WireGuard listener input",
+      );
       return {
         kind,
         host,
         port,
-        tunnelIp: requireStringProperty(input, "tunnelIp", "WireGuard listener input"),
+        tunnelIp: requireStringProperty(input, "tunnelIp", "WireGuard listener input", MAX_SHORT_STRING_LENGTH),
         tcpCommsPort: requireFiniteNumberProperty(input, "tcpCommsPort", "WireGuard listener input"),
         keyExchangePort: requireFiniteNumberProperty(input, "keyExchangePort", "WireGuard listener input"),
       };
     case "dns":
+      requireExactKeys(input, ["kind", "host", "port", "domains", "canaries", "enforceOtp"], "DNS listener input");
       return {
         kind,
         host,
         port,
-        domains: requireStringProperty(input, "domains", "DNS listener input"),
+        domains: requireStringProperty(input, "domains", "DNS listener input", MAX_LONG_STRING_LENGTH),
         canaries: requireBooleanProperty(input, "canaries", "DNS listener input"),
         enforceOtp: requireBooleanProperty(input, "enforceOtp", "DNS listener input"),
       };
     case "http":
-    case "https":
+    case "https": {
+      requireExactKeys(
+        input,
+        [
+          "kind",
+          "host",
+          "port",
+          "domain",
+          "website",
+          "enforceOtp",
+          "longPollTimeoutSeconds",
+          "longPollJitterSeconds",
+          "acme",
+          "randomizeJarm",
+          "certificateToken",
+        ],
+        "HTTP listener input",
+      );
+      const certificateToken = requireStringProperty(input, "certificateToken", "HTTP listener input", 36);
+      if (certificateToken && !UUID_PATTERN.test(certificateToken)) {
+        throw invalidArguments("HTTP listener input.certificateToken");
+      }
       return {
         kind,
         host,
         port,
-        domain: requireStringProperty(input, "domain", "HTTP listener input"),
-        website: requireStringProperty(input, "website", "HTTP listener input"),
+        domain: requireStringProperty(input, "domain", "HTTP listener input", MAX_SHORT_STRING_LENGTH),
+        website: requireStringProperty(input, "website", "HTTP listener input", MAX_SHORT_STRING_LENGTH),
         enforceOtp: requireBooleanProperty(input, "enforceOtp", "HTTP listener input"),
         longPollTimeoutSeconds: requireFiniteNumberProperty(
           input,
@@ -279,23 +353,29 @@ function parseListenerInput(value: unknown): ListenerInput {
         longPollJitterSeconds: requireFiniteNumberProperty(input, "longPollJitterSeconds", "HTTP listener input"),
         acme: requireBooleanProperty(input, "acme", "HTTP listener input"),
         randomizeJarm: requireBooleanProperty(input, "randomizeJarm", "HTTP listener input"),
-        certificateToken: requireStringProperty(input, "certificateToken", "HTTP listener input"),
+        certificateToken,
       };
+    }
     case "stage":
+      requireExactKeys(
+        input,
+        ["kind", "host", "port", "profileName", "compression", "aesKey", "aesIv", "rc4Key"],
+        "stage listener input",
+      );
       return {
         kind,
         host,
         port,
-        profileName: requireStringProperty(input, "profileName", "stage listener input"),
+        profileName: requireStringProperty(input, "profileName", "stage listener input", MAX_SHORT_STRING_LENGTH),
         compression: requireStringLiteralProperty(
           input,
           "compression",
           STAGE_COMPRESSIONS,
           "stage listener input",
         ),
-        aesKey: requireStringProperty(input, "aesKey", "stage listener input"),
-        aesIv: requireStringProperty(input, "aesIv", "stage listener input"),
-        rc4Key: requireStringProperty(input, "rc4Key", "stage listener input"),
+        aesKey: requireStringProperty(input, "aesKey", "stage listener input", MAX_SHORT_STRING_LENGTH),
+        aesIv: requireStringProperty(input, "aesIv", "stage listener input", MAX_SHORT_STRING_LENGTH),
+        rc4Key: requireStringProperty(input, "rc4Key", "stage listener input", MAX_SHORT_STRING_LENGTH),
       };
     default:
       return assertNever(kind);
@@ -304,14 +384,51 @@ function parseListenerInput(value: unknown): ListenerInput {
 
 function parseGenerateInput(value: unknown): GenerateInput {
   const input = requireRecord(value, "generate input");
+  requireExactKeys(
+    input,
+    [
+      "name",
+      "implantType",
+      "os",
+      "arch",
+      "format",
+      "templateName",
+      "c2",
+      "connectionStrategy",
+      "reconnectSeconds",
+      "pollTimeoutSeconds",
+      "maxConnectionErrors",
+      "beaconIntervalSeconds",
+      "beaconJitterSeconds",
+      "debug",
+      "evasion",
+      "obfuscateSymbols",
+      "netGo",
+      "runAtLoad",
+      "exports",
+      "canaryDomains",
+      "httpC2Profile",
+      "wgPeerTunIp",
+      "wgKeyExchangePort",
+      "wgTcpCommsPort",
+      "limitDomainJoined",
+      "limitDatetime",
+      "limitHostname",
+      "limitUsername",
+      "limitFileExists",
+      "limitLocale",
+      "shellcode",
+    ],
+    "generate input",
+  );
   return {
-    name: requireStringProperty(input, "name", "generate input"),
+    name: requireStringProperty(input, "name", "generate input", MAX_SHORT_STRING_LENGTH),
     implantType: requireStringLiteralProperty(input, "implantType", IMPLANT_TYPES, "generate input"),
-    os: requireStringProperty(input, "os", "generate input"),
-    arch: requireStringProperty(input, "arch", "generate input"),
+    os: requireStringProperty(input, "os", "generate input", 64),
+    arch: requireStringProperty(input, "arch", "generate input", 64),
     format: requireStringLiteralProperty(input, "format", ARTIFACT_FORMATS, "generate input"),
-    templateName: requireStringProperty(input, "templateName", "generate input"),
-    c2: requireStringProperty(input, "c2", "generate input"),
+    templateName: requireStringProperty(input, "templateName", "generate input", MAX_SHORT_STRING_LENGTH),
+    c2: requireStringProperty(input, "c2", "generate input", MAX_LONG_STRING_LENGTH),
     connectionStrategy: requireStringLiteralProperty(
       input,
       "connectionStrategy",
@@ -328,24 +445,29 @@ function parseGenerateInput(value: unknown): GenerateInput {
     obfuscateSymbols: requireBooleanProperty(input, "obfuscateSymbols", "generate input"),
     netGo: requireBooleanProperty(input, "netGo", "generate input"),
     runAtLoad: requireBooleanProperty(input, "runAtLoad", "generate input"),
-    exports: requireStringProperty(input, "exports", "generate input"),
-    canaryDomains: requireStringProperty(input, "canaryDomains", "generate input"),
-    httpC2Profile: requireStringProperty(input, "httpC2Profile", "generate input"),
-    wgPeerTunIp: requireStringProperty(input, "wgPeerTunIp", "generate input"),
+    exports: requireStringProperty(input, "exports", "generate input", MAX_LONG_STRING_LENGTH),
+    canaryDomains: requireStringProperty(input, "canaryDomains", "generate input", MAX_LONG_STRING_LENGTH),
+    httpC2Profile: requireStringProperty(input, "httpC2Profile", "generate input", MAX_SHORT_STRING_LENGTH),
+    wgPeerTunIp: requireStringProperty(input, "wgPeerTunIp", "generate input", MAX_SHORT_STRING_LENGTH),
     wgKeyExchangePort: requireFiniteNumberProperty(input, "wgKeyExchangePort", "generate input"),
     wgTcpCommsPort: requireFiniteNumberProperty(input, "wgTcpCommsPort", "generate input"),
     limitDomainJoined: requireBooleanProperty(input, "limitDomainJoined", "generate input"),
-    limitDatetime: requireStringProperty(input, "limitDatetime", "generate input"),
-    limitHostname: requireStringProperty(input, "limitHostname", "generate input"),
-    limitUsername: requireStringProperty(input, "limitUsername", "generate input"),
-    limitFileExists: requireStringProperty(input, "limitFileExists", "generate input"),
-    limitLocale: requireStringProperty(input, "limitLocale", "generate input"),
+    limitDatetime: requireStringProperty(input, "limitDatetime", "generate input", MAX_SHORT_STRING_LENGTH),
+    limitHostname: requireStringProperty(input, "limitHostname", "generate input", MAX_SHORT_STRING_LENGTH),
+    limitUsername: requireStringProperty(input, "limitUsername", "generate input", MAX_SHORT_STRING_LENGTH),
+    limitFileExists: requireStringProperty(input, "limitFileExists", "generate input", MAX_LONG_STRING_LENGTH),
+    limitLocale: requireStringProperty(input, "limitLocale", "generate input", MAX_SHORT_STRING_LENGTH),
     shellcode: parseShellcodeOptions(input["shellcode"]),
   };
 }
 
 function parseShellcodeOptions(value: unknown): GenerateInput["shellcode"] {
   const input = requireRecord(value, "shellcode options");
+  requireExactKeys(
+    input,
+    ["compress", "entropy", "exitOption", "bypass", "headers", "runInThread", "unicode", "originalEntryPoint"],
+    "shellcode options",
+  );
   return {
     compress: requireBooleanProperty(input, "compress", "shellcode options"),
     entropy: requireNumberLiteralProperty(input, "entropy", SHELLCODE_TRIPLE_OPTIONS, "shellcode options"),
@@ -376,10 +498,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function requireStringProperty(value: Record<string, unknown>, key: string, label: string): string {
+function requireStringProperty(
+  value: Record<string, unknown>,
+  key: string,
+  label: string,
+  maxLength = MAX_LONG_STRING_LENGTH,
+): string {
   const property = value[key];
-  if (typeof property !== "string") throw invalidArguments(`${label}.${key}`);
+  if (typeof property !== "string" || property.length > maxLength || property.includes("\0")) {
+    throw invalidArguments(`${label}.${key}`);
+  }
   return property;
+}
+
+function requireExactKeys(value: Record<string, unknown>, allowedKeys: readonly string[], label: string): void {
+  const allowed = new Set(allowedKeys);
+  const keys = Object.keys(value);
+  if (keys.length !== allowed.size || keys.some((key) => !allowed.has(key))) throw invalidArguments(label);
 }
 
 function requireBooleanProperty(value: Record<string, unknown>, key: string, label: string): boolean {

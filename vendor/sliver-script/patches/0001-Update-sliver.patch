@@ -1,0 +1,19 @@
+From cce82e7caac0edc72bce921d66c392b16810cf06 Mon Sep 17 00:00:00 2001
+From: moloch-- <875022+moloch--@users.noreply.github.com>
+Date: Sat, 21 Mar 2026 11:20:38 -0700
+Subject: [PATCH 1/2] Update sliver
+
+---
+ sliver | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sliver b/sliver
+index d2632e7..4ef8644 160000
+--- a/sliver
++++ b/sliver
+@@ -1 +1 @@
+-Subproject commit d2632e75bd687fa0b18c8eff01124f19bca815f7
++Subproject commit 4ef86448d07761b1ae1d86f322cb77c7bceb9a2e
+-- 
+2.55.0
+

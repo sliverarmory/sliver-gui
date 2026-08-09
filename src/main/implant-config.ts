@@ -1,6 +1,6 @@
 import { clientpb } from "sliver-script";
 
-import type { ArtifactFormat, GenerateInput } from "../shared/contracts.js";
+import { DEFAULT_C2_SCHEME, type ArtifactFormat, type GenerateInput } from "../shared/contracts.js";
 
 const NANOSECONDS_PER_SECOND = 1_000_000_000n;
 const DEFAULT_PORTS: Record<string, string> = {
@@ -76,7 +76,7 @@ function normalizeC2Input(value: string): string {
   let normalized = value.trim();
   if (/^tcp-pivot:\/\//i.test(normalized)) normalized = normalized.replace(/^tcp-pivot:/i, "tcppivot:");
   if (/^namedpipe:\/\//i.test(normalized)) normalized = normalized.replaceAll("\\", "/");
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) normalized = `mtls://${normalized}`;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) normalized = `${DEFAULT_C2_SCHEME}://${normalized}`;
   return normalized;
 }
 
@@ -201,7 +201,7 @@ function validateGenerateNumbers(input: GenerateInput): void {
     [input.wgTcpCommsPort, "WireGuard TCP communications port"],
   ] as const;
   for (const [value, label] of ports) {
-    if (!isValidPort(value)) throw new Error(`${label} must be between 1 and 65534`);
+    if (!isValidPort(value)) throw new Error(`${label} must be between 1 and 65535`);
   }
   if (!Number.isSafeInteger(input.maxConnectionErrors) || input.maxConnectionErrors < 0) {
     throw new Error("Maximum connection errors must be a non-negative whole number");
@@ -226,7 +226,7 @@ function validateFormatTarget(format: ArtifactFormat, os: string, arch: string):
 }
 
 export function isValidPort(port: number): boolean {
-  return Number.isInteger(port) && port >= 1 && port <= 65_534;
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
 export function splitList(raw: string): string[] {

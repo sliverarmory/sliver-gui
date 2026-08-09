@@ -17,6 +17,12 @@ configuration files and their private keys stay in the Electron main process.
   `~/.sliver-client/configs`, with a metadata-rich selector and the native file
   picker retained for configs stored elsewhere. Config secrets and full paths
   remain in Electron main.
+- Optional config import creates a private GUI-managed copy with a local display
+  name. Deleting is available only for that managed copy; forgetting a
+  pre-existing or externally selected config never deletes its source file.
+- Packaged operator connections use mTLS for M0. WireGuard operator configs are
+  still listed with an explicit deferred state and cannot connect, while
+  WireGuard implant C2 and listener workflows remain independent features.
 - Live connection state, recent server events, event-driven snapshot refresh,
   reconnect/backoff, and periodic reconciliation.
 - Start and stop mTLS, WireGuard, DNS, HTTP, HTTPS, and TCP staging listeners.
@@ -34,42 +40,87 @@ this first slice. They will use Ghostty Web when that slice is implemented.
 
 ## Development
 
-The workspace expects the adjacent checkouts already present here:
+The TypeScript gRPC client used by Electron main is tracked as a minimal source
+snapshot in `vendor/sliver-script`. This keeps clean checkouts reproducible
+without pulling the full upstream Sliver tree. Its provenance and update notes
+are recorded in `vendor/sliver-script/VENDORED.md`.
 
-- `./sliver/` — upstream backend, used as the protobuf and real-server source.
-- `./sliver-script/` — TypeScript gRPC client consumed by Electron main.
+Sliver GUI is licensed under GPL-3.0-or-later. Native packages include the
+license, third-party notice, retained client source, and its verifiable Git
+provenance bundle; matching release tags provide the complete GUI source.
 
-The GUI does not import or modify upstream `./sliver/` source. The current
-`sliver-script` checkout contains the GUI-facing API and regenerated protobuf
-definitions, so a clean distribution of this repository must pin or include
-that checkout before it is independently reproducible.
+An adjacent `./sliver/` checkout is optional for backend development and is
+ignored by this repository. The GUI does not import or modify that checkout.
 
 All tracked first-party JavaScript and JSX application, test, and tool-config
 source has been converted to strict TypeScript. HTML, CSS, JSON, and packaging
-metadata remain in their native formats. The adjacent `sliver` and
-`sliver-script` checkouts, dependencies, and generated `dist` and `release`
-outputs are ignored repository boundaries and are not part of the GUI's
-TypeScript source project.
+metadata remain in their native formats. Dependencies and generated `dist`,
+`release`, and vendored-client `lib` outputs are ignored and are not part of
+the GUI's TypeScript source project.
 
-Requirements: Node.js 24 or newer and npm.
+Requirements: Node.js 24 or newer, npm 11.19 or newer, and a HeroUI Pro
+license. Set `HEROUI_AUTH_TOKEN` for automated installs, or authenticate with
+the HeroUI Pro CLI and install its artifacts before building locally.
 
 ```sh
-npm install
+npm ci --strict-allow-scripts
+npx heroui-pro login
+npx heroui-pro install --yes
 npm run dev
 ```
+
+The HeroUI login/install steps are only needed once per workstation and can be
+skipped when `HEROUI_AUTH_TOKEN` is already present in the environment.
 
 Useful checks:
 
 ```sh
 npm run typecheck
 npm test
+npm run protocol:check
+npm run test:e2e:electron
 npm run build
 npm run package
+npm run test:e2e:packaged
+npm run test:m0
 ```
+
+`npm run protocol:check` is authoritative under the locked CI toolchain: Node
+24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` runs the
+current-platform application gate; the opt-in real-server package test below is
+kept separate because it requires an authorized disposable server and config.
 
 `npm run package` creates an unpacked application for the current platform in
 `release/`. `npm run dist` creates the configured macOS, Windows, or Linux
 installers.
+
+## Continuous integration and releases
+
+GitHub Actions verifies the locked Sliver protocol/parity baseline, runs the
+real Electron current-slice E2E, and creates native packages on pull requests
+and every push to `main`: a universal macOS DMG/ZIP, x64 Windows
+installer/portable executables, and x64 Linux AppImage/DEB packages. Each
+unpacked native application is exercised against a loopback mutual-TLS fixture
+before the packages are retained as workflow artifacts for 14 days on pull
+requests and 30 days on `main`, tag, and manually dispatched builds.
+
+The hosted jobs use versioned build images, but they exercise unpacked output
+and do not claim the minimum-runtime installed-package certification recorded
+as pending in the platform-support ADR. Dedicated Ventura 13.7.8 arm64/Intel,
+Windows 11 24H2, and Ubuntu 22.04.5 install lanes remain required before that
+certification evidence can be marked complete.
+
+The repository or organization must provide an Actions secret named
+`HEROUI_AUTH_TOKEN`. Create a CI/CD token in the HeroUI Pro dashboard and add it
+before enabling the workflow; the build fails early with a direct error when
+the secret is unavailable.
+
+Pushing a stable version tag such as `v1.2.3` runs the same clean native builds,
+sets the packaged application version to `1.2.3`, and creates a draft GitHub
+release containing all six packages plus `SHA256SUMS`. Release binaries are
+currently unsigned, so automation never publishes that draft. Signing,
+notarization, and their verification evidence are required before a maintainer
+publishes a stable release.
 
 ## Real-server integration test
 
@@ -84,6 +135,21 @@ npm test -- --run src/e2e/real-server.test.ts
 The test connects over mTLS, starts and stops a listener while observing server
 events, generates a real implant, checks the archived build, and exercises
 staging and profile lifecycle cleanup. It is skipped during normal unit runs.
+
+After building the unpacked native application with `npm run package`, exercise
+that production executable through its real renderer, frozen preload, trusted
+IPC handlers, and connection registry against the same disposable server:
+
+```sh
+SLIVER_GUI_E2E_CONFIG=/absolute/path/operator.cfg \
+SLIVER_GUI_E2E_LISTENER_PORT=18888 \
+npm run test:e2e:packaged-real
+```
+
+Use a currently unused listener port. The packaged-app test copies the mTLS
+configuration into an isolated `0600` home directory, starts one loopback mTLS
+listener, reviews the production stop impact, stops only the job it created,
+disconnects, and performs fallback cleanup if the UI path is interrupted.
 
 ## Security boundary
 

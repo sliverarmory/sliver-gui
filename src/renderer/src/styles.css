@@ -130,6 +130,31 @@
     background: color-mix(in srgb, var(--color-surface-secondary) 32%, transparent);
   }
 
+  .app-sidebar .connection-summary--trigger {
+    height: auto;
+    justify-content: flex-start;
+    color: var(--color-foreground);
+    cursor: var(--cursor-interactive);
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] .connection-summary--trigger {
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+
+  @media (hover: hover) {
+    .app-sidebar .connection-summary--trigger:hover,
+    .app-sidebar .connection-summary--trigger[data-hovered="true"] {
+      background: color-mix(in srgb, var(--color-surface-secondary) 54%, transparent);
+    }
+  }
+
+  .app-sidebar .connection-summary--trigger[data-pressed="true"],
+  .app-sidebar .connection-summary--trigger[aria-expanded="true"] {
+    background: color-mix(in srgb, var(--color-surface-secondary) 68%, transparent);
+  }
+
   .app-sidebar .sidebar__menu-item[data-current="true"] .sidebar__menu-item-content {
     background-color: color-mix(in srgb, var(--color-surface) 46%, transparent);
     box-shadow:

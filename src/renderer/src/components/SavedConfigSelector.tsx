@@ -1,12 +1,16 @@
 import type { Selection } from "@heroui/react";
 import {
+  AlertDialog,
   Button,
   Chip,
+  Description,
+  Input,
   Label,
   ListBox,
   Modal,
   ScrollShadow,
   Spinner,
+  TextField,
   Tooltip,
 } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
@@ -15,10 +19,13 @@ import {
   faCircleExclamation,
   faClock,
   faFileCode,
+  faFileImport,
   faFolderOpen,
   faRotate,
   faSatelliteDish,
   faServer,
+  faTrashCan,
+  faUnlink,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -36,6 +43,8 @@ export interface SavedConfigSelectorProps {
   onRefresh: () => void | Promise<void>;
   onConnect: (config: SavedConfigSummary) => void | Promise<void>;
   onChooseFile: () => void | Promise<void>;
+  onImport: (displayName: string) => void | Promise<void>;
+  onRemove: (config: SavedConfigSummary) => void | Promise<void>;
 }
 
 export function SavedConfigSelector({
@@ -48,25 +57,41 @@ export function SavedConfigSelector({
   onRefresh,
   onConnect,
   onChooseFile,
+  onImport,
+  onRemove,
 }: SavedConfigSelectorProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isChoosingFile, setIsChoosingFile] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [isImportFormOpen, setIsImportFormOpen] = useState(false);
+  const [importName, setImportName] = useState("");
+  const [importError, setImportError] = useState<string>();
+  const [removalCandidate, setRemovalCandidate] = useState<SavedConfigSummary | null>(null);
+  const [isRemoving, setIsRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string>();
 
   useEffect(() => {
     if (!isOpen) return;
     setSelectedId((current) => {
       if (current && configs.some((config) => config.id === current)) return current;
-      return configs[0]?.id ?? null;
+      return configs.find((config) => config.availability === "available")?.id ?? configs[0]?.id ?? null;
     });
   }, [configs, isOpen]);
+
+  useEffect(() => {
+    if (!removalCandidate || configs.some((config) => config.id === removalCandidate.id)) return;
+    setRemovalCandidate(null);
+    setRemoveError(undefined);
+  }, [configs, removalCandidate]);
 
   const selectedConfig = useMemo(
     () => configs.find((config) => config.id === selectedId),
     [configs, selectedId],
   );
-  const isBusy = isConnecting || isSubmitting || isChoosingFile;
+  const isBusy = isConnecting || isSubmitting || isChoosingFile || isImporting || isRemoving;
+  const isCatalogRefreshing = isLoading || isRefreshing;
 
   const handleSelectionChange = useCallback((selection: Selection) => {
     if (selection === "all") return;
@@ -85,14 +110,14 @@ export function SavedConfigSelector({
   }, [isRefreshing, onRefresh]);
 
   const connect = useCallback(async () => {
-    if (!selectedConfig || isBusy) return;
+    if (!selectedConfig || selectedConfig.availability !== "available" || isBusy || isCatalogRefreshing) return;
     setIsSubmitting(true);
     try {
       await onConnect(selectedConfig);
     } finally {
       setIsSubmitting(false);
     }
-  }, [isBusy, onConnect, selectedConfig]);
+  }, [isBusy, isCatalogRefreshing, onConnect, selectedConfig]);
 
   const chooseFile = useCallback(async () => {
     if (isBusy) return;
@@ -104,8 +129,43 @@ export function SavedConfigSelector({
     }
   }, [isBusy, onChooseFile]);
 
+  const importConfig = useCallback(async () => {
+    const displayName = importName.trim();
+    if (!displayName) {
+      setImportError("Enter a local name for the imported configuration.");
+      return;
+    }
+    if (isBusy) return;
+    setIsImporting(true);
+    setImportError(undefined);
+    try {
+      await onImport(displayName);
+      setImportName("");
+      setIsImportFormOpen(false);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsImporting(false);
+    }
+  }, [importName, isBusy, onImport]);
+
+  const removeConfig = useCallback(async () => {
+    if (!removalCandidate || isBusy || isCatalogRefreshing) return;
+    setIsRemoving(true);
+    setRemoveError(undefined);
+    try {
+      await onRemove(removalCandidate);
+      setRemovalCandidate(null);
+    } catch (error) {
+      setRemoveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsRemoving(false);
+    }
+  }, [isBusy, isCatalogRefreshing, onRemove, removalCandidate]);
+
   return (
-    <Modal.Backdrop
+    <>
+      <Modal.Backdrop
       isDismissable={!isBusy}
       isKeyboardDismissDisabled={isBusy}
       isOpen={isOpen}
@@ -124,7 +184,7 @@ export function SavedConfigSelector({
             <div className="min-w-0 flex-1">
               <Modal.Heading>Connect to Sliver</Modal.Heading>
               <p className="mt-0.5 text-xs font-normal leading-relaxed text-muted">
-                Saved operator configurations from ~/.sliver-client/configs
+                Saved mTLS configurations; WireGuard operator transport is deferred
               </p>
             </div>
             <Tooltip delay={300}>
@@ -153,6 +213,49 @@ export function SavedConfigSelector({
               >
                 <FontAwesomeIcon aria-hidden icon={faCircleExclamation} className="mt-0.5 size-3.5 shrink-0" />
                 <p className="min-w-0 break-words">{error}</p>
+              </div>
+            ) : null}
+
+            {isImportFormOpen ? (
+              <div className="rounded-xl border border-separator bg-default p-3">
+                <div className="flex items-start gap-2.5">
+                  <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent-soft-foreground">
+                    <FontAwesomeIcon aria-hidden icon={faFileImport} className="size-3.5" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <TextField
+                      fullWidth
+                      isInvalid={Boolean(importError)}
+                      value={importName}
+                      variant="secondary"
+                      onChange={(value) => {
+                        setImportName(value);
+                        setImportError(undefined);
+                      }}
+                    >
+                      <Label>Local configuration name</Label>
+                      <Input autoComplete="off" placeholder="Production team" />
+                      <Description>The GUI stores a private managed copy under this local name.</Description>
+                    </TextField>
+                    {importError ? <p className="mt-1 text-xs text-danger" role="alert">{importError}</p> : null}
+                    <div className="mt-3 flex justify-end gap-2">
+                      <Button
+                        isDisabled={isImporting}
+                        size="sm"
+                        variant="tertiary"
+                        onPress={() => {
+                          setIsImportFormOpen(false);
+                          setImportError(undefined);
+                        }}
+                      >
+                        Cancel import
+                      </Button>
+                      <Button isPending={isImporting} size="sm" onPress={() => void importConfig()}>
+                        Choose file and import
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : null}
 
@@ -199,6 +302,7 @@ export function SavedConfigSelector({
                     <ListBox.Item
                       className="rounded-xl px-3 py-3 data-[selected=true]:bg-surface"
                       id={config.id}
+                      isDisabled={isCatalogRefreshing || config.availability !== "available"}
                       key={config.id}
                       textValue={`${config.operator} ${config.displayName} ${safeConfigFilename(config.fileName)} ${configEndpoint(config.lhost, config.lport)}`}
                     >
@@ -209,6 +313,18 @@ export function SavedConfigSelector({
                           </Label>
                           <Chip size="sm" variant="soft" className="shrink-0">
                             <Chip.Label>{config.transport === "wireguard" ? "WireGuard" : "mTLS"}</Chip.Label>
+                          </Chip>
+                          <Chip
+                            color={config.availability === "available" ? "default" : "warning"}
+                            size="sm"
+                            variant="soft"
+                            className="shrink-0"
+                          >
+                            <Chip.Label>
+                              {config.availability === "available"
+                                ? config.origin === "managed" ? "Imported" : "Existing"
+                                : "Deferred"}
+                            </Chip.Label>
                           </Chip>
                         </div>
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
@@ -227,6 +343,11 @@ export function SavedConfigSelector({
                             <time dateTime={config.modifiedAt}>{formatConfigModifiedAt(config.modifiedAt)}</time>
                           </span>
                         </div>
+                        {config.unavailableReason ? (
+                          <p className="mt-1.5 text-[11px] leading-relaxed text-warning-soft-foreground">
+                            {config.unavailableReason}
+                          </p>
+                        ) : null}
                       </div>
                       <ListBox.ItemIndicator className="shrink-0 text-accent">
                         {({ isSelected }) => isSelected ? (
@@ -240,23 +361,55 @@ export function SavedConfigSelector({
             )}
           </Modal.Body>
 
-          <Modal.Footer className="flex-wrap items-center justify-between gap-3">
+          <Modal.Footer className="flex-wrap items-center gap-2">
+            <Button
+              isDisabled={isBusy || isImportFormOpen}
+              size="sm"
+              variant="outline"
+              onPress={() => setIsImportFormOpen(true)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faFileImport} className="size-3.5" />
+              Import a copy
+            </Button>
             <Button
               isDisabled={isBusy}
               isPending={isChoosingFile}
               size="sm"
-              variant="outline"
+              variant="tertiary"
               onPress={() => void chooseFile()}
             >
               <FontAwesomeIcon aria-hidden icon={faFolderOpen} className="size-3.5" />
-              Choose configuration file
+              Connect external file
             </Button>
+            {selectedConfig ? (
+              <Button
+                isDisabled={isBusy || isCatalogRefreshing}
+                size="sm"
+                variant="danger-soft"
+                onPress={() => {
+                  setRemoveError(undefined);
+                  setRemovalCandidate(selectedConfig);
+                }}
+              >
+                <FontAwesomeIcon
+                  aria-hidden
+                  icon={selectedConfig.removal === "delete-managed-copy" ? faTrashCan : faUnlink}
+                  className="size-3.5"
+                />
+                {selectedConfig.removal === "delete-managed-copy" ? "Delete copy" : "Forget"}
+              </Button>
+            ) : null}
             <div className="ml-auto flex items-center gap-2">
               <Button isDisabled={isBusy} size="sm" variant="tertiary" onPress={() => onOpenChange(false)}>
                 Cancel
               </Button>
               <Button
-                isDisabled={!selectedConfig || isBusy}
+                isDisabled={
+                  !selectedConfig ||
+                  selectedConfig.availability !== "available" ||
+                  isBusy ||
+                  isCatalogRefreshing
+                }
                 isPending={isConnecting || isSubmitting}
                 size="sm"
                 variant="primary"
@@ -268,6 +421,63 @@ export function SavedConfigSelector({
           </Modal.Footer>
         </Modal.Dialog>
       </Modal.Container>
-    </Modal.Backdrop>
+      </Modal.Backdrop>
+
+      <AlertDialog.Backdrop
+        isOpen={removalCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open && !isRemoving) {
+            setRemovalCandidate(null);
+            setRemoveError(undefined);
+          }
+        }}
+      >
+        <AlertDialog.Container placement="center" size="sm">
+          <AlertDialog.Dialog className="sm:max-w-[440px]">
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="danger">
+                <FontAwesomeIcon
+                  aria-hidden
+                  icon={removalCandidate?.removal === "delete-managed-copy" ? faTrashCan : faUnlink}
+                  className="size-4"
+                />
+              </AlertDialog.Icon>
+              <AlertDialog.Heading>
+                {removalCandidate?.removal === "delete-managed-copy"
+                  ? "Delete this imported copy?"
+                  : "Forget this configuration?"}
+              </AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              <p className="text-sm leading-relaxed text-muted">
+                {removalCandidate?.removal === "delete-managed-copy"
+                  ? `Delete the GUI-managed private copy “${removalCandidate.displayName}”? This does not change the Sliver server.`
+                  : `Detach “${removalCandidate?.displayName ?? "this configuration"}” from the GUI catalog? Its existing source file remains on disk.`}
+              </p>
+              {removeError ? <p className="mt-3 text-sm text-danger" role="alert">{removeError}</p> : null}
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <Button
+                isDisabled={isRemoving}
+                size="sm"
+                variant="tertiary"
+                onPress={() => setRemovalCandidate(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                isDisabled={isRemoving}
+                isPending={isRemoving}
+                size="sm"
+                variant="danger"
+                onPress={() => void removeConfig()}
+              >
+                {removalCandidate?.removal === "delete-managed-copy" ? "Delete managed copy" : "Forget only"}
+              </Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
+    </>
   );
 }

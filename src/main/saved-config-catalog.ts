@@ -1,16 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 
 import { parseConfig } from "sliver-script";
 
-import type { SavedConfigSummary } from "../shared/contracts.js";
+import type { SavedConfigOrigin, SavedConfigSummary } from "../shared/contracts.js";
+import { readBoundedRegularFile } from "./secure-file.js";
 
 export const MAX_SAVED_CONFIG_BYTES = 4 * 1024 * 1024;
 
 const MAX_METADATA_LENGTH = 200;
-const READ_CHUNK_BYTES = 64 * 1024;
 const UNSAFE_DISPLAY_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu;
 
 /** Main-process-only catalog entry. Paths and content fingerprints never cross IPC. */
@@ -20,7 +19,11 @@ export interface SavedConfigRecord {
   readonly summary: SavedConfigSummary;
 }
 
-export async function discoverSavedConfigs(directory: string): Promise<SavedConfigRecord[]> {
+export async function discoverSavedConfigs(
+  directory: string,
+  origin: SavedConfigOrigin = "preexisting",
+  displayNames: ReadonlyMap<string, string> = new Map(),
+): Promise<SavedConfigRecord[]> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -36,7 +39,11 @@ export async function discoverSavedConfigs(directory: string): Promise<SavedConf
     const path = join(directory, entry.name);
     let data: Buffer | undefined;
     try {
-      const loaded = await readBoundedRegularFile(path);
+      const loaded = await readBoundedRegularFile(path, {
+        label: "Saved configuration",
+        maxBytes: MAX_SAVED_CONFIG_BYTES,
+        requirePrivateMode: origin === "managed",
+      });
       data = loaded.data;
       const config = parseConfig(data);
       if (!Number.isSafeInteger(config.lport) || config.lport < 1 || config.lport > 65_535) {
@@ -45,7 +52,7 @@ export async function discoverSavedConfigs(directory: string): Promise<SavedConf
 
       const fileName = sanitizeSavedConfigMetadata(entry.name);
       const withoutExtension = entry.name.slice(0, Math.max(0, entry.name.length - extname(entry.name).length));
-      const displayName = sanitizeSavedConfigMetadata(withoutExtension || entry.name);
+      const displayName = sanitizeSavedConfigMetadata(displayNames.get(entry.name) ?? (withoutExtension || entry.name));
       const operator = sanitizeSavedConfigMetadata(config.operator);
       const lhost = sanitizeSavedConfigMetadata(config.lhost);
       if (!fileName || !displayName || !operator || !lhost) throw new Error("Invalid Sliver configuration metadata");
@@ -64,6 +71,12 @@ export async function discoverSavedConfigs(directory: string): Promise<SavedConf
           lport: config.lport,
           transport: config.wg === undefined ? "mtls" : "wireguard",
           modifiedAt: new Date(loaded.modifiedAtMs).toISOString(),
+          origin,
+          removal: origin === "managed" ? "delete-managed-copy" : "detach",
+          availability: config.wg === undefined ? "available" : "deferred",
+          ...(config.wg === undefined
+            ? {}
+            : { unavailableReason: "WireGuard operator connections are deferred for this milestone" }),
         },
       });
     } catch {
@@ -83,57 +96,17 @@ export async function discoverSavedConfigs(directory: string): Promise<SavedConf
 }
 
 export async function readCurrentSavedConfig(record: SavedConfigRecord): Promise<Buffer> {
-  const { data } = await readBoundedRegularFile(record.path);
+  const { data } = await readBoundedRegularFile(record.path, {
+    label: "Saved configuration",
+    maxBytes: MAX_SAVED_CONFIG_BYTES,
+    requirePrivateMode: record.summary.origin === "managed",
+  });
   const digest = createHash("sha256").update(data).digest("hex");
   if (digest !== record.digest) {
     data.fill(0);
     throw new Error("Saved configuration changed after the catalog was refreshed");
   }
   return data;
-}
-
-async function readBoundedRegularFile(path: string): Promise<{ data: Buffer; modifiedAtMs: number }> {
-  const before = await lstat(path);
-  if (before.isSymbolicLink() || !before.isFile() || before.size > MAX_SAVED_CONFIG_BYTES) {
-    throw new Error("Saved configuration is not a bounded regular file");
-  }
-
-  const noFollow = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
-  const handle = await open(path, constants.O_RDONLY | noFollow);
-  const chunks: Buffer[] = [];
-  try {
-    const opened = await handle.stat();
-    if (
-      !opened.isFile() ||
-      opened.size > MAX_SAVED_CONFIG_BYTES ||
-      before.dev !== opened.dev ||
-      before.ino !== opened.ino
-    ) {
-      throw new Error("Saved configuration changed while being opened");
-    }
-
-    let total = 0;
-    while (total <= MAX_SAVED_CONFIG_BYTES) {
-      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, MAX_SAVED_CONFIG_BYTES + 1 - total));
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
-      if (bytesRead === 0) {
-        chunk.fill(0);
-        break;
-      }
-      chunks.push(chunk.subarray(0, bytesRead));
-      total += bytesRead;
-    }
-    if (total > MAX_SAVED_CONFIG_BYTES) throw new Error("Saved configuration exceeds the size limit");
-
-    const data = Buffer.concat(chunks, total);
-    for (const chunk of chunks) chunk.fill(0);
-    return { data, modifiedAtMs: opened.mtimeMs };
-  } catch (error) {
-    for (const chunk of chunks) chunk.fill(0);
-    throw error;
-  } finally {
-    await handle.close();
-  }
 }
 
 export function sanitizeSavedConfigMetadata(value: string): string {

@@ -40,6 +40,10 @@ describe("saved Sliver config discovery", () => {
       lhost: "two.example",
       lport: 31337,
       transport: "wireguard",
+      origin: "preexisting",
+      removal: "detach",
+      availability: "deferred",
+      unavailableReason: "WireGuard operator connections are deferred for this milestone",
       modifiedAt: "2026-02-01T00:00:00.000Z",
     });
     expect(summaries[1]?.transport).toBe("mtls");
@@ -50,7 +54,20 @@ describe("saved Sliver config discovery", () => {
     expect(exposed).not.toContain("TOP-SECRET-PRIVATE-KEY");
     expect(exposed).not.toContain("TOP-SECRET-TOKEN");
     expect(Object.keys(summaries[0] ?? {}).sort()).toEqual(
-      ["displayName", "fileName", "id", "lhost", "lport", "modifiedAt", "operator", "transport"].sort(),
+      [
+        "availability",
+        "displayName",
+        "fileName",
+        "id",
+        "lhost",
+        "lport",
+        "modifiedAt",
+        "operator",
+        "origin",
+        "removal",
+        "transport",
+        "unavailableReason",
+      ].sort(),
     );
   });
 

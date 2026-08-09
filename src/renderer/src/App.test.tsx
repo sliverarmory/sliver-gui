@@ -1,11 +1,16 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar } from "@heroui-pro/react/sidebar";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { disconnectedSnapshot } from "../../shared/contracts";
-import type { OperationResult, SavedConfigSummary, SliverDesktopAPI } from "../../shared/contracts";
-import { App, NavigationContent, WindowMenu } from "./App";
+import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../../shared/contracts";
+import type {
+  OperationResult,
+  SavedConfigSummary,
+  SliverDesktopAPI,
+  SliverSnapshot,
+} from "../../shared/contracts";
+import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -33,6 +38,8 @@ function deferred<T>() {
 
 function installSliverAPI(
   listSavedConfigs: SliverDesktopAPI["listSavedConfigs"],
+  initialSnapshot = disconnectedSnapshot(),
+  captureSnapshotListener?: (listener: (snapshot: SliverSnapshot) => void) => void,
 ): SliverDesktopAPI {
   const failedOperation = async () => ({ ok: false as const, error: "Not implemented by this test" });
   const api: SliverDesktopAPI = {
@@ -45,16 +52,22 @@ function installSliverAPI(
     downloadBuild: vi.fn(failedOperation),
     generate: vi.fn(failedOperation),
     generateFromProfile: vi.fn(failedOperation),
-    getSnapshot: vi.fn().mockResolvedValue(disconnectedSnapshot()),
-    killAllJobs: vi.fn(failedOperation),
-    killJob: vi.fn(failedOperation),
+    getSnapshot: vi.fn().mockResolvedValue(initialSnapshot),
+    importConfig: vi.fn(failedOperation),
     listSavedConfigs,
-    onSnapshotChanged: vi.fn().mockReturnValue(vi.fn()),
+    onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
+      captureSnapshotListener?.(listener);
+      return vi.fn();
+    }),
     openWindow: vi.fn(failedOperation),
+    prepareStopAllJobs: vi.fn(failedOperation),
+    prepareStopJob: vi.fn(failedOperation),
     refresh: vi.fn(failedOperation),
+    removeSavedConfig: vi.fn(failedOperation),
     saveProfile: vi.fn(failedOperation),
     setStagedBuilds: vi.fn(failedOperation),
     startListener: vi.fn(failedOperation),
+    executeStopPlan: vi.fn(failedOperation),
   };
 
   Object.defineProperty(window, "sliver", {
@@ -77,6 +90,10 @@ describe("App startup", () => {
 
     expect(screen.getByRole("dialog", { name: "Connect to Sliver" })).toBeInTheDocument();
     expect(screen.getByText("Finding configurations")).toBeInTheDocument();
+    expect(listSavedConfigs).toHaveBeenCalledOnce();
+
+    window.dispatchEvent(new Event("focus"));
+    expect(listSavedConfigs).toHaveBeenCalledOnce();
 
     initialCatalog.resolve({ ok: true, value: [] });
     await screen.findByText("No saved configurations");
@@ -89,6 +106,273 @@ describe("App startup", () => {
     await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
   });
+
+  it("removes stale opaque config IDs when a catalog refresh fails", async () => {
+    const config: SavedConfigSummary = {
+      id: "46a72a10-a9ad-43ac-9db4-d108a0065e1c",
+      fileName: "operator.cfg",
+      displayName: "Production",
+      operator: "alice",
+      lhost: "sliver.example.test",
+      lport: 31337,
+      transport: "mtls",
+      modifiedAt: "2026-08-09T12:00:00.000Z",
+      origin: "preexisting",
+      removal: "detach",
+      availability: "available",
+    };
+    const listSavedConfigs = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: [config] })
+      .mockResolvedValueOnce({ ok: false, error: "Catalog refresh failed" });
+    installSliverAPI(listSavedConfigs);
+
+    render(<App />);
+
+    expect(await screen.findByRole("option", { name: /alice/i })).toBeInTheDocument();
+    window.dispatchEvent(new Event("focus"));
+    expect(await screen.findByText("Couldn't load configurations")).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /alice/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+  });
+
+  it("runs a trailing catalog scan after an import overlaps a focus refresh", async () => {
+    const user = userEvent.setup();
+    const initialConfig: SavedConfigSummary = {
+      id: "46a72a10-a9ad-43ac-9db4-d108a0065e1c",
+      fileName: "operator.cfg",
+      displayName: "Production",
+      operator: "alice",
+      lhost: "sliver.example.test",
+      lport: 31337,
+      transport: "mtls",
+      modifiedAt: "2026-08-09T12:00:00.000Z",
+      origin: "preexisting",
+      removal: "detach",
+      availability: "available",
+    };
+    const importedConfig: SavedConfigSummary = {
+      ...initialConfig,
+      id: "fe346126-d70e-42a7-91b8-53081903014f",
+      fileName: "managed.cfg",
+      displayName: "Imported lab",
+      operator: "bob",
+      origin: "managed",
+      removal: "delete-managed-copy",
+    };
+    const freshImportedConfig = {
+      ...importedConfig,
+      id: "59507a02-030f-4aa5-b01f-ad895458f58d",
+    };
+    const focusCatalog = deferred<OperationResult<SavedConfigSummary[]>>();
+    const listSavedConfigs = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: [initialConfig] })
+      .mockReturnValueOnce(focusCatalog.promise)
+      .mockResolvedValueOnce({ ok: true, value: [freshImportedConfig] });
+    const api = installSliverAPI(listSavedConfigs);
+    vi.mocked(api.importConfig).mockResolvedValue({ ok: true, value: importedConfig });
+    vi.mocked(api.connectSavedConfig).mockResolvedValue({ ok: false, error: "Connection not needed for this test" });
+
+    render(<App />);
+
+    expect(await screen.findByRole("option", { name: /alice/i })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Import a copy" }));
+    await user.type(screen.getByRole("textbox", { name: "Local configuration name" }), "Imported lab");
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Choose file and import" }));
+    await waitFor(() => expect(api.importConfig).toHaveBeenCalledWith({ displayName: "Imported lab" }));
+    expect(listSavedConfigs).toHaveBeenCalledTimes(2);
+
+    focusCatalog.resolve({ ok: true, value: [initialConfig] });
+    expect(await screen.findByRole("option", { name: /bob/i })).toBeInTheDocument();
+    expect(listSavedConfigs).toHaveBeenCalledTimes(3);
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.connectSavedConfig).toHaveBeenCalledWith(freshImportedConfig.id));
+  });
+
+  it("keeps an operationally degraded backend usable without showing a compatibility notice", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "degraded",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.6.0",
+      error: "Compiler inventory refresh failed",
+    };
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Backend degraded")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+    });
+    const header = document.querySelector<HTMLElement>(".app-header");
+    if (!header) throw new Error("Application header is missing");
+    expect(within(header).queryByRole("button", { name: "Switch config" })).not.toBeInTheDocument();
+    expect(within(header).queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
+    await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
+    expect(await screen.findByRole("dialog", { name: "Connect to Sliver" })).toBeInTheDocument();
+  });
+
+  it("shows a mismatched-server notice once per connection epoch and keeps it dismissed on refresh", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    const mismatchReason = "Sliver 1.7.6 is a modified build and has not been verified against the pinned baseline";
+    snapshot.connection = {
+      status: "degraded",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6 (dirty)",
+      epoch: 41,
+      error: mismatchReason,
+      capabilities: {
+        compatibility: "degraded",
+        baselineCommit: SLIVER_PROTOCOL_BASELINE_COMMIT,
+        serverVersion: "1.7.6 (dirty)",
+        reason: mismatchReason,
+        currentSlice: {
+          jobs: true,
+          listeners: true,
+          generation: true,
+          builds: true,
+          profiles: true,
+          events: true,
+        },
+      },
+    };
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      snapshot,
+      (listener) => {
+        emitSnapshot = listener;
+      },
+    );
+    vi.mocked(api.refresh).mockResolvedValue({ ok: true, value: snapshot });
+
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog", { name: "Server build mismatch" });
+    expect(dialog.querySelector('[data-slot="modal-body"]')).toHaveClass("flex", "flex-col", "gap-3");
+    expect(within(dialog).getByText("1.7.6 (dirty)")).toBeInTheDocument();
+    expect(within(dialog).getByText(SLIVER_PROTOCOL_BASELINE_COMMIT.slice(0, 12))).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(mismatchReason);
+    expect(dialog).not.toHaveTextContent("Current M0 features remain available");
+    const header = document.querySelector<HTMLElement>(".app-header");
+    if (!header) throw new Error("Application header is missing");
+    expect(within(header).queryByText("Backend degraded")).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Continue" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Refresh server state" }));
+    await waitFor(() => expect(api.refresh).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+
+    if (!emitSnapshot) throw new Error("Snapshot listener was not installed");
+    emitSnapshot({
+      ...snapshot,
+      connection: { ...snapshot.connection, status: "reconnecting" },
+    });
+    expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+
+    emitSnapshot({
+      ...snapshot,
+      connection: { ...snapshot.connection, epoch: 42 },
+    });
+    expect(await screen.findByRole("dialog", { name: "Server build mismatch" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("disconnects the active backend from the current-server menu", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+    vi.mocked(api.disconnect).mockResolvedValue({ ok: true, value: disconnectedSnapshot() });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
+    await user.click(await screen.findByRole("menuitem", { name: "Disconnect" }));
+
+    await waitFor(() => expect(api.disconnect).toHaveBeenCalledOnce());
+    expect(await screen.findByRole("heading", { name: "Connect an operator configuration" })).toBeInTheDocument();
+  });
+});
+
+describe("Current server menu", () => {
+  it("opens from the server summary and owns switch-config and disconnect actions", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "m0-manual-verification",
+      configName: "M0 manual verification",
+      version: "1.7.6",
+    };
+    const onSwitchConfig = vi.fn();
+    const onDisconnect = vi.fn();
+
+    render(
+      <ConnectionMenu
+        snapshot={snapshot}
+        onDisconnect={onDisconnect}
+        onSwitchConfig={onSwitchConfig}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Current server: m0-manual-verification" });
+    expect(trigger.querySelectorAll('[data-sidebar="label"]')).toHaveLength(2);
+    expect(screen.queryByRole("menuitem", { name: "Switch config" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Disconnect" })).not.toBeInTheDocument();
+
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
+    expect(onSwitchConfig).toHaveBeenCalledOnce();
+    expect(onDisconnect).not.toHaveBeenCalled();
+
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "Disconnect" }));
+    expect(onDisconnect).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the offline summary noninteractive", () => {
+    render(
+      <ConnectionMenu
+        snapshot={disconnectedSnapshot()}
+        onDisconnect={vi.fn()}
+        onSwitchConfig={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Offline")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Current server:/ })).not.toBeInTheDocument();
+  });
 });
 
 describe("Sidebar navigation", () => {
@@ -100,6 +384,8 @@ describe("Sidebar navigation", () => {
           <NavigationContent
             snapshot={disconnectedSnapshot()}
             view="operations"
+            onDisconnect={vi.fn()}
+            onSwitchConfig={vi.fn()}
             onViewChange={onViewChange}
           />
         </Sidebar>
@@ -128,6 +414,37 @@ describe("Sidebar navigation", () => {
     const expandedItem = screen.getByRole("row", { name: "Generate" });
     expect(expandedItem.querySelector("[data-slot=tooltip-trigger]")).toBeNull();
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("keeps the current-server menu actionable in the collapsed rail", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    const onSwitchConfig = vi.fn();
+
+    render(
+      <Sidebar.Provider collapsible="icon" open={false}>
+        <Sidebar className="app-sidebar">
+          <NavigationContent
+            snapshot={snapshot}
+            view="operations"
+            onDisconnect={vi.fn()}
+            onSwitchConfig={onSwitchConfig}
+            onViewChange={vi.fn()}
+          />
+        </Sidebar>
+      </Sidebar.Provider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Current server: alice" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
+    expect(onSwitchConfig).toHaveBeenCalledOnce();
   });
 });
 

@@ -28,6 +28,9 @@ type DeleteTarget =
   | undefined;
 
 export function BuildsPage({ snapshot }: BuildsPageProps) {
+  const buildInventory = snapshot.domains.builds;
+  const stagingAuthoritative =
+    (buildInventory.status === "ready" || buildInventory.status === "empty") && !buildInventory.page.truncated;
   const serverStaged = useMemo(
     () => new Set(snapshot.builds.filter((build) => build.staged).map((build) => build.name)),
     [snapshot.builds],
@@ -37,7 +40,7 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>();
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdatingStage, setIsUpdatingStage] = useState(false);
-  const isStageDirty = setKey(draftStaged) !== serverStagedKey;
+  const isStageDirty = stagingAuthoritative && setKey(draftStaged) !== serverStagedKey;
 
   useEffect(() => {
     setDraftStaged(new Set(serverStaged));
@@ -90,6 +93,12 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
   }
 
   async function applyStagedBuilds() {
+    if (!stagingAuthoritative) {
+      toast.danger("Build inventory incomplete", {
+        description: "Refresh the complete build inventory before replacing the HTTP staging allowlist.",
+      });
+      return;
+    }
     setIsUpdatingStage(true);
     try {
       const result = await window.sliver.setStagedBuilds([...draftStaged]);
@@ -141,6 +150,17 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
       accessorKey: "implantType",
       minWidth: 110,
       cell: (build) => <span className="capitalize text-sm text-muted">{build.implantType}</span>,
+    },
+    {
+      id: "staged",
+      header: "HTTP stage",
+      accessorKey: "staged",
+      minWidth: 120,
+      cell: (build) => (
+        <Chip size="sm" color={build.staged ? "success" : "default"} variant="soft">
+          {build.staged ? "Staged" : "Not staged"}
+        </Chip>
+      ),
     },
     {
       id: "c2",
@@ -204,8 +224,8 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
           <p>Download archived artifacts, choose HTTP staging candidates, and reuse server-side configurations.</p>
         </div>
         <div className="flex gap-2">
-          <Chip size="sm" variant="soft">{snapshot.builds.length} builds</Chip>
-          <Chip size="sm" variant="soft">{snapshot.profiles.length} profiles</Chip>
+          <Chip size="sm" variant="soft">{inventoryCountLabel(snapshot.builds.length, buildInventory.page.total, "build")}</Chip>
+          <Chip size="sm" variant="soft">{inventoryCountLabel(snapshot.profiles.length, snapshot.domains.profiles.page.total, "profile")}</Chip>
         </div>
       </section>
 
@@ -214,7 +234,11 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
           <div className="section-icon"><FontAwesomeIcon icon={faBoxArchive} /></div>
           <div className="min-w-0 flex-1">
             <Card.Title>Archived builds</Card.Title>
-            <Card.Description>Selection controls the server's complete HTTP staging allowlist.</Card.Description>
+            <Card.Description>
+              {stagingAuthoritative
+                ? "Selection controls the server's complete HTTP staging allowlist."
+                : "HTTP staging changes are unavailable until the complete build inventory is loaded."}
+            </Card.Description>
           </div>
           {isStageDirty ? <Chip size="sm" color="warning" variant="soft">Unsaved staging changes</Chip> : null}
         </Card.Header>
@@ -224,17 +248,28 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
             data={snapshot.builds}
             columns={buildColumns}
             getRowId={(build) => build.name}
-            selectionMode="multiple"
-            selectionBehavior="toggle"
-            showSelectionCheckboxes
-            selectedKeys={draftStaged}
-            onSelectionChange={(selection) => setDraftStaged(selectionToSet(selection, snapshot.builds))}
+            {...(stagingAuthoritative
+              ? {
+                  selectionMode: "multiple" as const,
+                  selectionBehavior: "toggle" as const,
+                  showSelectionCheckboxes: true,
+                  selectedKeys: draftStaged,
+                  onSelectionChange: (selection: DataGridSelection) => setDraftStaged(selectionToSet(selection, snapshot.builds)),
+                }
+              : {})}
             variant="secondary"
-            contentClassName="min-w-[920px]"
+            contentClassName="min-w-[1040px]"
             renderEmptyState={() => <BuildEmptyState />}
           />
         </Card.Content>
-        {isStageDirty ? (
+        {!stagingAuthoritative ? (
+          <Card.Footer className="border-t border-warning/30 bg-warning/10 px-5 py-4" role="status">
+            <p className="text-xs text-warning">
+              Showing {snapshot.builds.length} of {buildInventory.page.total} builds. Staging selection is read-only because
+              a replace-all update could remove unseen server builds.
+            </p>
+          </Card.Footer>
+        ) : isStageDirty ? (
           <Card.Footer className="flex items-center justify-between border-t border-border px-5 py-4">
             <p className="text-xs text-muted">This is a replace-all operation; unchecked builds stop being stageable.</p>
             <div className="flex gap-2">
@@ -346,4 +381,9 @@ function selectionToSet(selection: DataGridSelection, builds: BuildSummary[]): S
 
 function setKey(values: Set<string>): string {
   return [...values].sort().join("\u0000");
+}
+
+function inventoryCountLabel(visible: number, total: number, singular: string): string {
+  const count = total > visible ? `${visible} of ${total}` : String(total);
+  return `${count} ${total === 1 ? singular : `${singular}s`}`;
 }

@@ -1,15 +1,18 @@
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
+  importConfig: "sliver:connection:import-config",
   listSavedConfigs: "sliver:connection:list-saved-configs",
   connectSavedConfig: "sliver:connection:connect-saved-config",
+  removeSavedConfig: "sliver:connection:remove-saved-config",
   disconnect: "sliver:connection:disconnect",
   getSnapshot: "sliver:snapshot:get",
   refresh: "sliver:snapshot:refresh",
   openWindow: "sliver:window:open",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
   startListener: "sliver:listener:start",
-  killJob: "sliver:job:kill",
-  killAllJobs: "sliver:job:kill-all",
+  prepareStopJob: "sliver:job:prepare-stop",
+  prepareStopAllJobs: "sliver:job:prepare-stop-all",
+  executeStopPlan: "sliver:job:execute-stop-plan",
   generate: "sliver:generate:create",
   generateFromProfile: "sliver:generate:from-profile",
   downloadBuild: "sliver:build:download",
@@ -30,8 +33,33 @@ export const IPC = {
 
 export type IpcInvokeChannel = (typeof IPC_INVOKE)[keyof typeof IPC_INVOKE];
 
-export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
+export const DEFAULT_C2_SCHEME = "mtls" as const;
+export const SLIVER_PROTOCOL_BASELINE_COMMIT = "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9" as const;
+
+export type ConnectionStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "degraded"
+  | "reconnecting"
+  | "incompatible";
 export type EventStreamStatus = "stopped" | "connecting" | "connected" | "retrying";
+export type ServerCompatibility = "unknown" | "supported" | "degraded" | "unsupported";
+
+export interface ServerCapabilitySummary {
+  compatibility: ServerCompatibility;
+  baselineCommit: typeof SLIVER_PROTOCOL_BASELINE_COMMIT;
+  serverVersion?: string;
+  reason?: string;
+  currentSlice: {
+    jobs: boolean;
+    listeners: boolean;
+    generation: boolean;
+    builds: boolean;
+    profiles: boolean;
+    events: boolean;
+  };
+}
 
 export interface ConnectionSummary {
   status: ConnectionStatus;
@@ -40,9 +68,12 @@ export interface ConnectionSummary {
   configName?: string;
   version?: string;
   error?: string;
+  epoch?: number;
+  capabilities?: ServerCapabilitySummary;
 }
 
 export type SavedConfigTransport = "mtls" | "wireguard";
+export type SavedConfigOrigin = "managed" | "preexisting";
 
 export interface SavedConfigSummary {
   id: string;
@@ -53,6 +84,18 @@ export interface SavedConfigSummary {
   lport: number;
   transport: SavedConfigTransport;
   modifiedAt: string;
+  origin: SavedConfigOrigin;
+  removal: "delete-managed-copy" | "detach";
+  availability: "available" | "deferred";
+  unavailableReason?: string;
+}
+
+export interface ImportConfigInput {
+  displayName: string;
+}
+
+export interface RemoveSavedConfigInput {
+  id: string;
 }
 
 export interface EventStreamSummary {
@@ -97,6 +140,39 @@ export interface CompilerTargetSummary {
   supported: boolean;
 }
 
+export type DomainStatus = "idle" | "loading" | "ready" | "empty" | "error" | "unsupported";
+
+export interface PageSummary {
+  limit: number;
+  total: number;
+  truncated: boolean;
+  nextCursor?: string;
+}
+
+export interface PageRequest {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface PageResult<T> {
+  items: T[];
+  page: PageSummary;
+}
+
+export interface DomainCollection<T> extends PageResult<T> {
+  status: DomainStatus;
+  revision: number;
+  updatedAt?: string;
+  error?: string;
+}
+
+export interface SnapshotDomains {
+  jobs: DomainCollection<JobSummary>;
+  builds: DomainCollection<BuildSummary>;
+  profiles: DomainCollection<ProfileSummary>;
+  compiler: DomainCollection<CompilerTargetSummary>;
+}
+
 export interface RecentEventSummary {
   id: string;
   type: string;
@@ -113,7 +189,29 @@ export interface SliverSnapshot {
   profiles: ProfileSummary[];
   compilerTargets: CompilerTargetSummary[];
   recentEvents: RecentEventSummary[];
+  domains: SnapshotDomains;
   lastUpdated?: string;
+}
+
+export interface JobStopBackendSummary {
+  server: string;
+  operator: string;
+  configName: string;
+  epoch: number;
+  sharedWindowCount: number;
+}
+
+export interface JobStopImpact {
+  backend: JobStopBackendSummary;
+  jobs: JobSummary[];
+  stopsAll: boolean;
+  warning: string;
+}
+
+export interface JobStopPlan {
+  token: string;
+  expiresAt: string;
+  impact: JobStopImpact;
 }
 
 export type ImplantType = "session" | "beacon";
@@ -173,6 +271,7 @@ export interface GenerateFromProfileInput {
 export interface SaveProfileInput {
   profileName: string;
   config: GenerateInput;
+  overwrite: boolean;
 }
 
 export interface SavedArtifact {
@@ -287,6 +386,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [];
     result: OperationResult<SliverSnapshot>;
   };
+  [IPC.importConfig]: {
+    args: [input: ImportConfigInput];
+    result: OperationResult<SavedConfigSummary>;
+  };
   [IPC.listSavedConfigs]: {
     args: [];
     result: OperationResult<SavedConfigSummary[]>;
@@ -294,6 +397,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.connectSavedConfig]: {
     args: [id: string];
     result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.removeSavedConfig]: {
+    args: [input: RemoveSavedConfigInput];
+    result: OperationResult;
   };
   [IPC.disconnect]: {
     args: [];
@@ -319,12 +426,16 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: ListenerInput];
     result: OperationResult<JobSummary>;
   };
-  [IPC.killJob]: {
+  [IPC.prepareStopJob]: {
     args: [jobId: number];
-    result: OperationResult;
+    result: OperationResult<JobStopPlan>;
   };
-  [IPC.killAllJobs]: {
+  [IPC.prepareStopAllJobs]: {
     args: [];
+    result: OperationResult<JobStopPlan>;
+  };
+  [IPC.executeStopPlan]: {
+    args: [token: string];
     result: OperationResult;
   };
   [IPC.generate]: {
@@ -372,13 +483,25 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
 };
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {
+  const emptyDomain = <T>(): DomainCollection<T> => ({
+    status: "idle",
+    revision: 0,
+    items: [],
+    page: { limit: 0, total: 0, truncated: false },
+  });
   return {
-    connection: error ? { status: "error", error } : { status: "disconnected" },
+    connection: error ? { status: "disconnected", error } : { status: "disconnected" },
     eventStream: { status: "stopped", attempt: 0 },
     jobs: [],
     builds: [],
     profiles: [],
     compilerTargets: [],
     recentEvents: [],
+    domains: {
+      jobs: emptyDomain(),
+      builds: emptyDomain(),
+      profiles: emptyDomain(),
+      compiler: emptyDomain(),
+    },
   };
 }

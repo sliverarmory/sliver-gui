@@ -5,7 +5,27 @@ directories:
   output: release
 files:
   - dist/**
+  - "!dist/**/*.map"
   - package.json
+  - LICENSE
+  - THIRD_PARTY_NOTICES.md
+  - vendor/sliver-script/LICENSE
+  - vendor/sliver-script/README.md
+  - vendor/sliver-script/VENDORED.md
+  - vendor/sliver-script/package.json
+  - vendor/sliver-script/tsconfig.json
+  - vendor/sliver-script/sliver-script-snapshot.bundle
+  - vendor/sliver-script/patches/**
+  - vendor/sliver-script/src/**
+  - protocol/sliver-baseline.json
+  - protocol/sliver-script-provenance.json
+  - protocol/sliver-script-handwritten-overlay.patch
+  - docs/operator-parity.generated.json
+  - docs/operator-parity.annotations.json
+  - docs/operator-parity.schema.json
+  - docs/operator-parity.md
+  - docs/adr/0001-platform-support.md
+  - docs/rpc-message-budgets.md
 extraMetadata:
   main: dist/main/index.js
 mac:
@@ -21,6 +41,7 @@ win:
     - portable
 linux:
   category: Development
+  maintainer: Sliver Armory <sliverarmory@users.noreply.github.com>
   target:
     - AppImage
     - deb

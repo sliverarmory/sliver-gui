@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { clientpb } from "sliver-script";
 
-import type { GenerateInput, ShellcodeOptions } from "../shared/contracts.js";
+import { DEFAULT_C2_SCHEME, type GenerateInput, type ShellcodeOptions } from "../shared/contracts.js";
 import {
   artifactFormatFromProto,
   artifactFormatToProto,
@@ -88,13 +88,14 @@ describe("implant input validation", () => {
     expect(() => secondsToNanoseconds(1.5, "Delay")).toThrow(/non-negative whole number/);
 
     expect(isValidPort(1)).toBe(true);
-    expect(isValidPort(65_534)).toBe(true);
+    expect(isValidPort(65_535)).toBe(true);
     expect(isValidPort(0)).toBe(false);
-    expect(isValidPort(65_535)).toBe(false);
+    expect(isValidPort(65_536)).toBe(false);
     expect(isValidPort(1.5)).toBe(false);
   });
 
   it("normalizes C2 aliases, default ports, and stable priorities", () => {
+    expect(DEFAULT_C2_SCHEME).toBe("mtls");
     const endpoints = parseC2Endpoints(
       "c2.example.test\nwg://wireguard.example.test, tcp-pivot://pivot.example.test",
       "windows",

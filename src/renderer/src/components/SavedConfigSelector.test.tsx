@@ -26,6 +26,9 @@ const CONFIGS = [
     lport: 31337,
     transport: "mtls" as const,
     modifiedAt: "2026-08-08T12:00:00.000Z",
+    origin: "preexisting" as const,
+    removal: "detach" as const,
+    availability: "available" as const,
   },
   {
     id: "config-two",
@@ -36,6 +39,23 @@ const CONFIGS = [
     lport: 51820,
     transport: "wireguard" as const,
     modifiedAt: "2026-08-07T12:00:00.000Z",
+    origin: "preexisting" as const,
+    removal: "detach" as const,
+    availability: "deferred" as const,
+    unavailableReason: "WireGuard operator connections are deferred for this milestone",
+  },
+  {
+    id: "config-three",
+    fileName: "89c18203-c7d1-46b9-a088-cb59b70ce7f6.cfg",
+    displayName: "Managed lab",
+    operator: "charlie",
+    lhost: "lab.example.test",
+    lport: 8888,
+    transport: "mtls" as const,
+    modifiedAt: "2026-08-06T12:00:00.000Z",
+    origin: "managed" as const,
+    removal: "delete-managed-copy" as const,
+    availability: "available" as const,
   },
 ];
 
@@ -45,8 +65,10 @@ function renderSelector(overrides: Partial<React.ComponentProps<typeof SavedConf
     configs: CONFIGS,
     onChooseFile: vi.fn(),
     onConnect: vi.fn(),
+    onImport: vi.fn(),
     onOpenChange: vi.fn(),
     onRefresh: vi.fn(),
+    onRemove: vi.fn(),
     ...overrides,
   };
   return { ...render(<SavedConfigSelector {...props} />), props };
@@ -61,6 +83,8 @@ describe("SavedConfigSelector", () => {
     expect(screen.getByText("red-team.cfg")).toBeInTheDocument();
     expect(screen.getByText("c2.example.test:31337")).toBeInTheDocument();
     expect(screen.getByText("WireGuard")).toBeInTheDocument();
+    expect(screen.getByText("Deferred")).toBeInTheDocument();
+    expect(screen.getByText("Imported")).toBeInTheDocument();
     expect(screen.queryByText(/Users\/example/)).not.toBeInTheDocument();
   });
 
@@ -69,23 +93,81 @@ describe("SavedConfigSelector", () => {
     const onConnect = vi.fn();
     renderSelector({ onConnect });
 
-    await user.click(screen.getByRole("option", { name: /bob/i }));
+    await user.click(screen.getByRole("option", { name: /charlie/i }));
     await user.click(screen.getByRole("button", { name: "Connect" }));
 
-    expect(onConnect).toHaveBeenCalledWith(CONFIGS[1]);
+    expect(onConnect).toHaveBeenCalledWith(CONFIGS[2]);
   });
 
-  it("keeps refresh and native file import as distinct actions", async () => {
+  it("does not submit an opaque config ID while the catalog is refreshing", async () => {
+    const user = userEvent.setup();
+    const onConnect = vi.fn();
+    renderSelector({ isLoading: true, onConnect });
+
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(onConnect).not.toHaveBeenCalled();
+  });
+
+  it("keeps refresh, managed import, and one-off external selection distinct", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn();
     const onChooseFile = vi.fn();
-    renderSelector({ onChooseFile, onRefresh });
+    const onImport = vi.fn();
+    renderSelector({ onChooseFile, onImport, onRefresh });
 
     await user.click(screen.getByRole("button", { name: "Refresh saved configurations" }));
-    await user.click(screen.getByRole("button", { name: "Choose configuration file" }));
+    await user.click(screen.getByRole("button", { name: "Connect external file" }));
+    await user.click(screen.getByRole("button", { name: "Import a copy" }));
+    await user.type(screen.getByRole("textbox", { name: "Local configuration name" }), "  Production west  ");
+    await user.click(screen.getByRole("button", { name: "Choose file and import" }));
 
     expect(onRefresh).toHaveBeenCalledOnce();
     expect(onChooseFile).toHaveBeenCalledOnce();
+    expect(onImport).toHaveBeenCalledWith("Production west");
+  });
+
+  it("keeps deferred WireGuard configurations unavailable", async () => {
+    const user = userEvent.setup();
+    const onConnect = vi.fn();
+    renderSelector({ onConnect });
+
+    const wireGuard = screen.getByRole("option", { name: /bob/i });
+    expect(wireGuard).toHaveAttribute("aria-disabled", "true");
+    await user.click(wireGuard);
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    expect(onConnect).toHaveBeenCalledWith(CONFIGS[0]);
+  });
+
+  it("confirms detach without offering to delete a pre-existing source file", async () => {
+    const user = userEvent.setup();
+    const onRemove = vi.fn();
+    renderSelector({ onRemove });
+
+    await user.click(screen.getByRole("button", { name: "Forget" }));
+    expect(await screen.findByRole("alertdialog", { name: "Forget this configuration?" })).toHaveTextContent(
+      "source file remains on disk",
+    );
+    await user.click(screen.getByRole("button", { name: "Forget only" }));
+
+    expect(onRemove).toHaveBeenCalledWith(CONFIGS[0]);
+  });
+
+  it("closes a removal confirmation when a catalog refresh invalidates its opaque ID", async () => {
+    const user = userEvent.setup();
+    const { rerender, props } = renderSelector();
+
+    await user.click(screen.getByRole("button", { name: "Forget" }));
+    expect(await screen.findByRole("alertdialog", { name: "Forget this configuration?" })).toBeInTheDocument();
+
+    rerender(
+      <SavedConfigSelector
+        {...props}
+        configs={CONFIGS.map((config, index) => ({ ...config, id: `refreshed-config-${index}` }))}
+      />,
+    );
+    expect(screen.queryByRole("alertdialog", { name: "Forget this configuration?" })).not.toBeInTheDocument();
   });
 
   it("renders loading, error, and empty states", () => {

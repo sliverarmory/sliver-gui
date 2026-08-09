@@ -14,6 +14,6 @@ if (!root) throw new Error("Renderer root element was not found");
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     <App />
-    <Toast.Provider placement="bottom end" maxVisibleToasts={4} />
+    <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

@@ -16,22 +16,25 @@ type InvokeArgumentsByMethod = {
 
 const invokeArguments = {
   chooseConfig: [],
+  importConfig: [{ displayName: "local test" }],
   listSavedConfigs: [],
   connectSavedConfig: ["3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2"],
+  removeSavedConfig: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2" }],
   disconnect: [],
   getSnapshot: [],
   refresh: [],
   openWindow: [{ inheritConnection: true }],
   chooseCertificatePair: [],
   startListener: [{ kind: "mtls", host: "127.0.0.1", port: 8888 }],
-  killJob: [7],
-  killAllJobs: [],
+  prepareStopJob: [7],
+  prepareStopAllJobs: [],
+  executeStopPlan: ["8e577480-5dc2-4dde-aa58-23c8f1770627"],
   generate: [defaultGenerateInput],
   generateFromProfile: [{ profileName: "default", name: "test" }],
   downloadBuild: ["existing-build"],
   deleteBuild: ["existing-build"],
   setStagedBuilds: [["existing-build"]],
-  saveProfile: [{ profileName: "default", config: defaultGenerateInput }],
+  saveProfile: [{ profileName: "default", config: defaultGenerateInput, overwrite: false }],
   deleteProfile: ["default"],
 } satisfies InvokeArgumentsByMethod;
 

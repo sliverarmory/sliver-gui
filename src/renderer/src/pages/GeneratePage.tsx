@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Button, Card, Chip, toast } from "@heroui/react";
+import { useEffect, useMemo, useState } from "react";
+import { Button, Card, Chip, Spinner, toast } from "@heroui/react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faApple, faLinux, faWindows } from "@fortawesome/free-brands-svg-icons";
@@ -10,6 +10,8 @@ import {
   faBolt,
   faBoxArchive,
   faChevronRight,
+  faCircleExclamation,
+  faCircleNotch,
   faCircleXmark,
   faCode,
   faCodeBranch,
@@ -51,16 +53,6 @@ import { cloneGenerateInput, defaultGenerateInput } from "../../../shared/genera
 interface GeneratePageProps {
   snapshot: SliverSnapshot;
 }
-
-const fallbackTargets = [
-  { os: "windows", arch: "amd64", format: "executable" as const },
-  { os: "windows", arch: "amd64", format: "service" as const },
-  { os: "windows", arch: "amd64", format: "shared" as const },
-  { os: "windows", arch: "amd64", format: "shellcode" as const },
-  { os: "linux", arch: "amd64", format: "executable" as const },
-  { os: "linux", arch: "arm64", format: "executable" as const },
-  { os: "darwin", arch: "arm64", format: "executable" as const },
-];
 
 const formatLabels: Record<ArtifactFormat, string> = {
   executable: "Executable",
@@ -192,10 +184,32 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
 
-  const targets = useMemo(() => {
-    const advertised = snapshot.compilerTargets.filter((target) => target.supported);
-    return advertised.length > 0 ? advertised : fallbackTargets;
-  }, [snapshot.compilerTargets]);
+  const compilerDomain = snapshot.domains.compiler;
+  const targets = useMemo(
+    () => compilerDomain.items.filter((target) => target.supported),
+    [compilerDomain.items],
+  );
+  const compilerReady = compilerDomain.status === "ready" && targets.length > 0;
+  const profileInventory = snapshot.domains.profiles;
+  const profileInventoryAuthoritative =
+    (profileInventory.status === "ready" || profileInventory.status === "empty") &&
+    !profileInventory.page.truncated;
+
+  useEffect(() => {
+    const firstTarget = targets[0];
+    if (!firstTarget) return;
+    setForm((current) => {
+      const currentIsSupported = targets.some(
+        (target) =>
+          target.os === current.os &&
+          target.arch === current.arch &&
+          target.format === current.format,
+      );
+      return currentIsSupported
+        ? current
+        : { ...current, os: firstTarget.os, arch: firstTarget.arch, format: firstTarget.format };
+    });
+  }, [targets]);
 
   const operatingSystems = unique(targets.map((target) => target.os));
   const architectures = unique(
@@ -241,6 +255,12 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   }
 
   async function generate() {
+    if (!compilerReady) {
+      toast.danger("Generation unavailable", {
+        description: "Wait for the connected server to advertise a supported compiler target.",
+      });
+      return;
+    }
     setIsGenerating(true);
     try {
       const result = await window.sliver.generate(form);
@@ -260,7 +280,13 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
     }
   }
 
-  async function saveProfile() {
+  async function saveProfile(overwrite: boolean) {
+    if (!compilerReady) {
+      toast.danger("Profile unavailable", {
+        description: "A supported compiler target must be loaded before saving this profile.",
+      });
+      return;
+    }
     const trimmed = profileName.trim();
     if (!trimmed) {
       toast.warning("Profile name required", { description: "Name the reusable configuration before saving it." });
@@ -268,7 +294,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
     }
     setIsSaving(true);
     try {
-      const result = await window.sliver.saveProfile({ profileName: trimmed, config: form });
+      const result = await window.sliver.saveProfile({ profileName: trimmed, config: form, overwrite });
       if (!result.ok) {
         toast.danger("Could not save profile", { description: result.error });
         return;
@@ -280,16 +306,28 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   }
 
   function requestProfileSave() {
+    if (!profileInventoryAuthoritative) {
+      toast.danger("Profile inventory incomplete", {
+        description: "Refresh the complete profile inventory before creating or replacing a profile.",
+      });
+      return;
+    }
     const exists = snapshot.profiles.some((profile) => profile.name === profileName.trim());
     if (exists) {
       setConfirmOverwrite(true);
     } else {
-      void saveProfile();
+      void saveProfile(false);
     }
   }
 
   return (
     <div className="generate-page">
+      <fieldset
+        aria-busy={isGenerating}
+        aria-label="Implant generation configuration"
+        className="contents"
+        disabled={isGenerating}
+      >
       <div className="generate-page__content">
         <div className="page-stack">
           <section className="page-heading">
@@ -302,6 +340,29 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
               {targets.length} compiler targets
             </Chip>
           </section>
+
+          {!compilerReady ? (
+            <div
+              className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
+                compilerDomain.status === "error" || compilerDomain.status === "unsupported"
+                  ? "border-danger/25 bg-danger-soft text-danger-soft-foreground"
+                  : "border-warning/25 bg-warning-soft text-warning-soft-foreground"
+              }`}
+              role={compilerDomain.status === "error" || compilerDomain.status === "unsupported" ? "alert" : "status"}
+            >
+              <FontAwesomeIcon
+                aria-hidden
+                icon={compilerDomain.status === "loading" ? faCircleNotch : faCircleExclamation}
+                className={`mt-0.5 size-4 shrink-0 ${compilerDomain.status === "loading" ? "animate-spin" : ""}`}
+              />
+              <div>
+                <p className="font-medium">{compilerStatusTitle(compilerDomain.status, targets.length)}</p>
+                <p className="mt-0.5 text-xs opacity-80">
+                  {compilerDomain.error ?? compilerStatusDescription(compilerDomain.status, targets.length)}
+                </p>
+              </div>
+            </div>
+          ) : null}
 
       <Card variant="secondary">
         <Card.Header>
@@ -330,18 +391,21 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             value={form.os}
             onChange={changeOperatingSystem}
             options={operatingSystems.map(operatingSystemOption)}
+            disabled={!compilerReady}
           />
           <SelectField
             label="Architecture"
             value={form.arch}
             onChange={changeArchitecture}
             options={architectures.map(architectureOption)}
+            disabled={!compilerReady}
           />
           <SelectField
             label="Output format"
             value={form.format}
             onChange={(value) => update("format", value)}
             options={formats.map(formatOption)}
+            disabled={!compilerReady}
           />
           <Field
             label="Template"
@@ -366,7 +430,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             value={form.c2}
             onChange={(value) => update("c2", value)}
             placeholder={"mtls://team.example:8888\nhttps://fallback.example"}
-            description="One URL per line or comma-separated. Bare HTTP hosts default to HTTPS."
+            description="One URL per line or comma-separated. Endpoints without a scheme default to mTLS."
             mono
             required
           />
@@ -431,8 +495,8 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
           <AreaField label="Canary domains" value={form.canaryDomains} onChange={(value) => update("canaryDomains", value)} placeholder="example.net" description="One domain per line; trailing dots are normalized." rows={3} />
           <div className="form-grid self-start">
             <Field label="WireGuard peer IP" value={form.wgPeerTunIp} onChange={(value) => update("wgPeerTunIp", value)} placeholder="Assigned automatically" />
-            <Field label="WG key exchange port" type="number" min={1} max={65534} value={String(form.wgKeyExchangePort)} onChange={(value) => updateNumber("wgKeyExchangePort", value)} />
-            <Field label="WG TCP comms port" type="number" min={1} max={65534} value={String(form.wgTcpCommsPort)} onChange={(value) => updateNumber("wgTcpCommsPort", value)} />
+            <Field label="WG key exchange port" type="number" min={1} max={65535} value={String(form.wgKeyExchangePort)} onChange={(value) => updateNumber("wgKeyExchangePort", value)} />
+            <Field label="WG TCP comms port" type="number" min={1} max={65535} value={String(form.wgTcpCommsPort)} onChange={(value) => updateNumber("wgTcpCommsPort", value)} />
           </div>
         </div>
       </details>
@@ -516,22 +580,37 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
               value={profileName}
               onChange={setProfileName}
               placeholder="production-windows"
-              description="Saving an existing name replaces its configuration."
+              description={
+                profileInventoryAuthoritative
+                  ? "Saving an existing name requires explicit replacement confirmation."
+                  : "Saving is unavailable while the profile inventory is incomplete or stale."
+              }
             />
           </div>
           <div className="generate-page__footer-actions">
             <Button variant="tertiary" onPress={() => setForm(cloneGenerateInput(defaultGenerateInput))}>
               <FontAwesomeIcon icon={faArrowRotateLeft} /> Reset
             </Button>
-            <Button variant="secondary" isPending={isSaving} onPress={requestProfileSave}>
+            <Button
+              isDisabled={!compilerReady || !profileInventoryAuthoritative}
+              variant="secondary"
+              isPending={isSaving}
+              onPress={requestProfileSave}
+            >
               <FontAwesomeIcon icon={faFloppyDisk} /> Save profile
             </Button>
-            <Button isPending={isGenerating} onPress={() => void generate()}>
-              <FontAwesomeIcon icon={faDownload} /> Generate and save
+            <Button isDisabled={!compilerReady} isPending={isGenerating} onPress={() => void generate()}>
+              {({ isPending }) => (
+                <>
+                  {isPending ? <Spinner color="current" size="sm" /> : <FontAwesomeIcon icon={faDownload} />}
+                  Generate and save
+                </>
+              )}
             </Button>
           </div>
         </div>
       </footer>
+      </fieldset>
 
       <ConfirmDialog
         isOpen={confirmOverwrite}
@@ -540,10 +619,30 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
         description="This replaces the saved server-side profile configuration. Existing builds are not modified."
         confirmLabel="Replace profile"
         isPending={isSaving}
-        onConfirm={saveProfile}
+        onConfirm={() => saveProfile(true)}
       />
     </div>
   );
+}
+
+function compilerStatusTitle(status: SliverSnapshot["domains"]["compiler"]["status"], supportedCount: number): string {
+  if (status === "loading") return "Loading compiler targets";
+  if (status === "error") return "Compiler targets could not be loaded";
+  if (status === "unsupported") return "Generation is unsupported by this server";
+  if (status === "empty" || (status === "ready" && supportedCount === 0)) return "No supported compiler targets";
+  return "Compiler targets are not loaded";
+}
+
+function compilerStatusDescription(
+  status: SliverSnapshot["domains"]["compiler"]["status"],
+  supportedCount: number,
+): string {
+  if (status === "loading") return "The connected server is advertising its compiler capabilities.";
+  if (status === "empty" || (status === "ready" && supportedCount === 0)) {
+    return "The server returned no supported target combinations; no fallback targets were fabricated.";
+  }
+  if (status === "unsupported") return "Connect to a compatible Sliver server to generate implants.";
+  return "Refresh the server state or reconnect before generating or saving a profile.";
 }
 
 function formatBytes(bytes: number): string {

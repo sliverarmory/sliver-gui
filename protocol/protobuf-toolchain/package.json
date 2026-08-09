@@ -1,0 +1,18 @@
+{
+  "name": "sliver-gui-protobuf-toolchain",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "npm@11.19.0",
+  "engines": {
+    "node": "24.0.0",
+    "npm": "11.19.0"
+  },
+  "devDependencies": {
+    "ts-proto": "2.11.4",
+    "typescript": "5.8.3"
+  },
+  "overrides": {
+    "dprint-node": "1.0.8",
+    "ts-poet": "6.12.0"
+  }
+}

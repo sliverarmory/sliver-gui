@@ -147,7 +147,7 @@ export function validateListenerDraft(draft: ListenerDraft): ListenerDraftErrors
     errors.host = "Enter a valid bind host or address.";
   }
   if (!isValidPort(draft.port)) {
-    errors.port = "Use a whole number from 1 to 65534.";
+    errors.port = "Use a whole number from 1 to 65535.";
   }
 
   switch (draft.kind) {
@@ -156,10 +156,10 @@ export function validateListenerDraft(draft: ListenerDraft): ListenerDraftErrors
         errors.tunnelIp = "Enter an IPv4 tunnel address, such as 100.64.0.1.";
       }
       if (!isValidPort(draft.tcpCommsPort)) {
-        errors.tcpCommsPort = "Use a whole number from 1 to 65534.";
+        errors.tcpCommsPort = "Use a whole number from 1 to 65535.";
       }
       if (!isValidPort(draft.keyExchangePort)) {
-        errors.keyExchangePort = "Use a whole number from 1 to 65534.";
+        errors.keyExchangePort = "Use a whole number from 1 to 65535.";
       }
       if (
         isValidPort(draft.tcpCommsPort) &&
@@ -314,7 +314,7 @@ function isIpv4Address(value: string): boolean {
 }
 
 function isValidPort(value: number): boolean {
-  return Number.isSafeInteger(value) && value >= 1 && value <= 65_534;
+  return Number.isSafeInteger(value) && value >= 1 && value <= 65_535;
 }
 
 function isNonNegativeWholeNumber(value: number): boolean {

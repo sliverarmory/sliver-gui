@@ -2,9 +2,12 @@
 /sliver-script/
 /node_modules/
 /dist/
+/.e2e-dist/
 /release/
 /coverage/
 /artifacts/
+/vendor/sliver-script/lib/
+/vendor/sliver-script/node_modules/
 *.tsbuildinfo
 *.log
 *.cfg

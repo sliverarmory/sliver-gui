@@ -1,0 +1,489 @@
+diff --git a/src/client.ts b/src/client.ts
+index c2baf89..1dc3d3d 100644
+--- a/src/client.ts
++++ b/src/client.ts
+@@ -9,6 +9,12 @@ import { createSliverRpcCredentials } from "./internal/credentials";
+ import { withTimeoutSignal } from "./internal/timeout";
+ import { TunnelManager } from "./internal/tunnelManager";
+ import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
++import {
++  RPC_MESSAGE_DOMAINS,
++  rpcMessageChannelOptions,
++  rpcTlsAuthorityOverride,
++  type RpcMessageDomain,
++} from "./messageBudget";
+ import { BeaconTask } from "./pb/clientpb/client";
+ import type {
+   Event,
+@@ -39,9 +45,6 @@ const gzip = promisify(gzipCb);
+ const gunzip = promisify(gunzipCb);
+ 
+ const DEFAULT_TIMEOUT_SECONDS = 30;
+-const KiB = 1024;
+-const MiB = 1024 * KiB;
+-const GiB = 1024 * MiB;
+ const EVENT_RETRY_INITIAL_MS = 500;
+ const EVENT_RETRY_MAX_MS = 10_000;
+ 
+@@ -76,7 +79,10 @@ export interface Tunnel {
+ }
+ 
+ class BaseCommands {
+-  constructor(protected readonly rpc: SliverRPCClient) {}
++  constructor(
++    protected readonly rpc: SliverRPCClient,
++    protected readonly artifactRpc: SliverRPCClient = rpc,
++  ) {}
+ 
+   protected request(timeoutSeconds: number): CommonRequest {
+     return { Async: false, Timeout: `${timeoutSeconds}`, BeaconID: "", SessionID: "" };
+@@ -106,7 +112,10 @@ class BaseCommands {
+ 
+   download(path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Buffer> {
+     return this.unary(timeoutSeconds, async (signal) => {
+-      const download = await this.rpc.download({ Path: path, Request: this.request(timeoutSeconds) }, { signal });
++      const download = await this.artifactRpc.download(
++        { Path: path, Request: this.request(timeoutSeconds) },
++        { signal },
++      );
+       if (download.Encoder === "gzip") {
+         return await gunzip(download.Data);
+       }
+@@ -120,7 +129,7 @@ class BaseCommands {
+   upload(path: string, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return this.unary(timeoutSeconds, async (signal) => {
+       const payload = await gzip(data);
+-      return this.rpc.upload(
++      return this.artifactRpc.upload(
+         { Path: path, Encoder: "gzip", Data: payload, Request: this.request(timeoutSeconds) },
+         { signal },
+       );
+@@ -167,7 +176,7 @@ class BaseCommands {
+ 
+   processDump(pid: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.processDump({ Pid: pid, Request: this.request(timeoutSeconds) }, { signal }),
++      this.artifactRpc.processDump({ Pid: pid, Request: this.request(timeoutSeconds) }, { signal }),
+     );
+   }
+ 
+@@ -213,7 +222,7 @@ class BaseCommands {
+     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+   ) {
+     return this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.task(
++      this.artifactRpc.task(
+         {
+           Pid: pid,
+           Data: shellcode,
+@@ -261,7 +270,7 @@ class BaseCommands {
+ 
+   executeAssembly(assembly: Buffer, args: string[] = [], process = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.executeAssembly(
++      this.artifactRpc.executeAssembly(
+         { Assembly: assembly, Arguments: args, Process: process, Request: this.request(timeoutSeconds) },
+         { signal },
+       ),
+@@ -288,7 +297,7 @@ class BaseCommands {
+     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+   ) {
+     return this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.sideload(
++      this.artifactRpc.sideload(
+         { Data: data, ProcessName: processName, Args: args, EntryPoint: entryPoint, Request: this.request(timeoutSeconds) },
+         { signal },
+       ),
+@@ -303,7 +312,7 @@ class BaseCommands {
+     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+   ) {
+     return this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.spawnDll(
++      this.artifactRpc.spawnDll(
+         { Data: data, EntryPoint: entrypoint, ProcessName: processName, Args: args, Request: this.request(timeoutSeconds) },
+         { signal },
+       ),
+@@ -312,7 +321,7 @@ class BaseCommands {
+ 
+   screenshot(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.screenshot({ Request: this.request(timeoutSeconds) }, { signal }),
++      this.artifactRpc.screenshot({ Request: this.request(timeoutSeconds) }, { signal }),
+     );
+   }
+ }
+@@ -320,10 +329,11 @@ class BaseCommands {
+ export class InteractiveBeacon extends BaseCommands {
+   constructor(
+     rpc: SliverRPCClient,
++    artifactRpc: SliverRPCClient,
+     private readonly taskResult$: Observable<Event>,
+     private readonly beaconId: string,
+   ) {
+-    super(rpc);
++    super(rpc, artifactRpc);
+   }
+ 
+   protected request(timeoutSeconds: number): CommonRequest {
+@@ -349,7 +359,7 @@ export class InteractiveBeacon extends BaseCommands {
+       wait: async (waitTimeoutSeconds = timeoutSeconds) => {
+         const beaconTask = await waitForBeaconTask(this.taskResult$, taskId, waitTimeoutSeconds);
+         const taskContent = await this.unary(waitTimeoutSeconds, (signal) =>
+-          this.rpc.getBeaconTaskContent({ ID: beaconTask.ID }, { signal }),
++          this.artifactRpc.getBeaconTaskContent({ ID: beaconTask.ID }, { signal }),
+         );
+         return Ls.decode(taskContent.Response);
+       },
+@@ -365,10 +375,11 @@ export class InteractiveBeacon extends BaseCommands {
+ export class InteractiveSession extends BaseCommands {
+   constructor(
+     rpc: SliverRPCClient,
++    artifactRpc: SliverRPCClient,
+     private readonly tunnels: TunnelManager,
+     private readonly sessionId: string,
+   ) {
+-    super(rpc);
++    super(rpc, artifactRpc);
+   }
+ 
+   protected request(timeoutSeconds: number): CommonRequest {
+@@ -433,8 +444,8 @@ export class SliverClient {
+   static readonly EVENT_BEACON_TASKRESULT = "beacon-taskresult";
+ 
+   private readonly empty = {};
+-  private rpcClient: SliverRPCClient | null = null;
+-  private channel: Channel | null = null;
++  private readonly rpcClients: Partial<Record<RpcMessageDomain, SliverRPCClient>> = {};
++  private readonly channels: Partial<Record<RpcMessageDomain, Channel>> = {};
+ 
+   private eventsAbort: AbortController | null = null;
+   private tunnels: TunnelManager | null = null;
+@@ -467,33 +478,30 @@ export class SliverClient {
+     return `${this.config.lhost}:${this.config.lport}`;
+   }
+ 
+-  private rpcChannelOptions(): Record<string, number | string> {
+-    const options: Record<string, number | string> = {
+-      "grpc.max_send_message_length": (2 * GiB) - 1,
+-      "grpc.max_receive_message_length": (2 * GiB) - 1,
+-    };
++  private clientFor(domain: RpcMessageDomain): SliverRPCClient {
++    const client = this.rpcClients[domain];
++    if (!client) throw new Error("SliverClient is not connected");
++    return client;
++  }
+ 
+-    if (this.wireGuardProxy) {
+-      options["grpc.ssl_target_name_override"] = this.config.lhost;
+-      options["grpc.default_authority"] = this.config.lhost;
+-    }
++  get rpc(): SliverRPCClient {
++    return this.clientFor("control");
++  }
+ 
+-    return options;
++  private get inventoryRpc(): SliverRPCClient {
++    return this.clientFor("inventory");
+   }
+ 
+-  get rpc(): SliverRPCClient {
+-    if (!this.rpcClient) {
+-      throw new Error("SliverClient is not connected");
+-    }
+-    return this.rpcClient;
++  private get artifactRpc(): SliverRPCClient {
++    return this.clientFor("artifact");
+   }
+ 
+   get isConnected(): boolean {
+-    return this.rpcClient !== null;
++    return this.rpcClients.control !== undefined;
+   }
+ 
+   async connect(): Promise<this> {
+-    if (this.rpcClient) return this;
++    if (this.rpcClients.control) return this;
+ 
+     this.eventsAbort = new AbortController();
+     this.tunnels = new TunnelManager();
+@@ -505,15 +513,21 @@ export class SliverClient {
+         rpcTarget = this.wireGuardProxy.rpcHost();
+       }
+ 
+-      const creds = createSliverRpcCredentials(this.config);
+-      this.channel = createChannel(rpcTarget, creds, this.rpcChannelOptions());
+-
+-      this.rpcClient = createClient(SliverRPCDefinition, this.channel);
++      for (const domain of RPC_MESSAGE_DOMAINS) {
++        const authorityOverride = rpcTlsAuthorityOverride(this.config.lhost, this.wireGuardProxy !== null);
++        const channel = createChannel(
++          rpcTarget,
++          createSliverRpcCredentials(this.config),
++          rpcMessageChannelOptions(domain, authorityOverride),
++        );
++        this.channels[domain] = channel;
++        this.rpcClients[domain] = createClient(SliverRPCDefinition, channel);
++      }
+ 
+       // Ensure auth and connectivity are working before we start streams.
+       await this.getVersion();
+ 
+-      this.tunnels.start(this.rpcClient);
++      this.tunnels.start(this.rpc);
+       this.startEventsStream();
+       return this;
+     } catch (error) {
+@@ -529,9 +543,11 @@ export class SliverClient {
+     await this.tunnels?.stop();
+     this.tunnels = null;
+ 
+-    this.rpcClient = null;
+-    this.channel?.close();
+-    this.channel = null;
++    for (const domain of RPC_MESSAGE_DOMAINS) {
++      delete this.rpcClients[domain];
++      this.channels[domain]?.close();
++      delete this.channels[domain];
++    }
+ 
+     const wireGuardProxy = this.wireGuardProxy;
+     this.wireGuardProxy = null;
+@@ -541,14 +557,14 @@ export class SliverClient {
+   }
+ 
+   private startEventsStream(): void {
+-    const rpc = this.rpcClient;
++    const rpc = this.rpcClients.control;
+     const abort = this.eventsAbort;
+     if (!rpc || !abort) return;
+ 
+     (async () => {
+       let attempt = 0;
+ 
+-      while (!abort.signal.aborted && this.rpcClient === rpc) {
++      while (!abort.signal.aborted && this.rpcClients.control === rpc) {
+         this.eventStreamStateSubject.next({
+           status: attempt === 0 ? "connecting" : "retrying",
+           attempt,
+@@ -568,7 +584,7 @@ export class SliverClient {
+           }
+         } catch (err) {
+           // Abort is expected on disconnect; don't surface it as a retry.
+-          if (abort.signal.aborted || this.rpcClient !== rpc) {
++          if (abort.signal.aborted || this.rpcClients.control !== rpc) {
+             return;
+           }
+ 
+@@ -722,11 +738,11 @@ export class SliverClient {
+   }
+ 
+   startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startTCPStagerListener(request, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.startTCPStagerListener(request, { signal }));
+   }
+ 
+   getCompiler(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Compiler> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getCompiler(this.empty, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.getCompiler(this.empty, { signal }));
+   }
+ 
+   generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
+@@ -734,7 +750,7 @@ export class SliverClient {
+   }
+ 
+   generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generate({ Config: config, Name: name }, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.generate({ Config: config, Name: name }, { signal }));
+   }
+ 
+   async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+@@ -744,7 +760,7 @@ export class SliverClient {
+ 
+   generateSpoofMetadata(req: GenerateSpoofMetadataReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+     return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      await this.rpc.generateSpoofMetadata(req, { signal });
++      await this.artifactRpc.generateSpoofMetadata(req, { signal });
+     });
+   }
+ 
+@@ -755,12 +771,12 @@ export class SliverClient {
+ 
+   regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.regenerate({ ImplantName: implantName }, { signal }),
++      this.artifactRpc.regenerate({ ImplantName: implantName }, { signal }),
+     );
+   }
+ 
+   generateStage(request: GenerateStageReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateStage(request, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.generateStage(request, { signal }));
+   }
+ 
+   stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+@@ -770,7 +786,7 @@ export class SliverClient {
+   }
+ 
+   implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantBuilds(this.empty, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.implantBuilds(this.empty, { signal }));
+   }
+ 
+   deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+@@ -784,7 +800,7 @@ export class SliverClient {
+   }
+ 
+   implantProfiles(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantProfiles(this.empty, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.implantProfiles(this.empty, { signal }));
+   }
+ 
+   saveImplantProfile(profile: ImplantProfile, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+@@ -799,17 +815,17 @@ export class SliverClient {
+ 
+   lootAll(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      const res = await this.rpc.lootAll(this.empty, { signal });
++      const res = await this.inventoryRpc.lootAll(this.empty, { signal });
+       return res.Loot;
+     });
+   }
+ 
+   lootAdd(loot: Loot, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.lootAdd(loot, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.lootAdd(loot, { signal }));
+   }
+ 
+   lootUpdate(loot: Loot, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.lootUpdate(loot, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.lootUpdate(loot, { signal }));
+   }
+ 
+   lootRemove(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+@@ -819,18 +835,18 @@ export class SliverClient {
+   }
+ 
+   lootContent(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.lootContent({ ID: lootId }, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.lootContent({ ID: lootId }, { signal }));
+   }
+ 
+   websites(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      const res = await this.rpc.websites(this.empty, { signal });
++      const res = await this.inventoryRpc.websites(this.empty, { signal });
+       return res.Websites;
+     });
+   }
+ 
+   website(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.website({ Name: name }, { signal }));
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.website({ Name: name }, { signal }));
+   }
+ 
+   websiteRemove(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+@@ -841,13 +857,13 @@ export class SliverClient {
+ 
+   websiteAddContent(name: string, contents: Record<string, WebContent>, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.websiteAddContent({ Name: name, Contents: contents }, { signal }),
++      this.artifactRpc.websiteAddContent({ Name: name, Contents: contents }, { signal }),
+     );
+   }
+ 
+   websiteUpdateContent(name: string, contents: Record<string, WebContent>, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.websiteUpdateContent({ Name: name, Contents: contents }, { signal }),
++      this.artifactRpc.websiteUpdateContent({ Name: name, Contents: contents }, { signal }),
+     );
+   }
+ 
+@@ -883,11 +899,11 @@ export class SliverClient {
+     if (!this.tunnels) {
+       throw new Error("SliverClient is not connected");
+     }
+-    return new InteractiveSession(this.rpc, this.tunnels, sessionId);
++    return new InteractiveSession(this.rpc, this.artifactRpc, this.tunnels, sessionId);
+   }
+ 
+   interactBeacon(beaconId: string): InteractiveBeacon {
+-    return new InteractiveBeacon(this.rpc, this.taskResult$, beaconId);
++    return new InteractiveBeacon(this.rpc, this.artifactRpc, this.taskResult$, beaconId);
+   }
+ 
+   async rmBeacon(beaconId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+diff --git a/src/index.ts b/src/index.ts
+index 5920285..46551e5 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,5 +1,6 @@
+ export * from './client';
+ export * from './config';
++export * from './messageBudget';
+ export * as commonpb from "./pb/commonpb/common";
+ export * as clientpb from "./pb/clientpb/client";
+ export * as sliverpb from "./pb/sliverpb/sliver";
+diff --git a/src/messageBudget.ts b/src/messageBudget.ts
+new file mode 100644
+index 0000000..f3b344c
+--- /dev/null
++++ b/src/messageBudget.ts
+@@ -0,0 +1,58 @@
++import { isIP } from "node:net";
++
++const KiB = 1024;
++const MiB = 1024 * KiB;
++const IP_LITERAL_TLS_AUTHORITY = "sliver";
++
++export const RPC_MESSAGE_DOMAINS = ["control", "inventory", "artifact"] as const;
++export type RpcMessageDomain = (typeof RPC_MESSAGE_DOMAINS)[number];
++
++/**
++ * Channel-level limits are enforced by grpc-js before inbound protobuf payloads
++ * are decoded. Keep control traffic deliberately small, allow bounded summary
++ * inventories, and isolate the current binary artifact RPCs on their own
++ * channel instead of granting every RPC an artifact-sized allocation.
++ */
++export const RPC_MESSAGE_BUDGETS = Object.freeze({
++  control: Object.freeze({
++    maxSendBytes: 8 * MiB,
++    maxReceiveBytes: 16 * MiB,
++  }),
++  inventory: Object.freeze({
++    maxSendBytes: 4 * MiB,
++    maxReceiveBytes: 32 * MiB,
++  }),
++  artifact: Object.freeze({
++    maxSendBytes: 256 * MiB,
++    maxReceiveBytes: 256 * MiB,
++  }),
++} satisfies Record<RpcMessageDomain, { maxSendBytes: number; maxReceiveBytes: number }>);
++
++export function rpcMessageChannelOptions(
++  domain: RpcMessageDomain,
++  authorityOverride?: string,
++): Readonly<Record<string, number | string>> {
++  const budget = RPC_MESSAGE_BUDGETS[domain];
++  return Object.freeze({
++    "grpc.max_send_message_length": budget.maxSendBytes,
++    "grpc.max_receive_message_length": budget.maxReceiveBytes,
++    ...(authorityOverride
++      ? {
++          "grpc.ssl_target_name_override": authorityOverride,
++          "grpc.default_authority": authorityOverride,
++        }
++      : {}),
++  });
++}
++
++/**
++ * Node rejects IP literals as TLS SNI values. grpc-js still derives SNI from
++ * an IP-literal target even when Sliver's CA-only identity check is in use, so
++ * provide a stable DNS-form authority for direct IP targets. A loopback proxy
++ * also needs the original DNS authority when the configured host is a name.
++ */
++export function rpcTlsAuthorityOverride(host: string, throughProxy: boolean): string | undefined {
++  const normalized = host.trim().replace(/^\[|\]$/gu, "");
++  if (isIP(normalized) !== 0) return IP_LITERAL_TLS_AUTHORITY;
++  return throughProxy && normalized ? normalized : undefined;
++}

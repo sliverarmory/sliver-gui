@@ -23,8 +23,8 @@ vi.mock("sliver-script", async (importOriginal) => {
       subscribe: () => ({ unsubscribe: vi.fn() }),
     };
     readonly eventStreamState$ = {
-      subscribe: (listener: (state: { status: "connected"; attempt: number }) => void) => {
-        listener({ status: "connected", attempt: 0 });
+      subscribe: (observer: { next: (state: { status: "connected"; attempt: number }) => void }) => {
+        observer.next({ status: "connected", attempt: 0 });
         return { unsubscribe: vi.fn() };
       },
     };
@@ -107,10 +107,10 @@ describe("per-window saved configuration catalogs", () => {
       ok: true,
       value: {
         connection: {
-          status: "connected",
+          status: "degraded",
           operator: "operator",
           server: "localhost:31337",
-          configName: "operator.cfg",
+          configName: "operator",
         },
       },
     });

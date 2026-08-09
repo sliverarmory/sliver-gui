@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import { Button, Card, Chip, Dropdown, Label, Tooltip, toast } from "@heroui/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button, Card, Chip, Dropdown, Label, Modal, Tooltip, toast } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
-import { Sidebar } from "@heroui-pro/react/sidebar";
+import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowsRotate,
@@ -9,15 +9,17 @@ import {
   faBolt,
   faBoxesStacked,
   faCircleNodes,
+  faEllipsisVertical,
   faLink,
   faLinkSlash,
   faPlus,
   faSatelliteDish,
   faShieldHalved,
+  faTriangleExclamation,
   faWindowRestore,
 } from "@fortawesome/free-solid-svg-icons";
 import { disconnectedSnapshot } from "../../shared/contracts";
-import type { EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
+import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
@@ -40,21 +42,46 @@ export function App() {
   const [isLoadingSavedConfigs, setIsLoadingSavedConfigs] = useState(true);
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
   const [savedConfigError, setSavedConfigError] = useState<string>();
+  const savedConfigLoadRef = useRef<Promise<void> | null>(null);
+  const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
 
-  const loadSavedConfigs = useCallback(async () => {
-    setIsLoadingSavedConfigs(true);
-    try {
-      const result = await window.sliver.listSavedConfigs();
-      if (!result.ok || !result.value) {
-        setSavedConfigError(result.error ?? "Could not load saved configurations");
+  const loadSavedConfigs = useCallback(async (afterInFlight = false): Promise<void> => {
+    const activeRequest = savedConfigLoadRef.current;
+    if (activeRequest) {
+      await activeRequest;
+      if (!afterInFlight) return;
+      const trailingRequest = savedConfigLoadRef.current;
+      if (trailingRequest) {
+        await trailingRequest;
         return;
       }
-      setSavedConfigs(result.value);
-      setSavedConfigError(undefined);
-    } catch (error) {
-      setSavedConfigError(error instanceof Error ? error.message : String(error));
+    }
+
+    const request = (async () => {
+      setIsLoadingSavedConfigs(true);
+      try {
+        const result = await window.sliver.listSavedConfigs();
+        if (!result.ok || !result.value) {
+          setSavedConfigs([]);
+          setSavedConfigError(result.error ?? "Could not load saved configurations");
+          return;
+        }
+        setSavedConfigs(result.value);
+        setSavedConfigError(undefined);
+      } catch (error) {
+        setSavedConfigs([]);
+        setSavedConfigError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsLoadingSavedConfigs(false);
+      }
+    })();
+    savedConfigLoadRef.current = request;
+    try {
+      await request;
     } finally {
-      setIsLoadingSavedConfigs(false);
+      if (savedConfigLoadRef.current === request) savedConfigLoadRef.current = null;
     }
   }, []);
 
@@ -66,7 +93,7 @@ export function App() {
     void window.sliver.getSnapshot().then((next) => {
       if (mounted) {
         setSnapshot(next);
-        if (next.connection.status === "connected") setIsConfigSelectorOpen(false);
+        if (isUsableConnection(next.connection.status)) setIsConfigSelectorOpen(false);
       }
     });
     void loadSavedConfigs();
@@ -121,6 +148,25 @@ export function App() {
     }
   }, []);
 
+  const importConfig = useCallback(async (displayName: string): Promise<void> => {
+    const result = await window.sliver.importConfig({ displayName });
+    if (!result.ok || !result.value) {
+      if (result.error && /cancel/i.test(result.error)) return;
+      throw new Error(result.error ?? "Could not import the configuration");
+    }
+    await loadSavedConfigs(true);
+    toast.success("Configuration imported", { description: result.value.displayName });
+  }, [loadSavedConfigs]);
+
+  const removeConfig = useCallback(async (config: SavedConfigSummary): Promise<void> => {
+    const result = await window.sliver.removeSavedConfig({ id: config.id });
+    if (!result.ok) throw new Error(result.error ?? "Could not remove the configuration");
+    await loadSavedConfigs(true);
+    toast.success(config.removal === "delete-managed-copy" ? "Imported copy deleted" : "Configuration forgotten", {
+      description: config.displayName,
+    });
+  }, [loadSavedConfigs]);
+
   const disconnect = useCallback(async () => {
     const result = await window.sliver.disconnect();
     if (!result.ok || !result.value) {
@@ -149,19 +195,48 @@ export function App() {
     if (!result.ok) toast.danger("Could not open window", { description: result.error });
   }
 
-  const connected = snapshot.connection.status === "connected";
+  const connected = isUsableConnection(snapshot.connection.status);
+  const compatibilityKey = compatibilityNoticeKey(snapshot);
+  const isCompatibilityNoticeOpen = Boolean(
+    connected &&
+      compatibilityKey &&
+      !isConnecting &&
+      !isConfigSelectorOpen &&
+      !dismissedCompatibilityKeys.has(compatibilityKey),
+  );
   const setConfigSelectorOpen = useCallback((isOpen: boolean) => {
     setIsConfigSelectorOpen(isOpen);
   }, []);
+  const setCompatibilityNoticeOpen = useCallback((isOpen: boolean) => {
+    if (isOpen || !compatibilityKey) return;
+    setDismissedCompatibilityKeys((current) => {
+      if (current.has(compatibilityKey)) return current;
+      const next = new Set(current);
+      next.add(compatibilityKey);
+      return next;
+    });
+  }, [compatibilityKey]);
 
   return (
     <Sidebar.Provider collapsible="icon" defaultOpen>
       <Sidebar className="app-sidebar">
-        <NavigationContent snapshot={snapshot} view={view} onViewChange={setView} />
+        <NavigationContent
+          snapshot={snapshot}
+          view={view}
+          onDisconnect={() => void disconnect()}
+          onSwitchConfig={() => setIsConfigSelectorOpen(true)}
+          onViewChange={setView}
+        />
         <Sidebar.Rail />
       </Sidebar>
       <Sidebar.Mobile backdrop="blur" className="app-sidebar">
-        <NavigationContent snapshot={snapshot} view={view} onViewChange={setView} />
+        <NavigationContent
+          snapshot={snapshot}
+          view={view}
+          onDisconnect={() => void disconnect()}
+          onSwitchConfig={() => setIsConfigSelectorOpen(true)}
+          onViewChange={setView}
+        />
       </Sidebar.Mobile>
       <Sidebar.Main className="app-main min-w-0">
         <header className="app-header">
@@ -182,15 +257,10 @@ export function App() {
           </div>
           <div className="header-actions">
             {connected ? <EventStatus status={snapshot.eventStream.status} /> : null}
+            {connected && snapshot.connection.status === "reconnecting" ? <ReconnectingStatus /> : null}
             <WindowMenu connected={connected} onOpenWindow={openWindow} />
             {connected ? (
-              <>
-                <HeaderAction label="Refresh server state" icon={faArrowsRotate} pending={isRefreshing} onPress={() => void refresh()} />
-                <Button size="sm" variant="tertiary" onPress={() => void disconnect()}>
-                  <FontAwesomeIcon icon={faLinkSlash} />
-                  <span className="hidden lg:inline">Disconnect</span>
-                </Button>
-              </>
+              <HeaderAction label="Refresh server state" icon={faArrowsRotate} pending={isRefreshing} onPress={() => void refresh()} />
             ) : (
               <Button size="sm" isPending={isConnecting} onPress={() => setIsConfigSelectorOpen(true)}>
                 <FontAwesomeIcon icon={faLink} /> Connect
@@ -227,8 +297,15 @@ export function App() {
           isOpen={isConfigSelectorOpen}
           onChooseFile={connect}
           onConnect={connectSavedConfig}
+          onImport={importConfig}
           onOpenChange={setConfigSelectorOpen}
           onRefresh={loadSavedConfigs}
+          onRemove={removeConfig}
+        />
+        <CompatibilityMismatchModal
+          isOpen={isCompatibilityNoticeOpen}
+          snapshot={snapshot}
+          onOpenChange={setCompatibilityNoticeOpen}
         />
       </Sidebar.Main>
     </Sidebar.Provider>
@@ -238,13 +315,26 @@ export function App() {
 export function NavigationContent({
   snapshot,
   view,
+  onDisconnect,
+  onSwitchConfig,
   onViewChange,
 }: {
   snapshot: SliverSnapshot;
   view: ViewId;
+  onDisconnect: () => void;
+  onSwitchConfig: () => void;
   onViewChange: (view: ViewId) => void;
 }) {
-  const connected = snapshot.connection.status === "connected";
+  const connected = isUsableConnection(snapshot.connection.status);
+  const { setMobileOpen } = useSidebar();
+  const switchConfig = () => {
+    setMobileOpen(false);
+    onSwitchConfig();
+  };
+  const disconnectCurrentServer = () => {
+    setMobileOpen(false);
+    onDisconnect();
+  };
   return (
     <>
       <Sidebar.Header className="brand-block">
@@ -280,15 +370,80 @@ export function NavigationContent({
         </Sidebar.Group>
       </Sidebar.Content>
       <Sidebar.Footer>
-        <div className="connection-summary">
-          <span className={`status-dot status-dot--${connected ? "connected" : "stopped"}`} />
-          <div className="min-w-0" data-sidebar="label">
-            <p className="truncate text-xs font-medium">{connected ? snapshot.connection.operator : "Offline"}</p>
-            <p className="truncate text-[11px] text-muted">{connected ? snapshot.connection.version : "No active channel"}</p>
-          </div>
-        </div>
+        <ConnectionMenu
+          snapshot={snapshot}
+          onDisconnect={disconnectCurrentServer}
+          onSwitchConfig={switchConfig}
+        />
       </Sidebar.Footer>
     </>
+  );
+}
+
+export function ConnectionMenu({
+  snapshot,
+  onDisconnect,
+  onSwitchConfig,
+}: {
+  snapshot: SliverSnapshot;
+  onDisconnect: () => void;
+  onSwitchConfig: () => void;
+}) {
+  const connected = isUsableConnection(snapshot.connection.status);
+
+  if (!connected) {
+    return (
+      <div className="connection-summary">
+        <span className="status-dot status-dot--stopped" />
+        <div className="min-w-0" data-sidebar="label">
+          <p className="truncate text-xs font-medium">Offline</p>
+          <p className="truncate text-[11px] text-muted">No active channel</p>
+        </div>
+      </div>
+    );
+  }
+
+  const operator = snapshot.connection.operator ?? "Current server";
+
+  return (
+    <Dropdown>
+      <Button
+        aria-label={`Current server: ${operator}`}
+        className="connection-summary connection-summary--trigger"
+        fullWidth
+        variant="ghost"
+      >
+        <span className="status-dot status-dot--connected" />
+        <span className="min-w-0 text-left" data-sidebar="label">
+          <span className="block truncate text-xs font-medium">{operator}</span>
+          <span className="block truncate text-[11px] text-muted">{snapshot.connection.version}</span>
+        </span>
+        <FontAwesomeIcon
+          aria-hidden
+          className="ms-auto size-3.5 shrink-0 text-muted"
+          data-sidebar="label"
+          icon={faEllipsisVertical}
+        />
+      </Button>
+      <Dropdown.Popover className="min-w-56" placement="top start">
+        <Dropdown.Menu
+          aria-label="Current server actions"
+          onAction={(key) => {
+            if (String(key) === "switch-config") onSwitchConfig();
+            if (String(key) === "disconnect") onDisconnect();
+          }}
+        >
+          <Dropdown.Item id="switch-config" textValue="Switch config">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
+            <Label>Switch config</Label>
+          </Dropdown.Item>
+          <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
+            <Label>Disconnect</Label>
+          </Dropdown.Item>
+        </Dropdown.Menu>
+      </Dropdown.Popover>
+    </Dropdown>
   );
 }
 
@@ -324,7 +479,7 @@ function ConnectionLanding({
                 {savedConfigCount > 0 ? `Saved configurations (${savedConfigCount})` : "Select configuration"}
               </Button>
             </div>
-            {snapshot.connection.status === "error" && snapshot.connection.error ? (
+            {snapshot.connection.error ? (
               <div className="mt-6 max-w-md rounded-2xl bg-danger-soft px-4 py-3 text-left text-sm text-danger-soft-foreground">
                 {snapshot.connection.error}
               </div>
@@ -382,6 +537,89 @@ function EventStatus({ status }: { status: EventStreamStatus }) {
       <span className={`status-dot status-dot--${status}`} /> {metadata.label}
     </Chip>
   );
+}
+
+function ReconnectingStatus() {
+  return (
+    <Chip size="sm" color="warning" variant="soft" className="hidden md:inline-flex">
+      Backend reconnecting
+    </Chip>
+  );
+}
+
+function CompatibilityMismatchModal({
+  isOpen,
+  snapshot,
+  onOpenChange,
+}: {
+  isOpen: boolean;
+  snapshot: SliverSnapshot;
+  onOpenChange: (isOpen: boolean) => void;
+}) {
+  const capabilities = snapshot.connection.capabilities;
+  if (capabilities?.compatibility !== "degraded") return null;
+
+  const serverVersion = capabilities.serverVersion ?? snapshot.connection.version ?? "Not reported";
+  const baselineCommit = capabilities.baselineCommit.slice(0, 12);
+  const reason = capabilities.reason ?? "This server build has not been verified against the pinned baseline";
+
+  return (
+    <Modal.Backdrop isOpen={isOpen} variant="blur" onOpenChange={onOpenChange}>
+      <Modal.Container placement="center" size="sm">
+        <Modal.Dialog
+          aria-describedby="server-build-mismatch-description"
+          className="sm:max-w-[440px]"
+        >
+          <Modal.CloseTrigger />
+          <Modal.Header className="flex-row items-start pr-8">
+            <Modal.Icon className="bg-warning-soft text-warning-soft-foreground">
+              <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} className="size-4" />
+            </Modal.Icon>
+            <div className="min-w-0 flex-1">
+              <Modal.Heading>Server build mismatch</Modal.Heading>
+              <p
+                className="mt-1 text-sm font-normal leading-relaxed text-muted"
+                id="server-build-mismatch-description"
+              >
+                Sliver Desktop connected successfully, but this server does not match the build used to verify this app.
+              </p>
+            </div>
+          </Modal.Header>
+          <Modal.Body className="flex flex-col gap-3">
+            <dl className="grid gap-2 rounded-xl border border-separator bg-default p-3 text-sm">
+              <div className="flex items-baseline justify-between gap-4">
+                <dt className="text-muted">Connected server</dt>
+                <dd className="text-right font-medium text-foreground">{serverVersion}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-4">
+                <dt className="text-muted">Verified baseline</dt>
+                <dd className="font-mono text-xs text-foreground">{baselineCommit}</dd>
+              </div>
+            </dl>
+            <p className="rounded-xl bg-warning-soft px-3 py-2.5 text-sm leading-relaxed text-warning-soft-foreground">
+              {reason}.
+            </p>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button slot="close">Continue</Button>
+          </Modal.Footer>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
+  );
+}
+
+function compatibilityNoticeKey(snapshot: SliverSnapshot): string | undefined {
+  const capabilities = snapshot.connection.capabilities;
+  if (capabilities?.compatibility !== "degraded") return undefined;
+  const connectionIdentity = snapshot.connection.epoch === undefined
+    ? `${snapshot.connection.server ?? "unknown"}:${capabilities.serverVersion ?? snapshot.connection.version ?? "unknown"}`
+    : String(snapshot.connection.epoch);
+  return `${connectionIdentity}:${capabilities.baselineCommit}`;
+}
+
+function isUsableConnection(status: ConnectionStatus): boolean {
+  return status === "connected" || status === "degraded" || status === "reconnecting";
 }
 
 function HeaderAction({

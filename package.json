@@ -3,26 +3,59 @@
   "version": "0.1.0",
   "private": true,
   "description": "Cross-platform Electron operator console for Sliver",
+  "license": "GPL-3.0-or-later",
+  "author": {
+    "name": "Sliver Armory",
+    "email": "sliverarmory@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/sliverarmory/sliver-gui#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sliverarmory/sliver-gui.git"
+  },
   "main": "dist/main/index.js",
   "type": "module",
+  "packageManager": "npm@11.19.0",
   "engines": {
-    "node": ">=24"
+    "node": ">=24",
+    "npm": ">=11.19.0"
   },
   "scripts": {
-    "build:client": "node ./sliver-script/node_modules/typescript/bin/tsc -p ./sliver-script/tsconfig.json",
+    "build:client": "node ./vendor/sliver-script/node_modules/typescript/bin/tsc -p ./vendor/sliver-script/tsconfig.json --types node",
+    "build:e2e-app": "npm run build && node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json",
+    "build:licenses": "node ./scripts/generateThirdPartyLicenses.mjs",
     "dev": "npm run build:client && electron-vite dev",
+    "pretypecheck": "npm run build:client",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "build": "npm run build:client && npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && electron-vite build",
+    "pretest": "npm run build:client",
     "test": "vitest run",
+    "test:e2e:electron": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/electron-current-slice.e2e.js",
+    "test:e2e:packaged": "node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json && npm run verify:packaged-content && node --test .e2e-dist/src/e2e/packaged-mtls.e2e.js",
+    "test:e2e:packaged-real": "node ./scripts/requireRealServerE2EEnv.mjs && node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json && npm run verify:packaged-content && node --test .e2e-dist/src/e2e/packaged-real-server.e2e.js",
+    "test:m0": "npm test && npm run test:e2e:electron && npm run package && npm run test:e2e:packaged",
     "test:watch": "vitest",
-    "package": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder"
+    "protocol:check": "node ./scripts/protocol-check.mjs",
+    "protocol:fetch": "node ./scripts/protocol-fetch-baseline.mjs",
+    "protocol:fetch-wrapper": "node ./scripts/protocol-fetch-wrapper-base.mjs",
+    "protocol:protobuf": "node ./scripts/protocol-generate-protobuf.mjs",
+    "protocol:vendor": "node ./scripts/protocol-verify-vendor.mjs",
+    "parity:generate": "node ./scripts/parity-generate.mjs",
+    "parity:check": "node ./scripts/parity-check.mjs",
+    "verify:release-content": "node ./scripts/verifyReleaseContent.mjs",
+    "verify:packaged-content": "node ./scripts/verifyReleaseContent.mjs --packaged",
+    "prepackage": "npm run build:licenses",
+    "package": "npm run build && npm run verify:release-content && electron-builder --dir && npm run verify:packaged-content",
+    "predist": "npm run build:licenses",
+    "dist": "npm run build && npm run verify:release-content && electron-builder && npm run verify:packaged-content"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@fortawesome/fontawesome-svg-core": "7.3.1",
     "@fortawesome/free-brands-svg-icons": "7.3.1",
     "@fortawesome/free-solid-svg-icons": "7.3.1",
     "@fortawesome/react-fontawesome": "3.5.0",
+    "@grpc/grpc-js": "1.14.4",
     "@heroui-pro/react": "1.0.0-beta.8",
     "@heroui/react": "3.2.4",
     "@heroui/styles": "3.2.4",
@@ -42,13 +75,15 @@
     "electron-vite": "5.0.0",
     "jsdom": "30.0.1",
     "motion": "13.0.0",
+    "nice-grpc": "2.1.17",
+    "playwright-core": "1.54.2",
     "react": "19.2.8",
     "react-aria": "^3.51.0",
     "react-aria-components": "^1.20.0",
     "react-dom": "19.2.8",
     "react-resizable-panels": "4.12.2",
     "rxjs": "7.8.2",
-    "sliver-script": "file:./sliver-script",
+    "sliver-script": "file:./vendor/sliver-script",
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "7.3.6",
@@ -56,5 +91,14 @@
   },
   "overrides": {
     "tar": "7.5.22"
+  },
+  "allowScripts": {
+    "@heroui-pro/react@1.0.0-beta.8": true,
+    "@zowe/secrets-for-zowe-sdk": false,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "fsevents": false,
+    "protobufjs": false
   }
 }

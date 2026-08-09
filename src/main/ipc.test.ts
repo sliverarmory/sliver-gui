@@ -98,6 +98,31 @@ describe("trusted Electron IPC boundary", () => {
     expect(connectSavedConfig).toHaveBeenCalledWith(77, id);
   });
 
+  it("decodes managed config and stop-plan capability calls at the trusted boundary", async () => {
+    const importConfig = vi.fn(async () => ({ ok: false, error: "import probe" } as const));
+    const removeSavedConfig = vi.fn(async () => ({ ok: true } as const));
+    const prepareStopJob = vi.fn(async () => ({ ok: false, error: "stop probe" } as const));
+    const executeStopPlan = vi.fn(async () => ({ ok: true } as const));
+    registerIpcHandlers(
+      registryMock({ importConfig, removeSavedConfig, prepareStopJob, executeStopPlan }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event, sender } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const id = "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2";
+    const token = "8e577480-5dc2-4dde-aa58-23c8f1770627";
+
+    await electronMocks.handlers.get(IPC.importConfig)?.(event, { displayName: "Local operator" });
+    await electronMocks.handlers.get(IPC.removeSavedConfig)?.(event, { id });
+    await electronMocks.handlers.get(IPC.prepareStopJob)?.(event, 7);
+    await electronMocks.handlers.get(IPC.executeStopPlan)?.(event, token);
+
+    expect(importConfig).toHaveBeenCalledWith(sender, "Local operator");
+    expect(removeSavedConfig).toHaveBeenCalledWith(77, id);
+    expect(prepareStopJob).toHaveBeenCalledWith(77, 7);
+    expect(executeStopPlan).toHaveBeenCalledWith(77, token);
+  });
+
   it("rejects malformed saved-config IDs at the central IPC boundary", () => {
     const connectSavedConfig = vi.fn(async () => ({ ok: false, error: "not called" } as const));
     registerIpcHandlers(registryMock({ connectSavedConfig }), vi.fn(), RENDERER_URL);
@@ -119,7 +144,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.getSnapshot,
     IPC.refresh,
     IPC.chooseCertificatePair,
-    IPC.killAllJobs,
+    IPC.prepareStopAllJobs,
   ] as const)("rejects unexpected arguments for %s", (channel) => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
@@ -130,8 +155,11 @@ describe("trusted Electron IPC boundary", () => {
   it.each(
     [
       [IPC.openWindow, [{}]],
+      [IPC.importConfig, [{ displayName: 7 }]],
+      [IPC.removeSavedConfig, [{ id: "invalid" }]],
       [IPC.startListener, [{ kind: "bogus", host: "127.0.0.1", port: 8888 }]],
-      [IPC.killJob, ["7"]],
+      [IPC.prepareStopJob, ["7"]],
+      [IPC.executeStopPlan, ["invalid"]],
       [IPC.generate, [{ name: "incomplete" }]],
       [IPC.generateFromProfile, [{ profileName: 7, name: "test" }]],
       [IPC.downloadBuild, [7]],
@@ -226,7 +254,7 @@ describe("trusted Electron IPC boundary", () => {
     );
     const { event, sender } = invokeEvent("http://127.0.0.1:5173/", 77);
     const profileGeneration = { profileName: "default", name: "test" };
-    const profileSave = { profileName: "default", config: defaultGenerateInput };
+    const profileSave = { profileName: "default", config: defaultGenerateInput, overwrite: false };
     const stagedBuilds = ["alpha", "bravo"];
 
     expect(electronMocks.handlers.get(IPC.openWindow)?.(event, { inheritConnection: true })).toEqual({ ok: true });
@@ -253,15 +281,18 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
   });
   return {
     chooseAndConnect: vi.fn(unavailable),
+    importConfig: vi.fn(unavailable),
     listSavedConfigs: vi.fn(unavailable),
     connectSavedConfig: vi.fn(unavailable),
+    removeSavedConfig: vi.fn(unavailable),
     disconnect: vi.fn(unavailable),
     snapshot: vi.fn(() => disconnectedSnapshot()),
     refresh: vi.fn(unavailable),
     chooseCertificatePair: vi.fn(unavailable),
     startListener: vi.fn(unavailable),
-    killJob: vi.fn(unavailable),
-    killAllJobs: vi.fn(unavailable),
+    prepareStopJob: vi.fn(unavailable),
+    prepareStopAllJobs: vi.fn(unavailable),
+    executeStopPlan: vi.fn(unavailable),
     generate: vi.fn(unavailable),
     generateFromProfile: vi.fn(unavailable),
     downloadBuild: vi.fn(unavailable),

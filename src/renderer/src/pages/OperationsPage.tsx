@@ -46,6 +46,8 @@ import {
 
 import type {
   CertificatePairSelection,
+  ConnectionStatus,
+  JobStopPlan,
   JobSummary,
   RecentEventSummary,
   SliverSnapshot,
@@ -65,11 +67,6 @@ import {
   type ListenerKind,
 } from "./operations-listener";
 import { nonBlankJobDomains, normalizedJobProtocol } from "./operations-job";
-
-type ConfirmationTarget =
-  | { kind: "job"; job: JobSummary }
-  | { kind: "all"; count: number }
-  | null;
 
 interface Feedback {
   tone: "danger" | "success";
@@ -104,13 +101,14 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
   const [certificatePair, setCertificatePair] = useState<CertificatePairSelection | null>(null);
   const [draft, setDraft] = useState<ListenerDraft>(() => createListenerDraft());
   const [draftErrors, setDraftErrors] = useState<ListenerDraftErrors>({});
-  const [confirmation, setConfirmation] = useState<ConfirmationTarget>(null);
+  const [confirmation, setConfirmation] = useState<JobStopPlan | null>(null);
+  const [isPreparingStop, setIsPreparingStop] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
 
   const jobs = snapshot.jobs;
   const profiles = snapshot.profiles;
   const recentEvents = snapshot.recentEvents;
-  const isConnected = snapshot.connection.status === "connected";
+  const isConnected = isUsableConnection(snapshot.connection.status);
 
   const openListenerDialog = useCallback(() => {
     setDraft(createListenerDraft("mtls", profiles[0]?.name ?? ""));
@@ -120,8 +118,38 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     setIsCreateOpen(true);
   }, [profiles]);
 
-  const requestStop = useCallback((job: JobSummary) => {
-    setConfirmation({ kind: "job", job });
+  const requestStop = useCallback(async (job: JobSummary) => {
+    setIsPreparingStop(true);
+    setFeedback(null);
+    try {
+      const result = await window.sliver.prepareStopJob(job.id);
+      if (!result.ok || !result.value) {
+        setFeedback({ tone: "danger", message: result.error ?? `Unable to review job #${job.id}.` });
+        return;
+      }
+      setConfirmation(result.value);
+    } catch (error: unknown) {
+      setFeedback({ tone: "danger", message: errorMessage(error) });
+    } finally {
+      setIsPreparingStop(false);
+    }
+  }, []);
+
+  const requestStopAll = useCallback(async () => {
+    setIsPreparingStop(true);
+    setFeedback(null);
+    try {
+      const result = await window.sliver.prepareStopAllJobs();
+      if (!result.ok || !result.value) {
+        setFeedback({ tone: "danger", message: result.error ?? "Unable to review the active jobs." });
+        return;
+      }
+      setConfirmation(result.value);
+    } catch (error: unknown) {
+      setFeedback({ tone: "danger", message: errorMessage(error) });
+    } finally {
+      setIsPreparingStop(false);
+    }
   }, []);
 
   const columns = useMemo<DataGridColumn<JobSummary>[]>(
@@ -214,11 +242,11 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
           <Tooltip delay={250}>
             <Button
               aria-label={`Stop job ${job.id}`}
-              isDisabled={isStopping}
+              isDisabled={isPreparingStop || isStopping}
               isIconOnly
               size="sm"
               variant="danger-soft"
-              onPress={() => requestStop(job)}
+              onPress={() => void requestStop(job)}
             >
               <FontAwesomeIcon aria-hidden icon={faStop} className="size-3" />
             </Button>
@@ -227,7 +255,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
         ),
       },
     ],
-    [isStopping, requestStop],
+    [isPreparingStop, isStopping, requestStop],
   );
 
   const refresh = useCallback(async () => {
@@ -316,10 +344,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     setIsStopping(true);
     setFeedback(null);
     try {
-      const result =
-        confirmation.kind === "all"
-          ? await window.sliver.killAllJobs()
-          : await window.sliver.killJob(confirmation.job.id);
+      const result = await window.sliver.executeStopPlan(confirmation.token);
       if (!result.ok) {
         setFeedback({ tone: "danger", message: result.error ?? "Unable to stop the selected job." });
         return;
@@ -328,9 +353,9 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
       setFeedback({
         tone: "success",
         message:
-          confirmation.kind === "all"
-            ? `${confirmation.count} ${confirmation.count === 1 ? "job" : "jobs"} stopped.`
-            : `Job #${confirmation.job.id} stopped.`,
+          confirmation.impact.stopsAll
+            ? `${confirmation.impact.jobs.length} ${confirmation.impact.jobs.length === 1 ? "job" : "jobs"} stopped.`
+            : `Job #${confirmation.impact.jobs[0]?.id ?? "unknown"} stopped.`,
       });
       setConfirmation(null);
     } catch (error: unknown) {
@@ -349,9 +374,6 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
         <div className="min-w-0">
           <div className="eyebrow flex-wrap">
             <FontAwesomeIcon aria-hidden icon={faTowerBroadcast} /> Operations
-            <Chip color={connectionColor(snapshot.connection.status)} size="sm" variant="soft">
-              <Chip.Label>{connectionLabel(snapshot.connection.status)}</Chip.Label>
-            </Chip>
           </div>
           <h1>Jobs &amp; listeners</h1>
           <p>
@@ -423,10 +445,10 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
               </div>
             </div>
             <Button
-              isDisabled={!isConnected || jobs.length === 0 || isStopping}
+              isDisabled={!isConnected || jobs.length === 0 || isPreparingStop || isStopping}
               size="sm"
               variant="danger-soft"
-              onPress={() => setConfirmation({ kind: "all", count: jobs.length })}
+              onPress={() => void requestStopAll()}
             >
               <FontAwesomeIcon aria-hidden icon={faStop} className="size-3" />
               Stop all
@@ -590,10 +612,13 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                 <NumberControl
                   error={draftErrors.port}
                   label="Listener port"
-                  maxValue={65_534}
+                  maxValue={65_535}
                   minValue={1}
                   value={draft.port}
-                  onChange={(port) => setDraft((current) => ({ ...current, port }))}
+                  onChange={(port) => {
+                    setDraft((current) => ({ ...current, port }));
+                    setDraftErrors((current) => clearDraftError(current, "port"));
+                  }}
                 />
               </div>
 
@@ -655,17 +680,41 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                 <FontAwesomeIcon aria-hidden icon={faStop} className="size-4" />
               </AlertDialog.Icon>
               <AlertDialog.Heading>
-                {confirmation?.kind === "all" ? "Stop all server jobs?" : "Stop this server job?"}
+                {confirmation?.impact.stopsAll ? "Stop all reviewed server jobs?" : "Stop this reviewed server job?"}
               </AlertDialog.Heading>
             </AlertDialog.Header>
             <AlertDialog.Body>
-              <p className="text-sm leading-relaxed text-muted">
-                {confirmation?.kind === "all"
-                  ? `This stops ${confirmation.count} active ${confirmation.count === 1 ? "listener" : "listeners"}. Existing implant sessions are not terminated, but they may lose their callback path.`
-                  : confirmation
-                    ? `Job #${confirmation.job.id} (${protocolLabel(normalizedJobProtocol(confirmation.job))}) will stop accepting traffic immediately.`
-                    : "The selected job will be stopped."}
-              </p>
+              {confirmation ? (
+                <div className="space-y-3 text-sm">
+                  <div className="rounded-xl border border-separator bg-default px-3 py-2.5">
+                    <p className="font-medium text-foreground">{confirmation.impact.backend.server}</p>
+                    <p className="mt-0.5 text-xs text-muted">
+                      {confirmation.impact.backend.operator} · {confirmation.impact.backend.configName} · connection epoch {confirmation.impact.backend.epoch}
+                    </p>
+                    <p className="mt-1 text-xs text-muted">
+                      Shared by {confirmation.impact.backend.sharedWindowCount} {confirmation.impact.backend.sharedWindowCount === 1 ? "application window" : "application windows"}.
+                    </p>
+                  </div>
+                  <p className="leading-relaxed text-danger-soft-foreground">{confirmation.impact.warning}</p>
+                  <ScrollShadow className="max-h-52 rounded-xl border border-separator" hideScrollBar={false}>
+                    <ul className="divide-y divide-separator" aria-label="Jobs that will be stopped">
+                      {confirmation.impact.jobs.map((job) => (
+                        <li className="px-3 py-2.5" key={job.id}>
+                          <p className="font-medium text-foreground">
+                            Job #{job.id} · {protocolLabel(normalizedJobProtocol(job))}
+                          </p>
+                          <p className="mt-0.5 truncate text-xs text-muted">
+                            {job.description || listenerName(job)} · {job.domains.filter(Boolean).join(", ") || "all interfaces"} · port {job.port}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  </ScrollShadow>
+                  <p className="text-xs leading-relaxed text-muted">
+                    Existing implant sessions are not terminated, but they may lose their callback path. The plan expires at {new Date(confirmation.expiresAt).toLocaleTimeString()} and is rejected if the backend or job set changes.
+                  </p>
+                </div>
+              ) : null}
             </AlertDialog.Body>
             <AlertDialog.Footer>
               <Button
@@ -687,7 +736,11 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                   icon={isStopping ? faCircleNotch : faStop}
                   className={`size-3 ${isStopping ? "animate-spin" : ""}`}
                 />
-                {isStopping ? "Stopping…" : confirmation?.kind === "all" ? "Stop all" : "Stop job"}
+                {isStopping
+                  ? "Stopping…"
+                  : confirmation?.impact.stopsAll
+                    ? `Stop ${confirmation.impact.jobs.length} ${confirmation.impact.jobs.length === 1 ? "job" : "jobs"}`
+                    : `Stop job #${confirmation?.impact.jobs[0]?.id ?? ""}`}
               </Button>
             </AlertDialog.Footer>
           </AlertDialog.Dialog>
@@ -741,7 +794,7 @@ function ProtocolFields({
             <NumberControl
               error={errors.tcpCommsPort}
               label="TCP comms port"
-              maxValue={65_534}
+              maxValue={65_535}
               minValue={1}
               value={draft.tcpCommsPort}
               onChange={(tcpCommsPort) => setDraft((current) => ({ ...current, tcpCommsPort }))}
@@ -749,7 +802,7 @@ function ProtocolFields({
             <NumberControl
               error={errors.keyExchangePort}
               label="Key exchange port"
-              maxValue={65_534}
+              maxValue={65_535}
               minValue={1}
               value={draft.keyExchangePort}
               onChange={(keyExchangePort) => setDraft((current) => ({ ...current, keyExchangePort }))}
@@ -1077,17 +1130,20 @@ function NumberControl({
 }: NumberControlProps): React.JSX.Element {
   return (
     <NumberField
+      commitBehavior="validate"
       fullWidth
       formatOptions={{ useGrouping: false }}
-      isInvalid={Boolean(error)}
+      isRequired
+      {...(error ? { isInvalid: true } : {})}
       {...(maxValue === undefined ? {} : { maxValue })}
       minValue={minValue}
+      step={1}
       value={value}
       variant="secondary"
-      onChange={(nextValue) => onChange(nextValue ?? 0)}
+      onChange={(nextValue) => onChange(Number.isFinite(nextValue) ? nextValue : 0)}
     >
       <Label>{label}</Label>
-      <NumberField.Group>
+      <NumberField.Group className="grid-cols-1">
         <NumberField.Input />
       </NumberField.Group>
       {description && <Description>{description}</Description>}
@@ -1186,20 +1242,8 @@ function protocolColor(protocol: string): "accent" | "default" | "success" | "wa
   return "default";
 }
 
-function connectionColor(
-  status: SliverSnapshot["connection"]["status"] | undefined,
-): "danger" | "default" | "success" | "warning" {
-  if (status === "connected") return "success";
-  if (status === "connecting") return "warning";
-  if (status === "error") return "danger";
-  return "default";
-}
-
-function connectionLabel(status: SliverSnapshot["connection"]["status"] | undefined): string {
-  if (status === "connected") return "Backend connected";
-  if (status === "connecting") return "Connecting";
-  if (status === "error") return "Connection error";
-  return "Not connected";
+function isUsableConnection(status: ConnectionStatus): boolean {
+  return status === "connected" || status === "degraded" || status === "reconnecting";
 }
 
 function streamColor(
@@ -1233,6 +1277,16 @@ function formatEventType(type: string): string {
 function formatEventTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "—" : EVENT_TIME.format(date);
+}
+
+function clearDraftError(
+  errors: ListenerDraftErrors,
+  field: keyof ListenerDraftErrors,
+): ListenerDraftErrors {
+  if (!errors[field]) return errors;
+  const next = { ...errors };
+  delete next[field];
+  return next;
 }
 
 function errorMessage(error: unknown): string {

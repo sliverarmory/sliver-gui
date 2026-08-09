@@ -45,5 +45,8 @@ describe("sidebar glass styles", () => {
     expect(styles).toMatch(
       /button,\s*input,\s*textarea,\s*select\s*\{[^}]*-webkit-app-region:\s*no-drag;/s,
     );
+    expect(styles).toMatch(
+      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.connection-summary--trigger\s*\{[^}]*justify-content:\s*center;[^}]*gap:\s*0;[^}]*padding-inline:\s*0;/s,
+    );
   });
 });

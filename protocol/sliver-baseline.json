@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/BishopFox/sliver.git",
+  "commit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+  "tree": "62d00f3225977ecbcc723f847f2df2bcd14549cb",
+  "commandSources": [
+    "client/command/server.go",
+    "client/command/sliver.go",
+    "client/cli/cli.go"
+  ],
+  "protobuf": {
+    "sourceCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+    "descriptorSetSha256": "1448165f61ec76019c7dd3adbc284468109959fb23dd14ee8281c4b9c31a013f",
+    "files": [
+      {
+        "path": "commonpb/common.proto",
+        "sha256": "4c14e2f8ac4d35ab5d20509c0c8398c5690ff3ea18f56eae84104a9c7adfeaf9"
+      },
+      {
+        "path": "clientpb/client.proto",
+        "sha256": "00a3ba3e5ac798525d95be4af06ba1abdc0b94c1bc92b5427b7b150d1a9c4917"
+      },
+      {
+        "path": "sliverpb/sliver.proto",
+        "sha256": "368fa1381c0013a3f564ddce8ec1f4c6ed4f4c2c4ef04f498a7b224f821875dd"
+      },
+      {
+        "path": "rpcpb/services.proto",
+        "sha256": "67373d58e2cea7f7fb56a5dbc850d03811bf74df1ce37a042ad2d62dd7419656"
+      },
+      {
+        "path": "dnspb/dns.proto",
+        "sha256": "960f188447fda858047224f3ef22f926e5b9afecc7a278807f6c764431a587a2"
+      }
+    ],
+    "outputs": [
+      {
+        "path": "commonpb/common.ts",
+        "sha256": "ac46d0ede448a5d7cdfdc3ad4699da32f1ebf7f6566e074eebb7476f65655189"
+      },
+      {
+        "path": "clientpb/client.ts",
+        "sha256": "d9c9472a2b9302fc3453a85a0a44c695df3b1e68a0c9d516e87d35759df59a0f"
+      },
+      {
+        "path": "sliverpb/sliver.ts",
+        "sha256": "73517636b99ac563074e2a6af2acd7fed0bcd9417b8f80afb984efebf78308c0"
+      },
+      {
+        "path": "rpcpb/services.ts",
+        "sha256": "64829545f3902c671c394b6404c735ec78a5bd33f5da9575fc5bdbe85fc0cd25"
+      },
+      {
+        "path": "dnspb/dns.ts",
+        "sha256": "09e4c0a09a2535d9d6ad0795b0dafc669aee4efe0274afdd04d854c3d5d0e372"
+      }
+    ],
+    "pluginOptions": [
+      "env=node",
+      "esModuleInterop=true",
+      "forceLong=string",
+      "useExactTypes=false",
+      "useOptionals=messages",
+      "outputServices=nice-grpc",
+      "outputServices=generic-definitions"
+    ]
+  },
+  "toolchain": {
+    "go": "1.25.8",
+    "node": "24.0.0",
+    "npm": "11.19.0",
+    "protoc": "35.1",
+    "tsProto": "2.11.4",
+    "typescript": "5.8.3",
+    "tsPoet": "6.12.0",
+    "dprintNode": "1.0.8",
+    "formatting": "ts-proto/ts-poet deterministic emitter; no post-generation formatter"
+  },
+  "vendoredWrapper": {
+    "repository": "https://github.com/sliverarmory/sliver-script.git",
+    "publishedBase": "837fb21c5291eef6285c2e168eef0620b99a5394",
+    "snapshot": "01f1029cc17898da681e52b64af4a708ff82c3d3",
+    "bundleSha256": "56f71537e4ce8f9d75c29db27c4491ac69d008328563cfae14260c1c2f5ab0a2"
+  }
+}

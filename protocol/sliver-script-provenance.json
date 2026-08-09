@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "wrapper": {
+    "repository": "https://github.com/sliverarmory/sliver-script.git",
+    "publishedBase": "837fb21c5291eef6285c2e168eef0620b99a5394",
+    "snapshot": "01f1029cc17898da681e52b64af4a708ff82c3d3"
+  },
+  "archivalEvidence": {
+    "bundle": {
+      "path": "vendor/sliver-script/sliver-script-snapshot.bundle",
+      "sha256": "56f71537e4ce8f9d75c29db27c4491ac69d008328563cfae14260c1c2f5ab0a2"
+    },
+    "commitPatches": [
+      {
+        "path": "vendor/sliver-script/patches/0001-Update-sliver.patch",
+        "sha256": "27e43bd38d3cbac374613dbda7a6744804b65e2f766b23bd5cbdc25376fe2f94"
+      },
+      {
+        "path": "vendor/sliver-script/patches/0002-Update-pb.patch",
+        "sha256": "1570034e1166f26e6696ce6d0da7617eef72fba96ae32b422196cdb3b77e87b0"
+      }
+    ],
+    "purpose": "Historical evidence for reconstructing the unpublished wrapper snapshot. These archival commit patches are not the generated-protobuf or GUI overlay inputs."
+  },
+  "generatedProtobuf": {
+    "baseline": "protocol/sliver-baseline.json",
+    "sourceCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+    "paths": [
+      "src/pb/clientpb/client.ts",
+      "src/pb/commonpb/common.ts",
+      "src/pb/dnspb/dns.ts",
+      "src/pb/rpcpb/services.ts",
+      "src/pb/sliverpb/sliver.ts"
+    ]
+  },
+  "retainedSnapshotFiles": [
+    {
+      "path": "LICENSE",
+      "sha256": "3c48c70c1810279b31581f998473554d205567d65e522e1eac1112085511e50e"
+    },
+    {
+      "path": "README.md",
+      "sha256": "cd44f593a0dd88b39b96e4509e07da6ecfde4b507412ffef84ba3b23497bb73c"
+    },
+    {
+      "path": "package.json",
+      "sha256": "ddfcdb1a4be91a0485da09ee628d3e93b20f548e476a625a190ca326fa622e27"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "48a977a691c8e8a26a87b2e488aef1630371259e7ee93b5ff324ccc42897df88"
+    },
+    {
+      "path": "src/config.ts",
+      "sha256": "0faca469d4500b9357f4b9e88a9221cd321dab9e015ea348b56e3afe5e6d002b"
+    },
+    {
+      "path": "src/events/index.ts",
+      "sha256": "2e643c622faa5724f6f9aa76ea9fe1d3c98c7c2743d40374226a93a36755f11c"
+    },
+    {
+      "path": "src/internal/asyncQueue.ts",
+      "sha256": "9804cd42b895dc24895e91e1bbe5b732526a28c371e56d9d1b386d302749da41"
+    },
+    {
+      "path": "src/internal/credentials.ts",
+      "sha256": "599f662bc088be6382c73d903eb78638ec17cb54f70a9fd067e4803e3ecca950"
+    },
+    {
+      "path": "src/internal/timeout.ts",
+      "sha256": "803b6e3b96988a1d547f94c8259f7c97922793fdaea0ea465363845b21a0349c"
+    },
+    {
+      "path": "src/internal/tunnelManager.ts",
+      "sha256": "fb6e1f4fc1b4eefda29bd57d95cfc1eec46e1f50ae43e41cbab9bf08219bca07"
+    },
+    {
+      "path": "src/internal/wgProxy.ts",
+      "sha256": "99141481aa6be46519c18ec8e229175d439f0a383e712270e133287d163dc7c8"
+    }
+  ],
+  "handwrittenOverlay": {
+    "baseCommit": "01f1029cc17898da681e52b64af4a708ff82c3d3",
+    "appliedAfterProtobufGeneration": true,
+    "patch": {
+      "path": "protocol/sliver-script-handwritten-overlay.patch",
+      "sha256": "f1d6b613cb4b00c4c09468bba4c25bad524764865c68bfe9dc5c46a982db33e7"
+    },
+    "files": [
+      {
+        "path": "src/client.ts",
+        "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
+        "sha256": "bfdbf20da864026c5d962ef5a4d8891943ab0703d1046ba003844ed540b9afbe",
+        "review": "Route RPCs through bounded control, inventory, and artifact channels, including a DNS-form TLS authority for IP-literal targets."
+      },
+      {
+        "path": "src/index.ts",
+        "baseSha256": "37a8c9139932f7f1600f2da3b83e659e6706787ebdd69bad31d1c05de54af3d7",
+        "sha256": "991c0ee4272e7f4cd79092b6a7525537eece3ff2980c03811c24414dc706819f",
+        "review": "Export the reviewed message-budget API."
+      },
+      {
+        "path": "src/messageBudget.ts",
+        "baseSha256": null,
+        "sha256": "a0814ab3fd67e7babae17b0df1ee10007ea535727950b68034d2c35967f520a6",
+        "review": "Define immutable per-domain send and receive allocation limits plus IP-safe TLS authority selection."
+      }
+    ]
+  },
+  "omissions": [
+    "tests and fixtures",
+    "generated lib output",
+    "documentation site and examples",
+    "nested Sliver checkout"
+  ]
+}
