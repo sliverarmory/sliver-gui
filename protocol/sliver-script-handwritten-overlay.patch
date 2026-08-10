@@ -1,8 +1,8 @@
 diff --git a/src/client.ts b/src/client.ts
-index c2baf89..71a5b45 100644
+index c2baf89..a322460 100644
 --- a/src/client.ts
 +++ b/src/client.ts
-@@ -6,13 +6,22 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
+@@ -6,13 +6,23 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
 
  import type { SliverClientConfig } from "./config";
  import { createSliverRpcCredentials } from "./internal/credentials";
@@ -12,6 +12,7 @@ index c2baf89..71a5b45 100644
  import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
 +import {
 +  RPC_MESSAGE_DOMAINS,
++  WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
 +  rpcMessageChannelOptions,
 +  rpcTlsAuthorityOverride,
 +  type RpcMessageDomain,
@@ -26,7 +27,7 @@ index c2baf89..71a5b45 100644
    Sessions,
    Version,
    Beacons,
-@@ -30,18 +39,23 @@ import type {
+@@ -30,18 +40,23 @@ import type {
    StagerListenerReq,
    UniqueWGIP,
  } from "./pb/clientpb/client";
@@ -34,7 +35,8 @@ index c2baf89..71a5b45 100644
 +import type { Empty, Request as CommonRequest } from "./pb/commonpb/common";
  import { SliverRPCDefinition } from "./pb/rpcpb/services";
  import type { SliverRPCClient } from "./pb/rpcpb/services";
- import { Ls } from "./pb/sliverpb/sliver";
+-import { Ls } from "./pb/sliverpb/sliver";
++import { Ls, RegistryType } from "./pb/sliverpb/sliver";
 +import type {
 +  EnvInfo,
 +  OpenSession,
@@ -54,7 +56,7 @@ index c2baf89..71a5b45 100644
  const EVENT_RETRY_INITIAL_MS = 500;
  const EVENT_RETRY_MAX_MS = 10_000;
 
-@@ -68,6 +82,13 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
+@@ -68,6 +83,47 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
    randomizeJARM?: boolean;
  }
 
@@ -65,10 +67,44 @@ index c2baf89..71a5b45 100644
 +  c2Uri?: string;
 +}
 +
++export interface SessionNetstatOptions {
++  tcp: boolean;
++  udp: boolean;
++  ip4: boolean;
++  ip6: boolean;
++  listening: boolean;
++}
++
++export interface SessionDownloadFileOptions {
++  start?: number;
++  stop?: number;
++  maxBytes?: number;
++  maxLines?: number;
++}
++
++export interface SessionUploadOptions {
++  isIOC?: boolean;
++  fileName?: string;
++  isDirectory?: boolean;
++  overwrite?: boolean;
++}
++
++export interface SessionGrepOptions {
++  recursive?: boolean;
++  linesBefore?: number;
++  linesAfter?: number;
++}
++
++export type SessionRegistryWriteValue =
++  | { type: "binary"; value: Buffer }
++  | { type: "string"; value: string }
++  | { type: "dword"; value: number }
++  | { type: "qword"; value: string };
++
  export interface Tunnel {
    readonly id: string;
    readonly stdout$: Observable<Buffer>;
-@@ -76,10 +97,18 @@ export interface Tunnel {
+@@ -76,10 +132,18 @@ export interface Tunnel {
  }
 
  class BaseCommands {
@@ -89,7 +125,7 @@ index c2baf89..71a5b45 100644
    }
 
    protected async unary<T>(timeoutSeconds: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
-@@ -106,7 +135,10 @@ class BaseCommands {
+@@ -106,7 +170,10 @@ class BaseCommands {
 
    download(path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Buffer> {
      return this.unary(timeoutSeconds, async (signal) => {
@@ -101,7 +137,7 @@ index c2baf89..71a5b45 100644
        if (download.Encoder === "gzip") {
          return await gunzip(download.Data);
        }
-@@ -120,7 +152,7 @@ class BaseCommands {
+@@ -120,7 +187,7 @@ class BaseCommands {
    upload(path: string, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, async (signal) => {
        const payload = await gzip(data);
@@ -110,7 +146,7 @@ index c2baf89..71a5b45 100644
          { Path: path, Encoder: "gzip", Data: payload, Request: this.request(timeoutSeconds) },
          { signal },
        );
-@@ -167,7 +199,7 @@ class BaseCommands {
+@@ -167,7 +234,7 @@ class BaseCommands {
 
    processDump(pid: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -119,7 +155,7 @@ index c2baf89..71a5b45 100644
      );
    }
 
-@@ -213,7 +245,7 @@ class BaseCommands {
+@@ -213,7 +280,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -128,7 +164,7 @@ index c2baf89..71a5b45 100644
          {
            Pid: pid,
            Data: shellcode,
-@@ -261,7 +293,7 @@ class BaseCommands {
+@@ -261,7 +328,7 @@ class BaseCommands {
 
    executeAssembly(assembly: Buffer, args: string[] = [], process = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -137,7 +173,7 @@ index c2baf89..71a5b45 100644
          { Assembly: assembly, Arguments: args, Process: process, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -288,7 +320,7 @@ class BaseCommands {
+@@ -288,7 +355,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -146,7 +182,7 @@ index c2baf89..71a5b45 100644
          { Data: data, ProcessName: processName, Args: args, EntryPoint: entryPoint, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -303,7 +335,7 @@ class BaseCommands {
+@@ -303,7 +370,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -155,7 +191,7 @@ index c2baf89..71a5b45 100644
          { Data: data, EntryPoint: entrypoint, ProcessName: processName, Args: args, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -312,7 +344,7 @@ class BaseCommands {
+@@ -312,7 +379,7 @@ class BaseCommands {
 
    screenshot(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -164,7 +200,7 @@ index c2baf89..71a5b45 100644
      );
    }
  }
-@@ -320,16 +352,17 @@ class BaseCommands {
+@@ -320,16 +387,17 @@ class BaseCommands {
  export class InteractiveBeacon extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -184,7 +220,7 @@ index c2baf89..71a5b45 100644
        BeaconID: this.beaconId,
        SessionID: "",
      };
-@@ -349,7 +382,7 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -349,7 +417,7 @@ export class InteractiveBeacon extends BaseCommands {
        wait: async (waitTimeoutSeconds = timeoutSeconds) => {
          const beaconTask = await waitForBeaconTask(this.taskResult$, taskId, waitTimeoutSeconds);
          const taskContent = await this.unary(waitTimeoutSeconds, (signal) =>
@@ -193,7 +229,7 @@ index c2baf89..71a5b45 100644
          );
          return Ls.decode(taskContent.Response);
        },
-@@ -365,16 +398,17 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -365,16 +433,17 @@ export class InteractiveBeacon extends BaseCommands {
  export class InteractiveSession extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -213,7 +249,7 @@ index c2baf89..71a5b45 100644
        BeaconID: "",
        SessionID: this.sessionId,
      };
-@@ -433,8 +467,8 @@ export class SliverClient {
+@@ -433,8 +502,8 @@ export class SliverClient {
    static readonly EVENT_BEACON_TASKRESULT = "beacon-taskresult";
 
    private readonly empty = {};
@@ -224,7 +260,7 @@ index c2baf89..71a5b45 100644
 
    private eventsAbort: AbortController | null = null;
    private tunnels: TunnelManager | null = null;
-@@ -467,33 +501,52 @@ export class SliverClient {
+@@ -467,33 +536,56 @@ export class SliverClient {
      return `${this.config.lhost}:${this.config.lport}`;
    }
 
@@ -261,6 +297,10 @@ index c2baf89..71a5b45 100644
 +    return this.clientFor("artifact");
 +  }
 +
++  private get workbenchArtifactRpc(): SliverRPCClient {
++    return this.clientFor("workbench-artifact");
++  }
++
 +  private get taskContentRpc(): SliverRPCClient {
 +    return this.clientFor("task-content");
 +  }
@@ -294,7 +334,7 @@ index c2baf89..71a5b45 100644
 
      this.eventsAbort = new AbortController();
      this.tunnels = new TunnelManager();
-@@ -505,15 +558,21 @@ export class SliverClient {
+@@ -505,15 +597,21 @@ export class SliverClient {
          rpcTarget = this.wireGuardProxy.rpcHost();
        }
 
@@ -321,7 +361,7 @@ index c2baf89..71a5b45 100644
        this.startEventsStream();
        return this;
      } catch (error) {
-@@ -529,9 +588,11 @@ export class SliverClient {
+@@ -529,9 +627,11 @@ export class SliverClient {
      await this.tunnels?.stop();
      this.tunnels = null;
 
@@ -336,7 +376,7 @@ index c2baf89..71a5b45 100644
 
      const wireGuardProxy = this.wireGuardProxy;
      this.wireGuardProxy = null;
-@@ -541,14 +602,14 @@ export class SliverClient {
+@@ -541,14 +641,14 @@ export class SliverClient {
    }
 
    private startEventsStream(): void {
@@ -353,7 +393,7 @@ index c2baf89..71a5b45 100644
          this.eventStreamStateSubject.next({
            status: attempt === 0 ? "connecting" : "retrying",
            attempt,
-@@ -568,7 +629,7 @@ export class SliverClient {
+@@ -568,7 +668,7 @@ export class SliverClient {
            }
          } catch (err) {
            // Abort is expected on disconnect; don't surface it as a retry.
@@ -362,7 +402,7 @@ index c2baf89..71a5b45 100644
              return;
            }
 
-@@ -597,11 +658,193 @@ export class SliverClient {
+@@ -597,11 +697,717 @@ export class SliverClient {
    }
 
    getSessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Sessions> {
@@ -475,6 +515,530 @@ index c2baf89..71a5b45 100644
 +    );
 +  }
 +
++  // --- Explicit M2 session workbench APIs ---
++
++  currentTokenOwnerSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.currentTokenOwner(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  listEnvSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
++    return this.getEnvSession(sessionId, "", timeoutSeconds);
++  }
++
++  revealEnvSession(sessionId: string, exactName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
++    assertNonEmptyString(exactName, "Environment variable name");
++    return this.getEnvSession(sessionId, exactName, timeoutSeconds);
++  }
++
++  ifconfigSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.ifconfig(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  netstatSession(
++    sessionId: string,
++    options: SessionNetstatOptions,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.netstat(
++        {
++          TCP: options.tcp,
++          UDP: options.udp,
++          IP4: options.ip4,
++          IP6: options.ip6,
++          Listening: options.listening,
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  pwdSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.pwd(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  cdSession(sessionId: string, path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.cd(
++        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  lsSession(sessionId: string, path = ".", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.ls(
++        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  downloadFileSession(
++    sessionId: string,
++    path: string,
++    options: SessionDownloadFileOptions = {},
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    const maxBytes = boundedArtifactByteCount(options.maxBytes);
++    const start = boundedNonNegativeInteger(options.start ?? 0, "Download start");
++    const stop = boundedNonNegativeInteger(options.stop ?? 0, "Download stop");
++    const maxLines = boundedNonNegativeInteger(options.maxLines ?? 0, "Download max lines");
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const response = await this.workbenchArtifactRpc.download(
++        {
++          Path: path,
++          Start: String(start),
++          Stop: String(stop),
++          Recurse: false,
++          MaxBytes: String(maxBytes),
++          MaxLines: String(maxLines),
++          RestrictedToFile: true,
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      );
++      try {
++        assertImplantResponse(response.Response?.Err, "Download");
++        if (!response.Exists || response.IsDir) {
++          throw new Error("Download is unavailable or is not a single file");
++        }
++        const data = await decodeBoundedArtifact(response.Data, response.Encoder, maxBytes, "Download");
++        return { ...response, Encoder: "", Data: data };
++      } catch (error) {
++        response.Data.fill(0);
++        throw error;
++      }
++    });
++  }
++
++  uploadSession(
++    sessionId: string,
++    path: string,
++    data: Buffer,
++    options: SessionUploadOptions = {},
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    assertBoundedArtifact(data, "Upload");
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const payload = await gzip(data);
++      try {
++        const response = await this.workbenchArtifactRpc.upload(
++          {
++            Path: path,
++            Encoder: "gzip",
++            Data: payload,
++            IsIOC: options.isIOC ?? false,
++            FileName: options.fileName ?? "",
++            IsDirectory: options.isDirectory ?? false,
++            Overwrite: options.overwrite ?? false,
++            Request: this.sessionRequest(sessionId, timeoutSeconds),
++          },
++          { signal },
++        );
++        assertImplantResponse(response.Response?.Err, "Upload");
++        return response;
++      } finally {
++        payload.fill(0);
++      }
++    });
++  }
++
++  grepSession(
++    sessionId: string,
++    path: string,
++    searchPattern: string,
++    options: SessionGrepOptions = {},
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.grep(
++        {
++          SearchPattern: searchPattern,
++          Path: path,
++          Recursive: options.recursive ?? false,
++          LinesBefore: boundedNonNegativeInteger(options.linesBefore ?? 0, "Grep lines before"),
++          LinesAfter: boundedNonNegativeInteger(options.linesAfter ?? 0, "Grep lines after"),
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  cpSession(sessionId: string, source: string, destination: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.cp(
++        { Src: source, Dst: destination, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  mvSession(sessionId: string, source: string, destination: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.mv(
++        { Src: source, Dst: destination, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  mkdirSession(sessionId: string, path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.mkdir(
++        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  rmSession(
++    sessionId: string,
++    path: string,
++    recursive = false,
++    force = false,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.rm(
++        { Path: path, Recursive: recursive, Force: force, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  mountsSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.mount(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  memfilesListSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.memfilesList(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  memfilesAddSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.memfilesAdd(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  memfilesRmSession(sessionId: string, fd: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.memfilesRm(
++        { Fd: fd, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  chmodSession(
++    sessionId: string,
++    path: string,
++    fileMode: string,
++    recursive = false,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.chmod(
++        { Path: path, FileMode: fileMode, Recursive: recursive, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  chownSession(
++    sessionId: string,
++    path: string,
++    uid: string,
++    gid: string,
++    recursive = false,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.chown(
++        { Path: path, Uid: uid, Gid: gid, Recursive: recursive, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  chtimesSession(
++    sessionId: string,
++    path: string,
++    accessTime: string,
++    modificationTime: string,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.chtimes(
++        { Path: path, ATime: accessTime, MTime: modificationTime, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  psSession(sessionId: string, fullInfo = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.ps(
++        { FullInfo: fullInfo, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  terminateSessionProcess(
++    sessionId: string,
++    pid: number,
++    force = false,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.terminate(
++        { Pid: pid, Force: force, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  processDumpSession(
++    sessionId: string,
++    pid: number,
++    dumpTimeoutSeconds = 60,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const response = await this.workbenchArtifactRpc.processDump(
++        {
++          Pid: pid,
++          Timeout: boundedPositiveInteger(dumpTimeoutSeconds, "Process dump timeout"),
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      );
++      try {
++        assertImplantResponse(response.Response?.Err, "Process dump");
++        assertBoundedArtifact(response.Data, "Process dump");
++        return response;
++      } catch (error) {
++        response.Data.fill(0);
++        throw error;
++      }
++    });
++  }
++
++  screenshotSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const response = await this.workbenchArtifactRpc.screenshot(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      );
++      try {
++        assertImplantResponse(response.Response?.Err, "Screenshot");
++        assertBoundedArtifact(response.Data, "Screenshot");
++        return response;
++      } catch (error) {
++        response.Data.fill(0);
++        throw error;
++      }
++    });
++  }
++
++  servicesSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.services(
++        { Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  serviceDetailSession(sessionId: string, serviceName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.serviceDetail(
++        {
++          ServiceInfo: { ServiceName: serviceName, Hostname: "" },
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  startServiceSession(sessionId: string, serviceName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.startServiceByName(
++        {
++          ServiceInfo: { ServiceName: serviceName, Hostname: "" },
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  stopServiceSession(sessionId: string, serviceName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.stopService(
++        {
++          ServiceInfo: { ServiceName: serviceName, Hostname: "" },
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  registryReadSession(
++    sessionId: string,
++    hive: string,
++    path: string,
++    key: string,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.registryRead(
++        { Hive: hive, Path: path, Key: key, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  registryListSubkeysSession(
++    sessionId: string,
++    hive: string,
++    path: string,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.registryListSubKeys(
++        { Hive: hive, Path: path, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  registryListValuesSession(
++    sessionId: string,
++    hive: string,
++    path: string,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.registryListValues(
++        { Hive: hive, Path: path, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  registryReadHiveSession(
++    sessionId: string,
++    rootHive: string,
++    requestedHive: string,
++    maxBytes = WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    const boundedMaxBytes = boundedArtifactByteCount(maxBytes);
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const response = await this.workbenchArtifactRpc.registryReadHive(
++        { RootHive: rootHive, RequestedHive: requestedHive, Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      );
++      try {
++        assertImplantResponse(response.Response?.Err, "Registry hive read");
++        const data = await decodeBoundedArtifact(response.Data, response.Encoder, boundedMaxBytes, "Registry hive read");
++        return { ...response, Encoder: "", Data: data };
++      } catch (error) {
++        response.Data.fill(0);
++        throw error;
++      }
++    });
++  }
++
++  registryWriteSession(
++    sessionId: string,
++    hive: string,
++    path: string,
++    key: string,
++    value: SessionRegistryWriteValue,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    const fields = registryWriteFields(value);
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.registryWrite(
++        {
++          Hive: hive,
++          Path: path,
++          Key: key,
++          Hostname: "",
++          ...fields,
++          Request: this.sessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  registryCreateKeySession(
++    sessionId: string,
++    hive: string,
++    path: string,
++    key: string,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.registryCreateKey(
++        { Hive: hive, Path: path, Key: key, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  registryDeleteKeySession(
++    sessionId: string,
++    hive: string,
++    path: string,
++    key: string,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.registryDeleteKey(
++        { Hive: hive, Path: path, Key: key, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
 +  killSession(sessionId: string, force = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.kill(
@@ -558,7 +1122,7 @@ index c2baf89..71a5b45 100644
    }
 
    getJobs(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Jobs> {
-@@ -722,11 +965,11 @@ export class SliverClient {
+@@ -722,11 +1528,11 @@ export class SliverClient {
    }
 
    startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -572,7 +1136,7 @@ index c2baf89..71a5b45 100644
    }
 
    generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
-@@ -734,7 +977,7 @@ export class SliverClient {
+@@ -734,7 +1540,7 @@ export class SliverClient {
    }
 
    generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
@@ -581,7 +1145,7 @@ index c2baf89..71a5b45 100644
    }
 
    async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -744,7 +987,7 @@ export class SliverClient {
+@@ -744,7 +1550,7 @@ export class SliverClient {
 
    generateSpoofMetadata(req: GenerateSpoofMetadataReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
      return withTimeoutSignal(timeoutSeconds, async (signal) => {
@@ -590,7 +1154,7 @@ index c2baf89..71a5b45 100644
      });
    }
 
-@@ -755,12 +998,12 @@ export class SliverClient {
+@@ -755,12 +1561,12 @@ export class SliverClient {
 
    regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
      return withTimeoutSignal(timeoutSeconds, (signal) =>
@@ -605,7 +1169,7 @@ index c2baf89..71a5b45 100644
    }
 
    stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -770,7 +1013,7 @@ export class SliverClient {
+@@ -770,7 +1576,7 @@ export class SliverClient {
    }
 
    implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -614,7 +1178,7 @@ index c2baf89..71a5b45 100644
    }
 
    deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -784,7 +1027,7 @@ export class SliverClient {
+@@ -784,7 +1590,7 @@ export class SliverClient {
    }
 
    implantProfiles(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -623,7 +1187,7 @@ index c2baf89..71a5b45 100644
    }
 
    saveImplantProfile(profile: ImplantProfile, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -799,17 +1042,17 @@ export class SliverClient {
+@@ -799,17 +1605,17 @@ export class SliverClient {
 
    lootAll(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, async (signal) => {
@@ -644,7 +1208,7 @@ index c2baf89..71a5b45 100644
    }
 
    lootRemove(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -819,18 +1062,18 @@ export class SliverClient {
+@@ -819,18 +1625,18 @@ export class SliverClient {
    }
 
    lootContent(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -666,7 +1230,7 @@ index c2baf89..71a5b45 100644
    }
 
    websiteRemove(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -841,13 +1084,13 @@ export class SliverClient {
+@@ -841,13 +1647,13 @@ export class SliverClient {
 
    websiteAddContent(name: string, contents: Record<string, WebContent>, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, (signal) =>
@@ -682,7 +1246,7 @@ index c2baf89..71a5b45 100644
      );
    }
 
-@@ -859,17 +1102,17 @@ export class SliverClient {
+@@ -859,17 +1665,17 @@ export class SliverClient {
 
    // --- High-level helpers (ergonomic wrappers) ---
 
@@ -703,7 +1267,7 @@ index c2baf89..71a5b45 100644
      const res = await this.getBeacons(timeoutSeconds);
      return res.Beacons;
    }
-@@ -883,15 +1126,15 @@ export class SliverClient {
+@@ -883,15 +1689,142 @@ export class SliverClient {
      if (!this.tunnels) {
        throw new Error("SliverClient is not connected");
      }
@@ -719,6 +1283,133 @@ index c2baf89..71a5b45 100644
    async rmBeacon(beaconId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
 -    await withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.rmBeacon({ ID: beaconId } as Beacon, { signal }));
 +    await withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.rmBeacon({ ID: beaconId }, { signal }));
++  }
++}
++
++function assertNonEmptyString(value: string, label: string): void {
++  if (!value.trim()) throw new Error(`${label} must not be empty`);
++}
++
++function boundedNonNegativeInteger(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value < 0) {
++    throw new Error(`${label} must be a non-negative safe integer`);
++  }
++  return value;
++}
++
++function boundedPositiveInteger(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value <= 0) {
++    throw new Error(`${label} must be a positive safe integer`);
++  }
++  return value;
++}
++
++function boundedArtifactByteCount(value = WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES): number {
++  const bytes = boundedPositiveInteger(value, "Artifact byte limit");
++  if (bytes > WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES) {
++    throw new Error(`Artifact byte limit exceeds ${WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES} bytes`);
++  }
++  return bytes;
++}
++
++function assertBoundedArtifact(data: Buffer, label: string, maxBytes = WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES): void {
++  const boundedMaxBytes = boundedArtifactByteCount(maxBytes);
++  if (data.length > boundedMaxBytes) {
++    throw new Error(`${label} exceeds the ${boundedMaxBytes}-byte workbench limit`);
++  }
++}
++
++function assertImplantResponse(error: string | undefined, label: string): void {
++  if (error) throw new Error(`${label} was rejected by the target`);
++}
++
++async function decodeBoundedArtifact(
++  data: Buffer,
++  encoder: string,
++  maxBytes: number,
++  label: string,
++): Promise<Buffer> {
++  const boundedMaxBytes = boundedArtifactByteCount(maxBytes);
++  if (encoder === "") {
++    assertBoundedArtifact(data, label, boundedMaxBytes);
++    return data;
++  }
++  if (encoder !== "gzip") {
++    data.fill(0);
++    throw new Error(`${label} uses an unsupported artifact encoding`);
++  }
++
++  let decoded: Buffer | undefined;
++  try {
++    decoded = await gunzipBounded(data, boundedMaxBytes);
++    assertBoundedArtifact(decoded, label, boundedMaxBytes);
++    return decoded;
++  } catch (error) {
++    decoded?.fill(0);
++    throw new Error(`${label} exceeds the ${boundedMaxBytes}-byte decoded limit or is invalid gzip`, {
++      cause: error,
++    });
++  } finally {
++    data.fill(0);
++  }
++}
++
++function gunzipBounded(data: Buffer, maxOutputLength: number): Promise<Buffer> {
++  return new Promise((resolve, reject) => {
++    gunzipCb(data, { maxOutputLength }, (error, result) => {
++      if (error) reject(error);
++      else resolve(result);
++    });
++  });
++}
++
++function registryWriteFields(value: SessionRegistryWriteValue): {
++  StringValue: string;
++  ByteValue: Buffer;
++  DWordValue: number;
++  QWordValue: string;
++  Type: RegistryType;
++} {
++  switch (value.type) {
++    case "binary":
++      assertBoundedArtifact(value.value, "Registry binary value");
++      return {
++        StringValue: "",
++        ByteValue: value.value,
++        DWordValue: 0,
++        QWordValue: "0",
++        Type: RegistryType.Binary,
++      };
++    case "string":
++      return {
++        StringValue: value.value,
++        ByteValue: Buffer.alloc(0),
++        DWordValue: 0,
++        QWordValue: "0",
++        Type: RegistryType.String,
++      };
++    case "dword":
++      if (!Number.isInteger(value.value) || value.value < 0 || value.value > 0xffff_ffff) {
++        throw new Error("Registry DWORD value must be an unsigned 32-bit integer");
++      }
++      return {
++        StringValue: "",
++        ByteValue: Buffer.alloc(0),
++        DWordValue: value.value,
++        QWordValue: "0",
++        Type: RegistryType.DWORD,
++      };
++    case "qword":
++      if (!/^\d+$/u.test(value.value) || BigInt(value.value) > 0xffff_ffff_ffff_ffffn) {
++        throw new Error("Registry QWORD value must be an unsigned 64-bit decimal integer");
++      }
++      return {
++        StringValue: "",
++        ByteValue: Buffer.alloc(0),
++        DWordValue: 0,
++        QWordValue: value.value,
++        Type: RegistryType.QWORD,
++      };
    }
  }
 
@@ -800,17 +1491,32 @@ index 8df4201..e4c10f2 100644
 +}
 diff --git a/src/messageBudget.ts b/src/messageBudget.ts
 new file mode 100644
-index 0000000..7fe7605
+index 0000000..54ae92c
 --- /dev/null
 +++ b/src/messageBudget.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,87 @@
 +import { isIP } from "node:net";
 +
 +const KiB = 1024;
 +const MiB = 1024 * KiB;
 +const IP_LITERAL_TLS_AUTHORITY = "sliver";
 +
-+export const RPC_MESSAGE_DOMAINS = ["control", "inventory", "task-content", "artifact"] as const;
++/** Maximum decoded payload accepted by the bounded endpoint-workbench helpers. */
++export const WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES = 64 * MiB;
++/**
++ * Leave room for gzip expansion overhead, protobuf length prefixes, request
++ * metadata, and response metadata without granting the workbench the legacy
++ * 256 MiB artifact allocation.
++ */
++export const WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES = 66 * MiB;
++
++export const RPC_MESSAGE_DOMAINS = [
++  "control",
++  "inventory",
++  "task-content",
++  "workbench-artifact",
++  "artifact",
++] as const;
 +export type RpcMessageDomain = (typeof RPC_MESSAGE_DOMAINS)[number];
 +
 +/**
@@ -834,6 +1540,13 @@ index 0000000..7fe7605
 +  "task-content": Object.freeze({
 +    maxSendBytes: 1 * MiB,
 +    maxReceiveBytes: 80 * KiB,
++  }),
++  // M2 endpoint-workbench binary RPCs are hard-capped at 64 MiB decoded. Keep
++  // them isolated so neither control traffic nor these helpers inherit the
++  // broader legacy InteractiveSession/InteractiveBeacon artifact allowance.
++  "workbench-artifact": Object.freeze({
++    maxSendBytes: WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES,
++    maxReceiveBytes: WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES,
 +  }),
 +  artifact: Object.freeze({
 +    maxSendBytes: 256 * MiB,

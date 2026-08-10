@@ -80,14 +80,14 @@
     "appliedAfterProtobufGeneration": true,
     "patch": {
       "path": "protocol/sliver-script-handwritten-overlay.patch",
-      "sha256": "a0664b22e35961375a8bc68c2c971edc5b931a579bd866132209f5548fcc56dd"
+      "sha256": "355a8384c3cfb501c64b36e059d1a89d523d0b3e0b72126a25d687909dc1945a"
     },
     "files": [
       {
         "path": "src/client.ts",
         "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
-        "sha256": "b67c2186b22999dee5d21bc5959a01a7af84fb8b27434073cd324239080bb83b",
-        "review": "Route RPCs through bounded control, inventory, task-content, and artifact channels; add explicit typed M1 target, lifecycle, and beacon-task wrappers; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
+        "sha256": "acd14ad7514adf6a58e66609ef67391dec05ca659af23aeb2cc09ac26cf50e07",
+        "review": "Route RPCs through bounded control, inventory, task-content, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; map target-controlled errors to fixed messages; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
       },
       {
         "path": "src/index.ts",
@@ -104,8 +104,8 @@
       {
         "path": "src/messageBudget.ts",
         "baseSha256": null,
-        "sha256": "54c1494e1186e8753b7b2a0016256f1bbca9d8d773168f05206b18ca1689f45d",
-        "review": "Define immutable per-domain send and receive allocation limits, including an isolated 80 KiB task-content response ceiling, plus IP-safe TLS authority selection."
+        "sha256": "bc3919484bc602a731772d67009790e8817a87414ab2c4316b6e141daa7bf57d",
+        "review": "Define immutable per-domain send and receive allocation limits, including an isolated 80 KiB task-content response ceiling and a separate 66 MiB wire budget with a 64 MiB decoded ceiling for session workbench artifacts, plus IP-safe TLS authority selection."
       }
     ]
   },

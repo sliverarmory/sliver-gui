@@ -110,6 +110,46 @@ export async function writePrivateFileAtomic(path: string, data: Buffer): Promis
   }
 }
 
+/**
+ * Atomically writes an operator-selected artifact without changing the
+ * destination directory's permissions. The parent must already exist (native
+ * save dialogs only return paths in existing directories).
+ */
+export async function writePrivateArtifactFileAtomic(
+  path: string,
+  data: Buffer,
+  beforeCommit?: () => void,
+): Promise<void> {
+  const directory = dirname(path);
+  const directoryStats = await lstat(directory);
+  if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()) {
+    throw new Error("Artifact destination must be a regular directory");
+  }
+
+  const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await open(temporaryPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    await handle.writeFile(data);
+    await handle.sync();
+    if (process.platform !== "win32") await handle.chmod(0o600);
+    const stats = await handle.stat();
+    assertPrivateMode(stats.mode, { label: "Session artifact", maxBytes: Math.max(1, data.length), requirePrivateMode: true });
+    await handle.close();
+    handle = undefined;
+    beforeCommit?.();
+    await rename(temporaryPath, path);
+
+    const final = await lstat(path);
+    if (!final.isFile() || final.isSymbolicLink()) throw new Error("Session artifact is not a regular file");
+    assertPrivateMode(final.mode, { label: "Session artifact", maxBytes: Math.max(1, data.length), requirePrivateMode: true });
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+}
+
 export function assertPrivateMode(mode: number, options: SecureReadOptions): void {
   if (options.requirePrivateMode && process.platform !== "win32" && (mode & 0o7177) !== 0) {
     throw new Error(`${options.label} permissions must be private and non-executable (0600 or stricter)`);

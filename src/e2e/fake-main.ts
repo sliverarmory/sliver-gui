@@ -57,7 +57,11 @@ const state: FakeMainState = {
   holdNextBeaconTask: false,
   sessionName: "m1-session",
   beaconName: "m1-beacon",
-  environment: {},
+  environment: {
+    HOME: "/Users/e2e",
+    SHELL: "/bin/zsh",
+    SLIVER_GUI_M2_API_TOKEN: "FAKE_M2_ENV_SECRET_DO_NOT_RENDER",
+  },
   openSessionRequests: [],
   tasks: [],
 };
@@ -112,6 +116,10 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   ];
   let sessions = [seedSession(testState.sessionName)];
   let beacons = [seedBeacon(testState.beaconName)];
+  let workspaceFiles = [
+    fakeFile("notes.txt", false, "48", "-rw-r--r--"),
+    fakeFile("projects", true, "0", "drwxr-xr-x"),
+  ];
   const tasks = new Map<string, clientpb.BeaconTask>();
 
   globalThis.__SLIVER_GUI_E2E_CONTROL__ = {
@@ -331,6 +339,176 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         ),
       });
     },
+    async currentTokenOwnerSession(sessionId: string) {
+      record("currentTokenOwnerSession");
+      requireSession(sessionId);
+      return sliverpb.CurrentTokenOwner.create({
+        Output: "e2e-user",
+        Response: response(false),
+      });
+    },
+    async listEnvSession(sessionId: string) {
+      record("listEnvSession");
+      requireSession(sessionId);
+      return environmentResponse("");
+    },
+    async revealEnvSession(sessionId: string, name: string) {
+      record("revealEnvSession");
+      requireSession(sessionId);
+      return environmentResponse(name);
+    },
+    async ifconfigSession(sessionId: string) {
+      record("ifconfigSession");
+      requireSession(sessionId);
+      return sliverpb.Ifconfig.create({
+        NetInterfaces: [{
+          Index: 1,
+          Name: "lo0",
+          MAC: "00:00:00:00:00:00",
+          IPAddresses: ["127.0.0.1/8", "::1/128"],
+        }, {
+          Index: 7,
+          Name: "en0",
+          MAC: "02:00:00:00:00:07",
+          IPAddresses: ["192.0.2.25/24"],
+        }],
+        Response: response(false),
+      });
+    },
+    async netstatSession(sessionId: string) {
+      record("netstatSession");
+      requireSession(sessionId);
+      return sliverpb.Netstat.create({
+        Entries: [{
+          LocalAddr: { Ip: "192.0.2.25", Port: 41001 },
+          RemoteAddr: { Ip: "198.51.100.8", Port: 31337 },
+          SkState: "ESTABLISHED",
+          UID: 501,
+          Protocol: "tcp4",
+          Process: fakeProcess(41001, "sliver-m2-session"),
+        }],
+        Response: response(false),
+      });
+    },
+    async pwdSession(sessionId: string) {
+      record("pwdSession");
+      requireSession(sessionId);
+      return sliverpb.Pwd.create({ Path: "/Users/e2e/workspace", Response: response(false) });
+    },
+    async cdSession(sessionId: string, path: string) {
+      record("cdSession");
+      requireSession(sessionId);
+      return sliverpb.Pwd.create({ Path: path, Response: response(false) });
+    },
+    async lsSession(sessionId: string, path: string) {
+      record("lsSession");
+      requireSession(sessionId);
+      return sliverpb.Ls.create({
+        Path: path || "/Users/e2e/workspace",
+        Exists: true,
+        Files: path === "/Users/e2e/workspace" ? workspaceFiles.map((file) => ({ ...file })) : [],
+        timezone: "America/Los_Angeles",
+        timezoneOffset: -420,
+        Response: response(false),
+      });
+    },
+    async downloadFileSession() { return unsupported("downloadFileSession"); },
+    async uploadSession() { return unsupported("uploadSession"); },
+    async grepSession(sessionId: string, path: string, pattern: string) {
+      record("grepSession");
+      requireSession(sessionId);
+      return sliverpb.Grep.create({
+        SearchPathAbsolute: path,
+        Results: pattern ? {
+          [`${path}/notes.txt`]: {
+            FileResults: [{
+              LineNumber: "1",
+              Positions: [{ Start: 0, End: pattern.length }],
+              Line: `${pattern} appears in deterministic M2 test data`,
+              LinesBefore: [],
+              LinesAfter: [],
+            }],
+            IsBinary: false,
+          },
+        } : {},
+        Response: response(false),
+      });
+    },
+    async cpSession() { return unsupported("cpSession"); },
+    async mvSession() { return unsupported("mvSession"); },
+    async mkdirSession(sessionId: string, path: string) {
+      record("mkdirSession");
+      requireSession(sessionId);
+      const name = path.split("/").filter(Boolean).at(-1) ?? "new-folder";
+      if (!workspaceFiles.some((file) => file.Name === name)) {
+        workspaceFiles = [...workspaceFiles, fakeFile(name, true, "0", "drwxr-xr-x")];
+      }
+      return sliverpb.Mkdir.create({ Path: path, Response: response(false) });
+    },
+    async rmSession(sessionId: string, path: string) {
+      record("rmSession");
+      requireSession(sessionId);
+      const name = path.split("/").filter(Boolean).at(-1) ?? "";
+      workspaceFiles = workspaceFiles.filter((file) => file.Name !== name);
+      return sliverpb.Rm.create({ Path: path, Response: response(false) });
+    },
+    async mountsSession(sessionId: string) {
+      record("mountsSession");
+      requireSession(sessionId);
+      return sliverpb.Mount.create({
+        Info: [{
+          VolumeName: "disk3s1",
+          VolumeType: "apfs",
+          MountPoint: "/",
+          Label: "Macintosh HD",
+          FileSystem: "apfs",
+          UsedSpace: "1048576",
+          FreeSpace: "2097152",
+          TotalSpace: "3145728",
+          MountOptions: "rw",
+        }],
+        Response: response(false),
+      });
+    },
+    async memfilesListSession() { return unsupported("memfilesListSession"); },
+    async memfilesAddSession() { return unsupported("memfilesAddSession"); },
+    async memfilesRmSession() { return unsupported("memfilesRmSession"); },
+    async chmodSession() { return unsupported("chmodSession"); },
+    async chownSession() { return unsupported("chownSession"); },
+    async chtimesSession() { return unsupported("chtimesSession"); },
+    async psSession(sessionId: string) {
+      record("psSession");
+      requireSession(sessionId);
+      return sliverpb.Ps.create({
+        Processes: [
+          fakeProcess(1, "launchd", 0),
+          fakeProcess(41001, "sliver-m2-session", 1),
+          fakeProcess(41012, "zsh", 41001),
+        ],
+        Response: response(false),
+      });
+    },
+    async terminateSessionProcess() { return unsupported("terminateSessionProcess"); },
+    async processDumpSession() { return unsupported("processDumpSession"); },
+    async screenshotSession(sessionId: string) {
+      record("screenshotSession");
+      requireSession(sessionId);
+      return sliverpb.Screenshot.create({
+        Data: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nXsAAAAASUVORK5CYII=", "base64"),
+        Response: response(false),
+      });
+    },
+    async servicesSession() { return unsupported("servicesSession"); },
+    async serviceDetailSession() { return unsupported("serviceDetailSession"); },
+    async startServiceSession() { return unsupported("startServiceSession"); },
+    async stopServiceSession() { return unsupported("stopServiceSession"); },
+    async registryReadSession() { return unsupported("registryReadSession"); },
+    async registryListSubkeysSession() { return unsupported("registryListSubkeysSession"); },
+    async registryListValuesSession() { return unsupported("registryListValuesSession"); },
+    async registryReadHiveSession() { return unsupported("registryReadHiveSession"); },
+    async registryWriteSession() { return unsupported("registryWriteSession"); },
+    async registryCreateKeySession() { return unsupported("registryCreateKeySession"); },
+    async registryDeleteKeySession() { return unsupported("registryDeleteKeySession"); },
     async killSession(sessionId: string) {
       record("killSession");
       const session = requireSession(sessionId);
@@ -553,6 +731,31 @@ function seedBeacon(name: string): clientpb.Beacon {
     FirstContact: String(now - 30),
     Integrity: "Medium",
   });
+}
+
+function fakeFile(name: string, isDirectory: boolean, size: string, mode: string) {
+  return {
+    Name: name,
+    IsDir: isDirectory,
+    Size: size,
+    ModTime: "1786305600",
+    Mode: mode,
+    Link: "",
+    Uid: "501",
+    Gid: "20",
+  };
+}
+
+function fakeProcess(pid: number, executable: string, parentPid = 1) {
+  return {
+    Pid: pid,
+    Ppid: parentPid,
+    Executable: executable,
+    Owner: "e2e-user",
+    Architecture: "arm64",
+    SessionID: 1,
+    CmdLine: [`/usr/local/bin/${executable}`, "--m2-e2e"],
+  };
 }
 
 function cloneSession(session: clientpb.Session): clientpb.Session {

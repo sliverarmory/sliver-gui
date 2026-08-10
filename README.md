@@ -26,9 +26,20 @@ configuration files and their private keys stay in the Electron main process.
   WireGuard implant C2 and listener workflows remain independent features.
 - Live connection state, recent server events, event-driven snapshot refresh,
   reconnect/backoff, and periodic reconciliation.
-- Dedicated, bounded, searchable Sessions and Beacons dashboards with authoritative target
-  detail, capability state, read-only operator presence, and an active target
-  that remains local to each application window.
+- Dedicated, bounded, searchable Sessions and Beacons dashboards with
+  authoritative target state, capability state, read-only operator presence,
+  and an active target that remains local to each application window. Opening a
+  live session navigates to its dedicated interaction workbench instead of
+  expanding an inline selected-session card.
+- A session-first M2 workbench with clean Overview, Files, Processes,
+  Environment, Windows Registry, and Activity panels. It provides bounded
+  identity/network/environment reads, current-directory browsing and native
+  single-file transfers, process and service workflows, registry reads, and
+  main-owned screenshot artifacts with bounded renderer previews.
+- Session workbench mutations are a closed typed allowlist. Destructive or
+  replacement actions use expiring one-use review plans, target and platform
+  restrictions are revalidated in Electron main, and local paths and binary
+  buffers never cross into the renderer.
 - Target selection and backgrounding, beacon watch, rename, kill/close/remove,
   bounded dead-state pruning, typed timing reconfiguration, and beacon-to-session
   conversion over the main-owned current C2 endpoint.
@@ -100,11 +111,12 @@ npm run test:m0
 
 `npm run protocol:check` is authoritative under the locked CI toolchain: Node
 24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` retains the
-M0 current-platform regression gate, while `npm run test:e2e:m1` exercises the
-current target and task path through the production renderer, frozen preload,
-trusted IPC, and an injected Sliver client. Opt-in actual-server package tests
-remain separate because they require an authorized disposable server and
-operator configuration.
+M0 current-platform regression gate. `npm run test:e2e:electron` exercises the
+M1 target/task path and the dedicated session-first M2 workbench through the
+production renderer, frozen preload, trusted IPC, and an injected Sliver
+client; `npm run test:e2e:m1` remains an alias for that current-slice lane.
+Opt-in actual-server package tests remain separate because they require an
+authorized disposable server and operator configuration.
 
 `npm run package` creates an unpacked application for the current platform in
 `release/`. `npm run dist` creates the configured macOS, Windows, or Linux

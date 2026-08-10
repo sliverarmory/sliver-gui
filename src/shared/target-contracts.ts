@@ -31,6 +31,8 @@ export interface TargetIdentitySummary {
   hostname: string;
   hostId: string;
   username: string;
+  uid?: string;
+  gid?: string;
   os: string;
   arch: string;
   transport: TargetTransport;

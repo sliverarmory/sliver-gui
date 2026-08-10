@@ -11,6 +11,7 @@ import { TunnelManager } from "./internal/tunnelManager";
 import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
 import {
   RPC_MESSAGE_DOMAINS,
+  WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
   rpcMessageChannelOptions,
   rpcTlsAuthorityOverride,
   type RpcMessageDomain,
@@ -42,7 +43,7 @@ import type {
 import type { Empty, Request as CommonRequest } from "./pb/commonpb/common";
 import { SliverRPCDefinition } from "./pb/rpcpb/services";
 import type { SliverRPCClient } from "./pb/rpcpb/services";
-import { Ls } from "./pb/sliverpb/sliver";
+import { Ls, RegistryType } from "./pb/sliverpb/sliver";
 import type {
   EnvInfo,
   OpenSession,
@@ -88,6 +89,40 @@ export interface BeaconReconfigureOptions {
   jitterNanoseconds?: string;
   c2Uri?: string;
 }
+
+export interface SessionNetstatOptions {
+  tcp: boolean;
+  udp: boolean;
+  ip4: boolean;
+  ip6: boolean;
+  listening: boolean;
+}
+
+export interface SessionDownloadFileOptions {
+  start?: number;
+  stop?: number;
+  maxBytes?: number;
+  maxLines?: number;
+}
+
+export interface SessionUploadOptions {
+  isIOC?: boolean;
+  fileName?: string;
+  isDirectory?: boolean;
+  overwrite?: boolean;
+}
+
+export interface SessionGrepOptions {
+  recursive?: boolean;
+  linesBefore?: number;
+  linesAfter?: number;
+}
+
+export type SessionRegistryWriteValue =
+  | { type: "binary"; value: Buffer }
+  | { type: "string"; value: string }
+  | { type: "dword"; value: number }
+  | { type: "qword"; value: string };
 
 export interface Tunnel {
   readonly id: string;
@@ -519,6 +554,10 @@ export class SliverClient {
     return this.clientFor("artifact");
   }
 
+  private get workbenchArtifactRpc(): SliverRPCClient {
+    return this.clientFor("workbench-artifact");
+  }
+
   private get taskContentRpc(): SliverRPCClient {
     return this.clientFor("task-content");
   }
@@ -760,6 +799,530 @@ export class SliverClient {
     return withTimeoutSignal(timeoutSeconds, (signal) =>
       this.rpc.unsetEnv(
         { Name: name, Request: this.beaconRequest(beaconId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  // --- Explicit M2 session workbench APIs ---
+
+  currentTokenOwnerSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.currentTokenOwner(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  listEnvSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
+    return this.getEnvSession(sessionId, "", timeoutSeconds);
+  }
+
+  revealEnvSession(sessionId: string, exactName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
+    assertNonEmptyString(exactName, "Environment variable name");
+    return this.getEnvSession(sessionId, exactName, timeoutSeconds);
+  }
+
+  ifconfigSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.ifconfig(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  netstatSession(
+    sessionId: string,
+    options: SessionNetstatOptions,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.netstat(
+        {
+          TCP: options.tcp,
+          UDP: options.udp,
+          IP4: options.ip4,
+          IP6: options.ip6,
+          Listening: options.listening,
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  pwdSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.pwd(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  cdSession(sessionId: string, path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.cd(
+        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  lsSession(sessionId: string, path = ".", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.ls(
+        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  downloadFileSession(
+    sessionId: string,
+    path: string,
+    options: SessionDownloadFileOptions = {},
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    const maxBytes = boundedArtifactByteCount(options.maxBytes);
+    const start = boundedNonNegativeInteger(options.start ?? 0, "Download start");
+    const stop = boundedNonNegativeInteger(options.stop ?? 0, "Download stop");
+    const maxLines = boundedNonNegativeInteger(options.maxLines ?? 0, "Download max lines");
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const response = await this.workbenchArtifactRpc.download(
+        {
+          Path: path,
+          Start: String(start),
+          Stop: String(stop),
+          Recurse: false,
+          MaxBytes: String(maxBytes),
+          MaxLines: String(maxLines),
+          RestrictedToFile: true,
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      );
+      try {
+        assertImplantResponse(response.Response?.Err, "Download");
+        if (!response.Exists || response.IsDir) {
+          throw new Error("Download is unavailable or is not a single file");
+        }
+        const data = await decodeBoundedArtifact(response.Data, response.Encoder, maxBytes, "Download");
+        return { ...response, Encoder: "", Data: data };
+      } catch (error) {
+        response.Data.fill(0);
+        throw error;
+      }
+    });
+  }
+
+  uploadSession(
+    sessionId: string,
+    path: string,
+    data: Buffer,
+    options: SessionUploadOptions = {},
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    assertBoundedArtifact(data, "Upload");
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const payload = await gzip(data);
+      try {
+        const response = await this.workbenchArtifactRpc.upload(
+          {
+            Path: path,
+            Encoder: "gzip",
+            Data: payload,
+            IsIOC: options.isIOC ?? false,
+            FileName: options.fileName ?? "",
+            IsDirectory: options.isDirectory ?? false,
+            Overwrite: options.overwrite ?? false,
+            Request: this.sessionRequest(sessionId, timeoutSeconds),
+          },
+          { signal },
+        );
+        assertImplantResponse(response.Response?.Err, "Upload");
+        return response;
+      } finally {
+        payload.fill(0);
+      }
+    });
+  }
+
+  grepSession(
+    sessionId: string,
+    path: string,
+    searchPattern: string,
+    options: SessionGrepOptions = {},
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.grep(
+        {
+          SearchPattern: searchPattern,
+          Path: path,
+          Recursive: options.recursive ?? false,
+          LinesBefore: boundedNonNegativeInteger(options.linesBefore ?? 0, "Grep lines before"),
+          LinesAfter: boundedNonNegativeInteger(options.linesAfter ?? 0, "Grep lines after"),
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  cpSession(sessionId: string, source: string, destination: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.cp(
+        { Src: source, Dst: destination, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  mvSession(sessionId: string, source: string, destination: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.mv(
+        { Src: source, Dst: destination, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  mkdirSession(sessionId: string, path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.mkdir(
+        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  rmSession(
+    sessionId: string,
+    path: string,
+    recursive = false,
+    force = false,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.rm(
+        { Path: path, Recursive: recursive, Force: force, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  mountsSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.mount(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  memfilesListSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.memfilesList(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  memfilesAddSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.memfilesAdd(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  memfilesRmSession(sessionId: string, fd: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.memfilesRm(
+        { Fd: fd, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  chmodSession(
+    sessionId: string,
+    path: string,
+    fileMode: string,
+    recursive = false,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.chmod(
+        { Path: path, FileMode: fileMode, Recursive: recursive, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  chownSession(
+    sessionId: string,
+    path: string,
+    uid: string,
+    gid: string,
+    recursive = false,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.chown(
+        { Path: path, Uid: uid, Gid: gid, Recursive: recursive, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  chtimesSession(
+    sessionId: string,
+    path: string,
+    accessTime: string,
+    modificationTime: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.chtimes(
+        { Path: path, ATime: accessTime, MTime: modificationTime, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  psSession(sessionId: string, fullInfo = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.ps(
+        { FullInfo: fullInfo, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  terminateSessionProcess(
+    sessionId: string,
+    pid: number,
+    force = false,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.terminate(
+        { Pid: pid, Force: force, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  processDumpSession(
+    sessionId: string,
+    pid: number,
+    dumpTimeoutSeconds = 60,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const response = await this.workbenchArtifactRpc.processDump(
+        {
+          Pid: pid,
+          Timeout: boundedPositiveInteger(dumpTimeoutSeconds, "Process dump timeout"),
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      );
+      try {
+        assertImplantResponse(response.Response?.Err, "Process dump");
+        assertBoundedArtifact(response.Data, "Process dump");
+        return response;
+      } catch (error) {
+        response.Data.fill(0);
+        throw error;
+      }
+    });
+  }
+
+  screenshotSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const response = await this.workbenchArtifactRpc.screenshot(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      );
+      try {
+        assertImplantResponse(response.Response?.Err, "Screenshot");
+        assertBoundedArtifact(response.Data, "Screenshot");
+        return response;
+      } catch (error) {
+        response.Data.fill(0);
+        throw error;
+      }
+    });
+  }
+
+  servicesSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.services(
+        { Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  serviceDetailSession(sessionId: string, serviceName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.serviceDetail(
+        {
+          ServiceInfo: { ServiceName: serviceName, Hostname: "" },
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  startServiceSession(sessionId: string, serviceName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.startServiceByName(
+        {
+          ServiceInfo: { ServiceName: serviceName, Hostname: "" },
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  stopServiceSession(sessionId: string, serviceName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.stopService(
+        {
+          ServiceInfo: { ServiceName: serviceName, Hostname: "" },
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  registryReadSession(
+    sessionId: string,
+    hive: string,
+    path: string,
+    key: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.registryRead(
+        { Hive: hive, Path: path, Key: key, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  registryListSubkeysSession(
+    sessionId: string,
+    hive: string,
+    path: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.registryListSubKeys(
+        { Hive: hive, Path: path, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  registryListValuesSession(
+    sessionId: string,
+    hive: string,
+    path: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.registryListValues(
+        { Hive: hive, Path: path, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  registryReadHiveSession(
+    sessionId: string,
+    rootHive: string,
+    requestedHive: string,
+    maxBytes = WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    const boundedMaxBytes = boundedArtifactByteCount(maxBytes);
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const response = await this.workbenchArtifactRpc.registryReadHive(
+        { RootHive: rootHive, RequestedHive: requestedHive, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      );
+      try {
+        assertImplantResponse(response.Response?.Err, "Registry hive read");
+        const data = await decodeBoundedArtifact(response.Data, response.Encoder, boundedMaxBytes, "Registry hive read");
+        return { ...response, Encoder: "", Data: data };
+      } catch (error) {
+        response.Data.fill(0);
+        throw error;
+      }
+    });
+  }
+
+  registryWriteSession(
+    sessionId: string,
+    hive: string,
+    path: string,
+    key: string,
+    value: SessionRegistryWriteValue,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    const fields = registryWriteFields(value);
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.registryWrite(
+        {
+          Hive: hive,
+          Path: path,
+          Key: key,
+          Hostname: "",
+          ...fields,
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  registryCreateKeySession(
+    sessionId: string,
+    hive: string,
+    path: string,
+    key: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.registryCreateKey(
+        { Hive: hive, Path: path, Key: key, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  registryDeleteKeySession(
+    sessionId: string,
+    hive: string,
+    path: string,
+    key: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.registryDeleteKey(
+        { Hive: hive, Path: path, Key: key, Hostname: "", Request: this.sessionRequest(sessionId, timeoutSeconds) },
         { signal },
       ),
     );
@@ -1135,6 +1698,133 @@ export class SliverClient {
 
   async rmBeacon(beaconId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
     await withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.rmBeacon({ ID: beaconId }, { signal }));
+  }
+}
+
+function assertNonEmptyString(value: string, label: string): void {
+  if (!value.trim()) throw new Error(`${label} must not be empty`);
+}
+
+function boundedNonNegativeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function boundedPositiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function boundedArtifactByteCount(value = WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES): number {
+  const bytes = boundedPositiveInteger(value, "Artifact byte limit");
+  if (bytes > WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES) {
+    throw new Error(`Artifact byte limit exceeds ${WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES} bytes`);
+  }
+  return bytes;
+}
+
+function assertBoundedArtifact(data: Buffer, label: string, maxBytes = WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES): void {
+  const boundedMaxBytes = boundedArtifactByteCount(maxBytes);
+  if (data.length > boundedMaxBytes) {
+    throw new Error(`${label} exceeds the ${boundedMaxBytes}-byte workbench limit`);
+  }
+}
+
+function assertImplantResponse(error: string | undefined, label: string): void {
+  if (error) throw new Error(`${label} was rejected by the target`);
+}
+
+async function decodeBoundedArtifact(
+  data: Buffer,
+  encoder: string,
+  maxBytes: number,
+  label: string,
+): Promise<Buffer> {
+  const boundedMaxBytes = boundedArtifactByteCount(maxBytes);
+  if (encoder === "") {
+    assertBoundedArtifact(data, label, boundedMaxBytes);
+    return data;
+  }
+  if (encoder !== "gzip") {
+    data.fill(0);
+    throw new Error(`${label} uses an unsupported artifact encoding`);
+  }
+
+  let decoded: Buffer | undefined;
+  try {
+    decoded = await gunzipBounded(data, boundedMaxBytes);
+    assertBoundedArtifact(decoded, label, boundedMaxBytes);
+    return decoded;
+  } catch (error) {
+    decoded?.fill(0);
+    throw new Error(`${label} exceeds the ${boundedMaxBytes}-byte decoded limit or is invalid gzip`, {
+      cause: error,
+    });
+  } finally {
+    data.fill(0);
+  }
+}
+
+function gunzipBounded(data: Buffer, maxOutputLength: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    gunzipCb(data, { maxOutputLength }, (error, result) => {
+      if (error) reject(error);
+      else resolve(result);
+    });
+  });
+}
+
+function registryWriteFields(value: SessionRegistryWriteValue): {
+  StringValue: string;
+  ByteValue: Buffer;
+  DWordValue: number;
+  QWordValue: string;
+  Type: RegistryType;
+} {
+  switch (value.type) {
+    case "binary":
+      assertBoundedArtifact(value.value, "Registry binary value");
+      return {
+        StringValue: "",
+        ByteValue: value.value,
+        DWordValue: 0,
+        QWordValue: "0",
+        Type: RegistryType.Binary,
+      };
+    case "string":
+      return {
+        StringValue: value.value,
+        ByteValue: Buffer.alloc(0),
+        DWordValue: 0,
+        QWordValue: "0",
+        Type: RegistryType.String,
+      };
+    case "dword":
+      if (!Number.isInteger(value.value) || value.value < 0 || value.value > 0xffff_ffff) {
+        throw new Error("Registry DWORD value must be an unsigned 32-bit integer");
+      }
+      return {
+        StringValue: "",
+        ByteValue: Buffer.alloc(0),
+        DWordValue: value.value,
+        QWordValue: "0",
+        Type: RegistryType.DWORD,
+      };
+    case "qword":
+      if (!/^\d+$/u.test(value.value) || BigInt(value.value) > 0xffff_ffff_ffff_ffffn) {
+        throw new Error("Registry QWORD value must be an unsigned 64-bit decimal integer");
+      }
+      return {
+        StringValue: "",
+        ByteValue: Buffer.alloc(0),
+        DWordValue: 0,
+        QWordValue: value.value,
+        Type: RegistryType.QWORD,
+      };
   }
 }
 

@@ -23,12 +23,12 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.backdoor` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.backdoor |
 | `implant.background` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.background |
 | `implant.cat` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cat |
-| `implant.cd` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cd |
-| `implant.chmod` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chmod |
-| `implant.chown` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chown |
-| `implant.chtimes` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chtimes |
+| `implant.cd` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cd |
+| `implant.chmod` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chmod |
+| `implant.chown` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chown |
+| `implant.chtimes` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chtimes |
 | `implant.close` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.close |
-| `implant.cp` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cp |
+| `implant.cp` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cp |
 | `implant.cursed` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed |
 | `implant.cursed.chrome` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.chrome |
 | `implant.cursed.console` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.console |
@@ -39,9 +39,9 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.cursed.screenshot` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.screenshot |
 | `implant.dllhijack` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.dllhijack |
 | `implant.docs` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.docs |
-| `implant.download` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.download |
+| `implant.download` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.download |
 | `implant.edit` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.edit |
-| `implant.env` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.env |
+| `implant.env` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.env |
 | `implant.env.set` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.env.set |
 | `implant.env.unset` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.env.unset |
 | `implant.execute` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute |
@@ -50,31 +50,31 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.execute.children` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute.children |
 | `implant.extensions` | planned | M8 | session | windows, linux, darwin | extensions | parity-contract:implant.extensions |
 | `implant.extensions.list` | planned | M8 | session | windows, linux, darwin | extensions | parity-contract:implant.extensions.list |
-| `implant.getgid` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getgid |
-| `implant.getpid` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getpid |
+| `implant.getgid` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getgid, session-workbench-identity-summary |
+| `implant.getpid` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getpid, session-workbench-identity-summary |
 | `implant.getprivs` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.getprivs |
 | `implant.getsystem` | planned | M4 | session | windows | execution | parity-contract:implant.getsystem |
-| `implant.getuid` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getuid |
-| `implant.grep` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.grep |
+| `implant.getuid` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getuid, session-workbench-identity-summary |
+| `implant.grep` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.grep |
 | `implant.head` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.head |
 | `implant.hex-edit` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.hex-edit |
-| `implant.ifconfig` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ifconfig |
+| `implant.ifconfig` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ifconfig |
 | `implant.impersonate` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.impersonate |
 | `implant.info` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.info |
 | `implant.interactive` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.interactive |
 | `implant.kill` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.kill |
-| `implant.ls` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ls |
+| `implant.ls` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ls |
 | `implant.make-token` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.make-token |
-| `implant.memfiles` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles |
-| `implant.memfiles.add` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles.add |
-| `implant.memfiles.rm` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles.rm |
+| `implant.memfiles` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles |
+| `implant.memfiles.add` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles.add |
+| `implant.memfiles.rm` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles.rm |
 | `implant.migrate` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.migrate |
-| `implant.mkdir` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mkdir |
-| `implant.mount` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mount |
+| `implant.mkdir` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mkdir |
+| `implant.mount` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mount |
 | `implant.msf` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf |
 | `implant.msf-inject` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf-inject |
-| `implant.mv` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mv |
-| `implant.netstat` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.netstat |
+| `implant.mv` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mv |
+| `implant.netstat` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.netstat |
 | `implant.ping` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.ping |
 | `implant.pivots` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.pivots |
 | `implant.pivots.details` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.pivots.details |
@@ -85,31 +85,31 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.portfwd` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.portfwd |
 | `implant.portfwd.add` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.portfwd.add |
 | `implant.portfwd.rm` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.portfwd.rm |
-| `implant.procdump` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.procdump |
-| `implant.ps` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ps |
+| `implant.procdump` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.procdump |
+| `implant.ps` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ps |
 | `implant.psexec` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.psexec |
-| `implant.pwd` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.pwd |
+| `implant.pwd` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.pwd |
 | `implant.reconfig` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.reconfig |
-| `implant.registry` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry |
-| `implant.registry.create` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.create |
-| `implant.registry.delete` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.delete |
-| `implant.registry.list-subkeys` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.list-subkeys |
-| `implant.registry.list-values` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.list-values |
-| `implant.registry.read` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read |
-| `implant.registry.read.hive` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read.hive |
-| `implant.registry.write` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.write |
+| `implant.registry` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry |
+| `implant.registry.create` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.create |
+| `implant.registry.delete` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.delete |
+| `implant.registry.list-subkeys` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.list-subkeys |
+| `implant.registry.list-values` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.list-values |
+| `implant.registry.read` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read |
+| `implant.registry.read.hive` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read.hive |
+| `implant.registry.write` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.write |
 | `implant.rename` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.rename |
 | `implant.rev2self` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.rev2self |
-| `implant.rm` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.rm |
+| `implant.rm` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.rm |
 | `implant.rportfwd` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd |
 | `implant.rportfwd.add` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd.add |
 | `implant.rportfwd.rm` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd.rm |
 | `implant.runas` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.runas |
-| `implant.screenshot` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.screenshot |
-| `implant.services` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services |
-| `implant.services.info` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.info |
-| `implant.services.start` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.start |
-| `implant.services.stop` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.stop |
+| `implant.screenshot` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.screenshot |
+| `implant.services` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services |
+| `implant.services.info` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.info |
+| `implant.services.start` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.start |
+| `implant.services.stop` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.stop |
 | `implant.shell` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.shell |
 | `implant.shell.attach` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.shell.attach |
 | `implant.shell.kill` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.shell.kill |
@@ -124,8 +124,8 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.tasks` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks |
 | `implant.tasks.cancel` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.cancel |
 | `implant.tasks.fetch` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.fetch |
-| `implant.terminate` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.terminate |
-| `implant.upload` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.upload |
+| `implant.terminate` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.terminate, session-process-termination-plan |
+| `implant.upload` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.upload |
 | `implant.wasm` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.wasm |
 | `implant.wasm.ls` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.wasm.ls |
 | `implant.wg-portfwd` | planned | M5 | session | windows, linux, darwin | networking | parity-contract:implant.wg-portfwd |
@@ -134,7 +134,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.wg-socks` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.wg-socks |
 | `implant.wg-socks.start` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.wg-socks.start |
 | `implant.wg-socks.stop` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.wg-socks.stop |
-| `implant.whoami` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.whoami |
+| `implant.whoami` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.whoami |
 | `root.console` | complete | M0 | not-applicable | operator-host | connection | parity-contract:root.console |
 | `root.default-console` | complete | M0 | not-applicable | operator-host | connection | parity-contract:root.default-console |
 | `root.implant` | operator-out-of-scope | none | not-applicable | operator-host | none | scope-denial:root.implant |

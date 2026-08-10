@@ -311,7 +311,7 @@ Milestone governance is tracked separately from checklist state:
 | --- | --- | --- | --- | --- |
 | M0 | Codex / operator accepted | 2026-08-09 | [ADR 0001](docs/adr/0001-platform-support.md) | [M0 verification](docs/m0-verification.md) |
 | M1 | Codex / operator accepted | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
-| M2 | Codex / session-first implementation | 2026-08-09 | Session-first scope below | Pending |
+| M2 | Codex / session-first implementation | 2026-08-09 | Session-first scope below | [Session-first verification](docs/m2-session-verification.md) |
 | M3 | Unassigned | 2026-08-09 | TBD | TBD |
 | M4 | Unassigned | 2026-08-09 | TBD | TBD |
 | M5 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -553,43 +553,68 @@ session-mode endpoint operations. Beacon-mode M2 support remains part of this
 milestone and is not waived; shared M2 commands and exit criteria stay
 incomplete until their supported beacon paths and cross-mode evidence land.
 
+The first session tranche now has a dedicated workbench route opened from a
+Live Sessions row. It replaces the former inline selected-session card with
+Overview, Files, Processes, Environment, Windows Registry, and Activity panels.
+The boundary is a closed, typed session-operation contract owned by Electron
+main; the renderer cannot choose a backend, session ID, RPC method, local path,
+or raw request object.
+
 Read-only inventory and reconnaissance should land before broad mutation and
 execution. File-transfer primitives must land before editors, dump-to-file,
 remote-loot collection, and WASM memory-file workflows.
 
 ### System and identity
 
-- [ ] Process ID, user ID, group ID, username, and expanded target information.
-  The representative ping read is delivered by M1.
-- [ ] Environment listing with sensitive-value handling. Typed environment
-  set/unset mutations are delivered by M1.
-- [ ] Screenshot with bounded preview, native save, and optional loot save.
-- [ ] Windows registry read, list, hive read, write, create, and delete with
-  platform gating and destructive confirmation.
+- [x] Session process ID, user ID, group ID, username, token-owner (Windows),
+  network inventory, and expanded target information. The representative ping
+  read is delivered by M1.
+- [x] Session environment listing with value redaction and explicit
+  one-variable reveal. Typed environment set/unset mutations are delivered by
+  M1.
+- [x] Session screenshot with a signed-image preview cap, opaque main-owned
+  handle, SHA-256 metadata, and native save.
+- [ ] Screenshot loot save and the supported beacon screenshot path.
+- [x] Session Windows registry read, subkey/value list, and bounded hive read,
+  with authoritative platform gating.
+- [ ] Operator-facing registry write/create/delete controls. Their typed,
+  plan-confirmed session dispatch boundary exists, but the current registry
+  panel remains read-only; supported beacon paths are also pending.
 
 ### Filesystem
 
-- [ ] File browser with paginated or virtualized directory results.
-- [ ] `pwd`, `cd`, list, cat, head, tail, grep, copy, move, mkdir, and remove.
-- [ ] Upload and download through native dialogs and main-owned temporary files.
-- [ ] For current unary upload/download RPCs, enforce hard request/response caps,
-  main-only buffers or temporary files, pre/post-transfer status, checksum
-  reporting, and safe filename handling.
-- [ ] Mark true network chunking, byte-progress, and mid-transfer cancellation
-  `upstream-blocked` unless a supported chunked RPC exists; do not simulate
-  streaming by repeatedly cloning large buffers through renderer IPC.
+- [x] Session file browser with bounded directory pages, breadcrumbs, path
+  navigation, and a paged, scrollable HeroUI Pro data grid.
+- [x] Closed session contracts for `pwd`, `cd`, list, grep, copy, move, mkdir,
+  and remove. The current panel exposes browse, path navigation, mkdir, and
+  plan-confirmed remove; broader controls remain to be surfaced.
+- [ ] Cat, head, and tail workflows for sessions and beacons.
+- [x] Session single-file upload and download through native dialogs with bytes
+  retained in Electron main.
+- [x] Enforce a 64 MiB decoded cap and isolated 66 MiB wire allocation for
+  current session unary transfers, with pre-submit native cancellation,
+  SHA-256 reporting, safe basenames, private atomic saves, and buffer clearing.
+- [x] Keep true network chunking, byte-progress, and mid-transfer cancellation
+  unavailable unless a supported chunked RPC exists; do not simulate streaming
+  by repeatedly cloning large buffers through renderer IPC.
 - [ ] Text editor with encoding and overwrite confirmation.
 - [ ] Hex editor with explicit size limits and patch-oriented writes.
-- [ ] Mount inventory and in-memory file add/remove workflows.
-- [ ] `chmod`, `chown`, and `chtimes` with OS-aware validation.
+- [x] Closed session contracts for mount inventory and Linux in-memory file
+  list/add/remove; operator-facing controls and beacon paths remain pending.
+- [x] Closed session contracts for Linux `chmod`, `chown`, and `chtimes`, with
+  recursive changes requiring a one-use reviewed plan; operator-facing controls
+  and beacon paths remain pending.
 
 ### Processes and services
 
-- [ ] Process list, filters, full detail, and process tree.
-- [ ] Process dump to native save or loot without buffering the entire artifact
-  in renderer memory.
-- [ ] Process termination with identity summary and confirmation.
-- [ ] Windows service info/start/stop against supported hosts.
+- [x] Session process list, filters, and full detail in a bounded data grid.
+- [ ] Process tree presentation and supported beacon process inventory.
+- [x] Session process dump to native save without buffering the artifact in
+  renderer memory. Loot disposition and beacon process dumps remain pending.
+- [x] Session process termination with identity summary and a one-use
+  confirmation plan.
+- [x] Session Windows service list/info/start plus plan-confirmed stop against
+  supported hosts. Beacon service paths remain pending.
 
 ### M2 exit criteria
 
@@ -598,7 +623,8 @@ remote-loot collection, and WASM memory-file workflows.
 - [ ] Downloads, uploads, screenshots, and process dumps remain outside global
   snapshots, obey documented unary caps, and fail safely before exceeding the
   main-process budget.
-- [ ] Target restrictions are enforced in main even if renderer state is stale.
+- [x] Session target and platform restrictions are enforced in main even if
+  renderer state is stale; the future beacon path must use the same rule.
 - [ ] Unary transfer tests cover pre-submit cancellation, timeout/late response,
   target loss, filename collision, native-dialog cancellation, and temporary
   cleanup. After submission, timeout is `outcome-unknown`; no partial destination

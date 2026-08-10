@@ -1,7 +1,7 @@
 import type { SliverClient, SliverClientConfig } from "sliver-script";
 
 /**
- * The complete, reviewed main-process Sliver surface for M0 and M1.
+ * The complete, reviewed main-process Sliver surface for M0 through M2.
  *
  * Keeping this as an explicit Pick is a security boundary: target operations
  * cannot obtain the raw RPC client or select a method from renderer data.
@@ -49,7 +49,44 @@ export type SliverClientMethod =
   | "getBeaconTasks"
   | "fetchBeaconTask"
   | "cancelBeaconTask"
-  | "rmBeacon";
+  | "rmBeacon"
+  | "currentTokenOwnerSession"
+  | "listEnvSession"
+  | "revealEnvSession"
+  | "ifconfigSession"
+  | "netstatSession"
+  | "pwdSession"
+  | "cdSession"
+  | "lsSession"
+  | "downloadFileSession"
+  | "uploadSession"
+  | "grepSession"
+  | "cpSession"
+  | "mvSession"
+  | "mkdirSession"
+  | "rmSession"
+  | "mountsSession"
+  | "memfilesListSession"
+  | "memfilesAddSession"
+  | "memfilesRmSession"
+  | "chmodSession"
+  | "chownSession"
+  | "chtimesSession"
+  | "psSession"
+  | "terminateSessionProcess"
+  | "processDumpSession"
+  | "screenshotSession"
+  | "servicesSession"
+  | "serviceDetailSession"
+  | "startServiceSession"
+  | "stopServiceSession"
+  | "registryReadSession"
+  | "registryListSubkeysSession"
+  | "registryListValuesSession"
+  | "registryReadHiveSession"
+  | "registryWriteSession"
+  | "registryCreateKeySession"
+  | "registryDeleteKeySession";
 
 export type SliverClientAdapter = Pick<
   SliverClient,

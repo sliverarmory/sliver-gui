@@ -301,7 +301,7 @@
     {
       "id": "implant.cd",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -337,12 +337,12 @@
       "testIds": [
         "parity-contract:implant.cd"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.chmod",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -379,12 +379,12 @@
       "testIds": [
         "parity-contract:implant.chmod"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.chown",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -421,12 +421,12 @@
       "testIds": [
         "parity-contract:implant.chown"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.chtimes",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -466,7 +466,7 @@
       "testIds": [
         "parity-contract:implant.chtimes"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.close",
@@ -512,7 +512,7 @@
     {
       "id": "implant.cp",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -548,7 +548,7 @@
       "testIds": [
         "parity-contract:implant.cp"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.cursed",
@@ -970,7 +970,7 @@
     {
       "id": "implant.download",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1011,7 +1011,7 @@
       "testIds": [
         "parity-contract:implant.download"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.edit",
@@ -1060,7 +1060,7 @@
     {
       "id": "implant.env",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1096,7 +1096,7 @@
       "testIds": [
         "parity-contract:implant.env"
       ],
-      "notes": "Environment listing remains assigned to M2. The M1 adapter's typed getEnv methods are not renderer-submittable operations and do not make this workflow part of the M1 surface."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.env.set",
@@ -1462,7 +1462,7 @@
     {
       "id": "implant.getgid",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1496,14 +1496,15 @@
       ],
       "guiSurface": "target-workbench",
       "testIds": [
-        "parity-contract:implant.getgid"
+        "parity-contract:implant.getgid",
+        "session-workbench-identity-summary"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The authoritative session workbench renders the selected live session's sanitized GID from refreshed session inventory when the server reports it. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.getpid",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1537,9 +1538,10 @@
       ],
       "guiSurface": "target-workbench",
       "testIds": [
-        "parity-contract:implant.getpid"
+        "parity-contract:implant.getpid",
+        "session-workbench-identity-summary"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The authoritative session workbench renders the selected live session's sanitized PID from refreshed session inventory when the server reports it. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.getprivs",
@@ -1624,7 +1626,7 @@
     {
       "id": "implant.getuid",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1658,14 +1660,15 @@
       ],
       "guiSurface": "target-workbench",
       "testIds": [
-        "parity-contract:implant.getuid"
+        "parity-contract:implant.getuid",
+        "session-workbench-identity-summary"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The authoritative session workbench renders the selected live session's sanitized UID from refreshed session inventory when the server reports it. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.grep",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1711,7 +1714,7 @@
       "testIds": [
         "parity-contract:implant.grep"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.head",
@@ -1808,7 +1811,7 @@
     {
       "id": "implant.ifconfig",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1845,7 +1848,7 @@
       "testIds": [
         "parity-contract:implant.ifconfig"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.impersonate",
@@ -2020,7 +2023,7 @@
     {
       "id": "implant.ls",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2059,7 +2062,7 @@
       "testIds": [
         "parity-contract:implant.ls"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.make-token",
@@ -2108,7 +2111,7 @@
     {
       "id": "implant.memfiles",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2144,12 +2147,12 @@
       "testIds": [
         "parity-contract:implant.memfiles"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.memfiles.add",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2183,12 +2186,12 @@
       "testIds": [
         "parity-contract:implant.memfiles.add"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.memfiles.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2222,7 +2225,7 @@
       "testIds": [
         "parity-contract:implant.memfiles.rm"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.migrate",
@@ -2270,7 +2273,7 @@
     {
       "id": "implant.mkdir",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2306,12 +2309,12 @@
       "testIds": [
         "parity-contract:implant.mkdir"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.mount",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2347,7 +2350,7 @@
       "testIds": [
         "parity-contract:implant.mount"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.msf",
@@ -2445,7 +2448,7 @@
     {
       "id": "implant.mv",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2481,12 +2484,12 @@
       "testIds": [
         "parity-contract:implant.mv"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.netstat",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2528,7 +2531,7 @@
       "testIds": [
         "parity-contract:implant.netstat"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.ping",
@@ -2942,7 +2945,7 @@
     {
       "id": "implant.procdump",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -2983,12 +2986,12 @@
       "testIds": [
         "parity-contract:implant.procdump"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.ps",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3032,7 +3035,7 @@
       "testIds": [
         "parity-contract:implant.ps"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.psexec",
@@ -3082,7 +3085,7 @@
     {
       "id": "implant.pwd",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3118,7 +3121,7 @@
       "testIds": [
         "parity-contract:implant.pwd"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.reconfig",
@@ -3167,7 +3170,7 @@
     {
       "id": "implant.registry",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3202,12 +3205,12 @@
       "testIds": [
         "parity-contract:implant.registry"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.create",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3243,12 +3246,12 @@
       "testIds": [
         "parity-contract:implant.registry.create"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "Typed session-only wrapper and plan-confirmed main-process dispatch are implemented. The current registry panel remains read-only and the supported beacon path is pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.delete",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3284,12 +3287,12 @@
       "testIds": [
         "parity-contract:implant.registry.delete"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "Typed session-only wrapper and plan-confirmed main-process dispatch are implemented. The current registry panel remains read-only and the supported beacon path is pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.list-subkeys",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3325,12 +3328,12 @@
       "testIds": [
         "parity-contract:implant.registry.list-subkeys"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.list-values",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3366,12 +3369,12 @@
       "testIds": [
         "parity-contract:implant.registry.list-values"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.read",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3407,12 +3410,12 @@
       "testIds": [
         "parity-contract:implant.registry.read"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.read.hive",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3451,12 +3454,12 @@
       "testIds": [
         "parity-contract:implant.registry.read.hive"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.write",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3494,7 +3497,7 @@
       "testIds": [
         "parity-contract:implant.registry.write"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "Typed session-only wrapper and plan-confirmed main-process dispatch are implemented. The current registry panel remains read-only and the supported beacon path is pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.rename",
@@ -3581,7 +3584,7 @@
     {
       "id": "implant.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3619,7 +3622,7 @@
       "testIds": [
         "parity-contract:implant.rm"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.rportfwd",
@@ -3793,7 +3796,7 @@
     {
       "id": "implant.screenshot",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3832,12 +3835,12 @@
       "testIds": [
         "parity-contract:implant.screenshot"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.services",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3873,12 +3876,12 @@
       "testIds": [
         "parity-contract:implant.services"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.services.info",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3914,12 +3917,12 @@
       "testIds": [
         "parity-contract:implant.services.info"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.services.start",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3955,12 +3958,12 @@
       "testIds": [
         "parity-contract:implant.services.start"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.services.stop",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -3996,7 +3999,7 @@
       "testIds": [
         "parity-contract:implant.services.stop"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.shell",
@@ -4599,8 +4602,8 @@
     {
       "id": "implant.terminate",
       "operatorScope": true,
-      "status": "planned",
-      "milestone": "M4",
+      "status": "in-progress",
+      "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
           "session",
@@ -4632,16 +4635,17 @@
         "active-target",
         "compatible-server"
       ],
-      "guiSurface": "execution",
+      "guiSurface": "target-workbench",
       "testIds": [
-        "parity-contract:implant.terminate"
+        "parity-contract:implant.terminate",
+        "session-process-termination-plan"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Session process termination is implemented through a one-use reviewed plan with authoritative process-identity and PID-reuse revalidation. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.upload",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -4679,7 +4683,7 @@
       "testIds": [
         "parity-contract:implant.upload"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.wasm",
@@ -5015,7 +5019,7 @@
     {
       "id": "implant.whoami",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -5051,7 +5055,7 @@
       "testIds": [
         "parity-contract:implant.whoami"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "A session-only M2 workbench panel and closed main/wrapper path are implemented. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "root.console",

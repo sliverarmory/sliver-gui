@@ -18,6 +18,7 @@ import { ScrollShadow } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowLeft,
+  faArrowRight,
   faBan,
   faBolt,
   faBroom,
@@ -46,6 +47,7 @@ import {
 import type { PageSummary, SliverSnapshot } from "../../../shared/contracts";
 import type {
   DestructiveTargetActionId,
+  SessionSummary,
   TargetActionExecutionResult,
   TargetActionPlan,
   TargetCapabilityId,
@@ -87,6 +89,7 @@ export interface TargetsPageProps {
   mode: TargetMode;
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
+  onOpenSession?: (session: SessionSummary) => void;
 }
 
 type OperationDraft = {
@@ -127,7 +130,7 @@ const OPERATION_CAPABILITIES: Readonly<Record<TargetOperationId, TargetCapabilit
   "beacon.open-session": "beacon.open-session",
 };
 
-export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): React.JSX.Element {
+export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: TargetsPageProps): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [isSelecting, setIsSelecting] = useState(false);
   const [isChangingWatch, setIsChangingWatch] = useState(false);
@@ -162,6 +165,7 @@ export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): R
   const targetSearchPageRequestSequence = useRef<Record<TargetMode, number>>({ session: 0, beacon: 0 });
   const operationDetailRequestSequence = useRef(0);
   const taskDetailRequestSequence = useRef(0);
+  const targetSelectionRequestSequence = useRef(0);
   const selectedOperationIncarnationRef = useRef<string | undefined>(undefined);
   const selectedTaskIncarnationRef = useRef<string | undefined>(undefined);
   const targetInventoryIdentityRef = useRef(targetInventoryIdentity);
@@ -527,6 +531,8 @@ export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): R
   }, [mode, normalizedTargetQuery, targetSearchIdentity]);
 
   useEffect(() => {
+    targetSelectionRequestSequence.current += 1;
+    setIsSelecting(false);
     operationsRequestSequence.current += 1;
     tasksRequestSequence.current += 1;
     operationDetailRequestSequence.current += 1;
@@ -579,20 +585,50 @@ export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): R
       toast.warning("Target changed", { description: "Refresh the inventory and select it again." });
       return;
     }
+    const expectedIncarnation = backendIncarnationRef.current;
+    const requestSequence = ++targetSelectionRequestSequence.current;
     setIsSelecting(true);
     try {
       const result = await window.sliver.selectTarget(ref);
+      if (
+        requestSequence !== targetSelectionRequestSequence.current ||
+        expectedIncarnation !== backendIncarnationRef.current
+      ) return;
       if (!result.ok || !result.value) {
         toast.danger("Could not select target", { description: result.error });
         return;
       }
       onSnapshot(result.value);
+
+      if (target.mode === "session" && onOpenSession) {
+        const selectedRef = result.value.targetContext.activeTarget;
+        const selectedSummary = result.value.targetContext.activeTargetSummary;
+        if (
+          selectedRef?.mode !== "session" ||
+          selectedRef.id !== ref.id ||
+          selectedRef.backendEpoch !== ref.backendEpoch ||
+          selectedSummary?.mode !== "session" ||
+          selectedSummary.id !== ref.id
+        ) {
+          toast.warning("Session changed", {
+            description: "The server did not confirm the selected session. Refresh the inventory and try again.",
+          });
+          return;
+        }
+        onOpenSession(selectedSummary);
+      }
     } catch (error) {
-      toast.danger("Could not select target", { description: errorMessage(error) });
+      if (
+        requestSequence === targetSelectionRequestSequence.current &&
+        expectedIncarnation === backendIncarnationRef.current
+      ) toast.danger("Could not select target", { description: errorMessage(error) });
     } finally {
-      setIsSelecting(false);
+      if (
+        requestSequence === targetSelectionRequestSequence.current &&
+        expectedIncarnation === backendIncarnationRef.current
+      ) setIsSelecting(false);
     }
-  }, [onSnapshot, presentedTargetInventory.refs]);
+  }, [onOpenSession, onSnapshot, presentedTargetInventory.refs]);
 
   const selectTargetByKey = useCallback((key: Key) => {
     const target = allTargets.find((candidate) => targetRowKey(candidate) === String(key));
@@ -746,8 +782,22 @@ export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): R
       cell: (target: TargetSummary) => target.mode === "beacon"
         ? <span className="text-xs tabular-nums text-muted">{beaconTaskCountLabel(target)}</span>
         : null,
-    }] : []),
-  ], [mode]);
+    }] : [{
+      id: "interact",
+      header: "",
+      minWidth: 124,
+      cell: (target: TargetSummary) => (
+        <Button
+          aria-label={`Interact with ${target.name || target.hostname || target.id}`}
+          size="sm"
+          variant="secondary"
+          onPress={() => void selectTarget(target)}
+        >
+          Interact <FontAwesomeIcon aria-hidden icon={faArrowRight} />
+        </Button>
+      ),
+    }]),
+  ], [mode, selectTarget]);
 
   return (
     <section className="page-stack targets-page">
@@ -768,7 +818,7 @@ export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): R
         </div>
       </header>
 
-      <div className="grid min-h-0 gap-4 2xl:grid-cols-[minmax(0,1fr)_390px]">
+      <div className={mode === "session" ? "min-h-0" : "grid min-h-0 gap-4 2xl:grid-cols-[minmax(0,1fr)_390px]"}>
         <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="target-inventory-heading">
           <div className="flex flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex min-w-0 items-center gap-3">
@@ -874,27 +924,29 @@ export function TargetsPage({ mode, snapshot, onSnapshot }: TargetsPageProps): R
           />
         </section>
 
-        <TargetDetail
-          active={active}
-          mode={mode}
-          capabilities={snapshot.targetContext.capabilities}
-          isBusy={isSelecting || isPreparingAction}
-          isChangingWatch={isChangingWatch}
-          watchEnabled={snapshot.targetContext.beaconWatch}
-          unavailableReason={snapshot.targetContext.activeTarget?.mode === mode
-            ? snapshot.targetContext.unavailableReason
-            : undefined}
-          onBackground={() => void backgroundTarget()}
-          onPrepareAction={(action) => void prepareAction(action)}
-          onWatchChange={(enabled) => void setBeaconWatch(enabled)}
-          onOperationSubmitted={(operation) => {
-            const submittedIncarnation = backendIncarnation;
-            if (submittedIncarnation !== backendIncarnationRef.current) return false;
-            mergeOperation(operation);
-            return true;
-          }}
-          operationTargetIdentity={`${backendIncarnation}:${targetRefIdentity(activeRef) ?? `${active?.mode ?? "none"}:${active?.id ?? "none"}`}`}
-        />
+        {mode === "beacon" ? (
+          <TargetDetail
+            active={active}
+            mode={mode}
+            capabilities={snapshot.targetContext.capabilities}
+            isBusy={isSelecting || isPreparingAction}
+            isChangingWatch={isChangingWatch}
+            watchEnabled={snapshot.targetContext.beaconWatch}
+            unavailableReason={snapshot.targetContext.activeTarget?.mode === mode
+              ? snapshot.targetContext.unavailableReason
+              : undefined}
+            onBackground={() => void backgroundTarget()}
+            onPrepareAction={(action) => void prepareAction(action)}
+            onWatchChange={(enabled) => void setBeaconWatch(enabled)}
+            onOperationSubmitted={(operation) => {
+              const submittedIncarnation = backendIncarnation;
+              if (submittedIncarnation !== backendIncarnationRef.current) return false;
+              mergeOperation(operation);
+              return true;
+            }}
+            operationTargetIdentity={`${backendIncarnation}:${targetRefIdentity(activeRef) ?? `${active?.mode ?? "none"}:${active?.id ?? "none"}`}`}
+          />
+        ) : null}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -1166,7 +1218,7 @@ function TargetDetail({
   );
 }
 
-function OperationComposer({
+export function OperationComposer({
   active,
   targetIdentity,
   capabilities,
@@ -1631,7 +1683,7 @@ function HistoryPagingFooter({
   );
 }
 
-function OperationDetailModal({
+export function OperationDetailModal({
   isCurrent,
   operation,
   onChanged,
@@ -1795,7 +1847,7 @@ function TaskDetailModal({
   );
 }
 
-function DestructiveReviewModal({
+export function DestructiveReviewModal({
   plan,
   result,
   isExecuting,
@@ -2158,7 +2210,7 @@ function appendUnique<T>(current: T[], incoming: T[], keyFor: (item: T) => strin
   ];
 }
 
-async function openOperationDetail(
+export async function openOperationDetail(
   operation: TargetOperationRecord,
   setOperation: (operation: TargetOperationRecord) => void,
   isCurrent: () => boolean,

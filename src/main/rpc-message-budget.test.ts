@@ -1,6 +1,8 @@
 import {
   RPC_MESSAGE_BUDGETS,
   RPC_MESSAGE_DOMAINS,
+  WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
+  WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES,
   rpcMessageChannelOptions,
   rpcTlsAuthorityOverride,
 } from "sliver-script";
@@ -10,12 +12,21 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 
 describe("Sliver RPC message budgets", () => {
-  it("keeps control, inventory, and artifact allocations isolated and bounded", () => {
-    expect(RPC_MESSAGE_DOMAINS).toEqual(["control", "inventory", "task-content", "artifact"]);
+  it("keeps control, inventory, workbench, and legacy artifact allocations isolated and bounded", () => {
+    expect(RPC_MESSAGE_DOMAINS).toEqual([
+      "control",
+      "inventory",
+      "task-content",
+      "workbench-artifact",
+      "artifact",
+    ]);
+    expect(WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES).toBe(64 * MiB);
+    expect(WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES).toBe(66 * MiB);
     expect(RPC_MESSAGE_BUDGETS).toEqual({
       control: { maxSendBytes: 8 * MiB, maxReceiveBytes: 16 * MiB },
       inventory: { maxSendBytes: 4 * MiB, maxReceiveBytes: 32 * MiB },
       "task-content": { maxSendBytes: 1 * MiB, maxReceiveBytes: 80 * KiB },
+      "workbench-artifact": { maxSendBytes: 66 * MiB, maxReceiveBytes: 66 * MiB },
       artifact: { maxSendBytes: 256 * MiB, maxReceiveBytes: 256 * MiB },
     });
     expect(RPC_MESSAGE_BUDGETS.control.maxReceiveBytes).toBeLessThan(
@@ -26,6 +37,9 @@ describe("Sliver RPC message budgets", () => {
     );
     expect(RPC_MESSAGE_BUDGETS["task-content"].maxReceiveBytes).toBeLessThan(
       RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes,
+    );
+    expect(RPC_MESSAGE_BUDGETS["workbench-artifact"].maxReceiveBytes).toBeLessThan(
+      RPC_MESSAGE_BUDGETS.artifact.maxReceiveBytes,
     );
   });
 

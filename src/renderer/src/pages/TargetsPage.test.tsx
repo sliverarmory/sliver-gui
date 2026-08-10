@@ -12,6 +12,7 @@ import type {
   TargetRef,
 } from "../../../shared/target-contracts";
 import type { BeaconTaskDetail, TargetOperationRecord } from "../../../shared/operation-contracts";
+import { SessionWorkspacePage } from "./SessionWorkspacePage";
 import { TargetsPage } from "./TargetsPage";
 
 beforeAll(() => {
@@ -20,10 +21,15 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   });
+  Object.defineProperty(Element.prototype, "getAnimations", {
+    configurable: true,
+    value: () => [],
+  });
 });
 
 afterAll(() => {
   vi.unstubAllGlobals();
+  Reflect.deleteProperty(Element.prototype, "getAnimations");
 });
 
 afterEach(() => {
@@ -200,6 +206,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     downloadBuild: vi.fn(failed),
     executeStopPlan: vi.fn(failed),
     executeTargetActionPlan: vi.fn(failed),
+    executeSessionDestructiveActionPlan: vi.fn(failed),
     generate: vi.fn(failed),
     generateFromProfile: vi.fn(failed),
     getBeaconTask: vi.fn(failed),
@@ -226,8 +233,10 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     prepareStopAllJobs: vi.fn(failed),
     prepareStopJob: vi.fn(failed),
     prepareTargetAction: vi.fn(failed),
+    prepareSessionDestructiveAction: vi.fn(failed),
     refresh: vi.fn(failed),
     removeSavedConfig: vi.fn(failed),
+    runSessionWorkbench: vi.fn(failed),
     saveProfile: vi.fn(failed),
     selectTarget: vi.fn(failed),
     setBeaconWatch: vi.fn(failed),
@@ -238,6 +247,25 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
   };
   Object.defineProperty(window, "sliver", { configurable: true, value: api });
   return api;
+}
+
+function sessionWorkspace(snapshot: SliverSnapshot, onSnapshot = vi.fn()): React.JSX.Element {
+  const activeSession = snapshot.targetContext.activeTargetSummary?.mode === "session"
+    ? snapshot.targetContext.activeTargetSummary
+    : null;
+  return (
+    <SessionWorkspacePage
+      route={{
+        sessionId: session.id,
+        backendEpoch: 7,
+        connectionIncarnation: snapshot.connection.incarnation ?? 0,
+      }}
+      session={activeSession}
+      snapshot={snapshot}
+      onBack={vi.fn()}
+      onSnapshot={onSnapshot}
+    />
+  );
 }
 
 describe("TargetsPage", () => {
@@ -258,7 +286,7 @@ describe("TargetsPage", () => {
     expect(screen.getByRole("row", { name: /payments/i })).toBeInTheDocument();
     expect(screen.queryByRole("row", { name: /warehouse/i })).not.toBeInTheDocument();
     expect(screen.queryByText("Beacon inventory failed")).not.toBeInTheDocument();
-    expect(screen.getByText("Select a session")).toBeInTheDocument();
+    expect(screen.queryByText("Select a session")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run ping" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
   });
@@ -294,6 +322,75 @@ describe("TargetsPage", () => {
     expect(selectTarget).toHaveBeenCalledOnce();
     expect(onSnapshot).toHaveBeenCalledWith(nextSnapshot);
     expect(screen.getByText("m1-verification")).toBeInTheDocument();
+  });
+
+  it("opens the session workspace only after the main process confirms the exact session reference", async () => {
+    const user = userEvent.setup();
+    const selected = targetSnapshot("session");
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: selected });
+    const onSnapshot = vi.fn();
+    const onOpenSession = vi.fn();
+    installAPI({ selectTarget });
+
+    render(
+      <TargetsPage
+        mode="session"
+        snapshot={targetSnapshot()}
+        onOpenSession={onOpenSession}
+        onSnapshot={onSnapshot}
+      />,
+    );
+
+    await user.click(screen.getByRole("row", { name: /payments/i }));
+
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledWith(sessionRef));
+    expect(onSnapshot).toHaveBeenCalledWith(selected);
+    expect(onOpenSession).toHaveBeenCalledWith(session);
+    expect(onOpenSession).toHaveBeenCalledOnce();
+  });
+
+  it("opens an already-selected session through the explicit interaction action", async () => {
+    const user = userEvent.setup();
+    const selected = targetSnapshot("session");
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: selected });
+    const onOpenSession = vi.fn();
+    installAPI({ selectTarget });
+
+    render(
+      <TargetsPage
+        mode="session"
+        snapshot={selected}
+        onOpenSession={onOpenSession}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Interact with payments" }));
+
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledWith(sessionRef));
+    expect(selectTarget).toHaveBeenCalledOnce();
+    expect(onOpenSession).toHaveBeenCalledWith(session);
+    expect(onOpenSession).toHaveBeenCalledOnce();
+  });
+
+  it("does not open a session workspace when the selection response confirms another target", async () => {
+    const user = userEvent.setup();
+    const selected = targetSnapshot("beacon");
+    const onOpenSession = vi.fn();
+    installAPI({ selectTarget: vi.fn().mockResolvedValue({ ok: true, value: selected }) });
+
+    render(
+      <TargetsPage
+        mode="session"
+        snapshot={targetSnapshot()}
+        onOpenSession={onOpenSession}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("row", { name: /payments/i }));
+    await waitFor(() => expect(window.sliver.selectTarget).toHaveBeenCalledWith(sessionRef));
+    expect(onOpenSession).not.toHaveBeenCalled();
   });
 
   it("loads and selects target 501 through the opaque target catalog cursor", async () => {
@@ -590,7 +687,7 @@ describe("TargetsPage", () => {
     installAPI({ submitTargetOperation });
     const initial = targetSnapshot("session");
     initial.connection.incarnation = 1;
-    const { rerender } = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={vi.fn()} />);
+    const { rerender } = render(sessionWorkspace(initial));
 
     await user.click(screen.getByRole("button", { name: "Ping" }));
     await user.click(await screen.findByRole("menuitemradio", { name: "Rename" }));
@@ -603,7 +700,7 @@ describe("TargetsPage", () => {
     }));
     const reconnected = targetSnapshot("session");
     reconnected.connection.incarnation = 2;
-    rerender(<TargetsPage mode="session" snapshot={reconnected} onSnapshot={vi.fn()} />);
+    rerender(sessionWorkspace(reconnected));
     await waitFor(() => expect(screen.getByRole("button", { name: "Run ping" })).toBeEnabled());
     expect(screen.queryByRole("textbox", { name: "New target name" })).not.toBeInTheDocument();
 
@@ -634,16 +731,17 @@ describe("TargetsPage", () => {
       });
       await currentSubmitGate.promise;
     });
-    expect(await screen.findByRole("row", { name: /request-2/i })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("");
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByRole("row", { name: /request-2/i })).toBeInTheDocument();
   });
 
-  it("keeps an operation draft across domain revisions and resets it when the target fingerprint changes", async () => {
+  it("keeps an operation draft while the authoritative session route remains current", async () => {
     const user = userEvent.setup();
     installAPI();
     const initial = targetSnapshot("session");
     initial.connection.incarnation = 1;
-    const { rerender } = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={vi.fn()} />);
+    const { rerender } = render(sessionWorkspace(initial));
 
     await user.click(screen.getByRole("button", { name: "Ping" }));
     await user.click(await screen.findByRole("menuitemradio", { name: "Rename" }));
@@ -655,7 +753,7 @@ describe("TargetsPage", () => {
     refreshed.domains.sessions.revision = 4;
     refreshed.targetContext.activeTarget = refreshedRef;
     refreshed.targetContext.selectableTargets = [refreshedRef, beaconRef];
-    rerender(<TargetsPage mode="session" snapshot={refreshed} onSnapshot={vi.fn()} />);
+    rerender(sessionWorkspace(refreshed));
 
     expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("revision-safe-draft");
     expect(screen.getByRole("button", { name: "Run rename" })).toBeEnabled();
@@ -670,10 +768,10 @@ describe("TargetsPage", () => {
     changed.domains.sessions.revision = 5;
     changed.targetContext.activeTarget = changedRef;
     changed.targetContext.selectableTargets = [changedRef, beaconRef];
-    rerender(<TargetsPage mode="session" snapshot={changed} onSnapshot={vi.fn()} />);
+    rerender(sessionWorkspace(changed));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run ping" })).toBeEnabled());
-    expect(screen.queryByRole("textbox", { name: "New target name" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("revision-safe-draft");
+    expect(screen.getByRole("button", { name: "Run rename" })).toBeEnabled();
   });
 
   it("keeps a task modal across domain revisions and closes it for fingerprint or incarnation changes", async () => {
@@ -744,10 +842,11 @@ describe("TargetsPage", () => {
     const getTargetOperation = vi.fn().mockResolvedValue({ ok: true, value: completed });
     installAPI({ submitTargetOperation, getTargetOperation });
 
-    render(<TargetsPage mode="session" snapshot={targetSnapshot("session")} onSnapshot={vi.fn()} />);
+    render(sessionWorkspace(targetSnapshot("session")));
 
     await user.click(screen.getByRole("button", { name: "Run ping" }));
     await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledWith({ operationId: "target.ping" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const operationRow = await screen.findByRole("row", { name: /request-1/i });
     await user.click(operationRow);
 
@@ -760,7 +859,7 @@ describe("TargetsPage", () => {
   it("updates lifecycle actions from authoritative capabilities without restarting the page", () => {
     installAPI();
     const initial = targetSnapshot("session");
-    const { rerender } = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={vi.fn()} />);
+    const { rerender } = render(sessionWorkspace(initial));
 
     expect(screen.getByRole("button", { name: "Kill target" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Close session" })).toBeEnabled();
@@ -775,7 +874,7 @@ describe("TargetsPage", () => {
           }
         : capability
     );
-    rerender(<TargetsPage mode="session" snapshot={unavailable} onSnapshot={vi.fn()} />);
+    rerender(sessionWorkspace(unavailable));
 
     expect(screen.getByRole("button", { name: "Kill target" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close session" })).toBeDisabled();

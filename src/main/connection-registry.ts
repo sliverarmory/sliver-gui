@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, writeFile } from "node:fs/promises";
+import { chmod, lstat, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createSecureContext } from "node:tls";
 
 import { BrowserWindow, dialog, webContents, type WebContents } from "electron";
@@ -70,6 +70,20 @@ import type {
   TargetOperationState,
 } from "../shared/operation-contracts.js";
 import {
+  SESSION_WORKBENCH_ARTIFACT_IDS,
+  SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  sessionOperationSupportsPlatform,
+  type PrepareSessionDestructiveActionInput,
+  type SessionDestructiveActionOutcome,
+  type SessionDestructiveActionPreparation,
+  type SessionDestructiveActionPlan,
+  type SessionRegistryWriteValue,
+  type SessionTargetPlatform,
+  type SessionWorkbenchInput,
+  type SessionWorkbenchInvocationResult,
+  type SessionWorkbenchOutcomeUnknownOperationId,
+} from "../shared/session-contracts.js";
+import {
   artifactFormatFromProto,
   buildImplantConfig,
   ensureTrailingDot,
@@ -90,7 +104,7 @@ import {
   OperatorConfigStore,
   readConfigForImport,
 } from "./operator-config-store.js";
-import { readBoundedRegularFile } from "./secure-file.js";
+import { readBoundedRegularFile, writePrivateArtifactFileAtomic } from "./secure-file.js";
 import type { SliverClientAdapter, SliverClientFactory } from "./sliver-client-adapter.js";
 import {
   BeaconTaskCancellationError,
@@ -114,11 +128,30 @@ import {
   type RevalidatedTarget,
   type TargetDomainName,
 } from "./target-store.js";
+import {
+  SessionArtifactAccessError,
+  SessionArtifactStore,
+  type SessionArtifactScope,
+} from "./session-artifact-store.js";
+import {
+  SessionWorkbench,
+  SessionWorkbenchPlatformError,
+  SessionWorkbenchRemoteError,
+  type SessionPreparedStoredArtifactSave,
+  type SessionWorkbenchArtifactGateway,
+} from "./session-workbench.js";
 
 interface CertificatePair {
   cert: Buffer;
   key: Buffer;
   expiresAt: number;
+}
+
+class SessionWorkbenchBoundaryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionWorkbenchBoundaryError";
+  }
 }
 
 interface WindowContext {
@@ -135,6 +168,10 @@ interface WindowContext {
   beaconWatch: boolean;
   targetPlans: Map<string, InternalTargetActionPlan>;
   targetPlanAdmissions: Set<string>;
+  sessionPlans: Map<string, InternalSessionActionPlan>;
+  sessionPlanAdmissions: Set<string>;
+  sessionPlanTimers: Map<string, NodeJS.Timeout>;
+  sessionWorkbenchAdmissions: Map<string, "standard" | "artifact">;
   taskListAdmissions: Set<string>;
   taskDetailAdmissions: Set<string>;
   taskCancelAdmissions: Set<string>;
@@ -163,6 +200,14 @@ const CERTIFICATE_CAPABILITY_TTL_MS = 5 * 60_000;
 const JOB_STOP_PLAN_TTL_MS = 60_000;
 const TARGET_ACTION_PLAN_TTL_MS = 60_000;
 const MAX_OUTSTANDING_TARGET_ACTION_PLANS = 8;
+const SESSION_ACTION_PLAN_TTL_MS = 60_000;
+const MAX_OUTSTANDING_SESSION_ACTION_PLANS = 4;
+const MAX_WINDOW_SESSION_WORKBENCH_REQUESTS = 8;
+const MAX_WINDOW_SESSION_ARTIFACT_REQUESTS = 2;
+const MAX_GLOBAL_SESSION_WORKBENCH_REQUESTS = 32;
+const MAX_GLOBAL_SESSION_ARTIFACT_REQUESTS = 4;
+const SESSION_SAVE_INTENT_TTL_MS = 60 * 60_000;
+const MAX_SESSION_SAVE_INTENTS = 1_024;
 const MAX_TARGETS_PER_ACTION_PLAN = 100;
 const MAX_WINDOW_TASK_LIST_REQUESTS = 4;
 const MAX_WINDOW_TASK_DETAIL_REQUESTS = 4;
@@ -234,6 +279,29 @@ interface InternalTargetActionPlan {
   totalTargets: number;
 }
 
+interface InternalSessionActionPlan {
+  token: string;
+  expiresAt: number;
+  contentsId: number;
+  poolKey: string;
+  epoch: number;
+  connectionAttempt: number;
+  target: TargetRef;
+  input: PrepareSessionDestructiveActionInput;
+  payloadDigest: string;
+  artifactHandle?: string;
+  artifactScope?: SessionArtifactScope;
+  artifactSha256?: string;
+  resourceFingerprint?: string;
+}
+
+interface SessionSaveIntent {
+  readonly destinationKey: string;
+  readonly destinationPath: string;
+  readonly token: string;
+  readonly reservedAt: number;
+}
+
 interface InternalTargetPageCursor {
   contentsId: number;
   poolKey: string;
@@ -263,6 +331,11 @@ export class ConnectionRegistry {
   private readonly windows = new Map<number, WindowContext>();
   private readonly pools = new Map<string, BackendPool>();
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
+  private readonly sessionArtifacts: SessionArtifactStore;
+  private readonly sessionWorkbenchGlobalAdmissions = new Map<string, "standard" | "artifact">();
+  private readonly sessionSaveIntents = new Map<string, SessionSaveIntent>();
+  private readonly sessionSaveLocks = new Map<string, Promise<void>>();
+  private sessionSaveReservationTail: Promise<void> = Promise.resolve();
   private targetCatalogSnapshotBytes = 0;
 
   private readonly configStore: OperatorConfigStore;
@@ -277,6 +350,7 @@ export class ConnectionRegistry {
     this.configStore = new OperatorConfigStore(externalDirectory, managedDirectory);
     this.clientFactory = normalized.clientFactory ?? ((config) => new SliverClient(config));
     this.now = normalized.now ?? Date.now;
+    this.sessionArtifacts = new SessionArtifactStore({ now: this.now });
   }
 
   registerWindow(contentsId: number): void {
@@ -291,6 +365,10 @@ export class ConnectionRegistry {
       beaconWatch: false,
       targetPlans: new Map(),
       targetPlanAdmissions: new Set(),
+      sessionPlans: new Map(),
+      sessionPlanAdmissions: new Set(),
+      sessionPlanTimers: new Map(),
+      sessionWorkbenchAdmissions: new Map(),
       taskListAdmissions: new Set(),
       taskDetailAdmissions: new Set(),
       taskCancelAdmissions: new Set(),
@@ -310,8 +388,14 @@ export class ConnectionRegistry {
       delete context.activeTarget;
       context.beaconWatch = false;
       context.targetPlans.clear();
+      context.sessionPlans.clear();
+      context.sessionPlanAdmissions.clear();
+      for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
+      context.sessionPlanTimers.clear();
+      context.sessionWorkbenchAdmissions.clear();
       context.targetPageCursors.clear();
     }
+    this.sessionArtifacts.removeOwner(contentsId);
     context?.savedConfigs.clear();
     if (context?.poolKey) await this.releasePool(context.poolKey, contentsId).catch(() => undefined);
   }
@@ -323,6 +407,13 @@ export class ConnectionRegistry {
     const pool = this.pools.get(source.poolKey);
     if (!pool) return;
 
+    target.connectionAttempt += 1;
+    delete target.activeTarget;
+    target.sessionPlans.clear();
+    target.sessionPlanAdmissions.clear();
+    for (const timer of target.sessionPlanTimers.values()) clearTimeout(timer);
+    target.sessionPlanTimers.clear();
+    this.sessionArtifacts.removeOwner(targetContentsId);
     target.poolKey = source.poolKey;
     if (source.configName) target.configName = source.configName;
     else delete target.configName;
@@ -456,7 +547,12 @@ export class ConnectionRegistry {
     delete context.activeTarget;
     context.beaconWatch = false;
     context.targetPlans.clear();
+    context.sessionPlans.clear();
+    context.sessionPlanAdmissions.clear();
+    for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
+    context.sessionPlanTimers.clear();
     context.targetPageCursors.clear();
+    this.sessionArtifacts.removeOwner(contentsId);
     context.snapshot = disconnectedSnapshot();
     this.pushSnapshot(contentsId, context.snapshot);
     if (poolKey) {
@@ -913,6 +1009,800 @@ export class ConnectionRegistry {
       return { ok: false, error: errorMessage(error) };
     } finally {
       admittedContext?.taskCancelAdmissions.delete(admissionId);
+    }
+  }
+
+  async runSessionWorkbench(
+    sender: WebContents,
+    input: SessionWorkbenchInput,
+  ): Promise<OperationResult<SessionWorkbenchInvocationResult>> {
+    const admissionId = randomUUID();
+    let admittedContext: WindowContext | undefined;
+    try {
+      const context = this.requireWindow(sender.id);
+      const kind = (SESSION_WORKBENCH_ARTIFACT_IDS as readonly string[]).includes(input.operationId)
+        ? "artifact"
+        : "standard";
+      this.admitSessionWorkbenchRequest(context, admissionId, kind);
+      admittedContext = context;
+      const poolKey = context.poolKey;
+      const pool = poolKey ? this.pools.get(poolKey) : undefined;
+      const usableStatuses = new Set(["connected", "degraded", "reconnecting"]);
+      if (!pool || !usableStatuses.has(pool.snapshot.connection.status)) {
+        throw new Error("Connect to a Sliver server first");
+      }
+      const epoch = pool.epoch;
+      const attempt = context.connectionAttempt;
+      const assertBinding = (): void => {
+        if (
+          this.windows.get(sender.id) !== context ||
+          context.poolKey !== poolKey ||
+          context.connectionAttempt !== attempt ||
+          this.pools.get(poolKey!) !== pool ||
+          pool.epoch !== epoch
+        ) throw new Error("The backend connection changed while the session workbench request was running");
+      };
+      assertBinding();
+      const selected = this.requireSelectedSession(sender.id, pool);
+      if (!sessionOperationSupportsPlatform(input.operationId, selected.platform)) {
+        throw new Error(`${input.operationId} is unavailable on ${selected.platform} sessions`);
+      }
+      const scope = this.bindSessionArtifactScope(selected.context, pool, selected.target);
+      const selectedTarget = selected.target.ref;
+      const assertSelectedTarget = (): void => {
+        assertBinding();
+        if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selectedTarget)) {
+          throw new Error("The active session changed while the workbench operation was running");
+        }
+      };
+      let mutationDispatched = false;
+      const workbench = new SessionWorkbench(
+        pool.client,
+        this.sessionArtifactGateway(sender, scope, assertSelectedTarget),
+        {
+          now: this.now,
+          onMutationDispatch: () => { mutationDispatched = true; },
+        },
+      );
+      try {
+        const result = await workbench.run(
+          {
+            sessionId: selected.target.target.id,
+            platform: selected.platform,
+            username: selected.target.target.username,
+            ...(selected.target.target.uid === undefined ? {} : { uid: selected.target.target.uid }),
+            ...(selected.target.target.gid === undefined ? {} : { gid: selected.target.target.gid }),
+            ...(selected.target.target.pid === undefined ? {} : { pid: selected.target.target.pid }),
+            executable: selected.target.target.executable,
+            hostname: selected.target.target.hostname,
+            os: selected.target.target.os,
+            arch: selected.target.target.arch,
+          },
+          input,
+        );
+        assertSelectedTarget();
+        return { ok: true, value: { status: "completed", result } };
+      } catch (error) {
+        if (mutationDispatched) {
+          return {
+            ok: true,
+            value: {
+              status: "outcome-unknown",
+              operationId: input.operationId as SessionWorkbenchOutcomeUnknownOperationId,
+              message: "The session mutation was dispatched, but its final outcome could not be confirmed. Refresh the session state before taking another action.",
+            },
+          };
+        }
+        if (
+          error instanceof SessionWorkbenchBoundaryError ||
+          error instanceof SessionWorkbenchRemoteError ||
+          error instanceof SessionWorkbenchPlatformError ||
+          error instanceof SessionArtifactAccessError
+        ) {
+          throw error;
+        }
+        throw new SessionWorkbenchBoundaryError("The session workbench request failed");
+      }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      admittedContext?.sessionWorkbenchAdmissions.delete(admissionId);
+      this.sessionWorkbenchGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async prepareSessionDestructiveAction(
+    contentsId: number,
+    input: PrepareSessionDestructiveActionInput,
+  ): Promise<OperationResult<SessionDestructiveActionPreparation>> {
+    let admittedContext: WindowContext | undefined;
+    const admissionId = randomUUID();
+    const workbenchAdmissionId = randomUUID();
+    let workbenchAdmissionContext: WindowContext | undefined;
+    try {
+      const context = this.requireWindow(contentsId);
+      this.pruneSessionPlans(context);
+      if (
+        context.sessionPlans.size + context.sessionPlanAdmissions.size >=
+        MAX_OUTSTANDING_SESSION_ACTION_PLANS
+      ) {
+        throw new Error("Too many session actions are already awaiting review in this window");
+      }
+      context.sessionPlanAdmissions.add(admissionId);
+      admittedContext = context;
+      if (
+        input.actionId === "session.filesystem.upload-overwrite" ||
+        input.actionId === "session.process.terminate"
+      ) {
+        this.admitSessionWorkbenchRequest(
+          context,
+          workbenchAdmissionId,
+          input.actionId === "session.filesystem.upload-overwrite" ? "artifact" : "standard",
+        );
+        workbenchAdmissionContext = context;
+      }
+      return await this.withPool(contentsId, async (pool, assertBinding) => {
+        const selected = this.requireSelectedSession(contentsId, pool);
+        if (!sessionOperationSupportsPlatform(input.actionId, selected.platform)) {
+          throw new Error(`${input.actionId} is unavailable on ${selected.platform} sessions`);
+        }
+        if (
+          input.actionId === "session.filesystem.edit-text-overwrite" ||
+          input.actionId === "session.filesystem.patch-hex"
+        ) {
+          throw new Error("Conflict-aware file editing is not yet available in the session-first M2 tranche");
+        }
+        const scope = this.bindSessionArtifactScope(selected.context, pool, selected.target);
+        let artifactHandle: string | undefined;
+        let artifact: SessionDestructiveActionPlan["artifact"];
+        let resource: SessionDestructiveActionPlan["resource"];
+        let resourceFingerprint: string | undefined;
+        let expiresAt: number | undefined;
+        if (input.actionId === "session.filesystem.upload-overwrite") {
+          const picked = await this.chooseSessionUploadArtifact(contentsId, scope);
+          assertBinding();
+          if (!picked) return { status: "canceled" };
+          artifactHandle = picked.handle;
+          expiresAt = picked.expiresAt;
+          artifact = {
+            suggestedBasename: picked.suggestedBasename,
+            size: picked.size,
+            sha256: picked.sha256,
+          };
+        }
+        if (input.actionId === "session.process.terminate") {
+          let response;
+          try {
+            response = await pool.client.psSession(selected.target.target.id, true);
+          } catch {
+            throw new Error("Could not verify the selected process before review");
+          }
+          assertBinding();
+          if (response.Response?.Err?.trim()) {
+            throw new Error("Could not verify the selected process before review");
+          }
+          const identity = exactSessionProcessIdentity(response.Processes, input.pid);
+          if (!identity) throw new Error("The selected process is no longer available for review");
+          resource = identity.resource;
+          resourceFingerprint = identity.fingerprint;
+        }
+        const token = randomUUID();
+        expiresAt ??= this.now() + SESSION_ACTION_PLAN_TTL_MS;
+        const payloadDigest = sessionActionPayloadDigest(input, artifact, resourceFingerprint);
+        const plan: InternalSessionActionPlan = {
+          token,
+          expiresAt,
+          contentsId,
+          poolKey: pool.key,
+          epoch: pool.epoch,
+          connectionAttempt: selected.context.connectionAttempt,
+          target: selected.target.ref,
+          input,
+          payloadDigest,
+          ...(artifactHandle ? { artifactHandle, artifactScope: scope } : {}),
+          ...(artifact ? { artifactSha256: artifact.sha256 } : {}),
+          ...(resourceFingerprint ? { resourceFingerprint } : {}),
+        };
+        selected.context.sessionPlans.set(token, plan);
+        const expiryTimer = setTimeout(() => {
+          const currentContext = this.windows.get(contentsId);
+          const currentPlan = currentContext?.sessionPlans.get(token);
+          if (currentContext && currentPlan === plan) {
+            currentContext.sessionPlans.delete(token);
+            if (plan.artifactHandle && plan.artifactScope) {
+              try {
+                this.sessionArtifacts.remove(plan.artifactScope, plan.artifactHandle);
+              } catch {
+                // Rebinding may already have revoked the exact artifact.
+              }
+            }
+          }
+          currentContext?.sessionPlanTimers.delete(token);
+        }, Math.max(0, expiresAt - this.now()));
+        expiryTimer.unref?.();
+        selected.context.sessionPlanTimers.set(token, expiryTimer);
+        return {
+          status: "prepared",
+          plan: {
+            token,
+            expiresAt: new Date(expiresAt).toISOString(),
+            payloadDigest,
+            action: input,
+            target: {
+              name: selected.target.target.name,
+              hostname: selected.target.target.hostname,
+              os: selected.target.target.os,
+            },
+            warning: sessionActionWarning(input),
+            ...(resource ? { resource } : {}),
+            ...(artifact ? { artifact } : {}),
+          },
+        };
+      });
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      admittedContext?.sessionPlanAdmissions.delete(admissionId);
+      workbenchAdmissionContext?.sessionWorkbenchAdmissions.delete(workbenchAdmissionId);
+      this.sessionWorkbenchGlobalAdmissions.delete(workbenchAdmissionId);
+    }
+  }
+
+  async executeSessionDestructiveActionPlan(
+    contentsId: number,
+    token: string,
+  ): Promise<OperationResult<SessionDestructiveActionOutcome>> {
+    let plan: InternalSessionActionPlan | undefined;
+    let artifactData: Buffer | undefined;
+    let admittedContext: WindowContext | undefined;
+    let executionAdmissionId: string | undefined;
+    let planConsumed = false;
+    try {
+      const context = this.requireWindow(contentsId);
+      this.pruneSessionPlans(context);
+      plan = context.sessionPlans.get(token);
+      if (!plan) throw new Error("Unknown, expired, or already-used session action plan");
+      executionAdmissionId = randomUUID();
+      this.admitSessionWorkbenchRequest(
+        context,
+        executionAdmissionId,
+        plan.artifactHandle ? "artifact" : "standard",
+      );
+      admittedContext = context;
+      context.sessionPlans.delete(token);
+      planConsumed = true;
+      const planTimer = context.sessionPlanTimers.get(token);
+      if (planTimer) clearTimeout(planTimer);
+      context.sessionPlanTimers.delete(token);
+      const pool = this.pools.get(plan.poolKey);
+      if (
+        !pool ||
+        plan.contentsId !== contentsId ||
+        context.poolKey !== plan.poolKey ||
+        context.connectionAttempt !== plan.connectionAttempt ||
+        pool.epoch !== plan.epoch
+      ) {
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "target-disappeared", "The backend connection changed before dispatch"),
+        };
+      }
+      const boundPlan = plan;
+      const bindingCurrent = (): boolean =>
+        this.windows.get(contentsId) === context &&
+        this.pools.get(boundPlan.poolKey) === pool &&
+        context.poolKey === boundPlan.poolKey &&
+        context.connectionAttempt === boundPlan.connectionAttempt &&
+        pool.epoch === boundPlan.epoch;
+      try {
+        await pool.refreshDomains(["sessions"]);
+      } catch {
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "failed", "Could not refresh the reviewed session before dispatch"),
+        };
+      }
+      if (!bindingCurrent()) {
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "target-disappeared", "The backend connection changed before dispatch"),
+        };
+      }
+      if (plan.expiresAt <= this.now()) throw new Error("The reviewed session action plan expired before dispatch");
+      assertTargetDomainAuthoritative(pool, "session");
+      const current = pool.targetStore.revalidateTargetRef(plan.target, pool.epoch);
+      if (!current || current.target.mode !== "session") {
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "target-disappeared", "The reviewed session is no longer available"),
+        };
+      }
+      if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, plan.target)) {
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "target-disappeared", "The active session changed before dispatch"),
+        };
+      }
+      const platform = sessionPlatform(current.target.os);
+      if (!sessionOperationSupportsPlatform(plan.input.actionId, platform)) {
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "failed", `${plan.input.actionId} is unavailable on ${platform} sessions`),
+        };
+      }
+      if (plan.input.actionId === "session.process.terminate") {
+        let processes;
+        try {
+          processes = await pool.client.psSession(current.target.id, true);
+        } catch {
+          return {
+            ok: true,
+            value: sessionActionOutcome(plan, "failed", "Could not revalidate the reviewed process before dispatch"),
+          };
+        }
+        if (
+          !bindingCurrent() ||
+          !context.activeTarget ||
+          !sameTargetRefIdentity(context.activeTarget, plan.target) ||
+          !pool.targetStore.revalidateTargetRef(plan.target, pool.epoch)
+        ) {
+          return {
+            ok: true,
+            value: sessionActionOutcome(plan, "target-disappeared", "The active session changed before dispatch"),
+          };
+        }
+        if (processes.Response?.Err?.trim()) {
+          return {
+            ok: true,
+            value: sessionActionOutcome(plan, "failed", "Could not revalidate the reviewed process before dispatch"),
+          };
+        }
+        const identity = exactSessionProcessIdentity(processes.Processes, plan.input.pid);
+        if (!identity || !plan.resourceFingerprint || identity.fingerprint !== plan.resourceFingerprint) {
+          return {
+            ok: true,
+            value: sessionActionOutcome(plan, "failed", "The reviewed process identity changed before dispatch"),
+          };
+        }
+      }
+      if (plan.expiresAt <= this.now()) throw new Error("The reviewed session action plan expired before dispatch");
+      if (plan.artifactHandle && plan.artifactScope) {
+        const consumed = this.sessionArtifacts.consume(plan.artifactScope, plan.artifactHandle);
+        artifactData = consumed.data;
+        if (!plan.artifactSha256 || consumed.metadata.sha256 !== plan.artifactSha256) {
+          throw new Error("The reviewed upload bytes no longer match the authorized payload");
+        }
+      }
+
+      let dispatchStarted = false;
+      try {
+        dispatchStarted = true;
+        await executeReviewedSessionAction(pool.client, current.target.id, plan.input, artifactData);
+        if (this.pools.get(pool.key) === pool) await pool.refreshDomains(["sessions"]).catch(() => undefined);
+        return {
+          ok: true,
+          value: sessionActionOutcome(plan, "succeeded", "The reviewed action completed"),
+        };
+      } catch (error) {
+        return {
+          ok: true,
+          value: sessionActionOutcome(
+            plan,
+            dispatchStarted ? "outcome-unknown" : "failed",
+            dispatchStarted
+              ? "The action was dispatched, but its outcome could not be confirmed"
+              : errorMessage(error),
+          ),
+        };
+      }
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      artifactData?.fill(0);
+      if (planConsumed && plan?.artifactHandle && plan.artifactScope) {
+        try {
+          this.sessionArtifacts.remove(plan.artifactScope, plan.artifactHandle);
+        } catch {
+          // Rebinding the window already revokes and clears stale plan bytes.
+        }
+      }
+      if (executionAdmissionId) {
+        admittedContext?.sessionWorkbenchAdmissions.delete(executionAdmissionId);
+        this.sessionWorkbenchGlobalAdmissions.delete(executionAdmissionId);
+      }
+    }
+  }
+
+  private admitSessionWorkbenchRequest(
+    context: WindowContext,
+    admissionId: string,
+    kind: "standard" | "artifact",
+  ): void {
+    if (context.sessionWorkbenchAdmissions.size >= MAX_WINDOW_SESSION_WORKBENCH_REQUESTS) {
+      throw new Error("Too many session workbench requests are already running in this window");
+    }
+    if (this.sessionWorkbenchGlobalAdmissions.size >= MAX_GLOBAL_SESSION_WORKBENCH_REQUESTS) {
+      throw new Error("The global session workbench request capacity is currently full");
+    }
+    if (
+      kind === "artifact" &&
+      [...context.sessionWorkbenchAdmissions.values()].filter((candidate) => candidate === "artifact").length >=
+        MAX_WINDOW_SESSION_ARTIFACT_REQUESTS
+    ) {
+      throw new Error("Too many session artifact requests are already running in this window");
+    }
+    if (
+      kind === "artifact" &&
+      [...this.sessionWorkbenchGlobalAdmissions.values()].filter((candidate) => candidate === "artifact").length >=
+        MAX_GLOBAL_SESSION_ARTIFACT_REQUESTS
+    ) {
+      throw new Error("The global session artifact request capacity is currently full");
+    }
+    context.sessionWorkbenchAdmissions.set(admissionId, kind);
+    this.sessionWorkbenchGlobalAdmissions.set(admissionId, kind);
+  }
+
+  private requireSelectedSession(
+    contentsId: number,
+    pool: BackendPool,
+  ): { context: WindowContext; target: RevalidatedTarget; platform: SessionTargetPlatform } {
+    const context = this.requireWindow(contentsId);
+    if (!context.activeTarget || context.activeTarget.mode !== "session") {
+      throw new Error("Select an active session before using the session workbench");
+    }
+    assertTargetDomainAuthoritative(pool, "session");
+    const target = pool.targetStore.revalidateTargetRef(context.activeTarget, pool.epoch);
+    if (!target || target.target.mode !== "session") {
+      throw new Error("The selected session is no longer available");
+    }
+    if (target.target.liveness !== "active") throw new Error("The selected session is no longer active");
+    return { context, target, platform: sessionPlatform(target.target.os) };
+  }
+
+  private bindSessionArtifactScope(
+    context: WindowContext,
+    pool: BackendPool,
+    target: RevalidatedTarget,
+  ): SessionArtifactScope {
+    const scope: SessionArtifactScope = {
+      ownerWindowId: context.contentsId,
+      backendId: pool.key,
+      backendEpoch: pool.epoch,
+      connectionIncarnation: context.connectionAttempt,
+      sessionId: target.target.id,
+      sessionFingerprint: target.ref.fingerprint,
+    };
+    this.sessionArtifacts.bind(scope);
+    return scope;
+  }
+
+  private sessionArtifactGateway(
+    sender: WebContents,
+    scope: SessionArtifactScope,
+    assertCurrent: () => void,
+  ): SessionWorkbenchArtifactGateway {
+    const owner = requireOwnerWindow(sender);
+    const nativeSaves = new WeakMap<object, { path: string; intent: SessionSaveIntent }>();
+    const storedSaves = new WeakMap<object, { handle: string; path: string; intent: SessionSaveIntent }>();
+    return {
+      prepareNativeSave: async ({ suggestedBasename }) => {
+        assertCurrent();
+        if (owner.isDestroyed()) throw new Error("The application window is no longer available");
+        let selection;
+        try {
+          selection = await dialog.showSaveDialog(owner, {
+            title: "Save session artifact",
+            defaultPath: safeArtifactFileName(suggestedBasename),
+          });
+        } catch {
+          throw new SessionWorkbenchBoundaryError("Could not open the native save dialog");
+        }
+        assertCurrent();
+        if (selection.canceled || !selection.filePath) return null;
+        const capability = Object.freeze({});
+        const intent = await this.reserveSessionSaveIntent(selection.filePath);
+        try {
+          assertCurrent();
+        } catch (error) {
+          if (this.sessionSaveIntents.get(intent.destinationKey)?.token === intent.token) {
+            this.sessionSaveIntents.delete(intent.destinationKey);
+          }
+          throw error;
+        }
+        nativeSaves.set(capability, {
+          path: selection.filePath,
+          intent,
+        });
+        return Object.freeze({ capability });
+      },
+      writeNativeSave: async (prepared, artifact) => {
+        assertCurrent();
+        const save = nativeSaves.get(prepared.capability);
+        nativeSaves.delete(prepared.capability);
+        if (!save) throw new Error("The native save capability is stale or already used");
+        try {
+          await this.commitSessionSaveIntent(save.intent, artifact.data, assertCurrent);
+        } catch (error) {
+          if (error instanceof SessionWorkbenchBoundaryError) throw error;
+          throw new SessionWorkbenchBoundaryError("Could not save the session artifact");
+        }
+      },
+      prepareUploadOpen: async ({ maximumBytes }) => {
+        assertCurrent();
+        let selection;
+        try {
+          selection = await dialog.showOpenDialog(owner, {
+            title: "Choose a file to upload",
+            properties: ["openFile"],
+          });
+        } catch {
+          throw new SessionWorkbenchBoundaryError("Could not open the native upload picker");
+        }
+        assertCurrent();
+        const filePath = selection.filePaths[0];
+        if (selection.canceled || !filePath) return null;
+        let selected;
+        try {
+          selected = await readBoundedRegularFile(filePath, {
+            label: "Upload source",
+            maxBytes: maximumBytes,
+          });
+        } catch {
+          throw new SessionWorkbenchBoundaryError("Could not read the selected upload file");
+        }
+        try {
+          assertCurrent();
+          return {
+            data: selected.data,
+            suggestedBasename: safeArtifactFileName(basename(filePath)),
+          };
+        } catch (error) {
+          selected.data.fill(0);
+          throw error;
+        }
+      },
+      captureScreenshot: (artifact) => {
+        assertCurrent();
+        const metadata = this.sessionArtifacts.store({
+          scope,
+          data: artifact.data,
+          mediaType: artifact.mediaType,
+          suggestedBasename: artifact.suggestedBasename,
+          ownership: "take",
+        });
+        try {
+          if (metadata.sha256 !== artifact.sha256) {
+            throw new Error("Screenshot artifact digest changed before storage");
+          }
+          const preview = this.sessionArtifacts.previewDataUrl(scope, metadata.handle);
+          return {
+            status: "captured",
+            artifact: {
+              handle: metadata.handle,
+              suggestedBasename: metadata.suggestedBasename,
+              mediaType: metadata.mediaType,
+              size: metadata.size,
+              sha256: metadata.sha256,
+              createdAt: metadata.createdAt,
+              expiresAt: metadata.expiresAt,
+            },
+            preview: {
+              mediaType: artifact.mediaType,
+              dataUrl: preview,
+              size: metadata.size,
+            },
+          };
+        } catch (error) {
+          this.sessionArtifacts.remove(scope, metadata.handle);
+          throw error;
+        }
+      },
+      prepareStoredArtifactSave: async (handle) => {
+        assertCurrent();
+        const metadata = this.sessionArtifacts.metadata(scope, handle);
+        let selection;
+        try {
+          selection = await dialog.showSaveDialog(owner, {
+            title: "Save session artifact",
+            defaultPath: metadata.suggestedBasename,
+          });
+        } catch {
+          throw new SessionWorkbenchBoundaryError("Could not open the native save dialog");
+        }
+        assertCurrent();
+        if (selection.canceled || !selection.filePath) return null;
+        const capability = Object.freeze({});
+        const intent = await this.reserveSessionSaveIntent(selection.filePath);
+        try {
+          assertCurrent();
+        } catch (error) {
+          if (this.sessionSaveIntents.get(intent.destinationKey)?.token === intent.token) {
+            this.sessionSaveIntents.delete(intent.destinationKey);
+          }
+          throw error;
+        }
+        storedSaves.set(capability, {
+          handle,
+          path: selection.filePath,
+          intent,
+        });
+        return Object.freeze({
+          capability,
+          suggestedBasename: metadata.suggestedBasename,
+          size: metadata.size,
+          sha256: metadata.sha256,
+        });
+      },
+      writeStoredArtifact: async (prepared: SessionPreparedStoredArtifactSave) => {
+        assertCurrent();
+        const save = storedSaves.get(prepared.capability);
+        storedSaves.delete(prepared.capability);
+        if (!save) throw new Error("The stored artifact save capability is stale or already used");
+        const consumed = this.sessionArtifacts.consume(scope, save.handle);
+        try {
+          try {
+            await this.commitSessionSaveIntent(save.intent, consumed.data, assertCurrent);
+          } catch (error) {
+            if (error instanceof SessionWorkbenchBoundaryError) throw error;
+            throw new SessionWorkbenchBoundaryError("Could not save the session artifact");
+          }
+        } finally {
+          consumed.data.fill(0);
+        }
+      },
+    };
+  }
+
+  private async reserveSessionSaveIntent(path: string): Promise<SessionSaveIntent> {
+    const previousReservation = this.sessionSaveReservationTail;
+    let releaseReservation!: () => void;
+    const reservationGate = new Promise<void>((resolveReservation) => { releaseReservation = resolveReservation; });
+    const reservationTail = previousReservation.catch(() => undefined).then(() => reservationGate);
+    this.sessionSaveReservationTail = reservationTail;
+    await previousReservation.catch(() => undefined);
+    try {
+      let destinationPath: string;
+      try {
+        const canonicalDirectory = await realpath(dirname(path));
+        const candidate = join(canonicalDirectory, basename(path));
+        try {
+          const existing = await lstat(candidate);
+          if (existing.isSymbolicLink() || !existing.isFile()) {
+            throw new SessionWorkbenchBoundaryError("The selected artifact destination is not a regular file");
+          }
+          destinationPath = await realpath(candidate);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          destinationPath = candidate;
+        }
+      } catch (error) {
+        if (error instanceof SessionWorkbenchBoundaryError) throw error;
+        throw new SessionWorkbenchBoundaryError("Could not prepare the selected artifact destination");
+      }
+      const now = this.now();
+      for (const [key, intent] of this.sessionSaveIntents) {
+        if (intent.reservedAt + SESSION_SAVE_INTENT_TTL_MS <= now) this.sessionSaveIntents.delete(key);
+      }
+      while (this.sessionSaveIntents.size >= MAX_SESSION_SAVE_INTENTS) {
+        const oldest = [...this.sessionSaveIntents.values()].sort((left, right) => left.reservedAt - right.reservedAt)[0];
+        if (!oldest) break;
+        this.sessionSaveIntents.delete(oldest.destinationKey);
+      }
+      const normalizedDestination = destinationPath.normalize("NFC");
+      const destinationKey = process.platform === "win32" || process.platform === "darwin"
+        ? normalizedDestination.toLowerCase()
+        : normalizedDestination;
+      const intent: SessionSaveIntent = {
+        destinationKey,
+        destinationPath,
+        token: randomUUID(),
+        reservedAt: now,
+      };
+      this.sessionSaveIntents.set(destinationKey, intent);
+      return intent;
+    } finally {
+      releaseReservation();
+      if (this.sessionSaveReservationTail === reservationTail) {
+        this.sessionSaveReservationTail = Promise.resolve();
+      }
+    }
+  }
+
+  private async commitSessionSaveIntent(
+    intent: SessionSaveIntent,
+    data: Buffer,
+    assertCurrent: () => void,
+  ): Promise<void> {
+    const previous = this.sessionSaveLocks.get(intent.destinationKey) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.sessionSaveLocks.set(intent.destinationKey, tail);
+    await previous.catch(() => undefined);
+    try {
+      await writePrivateArtifactFileAtomic(intent.destinationPath, data, () => {
+        assertCurrent();
+        if (this.sessionSaveIntents.get(intent.destinationKey)?.token !== intent.token) {
+          throw new SessionWorkbenchBoundaryError(
+            "A newer save to this destination superseded the stale artifact response",
+          );
+        }
+      });
+    } finally {
+      release();
+      if (this.sessionSaveLocks.get(intent.destinationKey) === tail) {
+        this.sessionSaveLocks.delete(intent.destinationKey);
+      }
+    }
+  }
+
+  private async chooseSessionUploadArtifact(
+    contentsId: number,
+    scope: SessionArtifactScope,
+  ): Promise<{
+    handle: string;
+    suggestedBasename: string;
+    size: number;
+    sha256: string;
+    expiresAt: number;
+  } | null> {
+    const sender = webContents.fromId(contentsId);
+    if (!sender || sender.isDestroyed()) throw new Error("The application window is no longer available");
+    const owner = requireOwnerWindow(sender);
+    let selection;
+    try {
+      selection = await dialog.showOpenDialog(owner, {
+        title: "Choose a file to upload",
+        properties: ["openFile"],
+      });
+    } catch {
+      throw new SessionWorkbenchBoundaryError("Could not open the native upload picker");
+    }
+    const filePath = selection.filePaths[0];
+    if (selection.canceled || !filePath) return null;
+    let selected;
+    try {
+      selected = await readBoundedRegularFile(filePath, {
+        label: "Upload source",
+        maxBytes: SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+      });
+    } catch {
+      throw new SessionWorkbenchBoundaryError("Could not read the selected upload file");
+    }
+    const sha256 = createHash("sha256").update(selected.data).digest("hex");
+    const suggestedBasename = safeArtifactFileName(basename(filePath));
+    const metadata = this.sessionArtifacts.store({
+      scope,
+      data: selected.data,
+      mediaType: "application/octet-stream",
+      suggestedBasename,
+      ttlMilliseconds: SESSION_ACTION_PLAN_TTL_MS,
+      ownership: "take",
+    });
+    return {
+      handle: metadata.handle,
+      suggestedBasename,
+      size: metadata.size,
+      sha256,
+      expiresAt: Date.parse(metadata.expiresAt),
+    };
+  }
+
+  private pruneSessionPlans(context: WindowContext): void {
+    const now = this.now();
+    for (const [token, plan] of context.sessionPlans) {
+      if (plan.expiresAt > now) continue;
+      context.sessionPlans.delete(token);
+      const timer = context.sessionPlanTimers.get(token);
+      if (timer) clearTimeout(timer);
+      context.sessionPlanTimers.delete(token);
+      if (plan.artifactHandle && plan.artifactScope) {
+        try {
+          this.sessionArtifacts.remove(plan.artifactScope, plan.artifactHandle);
+        } catch {
+          // A newer session binding may already have revoked this capability.
+        }
+      }
     }
   }
 
@@ -2140,6 +3030,11 @@ export class ConnectionRegistry {
       delete context.activeTarget;
       context.beaconWatch = false;
       context.targetPlans.clear();
+      context.sessionPlans.clear();
+      context.sessionPlanAdmissions.clear();
+      for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
+      context.sessionPlanTimers.clear();
+      this.sessionArtifacts.removeOwner(contentsId);
 
       if (context.poolKey && context.poolKey !== poolKey) {
         const previousPoolKey = context.poolKey;
@@ -3725,6 +4620,184 @@ async function saveArtifact(owner: BrowserWindow, response: clientpb.Generate): 
   } finally {
     file.Data.fill(0);
   }
+}
+
+async function executeReviewedSessionAction(
+  client: SliverClientAdapter,
+  sessionId: string,
+  input: PrepareSessionDestructiveActionInput,
+  artifactData?: Buffer,
+): Promise<void> {
+  let response: { Response?: { Err?: string | undefined } | undefined } | undefined;
+  let registryBinary: Buffer | undefined;
+  try {
+    switch (input.actionId) {
+      case "session.filesystem.cp":
+        response = await client.cpSession(sessionId, input.source, input.destination);
+        break;
+      case "session.filesystem.mv":
+        response = await client.mvSession(sessionId, input.source, input.destination);
+        break;
+      case "session.filesystem.rm":
+        response = await client.rmSession(sessionId, input.path, input.recursive, input.force);
+        break;
+      case "session.filesystem.chmod-recursive":
+        response = await client.chmodSession(sessionId, input.path, input.fileMode, true);
+        break;
+      case "session.filesystem.chown-recursive":
+        response = await client.chownSession(sessionId, input.path, input.uid, input.gid, true);
+        break;
+      case "session.filesystem.memfiles.rm":
+        response = await client.memfilesRmSession(sessionId, input.fd);
+        break;
+      case "session.filesystem.upload-overwrite":
+        if (!artifactData) throw new Error("The reviewed upload bytes are no longer available");
+        if (input.isDirectory) throw new Error("Directory uploads are not supported by the bounded unary transfer path");
+        response = await client.uploadSession(sessionId, input.remotePath, artifactData, {
+          isIOC: input.isIOC,
+          isDirectory: false,
+          overwrite: true,
+        });
+        break;
+      case "session.process.terminate":
+        response = await client.terminateSessionProcess(sessionId, input.pid, input.force);
+        break;
+      case "session.service.stop":
+        response = await client.stopServiceSession(sessionId, input.name);
+        break;
+      case "session.registry.write": {
+        const value = sessionRegistryWriteValue(input.value);
+        if (value.type === "binary") registryBinary = value.value;
+        response = await client.registryWriteSession(sessionId, input.hive, input.path, input.key, value);
+        break;
+      }
+      case "session.registry.create-key":
+        response = await client.registryCreateKeySession(sessionId, input.hive, input.path, input.key);
+        break;
+      case "session.registry.delete-key":
+        response = await client.registryDeleteKeySession(sessionId, input.hive, input.path, input.key);
+        break;
+      case "session.filesystem.edit-text-overwrite":
+      case "session.filesystem.patch-hex":
+        throw new Error("Conflict-aware file editing is not yet available in the session-first M2 tranche");
+    }
+    const targetError = response?.Response?.Err?.trim();
+    if (targetError) throw new Error(targetError);
+  } finally {
+    registryBinary?.fill(0);
+  }
+}
+
+function sessionRegistryWriteValue(value: SessionRegistryWriteValue):
+  | { type: "string"; value: string }
+  | { type: "binary"; value: Buffer }
+  | { type: "dword"; value: number }
+  | { type: "qword"; value: string } {
+  return value.type === "binary" ? { type: "binary", value: Buffer.from(value.hex, "hex") } : value;
+}
+
+function sessionActionPayloadDigest(
+  input: PrepareSessionDestructiveActionInput,
+  artifact?: SessionDestructiveActionPlan["artifact"],
+  resourceFingerprint?: string,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      input,
+      ...(artifact ? { artifact } : {}),
+      ...(resourceFingerprint ? { resourceFingerprint } : {}),
+    }))
+    .digest("hex");
+}
+
+function exactSessionProcessIdentity(
+  processes: readonly {
+    Pid: number;
+    Ppid: number;
+    Executable: string;
+    Owner: string;
+    Architecture: string;
+    CmdLine: string[];
+  }[],
+  pid: number,
+): {
+  resource: NonNullable<SessionDestructiveActionPlan["resource"]>;
+  fingerprint: string;
+} | undefined {
+  const matches = processes.filter((process) => process.Pid === pid);
+  if (matches.length !== 1) return undefined;
+  const process = matches[0]!;
+  const canonical = {
+    pid,
+    parentPid: Number.isSafeInteger(process.Ppid) && process.Ppid >= 0 ? process.Ppid : 0,
+    executable: boundedText(process.Executable, 4_096),
+    owner: boundedText(process.Owner, 4_096),
+    architecture: boundedText(process.Architecture, 128),
+    commandLine: boundedList(process.CmdLine.map((part) => boundedText(part, 4_096)), 64),
+  };
+  return {
+    resource: {
+      kind: "process",
+      pid: canonical.pid,
+      parentPid: canonical.parentPid,
+      executable: canonical.executable,
+      owner: canonical.owner,
+      architecture: canonical.architecture,
+    },
+    fingerprint: createHash("sha256").update(JSON.stringify(canonical)).digest("hex"),
+  };
+}
+
+function sessionActionWarning(input: PrepareSessionDestructiveActionInput): string {
+  switch (input.actionId) {
+    case "session.filesystem.cp":
+      return "Copying may replace or truncate an existing destination file.";
+    case "session.filesystem.mv":
+      return "Moving may replace an existing destination on the remote operating system.";
+    case "session.filesystem.rm":
+      return input.recursive
+        ? "This recursively removes the selected remote path and cannot be undone."
+        : "This removes the selected remote path and cannot be undone.";
+    case "session.filesystem.chmod-recursive":
+    case "session.filesystem.chown-recursive":
+      return "This recursively changes remote file metadata for every reachable child.";
+    case "session.filesystem.memfiles.rm":
+      return "This removes the selected in-memory file descriptor from the remote implant.";
+    case "session.filesystem.upload-overwrite":
+      return "This overwrites the remote destination with the exact file reviewed in this one-use plan.";
+    case "session.filesystem.edit-text-overwrite":
+    case "session.filesystem.patch-hex":
+      return "This replaces remote file content after a best-effort digest preflight; the upstream RPC is not atomic.";
+    case "session.process.terminate":
+      return `This terminates remote process ${input.pid}${input.force ? " forcibly" : ""}.`;
+    case "session.service.stop":
+      return `This stops the Windows service '${input.name}'.`;
+    case "session.registry.write":
+      return "This overwrites a Windows registry value.";
+    case "session.registry.create-key":
+      return "This creates a Windows registry key on the remote host.";
+    case "session.registry.delete-key":
+      return "This deletes a Windows registry key and cannot be undone.";
+  }
+}
+
+function sessionActionOutcome(
+  plan: InternalSessionActionPlan,
+  status: SessionDestructiveActionOutcome["status"],
+  message: string,
+): SessionDestructiveActionOutcome {
+  return {
+    actionId: plan.input.actionId,
+    status,
+    message: boundedText(message, MAX_SUMMARY_TEXT),
+    payloadDigest: plan.payloadDigest,
+  };
+}
+
+function sessionPlatform(value: string): SessionTargetPlatform {
+  const normalized = value.trim().toLocaleLowerCase();
+  if (normalized === "windows" || normalized === "linux" || normalized === "darwin") return normalized;
+  throw new Error("The session operating system is not supported by the M2 workbench");
 }
 
 function validateListener(input: ListenerInput): void {

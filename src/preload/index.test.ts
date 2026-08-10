@@ -55,6 +55,14 @@ const invokeArguments = {
   listBeaconTasks: [{}],
   getBeaconTask: [{ taskId: "task_1" }],
   cancelBeaconTask: [{ taskId: "task_1" }],
+  runSessionWorkbench: [{ operationId: "session.filesystem.pwd" }],
+  prepareSessionDestructiveAction: [{
+    actionId: "session.filesystem.rm",
+    path: "/tmp/m2-test",
+    recursive: false,
+    force: false,
+  }],
+  executeSessionDestructiveActionPlan: [{ token: "8e577480-5dc2-4dde-aa58-23c8f1770627" }],
 } satisfies InvokeArgumentsByMethod;
 
 const electronMocks = vi.hoisted(() => ({

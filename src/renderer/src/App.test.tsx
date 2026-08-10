@@ -10,6 +10,7 @@ import type {
   SliverDesktopAPI,
   SliverSnapshot,
 } from "../../shared/contracts";
+import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 
 beforeAll(() => {
@@ -18,10 +19,15 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   });
+  Object.defineProperty(Element.prototype, "getAnimations", {
+    configurable: true,
+    value: () => [],
+  });
 });
 
 afterAll(() => {
   vi.unstubAllGlobals();
+  Reflect.deleteProperty(Element.prototype, "getAnimations");
 });
 
 afterEach(() => {
@@ -82,6 +88,9 @@ function installSliverAPI(
     startListener: vi.fn(failedOperation),
     executeStopPlan: vi.fn(failedOperation),
     executeTargetActionPlan: vi.fn(failedOperation),
+    executeSessionDestructiveActionPlan: vi.fn(failedOperation),
+    prepareSessionDestructiveAction: vi.fn(failedOperation),
+    runSessionWorkbench: vi.fn(failedOperation),
     submitTargetOperation: vi.fn(failedOperation),
   };
 
@@ -496,6 +505,91 @@ describe("Sidebar navigation", () => {
     expect(onViewChange).toHaveBeenCalledWith("sessions");
     await user.click(beaconsItem);
     expect(onViewChange).toHaveBeenCalledWith("beacons");
+  });
+
+  it("keeps Sessions current while an exact row opens the dedicated session workspace", async () => {
+    const user = userEvent.setup();
+    const session: SessionSummary = {
+      mode: "session",
+      id: "session-1",
+      name: "payments",
+      hostname: "prod-mac",
+      hostId: "host-1",
+      username: "alice",
+      os: "darwin",
+      arch: "arm64",
+      transport: "mtls",
+      remoteAddress: "127.0.0.1:4444",
+      activeC2: "mtls://127.0.0.1:4444",
+      executable: "/tmp/agent",
+      version: "1.7.6",
+      locale: "en-US",
+      integrity: "High",
+      burned: false,
+      pid: 4001,
+      liveness: "active",
+    };
+    const ref: TargetRef = {
+      mode: "session",
+      id: session.id,
+      backendEpoch: 7,
+      domainRevision: 3,
+      fingerprint: "a".repeat(64),
+    };
+    const initial = disconnectedSnapshot();
+    initial.connection = {
+      status: "connected",
+      server: "127.0.0.1:53137",
+      operator: "alice",
+      configName: "M2 test",
+      version: "1.7.6",
+      epoch: 7,
+      incarnation: 4,
+    };
+    initial.sessions = [session];
+    initial.domains.sessions = {
+      status: "ready",
+      revision: 3,
+      items: [session],
+      page: { limit: 500, total: 1, truncated: false },
+    };
+    initial.targetContext.selectableTargets = [ref];
+    const selected: SliverSnapshot = {
+      ...initial,
+      targetContext: {
+        status: "selected",
+        activeTarget: ref,
+        activeTargetSummary: session,
+        selectableTargets: [ref],
+        capabilities: [
+          { id: "target.ping", available: true },
+          { id: "target.rename", available: true },
+          { id: "target.environment.write", available: true },
+          { id: "target.terminate", available: true },
+          { id: "session.close", available: true },
+        ],
+        beaconWatch: false,
+      },
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial);
+    vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: selected });
+    vi.mocked(api.listTargetOperations).mockResolvedValue({
+      ok: true,
+      value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument());
+    const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
+    await user.click(within(interact).getByRole("row", { name: "Sessions" }));
+    await user.click(await screen.findByRole("row", { name: /payments/i }));
+
+    expect(await screen.findByRole("heading", { name: "payments" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Live sessions" })).not.toBeInTheDocument();
+    expect(within(interact).getByRole("row", { name: "Sessions" })).toHaveAttribute("data-current", "true");
+    await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
+    expect(await screen.findByRole("heading", { name: "Live sessions" })).toBeInTheDocument();
   });
 
   it("keeps the Interact section actionable in the mobile sheet", async () => {

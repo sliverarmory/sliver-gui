@@ -352,6 +352,65 @@ describe("trusted Electron IPC boundary", () => {
     })).toThrow(/invalid target catalog page request/i);
     expect(submitTargetOperation).toHaveBeenCalledOnce();
   });
+
+  it("routes only closed session-workbench operations and main-owned action plans", async () => {
+    const runSessionWorkbench = vi.fn(async () => ({ ok: false as const, error: "workbench probe" }));
+    const prepareSessionDestructiveAction = vi.fn(async () => ({ ok: false as const, error: "review probe" }));
+    const executeSessionDestructiveActionPlan = vi.fn(async () => ({ ok: false as const, error: "execute probe" }));
+    registerIpcHandlers(
+      registryMock({
+        runSessionWorkbench,
+        prepareSessionDestructiveAction,
+        executeSessionDestructiveActionPlan,
+      }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event, sender } = invokeEvent("http://127.0.0.1:5173/sessions", 77);
+    const planToken = "8e577480-5dc2-4dde-aa58-23c8f1770627";
+
+    await electronMocks.handlers.get(IPC.runSessionWorkbench)?.(event, {
+      operationId: "session.filesystem.ls",
+      path: "/tmp",
+      limit: 100,
+    });
+    await electronMocks.handlers.get(IPC.prepareSessionDestructiveAction)?.(event, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/reviewed",
+      recursive: false,
+      force: false,
+    });
+    await electronMocks.handlers.get(IPC.executeSessionDestructiveActionPlan)?.(event, { token: planToken });
+
+    expect(runSessionWorkbench).toHaveBeenCalledWith(sender, {
+      operationId: "session.filesystem.ls",
+      path: "/tmp",
+      limit: 100,
+    });
+    expect(prepareSessionDestructiveAction).toHaveBeenCalledWith(77, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/reviewed",
+      recursive: false,
+      force: false,
+    });
+    expect(executeSessionDestructiveActionPlan).toHaveBeenCalledWith(77, planToken);
+
+    expect(() => electronMocks.handlers.get(IPC.runSessionWorkbench)?.(event, {
+      operationId: "session.shell.execute",
+      command: "whoami",
+    })).toThrow(/unknown session workbench operation/i);
+    expect(() => electronMocks.handlers.get(IPC.runSessionWorkbench)?.(event, {
+      operationId: "session.filesystem.pwd",
+      sessionId: "attacker-selected-session",
+    })).toThrow(/unexpected session input field/i);
+    expect(() => electronMocks.handlers.get(IPC.prepareSessionDestructiveAction)?.(event, {
+      actionId: "sessions.kill-all",
+    })).toThrow(/unknown session destructive action/i);
+    expect(() => electronMocks.handlers.get(IPC.executeSessionDestructiveActionPlan)?.(event, {
+      token: planToken,
+      targetId: "session_1",
+    })).toThrow(/unexpected session input field/i);
+  });
 });
 
 function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnectionRegistry {
@@ -393,6 +452,9 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     listBeaconTasks: vi.fn(unavailable),
     getBeaconTask: vi.fn(unavailable),
     cancelBeaconTask: vi.fn(unavailable),
+    runSessionWorkbench: vi.fn(unavailable),
+    prepareSessionDestructiveAction: vi.fn(unavailable),
+    executeSessionDestructiveActionPlan: vi.fn(unavailable),
     ...overrides,
   };
 }

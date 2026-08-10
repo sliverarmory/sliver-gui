@@ -4,7 +4,22 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 const IP_LITERAL_TLS_AUTHORITY = "sliver";
 
-export const RPC_MESSAGE_DOMAINS = ["control", "inventory", "task-content", "artifact"] as const;
+/** Maximum decoded payload accepted by the bounded endpoint-workbench helpers. */
+export const WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES = 64 * MiB;
+/**
+ * Leave room for gzip expansion overhead, protobuf length prefixes, request
+ * metadata, and response metadata without granting the workbench the legacy
+ * 256 MiB artifact allocation.
+ */
+export const WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES = 66 * MiB;
+
+export const RPC_MESSAGE_DOMAINS = [
+  "control",
+  "inventory",
+  "task-content",
+  "workbench-artifact",
+  "artifact",
+] as const;
 export type RpcMessageDomain = (typeof RPC_MESSAGE_DOMAINS)[number];
 
 /**
@@ -28,6 +43,13 @@ export const RPC_MESSAGE_BUDGETS = Object.freeze({
   "task-content": Object.freeze({
     maxSendBytes: 1 * MiB,
     maxReceiveBytes: 80 * KiB,
+  }),
+  // M2 endpoint-workbench binary RPCs are hard-capped at 64 MiB decoded. Keep
+  // them isolated so neither control traffic nor these helpers inherit the
+  // broader legacy InteractiveSession/InteractiveBeacon artifact allowance.
+  "workbench-artifact": Object.freeze({
+    maxSendBytes: WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES,
+    maxReceiveBytes: WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES,
   }),
   artifact: Object.freeze({
     maxSendBytes: 256 * MiB,

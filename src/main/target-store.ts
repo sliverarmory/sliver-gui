@@ -420,6 +420,8 @@ function normalizeTargetIdentity(
   const lastCheckinAt = unixSecondsToIso(record.LastCheckin);
   const reconnectIntervalMs = nanosecondsToMilliseconds(record.ReconnectInterval);
   const pid = safePid(record.PID);
+  const uid = cleanText(record.UID, MAX_ID_TEXT);
+  const gid = cleanText(record.GID, MAX_ID_TEXT);
 
   return {
     id,
@@ -427,6 +429,8 @@ function normalizeTargetIdentity(
     hostname: cleanText(record.Hostname, MAX_SUMMARY_TEXT),
     hostId: cleanText(record.UUID, MAX_ID_TEXT),
     username: cleanText(record.Username, MAX_SUMMARY_TEXT),
+    ...(uid ? { uid } : {}),
+    ...(gid ? { gid } : {}),
     os: cleanText(record.OS, MAX_PLATFORM_TEXT).toLowerCase() || "unknown",
     arch: cleanText(record.Arch, MAX_PLATFORM_TEXT).toLowerCase() || "unknown",
     transport: normalizeTransport(record.Transport, record.ActiveC2),

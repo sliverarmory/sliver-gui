@@ -25,6 +25,14 @@ import type {
   TargetRef,
   WindowTargetContext,
 } from "./target-contracts.js";
+import type {
+  ExecuteSessionDestructiveActionPlanInput,
+  PrepareSessionDestructiveActionInput,
+  SessionDestructiveActionOutcome,
+  SessionDestructiveActionPreparation,
+  SessionWorkbenchInput,
+  SessionWorkbenchInvocationResult,
+} from "./session-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -61,6 +69,9 @@ export const IPC_INVOKE = {
   listBeaconTasks: "sliver:beacon-task:list",
   getBeaconTask: "sliver:beacon-task:get",
   cancelBeaconTask: "sliver:beacon-task:cancel",
+  runSessionWorkbench: "sliver:session-workbench:run",
+  prepareSessionDestructiveAction: "sliver:session-workbench:prepare-action",
+  executeSessionDestructiveActionPlan: "sliver:session-workbench:execute-action-plan",
 } as const;
 
 export const IPC_EVENTS = {
@@ -573,6 +584,18 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.cancelBeaconTask]: {
     args: [input: CancelBeaconTaskInput];
     result: OperationResult<BeaconTaskSummary>;
+  };
+  [IPC.runSessionWorkbench]: {
+    args: [input: SessionWorkbenchInput];
+    result: OperationResult<SessionWorkbenchInvocationResult>;
+  };
+  [IPC.prepareSessionDestructiveAction]: {
+    args: [input: PrepareSessionDestructiveActionInput];
+    result: OperationResult<SessionDestructiveActionPreparation>;
+  };
+  [IPC.executeSessionDestructiveActionPlan]: {
+    args: [input: ExecuteSessionDestructiveActionPlanInput];
+    result: OperationResult<SessionDestructiveActionOutcome>;
   };
 }>;
 

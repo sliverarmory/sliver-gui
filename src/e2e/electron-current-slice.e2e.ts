@@ -15,6 +15,7 @@ const TOKEN_SECRET = "FAKE_TOKEN_M0_DO_NOT_RENDER";
 const EVENT_SECRET = "FAKE_EVENT_SECRET_M0_DO_NOT_RENDER";
 const TARGET_SECRET = "FAKE_TARGET_SECRET_M1_DO_NOT_RENDER";
 const TASK_SECRET = "FAKE_TASK_REQUEST_SECRET_M1_DO_NOT_RENDER";
+const M2_ENV_SECRET = "FAKE_M2_ENV_SECRET_DO_NOT_RENDER";
 
 test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 90_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -109,6 +110,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       EVENT_SECRET,
       TARGET_SECRET,
       TASK_SECRET,
+      M2_ENV_SECRET,
       selectedConfigPath,
     ]) {
       assert.ok(!observableText.includes(forbidden), `renderer-visible text exposed ${forbidden}`);
@@ -212,6 +214,7 @@ async function verifyM1TargetsAndOperations(
   const sessionRef = requireTargetRef(initial, "session");
   await page.getByRole("row", { name: /m1-session/i }).click();
   await waitForSnapshot(page, (snapshot) => snapshot.targetContext.activeTarget?.id === sessionRef.id);
+  await verifyM2SessionWorkspace(electronApplication, page);
 
   const sessionPing = requireOperation(await invokeSliver(page, "submitTargetOperation", {
     operationId: "target.ping",
@@ -234,6 +237,8 @@ async function verifyM1TargetsAndOperations(
   assert.equal(sessionMutation.state, "completed");
   assert.equal((await readFakeState(electronApplication)).environment["SLIVER_GUI_M1_E2E"], "session-value");
 
+  await verifyM2SessionActivityAndBack(page);
+
   // Moving through unrelated renderer views must not mutate main-owned target
   // selection or its epoch-bound reference.
   await page.locator('[aria-label="Generate"]:visible').click();
@@ -244,7 +249,7 @@ async function verifyM1TargetsAndOperations(
 
   await page.locator('[aria-label="Sessions"]:visible').click();
   await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
-  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  await page.locator('[aria-label="Sliver sessions"]').getByText("m1-session", { exact: true }).waitFor();
   const beaconRef = requireTargetRef(await rendererSnapshot(page), "beacon");
   await page.locator('[aria-label="Beacons"]:visible').click();
   await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
@@ -441,6 +446,11 @@ async function verifyM1TargetsAndOperations(
     assert.equal(firstHistory.ok, true);
     assert.ok(!firstHistory.value?.items.some((operation) => operation.requestId === secondPing.requestId));
 
+    await secondPage.locator('[aria-label="Sessions"]:visible').click();
+    await secondPage.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+    await secondPage.getByRole("button", { name: "Interact with m1-session", exact: true }).click();
+    await secondPage.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+
     const closePlan = await invokeSliver(secondPage, "prepareTargetAction", { actionId: "session.close" });
     assert.equal(closePlan.ok, true);
     assert.equal(closePlan.value?.impact.targets.length, 1);
@@ -448,8 +458,6 @@ async function verifyM1TargetsAndOperations(
     assert.match(closePlan.value?.impact.warning ?? "", /interactive connection without killing the remote process/i);
     assert.ok(closePlan.value?.token, "destructive action review must issue a one-use confirmation token");
 
-    await secondPage.locator('[aria-label="Sessions"]:visible').click();
-    await secondPage.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
     await secondPage.getByRole("button", { name: "Close session", exact: true }).click();
     const closeReview = secondPage.getByRole("dialog", { name: /review close session/i });
     await closeReview.waitFor();
@@ -465,6 +473,7 @@ async function verifyM1TargetsAndOperations(
     });
     assert.equal(closeResult.ok, true);
     assert.equal(closeResult.value?.outcomes[0]?.status, "succeeded");
+    await secondPage.getByRole("heading", { name: "Session workspace unavailable", exact: true }).waitFor();
     const replay = await invokeSliver(secondPage, "executeTargetActionPlan", {
       token: closePlan.value!.token,
     });
@@ -474,6 +483,101 @@ async function verifyM1TargetsAndOperations(
   }
   await page.locator('[aria-label="Jobs & listeners"]:visible').click();
   await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+}
+
+async function verifyM2SessionWorkspace(
+  electronApplication: ElectronApplication,
+  page: Page,
+): Promise<void> {
+  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  await page.getByRole("tablist", { name: "Session interaction sections" }).waitFor();
+  assert.equal(
+    await page.getByText("Selected session", { exact: true }).count(),
+    0,
+    "session row activation must replace the legacy selected-session card with a dedicated route",
+  );
+
+  await page.getByRole("heading", { name: "Identity", exact: true }).waitFor();
+  await page.getByText("m1-session-host", { exact: true }).first().waitFor();
+  await page.getByRole("heading", { name: "Network", exact: true }).waitFor();
+  await page.getByText("en0", { exact: true }).waitFor();
+  await page.getByText("ESTABLISHED", { exact: true }).waitFor();
+  await page.getByText("Screenshot unavailable", { exact: true }).waitFor();
+
+  await page.getByRole("tab", { name: "Files", exact: true }).click();
+  const filesGrid = page.getByRole("grid", { name: "Files in /Users/e2e/workspace" });
+  await filesGrid.waitFor();
+  await filesGrid.getByText("notes.txt", { exact: true }).waitFor();
+  await filesGrid.getByText("projects", { exact: true }).waitFor();
+  await page.getByLabel("New folder name").fill("m2-e2e-folder");
+  await page.getByRole("button", { name: "New folder", exact: true }).click();
+  const createdFolderRow = filesGrid.getByRole("row").filter({ hasText: "m2-e2e-folder" });
+  await createdFolderRow.waitFor();
+  await createdFolderRow.getByRole("button", { name: "Delete m2-e2e-folder", exact: true }).click();
+  const deleteDialog = page.getByRole("alertdialog", { name: "Delete this remote item?", exact: true });
+  await deleteDialog.waitFor();
+  const reviewText = await deleteDialog.innerText();
+  assert.ok(reviewText.includes("/Users/e2e/workspace/m2-e2e-folder"));
+  assert.match(reviewText, /backend.*payload change invalidates it/i);
+  await deleteDialog.getByRole("button", { name: "Confirm action", exact: true }).click();
+  await deleteDialog.waitFor({ state: "hidden" });
+  await createdFolderRow.waitFor({ state: "hidden" });
+
+  await page.getByRole("tab", { name: "Processes", exact: true }).click();
+  const processesGrid = page.getByRole("grid", { name: "Session processes" });
+  await processesGrid.waitFor();
+  await processesGrid.getByText("launchd", { exact: true }).waitFor();
+  await processesGrid.getByText("sliver-m2-session", { exact: true }).waitFor();
+  await page.getByRole("searchbox", { name: "Filter processes" }).fill("zsh");
+  await processesGrid.getByText("zsh", { exact: true }).waitFor();
+  assert.equal(await processesGrid.getByText("launchd", { exact: true }).count(), 0);
+
+  await page.getByRole("tab", { name: "Environment", exact: true }).click();
+  const environmentGrid = page.getByRole("grid", { name: "Session environment variables" });
+  await environmentGrid.waitFor();
+  await environmentGrid.getByText("HOME", { exact: true }).waitFor();
+  await environmentGrid.getByText("/Users/e2e", { exact: true }).waitFor();
+  const sensitiveRow = environmentGrid.getByRole("row").filter({ hasText: "SLIVER_GUI_M2_API_TOKEN" });
+  await sensitiveRow.waitFor();
+  await sensitiveRow.getByText("Sensitive", { exact: true }).waitFor();
+  assert.equal(await page.getByText(M2_ENV_SECRET, { exact: true }).count(), 0);
+  await sensitiveRow.getByRole("button", { name: "Reveal", exact: true }).click();
+  await sensitiveRow.getByText(M2_ENV_SECRET, { exact: true }).waitFor();
+
+  await page.getByRole("tab", { name: "Overview", exact: true }).click();
+  assert.ok(!(await page.locator("body").innerText()).includes(M2_ENV_SECRET));
+  const state = await readFakeState(electronApplication);
+  for (const method of [
+    "ifconfigSession",
+    "netstatSession",
+    "pwdSession",
+    "lsSession",
+    "mkdirSession",
+    "rmSession",
+    "psSession",
+    "listEnvSession",
+    "revealEnvSession",
+  ]) {
+    assert.ok(state.methods.includes(method), `expected the M2 workbench to call ${method}`);
+  }
+  assert.ok(!state.methods.includes("currentTokenOwnerSession"), "Darwin must quarantine the Windows-only token owner RPC");
+  assert.ok(!state.methods.includes("screenshotSession"), "Darwin must quarantine the unsupported screenshot RPC");
+}
+
+async function verifyM2SessionActivityAndBack(page: Page): Promise<void> {
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  const activityGrid = page.getByRole("grid", { name: "Session operation activity" });
+  await activityGrid.waitFor();
+  await activityGrid.getByText("Ping", { exact: true }).waitFor();
+  await activityGrid.getByText("Set environment variable", { exact: true }).waitFor();
+  await activityGrid.getByText("Completed", { exact: true }).first().waitFor();
+  assert.ok(!(await page.locator("body").innerText()).includes(M2_ENV_SECRET));
+
+  await page.getByRole("button", { name: "Back to live sessions", exact: true }).click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+  await page.locator('[aria-label="Sliver sessions"]').getByText("m1-session", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("tablist", { name: "Session interaction sections" }).count(), 0);
+  assert.equal(await page.getByText("Selected session", { exact: true }).count(), 0);
 }
 
 async function rendererSnapshot(page: Page): Promise<SliverSnapshot> {

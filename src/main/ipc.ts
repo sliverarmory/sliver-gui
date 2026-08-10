@@ -22,6 +22,11 @@ import {
   parseTargetOperationInput,
 } from "../shared/operation-contracts.js";
 import {
+  parseExecuteSessionDestructiveActionPlanInput,
+  parsePrepareSessionDestructiveActionInput,
+  parseSessionWorkbenchInput,
+} from "../shared/session-contracts.js";
+import {
   DESTRUCTIVE_TARGET_ACTION_IDS,
   MAX_TARGET_CATALOG_CURSOR_LENGTH,
   MAX_TARGET_CATALOG_PAGE_SIZE,
@@ -78,6 +83,9 @@ export type IpcConnectionRegistry = Pick<
   | "listBeaconTasks"
   | "getBeaconTask"
   | "cancelBeaconTask"
+  | "runSessionWorkbench"
+  | "prepareSessionDestructiveAction"
+  | "executeSessionDestructiveActionPlan"
 >;
 
 const IMPLANT_TYPES = ["session", "beacon"] as const;
@@ -200,6 +208,21 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.cancelBeaconTask, rendererUrl, parseCancelBeaconTaskArguments, ({ contentsId }, input) =>
     registry.cancelBeaconTask(contentsId, input.taskId),
+  );
+  handleTrusted(IPC.runSessionWorkbench, rendererUrl, parseSessionWorkbenchArguments, ({ sender }, input) =>
+    registry.runSessionWorkbench(sender, input),
+  );
+  handleTrusted(
+    IPC.prepareSessionDestructiveAction,
+    rendererUrl,
+    parsePrepareSessionDestructiveActionArguments,
+    ({ contentsId }, input) => registry.prepareSessionDestructiveAction(contentsId, input),
+  );
+  handleTrusted(
+    IPC.executeSessionDestructiveActionPlan,
+    rendererUrl,
+    parseExecuteSessionDestructiveActionPlanArguments,
+    ({ contentsId }, input) => registry.executeSessionDestructiveActionPlan(contentsId, input.token),
   );
 }
 
@@ -383,6 +406,25 @@ function parseBeaconTaskArguments(args: readonly unknown[]): [input: ReturnType<
 function parseCancelBeaconTaskArguments(args: readonly unknown[]): [input: ReturnType<typeof parseCancelBeaconTaskInput>] {
   requireArgumentCount(args, 1, "beacon task cancellation");
   return [parseCancelBeaconTaskInput(args[0])];
+}
+
+function parseSessionWorkbenchArguments(args: readonly unknown[]): [input: ReturnType<typeof parseSessionWorkbenchInput>] {
+  requireArgumentCount(args, 1, "session workbench input");
+  return [parseSessionWorkbenchInput(args[0])];
+}
+
+function parsePrepareSessionDestructiveActionArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parsePrepareSessionDestructiveActionInput>] {
+  requireArgumentCount(args, 1, "session destructive action input");
+  return [parsePrepareSessionDestructiveActionInput(args[0])];
+}
+
+function parseExecuteSessionDestructiveActionPlanArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseExecuteSessionDestructiveActionPlanInput>] {
+  requireArgumentCount(args, 1, "session destructive action execution");
+  return [parseExecuteSessionDestructiveActionPlanInput(args[0])];
 }
 
 function parseListenerArguments(args: readonly unknown[]): [input: ListenerInput] {

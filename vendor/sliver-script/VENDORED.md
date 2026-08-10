@@ -69,7 +69,10 @@ command.
 
 The current handwritten overlay replaces the former generic approximately
 2 GiB gRPC allocation limit with bounded control, inventory, task-content,
-and artifact channels. It also supplies a stable DNS-form TLS authority for direct
+workbench-artifact, and artifact channels. The session workbench's binary RPCs
+have a dedicated 66 MiB wire allocation and a separately enforced 64 MiB
+decoded-payload ceiling; they do not inherit the legacy 256 MiB artifact
+channel. The overlay also supplies a stable DNS-form TLS authority for direct
 IP-literal targets, because Node TLS does not accept an IP literal as SNI, and
 preserves the configured DNS authority when traffic traverses the loopback
 proxy. This changes authority/SNI selection only; the configured Sliver CA,
@@ -85,6 +88,17 @@ are reviewed named methods, not an arbitrary RPC dispatcher; the Electron
 main-process adapter and operation registry apply a narrower closed allowlist
 before renderer input can reach them. The packaged RPC domains, M1 allowlist,
 and timeout rules are documented in `docs/rpc-message-budgets.md`.
+
+The session-first M2 overlay adds named session wrappers for identity and
+environment reads, network inventory, bounded filesystem operations and
+transfers, process inventory and dumps, Windows service operations, and Windows
+registry operations. Binary screenshot, download, upload, process-dump, and
+registry-hive calls use the isolated workbench-artifact channel and validate
+decoded payload sizes in the wrapper before main-process publication. These
+wrappers always construct their protobuf requests from typed parameters and a
+main-owned session ID; there is still no arbitrary method-name or request-object
+dispatcher. Beacon-mode M2 support has not landed and remains required before
+M2 can be complete.
 
 Packaged WireGuard operator transport and native-helper certification are
 deferred beyond M0; mTLS is the M0 packaged transport baseline. This does not

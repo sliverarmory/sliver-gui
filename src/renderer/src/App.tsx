@@ -23,10 +23,15 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { disconnectedSnapshot } from "../../shared/contracts";
 import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
+import type { SessionSummary } from "../../shared/target-contracts";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { OperationsPage } from "./pages/OperationsPage";
+import {
+  SessionWorkspacePage,
+  type SessionWorkspaceRoute,
+} from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
 type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts";
@@ -45,6 +50,7 @@ const interactNavItems = [
 export function App() {
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const [view, setView] = useState<ViewId>("operations");
+  const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [isConnecting, setIsConnecting] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(true);
@@ -225,6 +231,36 @@ export function App() {
       return next;
     });
   }, [compatibilityKey]);
+  const changeView = useCallback((nextView: ViewId) => {
+    setSessionWorkspaceRoute(undefined);
+    setView(nextView);
+  }, []);
+  const openSessionWorkspace = useCallback((session: SessionSummary) => {
+    const backendEpoch = snapshot.connection.epoch;
+    if (backendEpoch === undefined) {
+      toast.warning("Session changed", { description: "Reconnect and select the session again." });
+      return;
+    }
+    setSessionWorkspaceRoute({
+      sessionId: session.id,
+      backendEpoch,
+      connectionIncarnation: snapshot.connection.incarnation ?? 0,
+    });
+  }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
+
+  useEffect(() => {
+    if (!sessionWorkspaceRoute) return;
+    if (
+      !connected ||
+      snapshot.connection.epoch !== sessionWorkspaceRoute.backendEpoch ||
+      (snapshot.connection.incarnation ?? 0) !== sessionWorkspaceRoute.connectionIncarnation
+    ) setSessionWorkspaceRoute(undefined);
+  }, [
+    connected,
+    sessionWorkspaceRoute,
+    snapshot.connection.epoch,
+    snapshot.connection.incarnation,
+  ]);
 
   return (
     <Sidebar.Provider collapsible="icon" defaultOpen>
@@ -234,7 +270,7 @@ export function App() {
           view={view}
           onDisconnect={() => void disconnect()}
           onSwitchConfig={() => setIsConfigSelectorOpen(true)}
-          onViewChange={setView}
+          onViewChange={changeView}
         />
         <Sidebar.Rail />
       </Sidebar>
@@ -244,7 +280,7 @@ export function App() {
           view={view}
           onDisconnect={() => void disconnect()}
           onSwitchConfig={() => setIsConfigSelectorOpen(true)}
-          onViewChange={setView}
+          onViewChange={changeView}
         />
       </Sidebar.Mobile>
       <Sidebar.Main className="app-main min-w-0">
@@ -285,7 +321,28 @@ export function App() {
           {connected ? (
             <>
               {view === "operations" ? <OperationsPage snapshot={snapshot} /> : null}
-              {view === "sessions" ? <TargetsPage key="sessions" mode="session" snapshot={snapshot} onSnapshot={setSnapshot} /> : null}
+              {view === "sessions" ? (
+                sessionWorkspaceRoute ? (
+                  <SessionWorkspacePage
+                    key={`session-workspace:${sessionWorkspaceRoute.backendEpoch}:${sessionWorkspaceRoute.connectionIncarnation}:${sessionWorkspaceRoute.sessionId}`}
+                    route={sessionWorkspaceRoute}
+                    session={snapshot.targetContext.activeTargetSummary?.mode === "session"
+                      ? snapshot.targetContext.activeTargetSummary
+                      : null}
+                    snapshot={snapshot}
+                    onBack={() => setSessionWorkspaceRoute(undefined)}
+                    onSnapshot={setSnapshot}
+                  />
+                ) : (
+                  <TargetsPage
+                    key="sessions"
+                    mode="session"
+                    snapshot={snapshot}
+                    onOpenSession={openSessionWorkspace}
+                    onSnapshot={setSnapshot}
+                  />
+                )
+              ) : null}
               {view === "beacons" ? <TargetsPage key="beacons" mode="beacon" snapshot={snapshot} onSnapshot={setSnapshot} /> : null}
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
