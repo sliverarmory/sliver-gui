@@ -3,16 +3,19 @@ import { Button, Card, Chip, Dropdown, Label, Modal, Tooltip, toast } from "@her
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Heading } from "react-aria-components";
 import {
   faArrowsRotate,
   faBars,
   faBolt,
   faBoxesStacked,
   faCircleNodes,
+  faComputer,
   faEllipsisVertical,
   faLink,
   faLinkSlash,
   faPlus,
+  faSatellite,
   faSatelliteDish,
   faShieldHalved,
   faTriangleExclamation,
@@ -24,13 +27,19 @@ import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { OperationsPage } from "./pages/OperationsPage";
+import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "operations" | "generate" | "artifacts";
+type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts";
 
-const navItems = [
+const workspaceNavItems = [
   { id: "operations" as const, label: "Jobs & listeners", icon: faSatelliteDish },
   { id: "generate" as const, label: "Generate", icon: faBolt },
   { id: "artifacts" as const, label: "Builds & profiles", icon: faBoxesStacked },
+];
+
+const interactNavItems = [
+  { id: "sessions" as const, label: "Sessions", icon: faComputer },
+  { id: "beacons" as const, label: "Beacons", icon: faSatellite },
 ];
 
 export function App() {
@@ -276,6 +285,8 @@ export function App() {
           {connected ? (
             <>
               {view === "operations" ? <OperationsPage snapshot={snapshot} /> : null}
+              {view === "sessions" ? <TargetsPage key="sessions" mode="session" snapshot={snapshot} onSnapshot={setSnapshot} /> : null}
+              {view === "beacons" ? <TargetsPage key="beacons" mode="beacon" snapshot={snapshot} onSnapshot={setSnapshot} /> : null}
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
             </>
@@ -335,8 +346,13 @@ export function NavigationContent({
     setMobileOpen(false);
     onDisconnect();
   };
+  const navigate = (nextView: ViewId) => {
+    setMobileOpen(false);
+    onViewChange(nextView);
+  };
   return (
     <>
+      <Heading className="sr-only" slot="title">Sliver navigation</Heading>
       <Sidebar.Header className="brand-block">
         <div className="brand-mark" aria-hidden="true"><FontAwesomeIcon icon={faShieldHalved} /></div>
         <div className="min-w-0" data-sidebar="label">
@@ -348,7 +364,7 @@ export function NavigationContent({
         <Sidebar.Group>
           <Sidebar.GroupLabel>Workspace</Sidebar.GroupLabel>
           <Sidebar.Menu aria-label="Workspace navigation" showGuideLines={false}>
-            {navItems.map((item) => (
+            {workspaceNavItems.map((item) => (
               <Sidebar.MenuItem
                 key={item.id}
                 id={item.id}
@@ -357,12 +373,35 @@ export function NavigationContent({
                 isCurrent={view === item.id}
                 isDisabled={!connected}
                 tooltip={item.label}
-                onAction={() => onViewChange(item.id)}
+                onAction={() => navigate(item.id)}
               >
                 <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
                 <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
                 {item.id === "operations" && snapshot.jobs.length > 0 ? (
                   <Sidebar.MenuChip>{snapshot.jobs.length}</Sidebar.MenuChip>
+                ) : null}
+              </Sidebar.MenuItem>
+            ))}
+          </Sidebar.Menu>
+        </Sidebar.Group>
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>Interact</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label="Interact navigation" showGuideLines={false}>
+            {interactNavItems.map((item) => (
+              <Sidebar.MenuItem
+                key={item.id}
+                id={item.id}
+                aria-label={item.label}
+                textValue={item.label}
+                isCurrent={view === item.id}
+                isDisabled={!connected}
+                tooltip={item.label}
+                onAction={() => navigate(item.id)}
+              >
+                <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
+                <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
+                {(item.id === "sessions" ? snapshot.domains.sessions.page.total : snapshot.domains.beacons.page.total) > 0 ? (
+                  <Sidebar.MenuChip>{item.id === "sessions" ? snapshot.domains.sessions.page.total : snapshot.domains.beacons.page.total}</Sidebar.MenuChip>
                 ) : null}
               </Sidebar.MenuItem>
             ))}

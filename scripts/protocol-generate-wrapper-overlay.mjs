@@ -20,7 +20,12 @@ if (git(source, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
   throw new Error("Wrapper source has tracked changes");
 }
 
-const overlayFiles = ["src/client.ts", "src/index.ts", "src/messageBudget.ts"];
+const overlayFiles = [
+  "src/client.ts",
+  "src/index.ts",
+  "src/internal/timeout.ts",
+  "src/messageBudget.ts",
+];
 const workspace = await mkdtemp(join(tmpdir(), "sliver-wrapper-overlay-"));
 execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", source, workspace], { stdio: "inherit" });
 if (!git(workspace, ["cat-file", "-e", `${snapshot}^{commit}`], false)) {
@@ -48,16 +53,23 @@ const diff = spawnSync("git", ["diff", "--binary", "--", ...overlayFiles], {
   stdio: ["ignore", "pipe", "inherit"],
 });
 if (diff.status !== 0) throw new Error(`git diff failed with status ${diff.status}`);
-if (!diff.stdout.includes("src/messageBudget.ts")) {
-  throw new Error("Overlay patch did not capture the message-budget module");
+// A unified diff represents blank context lines with one leading space. Store
+// those as empty lines so this reviewed patch artifact itself remains clean
+// under `git diff --check`; `git apply` accepts the normalized form.
+const patchText = diff.stdout.replace(/^ $/gmu, "");
+const changedFiles = git(workspace, ["diff", "--name-only", "--", ...overlayFiles]).split("\n").filter(Boolean);
+for (const file of overlayFiles) {
+  if (!changedFiles.includes(file)) {
+    throw new Error(`Overlay patch did not capture reviewed file: ${file}`);
+  }
 }
 
 const output = join(repositoryRoot, "protocol/sliver-script-handwritten-overlay.patch");
 if (arguments_.check) {
   const checkedIn = await readFile(output, "utf8").catch(() => undefined);
-  if (checkedIn !== diff.stdout) throw new Error("Handwritten wrapper overlay patch drifted; regenerate it deliberately");
+  if (checkedIn !== patchText) throw new Error("Handwritten wrapper overlay patch drifted; regenerate it deliberately");
 } else {
-  await writeFile(output, diff.stdout, "utf8");
+  await writeFile(output, patchText, "utf8");
 }
 
 console.log(`Handwritten wrapper overlay ${arguments_.check ? "verified" : "generated"}: ${overlayFiles.join(", ")}`);

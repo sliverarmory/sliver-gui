@@ -14,6 +14,23 @@ import {
   type RemoveSavedConfigInput,
   type SaveProfileInput,
 } from "../shared/contracts.js";
+import {
+  parseCancelBeaconTaskInput,
+  parseCancelTargetOperationInput,
+  parseGetBeaconTaskInput,
+  parseOperationPageRequest,
+  parseTargetOperationInput,
+} from "../shared/operation-contracts.js";
+import {
+  DESTRUCTIVE_TARGET_ACTION_IDS,
+  MAX_TARGET_CATALOG_CURSOR_LENGTH,
+  MAX_TARGET_CATALOG_PAGE_SIZE,
+  MAX_TARGET_CATALOG_QUERY_LENGTH,
+  type ExecuteTargetActionPlanInput,
+  type PrepareTargetActionInput,
+  type TargetCatalogPageRequest,
+  type TargetRef,
+} from "../shared/target-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import { isTrustedRendererUrl } from "./security.js";
 
@@ -48,6 +65,19 @@ export type IpcConnectionRegistry = Pick<
   | "setStagedBuilds"
   | "saveProfile"
   | "deleteProfile"
+  | "listTargets"
+  | "selectTarget"
+  | "backgroundTarget"
+  | "setBeaconWatch"
+  | "submitTargetOperation"
+  | "listTargetOperations"
+  | "getTargetOperation"
+  | "cancelTargetOperation"
+  | "prepareTargetAction"
+  | "executeTargetActionPlan"
+  | "listBeaconTasks"
+  | "getBeaconTask"
+  | "cancelBeaconTask"
 >;
 
 const IMPLANT_TYPES = ["session", "beacon"] as const;
@@ -132,6 +162,45 @@ export function registerIpcHandlers(
     (args) => parseStringArguments(args, "profile name"),
     ({ contentsId }, name) => registry.deleteProfile(contentsId, name),
   );
+  handleTrusted(IPC.listTargets, rendererUrl, parseTargetCatalogPageArguments, ({ contentsId }, request) =>
+    registry.listTargets(contentsId, request),
+  );
+  handleTrusted(IPC.selectTarget, rendererUrl, parseTargetRefArguments, ({ contentsId }, target) =>
+    registry.selectTarget(contentsId, target),
+  );
+  handleTrusted(IPC.backgroundTarget, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.backgroundTarget(contentsId),
+  );
+  handleTrusted(IPC.setBeaconWatch, rendererUrl, parseBeaconWatchArguments, ({ contentsId }, input) =>
+    registry.setBeaconWatch(contentsId, input.enabled),
+  );
+  handleTrusted(IPC.submitTargetOperation, rendererUrl, parseTargetOperationArguments, ({ contentsId }, input) =>
+    registry.submitTargetOperation(contentsId, input),
+  );
+  handleTrusted(IPC.listTargetOperations, rendererUrl, parseOperationPageArguments, ({ contentsId }, request) =>
+    registry.listTargetOperations(contentsId, request),
+  );
+  handleTrusted(IPC.getTargetOperation, rendererUrl, parseOperationRequestArguments, ({ contentsId }, input) =>
+    registry.getTargetOperation(contentsId, input.requestId),
+  );
+  handleTrusted(IPC.cancelTargetOperation, rendererUrl, parseOperationRequestArguments, ({ contentsId }, input) =>
+    registry.cancelTargetOperation(contentsId, input.requestId),
+  );
+  handleTrusted(IPC.prepareTargetAction, rendererUrl, parsePrepareTargetActionArguments, ({ contentsId }, input) =>
+    registry.prepareTargetAction(contentsId, input),
+  );
+  handleTrusted(IPC.executeTargetActionPlan, rendererUrl, parseExecuteTargetActionPlanArguments, ({ contentsId }, input) =>
+    registry.executeTargetActionPlan(contentsId, input.token),
+  );
+  handleTrusted(IPC.listBeaconTasks, rendererUrl, parseOperationPageArguments, ({ contentsId }, input) =>
+    registry.listBeaconTasks(contentsId, input),
+  );
+  handleTrusted(IPC.getBeaconTask, rendererUrl, parseBeaconTaskArguments, ({ contentsId }, input) =>
+    registry.getBeaconTask(contentsId, input.taskId),
+  );
+  handleTrusted(IPC.cancelBeaconTask, rendererUrl, parseCancelBeaconTaskArguments, ({ contentsId }, input) =>
+    registry.cancelBeaconTask(contentsId, input.taskId),
+  );
 }
 
 export function unregisterIpcHandlers(): void {
@@ -209,6 +278,111 @@ function parseOpenWindowArguments(args: readonly unknown[]): [input: OpenWindowI
   const value = requireRecord(requireSingleArgument(args, "open-window input"), "open-window input");
   requireExactKeys(value, ["inheritConnection"], "open-window input");
   return [{ inheritConnection: requireBooleanProperty(value, "inheritConnection", "open-window input") }];
+}
+
+function parseTargetRefArguments(args: readonly unknown[]): [target: TargetRef] {
+  const value = requireRecord(requireSingleArgument(args, "target reference"), "target reference");
+  requireExactKeys(value, ["mode", "id", "backendEpoch", "domainRevision", "fingerprint"], "target reference");
+  const mode = requireStringLiteralProperty(value, "mode", ["session", "beacon"] as const, "target reference");
+  const id = requireStringProperty(value, "id", "target reference", 128);
+  const backendEpoch = requireFiniteNumberProperty(value, "backendEpoch", "target reference");
+  const domainRevision = requireFiniteNumberProperty(value, "domainRevision", "target reference");
+  const fingerprint = requireStringProperty(value, "fingerprint", "target reference", 64);
+  if (
+    !id ||
+    !Number.isSafeInteger(backendEpoch) || backendEpoch < 1 ||
+    !Number.isSafeInteger(domainRevision) || domainRevision < 0 ||
+    !/^[a-f0-9]{64}$/u.test(fingerprint)
+  ) {
+    throw invalidArguments("target reference");
+  }
+  return [{ mode, id, backendEpoch, domainRevision, fingerprint }];
+}
+
+function parseTargetCatalogPageArguments(args: readonly unknown[]): [request: TargetCatalogPageRequest] {
+  const value = requireRecord(requireSingleArgument(args, "target catalog page request"), "target catalog page request");
+  const keys = Object.keys(value);
+  if (
+    !keys.includes("mode") ||
+    keys.some((key) => key !== "mode" && key !== "cursor" && key !== "limit" && key !== "query")
+  ) {
+    throw invalidArguments("target catalog page request");
+  }
+  const request: TargetCatalogPageRequest = {
+    mode: requireStringLiteralProperty(value, "mode", ["session", "beacon"] as const, "target catalog page request"),
+  };
+  if (value["cursor"] !== undefined) {
+    const cursor = requireStringProperty(
+      value,
+      "cursor",
+      "target catalog page request",
+      MAX_TARGET_CATALOG_CURSOR_LENGTH,
+    );
+    if (!/^target:v1:[0-9a-f-]+$/iu.test(cursor)) throw invalidArguments("target catalog page request.cursor");
+    request.cursor = cursor;
+  }
+  if (value["limit"] !== undefined) {
+    const limit = requireFiniteNumberProperty(value, "limit", "target catalog page request");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_TARGET_CATALOG_PAGE_SIZE) {
+      throw invalidArguments("target catalog page request.limit");
+    }
+    request.limit = limit;
+  }
+  if (value["query"] !== undefined) {
+    request.query = requireStringProperty(
+      value,
+      "query",
+      "target catalog page request",
+      MAX_TARGET_CATALOG_QUERY_LENGTH,
+    );
+  }
+  return [request];
+}
+
+function parseBeaconWatchArguments(args: readonly unknown[]): [input: { enabled: boolean }] {
+  const value = requireRecord(requireSingleArgument(args, "beacon watch input"), "beacon watch input");
+  requireExactKeys(value, ["enabled"], "beacon watch input");
+  return [{ enabled: requireBooleanProperty(value, "enabled", "beacon watch input") }];
+}
+
+function parseTargetOperationArguments(args: readonly unknown[]): [input: ReturnType<typeof parseTargetOperationInput>] {
+  requireArgumentCount(args, 1, "target operation input");
+  return [parseTargetOperationInput(args[0])];
+}
+
+function parseOperationPageArguments(args: readonly unknown[]): [input: ReturnType<typeof parseOperationPageRequest>] {
+  requireArgumentCount(args, 1, "operation page request");
+  return [parseOperationPageRequest(args[0])];
+}
+
+function parseOperationRequestArguments(args: readonly unknown[]): [input: ReturnType<typeof parseCancelTargetOperationInput>] {
+  requireArgumentCount(args, 1, "operation request");
+  return [parseCancelTargetOperationInput(args[0])];
+}
+
+function parsePrepareTargetActionArguments(args: readonly unknown[]): [input: PrepareTargetActionInput] {
+  const value = requireRecord(requireSingleArgument(args, "target action input"), "target action input");
+  requireExactKeys(value, ["actionId"], "target action input");
+  return [{
+    actionId: requireStringLiteralProperty(value, "actionId", DESTRUCTIVE_TARGET_ACTION_IDS, "target action input"),
+  }];
+}
+
+function parseExecuteTargetActionPlanArguments(args: readonly unknown[]): [input: ExecuteTargetActionPlanInput] {
+  const value = requireRecord(requireSingleArgument(args, "target action plan"), "target action plan");
+  requireExactKeys(value, ["token"], "target action plan");
+  const [token] = parseOpaqueTokenArguments([value["token"]]);
+  return [{ token }];
+}
+
+function parseBeaconTaskArguments(args: readonly unknown[]): [input: ReturnType<typeof parseGetBeaconTaskInput>] {
+  requireArgumentCount(args, 1, "beacon task request");
+  return [parseGetBeaconTaskInput(args[0])];
+}
+
+function parseCancelBeaconTaskArguments(args: readonly unknown[]): [input: ReturnType<typeof parseCancelBeaconTaskInput>] {
+  requireArgumentCount(args, 1, "beacon task cancellation");
+  return [parseCancelBeaconTaskInput(args[0])];
 }
 
 function parseListenerArguments(args: readonly unknown[]): [input: ListenerInput] {

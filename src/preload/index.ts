@@ -7,6 +7,8 @@ import {
   type SliverDesktopInvokeAPI,
   type SliverSnapshot,
 } from "../shared/contracts.js";
+import type { TargetOperationRecord } from "../shared/operation-contracts.js";
+import type { TargetRef } from "../shared/target-contracts.js";
 
 function createInvokeApi(): SliverDesktopInvokeAPI {
   // Generate routes from the shared method-to-channel map so methods cannot be
@@ -26,6 +28,16 @@ const api: SliverDesktopAPI = {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: SliverSnapshot) => listener(snapshot);
     ipcRenderer.on(IPC.snapshotChanged, handler);
     return () => ipcRenderer.removeListener(IPC.snapshotChanged, handler);
+  },
+  onOperationChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, operation: TargetOperationRecord) => listener(operation);
+    ipcRenderer.on(IPC.operationChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.operationChanged, handler);
+  },
+  onBeaconTasksInvalidated: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, target: TargetRef) => listener(target);
+    ipcRenderer.on(IPC.beaconTasksInvalidated, handler);
+    return () => ipcRenderer.removeListener(IPC.beaconTasksInvalidated, handler);
   },
 };
 

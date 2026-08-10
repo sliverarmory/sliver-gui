@@ -21,13 +21,13 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.aka.create` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.aka.create |
 | `implant.aka.delete` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.aka.delete |
 | `implant.backdoor` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.backdoor |
-| `implant.background` | planned | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.background |
+| `implant.background` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.background |
 | `implant.cat` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cat |
 | `implant.cd` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cd |
 | `implant.chmod` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chmod |
 | `implant.chown` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chown |
 | `implant.chtimes` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.chtimes |
-| `implant.close` | planned | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.close |
+| `implant.close` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.close |
 | `implant.cp` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cp |
 | `implant.cursed` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed |
 | `implant.cursed.chrome` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.chrome |
@@ -42,8 +42,8 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.download` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.download |
 | `implant.edit` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.edit |
 | `implant.env` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.env |
-| `implant.env.set` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.env.set |
-| `implant.env.unset` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.env.unset |
+| `implant.env.set` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.env.set |
+| `implant.env.unset` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.env.unset |
 | `implant.execute` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute |
 | `implant.execute-assembly` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.execute-assembly |
 | `implant.execute-shellcode` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute-shellcode |
@@ -60,9 +60,9 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.hex-edit` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.hex-edit |
 | `implant.ifconfig` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ifconfig |
 | `implant.impersonate` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.impersonate |
-| `implant.info` | planned | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.info |
-| `implant.interactive` | planned | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.interactive |
-| `implant.kill` | planned | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.kill |
+| `implant.info` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.info |
+| `implant.interactive` | in-progress | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.interactive |
+| `implant.kill` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.kill |
 | `implant.ls` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ls |
 | `implant.make-token` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.make-token |
 | `implant.memfiles` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles |
@@ -75,7 +75,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.msf-inject` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf-inject |
 | `implant.mv` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mv |
 | `implant.netstat` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.netstat |
-| `implant.ping` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ping |
+| `implant.ping` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.ping |
 | `implant.pivots` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.pivots |
 | `implant.pivots.details` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.pivots.details |
 | `implant.pivots.graph` | planned | M5 | session, beacon | windows, linux, darwin | networking | parity-contract:implant.pivots.graph |
@@ -89,7 +89,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.ps` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ps |
 | `implant.psexec` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.psexec |
 | `implant.pwd` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.pwd |
-| `implant.reconfig` | planned | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.reconfig |
+| `implant.reconfig` | in-progress | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.reconfig |
 | `implant.registry` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry |
 | `implant.registry.create` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.create |
 | `implant.registry.delete` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.delete |
@@ -98,7 +98,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.registry.read` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read |
 | `implant.registry.read.hive` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read.hive |
 | `implant.registry.write` | planned | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.write |
-| `implant.rename` | planned | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.rename |
+| `implant.rename` | in-progress | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.rename |
 | `implant.rev2self` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.rev2self |
 | `implant.rm` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.rm |
 | `implant.rportfwd` | planned | M3 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd |
@@ -121,9 +121,9 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.spawndll` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.spawndll |
 | `implant.ssh` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.ssh |
 | `implant.tail` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.tail |
-| `implant.tasks` | planned | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks |
-| `implant.tasks.cancel` | planned | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.cancel |
-| `implant.tasks.fetch` | planned | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.fetch |
+| `implant.tasks` | in-progress | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks |
+| `implant.tasks.cancel` | in-progress | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.cancel |
+| `implant.tasks.fetch` | in-progress | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.fetch |
 | `implant.terminate` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.terminate |
 | `implant.upload` | planned | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.upload |
 | `implant.wasm` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.wasm |
@@ -162,10 +162,10 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.armory.save` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.armory.save |
 | `server.armory.search` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.armory.search |
 | `server.armory.update` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.armory.update |
-| `server.beacons` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons |
-| `server.beacons.prune` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons.prune |
-| `server.beacons.rm` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons.rm |
-| `server.beacons.watch` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons.watch |
+| `server.beacons` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons |
+| `server.beacons.prune` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons.prune |
+| `server.beacons.rm` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons.rm |
+| `server.beacons.watch` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.beacons.watch |
 | `server.builders` | planned | M7 | not-applicable | not-applicable | payloads | parity-contract:server.builders |
 | `server.c2profiles` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.c2profiles |
 | `server.c2profiles.export` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.c2profiles.export |
@@ -211,7 +211,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.implants` | planned | M7 | not-applicable | not-applicable | payloads | parity-contract:server.implants |
 | `server.implants.rm` | planned | M7 | not-applicable | not-applicable | payloads | parity-contract:server.implants.rm |
 | `server.implants.stage` | planned | M7 | not-applicable | not-applicable | payloads | parity-contract:server.implants.stage |
-| `server.info` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.info |
+| `server.info` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.info |
 | `server.jobs` | in-progress | M0 | not-applicable | not-applicable | jobs-listeners | parity-contract:server.jobs, operations-job, operations-page |
 | `server.licenses` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.licenses |
 | `server.loot` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot |
@@ -242,8 +242,8 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.reaction.set` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.reaction.set |
 | `server.reaction.unset` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.reaction.unset |
 | `server.regenerate` | planned | M7 | not-applicable | not-applicable | payloads | parity-contract:server.regenerate |
-| `server.sessions` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.sessions |
-| `server.sessions.prune` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.sessions.prune |
+| `server.sessions` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.sessions |
+| `server.sessions.prune` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.sessions.prune |
 | `server.settings` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.settings |
 | `server.settings.always-overflow` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.settings.always-overflow |
 | `server.settings.autoadult` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.settings.autoadult |
@@ -264,9 +264,9 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.stage-listener` | in-progress | M0 | not-applicable | not-applicable | jobs-listeners | parity-contract:server.stage-listener |
 | `server.taskmany` | upstream-blocked | M9 | not-applicable | not-applicable | none | upstream-regression:server.taskmany |
 | `server.update` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.update |
-| `server.use` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.use |
-| `server.use.beacons` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.use.beacons |
-| `server.use.sessions` | planned | M1 | not-applicable | not-applicable | targets | parity-contract:server.use.sessions |
+| `server.use` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.use |
+| `server.use.beacons` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.use.beacons |
+| `server.use.sessions` | in-progress | M1 | not-applicable | not-applicable | targets | parity-contract:server.use.sessions |
 | `server.version` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.version |
 | `server.websites` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites |
 | `server.websites.add-content` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.add-content |

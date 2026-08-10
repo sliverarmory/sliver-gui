@@ -258,6 +258,18 @@ function classify(command) {
   }
   if (id === "root.mcp") return decision(true, "planned", "M8", "integrations", "Client MCP parity is planned as a policy-gated integration.");
 
+  const m1OperationOverrides = new Map([
+    ["implant.ping", "Pulled forward into M1 as the closed target.ping representative read for synchronous sessions and asynchronous beacon tasks."],
+    ["implant.env.set", "Pulled forward into M1 as a closed environment-mutation proof; the broader environment listing workflow remains assigned to M2."],
+    ["implant.env.unset", "Pulled forward into M1 as a closed environment-mutation proof; the broader environment listing workflow remains assigned to M2."],
+    ["implant.interactive", "M1 exposes the typed beacon.open-session operation only; it does not provide an arbitrary implant RPC selector."],
+    ["implant.reconfig", "M1 exposes the typed beacon.reconfigure operation only; it does not provide an arbitrary implant RPC selector."],
+  ]);
+  const m1OperationNote = m1OperationOverrides.get(id);
+  if (m1OperationNote) {
+    return decision(true, "in-progress", "M1", "targets", m1OperationNote);
+  }
+
   const current = new Set(["jobs", "dns", "http", "https", "mtls", "stage-listener", "wg"]);
   if (command.surface === "server" && current.has(top)) {
     return decision(true, "in-progress", "M0", "jobs-listeners",

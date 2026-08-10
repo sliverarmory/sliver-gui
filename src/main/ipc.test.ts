@@ -272,6 +272,86 @@ describe("trusted Electron IPC boundary", () => {
     expect(setStagedBuilds).toHaveBeenCalledWith(77, stagedBuilds);
     expect(saveProfile).toHaveBeenCalledWith(77, profileSave);
   });
+
+  it("accepts only main-issued target references and compiled operation identifiers", async () => {
+    const listTargets = vi.fn(async () => ({ ok: true as const, value: { items: [], page: { limit: 100, total: 0, truncated: false } } }));
+    const selectTarget = vi.fn(async () => ({ ok: false as const, error: "selection probe" }));
+    const submitTargetOperation = vi.fn(async () => ({ ok: false as const, error: "operation probe" }));
+    const prepareTargetAction = vi.fn(async () => ({ ok: false as const, error: "action probe" }));
+    registerIpcHandlers(
+      registryMock({ listTargets, selectTarget, submitTargetOperation, prepareTargetAction }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event } = invokeEvent("http://127.0.0.1:5173/targets", 77);
+    const target = {
+      mode: "beacon",
+      id: "beacon_1",
+      backendEpoch: 3,
+      domainRevision: 7,
+      fingerprint: "a".repeat(64),
+    } as const;
+
+    await electronMocks.handlers.get(IPC.listTargets)?.(event, {
+      mode: "session",
+      limit: 100,
+      query: "prod-mac",
+    });
+    await electronMocks.handlers.get(IPC.selectTarget)?.(event, target);
+    await electronMocks.handlers.get(IPC.submitTargetOperation)?.(event, {
+      operationId: "target.env-set",
+      name: "GUI_M1_TEST",
+      value: "bounded-value",
+    });
+    await electronMocks.handlers.get(IPC.prepareTargetAction)?.(event, { actionId: "beacon.remove" });
+    expect(selectTarget).toHaveBeenCalledWith(77, target);
+    expect(listTargets).toHaveBeenCalledWith(77, {
+      mode: "session",
+      limit: 100,
+      query: "prod-mac",
+    });
+    expect(submitTargetOperation).toHaveBeenCalledWith(77, {
+      operationId: "target.env-set",
+      name: "GUI_M1_TEST",
+      value: "bounded-value",
+    });
+    expect(prepareTargetAction).toHaveBeenCalledWith(77, { actionId: "beacon.remove" });
+
+    expect(() => electronMocks.handlers.get(IPC.selectTarget)?.(event, { ...target, path: "/tmp/secret" })).toThrow(
+      /invalid target reference/i,
+    );
+    expect(() => electronMocks.handlers.get(IPC.submitTargetOperation)?.(event, {
+      operationId: "raw.rpc",
+      method: "SessionsKillAll",
+      payload: { admin: true },
+    })).toThrow(/not an allowed target operation/);
+    expect(() => electronMocks.handlers.get(IPC.prepareTargetAction)?.(event, {
+      actionId: "sessions.kill-all",
+    })).toThrow(/invalid target action input/i);
+    expect(() => electronMocks.handlers.get(IPC.listTargets)?.(event, {
+      mode: "session",
+      cursor: "500",
+      limit: 100,
+    })).toThrow(/invalid target catalog page request/i);
+    expect(() => electronMocks.handlers.get(IPC.listTargets)?.(event, {
+      mode: "session",
+      limit: 101,
+    })).toThrow(/invalid target catalog page request/i);
+    expect(() => electronMocks.handlers.get(IPC.listTargets)?.(event, {
+      mode: "session",
+      limit: 100,
+      targetId: "session_1",
+    })).toThrow(/invalid target catalog page request/i);
+    expect(() => electronMocks.handlers.get(IPC.listTargets)?.(event, {
+      mode: "session",
+      query: "x".repeat(129),
+    })).toThrow(/invalid target catalog page request/i);
+    expect(() => electronMocks.handlers.get(IPC.listTargets)?.(event, {
+      mode: "session",
+      query: "prod\0mac",
+    })).toThrow(/invalid target catalog page request/i);
+    expect(submitTargetOperation).toHaveBeenCalledOnce();
+  });
 });
 
 function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnectionRegistry {
@@ -300,6 +380,19 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     setStagedBuilds: vi.fn(unavailable),
     saveProfile: vi.fn(unavailable),
     deleteProfile: vi.fn(unavailable),
+    listTargets: vi.fn(unavailable),
+    selectTarget: vi.fn(unavailable),
+    backgroundTarget: vi.fn(unavailable),
+    setBeaconWatch: vi.fn(unavailable),
+    submitTargetOperation: vi.fn(unavailable),
+    listTargetOperations: vi.fn(unavailable),
+    getTargetOperation: vi.fn(unavailable),
+    cancelTargetOperation: vi.fn(unavailable),
+    prepareTargetAction: vi.fn(unavailable),
+    executeTargetActionPlan: vi.fn(unavailable),
+    listBeaconTasks: vi.fn(unavailable),
+    getBeaconTask: vi.fn(unavailable),
+    cancelBeaconTask: vi.fn(unavailable),
     ...overrides,
   };
 }

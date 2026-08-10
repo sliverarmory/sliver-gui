@@ -2,7 +2,7 @@
 
 - Date: 2026-08-09
 - Milestone state: complete; operator accepted
-- M1 state: dependency unlocked; implementation not yet committed
+- M1 state: implemented; awaiting operator acceptance
 - Local package host: macOS arm64
 
 ## Protocol and provenance

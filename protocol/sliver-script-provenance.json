@@ -67,10 +67,6 @@
       "sha256": "599f662bc088be6382c73d903eb78638ec17cb54f70a9fd067e4803e3ecca950"
     },
     {
-      "path": "src/internal/timeout.ts",
-      "sha256": "803b6e3b96988a1d547f94c8259f7c97922793fdaea0ea465363845b21a0349c"
-    },
-    {
       "path": "src/internal/tunnelManager.ts",
       "sha256": "fb6e1f4fc1b4eefda29bd57d95cfc1eec46e1f50ae43e41cbab9bf08219bca07"
     },
@@ -84,26 +80,32 @@
     "appliedAfterProtobufGeneration": true,
     "patch": {
       "path": "protocol/sliver-script-handwritten-overlay.patch",
-      "sha256": "f1d6b613cb4b00c4c09468bba4c25bad524764865c68bfe9dc5c46a982db33e7"
+      "sha256": "a0664b22e35961375a8bc68c2c971edc5b931a579bd866132209f5548fcc56dd"
     },
     "files": [
       {
         "path": "src/client.ts",
         "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
-        "sha256": "bfdbf20da864026c5d962ef5a4d8891943ab0703d1046ba003844ed540b9afbe",
-        "review": "Route RPCs through bounded control, inventory, and artifact channels, including a DNS-form TLS authority for IP-literal targets."
+        "sha256": "b67c2186b22999dee5d21bc5959a01a7af84fb8b27434073cd324239080bb83b",
+        "review": "Route RPCs through bounded control, inventory, task-content, and artifact channels; add explicit typed M1 target, lifecycle, and beacon-task wrappers; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
       },
       {
         "path": "src/index.ts",
         "baseSha256": "37a8c9139932f7f1600f2da3b83e659e6706787ebdd69bad31d1c05de54af3d7",
-        "sha256": "991c0ee4272e7f4cd79092b6a7525537eece3ff2980c03811c24414dc706819f",
-        "review": "Export the reviewed message-budget API."
+        "sha256": "ff338f7605ee0d4b310a15d4a2a462b490a9d3438f8d3efe5bd124834c924f85",
+        "review": "Export the reviewed message-budget API, exact timeout conversion helper, and validated timeout signal helper."
+      },
+      {
+        "path": "src/internal/timeout.ts",
+        "baseSha256": "803b6e3b96988a1d547f94c8259f7c97922793fdaea0ea465363845b21a0349c",
+        "sha256": "d8bf70ed86bc3e316c64c125926d5c63db769f93aab7b615fbc406bcb42348cd",
+        "review": "Validate public timeouts as non-negative whole seconds within the safe timer ceiling before callbacks run, and convert them to canonical protobuf int64 nanoseconds without numeric precision loss."
       },
       {
         "path": "src/messageBudget.ts",
         "baseSha256": null,
-        "sha256": "a0814ab3fd67e7babae17b0df1ee10007ea535727950b68034d2c35967f520a6",
-        "review": "Define immutable per-domain send and receive allocation limits plus IP-safe TLS authority selection."
+        "sha256": "54c1494e1186e8753b7b2a0016256f1bbca9d8d773168f05206b18ca1689f45d",
+        "review": "Define immutable per-domain send and receive allocation limits, including an isolated 80 KiB task-content response ceiling, plus IP-safe TLS authority selection."
       }
     ]
   },

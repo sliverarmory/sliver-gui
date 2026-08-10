@@ -68,12 +68,23 @@ directory remains ignored and is rebuilt by the root `npm run build:client`
 command.
 
 The current handwritten overlay replaces the former generic approximately
-2 GiB gRPC allocation limit with bounded control, inventory, and artifact
-channels. It also supplies a stable DNS-form TLS authority for direct
+2 GiB gRPC allocation limit with bounded control, inventory, task-content,
+and artifact channels. It also supplies a stable DNS-form TLS authority for direct
 IP-literal targets, because Node TLS does not accept an IP literal as SNI, and
 preserves the configured DNS authority when traffic traverses the loopback
 proxy. This changes authority/SNI selection only; the configured Sliver CA,
 client certificate, private key, and token remain the authenticated material.
+
+The M1 overlay adds explicit typed wrappers for target inventory and presence,
+named target lifecycle operations, ping and environment mutation,
+beacon reconfiguration and session conversion, and beacon-task
+list/fetch/cancel. It also converts public whole-second deadlines to the
+nanosecond int64 strings expected by `commonpb.Request.Timeout`, matching the
+canonical Go client without passing imprecise numbers through protobuf. These
+are reviewed named methods, not an arbitrary RPC dispatcher; the Electron
+main-process adapter and operation registry apply a narrower closed allowlist
+before renderer input can reach them. The packaged RPC domains, M1 allowlist,
+and timeout rules are documented in `docs/rpc-message-budgets.md`.
 
 Packaged WireGuard operator transport and native-helper certification are
 deferred beyond M0; mTLS is the M0 packaged transport baseline. This does not

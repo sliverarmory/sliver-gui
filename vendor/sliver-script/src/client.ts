@@ -6,7 +6,7 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
 
 import type { SliverClientConfig } from "./config";
 import { createSliverRpcCredentials } from "./internal/credentials";
-import { withTimeoutSignal } from "./internal/timeout";
+import { timeoutSecondsToNanoseconds, withTimeoutSignal } from "./internal/timeout";
 import { TunnelManager } from "./internal/tunnelManager";
 import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
 import {
@@ -17,8 +17,11 @@ import {
 } from "./messageBudget";
 import { BeaconTask } from "./pb/clientpb/client";
 import type {
+  BeaconTasks,
   Event,
+  Operator,
   Operators,
+  Session,
   Sessions,
   Version,
   Beacons,
@@ -36,10 +39,18 @@ import type {
   StagerListenerReq,
   UniqueWGIP,
 } from "./pb/clientpb/client";
-import type { Request as CommonRequest } from "./pb/commonpb/common";
+import type { Empty, Request as CommonRequest } from "./pb/commonpb/common";
 import { SliverRPCDefinition } from "./pb/rpcpb/services";
 import type { SliverRPCClient } from "./pb/rpcpb/services";
 import { Ls } from "./pb/sliverpb/sliver";
+import type {
+  EnvInfo,
+  OpenSession,
+  Ping,
+  Reconfigure,
+  SetEnv,
+  UnsetEnv,
+} from "./pb/sliverpb/sliver";
 
 const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
@@ -71,6 +82,13 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
   randomizeJARM?: boolean;
 }
 
+export interface BeaconReconfigureOptions {
+  reconnectIntervalNanoseconds?: string;
+  intervalNanoseconds?: string;
+  jitterNanoseconds?: string;
+  c2Uri?: string;
+}
+
 export interface Tunnel {
   readonly id: string;
   readonly stdout$: Observable<Buffer>;
@@ -85,7 +103,12 @@ class BaseCommands {
   ) {}
 
   protected request(timeoutSeconds: number): CommonRequest {
-    return { Async: false, Timeout: `${timeoutSeconds}`, BeaconID: "", SessionID: "" };
+    return {
+      Async: false,
+      Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
+      BeaconID: "",
+      SessionID: "",
+    };
   }
 
   protected async unary<T>(timeoutSeconds: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -339,7 +362,7 @@ export class InteractiveBeacon extends BaseCommands {
   protected request(timeoutSeconds: number): CommonRequest {
     return {
       Async: true,
-      Timeout: `${timeoutSeconds}`,
+      Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
       BeaconID: this.beaconId,
       SessionID: "",
     };
@@ -385,7 +408,7 @@ export class InteractiveSession extends BaseCommands {
   protected request(timeoutSeconds: number): CommonRequest {
     return {
       Async: false,
-      Timeout: `${timeoutSeconds}`,
+      Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
       BeaconID: "",
       SessionID: this.sessionId,
     };
@@ -494,6 +517,28 @@ export class SliverClient {
 
   private get artifactRpc(): SliverRPCClient {
     return this.clientFor("artifact");
+  }
+
+  private get taskContentRpc(): SliverRPCClient {
+    return this.clientFor("task-content");
+  }
+
+  private sessionRequest(sessionId: string, timeoutSeconds: number): CommonRequest {
+    return {
+      Async: false,
+      Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
+      BeaconID: "",
+      SessionID: sessionId,
+    };
+  }
+
+  private beaconRequest(beaconId: string, timeoutSeconds: number): CommonRequest {
+    return {
+      Async: true,
+      Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
+      BeaconID: beaconId,
+      SessionID: "",
+    };
   }
 
   get isConnected(): boolean {
@@ -613,11 +658,193 @@ export class SliverClient {
   }
 
   getSessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Sessions> {
-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getSessions(this.empty, { signal }));
+    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.getSessions(this.empty, { signal }));
   }
 
   getBeacons(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Beacons> {
-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getBeacons(this.empty, { signal }));
+    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.getBeacons(this.empty, { signal }));
+  }
+
+  renameSession(sessionId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.rename({ SessionID: sessionId, BeaconID: "", Name: name }, { signal }),
+    );
+  }
+
+  renameBeacon(beaconId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.rename({ SessionID: "", BeaconID: beaconId, Name: name }, { signal }),
+    );
+  }
+
+  pingSession(sessionId: string, nonce: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Ping> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.ping(
+        { Nonce: nonce, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  pingBeacon(beaconId: string, nonce: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Ping> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.ping(
+        { Nonce: nonce, Request: this.beaconRequest(beaconId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  getEnvSession(sessionId: string, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.getEnv(
+        { Name: name, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  getEnvBeacon(beaconId: string, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.getEnv(
+        { Name: name, Request: this.beaconRequest(beaconId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  setEnvSession(
+    sessionId: string,
+    key: string,
+    value: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ): Promise<SetEnv> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.setEnv(
+        {
+          Variable: { Key: key, Value: value },
+          Request: this.sessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  setEnvBeacon(
+    beaconId: string,
+    key: string,
+    value: string,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ): Promise<SetEnv> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.setEnv(
+        {
+          Variable: { Key: key, Value: value },
+          Request: this.beaconRequest(beaconId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  unsetEnvSession(sessionId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UnsetEnv> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.unsetEnv(
+        { Name: name, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  unsetEnvBeacon(beaconId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UnsetEnv> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.unsetEnv(
+        { Name: name, Request: this.beaconRequest(beaconId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  killSession(sessionId: string, force = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.kill(
+        { Force: force, Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  killBeacon(beaconId: string, force = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.kill(
+        { Force: force, Request: this.beaconRequest(beaconId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  reconfigureBeacon(
+    beaconId: string,
+    options: BeaconReconfigureOptions,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ): Promise<Reconfigure> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.reconfigure(
+        {
+          ReconnectInterval: options.reconnectIntervalNanoseconds ?? "0",
+          BeaconInterval: options.intervalNanoseconds ?? "0",
+          BeaconJitter: options.jitterNanoseconds ?? "0",
+          C2URI: options.c2Uri ?? "",
+          Request: this.beaconRequest(beaconId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  openSessionFromBeacon(
+    beaconId: string,
+    c2s: string[],
+    delayNanoseconds = "0",
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ): Promise<OpenSession> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.openSession(
+        {
+          C2s: c2s,
+          Delay: delayNanoseconds,
+          Request: this.beaconRequest(beaconId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  closeSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.closeSession(
+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  getBeaconTasks(beaconId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<BeaconTasks> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.inventoryRpc.getBeaconTasks({ ID: beaconId }, { signal }),
+    );
+  }
+
+  fetchBeaconTask(taskId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<BeaconTask> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.taskContentRpc.getBeaconTaskContent({ ID: taskId }, { signal }),
+    );
+  }
+
+  cancelBeaconTask(taskId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<BeaconTask> {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.cancelBeaconTask({ ID: taskId }, { signal }),
+    );
   }
 
   getJobs(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Jobs> {
@@ -875,17 +1102,17 @@ export class SliverClient {
 
   // --- High-level helpers (ergonomic wrappers) ---
 
-  async operators(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+  async operators(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Operator[]> {
     const res = await this.getOperators(timeoutSeconds);
     return res.Operators;
   }
 
-  async sessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+  async sessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Session[]> {
     const res = await this.getSessions(timeoutSeconds);
     return res.Sessions;
   }
 
-  async beacons(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+  async beacons(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Beacon[]> {
     const res = await this.getBeacons(timeoutSeconds);
     return res.Beacons;
   }
@@ -907,7 +1134,7 @@ export class SliverClient {
   }
 
   async rmBeacon(beaconId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-    await withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.rmBeacon({ ID: beaconId } as Beacon, { signal }));
+    await withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.rmBeacon({ ID: beaconId }, { signal }));
   }
 }
 

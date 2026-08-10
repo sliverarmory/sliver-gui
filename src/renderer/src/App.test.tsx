@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Sidebar } from "@heroui-pro/react/sidebar";
+import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../../shared/contracts";
@@ -45,6 +45,9 @@ function installSliverAPI(
   const api: SliverDesktopAPI = {
     chooseConfig: vi.fn(failedOperation),
     chooseCertificatePair: vi.fn(failedOperation),
+    backgroundTarget: vi.fn(failedOperation),
+    cancelBeaconTask: vi.fn(failedOperation),
+    cancelTargetOperation: vi.fn(failedOperation),
     connectSavedConfig: vi.fn(failedOperation),
     deleteBuild: vi.fn(failedOperation),
     deleteProfile: vi.fn(failedOperation),
@@ -52,9 +55,16 @@ function installSliverAPI(
     downloadBuild: vi.fn(failedOperation),
     generate: vi.fn(failedOperation),
     generateFromProfile: vi.fn(failedOperation),
+    getBeaconTask: vi.fn(failedOperation),
     getSnapshot: vi.fn().mockResolvedValue(initialSnapshot),
+    getTargetOperation: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
     listSavedConfigs,
+    listBeaconTasks: vi.fn(failedOperation),
+    listTargets: vi.fn(failedOperation),
+    listTargetOperations: vi.fn(failedOperation),
+    onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
+    onOperationChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
       captureSnapshotListener?.(listener);
       return vi.fn();
@@ -62,12 +72,17 @@ function installSliverAPI(
     openWindow: vi.fn(failedOperation),
     prepareStopAllJobs: vi.fn(failedOperation),
     prepareStopJob: vi.fn(failedOperation),
+    prepareTargetAction: vi.fn(failedOperation),
     refresh: vi.fn(failedOperation),
     removeSavedConfig: vi.fn(failedOperation),
     saveProfile: vi.fn(failedOperation),
+    selectTarget: vi.fn(failedOperation),
+    setBeaconWatch: vi.fn(failedOperation),
     setStagedBuilds: vi.fn(failedOperation),
     startListener: vi.fn(failedOperation),
     executeStopPlan: vi.fn(failedOperation),
+    executeTargetActionPlan: vi.fn(failedOperation),
+    submitTargetOperation: vi.fn(failedOperation),
   };
 
   Object.defineProperty(window, "sliver", {
@@ -244,6 +259,8 @@ describe("App startup", () => {
           builds: true,
           profiles: true,
           events: true,
+          targets: true,
+          tasks: true,
         },
       },
     };
@@ -406,6 +423,22 @@ describe("Sidebar navigation", () => {
     await user.hover(tooltipTrigger);
     expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Generate");
 
+    await user.unhover(tooltipTrigger);
+    const sessionsItem = screen.getByRole("row", { name: "Sessions" });
+    const sessionsTooltipTrigger = sessionsItem.querySelector<HTMLElement>("[data-slot=tooltip-trigger]");
+    expect(sessionsTooltipTrigger).not.toBeNull();
+    if (!sessionsTooltipTrigger) throw new Error("Sessions tooltip trigger is missing");
+    await user.hover(sessionsTooltipTrigger);
+    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Sessions");
+
+    await user.unhover(sessionsTooltipTrigger);
+    const beaconsItem = screen.getByRole("row", { name: "Beacons" });
+    const beaconsTooltipTrigger = beaconsItem.querySelector<HTMLElement>("[data-slot=tooltip-trigger]");
+    expect(beaconsTooltipTrigger).not.toBeNull();
+    if (!beaconsTooltipTrigger) throw new Error("Beacons tooltip trigger is missing");
+    await user.hover(beaconsTooltipTrigger);
+    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Beacons");
+
     await user.click(generateItem);
     expect(onViewChange).not.toHaveBeenCalled();
 
@@ -414,6 +447,119 @@ describe("Sidebar navigation", () => {
     const expandedItem = screen.getByRole("row", { name: "Generate" });
     expect(expandedItem.querySelector("[data-slot=tooltip-trigger]")).toBeNull();
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
+  it("places Sessions and Beacons in a distinct Interact section on the desktop sidebar", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    snapshot.domains.sessions.page = { limit: 500, total: 501, truncated: true };
+    snapshot.domains.beacons.page = { limit: 500, total: 702, truncated: true };
+    const onViewChange = vi.fn();
+
+    render(
+      <Sidebar.Provider collapsible="icon" open>
+        <Sidebar className="app-sidebar">
+          <NavigationContent
+            snapshot={snapshot}
+            view="operations"
+            onDisconnect={vi.fn()}
+            onSwitchConfig={vi.fn()}
+            onViewChange={onViewChange}
+          />
+        </Sidebar>
+      </Sidebar.Provider>,
+    );
+
+    const workspace = screen.getByRole("treegrid", { name: "Workspace navigation" });
+    const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
+    expect(within(workspace).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(within(workspace).getByRole("row", { name: "Generate" })).toBeInTheDocument();
+    expect(within(workspace).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
+    expect(within(workspace).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(within(workspace).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();
+    const sessionsItem = within(interact).getByRole("row", { name: "Sessions" });
+    const beaconsItem = within(interact).getByRole("row", { name: "Beacons" });
+    expect(sessionsItem).toBeInTheDocument();
+    expect(beaconsItem).toBeInTheDocument();
+    expect(within(sessionsItem).getByText("501")).toBeInTheDocument();
+    expect(within(beaconsItem).getByText("702")).toBeInTheDocument();
+    expect(screen.getByText("Interact")).toBeInTheDocument();
+
+    await user.click(sessionsItem);
+    expect(onViewChange).toHaveBeenCalledWith("sessions");
+    await user.click(beaconsItem);
+    expect(onViewChange).toHaveBeenCalledWith("beacons");
+  });
+
+  it("keeps the Interact section actionable in the mobile sheet", async () => {
+    const originalMatchMedia = globalThis.matchMedia;
+    Object.defineProperty(globalThis, "matchMedia", {
+      configurable: true,
+      value: (query: string) => ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        dispatchEvent: () => true,
+      }),
+    });
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    const onViewChange = vi.fn();
+
+    function MobileProbe() {
+      const { isMobile } = useSidebar();
+      return <span>{isMobile ? "mobile-ready" : "desktop-ready"}</span>;
+    }
+
+    try {
+      render(
+        <Sidebar.Provider collapsible="icon" defaultOpen>
+          <MobileProbe />
+          <Sidebar.Trigger aria-label="Open mobile navigation" />
+          <Sidebar.Mobile backdrop="blur" className="app-sidebar">
+            <NavigationContent
+              snapshot={snapshot}
+              view="operations"
+              onDisconnect={vi.fn()}
+              onSwitchConfig={vi.fn()}
+              onViewChange={onViewChange}
+            />
+          </Sidebar.Mobile>
+        </Sidebar.Provider>,
+      );
+
+      await screen.findByText("mobile-ready");
+      await user.click(screen.getByRole("button", { name: "Open mobile navigation" }));
+      const workspace = await screen.findByRole("treegrid", { name: "Workspace navigation" });
+      const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
+      expect(within(workspace).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
+      expect(within(workspace).getByRole("row", { name: "Generate" })).toBeInTheDocument();
+      expect(within(workspace).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
+      expect(within(interact).getByRole("row", { name: "Sessions" })).toBeInTheDocument();
+      await user.click(within(interact).getByRole("row", { name: "Beacons" }));
+      expect(onViewChange).toHaveBeenCalledWith("beacons");
+      await waitFor(() => expect(screen.queryByRole("treegrid", { name: "Interact navigation" })).not.toBeInTheDocument());
+    } finally {
+      Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: originalMatchMedia });
+    }
   });
 
   it("keeps the current-server menu actionable in the collapsed rail", async () => {

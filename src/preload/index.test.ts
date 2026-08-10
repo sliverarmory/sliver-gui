@@ -36,6 +36,25 @@ const invokeArguments = {
   setStagedBuilds: [["existing-build"]],
   saveProfile: [{ profileName: "default", config: defaultGenerateInput, overwrite: false }],
   deleteProfile: ["default"],
+  listTargets: [{ mode: "session", limit: 100, query: "prod-mac" }],
+  selectTarget: [{
+    mode: "session",
+    id: "session_1",
+    backendEpoch: 1,
+    domainRevision: 1,
+    fingerprint: "a".repeat(64),
+  }],
+  backgroundTarget: [],
+  setBeaconWatch: [{ enabled: true }],
+  submitTargetOperation: [{ operationId: "target.ping" }],
+  listTargetOperations: [{}],
+  getTargetOperation: [{ requestId: "request_1" }],
+  cancelTargetOperation: [{ requestId: "request_1" }],
+  prepareTargetAction: [{ actionId: "target.kill" }],
+  executeTargetActionPlan: [{ token: "8e577480-5dc2-4dde-aa58-23c8f1770627" }],
+  listBeaconTasks: [{}],
+  getBeaconTask: [{ taskId: "task_1" }],
+  cancelBeaconTask: [{ taskId: "task_1" }],
 } satisfies InvokeArgumentsByMethod;
 
 const electronMocks = vi.hoisted(() => ({
@@ -82,7 +101,12 @@ describe("sandboxed preload bridge", () => {
     if (!call) throw new Error("Expected the preload API to be exposed");
     const [, exposed] = call;
 
-    expect(Object.keys(exposed).sort()).toEqual([...Object.keys(IPC_INVOKE), "onSnapshotChanged"].sort());
+    expect(Object.keys(exposed).sort()).toEqual([
+      ...Object.keys(IPC_INVOKE),
+      "onSnapshotChanged",
+      "onOperationChanged",
+      "onBeaconTasksInvalidated",
+    ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
       electronMocks.invoke.mockClear();
       const args: readonly unknown[] = invokeArguments[method];

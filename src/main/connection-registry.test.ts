@@ -6,11 +6,11 @@ import { join } from "node:path";
 
 import type { WebContents } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
-import { clientpb, type SliverEventStreamState } from "sliver-script";
+import { clientpb, sliverpb, type SliverEventStreamState } from "sliver-script";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
-import { SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
+import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   fromWebContents: vi.fn(),
@@ -34,6 +34,7 @@ import {
   summarizeEvent,
   type SliverClientAdapter,
 } from "./connection-registry.js";
+import { BeaconTaskStore } from "./beacon-task-store.js";
 
 let root: string;
 let externalDirectory: string;
@@ -175,6 +176,31 @@ describe("connection registry with an injected Sliver client", () => {
     await expect(refresh).resolves.toMatchObject({ ok: true });
     expect(client.jobs).toHaveBeenCalledTimes(baselineCalls + 2);
     expect(registry.snapshot(1).jobs).toMatchObject([{ id: 44, port: 4444 }]);
+  });
+
+  it("bounds overlapping manual refresh waiters and coalesces them into one follow-up", async () => {
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const baselineSessions = client.getSessions.mock.calls.length;
+    const gate = deferred<clientpb.Sessions>();
+    client.nextSessionsPromise = gate.promise;
+
+    const admitted = [registry.refresh(1)];
+    await vi.waitFor(() => expect(client.getSessions).toHaveBeenCalledTimes(baselineSessions + 1));
+    admitted.push(registry.refresh(1), registry.refresh(1), registry.refresh(1));
+    await expect(registry.refresh(1)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/Too many manual refresh callers/),
+    });
+    expect(client.getSessions).toHaveBeenCalledTimes(baselineSessions + 1);
+
+    gate.resolve(clientpb.Sessions.create(client.sessionState));
+    await expect(Promise.all(admitted)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ ok: true })]),
+    );
+    expect(client.getSessions).toHaveBeenCalledTimes(baselineSessions + 2);
   });
 
   it("recognizes the pinned external-build-completed event as a build invalidation", async () => {
@@ -438,6 +464,118 @@ describe("connection registry with an injected Sliver client", () => {
     expect(registry.snapshot(1).connection.server).toBe("localhost:31338");
   });
 
+  it("returns the old backend operation journal after a config switch instead of losing a dispatched result", async () => {
+    await writeFile(join(externalDirectory, "backend-b.cfg"), validConfig({ lport: 31338, token: "backend-b" }));
+    const firstClient = new FakeSliverClient();
+    const secondClient = new FakeSliverClient();
+    firstClient.sessionState.Sessions = [session("session_1", "interactive")];
+    const mutationGate = deferred<void>();
+    firstClient.setEnvSession.mockImplementationOnce(async () => {
+      await mutationGate.promise;
+      return sliverpb.SetEnv.create({});
+    });
+    const clients = [firstClient, secondClient];
+    const registry = createRegistry(() => clients.shift()!.adapter);
+    registry.registerWindow(1);
+    await connectNamed(registry, 1, "operator");
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const submitted = registry.submitTargetOperation(1, {
+      operationId: "target.env-set",
+      name: "M1_SWITCH",
+      value: "old-backend",
+    });
+    await vi.waitFor(() => expect(firstClient.setEnvSession).toHaveBeenCalledOnce());
+    await connectNamed(registry, 1, "backend-b");
+    mutationGate.resolve(undefined);
+
+    await expect(submitted).resolves.toMatchObject({
+      ok: true,
+      value: {
+        operationId: "target.env-set",
+        target: { id: "session_1" },
+        backend: { server: "localhost:31337" },
+        state: "outcome-unknown",
+      },
+    });
+    expect(firstClient.setEnvSession).toHaveBeenCalledOnce();
+    expect(registry.snapshot(1).connection.server).toBe("localhost:31338");
+  });
+
+  it("keeps a late exact beacon task ID while same-config reconnect retires its old ownership", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const responseGate = deferred<void>();
+    client.pingBeacon.mockImplementationOnce(async (beaconId: string, nonce: number) => {
+      await responseGate.promise;
+      const response = {
+        Nonce: nonce,
+        Response: { Async: true, BeaconID: beaconId, TaskID: "late_exact_task", Err: "" },
+      };
+      client.taskState.set(beaconId, [clientpb.BeaconTask.create({
+        ID: "late_exact_task",
+        BeaconID: beaconId,
+        State: "pending",
+        Description: "Ping",
+        CreatedAt: String(Math.floor(Date.now() / 1_000)),
+        Request: Buffer.alloc(0),
+        Response: Buffer.from(sliverpb.Ping.encode(sliverpb.Ping.create({ Nonce: nonce })).finish()),
+      })]);
+      return response;
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectNamed(registry, 1, "operator");
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const submitted = registry.submitTargetOperation(1, { operationId: "target.ping" });
+    await vi.waitFor(() => expect(client.pingBeacon).toHaveBeenCalledOnce());
+
+    await connectNamed(registry, 1, "operator");
+    responseGate.resolve(undefined);
+    await expect(submitted).resolves.toMatchObject({
+      ok: true,
+      value: { state: "outcome-unknown", taskId: "late_exact_task", target: { id: "beacon_1" } },
+    });
+
+    const currentRef = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "beacon_1")!;
+    await registry.selectTarget(1, currentRef);
+    await expect(registry.listBeaconTasks(1, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ taskId: "late_exact_task", ownership: { origin: "unknown" } }] },
+    });
+    await expect(registry.listTargetOperations(1, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [] },
+    });
+  });
+
+  it("does not let an old postcondition refresh complete after same-config engine replacement", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_1", "interactive")];
+    const refreshGate = deferred<clientpb.Sessions>();
+    const rendererSend = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send: rendererSend });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectNamed(registry, 1, "operator");
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    client.nextSessionsPromise = refreshGate.promise;
+
+    const rename = registry.submitTargetOperation(1, { operationId: "target.rename", name: "renamed" });
+    await vi.waitFor(() => expect(client.renameSession).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(client.getSessions.mock.calls.length).toBeGreaterThan(1));
+    await connectNamed(registry, 1, "operator");
+    rendererSend.mockClear();
+    refreshGate.resolve(clientpb.Sessions.create(client.sessionState));
+
+    await expect(rename).resolves.toMatchObject({ ok: true, value: { state: "outcome-unknown" } });
+    expect(rendererSend).not.toHaveBeenCalledWith(IPC.operationChanged, expect.anything());
+    await expect(registry.listTargetOperations(1, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [] },
+    });
+  });
+
   it("uses authoritative compiler inventory and sanitizes bounded build summaries", async () => {
     const client = new FakeSliverClient();
     client.compilerState = clientpb.Compiler.create({
@@ -693,6 +831,1462 @@ describe("connection registry with an injected Sliver client", () => {
     });
   });
 
+  it("pages target 501 with window-bound immutable cursors across polling and insertion", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) =>
+      session(`session_${String(index).padStart(4, "0")}`, `session-${index}`),
+    );
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+
+    const bounded = registry.snapshot(1);
+    const cursor = bounded.domains.sessions.page.nextCursor;
+    expect(cursor).toMatch(/^target:v1:[0-9a-f-]{36}$/u);
+    if (!cursor) throw new Error("Expected a target continuation cursor");
+    expect(bounded.sessions).toHaveLength(500);
+    expect(bounded.sessions).not.toContainEqual(expect.objectContaining({ id: "session_0500" }));
+
+    await expect(registry.listTargets(2, { mode: "session", cursor, limit: 100 })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/stale|another window/),
+    });
+    const continuation = await registry.listTargets(1, { mode: "session", cursor, limit: 100 });
+    expect(continuation).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ target: { id: "session_0500" }, ref: { id: "session_0500" } }],
+        page: { total: 501, truncated: false },
+      },
+    });
+    if (!continuation.ok) throw new Error(continuation.error);
+    await expect(registry.selectTarget(1, continuation.value.items[0]!.ref)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTargetSummary: { id: "session_0500" } } },
+    });
+
+    const identicalRefreshCursor = registry.snapshot(1).domains.sessions.page.nextCursor;
+    if (!identicalRefreshCursor) throw new Error("Expected an identical-refresh target continuation cursor");
+    const revisionBeforeRefresh = registry.snapshot(1).domains.sessions.revision;
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    expect(registry.snapshot(1).domains.sessions.revision).toBe(revisionBeforeRefresh);
+    await expect(registry.listTargets(1, {
+      mode: "session",
+      cursor: identicalRefreshCursor,
+      limit: 100,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ target: { id: "session_0500" } }], page: { truncated: false } },
+    });
+
+    const insertionCursor = registry.snapshot(1).domains.sessions.page.nextCursor;
+    if (!insertionCursor) throw new Error("Expected an insertion-safe target continuation cursor");
+    client.sessionState.Sessions = [session("session_-inserted", "inserted"), ...client.sessionState.Sessions];
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    await expect(registry.listTargets(1, {
+      mode: "session",
+      cursor: insertionCursor,
+      limit: 100,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ target: { id: "session_0500" } }], page: { truncated: false } },
+    });
+  });
+
+  it("searches the complete target catalog and binds continuations to the normalized query", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) =>
+      session(
+        `session_${String(index).padStart(4, "0")}`,
+        index === 500 ? "only-hidden-catalog-match" : `ordinary-${index}`,
+      ),
+    );
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    await expect(registry.listTargets(1, {
+      mode: "session",
+      query: "  ONLY-HIDDEN-CATALOG-MATCH  ",
+      limit: 100,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        items: [{ target: { id: "session_0500" }, ref: { id: "session_0500" } }],
+        page: { limit: 100, total: 1, truncated: false },
+      },
+    });
+
+    client.sessionState.Sessions = Array.from({ length: 201 }, (_, index) =>
+      session(`matching_${String(index).padStart(4, "0")}`, `query-bound-${index}`),
+    );
+    await registry.refresh(1);
+    const firstPage = await registry.listTargets(1, {
+      mode: "session",
+      query: "query-bound",
+      limit: 100,
+    });
+    if (!firstPage.ok || !firstPage.value.page.nextCursor) throw new Error("Expected a search cursor");
+    await expect(registry.listTargets(1, {
+      mode: "session",
+      query: "different-query",
+      cursor: firstPage.value.page.nextCursor,
+      limit: 100,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/stale|query|refresh/),
+    });
+
+    const retry = await registry.listTargets(1, {
+      mode: "session",
+      query: "QUERY-BOUND",
+      limit: 100,
+    });
+    if (!retry.ok || !retry.value.page.nextCursor) throw new Error("Expected a replacement search cursor");
+    await expect(registry.listTargets(1, {
+      mode: "session",
+      query: " query-bound ",
+      cursor: retry.value.page.nextCursor,
+      limit: 100,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { items: expect.any(Array), page: { total: 201, truncated: true } },
+    });
+  });
+
+  it("shares bounded target paging snapshots across windows and changing revisions", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) =>
+      session(`session_${String(index).padStart(4, "0")}`, `session-${index}`),
+    );
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+
+    for (let revision = 0; revision < 40; revision += 1) {
+      client.sessionState.Sessions[0]!.Name = `revision-${revision}`;
+      await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    }
+
+    const internals = registry as unknown as {
+      targetCatalogSnapshots: Map<string, { estimatedBytes: number }>;
+      targetCatalogSnapshotBytes: number;
+      windows: Map<number, { targetPageCursors: Map<string, { snapshotKey: string }> }>;
+    };
+    expect(internals.targetCatalogSnapshots.size).toBeLessThanOrEqual(32);
+    expect(internals.targetCatalogSnapshotBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+    expect(internals.windows.get(1)?.targetPageCursors.size).toBeLessThanOrEqual(8);
+    expect(internals.windows.get(2)?.targetPageCursors.size).toBeLessThanOrEqual(8);
+    const firstCursor = registry.snapshot(1).domains.sessions.page.nextCursor;
+    const secondCursor = registry.snapshot(2).domains.sessions.page.nextCursor;
+    if (!firstCursor || !secondCursor) throw new Error("Expected both windows to have target cursors");
+    const firstSnapshotKey = internals.windows.get(1)?.targetPageCursors.get(firstCursor)?.snapshotKey;
+    const secondSnapshotKey = internals.windows.get(2)?.targetPageCursors.get(secondCursor)?.snapshotKey;
+    expect(firstSnapshotKey).toBeDefined();
+    expect(secondSnapshotKey).toBe(firstSnapshotKey);
+    expect(firstCursor).not.toBe(secondCursor);
+  });
+
+  it("revokes the oldest cursor instead of blocking a thirty-third target catalog snapshot", async () => {
+    await Promise.all([
+      writeFile(join(externalDirectory, "pool-b.cfg"), validConfig({ lport: 31_338, token: "pool-b" })),
+      writeFile(join(externalDirectory, "pool-c.cfg"), validConfig({ lport: 31_339, token: "pool-c" })),
+      writeFile(join(externalDirectory, "pool-d.cfg"), validConfig({ lport: 31_340, token: "pool-d" })),
+    ]);
+    const clients = Array.from({ length: 4 }, (_, poolIndex) => {
+      const client = new FakeSliverClient();
+      client.sessionState.Sessions = Array.from({ length: 501 }, (_, targetIndex) =>
+        session(
+          `pool_${poolIndex}_session_${String(targetIndex).padStart(4, "0")}`,
+          `pool-${poolIndex}-target-${targetIndex}`,
+        ),
+      );
+      return client;
+    });
+    const availableClients = [...clients];
+    const registry = createRegistry(() => availableClients.shift()!.adapter);
+    for (const contentsId of [1, 2, 3, 4]) registry.registerWindow(contentsId);
+
+    try {
+      await connectNamed(registry, 1, "operator");
+      await connectNamed(registry, 2, "pool-b");
+      await connectNamed(registry, 3, "pool-c");
+      await connectNamed(registry, 4, "pool-d");
+
+      const oldestCursor = registry.snapshot(1).domains.sessions.page.nextCursor;
+      if (!oldestCursor) throw new Error("Expected an initial cursor for the first backend");
+      for (let revision = 1; revision < 8; revision += 1) {
+        for (let poolIndex = 0; poolIndex < clients.length; poolIndex += 1) {
+          clients[poolIndex]!.sessionState.Sessions[0]!.Name = `pool-${poolIndex}-revision-${revision}`;
+          await expect(registry.refresh(poolIndex + 1)).resolves.toMatchObject({ ok: true });
+        }
+      }
+
+      const internals = registry as unknown as {
+        targetCatalogSnapshots: Map<string, { estimatedBytes: number }>;
+        targetCatalogSnapshotBytes: number;
+        windows: Map<number, { targetPageCursors: Map<string, { snapshotKey: string }> }>;
+      };
+      expect(internals.targetCatalogSnapshots.size).toBe(32);
+      for (const contentsId of [1, 2, 3, 4]) {
+        expect(internals.windows.get(contentsId)?.targetPageCursors.size).toBe(8);
+      }
+
+      clients[0]!.sessionState.Sessions[0]!.Name = "pool-0-revision-8";
+      await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+      const newestCursor = registry.snapshot(1).domains.sessions.page.nextCursor;
+      if (!newestCursor) throw new Error("Expected the newest target catalog cursor");
+
+      await expect(registry.listTargets(1, {
+        mode: "session",
+        cursor: oldestCursor,
+        limit: 100,
+      })).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/stale|refresh/),
+      });
+      await expect(registry.listTargets(1, {
+        mode: "session",
+        cursor: newestCursor,
+        limit: 100,
+      })).resolves.toMatchObject({
+        ok: true,
+        value: {
+          items: [{ target: { id: "pool_0_session_0500" } }],
+          page: { total: 501, truncated: false },
+        },
+      });
+      expect(internals.targetCatalogSnapshots.size).toBeLessThanOrEqual(32);
+      expect(internals.targetCatalogSnapshotBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+    } finally {
+      await registry.unregisterWindow(3);
+      await registry.unregisterWindow(4);
+    }
+  });
+
+  it("keeps target selection and operation ownership independent across shared windows", async () => {
+    const rendererSend = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send: rendererSend });
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_1", "interactive")];
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    client.operatorState.Operators = [clientpb.Operator.create({ Name: "operator", Online: true })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+
+    const firstSnapshot = registry.snapshot(1);
+    const sessionRef = firstSnapshot.targetContext.selectableTargets.find((ref) => ref.id === "session_1");
+    const beaconRef = firstSnapshot.targetContext.selectableTargets.find((ref) => ref.id === "beacon_1");
+    expect(sessionRef).toBeDefined();
+    expect(beaconRef).toBeDefined();
+    await expect(registry.selectTarget(1, sessionRef!)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { status: "selected", activeTargetSummary: { id: "session_1" } } },
+    });
+    await expect(registry.selectTarget(2, beaconRef!)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { status: "selected", activeTargetSummary: { id: "beacon_1" } } },
+    });
+
+    const sessionPing = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    expect(sessionPing).toMatchObject({ ok: true, value: { state: "completed", mode: "session" } });
+    const beaconPing = await registry.submitTargetOperation(2, { operationId: "target.ping" });
+    expect(beaconPing).toMatchObject({
+      ok: true,
+      value: { mode: "beacon", taskId: expect.stringMatching(/^task_/u) },
+    });
+    if (!beaconPing.ok || !beaconPing.value.taskId) throw new Error("Expected a correlated beacon task");
+    expect(["submitted", "running"]).toContain(beaconPing.value.state);
+
+    rendererSend.mockClear();
+    await expect(registry.listBeaconTasks(2, { limit: 50 })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          taskId: beaconPing.value.taskId,
+          localRequestId: beaconPing.value.requestId,
+          ownership: { origin: "local", ownerWindowId: 2 },
+        }],
+      },
+    });
+    expect(rendererSend).not.toHaveBeenCalledWith(IPC.beaconTasksInvalidated, expect.anything());
+    await expect(registry.listBeaconTasks(1, { limit: 50 })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/Select an available beacon/),
+    });
+    await expect(registry.listTargetOperations(1, { limit: 50 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ mode: "session", ownership: { ownerWindowId: 1 } }] },
+    });
+    await expect(registry.listTargetOperations(2, { limit: 50 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ mode: "beacon", ownership: { ownerWindowId: 2 } }] },
+    });
+
+    const task = client.taskState.get("beacon_1")?.find((candidate) => candidate.ID === beaconPing.value.taskId);
+    if (!task) throw new Error("Expected fake beacon task");
+    task.State = "completed";
+    task.SentAt = String(Math.floor(Date.now() / 1_000));
+    task.CompletedAt = String(Math.floor(Date.now() / 1_000) + 1);
+    await expect(registry.getBeaconTask(2, task.ID)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "completed", disposition: { kind: "structured-detail", title: "Ping response" } },
+    });
+    await expect(registry.getTargetOperation(2, beaconPing.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "completed" },
+    });
+
+    expect(registry.snapshot(1).targetContext.activeTargetSummary?.id).toBe("session_1");
+    expect(registry.snapshot(2).targetContext.activeTargetSummary?.id).toBe("beacon_1");
+  });
+
+  it("coalesces a burst of task-reconciliation signals into one follow-up refresh", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    const internals = registry as unknown as {
+      windows: Map<number, { operationReconcileInFlight?: Promise<void> }>;
+      reconcileWindowOperations(
+        contentsId: number,
+        reason: "server-event",
+        includeOutcomeUnknown?: boolean,
+      ): Promise<void>;
+    };
+    await internals.windows.get(1)?.operationReconcileInFlight;
+    const baselineCalls = client.getBeaconTasks.mock.calls.length;
+    const gate = deferred<clientpb.BeaconTasks>();
+    client.getBeaconTasks.mockImplementationOnce(async () => gate.promise);
+
+    const first = internals.reconcileWindowOperations(1, "server-event");
+    await vi.waitFor(() => expect(client.getBeaconTasks).toHaveBeenCalledTimes(baselineCalls + 1));
+    const burst = Array.from({ length: 12 }, () =>
+      internals.reconcileWindowOperations(1, "server-event", true)
+    );
+    gate.resolve(clientpb.BeaconTasks.create({
+      Tasks: (client.taskState.get("beacon_1") ?? []).map((task) => clientpb.BeaconTask.create({
+        ...task,
+        Request: Buffer.alloc(0),
+        Response: Buffer.alloc(0),
+      })),
+    }));
+
+    await Promise.all([first, ...burst]);
+    expect(client.getBeaconTasks).toHaveBeenCalledTimes(baselineCalls + 2);
+  });
+
+  it("allows only one window to claim a duplicated server task ID", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "shared")];
+    client.setEnvBeacon.mockResolvedValue({
+      Response: { Async: true, BeaconID: "beacon_1", TaskID: "shared_task", Err: "" },
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0]!;
+    await registry.selectTarget(1, target);
+    await registry.selectTarget(2, target);
+
+    const first = await registry.submitTargetOperation(1, {
+      operationId: "target.env-set",
+      name: "SHARED_KEY",
+      value: "first",
+    });
+    const second = await registry.submitTargetOperation(2, {
+      operationId: "target.env-set",
+      name: "SHARED_KEY",
+      value: "second",
+    });
+    expect(first).toMatchObject({
+      ok: true,
+      value: { taskId: "shared_task", ownership: { ownerWindowId: 1 } },
+    });
+    expect(second).toMatchObject({
+      ok: true,
+      value: {
+        state: "outcome-unknown",
+        ownership: { ownerWindowId: 2 },
+        message: expect.stringMatching(/claimed by another window/),
+      },
+    });
+    if (!first.ok || !second.ok) throw new Error("Expected operation records");
+    expect(second.value.taskId).toBeUndefined();
+
+    client.taskState.set("beacon_1", [clientpb.BeaconTask.create({
+      ID: "shared_task",
+      BeaconID: "beacon_1",
+      State: "completed",
+      Description: "SetEnvReq",
+      CreatedAt: String(Math.floor(Date.now() / 1_000)),
+      SentAt: String(Math.floor(Date.now() / 1_000)),
+      CompletedAt: String(Math.floor(Date.now() / 1_000) + 1),
+      Response: Buffer.from(sliverpb.SetEnv.encode(sliverpb.SetEnv.create({ Response: {} })).finish()),
+    })]);
+    await expect(registry.getBeaconTask(1, "shared_task")).resolves.toMatchObject({
+      ok: true,
+      value: { ownership: { origin: "local", ownerWindowId: 1 } },
+    });
+    await expect(registry.getTargetOperation(1, first.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "completed" },
+    });
+    await expect(registry.listBeaconTasks(2, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ taskId: "shared_task", ownership: { origin: "unknown" } }] },
+    });
+    await expect(registry.getTargetOperation(2, second.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "outcome-unknown" },
+    });
+    expect(client.setEnvBeacon).toHaveBeenCalledTimes(2);
+  });
+
+  it("advertises beacon session conversion only for a valid main-owned ActiveC2", async () => {
+    const client = new FakeSliverClient();
+    const valid = beacon("beacon_valid", "valid");
+    const missing = beacon("beacon_missing", "missing");
+    missing.ActiveC2 = "";
+    const mismatched = beacon("beacon_mismatched", "mismatched");
+    mismatched.Transport = "mtls";
+    mismatched.ActiveC2 = "https://127.0.0.1:9999/private";
+    client.beaconState.Beacons = [valid, missing, mismatched];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    for (const [id, available] of [
+      ["beacon_valid", true],
+      ["beacon_missing", false],
+      ["beacon_mismatched", false],
+    ] as const) {
+      const ref = registry.snapshot(1).targetContext.selectableTargets.find((candidate) => candidate.id === id)!;
+      const selected = await registry.selectTarget(1, ref);
+      if (!selected.ok) throw new Error(selected.error);
+      const capability = selected.value.targetContext.capabilities.find(
+        (candidate) => candidate.id === "beacon.open-session",
+      );
+      expect(capability?.available).toBe(available);
+      if (!available) expect(capability?.reason?.code).toBe("unsupported-transport");
+    }
+  });
+
+  it("retains a selected target through a deferred refresh while failing dispatch closed", async () => {
+    const rendererSend = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send: rendererSend });
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    await registry.setBeaconWatch(1, true);
+    const selected = registry.snapshot(1).targetContext.activeTarget;
+    expect(selected).not.toBeNull();
+
+    rendererSend.mockClear();
+    const beaconsGate = deferred<clientpb.Beacons>();
+    client.nextBeaconsPromise = beaconsGate.promise;
+    const refresh = registry.refresh(1);
+    await vi.waitFor(() => expect(registry.snapshot(1).domains.beacons.status).toBe("loading"));
+
+    const duringRefresh = registry.snapshot(1).targetContext;
+    expect(duringRefresh).toMatchObject({
+      status: "unavailable",
+      activeTarget: selected,
+      activeTargetSummary: { id: "beacon_1" },
+      beaconWatch: true,
+      unavailableReason: expect.stringMatching(/refreshing|temporarily disabled/),
+    });
+    expect(duringRefresh.capabilities).not.toHaveLength(0);
+    expect(duringRefresh.capabilities.every((capability) => !capability.available)).toBe(true);
+    await expect(registry.submitTargetOperation(1, { operationId: "target.ping" })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/not authoritative/),
+    });
+    expect(client.pingBeacon).not.toHaveBeenCalled();
+
+    beaconsGate.resolve(clientpb.Beacons.create({ Beacons: [beacon("beacon_1", "async")] }));
+    await expect(refresh).resolves.toMatchObject({ ok: true });
+    const restored = registry.snapshot(1).targetContext;
+    expect(restored).toMatchObject({
+      status: "selected",
+      activeTarget: {
+        mode: selected!.mode,
+        id: selected!.id,
+        backendEpoch: selected!.backendEpoch,
+        fingerprint: selected!.fingerprint,
+      },
+      activeTargetSummary: { id: "beacon_1" },
+      beaconWatch: true,
+    });
+    expect(restored.capabilities.some((capability) => capability.available)).toBe(true);
+    const emittedSnapshots = rendererSend.mock.calls
+      .filter(([channel]) => channel === IPC.snapshotChanged)
+      .map(([, snapshot]) => snapshot as ReturnType<ConnectionRegistry["snapshot"]>);
+    expect(emittedSnapshots.length).toBeGreaterThan(0);
+    expect(emittedSnapshots.every((snapshot) =>
+      snapshot.targetContext.activeTarget?.id === "beacon_1" &&
+      snapshot.targetContext.activeTargetSummary?.id === "beacon_1"
+    )).toBe(true);
+  });
+
+  it("clears selection and watch after a complete empty inventory and marks in-flight work target-disappeared", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const renameGate = deferred<void>();
+    client.renameBeacon.mockImplementationOnce(async () => {
+      await renameGate.promise;
+      return {};
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    await registry.setBeaconWatch(1, true);
+
+    const rename = registry.submitTargetOperation(1, { operationId: "target.rename", name: "renamed" });
+    await vi.waitFor(() => expect(client.renameBeacon).toHaveBeenCalledOnce());
+    client.beaconState.Beacons = [];
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    renameGate.resolve(undefined);
+    await expect(rename).resolves.toMatchObject({
+      ok: true,
+      value: { state: "target-disappeared", target: { id: "beacon_1" } },
+    });
+
+    expect(registry.snapshot(1).targetContext).toMatchObject({
+      status: "none",
+      activeTarget: null,
+      activeTargetSummary: null,
+      beaconWatch: false,
+    });
+    expect(history).toMatchObject({
+      ok: true,
+      value: { items: [{ state: "target-disappeared", target: { id: "beacon_1" } }] },
+    });
+    expect(client.renameBeacon).toHaveBeenCalledOnce();
+  });
+
+  it("treats an omitted target in the full paged catalog as authoritatively disappeared", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_selected", "selected")];
+    const pingGate = deferred<void>();
+    client.pingSession.mockImplementationOnce(async (_sessionId, nonce) => {
+      await pingGate.promise;
+      return sliverpb.Ping.create({ Nonce: nonce });
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const ping = registry.submitTargetOperation(1, { operationId: "target.ping" });
+    await vi.waitFor(() => expect(client.pingSession).toHaveBeenCalledOnce());
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) =>
+      session(`session_${String(index).padStart(4, "0")}`, `session-${index}`),
+    );
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    const boundedSnapshot = registry.snapshot(1);
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    pingGate.resolve(undefined);
+    await expect(ping).resolves.toMatchObject({ ok: true, value: { state: "target-disappeared" } });
+
+    expect(boundedSnapshot.domains.sessions.page).toMatchObject({ total: 501, truncated: true });
+    expect(boundedSnapshot.targetContext).toMatchObject({
+      status: "none",
+      activeTarget: null,
+      activeTargetSummary: null,
+    });
+    expect(history).toMatchObject({ ok: true });
+    if (!history.ok) throw new Error(history.error);
+    expect(history.value.items[0]?.state).toBe("target-disappeared");
+    expect(client.pingSession).toHaveBeenCalledOnce();
+  });
+
+  it("reruns an older in-flight inventory refresh before executing a destructive target plan", async () => {
+    const client = new FakeSliverClient();
+    const dead = session("session_dead", "dead");
+    dead.IsDead = true;
+    client.sessionState.Sessions = [dead];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const prepared = await registry.prepareTargetAction(1, { actionId: "sessions.prune-dead" });
+    if (!prepared.ok) throw new Error(prepared.error);
+    const baselineCalls = client.getSessions.mock.calls.length;
+
+    const staleSessions = deferred<clientpb.Sessions>();
+    client.nextSessionsPromise = staleSessions.promise;
+    const olderRefresh = registry.refresh(1);
+    await vi.waitFor(() => expect(client.getSessions).toHaveBeenCalledTimes(baselineCalls + 1));
+    client.sessionState.Sessions = [session("session_dead", "now-active")];
+    const execute = registry.executeTargetActionPlan(1, prepared.value.token);
+    await Promise.resolve();
+    staleSessions.resolve(clientpb.Sessions.create({ Sessions: [dead] }));
+
+    await expect(olderRefresh).resolves.toMatchObject({ ok: true });
+    await expect(execute).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/reviewed target set changed|no longer available/),
+    });
+    expect(client.getSessions).toHaveBeenCalledTimes(baselineCalls + 2);
+    expect(client.killSession).not.toHaveBeenCalled();
+  });
+
+  it("revalidates every bulk-prune target immediately before dispatch", async () => {
+    const client = new FakeSliverClient();
+    const first = session("session_dead_a", "dead-a");
+    const second = session("session_dead_b", "dead-b");
+    first.IsDead = true;
+    second.IsDead = true;
+    client.sessionState.Sessions = [first, second];
+    const firstKill = deferred<void>();
+    client.killSession.mockImplementationOnce(async (sessionId: string) => {
+      await firstKill.promise;
+      client.sessionState.Sessions = client.sessionState.Sessions.filter((candidate) => candidate.ID !== sessionId);
+      return {};
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const prepared = await registry.prepareTargetAction(1, { actionId: "sessions.prune-dead" });
+    if (!prepared.ok) throw new Error(prepared.error);
+
+    const execution = registry.executeTargetActionPlan(1, prepared.value.token);
+    await vi.waitFor(() => expect(client.killSession).toHaveBeenCalledWith("session_dead_a", false));
+    client.sessionState.Sessions = [first, session("session_dead_b", "revived")];
+    firstKill.resolve(undefined);
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: {
+        outcomes: [
+          { target: { id: "session_dead_a" }, status: "succeeded" },
+          { target: { id: "session_dead_b" }, status: "skipped" },
+        ],
+        partial: true,
+      },
+    });
+    expect(client.killSession).toHaveBeenCalledOnce();
+  });
+
+  it("reviews and executes an eligible target beyond the 500-row projection", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) => {
+      const record = session(`session_${String(index).padStart(4, "0")}`, `session-${index}`);
+      record.IsDead = index === 500;
+      return record;
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const prepared = await registry.prepareTargetAction(1, { actionId: "sessions.prune-dead" });
+    expect(prepared).toMatchObject({
+      ok: true,
+      value: {
+        impact: {
+          targets: [{ id: "session_0500" }],
+          totalTargets: 1,
+          truncated: false,
+        },
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    await expect(registry.executeTargetActionPlan(1, prepared.value.token)).resolves.toMatchObject({
+      ok: true,
+      value: { outcomes: [{ target: { id: "session_0500" }, status: "succeeded" }] },
+    });
+    expect(client.killSession).toHaveBeenCalledWith("session_0500", false);
+  });
+
+  it("bounds bulk-prune review plans and discloses the full matching count", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) => {
+      const record = session(`session_${String(index).padStart(4, "0")}`, `session-${index}`);
+      record.IsDead = true;
+      return record;
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const prepared = await registry.prepareTargetAction(1, { actionId: "sessions.prune-dead" });
+    if (!prepared.ok) throw new Error(prepared.error);
+    expect(prepared.value.impact.targets).toHaveLength(100);
+    expect(prepared.value.impact).toMatchObject({ totalTargets: 501, truncated: true });
+    expect(prepared.value.impact.warning).toMatch(/100 of 501/u);
+  });
+
+  it("reconciles a lost rename response against its journaled target after selection changes", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      session("session_a", "first"),
+      session("session_b", "second"),
+    ];
+    const renameGate = deferred<void>();
+    client.renameSession.mockImplementationOnce(async (sessionId: string, name: string) => {
+      const target = client.sessionState.Sessions.find((candidate) => candidate.ID === sessionId);
+      if (target) target.Name = name;
+      await renameGate.promise;
+      throw new Error("response lost after rename");
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const firstRef = registry.snapshot(1).targetContext.selectableTargets.find((ref) => ref.id === "session_a")!;
+    const secondRef = registry.snapshot(1).targetContext.selectableTargets.find((ref) => ref.id === "session_b")!;
+    await registry.selectTarget(1, firstRef);
+
+    const rename = registry.submitTargetOperation(1, {
+      operationId: "target.rename",
+      name: "renamed-first",
+    });
+    await vi.waitFor(() => expect(client.renameSession).toHaveBeenCalledOnce());
+    await expect(registry.selectTarget(1, secondRef)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTargetSummary: { id: "session_b" } } },
+    });
+    renameGate.resolve(undefined);
+
+    await expect(rename).resolves.toMatchObject({
+      ok: true,
+      value: {
+        operationId: "target.rename",
+        target: { id: "session_a" },
+        state: "completed",
+      },
+    });
+    expect(client.renameSession).toHaveBeenCalledOnce();
+    expect(registry.snapshot(1).targetContext.activeTargetSummary?.id).toBe("session_b");
+  });
+
+  it("cancels only the exact pending beacon task and rejects stale target references", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const staleRef = registry.snapshot(1).targetContext.selectableTargets[0]!;
+    client.beaconState.Beacons[0]!.Name = "updated-after-selection";
+    await registry.refresh(1);
+    await expect(registry.selectTarget(1, staleRef)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/stale/),
+    });
+
+    const currentRef = registry.snapshot(1).targetContext.selectableTargets[0]!;
+    await expect(registry.selectTarget(1, currentRef)).resolves.toMatchObject({ ok: true });
+    const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a correlated beacon task");
+    await expect(registry.cancelTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled", taskId: submitted.value.taskId },
+    });
+    expect(client.cancelBeaconTask).toHaveBeenCalledWith(submitted.value.taskId);
+    await expect(registry.getBeaconTask(1, submitted.value.taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled" },
+    });
+    await expect(registry.getTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled" },
+    });
+  });
+
+  it("keeps a locally rejected ninth task cancellation eligible for one retry", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const operations = [];
+    for (let index = 0; index < 9; index += 1) {
+      const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+      if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a correlated ping task");
+      operations.push(submitted.value);
+    }
+    const admittedTaskIds = operations.slice(0, 8).map((operation) => operation.taskId!);
+    const ninthTaskId = operations[8]!.taskId!;
+    const gates = new Map(admittedTaskIds.map((taskId) => [taskId, deferred<void>()]));
+    client.cancelBeaconTask.mockImplementation(async (taskId: string) => {
+      const gate = gates.get(taskId);
+      if (gate) await gate.promise;
+      const task = client.taskState.get("beacon_1")?.find((candidate) => candidate.ID === taskId);
+      if (!task) throw new Error("missing task");
+      task.State = "canceled";
+      return clientpb.BeaconTask.create({ ...task });
+    });
+
+    const admitted = operations.slice(0, 8).map((operation) =>
+      registry.cancelTargetOperation(1, operation.requestId)
+    );
+    await vi.waitFor(() => expect(client.cancelBeaconTask).toHaveBeenCalledTimes(8));
+
+    await expect(registry.cancelTargetOperation(1, operations[8]!.requestId)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/Too many beacon task cancellations/u),
+    });
+    expect(client.cancelBeaconTask).toHaveBeenCalledTimes(8);
+    expect(client.cancelBeaconTask).not.toHaveBeenCalledWith(ninthTaskId);
+
+    gates.get(admittedTaskIds[0]!)?.resolve(undefined);
+    await expect(admitted[0]).resolves.toMatchObject({ ok: true, value: { state: "canceled" } });
+
+    await expect(registry.cancelTargetOperation(1, operations[8]!.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled", taskId: ninthTaskId },
+    });
+    expect(client.cancelBeaconTask.mock.calls.filter(([taskId]) => taskId === ninthTaskId)).toHaveLength(1);
+
+    for (const taskId of admittedTaskIds.slice(1)) gates.get(taskId)?.resolve(undefined);
+    await expect(Promise.all(admitted.slice(1))).resolves.toHaveLength(7);
+  });
+
+  it("preserves direct task-cancellation policy denials without dispatching", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const submitted = await registry.submitTargetOperation(1, {
+      operationId: "beacon.reconfigure",
+      intervalSeconds: 5,
+      jitterSeconds: 1,
+    });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a reconfigure task");
+
+    await expect(registry.cancelBeaconTask(1, submitted.value.taskId)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/cannot be canceled safely|server timing metadata/u),
+    });
+    expect(client.cancelBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["canceled", "canceled"],
+    ["sent", "running"],
+    ["completed", "completed"],
+  ] as const)("reconciles an already-%s task without dispatching cancellation", async (taskState, operationState) => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a correlated ping task");
+    const task = client.taskState.get("beacon_1")?.find(({ ID }) => ID === submitted.value!.taskId);
+    if (!task) throw new Error("Expected the fake ping task");
+    task.State = taskState;
+    if (taskState === "sent" || taskState === "completed") task.SentAt = String(Math.floor(Date.now() / 1_000));
+    if (taskState === "completed") task.CompletedAt = String(Math.floor(Date.now() / 1_000));
+
+    await expect(registry.cancelBeaconTask(1, submitted.value.taskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        taskId: submitted.value.taskId,
+        state: taskState,
+      },
+    });
+    await expect(registry.getTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        state: operationState,
+        ...(taskState === "completed" ? { disposition: { kind: "structured-detail" } } : {}),
+      },
+    });
+    expect(client.cancelBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it("does not return a confirmed old-target cancellation as current after selection changes", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_a", "first"), beacon("beacon_b", "second")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const first = registry.snapshot(1).targetContext.selectableTargets.find((target) => target.id === "beacon_a")!;
+    await registry.selectTarget(1, first);
+    const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a ping task");
+    const cancelGate = deferred<void>();
+    client.cancelBeaconTask.mockImplementationOnce(async (taskId: string) => {
+      await cancelGate.promise;
+      const task = client.taskState.get("beacon_a")?.find((candidate) => candidate.ID === taskId);
+      if (!task) throw new Error("missing task");
+      task.State = "canceled";
+      return clientpb.BeaconTask.create({ ...task });
+    });
+
+    const cancellation = registry.cancelBeaconTask(1, submitted.value.taskId);
+    await vi.waitFor(() => expect(client.cancelBeaconTask).toHaveBeenCalledOnce());
+    const currentSecond = registry.snapshot(1).targetContext.selectableTargets.find((target) => target.id === "beacon_b");
+    if (!currentSecond) throw new Error("Expected the second beacon to remain selectable");
+    await expect(registry.selectTarget(1, currentSecond)).resolves.toMatchObject({ ok: true });
+    cancelGate.resolve(undefined);
+
+    await expect(cancellation).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/previously selected backend target/u),
+    });
+    expect(registry.snapshot(1).targetContext.activeTargetSummary?.id).toBe("beacon_b");
+    expect(client.cancelBeaconTask).toHaveBeenCalledOnce();
+  });
+
+  it("uses exact task lookup to reconcile cancellation beyond the first 100 active tasks", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a correlated beacon task");
+    const tasks = client.taskState.get("beacon_1");
+    if (!tasks) throw new Error("Expected fake beacon task inventory");
+    tasks.push(...activeBeaconTasks("beacon_1", 101, "first_page_distractor"));
+
+    const exactTaskSpy = vi.spyOn(BeaconTaskStore.prototype, "task");
+    const pageSpy = vi.spyOn(BeaconTaskStore.prototype, "list");
+    try {
+      await expect(registry.cancelBeaconTask(1, submitted.value.taskId)).resolves.toMatchObject({
+        ok: true,
+        value: {
+          taskId: submitted.value.taskId,
+          state: "canceled",
+          localRequestId: submitted.value.requestId,
+        },
+      });
+      expect(client.cancelBeaconTask).toHaveBeenCalledWith(submitted.value.taskId);
+      expect(exactTaskSpy).toHaveBeenCalledWith("beacon_1", submitted.value.taskId, expect.any(Function));
+      expect(pageSpy).not.toHaveBeenCalled();
+      await expect(registry.getTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+        ok: true,
+        value: { state: "canceled", taskId: submitted.value.taskId },
+      });
+    } finally {
+      exactTaskSpy.mockRestore();
+      pageSpy.mockRestore();
+    }
+  });
+
+  it("keeps an exact cancellation authoritative when refresh fails and reconciles a lost cancel response", async () => {
+    const exactClient = new FakeSliverClient();
+    exactClient.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const exactRegistry = createRegistry(() => exactClient.adapter);
+    exactRegistry.registerWindow(1);
+    await connectSaved(exactRegistry, 1);
+    await exactRegistry.selectTarget(1, exactRegistry.snapshot(1).targetContext.selectableTargets[0]!);
+    const exactSubmitted = await exactRegistry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!exactSubmitted.ok || !exactSubmitted.value.taskId) throw new Error("Expected a correlated beacon task");
+    exactClient.getBeaconTasks
+      .mockImplementationOnce(async (beaconId: string) => clientpb.BeaconTasks.create({
+        Tasks: (exactClient.taskState.get(beaconId) ?? []).map((task) => clientpb.BeaconTask.create({
+          ...task,
+          Request: Buffer.alloc(0),
+          Response: Buffer.alloc(0),
+        })),
+      }))
+      .mockRejectedValueOnce(new Error("post-cancel inventory unavailable"));
+
+    await expect(exactRegistry.cancelBeaconTask(1, exactSubmitted.value.taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { taskId: exactSubmitted.value.taskId, state: "canceled" },
+    });
+    await expect(exactRegistry.getTargetOperation(1, exactSubmitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled" },
+    });
+    expect(exactClient.cancelBeaconTask).toHaveBeenCalledOnce();
+
+    const lostClient = new FakeSliverClient();
+    lostClient.beaconState.Beacons = [beacon("beacon_2", "async")];
+    const lostRegistry = createRegistry(() => lostClient.adapter);
+    lostRegistry.registerWindow(2);
+    await connectSaved(lostRegistry, 2);
+    await lostRegistry.selectTarget(2, lostRegistry.snapshot(2).targetContext.selectableTargets[0]!);
+    const lostSubmitted = await lostRegistry.submitTargetOperation(2, { operationId: "target.ping" });
+    if (!lostSubmitted.ok || !lostSubmitted.value.taskId) throw new Error("Expected a correlated beacon task");
+    lostClient.cancelBeaconTask.mockImplementationOnce(async (taskId: string) => {
+      const task = lostClient.taskState.get("beacon_2")?.find((candidate) => candidate.ID === taskId);
+      if (task) task.State = "canceled";
+      throw new Error("cancel response lost");
+    });
+
+    await expect(lostRegistry.cancelBeaconTask(2, lostSubmitted.value.taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { taskId: lostSubmitted.value.taskId, state: "canceled" },
+    });
+    await expect(lostRegistry.getTargetOperation(2, lostSubmitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled" },
+    });
+    expect(lostClient.cancelBeaconTask).toHaveBeenCalledOnce();
+  });
+
+  it("pins and reconciles a cancel-target task among more than 500 active tasks", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a correlated beacon task");
+    const tasks = client.taskState.get("beacon_1");
+    if (!tasks) throw new Error("Expected fake beacon task inventory");
+    tasks.push(...activeBeaconTasks("beacon_1", 501, "bounded_distractor"));
+
+    const listed = await registry.listBeaconTasks(1, { limit: 100 });
+    if (!listed.ok) throw new Error(listed.error);
+    expect(listed.value.page).toMatchObject({ total: 502, truncated: true });
+    expect(listed.value.items).toHaveLength(100);
+    expect(listed.value.items[0]).toMatchObject({
+      taskId: submitted.value.taskId,
+      localRequestId: submitted.value.requestId,
+      ownership: { origin: "local", ownerWindowId: 1 },
+    });
+    await expect(registry.cancelTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled", taskId: submitted.value.taskId },
+    });
+    expect(client.cancelBeaconTask).toHaveBeenCalledWith(submitted.value.taskId);
+    await expect(registry.getBeaconTask(1, submitted.value.taskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        taskId: submitted.value.taskId,
+        state: "canceled",
+        localRequestId: submitted.value.requestId,
+      },
+    });
+    await expect(registry.getTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "canceled", taskId: submitted.value.taskId },
+    });
+  });
+
+  it("keeps beacon task continuation pages on one catalog and refreshes new tasks on restart", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    client.taskState.set("beacon_1", activeBeaconTasks("beacon_1", 3, "history"));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const first = await registry.listBeaconTasks(1, { limit: 2 });
+    if (!first.ok || !first.value.page.nextCursor) throw new Error("Expected a task continuation cursor");
+    expect(client.getBeaconTasks).toHaveBeenCalledOnce();
+    const newerTask = activeBeaconTasks("beacon_1", 1, "newer")[0]!;
+    newerTask.CreatedAt = "3000000000";
+    client.taskState.get("beacon_1")!.push(newerTask);
+
+    const second = await registry.listBeaconTasks(1, {
+      cursor: first.value.page.nextCursor,
+      limit: 2,
+    });
+    if (!second.ok) throw new Error(second.error);
+    expect(second.value.items).toHaveLength(1);
+    expect(client.getBeaconTasks).toHaveBeenCalledOnce();
+    expect(new Set([...first.value.items, ...second.value.items].map(({ taskId }) => taskId)).size).toBe(3);
+
+    const restarted = await registry.listBeaconTasks(1, { limit: 2 });
+    if (!restarted.ok) throw new Error(restarted.error);
+    expect(client.getBeaconTasks).toHaveBeenCalledTimes(2);
+    expect(restarted.value.items[0]?.taskId).toMatch(/^newer_/u);
+  });
+
+  it("bounds same-beacon task-list waiters per window without starving another window", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_a", "async-a"), beacon("beacon_b", "async-b")];
+    client.taskState.set("beacon_a", activeBeaconTasks("beacon_a", 1, "a_task"));
+    client.taskState.set("beacon_b", activeBeaconTasks("beacon_b", 1, "b_task"));
+    const beaconAGate = deferred<void>();
+    client.getBeaconTasks.mockImplementation(async (beaconId: string) => {
+      if (beaconId === "beacon_a") await beaconAGate.promise;
+      return clientpb.BeaconTasks.create({
+        Tasks: (client.taskState.get(beaconId) ?? []).map((task) => clientpb.BeaconTask.create({
+          ...task,
+          Request: Buffer.alloc(0),
+          Response: Buffer.alloc(0),
+        })),
+      });
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+    const targetA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "beacon_a");
+    const targetB = registry.snapshot(2).targetContext.selectableTargets.find(({ id }) => id === "beacon_b");
+    if (!targetA || !targetB) throw new Error("Expected both fake beacons to be selectable");
+    await registry.selectTarget(1, targetA);
+    await registry.selectTarget(2, targetB);
+
+    const admitted = Array.from({ length: 4 }, () => registry.listBeaconTasks(1, { limit: 100 }));
+    await vi.waitFor(() => {
+      expect(client.getBeaconTasks.mock.calls.filter(([beaconId]) => beaconId === "beacon_a")).toHaveLength(1);
+    });
+    await expect(registry.listBeaconTasks(1, { limit: 100 })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/Too many beacon task inventories/),
+    });
+
+    await expect(registry.listBeaconTasks(2, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ taskId: expect.stringMatching(/^b_task_/u) }] },
+    });
+    beaconAGate.resolve(undefined);
+    await expect(Promise.all(admitted)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ ok: true })]),
+    );
+    expect(client.getBeaconTasks.mock.calls.filter(([beaconId]) => beaconId === "beacon_a")).toHaveLength(2);
+  });
+
+  it("bounds concurrent task-detail admissions per window before raw content fetch", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    client.taskState.set("beacon_1", [clientpb.BeaconTask.create({
+      ID: "completed_task",
+      BeaconID: "beacon_1",
+      State: "completed",
+      Description: "Ping",
+      CreatedAt: String(Math.floor(Date.now() / 1_000)),
+      SentAt: String(Math.floor(Date.now() / 1_000)),
+      CompletedAt: String(Math.floor(Date.now() / 1_000)),
+    })]);
+    const fetchGate = deferred<void>();
+    client.fetchBeaconTask.mockImplementation(async () => {
+      await fetchGate.promise;
+      return clientpb.BeaconTask.create({
+        ...client.taskState.get("beacon_1")![0],
+        Response: Buffer.from(sliverpb.Ping.encode(sliverpb.Ping.create({ Nonce: 7 })).finish()),
+      });
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const admitted = Array.from({ length: 4 }, () => registry.getBeaconTask(1, "completed_task"));
+    await vi.waitFor(() => expect(client.fetchBeaconTask).toHaveBeenCalledTimes(4));
+    await expect(registry.getBeaconTask(1, "completed_task")).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/Too many beacon task details/),
+    });
+    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(4);
+    fetchGate.resolve(undefined);
+    await expect(Promise.all(admitted)).resolves.toHaveLength(4);
+  });
+
+  it("keeps editable config operator metadata out of verified operation attribution", async () => {
+    await writeFile(join(externalDirectory, "spoofed.cfg"), validConfig({ operator: "spoofed-verified-actor" }));
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_1", "interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectNamed(registry, 1, "spoofed");
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const operation = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    expect(registry.snapshot(1).connection.operator).toBe("spoofed-verified-actor");
+    expect(operation).toMatchObject({
+      ok: true,
+      value: { ownership: { origin: "local", actor: { attribution: "unknown" } } },
+    });
+    expect(JSON.stringify(operation)).not.toContain('"attribution":"verified"');
+  });
+
+  it("fails target actions closed while their inventory is non-authoritative and recovers selection", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    client.getBeacons.mockRejectedValueOnce(new Error("temporary beacon inventory failure"));
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: false });
+    expect(registry.snapshot(1).targetContext).toMatchObject({
+      status: "unavailable",
+      selectableTargets: [],
+      unavailableReason: expect.stringMatching(/refreshing|unavailable/),
+    });
+    await expect(registry.submitTargetOperation(1, { operationId: "target.ping" })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/not authoritative/),
+    });
+    expect(client.pingBeacon).not.toHaveBeenCalled();
+
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    expect(registry.snapshot(1).targetContext).toMatchObject({
+      status: "selected",
+      activeTargetSummary: { id: "beacon_1" },
+    });
+  });
+
+  it("prunes task catalogs only after a complete authoritative beacon inventory", async () => {
+    const pruneSpy = vi.spyOn(BeaconTaskStore.prototype, "pruneAbsentBeacons");
+    try {
+      const client = new FakeSliverClient();
+      client.beaconState.Beacons = [beacon("beacon_keep", "keep"), beacon("beacon_removed", "removed")];
+      const registry = createRegistry(() => client.adapter);
+      registry.registerWindow(1);
+      await connectSaved(registry, 1);
+      pruneSpy.mockClear();
+
+      client.getBeacons.mockRejectedValueOnce(new Error("temporary beacon inventory failure"));
+      await expect(registry.refresh(1)).resolves.toMatchObject({ ok: false });
+      expect(pruneSpy).not.toHaveBeenCalled();
+
+      client.beaconState.Beacons = Array.from({ length: 501 }, (_, index) =>
+        beacon(`beacon_${String(index).padStart(4, "0")}`, `beacon-${index}`),
+      );
+      await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+      expect(registry.snapshot(1).domains.beacons.page.truncated).toBe(true);
+      expect(pruneSpy).toHaveBeenCalledOnce();
+      expect(pruneSpy.mock.calls[0]?.[0]).toHaveLength(501);
+      expect(pruneSpy.mock.calls[0]?.[0]).toContain("beacon_0500");
+      pruneSpy.mockClear();
+
+      client.beaconState.Beacons = [beacon("beacon_keep", "keep")];
+      await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+      expect(pruneSpy).toHaveBeenCalledOnce();
+      expect(pruneSpy).toHaveBeenCalledWith(["beacon_keep"]);
+    } finally {
+      pruneSpy.mockRestore();
+    }
+  });
+
+  it("reconciles a correlated beacon task after operator connection uncertainty without resubmission", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const submitted = await registry.submitTargetOperation(1, { operationId: "target.ping" });
+    if (!submitted.ok || !submitted.value.taskId) throw new Error("Expected a correlated beacon task");
+
+    client.streamStates.next({ status: "retrying", attempt: 1, error: "fault proxy blocked" });
+    await expect(registry.getTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "outcome-unknown", taskId: submitted.value.taskId },
+    });
+    const task = client.taskState.get("beacon_1")?.find((candidate) => candidate.ID === submitted.value.taskId);
+    if (!task) throw new Error("Expected fake beacon task");
+    task.State = "completed";
+    task.SentAt = String(Math.floor(Date.now() / 1_000));
+    task.CompletedAt = String(Math.floor(Date.now() / 1_000) + 1);
+    client.streamStates.next({ status: "connected", attempt: 0 });
+    await registry.getBeaconTask(1, task.ID);
+
+    await expect(registry.getTargetOperation(1, submitted.value.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "completed", disposition: { kind: "structured-detail" } },
+    });
+    expect(client.pingBeacon).toHaveBeenCalledOnce();
+  });
+
+  it("binds destructive target actions to a reviewed one-use plan", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const prepared = await registry.prepareTargetAction(1, { actionId: "target.kill" });
+    expect(prepared).toMatchObject({
+      ok: true,
+      value: {
+        impact: {
+          targets: [{ id: "beacon_1" }],
+          warning: expect.stringMatching(/outcome unknown/),
+        },
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    await expect(registry.executeTargetActionPlan(1, prepared.value.token)).resolves.toMatchObject({
+      ok: true,
+      value: { outcomes: [{ target: { id: "beacon_1" }, status: "outcome-unknown" }] },
+    });
+    await expect(registry.executeTargetActionPlan(1, prepared.value.token)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/expired or was already used/),
+    });
+    expect(client.killBeacon).toHaveBeenCalledOnce();
+  });
+
+  it("bounds parallel target action plan preparation and retained reviews per window", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_1", "interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const inventoryGate = deferred<clientpb.Sessions>();
+    client.nextSessionsPromise = inventoryGate.promise;
+
+    const preparations = Array.from({ length: 9 }, () =>
+      registry.prepareTargetAction(1, { actionId: "target.kill" })
+    );
+    await vi.waitFor(() => expect(client.getSessions.mock.calls.length).toBeGreaterThan(0));
+    inventoryGate.resolve(clientpb.Sessions.create(client.sessionState));
+    const results = await Promise.all(preparations);
+
+    expect(results.filter((result) => result.ok)).toHaveLength(8);
+    expect(results.filter((result) => !result.ok)).toEqual([
+      expect.objectContaining({ error: expect.stringMatching(/Too many target action plans/) }),
+    ]);
+    const internals = registry as unknown as {
+      windows: Map<number, { targetPlans: Map<string, unknown>; targetPlanAdmissions: Set<string> }>;
+    };
+    expect(internals.windows.get(1)?.targetPlans.size).toBe(8);
+    expect(internals.windows.get(1)?.targetPlanAdmissions.size).toBe(0);
+  });
+
+  it("returns backend-bound destructive outcomes and skips undispatched targets after a config switch", async () => {
+    await writeFile(join(externalDirectory, "backend-b.cfg"), validConfig({ lport: 31338, token: "backend-b" }));
+    const firstClient = new FakeSliverClient();
+    const secondClient = new FakeSliverClient();
+    const deadA = session("session_a", "dead-a");
+    const deadB = session("session_b", "dead-b");
+    deadA.IsDead = true;
+    deadB.IsDead = true;
+    firstClient.sessionState.Sessions = [deadA, deadB];
+    const killGate = deferred<void>();
+    firstClient.killSession.mockImplementationOnce(async (sessionId: string) => {
+      await killGate.promise;
+      firstClient.sessionState.Sessions = firstClient.sessionState.Sessions.filter(({ ID }) => ID !== sessionId);
+      return {};
+    });
+    const clients = [firstClient, secondClient];
+    const registry = createRegistry(() => clients.shift()!.adapter);
+    registry.registerWindow(1);
+    await connectNamed(registry, 1, "operator");
+    const prepared = await registry.prepareTargetAction(1, { actionId: "sessions.prune-dead" });
+    if (!prepared.ok) throw new Error(prepared.error);
+
+    const execution = registry.executeTargetActionPlan(1, prepared.value.token);
+    await vi.waitFor(() => expect(firstClient.killSession).toHaveBeenCalledOnce());
+    await connectNamed(registry, 1, "backend-b");
+    killGate.resolve(undefined);
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: {
+        actionId: "sessions.prune-dead",
+        outcomes: [
+          { ownerWindowId: 1, target: { id: "session_a" }, status: "succeeded" },
+          { ownerWindowId: 1, target: { id: "session_b" }, status: "skipped" },
+        ],
+        partial: true,
+      },
+    });
+    expect(firstClient.killSession).toHaveBeenCalledOnce();
+    expect(secondClient.killSession).not.toHaveBeenCalled();
+    expect(registry.snapshot(1).connection.server).toBe("localhost:31338");
+  });
+
+  it.each([
+    ["target.kill", "killSession"],
+    ["session.close", "closeSession"],
+  ] as const)(
+    "reconciles %s as succeeded when its response is lost after exact session removal",
+    async (actionId, method) => {
+      const client = new FakeSliverClient();
+      client.sessionState.Sessions = [session("session_1", "interactive")];
+      client[method].mockImplementationOnce(async (sessionId: string) => {
+        client.sessionState.Sessions = client.sessionState.Sessions.filter(
+          (candidate) => candidate.ID !== sessionId,
+        );
+        throw new Error("response lost after mutation");
+      });
+      const registry = createRegistry(() => client.adapter);
+      registry.registerWindow(1);
+      await connectSaved(registry, 1);
+      await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+      const prepared = await registry.prepareTargetAction(1, { actionId });
+      if (!prepared.ok) throw new Error(prepared.error);
+
+      await expect(registry.executeTargetActionPlan(1, prepared.value.token)).resolves.toMatchObject({
+        ok: true,
+        value: {
+          outcomes: [{
+            requestId: expect.stringMatching(/^[A-Za-z0-9-]+$/u),
+            ownerWindowId: 1,
+            target: { id: "session_1" },
+            status: "succeeded",
+          }],
+        },
+      });
+      expect(client[method]).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("reconciles beacon removal after a lost response and keeps unproved actions outcome unknown", async () => {
+    const removedClient = new FakeSliverClient();
+    removedClient.beaconState.Beacons = [beacon("beacon_1", "async")];
+    removedClient.rmBeacon.mockImplementationOnce(async (beaconId: string) => {
+      removedClient.beaconState.Beacons = removedClient.beaconState.Beacons.filter(
+        (candidate) => candidate.ID !== beaconId,
+      );
+      throw new Error("response lost after mutation");
+    });
+    const removedRegistry = createRegistry(() => removedClient.adapter);
+    removedRegistry.registerWindow(1);
+    await connectSaved(removedRegistry, 1);
+    await removedRegistry.selectTarget(1, removedRegistry.snapshot(1).targetContext.selectableTargets[0]!);
+    const removedPlan = await removedRegistry.prepareTargetAction(1, { actionId: "beacon.remove" });
+    if (!removedPlan.ok) throw new Error(removedPlan.error);
+    await expect(removedRegistry.executeTargetActionPlan(1, removedPlan.value.token)).resolves.toMatchObject({
+      ok: true,
+      value: { outcomes: [{ target: { id: "beacon_1" }, status: "succeeded" }] },
+    });
+    expect(removedClient.rmBeacon).toHaveBeenCalledOnce();
+
+    const unknownClient = new FakeSliverClient();
+    unknownClient.sessionState.Sessions = [session("session_2", "interactive")];
+    unknownClient.killSession.mockRejectedValueOnce(new Error("response lost before mutation"));
+    const unknownRegistry = createRegistry(() => unknownClient.adapter);
+    unknownRegistry.registerWindow(2);
+    await connectSaved(unknownRegistry, 2);
+    await unknownRegistry.selectTarget(2, unknownRegistry.snapshot(2).targetContext.selectableTargets[0]!);
+    const unknownPlan = await unknownRegistry.prepareTargetAction(2, { actionId: "target.kill" });
+    if (!unknownPlan.ok) throw new Error(unknownPlan.error);
+    await expect(unknownRegistry.executeTargetActionPlan(2, unknownPlan.value.token)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        outcomes: [{
+          ownerWindowId: 2,
+          target: { id: "session_2" },
+          status: "outcome-unknown",
+          error: expect.stringMatching(/could not be confirmed/),
+        }],
+      },
+    });
+    expect(unknownClient.killSession).toHaveBeenCalledOnce();
+  });
+
   it("discovers but refuses a WireGuard operator config before constructing a client", async () => {
     const wireGuardPath = join(externalDirectory, "wireguard.cfg");
     await writeFile(wireGuardPath, validConfig({ wg: wireGuardConfig() }));
@@ -751,10 +2345,18 @@ class FakeSliverClient {
   buildState = clientpb.ImplantBuilds.create({ Configs: {}, ResourceIDs: {}, staged: {} });
   profileState = clientpb.ImplantProfiles.create({ Profiles: [] });
   compilerState = clientpb.Compiler.create({ Targets: [], UnsupportedTargets: [] });
+  sessionState = clientpb.Sessions.create({ Sessions: [] });
+  beaconState = clientpb.Beacons.create({ Beacons: [] });
+  operatorState = clientpb.Operators.create({ Operators: [] });
+  taskState = new Map<string, clientpb.BeaconTask[]>();
+  environmentState = new Map<string, string>();
+  private nextTaskId = 1;
   nextJobsError: Error | undefined;
   nextJobsPromise: Promise<clientpb.Job[]> | undefined;
   nextProfilesError: Error | undefined;
   nextProfilesPromise: Promise<clientpb.ImplantProfiles> | undefined;
+  nextSessionsPromise: Promise<clientpb.Sessions> | undefined;
+  nextBeaconsPromise: Promise<clientpb.Beacons> | undefined;
 
   readonly connect = vi.fn(async (): Promise<unknown> => {
     return this;
@@ -789,6 +2391,109 @@ class FakeSliverClient {
     return clientpb.ImplantProfiles.create(this.profileState);
   });
   readonly getCompiler = vi.fn(async () => clientpb.Compiler.create(this.compilerState));
+  readonly getSessions = vi.fn(async () => {
+    if (this.nextSessionsPromise) {
+      const promise = this.nextSessionsPromise;
+      this.nextSessionsPromise = undefined;
+      return clientpb.Sessions.create(await promise);
+    }
+    return clientpb.Sessions.create(this.sessionState);
+  });
+  readonly getBeacons = vi.fn(async () => {
+    if (this.nextBeaconsPromise) {
+      const promise = this.nextBeaconsPromise;
+      this.nextBeaconsPromise = undefined;
+      return clientpb.Beacons.create(await promise);
+    }
+    return clientpb.Beacons.create(this.beaconState);
+  });
+  readonly getOperators = vi.fn(async () => clientpb.Operators.create(this.operatorState));
+  readonly renameSession = vi.fn(async (sessionId: string, name: string) => {
+    const session = this.sessionState.Sessions.find((candidate) => candidate.ID === sessionId);
+    if (session) session.Name = name;
+    return {};
+  });
+  readonly renameBeacon = vi.fn(async (beaconId: string, name: string) => {
+    const beacon = this.beaconState.Beacons.find((candidate) => candidate.ID === beaconId);
+    if (beacon) beacon.Name = name;
+    return {};
+  });
+  readonly pingSession = vi.fn(async (_sessionId: string, nonce: number) => sliverpb.Ping.create({ Nonce: nonce }));
+  readonly pingBeacon = vi.fn(async (beaconId: string, nonce: number) =>
+    this.queueBeaconTask(beaconId, "Ping", sliverpb.Ping.encode(sliverpb.Ping.create({ Nonce: nonce })).finish(), nonce),
+  );
+  readonly getEnvSession = vi.fn(async (_sessionId: string, name = "") => sliverpb.EnvInfo.create({
+    Variables: [...this.environmentState]
+      .filter(([key]) => !name || key === name)
+      .map(([Key, Value]) => ({ Key, Value })),
+  }));
+  readonly setEnvSession = vi.fn(async (_sessionId: string, name: string, value: string) => {
+    this.environmentState.set(name, value);
+    return sliverpb.SetEnv.create({});
+  });
+  readonly setEnvBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "SetEnvReq",
+    sliverpb.SetEnv.encode(sliverpb.SetEnv.create({})).finish(),
+  ));
+  readonly unsetEnvSession = vi.fn(async (_sessionId: string, name: string) => {
+    this.environmentState.delete(name);
+    return sliverpb.UnsetEnv.create({});
+  });
+  readonly unsetEnvBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "UnsetEnvReq",
+    sliverpb.UnsetEnv.encode(sliverpb.UnsetEnv.create({})).finish(),
+  ));
+  readonly reconfigureBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "ReconfigureReq",
+    sliverpb.Reconfigure.encode(sliverpb.Reconfigure.create({})).finish(),
+  ));
+  readonly openSessionFromBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "OpenSession",
+    Buffer.alloc(0),
+  ));
+  readonly killSession = vi.fn(async (sessionId: string) => {
+    this.sessionState.Sessions = this.sessionState.Sessions.filter((candidate) => candidate.ID !== sessionId);
+    return {};
+  });
+  readonly killBeacon = vi.fn(async () => ({}));
+  readonly closeSession = vi.fn(async (sessionId: string) => {
+    this.sessionState.Sessions = this.sessionState.Sessions.filter((candidate) => candidate.ID !== sessionId);
+    return {};
+  });
+  readonly getBeaconTasks = vi.fn(async (beaconId: string) => clientpb.BeaconTasks.create({
+    Tasks: (this.taskState.get(beaconId) ?? []).map((task) => clientpb.BeaconTask.create({
+      ...task,
+      Request: Buffer.alloc(0),
+      Response: Buffer.alloc(0),
+    })),
+  }));
+  readonly fetchBeaconTask = vi.fn(async (taskId: string) => {
+    const task = [...this.taskState.values()].flat().find((candidate) => candidate.ID === taskId);
+    if (!task) throw new Error("unknown fake task");
+    return clientpb.BeaconTask.create({
+      ...task,
+      Request: Buffer.from(task.Request),
+      Response: Buffer.from(task.Response),
+    });
+  });
+  readonly cancelBeaconTask = vi.fn(async (taskId: string) => {
+    const task = [...this.taskState.values()].flat().find((candidate) => candidate.ID === taskId);
+    if (!task) throw new Error("unknown fake task");
+    task.State = "canceled";
+    return clientpb.BeaconTask.create({
+      ...task,
+      Request: Buffer.from(task.Request),
+      Response: Buffer.from(task.Response),
+    });
+  });
+  readonly rmBeacon = vi.fn(async (beaconId: string) => {
+    this.beaconState.Beacons = this.beaconState.Beacons.filter((candidate) => candidate.ID !== beaconId);
+    this.taskState.delete(beaconId);
+  });
   readonly startMTLSListener = vi.fn(async (host: string, port: number) => this.addListener("mtls", host, port));
   readonly startWGListener = vi.fn(async (host: string, port: number) => this.addListener("wireguard", host, port));
   readonly startDNSListener = vi.fn(async (_domains: string[], _canaries: boolean, host: string, port: number) =>
@@ -849,6 +2554,27 @@ class FakeSliverClient {
     implantBuilds: this.implantBuilds,
     implantProfiles: this.implantProfiles,
     getCompiler: this.getCompiler,
+    getSessions: this.getSessions,
+    getBeacons: this.getBeacons,
+    getOperators: this.getOperators,
+    renameSession: this.renameSession,
+    renameBeacon: this.renameBeacon,
+    pingSession: this.pingSession,
+    pingBeacon: this.pingBeacon,
+    getEnvSession: this.getEnvSession,
+    setEnvSession: this.setEnvSession,
+    setEnvBeacon: this.setEnvBeacon,
+    unsetEnvSession: this.unsetEnvSession,
+    unsetEnvBeacon: this.unsetEnvBeacon,
+    reconfigureBeacon: this.reconfigureBeacon,
+    openSessionFromBeacon: this.openSessionFromBeacon,
+    killSession: this.killSession,
+    killBeacon: this.killBeacon,
+    closeSession: this.closeSession,
+    getBeaconTasks: this.getBeaconTasks,
+    fetchBeaconTask: this.fetchBeaconTask,
+    cancelBeaconTask: this.cancelBeaconTask,
+    rmBeacon: this.rmBeacon,
     startMTLSListener: this.startMTLSListener,
     startWGListener: this.startWGListener,
     startDNSListener: this.startDNSListener,
@@ -871,6 +2597,31 @@ class FakeSliverClient {
     const id = Math.max(0, ...this.jobState.map((item) => item.ID)) + 1;
     this.jobState.push(job(id, port, protocol));
     return clientpb.ListenerJob.create({ JobID: id });
+  }
+
+  private queueBeaconTask(
+    beaconId: string,
+    description: string,
+    responseBytes: Uint8Array,
+    nonce?: number,
+  ) {
+    const id = `task_${this.nextTaskId++}`;
+    const task = clientpb.BeaconTask.create({
+      ID: id,
+      BeaconID: beaconId,
+      State: "pending",
+      Description: description,
+      CreatedAt: String(Math.floor(Date.now() / 1_000)),
+      Request: Buffer.alloc(0),
+      Response: Buffer.from(responseBytes),
+    });
+    const current = this.taskState.get(beaconId) ?? [];
+    current.push(task);
+    this.taskState.set(beaconId, current);
+    return {
+      ...(description === "Ping" ? { Nonce: nonce ?? 0 } : {}),
+      Response: { Async: true, BeaconID: beaconId, TaskID: id, Err: "" },
+    };
   }
 }
 
@@ -924,6 +2675,64 @@ function job(id: number, port: number, protocol = "mtls"): clientpb.Job {
     Port: port,
     Domains: [],
     ProfileName: "",
+  });
+}
+
+function activeBeaconTasks(beaconId: string, count: number, idPrefix: string): clientpb.BeaconTask[] {
+  const baseCreatedAt = 2_000_000_000;
+  return Array.from({ length: count }, (_, index) => {
+    const state = index % 2 === 0 ? "pending" : "sent";
+    const createdAt = baseCreatedAt + index;
+    return clientpb.BeaconTask.create({
+      ID: `${idPrefix}_${String(index).padStart(4, "0")}`,
+      BeaconID: beaconId,
+      State: state,
+      Description: "ExternalTask",
+      CreatedAt: String(createdAt),
+      SentAt: state === "sent" ? String(createdAt + 1) : "0",
+      CompletedAt: "0",
+      Request: Buffer.alloc(0),
+      Response: Buffer.alloc(0),
+    });
+  });
+}
+
+function session(id: string, name: string): clientpb.Session {
+  return clientpb.Session.create({
+    ID: id,
+    Name: name,
+    Hostname: `${name}-host`,
+    UUID: `${id}-host`,
+    Username: "operator-user",
+    OS: "darwin",
+    Arch: "arm64",
+    Transport: "mtls",
+    RemoteAddress: "127.0.0.1:4444",
+    ActiveC2: "mtls://127.0.0.1:8888?token=redacted",
+    PID: 1234,
+    FirstContact: String(Math.floor(Date.now() / 1_000) - 10),
+    LastCheckin: String(Math.floor(Date.now() / 1_000)),
+  });
+}
+
+function beacon(id: string, name: string): clientpb.Beacon {
+  return clientpb.Beacon.create({
+    ID: id,
+    Name: name,
+    Hostname: `${name}-host`,
+    UUID: `${id}-host`,
+    Username: "operator-user",
+    OS: "darwin",
+    Arch: "arm64",
+    Transport: "https",
+    RemoteAddress: "127.0.0.1:5555",
+    ActiveC2: "https://127.0.0.1:9999?token=redacted",
+    PID: 4321,
+    FirstContact: String(Math.floor(Date.now() / 1_000) - 10),
+    LastCheckin: String(Math.floor(Date.now() / 1_000)),
+    NextCheckin: String(Math.floor(Date.now() / 1_000) + 60),
+    Interval: "8000000000",
+    Jitter: "0",
   });
 }
 

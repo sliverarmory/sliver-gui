@@ -76,6 +76,44 @@ describe("grpc-js allocation enforcement", () => {
     expect(serverDecodedRequest).toBe(false);
     expect(clientDecodedResponse).toBe(false);
   });
+
+  it("rejects oversized task content on its dedicated channel before protobuf decode", async () => {
+    let clientDecodedResponse = false;
+    const definition: grpc.MethodDefinition<Buffer, Buffer> = {
+      path: METHOD_PATH,
+      originalName: "probe",
+      requestStream: false,
+      responseStream: false,
+      requestSerialize: identity,
+      requestDeserialize: identity,
+      responseSerialize: identity,
+      responseDeserialize: identity,
+    };
+    server = new grpc.Server();
+    server.addService(
+      { probe: definition },
+      {
+        probe(
+          _call: grpc.ServerUnaryCall<Buffer, Buffer>,
+          callback: grpc.sendUnaryData<Buffer>,
+        ): void {
+          callback(null, Buffer.alloc(RPC_MESSAGE_BUDGETS["task-content"].maxReceiveBytes + 1));
+        },
+      },
+    );
+    const port = await bind(server);
+    client = new grpc.Client(
+      `127.0.0.1:${port}`,
+      grpc.credentials.createInsecure(),
+      rpcMessageChannelOptions("task-content"),
+    );
+
+    const inbound = await unary(client, Buffer.alloc(0), () => {
+      clientDecodedResponse = true;
+    });
+    expect(inbound.error?.code).toBe(grpc.status.RESOURCE_EXHAUSTED);
+    expect(clientDecodedResponse).toBe(false);
+  });
 });
 
 function identity(value: Buffer): Buffer {

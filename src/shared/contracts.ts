@@ -1,3 +1,31 @@
+import type {
+  BeaconTaskDetail,
+  BeaconTaskPage,
+  BeaconTaskSummary,
+  CancelBeaconTaskInput,
+  CancelTargetOperationInput,
+  GetBeaconTaskInput,
+  ListBeaconTasksInput,
+  OperationPageRequest,
+  TargetOperationInput,
+  TargetOperationPage,
+  TargetOperationRecord,
+} from "./operation-contracts.js";
+import type {
+  BeaconSummary,
+  ExecuteTargetActionPlanInput,
+  OperatorPresenceSummary,
+  PrepareTargetActionInput,
+  SessionSummary,
+  TargetCatalogPage,
+  TargetCatalogPageRequest,
+  TargetActionExecutionResult,
+  TargetActionPlan,
+  TargetDomains,
+  TargetRef,
+  WindowTargetContext,
+} from "./target-contracts.js";
+
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
   importConfig: "sliver:connection:import-config",
@@ -20,10 +48,25 @@ export const IPC_INVOKE = {
   setStagedBuilds: "sliver:build:set-staged",
   saveProfile: "sliver:profile:save",
   deleteProfile: "sliver:profile:delete",
+  listTargets: "sliver:target:list",
+  selectTarget: "sliver:target:select",
+  backgroundTarget: "sliver:target:background",
+  setBeaconWatch: "sliver:target:set-beacon-watch",
+  submitTargetOperation: "sliver:operation:submit",
+  listTargetOperations: "sliver:operation:list",
+  getTargetOperation: "sliver:operation:get",
+  cancelTargetOperation: "sliver:operation:cancel",
+  prepareTargetAction: "sliver:target:prepare-action",
+  executeTargetActionPlan: "sliver:target:execute-action-plan",
+  listBeaconTasks: "sliver:beacon-task:list",
+  getBeaconTask: "sliver:beacon-task:get",
+  cancelBeaconTask: "sliver:beacon-task:cancel",
 } as const;
 
 export const IPC_EVENTS = {
   snapshotChanged: "sliver:snapshot:changed",
+  operationChanged: "sliver:operation:changed",
+  beaconTasksInvalidated: "sliver:beacon-task:invalidated",
 } as const;
 
 export const IPC = {
@@ -58,6 +101,8 @@ export interface ServerCapabilitySummary {
     builds: boolean;
     profiles: boolean;
     events: boolean;
+    targets: boolean;
+    tasks: boolean;
   };
 }
 
@@ -69,6 +114,10 @@ export interface ConnectionSummary {
   version?: string;
   error?: string;
   epoch?: number;
+  /** Per-window connection attempt. This changes even when reconnecting to the
+   * same shared backend epoch, allowing renderer requests to quarantine stale
+   * results without exposing a secret. */
+  incarnation?: number;
   capabilities?: ServerCapabilitySummary;
 }
 
@@ -171,6 +220,9 @@ export interface SnapshotDomains {
   builds: DomainCollection<BuildSummary>;
   profiles: DomainCollection<ProfileSummary>;
   compiler: DomainCollection<CompilerTargetSummary>;
+  sessions: TargetDomains["sessions"];
+  beacons: TargetDomains["beacons"];
+  operators: TargetDomains["operators"];
 }
 
 export interface RecentEventSummary {
@@ -188,6 +240,10 @@ export interface SliverSnapshot {
   builds: BuildSummary[];
   profiles: ProfileSummary[];
   compilerTargets: CompilerTargetSummary[];
+  sessions: SessionSummary[];
+  beacons: BeaconSummary[];
+  operators: OperatorPresenceSummary[];
+  targetContext: WindowTargetContext;
   recentEvents: RecentEventSummary[];
   domains: SnapshotDomains;
   lastUpdated?: string;
@@ -466,6 +522,58 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [profileName: string];
     result: OperationResult;
   };
+  [IPC.listTargets]: {
+    args: [request: TargetCatalogPageRequest];
+    result: OperationResult<TargetCatalogPage>;
+  };
+  [IPC.selectTarget]: {
+    args: [target: TargetRef];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.backgroundTarget]: {
+    args: [];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.setBeaconWatch]: {
+    args: [input: { enabled: boolean }];
+    result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.submitTargetOperation]: {
+    args: [input: TargetOperationInput];
+    result: OperationResult<TargetOperationRecord>;
+  };
+  [IPC.listTargetOperations]: {
+    args: [request: OperationPageRequest];
+    result: OperationResult<TargetOperationPage>;
+  };
+  [IPC.getTargetOperation]: {
+    args: [input: CancelTargetOperationInput];
+    result: OperationResult<TargetOperationRecord>;
+  };
+  [IPC.cancelTargetOperation]: {
+    args: [input: CancelTargetOperationInput];
+    result: OperationResult<TargetOperationRecord>;
+  };
+  [IPC.prepareTargetAction]: {
+    args: [input: PrepareTargetActionInput];
+    result: OperationResult<TargetActionPlan>;
+  };
+  [IPC.executeTargetActionPlan]: {
+    args: [input: ExecuteTargetActionPlanInput];
+    result: OperationResult<TargetActionExecutionResult>;
+  };
+  [IPC.listBeaconTasks]: {
+    args: [input: ListBeaconTasksInput];
+    result: OperationResult<BeaconTaskPage>;
+  };
+  [IPC.getBeaconTask]: {
+    args: [input: GetBeaconTaskInput];
+    result: OperationResult<BeaconTaskDetail>;
+  };
+  [IPC.cancelBeaconTask]: {
+    args: [input: CancelBeaconTaskInput];
+    result: OperationResult<BeaconTaskSummary>;
+  };
 }>;
 
 export type IpcInvokeArgs<Channel extends IpcInvokeChannel> = IpcInvokeContract[Channel]["args"];
@@ -480,6 +588,8 @@ export type SliverDesktopInvokeAPI = {
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
+  onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
+  onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
 };
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {
@@ -496,12 +606,26 @@ export function disconnectedSnapshot(error?: string): SliverSnapshot {
     builds: [],
     profiles: [],
     compilerTargets: [],
+    sessions: [],
+    beacons: [],
+    operators: [],
+    targetContext: {
+      status: "none",
+      activeTarget: null,
+      activeTargetSummary: null,
+      selectableTargets: [],
+      capabilities: [],
+      beaconWatch: false,
+    },
     recentEvents: [],
     domains: {
       jobs: emptyDomain(),
       builds: emptyDomain(),
       profiles: emptyDomain(),
       compiler: emptyDomain(),
+      sessions: emptyDomain(),
+      beacons: emptyDomain(),
+      operators: emptyDomain(),
     },
   };
 }

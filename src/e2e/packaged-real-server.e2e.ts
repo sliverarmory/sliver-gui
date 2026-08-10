@@ -294,7 +294,12 @@ async function assertPackagedRendererSecurity(
   page: Page,
   executablePath: string,
 ): Promise<void> {
-  const expectedApiKeys = [...Object.keys(IPC_INVOKE), "onSnapshotChanged"].sort();
+  const expectedApiKeys = [
+    ...Object.keys(IPC_INVOKE),
+    "onSnapshotChanged",
+    "onOperationChanged",
+    "onBeaconTasksInvalidated",
+  ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
       sliver: object;

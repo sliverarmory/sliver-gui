@@ -6,14 +6,16 @@ import {
 } from "sliver-script";
 import { describe, expect, it } from "vitest";
 
-const MiB = 1024 * 1024;
+const KiB = 1024;
+const MiB = 1024 * KiB;
 
 describe("Sliver RPC message budgets", () => {
   it("keeps control, inventory, and artifact allocations isolated and bounded", () => {
-    expect(RPC_MESSAGE_DOMAINS).toEqual(["control", "inventory", "artifact"]);
+    expect(RPC_MESSAGE_DOMAINS).toEqual(["control", "inventory", "task-content", "artifact"]);
     expect(RPC_MESSAGE_BUDGETS).toEqual({
       control: { maxSendBytes: 8 * MiB, maxReceiveBytes: 16 * MiB },
       inventory: { maxSendBytes: 4 * MiB, maxReceiveBytes: 32 * MiB },
+      "task-content": { maxSendBytes: 1 * MiB, maxReceiveBytes: 80 * KiB },
       artifact: { maxSendBytes: 256 * MiB, maxReceiveBytes: 256 * MiB },
     });
     expect(RPC_MESSAGE_BUDGETS.control.maxReceiveBytes).toBeLessThan(
@@ -21,6 +23,9 @@ describe("Sliver RPC message budgets", () => {
     );
     expect(RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes).toBeLessThan(
       RPC_MESSAGE_BUDGETS.artifact.maxReceiveBytes,
+    );
+    expect(RPC_MESSAGE_BUDGETS["task-content"].maxReceiveBytes).toBeLessThan(
+      RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes,
     );
   });
 

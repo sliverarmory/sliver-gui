@@ -158,8 +158,8 @@ The current application already provides the first operator slices:
   delete, and replace operations.
 - [x] Native save dialogs for generated and archived artifacts.
 - [x] Cross-platform package-build and tagged-release workflow definitions.
-- [ ] Authoritative session and beacon state.
-- [ ] Generic operator action and beacon task engine.
+- [x] Authoritative session and beacon state.
+- [x] Generic operator action and beacon task engine.
 - [ ] Interactive terminal and bounded tunnel streaming.
 - [ ] Broad terminal-client operator feature coverage.
 
@@ -295,7 +295,7 @@ Operator-only scope is enforced at the application boundary:
 | Milestone | Outcome | Status | Estimate |
 | --- | --- | --- | --- |
 | M0 | Reproducible protocol baseline and stable current features | **Complete** | 4-6 weeks |
-| M1 | Sessions, beacons, target state, and generic task execution | **Next** | 3-5 weeks |
+| M1 | Sessions, beacons, target state, and generic task execution | **Awaiting operator acceptance** | 3-5 weeks |
 | M2 | Core endpoint reconnaissance, files, and processes | Not started | 4-6 weeks |
 | M3 | Bounded streaming, managed shells, and tunnel lifecycle | Not started | 3-5 weeks |
 | M4 | Execution, post-exploitation, and privilege workflows | Not started | 4-6 weeks |
@@ -310,7 +310,7 @@ Milestone governance is tracked separately from checklist state:
 | Milestone | Owner | Last reviewed | Decision/ADR links | Exit evidence |
 | --- | --- | --- | --- | --- |
 | M0 | Codex / operator accepted | 2026-08-09 | [ADR 0001](docs/adr/0001-platform-support.md) | [M0 verification](docs/m0-verification.md) |
-| M1 | Unassigned | 2026-08-09 | TBD | TBD |
+| M1 | Codex / awaiting operator acceptance | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
 | M2 | Unassigned | 2026-08-09 | TBD | TBD |
 | M3 | Unassigned | 2026-08-09 | TBD | TBD |
 | M4 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -468,65 +468,75 @@ milestone.
 
 ## M1 - Sessions, beacons, targets, and task execution
 
-- Status: **Next**
+- Status: **Awaiting operator acceptance**
 - Dependencies: M0
 
 ### Authoritative target state
 
-- [ ] Add normalized session and beacon stores populated by initial refresh,
+- [x] Add normalized session and beacon stores populated by initial refresh,
   events, explicit refresh, and reconnect reconciliation.
-- [ ] Add filterable session and beacon dashboards with status, identity,
+- [x] Add filterable session and beacon dashboards with status, identity,
   operating system, architecture, transport, remote address, last check-in,
   timing, and active-task summaries.
-- [ ] Add a target detail surface and a per-window active-target selector.
-- [ ] Support target selection, backgrounding, rename, kill/close, beacon
+- [x] Add a target detail surface and a per-window active-target selector.
+- [x] Support target selection, backgrounding, rename, kill/close, beacon
   removal, session/beacon dead-state pruning, beacon watch, and beacon
   reconfiguration where the remote client permits them.
-- [ ] Support beacon-to-session interactive conversion over the available C2
+- [x] Support beacon-to-session interactive conversion over the available C2
   options.
-- [ ] Show read-only online/offline operator presence plus the current window's
+- [x] Show read-only online/offline operator presence plus the current window's
   backend and target-selection context without implying server-enforced target
   ownership.
 
+M1's authoritative C2 boundary is intentionally narrow: the pinned session and
+beacon inventory exposes only the exact current `ActiveC2`, not the implant's
+configured alternate endpoint list or a stable config ID. M1 therefore permits
+typed timing reconfiguration and beacon-to-session conversion over that one
+main-owned current endpoint. Arbitrary C2 URI mutation and alternate-endpoint
+selection remain deferred until a server-provided authoritative option list can
+be validated without accepting renderer-authored destinations. This does not
+defer implant-side WireGuard when it is the reported current endpoint; only
+WireGuard-enabled operator configurations remain deferred from M0.
+
 ### Generic operation engine
 
-- [ ] Define an operation descriptor containing RPC/action identity, request
+- [x] Define an operation descriptor containing RPC/action identity, request
   encoder, response decoder, session/beacon mode, capability constraints,
   timeout policy, cancellation policy, idempotency/reconciliation class,
   confirmation policy, and result disposition.
-- [ ] Allow automatic retry only for idempotent reads or operations backed by a
+- [x] Allow automatic retry only for idempotent reads or operations backed by a
   server-supported idempotency key. Never automatically retry an unconfirmed
   mutation.
-- [ ] Assign every invocation a request ID and owning window.
-- [ ] Support synchronous session responses and asynchronous beacon task IDs
+- [x] Assign every invocation a request ID and owning window.
+- [x] Support synchronous session responses and asynchronous beacon task IDs
   through one UI model.
-- [ ] Add beacon task list, detail, fetch, cancellation, history, and typed
+- [x] Add beacon task list, detail, fetch, cancellation, history, and typed
   response decoding.
-- [ ] Recover locally initiated pending tasks after navigation and reconnect.
-- [ ] Display non-locally initiated results without claiming local ownership.
+- [x] Recover locally initiated pending tasks after navigation and reconnect.
+- [x] Display non-locally initiated results without claiming local ownership.
   Attribute an actor only when verified event/protocol metadata supplies one;
   otherwise label the actor as unknown.
-- [ ] Add operation progress, timeout, best-effort cancellation, partial-result,
+- [x] Add operation progress, timeout, best-effort cancellation, partial-result,
   outcome-unknown, and target-disappeared states. A timeout or disconnect after
   submission is `outcome-unknown` until task/resource reconciliation proves the
   result; resubmission requires an explicit decision.
-- [ ] Add standard dispositions for inline text/table, structured detail,
+- [x] Add standard dispositions for inline text/table, structured detail,
   native save, loot save, binary preview, and stream attachment.
 
 ### M1 exit criteria
 
-- [ ] A representative read and mutation work synchronously on a session and
+- [x] A representative read and mutation work synchronously on a session and
   asynchronously on a beacon.
-- [ ] Task completion remains visible after navigation and reconnect.
-- [ ] Beacon task cancellation is verified against a real server.
-- [ ] Two windows sharing a backend maintain independent active targets and
+- [x] Task completion remains visible after navigation and reconnect.
+- [x] Beacon task cancellation is verified against a real server.
+- [x] Two windows sharing a backend maintain independent active targets and
   operation ownership.
-- [ ] Operator-presence events cannot mutate account state from the GUI.
-- [ ] Target capability changes update available actions without restarting the
+- [x] Operator-presence events cannot mutate account state from the GUI.
+- [x] Target capability changes update available actions without restarting the
   application.
-- [ ] Duplicate-request, timeout-after-submission, cancellation-race, and
+- [x] Duplicate-request, timeout-after-submission, cancellation-race, and
   outcome-reconciliation fault tests pass for reads and mutations.
-- [ ] The compiled operation registry contains no data-driven arbitrary-RPC
+- [x] The compiled operation registry contains no data-driven arbitrary-RPC
   selector, and renderer IPC cannot invoke an unregistered or excluded
   administrative method. Package, AI, and MCP adapter-specific enforcement is
   added when those adapters land in M8.
@@ -542,8 +552,10 @@ remote-loot collection, and WASM memory-file workflows.
 
 ### System and identity
 
-- [ ] Ping, process ID, user ID, group ID, username, and target information.
-- [ ] Environment list/set/unset with sensitive-value handling.
+- [ ] Process ID, user ID, group ID, username, and expanded target information.
+  The representative ping read is delivered by M1.
+- [ ] Environment listing with sensitive-value handling. Typed environment
+  set/unset mutations are delivered by M1.
 - [ ] Screenshot with bounded preview, native save, and optional loot save.
 - [ ] Windows registry read, list, hive read, write, create, and delete with
   platform gating and destructive confirmation.

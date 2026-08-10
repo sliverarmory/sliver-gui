@@ -1,8 +1,9 @@
 # Sliver GUI
 
-Sliver GUI is a cross-platform Electron operator console for Sliver. This first
-feature slice covers implant generation, archived builds and profiles, and
-job/listener management against a real Sliver server.
+Sliver GUI is a cross-platform Electron operator console for Sliver. Its current
+operator slices cover implant generation, archived builds and profiles,
+job/listener management, and authoritative session, beacon, and task workflows
+against a real Sliver server.
 
 The renderer is built with HeroUI and HeroUI Pro, uses the Font Awesome Free
 icon set, and has no direct Node.js, filesystem, or network access. Sliver
@@ -25,6 +26,17 @@ configuration files and their private keys stay in the Electron main process.
   WireGuard implant C2 and listener workflows remain independent features.
 - Live connection state, recent server events, event-driven snapshot refresh,
   reconnect/backoff, and periodic reconciliation.
+- Dedicated, bounded, searchable Sessions and Beacons dashboards with authoritative target
+  detail, capability state, read-only operator presence, and an active target
+  that remains local to each application window.
+- Target selection and backgrounding, beacon watch, rename, kill/close/remove,
+  bounded dead-state pruning, typed timing reconfiguration, and beacon-to-session
+  conversion over the main-owned current C2 endpoint.
+- A closed typed operation engine for synchronous session and asynchronous
+  beacon ping and environment mutations, with request ownership, progress,
+  timeout and outcome reconciliation, and no renderer-selectable RPC methods.
+- Bounded beacon task history, detail and typed result decoding, locally
+  correlated ownership, best-effort cancellation, and reconnect reconciliation.
 - Start and stop mTLS, WireGuard, DNS, HTTP, HTTPS, and TCP staging listeners.
 - Generate session and beacon implants with target, format, C2, timing,
   hardening, limits, WireGuard, canary, HTTP profile, and shellcode options.
@@ -35,8 +47,8 @@ configuration files and their private keys stay in the Electron main process.
 - Accessible confirmation dialogs for destructive actions and local Font
   Awesome SVG icons.
 
-Terminal-backed features such as interactive shell are intentionally outside
-this first slice. They will use Ghostty Web when that slice is implemented.
+Terminal-backed features such as interactive shell remain planned for a later
+milestone. They will use Ghostty Web when that slice is implemented.
 
 ## Development
 
@@ -79,6 +91,7 @@ npm run typecheck
 npm test
 npm run protocol:check
 npm run test:e2e:electron
+npm run test:e2e:m1
 npm run build
 npm run package
 npm run test:e2e:packaged
@@ -86,9 +99,12 @@ npm run test:m0
 ```
 
 `npm run protocol:check` is authoritative under the locked CI toolchain: Node
-24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` runs the
-current-platform application gate; the opt-in real-server package test below is
-kept separate because it requires an authorized disposable server and config.
+24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` retains the
+M0 current-platform regression gate, while `npm run test:e2e:m1` exercises the
+current target and task path through the production renderer, frozen preload,
+trusted IPC, and an injected Sliver client. Opt-in actual-server package tests
+remain separate because they require an authorized disposable server and
+operator configuration.
 
 `npm run package` creates an unpacked application for the current platform in
 `release/`. `npm run dist` creates the configured macOS, Windows, or Linux
@@ -150,6 +166,25 @@ Use a currently unused listener port. The packaged-app test copies the mTLS
 configuration into an isolated `0600` home directory, starts one loopback mTLS
 listener, reviews the production stop impact, stops only the job it created,
 disconnects, and performs fallback cleanup if the UI path is interrupted.
+
+To exercise M1 through the freshly packaged production application, opt in
+against an authorized disposable loopback server with an unused port from 1 to
+65534:
+
+```sh
+SLIVER_GUI_M1_REAL_E2E=1 \
+SLIVER_GUI_E2E_CONFIG=/absolute/path/operator.cfg \
+SLIVER_GUI_E2E_LISTENER_PORT=18889 \
+npm run test:e2e:packaged-real-m1
+```
+
+The M1 harness creates and runs one test-owned session implant and one
+test-owned beacon implant against an exact loopback HTTPS listener. It verifies
+synchronous and asynchronous operations, typed beacon-task decoding,
+reconfiguration, current-C2 session conversion, and authoritative task
+cancellation. Cleanup is restricted to captured test-owned process, target,
+listener, profile, and build identities; no wildcard or server-wide clean is
+used.
 
 ## Security boundary
 

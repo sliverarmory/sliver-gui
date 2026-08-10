@@ -153,11 +153,11 @@ function fakeAdapter(): {
       regenerateImplant: async () => clientpb.Generate.create(),
       deleteImplantBuild: empty,
       stageImplantBuild: empty,
-      saveImplantProfile: async (profile) => profile,
+      saveImplantProfile: async (profile: clientpb.ImplantProfile) => profile,
       deleteImplantProfile: empty,
       event$: event$.asObservable(),
       eventStreamState$: eventStreamState$.asObservable(),
-    } as SliverClientAdapter,
+    } as unknown as SliverClientAdapter,
   };
 }
 

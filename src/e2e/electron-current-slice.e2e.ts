@@ -6,11 +6,15 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
-import { IPC_INVOKE } from "../shared/contracts.js";
+import { IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import type { TargetOperationRecord } from "../shared/operation-contracts.js";
+import type { TargetRef } from "../shared/target-contracts.js";
 
 const PRIVATE_KEY_SECRET = "FAKE_PRIVATE_KEY_M0_DO_NOT_RENDER";
 const TOKEN_SECRET = "FAKE_TOKEN_M0_DO_NOT_RENDER";
 const EVENT_SECRET = "FAKE_EVENT_SECRET_M0_DO_NOT_RENDER";
+const TARGET_SECRET = "FAKE_TARGET_SECRET_M1_DO_NOT_RENDER";
+const TASK_SECRET = "FAKE_TASK_REQUEST_SECRET_M1_DO_NOT_RENDER";
 
 test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 90_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -80,6 +84,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       assert.ok(stateAfterConnect.methods.includes(method), `expected ConnectionRegistry to call ${method}`);
     }
 
+    await verifyM1TargetsAndOperations(electronApplication, page);
+
     await startAndStopMtlsListener(page);
     const stateAfterStop = await readFakeState(electronApplication);
     assert.ok(stateAfterStop.methods.includes("startMTLSListener"));
@@ -97,7 +103,14 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       path: join(artifactDirectory, "current-slice.png"),
     });
     const observableText = [bodyText, snapshotText, ...consoleMessages].join("\n");
-    for (const forbidden of [PRIVATE_KEY_SECRET, TOKEN_SECRET, EVENT_SECRET, selectedConfigPath]) {
+    for (const forbidden of [
+      PRIVATE_KEY_SECRET,
+      TOKEN_SECRET,
+      EVENT_SECRET,
+      TARGET_SECRET,
+      TASK_SECRET,
+      selectedConfigPath,
+    ]) {
       assert.ok(!observableText.includes(forbidden), `renderer-visible text exposed ${forbidden}`);
       assert.equal(screenshot.includes(Buffer.from(forbidden)), false, `screenshot bytes exposed ${forbidden}`);
     }
@@ -114,7 +127,12 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 });
 
 async function assertRendererSecurity(electronApplication: ElectronApplication, page: Page): Promise<void> {
-  const expectedApiKeys = [...Object.keys(IPC_INVOKE), "onSnapshotChanged"].sort();
+  const expectedApiKeys = [
+    ...Object.keys(IPC_INVOKE),
+    "onSnapshotChanged",
+    "onOperationChanged",
+    "onBeaconTasksInvalidated",
+  ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
       sliver: object;
@@ -168,6 +186,385 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
   });
 }
 
+async function verifyM1TargetsAndOperations(
+  electronApplication: ElectronApplication,
+  page: Page,
+): Promise<void> {
+  const initial = await rendererSnapshot(page);
+  assert.deepEqual(initial.sessions.map(({ id, name }) => ({ id, name })), [
+    { id: "m1_session", name: "m1-session" },
+  ]);
+  assert.deepEqual(initial.beacons.map(({ id, name }) => ({ id, name })), [
+    { id: "m1_beacon", name: "m1-beacon" },
+  ]);
+  assert.deepEqual(initial.operators.map(({ name, online }) => ({ name, online })), [
+    { name: "m0-e2e-operator", online: true },
+    { name: "m1-read-only-observer", online: true },
+  ]);
+  assert.equal(initial.sessions[0]?.remoteAddress, "127.0.0.1:41001");
+  assert.equal(initial.beacons[0]?.activeC2, "https://127.0.0.1:4445");
+
+  await page.locator('[aria-label="Sessions"]:visible').click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+  const sessionsGrid = page.locator('[aria-label="Sliver sessions"]');
+  await sessionsGrid.getByText("m1-session", { exact: true }).waitFor();
+  assert.equal(await sessionsGrid.getByText("m1-beacon", { exact: true }).count(), 0);
+  const sessionRef = requireTargetRef(initial, "session");
+  await page.getByRole("row", { name: /m1-session/i }).click();
+  await waitForSnapshot(page, (snapshot) => snapshot.targetContext.activeTarget?.id === sessionRef.id);
+
+  const sessionPing = requireOperation(await invokeSliver(page, "submitTargetOperation", {
+    operationId: "target.ping",
+  }));
+  assert.equal(sessionPing.mode, "session");
+  assert.equal(sessionPing.state, "completed");
+  assert.deepEqual(sessionPing.progress, {
+    completedUnits: 3,
+    totalUnits: 3,
+    message: "Operation completed",
+  });
+  assert.equal(sessionPing.ownership.origin, "local");
+  assert.equal(sessionPing.disposition?.kind, "structured-detail");
+
+  const sessionMutation = requireOperation(await invokeSliver(page, "submitTargetOperation", {
+    operationId: "target.env-set",
+    name: "SLIVER_GUI_M1_E2E",
+    value: "session-value",
+  }));
+  assert.equal(sessionMutation.state, "completed");
+  assert.equal((await readFakeState(electronApplication)).environment["SLIVER_GUI_M1_E2E"], "session-value");
+
+  // Moving through unrelated renderer views must not mutate main-owned target
+  // selection or its epoch-bound reference.
+  await page.locator('[aria-label="Generate"]:visible').click();
+  await page.getByRole("heading", { name: "Generate implant" }).waitFor();
+  await page.locator('[aria-label="Jobs & listeners"]:visible').click();
+  await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+  assert.equal((await rendererSnapshot(page)).targetContext.activeTarget?.id, "m1_session");
+
+  await page.locator('[aria-label="Sessions"]:visible').click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  const beaconRef = requireTargetRef(await rendererSnapshot(page), "beacon");
+  await page.locator('[aria-label="Beacons"]:visible').click();
+  await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
+  const beaconsGrid = page.locator('[aria-label="Sliver beacons"]');
+  assert.equal(await beaconsGrid.getByText("m1-session", { exact: true }).count(), 0);
+  await beaconsGrid.getByText("m1-beacon", { exact: true }).waitFor();
+  await page.getByRole("row", { name: /m1-beacon/i }).click();
+  const selectedBeacon = await waitForSnapshot(
+    page,
+    (snapshot) => snapshot.targetContext.activeTarget?.id === beaconRef.id,
+  );
+  assert.deepEqual(
+    selectedBeacon.targetContext.capabilities.find(({ id }) => id === "beacon.open-session"),
+    { id: "beacon.open-session", available: true },
+    "a safe main-owned C2 endpoint must enable beacon session conversion",
+  );
+
+  await electronApplication.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  const queuedPing = requireOperation(await invokeSliver(page, "submitTargetOperation", {
+    operationId: "target.ping",
+  }));
+  assert.equal(queuedPing.mode, "beacon");
+  assert.equal(queuedPing.state, "running");
+  assert.deepEqual(queuedPing.progress, {
+    completedUnits: 2,
+    totalUnits: 3,
+    message: "Waiting for authoritative task completion",
+  });
+  const fakeAfterBeaconPing = await readFakeState(electronApplication);
+  assert.ok(
+    queuedPing.taskId,
+    `beacon ping must expose an exact task correlation ID; state=${queuedPing.state}; ` +
+      `message=${queuedPing.message ?? "none"}; fake=${JSON.stringify({
+        tasks: fakeAfterBeaconPing.tasks,
+        methods: fakeAfterBeaconPing.methods.slice(-8),
+      })}`,
+  );
+  await page.locator('[aria-label="Generate"]:visible').click();
+  await page.getByRole("heading", { name: "Generate implant" }).waitFor();
+  await electronApplication.evaluate((_electron, taskId) => {
+    globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId, true);
+  }, queuedPing.taskId!);
+  await page.locator('[aria-label="Beacons"]:visible').click();
+  await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
+  const completedPing = await waitForOperation(page, queuedPing.requestId, "completed");
+  assert.equal(completedPing.taskId, queuedPing.taskId);
+  assert.equal(completedPing.disposition?.kind, "structured-detail");
+  assert.deepEqual(completedPing.progress, {
+    completedUnits: 3,
+    totalUnits: 3,
+    message: "Operation completed",
+  });
+  const completedPingRow = page.getByRole("row").filter({ hasText: queuedPing.requestId });
+  await completedPingRow.waitFor();
+  await completedPingRow.getByText("Completed", { exact: true }).waitFor();
+
+  const completedTasks = await invokeSliver(page, "listBeaconTasks", { limit: 100 });
+  assert.equal(completedTasks.ok, true);
+  const correlatedTask = completedTasks.value?.items.find((task) => task.taskId === queuedPing.taskId);
+  assert.equal(correlatedTask?.localRequestId, queuedPing.requestId);
+  assert.equal(correlatedTask?.ownership.origin, "local");
+  assert.equal(correlatedTask?.state, "completed");
+  const taskDetail = await invokeSliver(page, "getBeaconTask", { taskId: queuedPing.taskId! });
+  assert.equal(taskDetail.ok, true);
+  assert.equal(taskDetail.value?.disposition?.kind, "structured-detail");
+
+  const openSession = requireOperation(await invokeSliver(page, "submitTargetOperation", {
+    operationId: "beacon.open-session",
+    delaySeconds: 2,
+  }));
+  assert.equal(openSession.state, "running");
+  assert.deepEqual(openSession.progress, {
+    completedUnits: 2,
+    totalUnits: 3,
+    message: "Waiting for authoritative task completion",
+  });
+  assert.ok(openSession.taskId, "session conversion must retain its exact task binding");
+  assert.deepEqual((await readFakeState(electronApplication)).openSessionRequests.at(-1), {
+    beaconId: "m1_beacon",
+    c2s: ["https://operator:FAKE_TARGET_SECRET_M1_DO_NOT_RENDER@127.0.0.1:4445/secret-path"],
+    delayNanoseconds: "2000000000",
+  });
+  const completedOpenSession = await waitForOperation(page, openSession.requestId, "completed");
+  assert.equal(completedOpenSession.taskId, openSession.taskId);
+  assert.equal(completedOpenSession.disposition?.kind, "inline-text");
+
+  await electronApplication.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  const cancelable = requireOperation(await invokeSliver(page, "submitTargetOperation", {
+    operationId: "target.env-set",
+    name: "SLIVER_GUI_M1_CANCEL",
+    value: "cancel-me",
+  }));
+  assert.ok(cancelable.taskId);
+  const canceled = requireOperation(await invokeSliver(page, "cancelTargetOperation", {
+    requestId: cancelable.requestId,
+  }));
+  assert.equal(canceled.state, "canceled");
+  assert.deepEqual(canceled.progress, {
+    completedUnits: 3,
+    totalUnits: 3,
+    message: "Operation canceled",
+  });
+  assert.equal(
+    (await readFakeState(electronApplication)).tasks.find((task) => task.id === cancelable.taskId)?.state,
+    "canceled",
+  );
+  const canceledTasks = await invokeSliver(page, "listBeaconTasks", { limit: 100 });
+  assert.equal(canceledTasks.ok, true);
+  assert.equal(
+    canceledTasks.value?.items.find((task) => task.taskId === cancelable.taskId)?.state,
+    "canceled",
+    "the authoritative task inventory must confirm cancellation",
+  );
+
+  const operationPage = await invokeSliver(page, "listTargetOperations", { limit: 1 });
+  assert.equal(operationPage.ok, true);
+  assert.equal(operationPage.value?.page.total, 5);
+  assert.equal(operationPage.value?.page.truncated, true);
+  assert.match(operationPage.value?.page.nextCursor ?? "", /^operation:v1:/u);
+  const nextOperationPage = await invokeSliver(page, "listTargetOperations", {
+    cursor: operationPage.value!.page.nextCursor!,
+    limit: 1,
+  });
+  assert.equal(nextOperationPage.ok, true);
+  assert.equal(nextOperationPage.value?.items.length, 1);
+  assert.notEqual(nextOperationPage.value?.items[0]?.requestId, operationPage.value?.items[0]?.requestId);
+
+  const taskPage = await invokeSliver(page, "listBeaconTasks", { limit: 1 });
+  assert.equal(taskPage.ok, true);
+  assert.equal(taskPage.value?.page.total, 3);
+  assert.equal(taskPage.value?.page.truncated, true);
+  assert.match(taskPage.value?.page.nextCursor ?? "", /^task:v2:/u);
+  const nextTaskPage = await invokeSliver(page, "listBeaconTasks", {
+    cursor: taskPage.value!.page.nextCursor!,
+    limit: 1,
+  });
+  assert.equal(nextTaskPage.ok, true);
+  assert.equal(nextTaskPage.value?.items.length, 1);
+  assert.notEqual(nextTaskPage.value?.items[0]?.taskId, taskPage.value?.items[0]?.taskId);
+
+  // Complete a held task without its server event, interrupt the event stream,
+  // and prove the connected transition reconciles authoritative task state.
+  await electronApplication.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  const reconnectTask = requireOperation(await invokeSliver(page, "submitTargetOperation", {
+    operationId: "target.ping",
+  }));
+  assert.ok(reconnectTask.taskId);
+  await electronApplication.evaluate((_electron, taskId) => {
+    globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId, false);
+    globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("retrying");
+  }, reconnectTask.taskId!);
+  await waitForSnapshot(page, (snapshot) => snapshot.connection.status === "reconnecting");
+  await electronApplication.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("connected");
+  });
+  await waitForOperation(page, reconnectTask.requestId, "completed");
+  await page.locator('[aria-label="Jobs & listeners"]:visible').click();
+  await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+  await page.locator('[aria-label="Beacons"]:visible').click();
+  await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
+  const reconnectRow = page.getByRole("row").filter({ hasText: reconnectTask.requestId });
+  await reconnectRow.waitFor();
+  await reconnectRow.getByText("Completed", { exact: true }).waitFor();
+
+  const windowCount = electronApplication.windows().length;
+  await page.getByRole("button", { name: "New window options" }).click();
+  await page.getByRole("menuitem", { name: "Same server" }).click();
+  const secondPage = await waitForAdditionalWindow(electronApplication, windowCount, page);
+  await secondPage.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+  try {
+    const secondSnapshot = await rendererSnapshot(secondPage);
+    const secondSessionRef = requireTargetRef(secondSnapshot, "session");
+    const secondSelection = await invokeSliver(secondPage, "selectTarget", secondSessionRef);
+    assert.equal(secondSelection.ok, true);
+    assert.equal((await rendererSnapshot(page)).targetContext.activeTarget?.id, "m1_beacon");
+    assert.equal((await rendererSnapshot(secondPage)).targetContext.activeTarget?.id, "m1_session");
+
+    const secondPing = requireOperation(await invokeSliver(secondPage, "submitTargetOperation", {
+      operationId: "target.ping",
+    }));
+    assert.equal(secondPing.state, "completed");
+    assert.equal(secondPing.ownership.origin, "local");
+    assert.notEqual(
+      secondPing.ownership.origin === "local" ? secondPing.ownership.ownerWindowId : undefined,
+      sessionPing.ownership.origin === "local" ? sessionPing.ownership.ownerWindowId : undefined,
+    );
+    const firstHistory = await invokeSliver(page, "listTargetOperations", { limit: 100 });
+    assert.equal(firstHistory.ok, true);
+    assert.ok(!firstHistory.value?.items.some((operation) => operation.requestId === secondPing.requestId));
+
+    const closePlan = await invokeSliver(secondPage, "prepareTargetAction", { actionId: "session.close" });
+    assert.equal(closePlan.ok, true);
+    assert.equal(closePlan.value?.impact.targets.length, 1);
+    assert.equal(closePlan.value?.impact.targets[0]?.id, "m1_session");
+    assert.match(closePlan.value?.impact.warning ?? "", /interactive connection without killing the remote process/i);
+    assert.ok(closePlan.value?.token, "destructive action review must issue a one-use confirmation token");
+
+    await secondPage.locator('[aria-label="Sessions"]:visible').click();
+    await secondPage.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+    await secondPage.getByRole("button", { name: "Close session", exact: true }).click();
+    const closeReview = secondPage.getByRole("dialog", { name: /review close session/i });
+    await closeReview.waitFor();
+    const closeReviewText = await closeReview.innerText();
+    assert.ok(closeReviewText.includes("m1-session"));
+    assert.ok(closeReviewText.includes("m1_session"));
+    assert.match(closeReviewText, /one-use review is bound to the exact backend epoch and target set/i);
+    await closeReview.getByRole("button", { name: "Cancel", exact: true }).click();
+    await closeReview.waitFor({ state: "hidden" });
+
+    const closeResult = await invokeSliver(secondPage, "executeTargetActionPlan", {
+      token: closePlan.value!.token,
+    });
+    assert.equal(closeResult.ok, true);
+    assert.equal(closeResult.value?.outcomes[0]?.status, "succeeded");
+    const replay = await invokeSliver(secondPage, "executeTargetActionPlan", {
+      token: closePlan.value!.token,
+    });
+    assert.equal(replay.ok, false, "destructive confirmation tokens must be one-use");
+  } finally {
+    await secondPage.close().catch(() => undefined);
+  }
+  await page.locator('[aria-label="Jobs & listeners"]:visible').click();
+  await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+}
+
+async function rendererSnapshot(page: Page): Promise<SliverSnapshot> {
+  return invokeSliver(page, "getSnapshot");
+}
+
+type SliverMethod = keyof SliverDesktopAPI;
+type SliverMethodArgs<Method extends SliverMethod> =
+  SliverDesktopAPI[Method] extends (...args: infer Args) => unknown ? Args : never;
+type SliverMethodResult<Method extends SliverMethod> =
+  SliverDesktopAPI[Method] extends (...args: never[]) => infer Result ? Awaited<Result> : never;
+
+async function invokeSliver<Method extends SliverMethod>(
+  page: Page,
+  method: Method,
+  ...args: SliverMethodArgs<Method>
+): Promise<SliverMethodResult<Method>> {
+  return page.evaluate(async ({ method: rendererMethod, args: rendererArgs }) => {
+    const api = (globalThis as unknown as { sliver: Record<string, (...values: unknown[]) => Promise<unknown>> }).sliver;
+    return api[rendererMethod]!(...rendererArgs);
+  }, { method, args }) as Promise<SliverMethodResult<Method>>;
+}
+
+function requireTargetRef(snapshot: SliverSnapshot, mode: "session" | "beacon"): TargetRef {
+  const target = snapshot.targetContext.selectableTargets.find((candidate) => candidate.mode === mode);
+  assert.ok(target, `expected a selectable ${mode}`);
+  return target;
+}
+
+function requireOperation(result: Awaited<ReturnType<SliverDesktopAPI["submitTargetOperation"]>>): TargetOperationRecord;
+function requireOperation(result: Awaited<ReturnType<SliverDesktopAPI["cancelTargetOperation"]>>): TargetOperationRecord;
+function requireOperation(
+  result: Awaited<ReturnType<SliverDesktopAPI["submitTargetOperation"]>> |
+    Awaited<ReturnType<SliverDesktopAPI["cancelTargetOperation"]>>,
+): TargetOperationRecord {
+  assert.equal(result.ok, true, result.error ?? "operation request failed");
+  assert.ok(result.value, "operation result must include a record");
+  return result.value;
+}
+
+async function waitForOperation(
+  page: Page,
+  requestId: string,
+  state: TargetOperationRecord["state"],
+  timeoutMs = 15_000,
+): Promise<TargetOperationRecord> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: TargetOperationRecord | undefined;
+  while (Date.now() < deadline) {
+    const result = await invokeSliver(page, "getTargetOperation", { requestId });
+    if (result.ok && result.value) {
+      latest = result.value;
+      if (latest.state === state) return latest;
+      if (["failed", "canceled", "partial", "outcome-unknown", "target-disappeared"].includes(latest.state)) {
+        break;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Operation ${requestId} did not reach ${state}; latest state was ${latest?.state ?? "missing"}`);
+}
+
+async function waitForSnapshot(
+  page: Page,
+  predicate: (snapshot: SliverSnapshot) => boolean,
+  timeoutMs = 10_000,
+): Promise<SliverSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snapshot = await rendererSnapshot(page);
+    if (predicate(snapshot)) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for renderer snapshot state");
+}
+
+async function waitForAdditionalWindow(
+  electronApplication: ElectronApplication,
+  previousCount: number,
+  firstPage: Page,
+): Promise<Page> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const pages = electronApplication.windows();
+    const additional = pages.find((candidate) => candidate !== firstPage);
+    if (pages.length > previousCount && additional) return additional;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for inherited application window");
+}
+
 async function startAndStopMtlsListener(page: Page): Promise<void> {
   await page.getByRole("button", { name: "New listener" }).click();
   const dialog = page.getByRole("dialog", { name: "Start a listener" });
@@ -205,6 +602,12 @@ interface FakeStateSnapshot {
   dialogCalls: number;
   methods: string[];
   disconnects: number;
+  holdNextBeaconTask: boolean;
+  sessionName: string;
+  beaconName: string;
+  environment: Record<string, string>;
+  openSessionRequests: Array<{ beaconId: string; c2s: string[]; delayNanoseconds: string }>;
+  tasks: Array<{ id: string; beaconId: string; state: string; description: string }>;
   connectedConfig?: { operator: string; host: string; port: number };
 }
 

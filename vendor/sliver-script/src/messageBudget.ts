@@ -4,7 +4,7 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 const IP_LITERAL_TLS_AUTHORITY = "sliver";
 
-export const RPC_MESSAGE_DOMAINS = ["control", "inventory", "artifact"] as const;
+export const RPC_MESSAGE_DOMAINS = ["control", "inventory", "task-content", "artifact"] as const;
 export type RpcMessageDomain = (typeof RPC_MESSAGE_DOMAINS)[number];
 
 /**
@@ -21,6 +21,13 @@ export const RPC_MESSAGE_BUDGETS = Object.freeze({
   inventory: Object.freeze({
     maxSendBytes: 4 * MiB,
     maxReceiveBytes: 32 * MiB,
+  }),
+  // Beacon task detail in the desktop client accepts at most a 64 KiB decoded
+  // operation response. Keep protobuf framing and the small request envelope
+  // on a separate channel so this path can never inherit artifact allocations.
+  "task-content": Object.freeze({
+    maxSendBytes: 1 * MiB,
+    maxReceiveBytes: 80 * KiB,
   }),
   artifact: Object.freeze({
     maxSendBytes: 256 * MiB,
