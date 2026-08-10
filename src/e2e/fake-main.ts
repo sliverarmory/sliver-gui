@@ -49,6 +49,7 @@ declare global {
 }
 
 const repositoryRoot = requiredArgument("--repository-root=");
+const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
 const state: FakeMainState = {
   configFactoryCalls: 0,
   dialogCalls: 0,
@@ -57,11 +58,15 @@ const state: FakeMainState = {
   holdNextBeaconTask: false,
   sessionName: "m1-session",
   beaconName: "m1-beacon",
-  environment: {
-    HOME: "/Users/e2e",
-    SHELL: "/bin/zsh",
-    SLIVER_GUI_M2_API_TOKEN: "FAKE_M2_ENV_SECRET_DO_NOT_RENDER",
-  },
+  environment: Object.fromEntries([
+    ["HOME", "/Users/e2e"],
+    ["SHELL", "/bin/zsh"],
+    ["SLIVER_GUI_M2_API_TOKEN", "FAKE_M2_ENV_SECRET_DO_NOT_RENDER"],
+    ...Array.from({ length: 105 }, (_, index) => [
+      `M2_PAGE_${String(index + 1).padStart(3, "0")}`,
+      `deterministic-value-${index + 1}`,
+    ]),
+  ]),
   openSessionRequests: [],
   tasks: [],
 };
@@ -117,8 +122,27 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   let sessions = [seedSession(testState.sessionName)];
   let beacons = [seedBeacon(testState.beaconName)];
   let workspaceFiles = [
-    fakeFile("notes.txt", false, "48", "-rw-r--r--"),
+    fakeFile(
+      "notes.txt",
+      false,
+      String(Buffer.byteLength(`${M2_FILE_CONTENT}\nsecond deterministic line\n`, "utf8")),
+      "-rw-r--r--",
+    ),
     fakeFile("projects", true, "0", "drwxr-xr-x"),
+  ];
+  const remoteFiles = new Map<string, Buffer>([
+    ["/Users/e2e/workspace/notes.txt", Buffer.from(`${M2_FILE_CONTENT}\nsecond deterministic line\n`, "utf8")],
+    ["/Users/e2e/workspace/projects/readme.md", Buffer.from("deterministic project readme\n", "utf8")],
+  ]);
+  let memoryFiles = [
+    fakeFile("73", false, "4096", "-rw-------", "m2-memory-cache.bin"),
+  ];
+  const processInventory = [
+    fakeProcess(1, "launchd", 0),
+    fakeProcess(41001, "sliver-m2-session", 1),
+    fakeProcess(41012, "zsh", 41001),
+    ...Array.from({ length: 105 }, (_, index) =>
+      fakeProcess(42_000 + index, `m2-worker-${String(index + 1).padStart(3, "0")}`, 41001)),
   ];
   const tasks = new Map<string, clientpb.BeaconTask>();
 
@@ -403,39 +427,124 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async lsSession(sessionId: string, path: string) {
       record("lsSession");
       requireSession(sessionId);
+      const requestedPath = path || "/Users/e2e/workspace";
+      const files = requestedPath === "/Users/e2e/workspace"
+        ? workspaceFiles
+        : requestedPath === "/Users/e2e/workspace/projects"
+          ? [fakeFile("readme.md", false, String(remoteFiles.get(`${requestedPath}/readme.md`)?.length ?? 0), "-rw-r--r--")]
+          : [];
       return sliverpb.Ls.create({
-        Path: path || "/Users/e2e/workspace",
+        Path: requestedPath,
         Exists: true,
-        Files: path === "/Users/e2e/workspace" ? workspaceFiles.map((file) => ({ ...file })) : [],
+        Files: files.map((file) => ({ ...file })),
         timezone: "America/Los_Angeles",
         timezoneOffset: -420,
         Response: response(false),
       });
     },
-    async downloadFileSession() { return unsupported("downloadFileSession"); },
-    async uploadSession() { return unsupported("uploadSession"); },
-    async grepSession(sessionId: string, path: string, pattern: string) {
-      record("grepSession");
+    async downloadFileSession(
+      sessionId: string,
+      path: string,
+      options: { maxBytes?: number; fromEnd?: boolean } = {},
+    ) {
+      record("downloadFileSession");
       requireSession(sessionId);
-      return sliverpb.Grep.create({
-        SearchPathAbsolute: path,
-        Results: pattern ? {
-          [`${path}/notes.txt`]: {
-            FileResults: [{
-              LineNumber: "1",
-              Positions: [{ Start: 0, End: pattern.length }],
-              Line: `${pattern} appears in deterministic M2 test data`,
-              LinesBefore: [],
-              LinesAfter: [],
-            }],
-            IsBinary: false,
-          },
-        } : {},
+      const source = remoteFiles.get(path);
+      if (!source) {
+        return sliverpb.Download.create({
+          Path: path,
+          Exists: false,
+          IsDir: false,
+          Data: Buffer.alloc(0),
+          Response: response(false),
+        });
+      }
+      const maximumBytes = options.maxBytes ?? source.length;
+      const start = options.fromEnd ? Math.max(0, source.length - maximumBytes) : 0;
+      const stop = options.fromEnd ? source.length : Math.min(source.length, maximumBytes);
+      return sliverpb.Download.create({
+        Path: path,
+        Exists: true,
+        IsDir: false,
+        Start: String(start),
+        Stop: String(stop),
+        Data: Buffer.from(source.subarray(start, stop)),
+        ReadFiles: 1,
         Response: response(false),
       });
     },
-    async cpSession() { return unsupported("cpSession"); },
-    async mvSession() { return unsupported("mvSession"); },
+    async uploadSession(
+      sessionId: string,
+      path: string,
+      data: Buffer,
+      options: { fileName?: string; isDirectory?: boolean; overwrite?: boolean } = {},
+    ) {
+      record("uploadSession");
+      requireSession(sessionId);
+      if (options.isDirectory) throw new Error("The deterministic fake accepts only bounded file uploads");
+      const destination = options.fileName ? `${path.replace(/\/$/u, "")}/${options.fileName}` : path;
+      const ownedCopy = Buffer.from(data);
+      remoteFiles.set(destination, ownedCopy);
+      upsertWorkspaceFile(destination, ownedCopy.length);
+      return sliverpb.Upload.create({
+        Path: destination,
+        WrittenFiles: 1,
+        UnwriteableFiles: 0,
+        Response: response(false),
+      });
+    },
+    async grepSession(sessionId: string, path: string, pattern: string) {
+      record("grepSession");
+      requireSession(sessionId);
+      const matches = pattern
+        ? Object.fromEntries(Array.from({ length: 105 }, (_, index) => [
+            `${path.replace(/\/$/u, "")}/match-${String(index + 1).padStart(3, "0")}.txt`,
+            {
+              FileResults: [{
+                LineNumber: String(index + 1),
+                Positions: [{ Start: 0, End: pattern.length }],
+                Line: `${pattern} appears in deterministic M2 test data ${index + 1}`,
+                LinesBefore: index === 0 ? [] : [`before ${index + 1}`],
+                LinesAfter: index === 104 ? [] : [`after ${index + 1}`],
+              }],
+              IsBinary: false,
+            },
+          ]))
+        : {};
+      return sliverpb.Grep.create({
+        SearchPathAbsolute: path,
+        Results: matches,
+        Response: response(false),
+      });
+    },
+    async cpSession(sessionId: string, source: string, destination: string) {
+      record("cpSession");
+      requireSession(sessionId);
+      const sourceData = remoteFiles.get(source);
+      if (sourceData) {
+        const copy = Buffer.from(sourceData);
+        remoteFiles.set(destination, copy);
+        upsertWorkspaceFile(destination, copy.length);
+      }
+      return sliverpb.Cp.create({
+        Src: source,
+        Dst: destination,
+        BytesWritten: String(sourceData?.length ?? 0),
+        Response: response(false),
+      });
+    },
+    async mvSession(sessionId: string, source: string, destination: string) {
+      record("mvSession");
+      requireSession(sessionId);
+      const sourceData = remoteFiles.get(source);
+      if (sourceData) {
+        remoteFiles.delete(source);
+        remoteFiles.set(destination, sourceData);
+        removeWorkspaceFile(source);
+        upsertWorkspaceFile(destination, sourceData.length);
+      }
+      return sliverpb.Mv.create({ Src: source, Dst: destination, Response: response(false) });
+    },
     async mkdirSession(sessionId: string, path: string) {
       record("mkdirSession");
       requireSession(sessionId);
@@ -450,6 +559,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireSession(sessionId);
       const name = path.split("/").filter(Boolean).at(-1) ?? "";
       workspaceFiles = workspaceFiles.filter((file) => file.Name !== name);
+      remoteFiles.delete(path);
       return sliverpb.Rm.create({ Path: path, Response: response(false) });
     },
     async mountsSession(sessionId: string) {
@@ -470,26 +580,70 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         Response: response(false),
       });
     },
-    async memfilesListSession() { return unsupported("memfilesListSession"); },
-    async memfilesAddSession() { return unsupported("memfilesAddSession"); },
-    async memfilesRmSession() { return unsupported("memfilesRmSession"); },
-    async chmodSession() { return unsupported("chmodSession"); },
-    async chownSession() { return unsupported("chownSession"); },
-    async chtimesSession() { return unsupported("chtimesSession"); },
+    async memfilesListSession(sessionId: string) {
+      record("memfilesListSession");
+      requireSession(sessionId);
+      return sliverpb.Ls.create({
+        Path: "/proc/self/fd",
+        Exists: true,
+        Files: memoryFiles.map((file) => ({ ...file })),
+        timezone: "America/Los_Angeles",
+        timezoneOffset: -420,
+        Response: response(false),
+      });
+    },
+    async memfilesAddSession(sessionId: string) {
+      record("memfilesAddSession");
+      requireSession(sessionId);
+      const fd = String(73 + memoryFiles.length);
+      memoryFiles = [...memoryFiles, fakeFile(fd, false, "0", "-rw-------", `m2-memory-${fd}.bin`)];
+      return sliverpb.MemfilesAdd.create({ Fd: fd, Response: response(false) });
+    },
+    async memfilesRmSession(sessionId: string, fd: string) {
+      record("memfilesRmSession");
+      requireSession(sessionId);
+      memoryFiles = memoryFiles.filter((file) => file.Name !== fd);
+      return sliverpb.MemfilesRm.create({ Fd: fd, Response: response(false) });
+    },
+    async chmodSession(sessionId: string, path: string, fileMode: string) {
+      record("chmodSession");
+      requireSession(sessionId);
+      const name = remoteBasename(path);
+      workspaceFiles = workspaceFiles.map((file) => file.Name === name ? { ...file, Mode: fileMode } : file);
+      return sliverpb.Chmod.create({ Path: path, Response: response(false) });
+    },
+    async chownSession(sessionId: string, path: string, uid: string, gid: string) {
+      record("chownSession");
+      requireSession(sessionId);
+      const name = remoteBasename(path);
+      workspaceFiles = workspaceFiles.map((file) => file.Name === name ? { ...file, Uid: uid, Gid: gid } : file);
+      return sliverpb.Chown.create({ Path: path, Response: response(false) });
+    },
+    async chtimesSession(sessionId: string, path: string, _accessTime: string, modificationTime: string) {
+      record("chtimesSession");
+      requireSession(sessionId);
+      const name = remoteBasename(path);
+      workspaceFiles = workspaceFiles.map((file) =>
+        file.Name === name ? { ...file, ModTime: modificationTime } : file);
+      return sliverpb.Chtimes.create({ Path: path, Response: response(false) });
+    },
     async psSession(sessionId: string) {
       record("psSession");
       requireSession(sessionId);
       return sliverpb.Ps.create({
-        Processes: [
-          fakeProcess(1, "launchd", 0),
-          fakeProcess(41001, "sliver-m2-session", 1),
-          fakeProcess(41012, "zsh", 41001),
-        ],
+        Processes: processInventory.map((process) => ({ ...process, CmdLine: [...process.CmdLine] })),
         Response: response(false),
       });
     },
     async terminateSessionProcess() { return unsupported("terminateSessionProcess"); },
-    async processDumpSession() { return unsupported("processDumpSession"); },
+    async processDumpSession(sessionId: string, pid: number) {
+      record("processDumpSession");
+      requireSession(sessionId);
+      return sliverpb.ProcessDump.create({
+        Data: Buffer.from(`deterministic process dump for ${pid}`, "utf8"),
+        Response: response(false),
+      });
+    },
     async screenshotSession(sessionId: string) {
       record("screenshotSession");
       requireSession(sessionId);
@@ -590,6 +744,19 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       eventSubject.next(fakeEvent("beacon-registered"));
     },
   };
+
+  function upsertWorkspaceFile(path: string, size: number): void {
+    if (remoteParent(path) !== "/Users/e2e/workspace") return;
+    const name = remoteBasename(path);
+    const next = fakeFile(name, false, String(size), "-rw-r--r--");
+    workspaceFiles = [...workspaceFiles.filter((file) => file.Name !== name), next];
+  }
+
+  function removeWorkspaceFile(path: string): void {
+    if (remoteParent(path) !== "/Users/e2e/workspace") return;
+    const name = remoteBasename(path);
+    workspaceFiles = workspaceFiles.filter((file) => file.Name !== name);
+  }
 
   function requireSession(sessionId: string): clientpb.Session {
     const session = sessions.find((candidate) => candidate.ID === sessionId);
@@ -733,17 +900,27 @@ function seedBeacon(name: string): clientpb.Beacon {
   });
 }
 
-function fakeFile(name: string, isDirectory: boolean, size: string, mode: string) {
+function fakeFile(name: string, isDirectory: boolean, size: string, mode: string, link = "") {
   return {
     Name: name,
     IsDir: isDirectory,
     Size: size,
     ModTime: "1786305600",
     Mode: mode,
-    Link: "",
+    Link: link,
     Uid: "501",
     Gid: "20",
   };
+}
+
+function remoteBasename(path: string): string {
+  return path.replace(/\/+$/u, "").split("/").at(-1) ?? "";
+}
+
+function remoteParent(path: string): string {
+  const normalized = path.replace(/\/+$/u, "");
+  const separator = normalized.lastIndexOf("/");
+  return separator <= 0 ? "/" : normalized.slice(0, separator);
 }
 
 function fakeProcess(pid: number, executable: string, parentPid = 1) {

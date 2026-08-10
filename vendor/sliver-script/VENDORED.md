@@ -96,7 +96,10 @@ registry operations. Binary screenshot, download, upload, process-dump, and
 registry-hive calls use the isolated workbench-artifact channel and validate
 decoded payload sizes in the wrapper before main-process publication. These
 wrappers always construct their protobuf requests from typed parameters and a
-main-owned session ID; there is still no arbitrary method-name or request-object
+main-owned session ID. Tail uses an explicit validated from-end option that maps
+to the upstream negative `MaxBytes` convention, and upload responses remain
+available to the main-owned mutation classifier instead of being collapsed by
+the wrapper. There is still no arbitrary method-name or request-object
 dispatcher. Beacon-mode M2 support has not landed and remains required before
 M2 can be complete.
 

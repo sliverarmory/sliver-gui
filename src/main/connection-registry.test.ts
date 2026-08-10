@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
 import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
+import type { SessionStoredArtifact } from "../shared/session-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   fromWebContents: vi.fn(),
@@ -1289,7 +1291,8 @@ describe("connection registry with an injected Sliver client", () => {
     const rendererSend = vi.fn();
     electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send: rendererSend });
     const client = new FakeSliverClient();
-    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    const stableBeacon = beacon("beacon_1", "async");
+    client.beaconState.Beacons = [stableBeacon];
     const registry = createRegistry(() => client.adapter);
     registry.registerWindow(1);
     await connectSaved(registry, 1);
@@ -1320,7 +1323,7 @@ describe("connection registry with an injected Sliver client", () => {
     });
     expect(client.pingBeacon).not.toHaveBeenCalled();
 
-    beaconsGate.resolve(clientpb.Beacons.create({ Beacons: [beacon("beacon_1", "async")] }));
+    beaconsGate.resolve(clientpb.Beacons.create({ Beacons: [stableBeacon] }));
     await expect(refresh).resolves.toMatchObject({ ok: true });
     const restored = registry.snapshot(1).targetContext;
     expect(restored).toMatchObject({
@@ -2360,7 +2363,7 @@ describe("connection registry with an injected Sliver client", () => {
     expect(client.currentTokenOwnerSession).not.toHaveBeenCalled();
   });
 
-  it("reports a dispatched direct session mutation as outcome-unknown after selection loss", async () => {
+  it("keeps a confirmed session mutation completed while suppressing its stale-selection result", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
     const registry = createRegistry(() => client.adapter);
@@ -2372,13 +2375,231 @@ describe("connection registry with an injected Sliver client", () => {
 
     const mutation = registry.runSessionWorkbench(sender(1), {
       operationId: "session.filesystem.mkdir",
-      path: "/tmp/maybe-created",
+      path: "/tmp/TOP-SECRET-confirmed-create",
     });
     await vi.waitFor(() => expect(client.mkdirSession).toHaveBeenCalledOnce());
     await registry.backgroundTarget(1);
-    mutationGate.resolve(sliverpb.Mkdir.create({ Path: "/tmp/maybe-created" }));
+    mutationGate.resolve(sliverpb.Mkdir.create({ Path: "/tmp/TOP-SECRET-confirmed-create" }));
+
+    const result = await mutation;
+    expect(result).toEqual({
+      ok: false,
+      error: "The session mutation completed for the previously selected session; refresh the session state before continuing",
+    });
+    expect(client.mkdirSession).toHaveBeenCalledOnce();
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.filesystem.mkdir", state: "completed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ result, history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("recovers target-loss uncertainty after an exact mutation success without exposing the stale result", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const mutationGate = deferred<sliverpb.Mkdir>();
+    client.mkdirSession.mockImplementationOnce(async () => mutationGate.promise);
+
+    const mutation = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.mkdir",
+      path: "/tmp/TOP-SECRET-late-exact-create",
+    });
+    await vi.waitFor(() => expect(client.mkdirSession).toHaveBeenCalledOnce());
+    client.sessionState.Sessions = [];
+    await registry.refresh(1);
+    mutationGate.resolve(sliverpb.Mkdir.create({ Path: "/tmp/TOP-SECRET-late-exact-create" }));
+
+    const result = await mutation;
+    expect(result).toEqual({
+      ok: false,
+      error: "The session mutation completed for the previously selected session; refresh the session state before continuing",
+    });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.filesystem.mkdir", state: "completed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ result, history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("does not recover an exact mutation response after the backend incarnation changes", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const mutationGate = deferred<sliverpb.Mkdir>();
+    client.mkdirSession.mockImplementationOnce(async () => mutationGate.promise);
+
+    const mutation = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.mkdir",
+      path: "/tmp/TOP-SECRET-stale-incarnation-create",
+    });
+    await vi.waitFor(() => expect(client.mkdirSession).toHaveBeenCalledOnce());
+    await registry.disconnect(1);
+    mutationGate.resolve(sliverpb.Mkdir.create({ Path: "/tmp/TOP-SECRET-stale-incarnation-create" }));
 
     await expect(mutation).resolves.toMatchObject({
+      ok: true,
+      value: { status: "outcome-unknown", operationId: "session.filesystem.mkdir" },
+    });
+    expect(JSON.stringify({ result: await mutation, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("does not downgrade a confirmed service start when selection drifts during its detail refresh", async () => {
+    const client = new FakeSliverClient();
+    const sessionARecord = session("session_a", "session-a");
+    const sessionBRecord = session("session_b", "session-b");
+    sessionARecord.OS = "windows";
+    sessionBRecord.OS = "windows";
+    client.sessionState.Sessions = [sessionARecord, sessionBRecord];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const sessionA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a")!;
+    const sessionB = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_b")!;
+    await registry.selectTarget(1, sessionA);
+    const detailGate = deferred<sliverpb.ServiceDetail>();
+    client.serviceDetailSession.mockImplementationOnce(async () => detailGate.promise);
+
+    const start = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.service.start",
+      name: "TOP-SECRET-service-name",
+    });
+    await vi.waitFor(() => expect(client.startServiceSession).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(client.serviceDetailSession).toHaveBeenCalledOnce());
+    await registry.selectTarget(1, sessionB);
+    detailGate.resolve(sliverpb.ServiceDetail.create({
+      Detail: {
+        Name: "TOP-SECRET-service-name",
+        DisplayName: "TOP-SECRET display name",
+        Description: "TOP-SECRET description",
+        Status: 4,
+        StartupType: 2,
+        BinPath: "C:\\TOP-SECRET\\service.exe",
+        Account: "TOP-SECRET-account",
+      },
+    }));
+
+    const result = await start;
+    expect(result).toEqual({
+      ok: false,
+      error: "The session mutation completed for the previously selected session; refresh the session state before continuing",
+    });
+    expect(client.startServiceSession).toHaveBeenCalledOnce();
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.service.start", state: "completed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ result, history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("reports a target-rejected direct session mutation as confirmed failed without reflecting target details", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    client.mkdirSession.mockResolvedValueOnce(sliverpb.Mkdir.create({
+      Response: { Err: "TOP-SECRET target rejection at /private/implant/path" },
+    }));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const result = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.mkdir",
+      path: "/tmp/rejected",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        status: "failed",
+        operationId: "session.filesystem.mkdir",
+        message: "The target rejected the session mutation. Refresh the session state before taking another action.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/TOP-SECRET|private\/implant/u);
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          operationId: "session.filesystem.mkdir",
+          state: "failed",
+          attempts: 1,
+          target: { id: "session_m2" },
+          backend: { configName: "operator" },
+        }],
+      },
+    });
+    expect(JSON.stringify(history)).not.toMatch(/TOP-SECRET|\/tmp\/rejected|private\/implant/u);
+  });
+
+  it("recovers direct target-loss uncertainty after an exact target rejection", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const mutationGate = deferred<sliverpb.Mkdir>();
+    client.mkdirSession.mockImplementationOnce(async () => mutationGate.promise);
+
+    const mutation = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.mkdir",
+      path: "/tmp/TOP-SECRET-late-rejection",
+    });
+    await vi.waitFor(() => expect(client.mkdirSession).toHaveBeenCalledOnce());
+    client.sessionState.Sessions = [];
+    await registry.refresh(1);
+    mutationGate.resolve(sliverpb.Mkdir.create({ Response: { Err: "TOP-SECRET exact rejection" } }));
+
+    await expect(mutation).resolves.toEqual({
+      ok: true,
+      value: {
+        status: "failed",
+        operationId: "session.filesystem.mkdir",
+        message: "The target rejected the session mutation. Refresh the session state before taking another action.",
+      },
+    });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.filesystem.mkdir", state: "failed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("keeps a direct session mutation outcome unknown after a transport failure", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    client.mkdirSession.mockRejectedValueOnce(new Error("14 UNAVAILABLE: TOP-SECRET transport path"));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const result = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.mkdir",
+      path: "/tmp/uncertain",
+    });
+
+    expect(result).toMatchObject({
       ok: true,
       value: {
         status: "outcome-unknown",
@@ -2386,7 +2607,633 @@ describe("connection registry with an injected Sliver client", () => {
         message: expect.stringMatching(/dispatched, but its final outcome could not be confirmed/i),
       },
     });
-    expect(client.mkdirSession).toHaveBeenCalledOnce();
+    expect(JSON.stringify(result)).not.toContain("TOP-SECRET");
+  });
+
+  it("classifies unary transfer response loss by side effect and never replays an upload", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const downloadDestination = join(root, "download-timeout.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({
+      canceled: false,
+      filePath: downloadDestination,
+    });
+    client.downloadFileSession.mockRejectedValueOnce(
+      new Error("4 DEADLINE_EXCEEDED: TOP-SECRET download transport detail"),
+    );
+
+    const download = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.download",
+      path: "/tmp/TOP-SECRET-read.bin",
+      maxBytes: 1_024,
+    });
+    expect(download).toEqual({ ok: false, error: "The session workbench request failed" });
+    expect(JSON.stringify(download)).not.toContain("TOP-SECRET");
+
+    const uploadPath = join(root, "TOP-SECRET-local-upload.bin");
+    await writeFile(uploadPath, "TOP-SECRET unary upload bytes", { mode: 0o600 });
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [uploadPath] });
+    client.uploadSession.mockRejectedValueOnce(
+      new Error("4 DEADLINE_EXCEEDED: TOP-SECRET upload transport detail"),
+    );
+
+    const upload = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.upload-open",
+      remotePath: "/tmp/TOP-SECRET-remote",
+      isIOC: false,
+      isDirectory: false,
+      overwrite: false,
+    });
+    expect(upload).toEqual({
+      ok: true,
+      value: {
+        status: "outcome-unknown",
+        operationId: "session.filesystem.upload-open",
+        message: "The session mutation was dispatched, but its final outcome could not be confirmed. Refresh the session state before taking another action.",
+      },
+    });
+    expect(client.uploadSession).toHaveBeenCalledOnce();
+    expect(client.uploadSession.mock.calls[0]?.[2].every((byte) => byte === 0)).toBe(true);
+
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [
+          { operationId: "session.filesystem.upload-open", state: "outcome-unknown", attempts: 1 },
+          { operationId: "session.filesystem.download", state: "failed", attempts: 1 },
+        ],
+      },
+    });
+    const serialized = JSON.stringify({ upload, history, snapshot: registry.snapshot(1) });
+    expect(serialized).not.toMatch(/TOP-SECRET|local-upload|remote-upload/u);
+    await expect(readFile(downloadDestination)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("journals native cancellation without dispatch or sensitive workbench input", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const secretRemotePath = "/tmp/TOP-SECRET-native-cancel.bin";
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: true });
+
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.download",
+      path: secretRemotePath,
+      maxBytes: 1_024,
+    })).resolves.toEqual({
+      ok: true,
+      value: {
+        status: "completed",
+        result: {
+          operationId: "session.filesystem.download",
+          value: { status: "canceled" },
+        },
+      },
+    });
+
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          operationId: "session.filesystem.download",
+          state: "canceled",
+          attempts: 0,
+        }],
+      },
+    });
+    expect(JSON.stringify(history)).not.toContain(secretRemotePath);
+    expect(client.downloadFileSession).not.toHaveBeenCalled();
+  });
+
+  it("quarantines pending download, dump, and screenshot responses after session selection loss", async () => {
+    const client = new FakeSliverClient();
+    const activeSession = session("session_m2", "m2-interactive");
+    activeSession.OS = "linux";
+    client.sessionState.Sessions = [activeSession];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const sessionRef = registry.snapshot(1).targetContext.selectableTargets[0]!;
+    await registry.selectTarget(1, sessionRef);
+    const internals = registry as unknown as {
+      sessionArtifacts: { usage(ownerWindowId?: number): { itemCount: number; byteCount: number } };
+    };
+
+    const downloadDestination = join(root, "TOP-SECRET-pending-download.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: downloadDestination });
+    const downloadGate = deferred<sliverpb.Download>();
+    const downloadedBytes = Buffer.from("TOP-SECRET pending download bytes");
+    client.downloadFileSession.mockImplementationOnce(async () => downloadGate.promise);
+    const download = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.download",
+      path: "/tmp/TOP-SECRET-pending-download.bin",
+      maxBytes: 1_024,
+    });
+    await vi.waitFor(() => expect(client.downloadFileSession).toHaveBeenCalledOnce());
+    await registry.backgroundTarget(1);
+    downloadGate.resolve(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Data: downloadedBytes,
+    }));
+    await expect(download).resolves.toEqual({ ok: false, error: "The session workbench request failed" });
+    expect(downloadedBytes.every((byte) => byte === 0)).toBe(true);
+    await expect(readFile(downloadDestination)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await registry.selectTarget(1, sessionRef);
+    const dumpDestination = join(root, "TOP-SECRET-pending-dump.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: dumpDestination });
+    const dumpGate = deferred<sliverpb.ProcessDump>();
+    const dumpBytes = Buffer.from("TOP-SECRET pending process dump");
+    client.processDumpSession.mockImplementationOnce(async () => dumpGate.promise);
+    const dump = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.process.dump",
+      pid: 4242,
+      dumpTimeoutSeconds: 60,
+    });
+    await vi.waitFor(() => expect(client.processDumpSession).toHaveBeenCalledOnce());
+    await registry.backgroundTarget(1);
+    dumpGate.resolve(sliverpb.ProcessDump.create({ Data: dumpBytes }));
+    await expect(dump).resolves.toEqual({ ok: false, error: "The session workbench request failed" });
+    expect(dumpBytes.every((byte) => byte === 0)).toBe(true);
+    await expect(readFile(dumpDestination)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await registry.selectTarget(1, sessionRef);
+    const screenshotGate = deferred<sliverpb.Screenshot>();
+    const screenshotBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    client.screenshotSession.mockImplementationOnce(async () => screenshotGate.promise);
+    const screenshot = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.screenshot.capture",
+    });
+    await vi.waitFor(() => expect(client.screenshotSession).toHaveBeenCalledOnce());
+    await registry.backgroundTarget(1);
+    screenshotGate.resolve(sliverpb.Screenshot.create({ Data: screenshotBytes }));
+    await expect(screenshot).resolves.toEqual({ ok: false, error: "The session workbench request failed" });
+    expect(screenshotBytes.every((byte) => byte === 0)).toBe(true);
+    expect(internals.sessionArtifacts.usage(1)).toEqual({ itemCount: 0, byteCount: 0 });
+
+    await registry.selectTarget(1, sessionRef);
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [
+          { operationId: "session.screenshot.capture", state: "failed", attempts: 1 },
+          { operationId: "session.process.dump", state: "failed", attempts: 1 },
+          { operationId: "session.filesystem.download", state: "failed", attempts: 1 },
+        ],
+      },
+    });
+    expect(JSON.stringify({ history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("revokes plans and screenshot/editor capabilities across an A-to-B-to-A selection cycle", async () => {
+    const client = new FakeSliverClient();
+    const sessionARecord = session("session_a", "session-a");
+    const sessionBRecord = session("session_b", "session-b");
+    sessionARecord.OS = "linux";
+    sessionBRecord.OS = "linux";
+    client.sessionState.Sessions = [sessionARecord, sessionBRecord];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const sessionA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a")!;
+    const sessionB = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_b")!;
+    await registry.selectTarget(1, sessionA);
+
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/TOP-SECRET-reviewed-delete.bin",
+      recursive: false,
+      force: false,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected a reviewed plan");
+    const editorArtifact = await stageTextArtifact(registry, 1, "TOP-SECRET editor capability bytes");
+    const screenshot = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.screenshot.capture",
+    });
+    if (
+      !screenshot.ok || screenshot.value.status !== "completed" ||
+      screenshot.value.result.operationId !== "session.screenshot.capture"
+    ) throw new Error(`Expected a screenshot artifact: ${JSON.stringify(screenshot)}`);
+    const screenshotHandle = screenshot.value.result.value.artifact.handle;
+    const internals = registry as unknown as {
+      windows: Map<number, {
+        sessionPlans: Map<string, unknown>;
+        sessionPlanTimers: Map<string, NodeJS.Timeout>;
+      }>;
+      sessionArtifacts: {
+        artifacts: Map<string, { data: Buffer }>;
+        usage(ownerWindowId?: number): { itemCount: number; byteCount: number };
+      };
+    };
+    const ownedBuffers = [...internals.sessionArtifacts.artifacts.values()].map(({ data }) => data);
+    expect(ownedBuffers).toHaveLength(2);
+    expect(internals.windows.get(1)?.sessionPlans.size).toBe(1);
+    expect(internals.windows.get(1)?.sessionPlanTimers.size).toBe(1);
+
+    await registry.selectTarget(1, sessionB);
+    expect(internals.windows.get(1)?.sessionPlans.size).toBe(0);
+    expect(internals.windows.get(1)?.sessionPlanTimers.size).toBe(0);
+    expect(internals.sessionArtifacts.usage(1)).toEqual({ itemCount: 0, byteCount: 0 });
+    for (const buffer of ownedBuffers) expect(buffer.every((byte) => byte === 0)).toBe(true);
+
+    await registry.selectTarget(1, sessionA);
+    await expect(
+      registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token),
+    ).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/already-used/) });
+    expect(client.rmSession).not.toHaveBeenCalled();
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.artifact.save",
+      handle: screenshotHandle,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/unavailable/) });
+    await expect(registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: editorArtifact.handle,
+      remotePath: "/tmp/TOP-SECRET-editor.txt",
+      encoding: "utf-8",
+      expectedSha256: "0".repeat(64),
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/unavailable/) });
+
+    const backgroundArtifact = await stageTextArtifact(
+      registry,
+      1,
+      "TOP-SECRET background-bound editor bytes",
+    );
+    const backgroundPlan = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/TOP-SECRET-background-delete.bin",
+      recursive: false,
+      force: false,
+    });
+    if (!backgroundPlan.ok || backgroundPlan.value.status !== "prepared") {
+      throw new Error("Expected a background-bound plan");
+    }
+    const backgroundBytes = [...internals.sessionArtifacts.artifacts.values()][0]?.data;
+    await registry.backgroundTarget(1);
+    expect(internals.windows.get(1)?.sessionPlans.size).toBe(0);
+    expect(internals.windows.get(1)?.sessionPlanTimers.size).toBe(0);
+    expect(internals.sessionArtifacts.usage(1)).toEqual({ itemCount: 0, byteCount: 0 });
+    expect(backgroundBytes?.every((byte) => byte === 0)).toBe(true);
+    await registry.selectTarget(1, sessionA);
+    await expect(
+      registry.executeSessionDestructiveActionPlan(1, backgroundPlan.value.plan.token),
+    ).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/already-used/) });
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.artifact.save",
+      handle: backgroundArtifact.handle,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/unavailable/) });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(JSON.stringify({ history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("preserves capabilities across summary refreshes but revokes them on authoritative identity replacement", async () => {
+    const client = new FakeSliverClient();
+    const original = session("session_m2", "m2-interactive");
+    client.sessionState.Sessions = [original];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const editorArtifact = await stageTextArtifact(registry, 1, "TOP-SECRET refresh-bound editor bytes");
+    const internals = registry as unknown as {
+      sessionArtifacts: {
+        artifacts: Map<string, { data: Buffer }>;
+        usage(ownerWindowId?: number): { itemCount: number; byteCount: number };
+      };
+    };
+    const ownedBytes = [...internals.sessionArtifacts.artifacts.values()][0]?.data;
+
+    original.LastCheckin = String(Number(original.LastCheckin) + 1);
+    await expect(registry.refresh(1)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTarget: { id: "session_m2" } } },
+    });
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: true });
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.artifact.save",
+      handle: editorArtifact.handle,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { status: "completed", result: { value: { status: "canceled" } } },
+    });
+    expect(internals.sessionArtifacts.usage(1).itemCount).toBe(1);
+    expect(ownedBytes?.some((byte) => byte !== 0)).toBe(true);
+
+    original.UUID = "replacement-host-identity";
+    await expect(registry.refresh(1)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTarget: null } },
+    });
+    expect(internals.sessionArtifacts.usage(1)).toEqual({ itemCount: 0, byteCount: 0 });
+    expect(ownedBytes?.every((byte) => byte === 0)).toBe(true);
+    const replacement = registry.snapshot(1).targetContext.selectableTargets[0]!;
+    await registry.selectTarget(1, replacement);
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.artifact.save",
+      handle: editorArtifact.handle,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/unavailable/) });
+    expect(JSON.stringify(registry.snapshot(1))).not.toContain("TOP-SECRET");
+  });
+
+  it("stages bounded editor bytes in main-owned storage and journals no content, handle, or native path", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const editorContent = "TOP-SECRET editor body";
+
+    const staged = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.stage-text",
+      content: editorContent,
+      encoding: "utf-8",
+    });
+    if (
+      !staged.ok || staged.value.status !== "completed" ||
+      staged.value.result.operationId !== "session.filesystem.stage-text"
+    ) throw new Error("Expected staged editor content");
+    const artifact = staged.value.result.value.artifact;
+    expect(artifact).toMatchObject({
+      suggestedBasename: "edited-text.txt",
+      mediaType: "text/plain",
+      size: Buffer.byteLength(editorContent),
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(Date.parse(artifact.expiresAt) - Date.parse(artifact.createdAt)).toBeLessThanOrEqual(60_000);
+
+    const destination = join(root, "TOP-SECRET-editor-destination.txt");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.artifact.save",
+      handle: artifact.handle,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: { status: "completed", result: { value: { status: "saved" } } },
+    });
+    expect(await readFile(destination, "utf8")).toBe(editorContent);
+
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({ ok: true });
+    if (!history.ok) throw new Error(history.error);
+    expect(history.value.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: "session.filesystem.stage-text", state: "completed", attempts: 0 }),
+      expect.objectContaining({ operationId: "session.artifact.save", state: "completed", attempts: 0 }),
+    ]));
+    const serializedHistory = JSON.stringify(history);
+    for (const sensitiveValue of [editorContent, artifact.handle, destination]) {
+      expect(serializedHistory).not.toContain(sensitiveValue);
+    }
+  });
+
+  it("executes conflict-aware text and hex overwrites from exact staged artifacts", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const textArtifact = await stageTextArtifact(registry, 1, "new text");
+    const textOriginal = Buffer.from("old text");
+    const textExpected = createHash("sha256").update(textOriginal).digest("hex");
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Data: textOriginal,
+    }));
+    const textPlan = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: textArtifact.handle,
+      remotePath: "/tmp/edit.txt",
+      encoding: "utf-8",
+      expectedSha256: textExpected,
+    });
+    expect(textPlan).toMatchObject({
+      ok: true,
+      value: { status: "prepared", plan: { artifact: {
+        suggestedBasename: "edited-text.txt",
+        size: 8,
+        sha256: textArtifact.sha256,
+      } } },
+    });
+    if (!textPlan.ok || textPlan.value.status !== "prepared") throw new Error("Expected text edit plan");
+    expect(Date.parse(textPlan.value.plan.expiresAt)).toBeLessThanOrEqual(Date.parse(textArtifact.expiresAt));
+    await expect(registry.executeSessionDestructiveActionPlan(1, textPlan.value.plan.token)).resolves.toMatchObject({
+      ok: true,
+      value: { actionId: "session.filesystem.edit-text-overwrite", status: "succeeded" },
+    });
+    expect(client.lastUploadData?.toString()).toBe("new text");
+    expect(client.uploadSession).toHaveBeenLastCalledWith("session_m2", "/tmp/edit.txt", expect.any(Buffer), {
+      isIOC: false,
+      isDirectory: false,
+      overwrite: true,
+    });
+    expect(client.uploadSession.mock.calls.at(-1)?.[2].every((byte) => byte === 0)).toBe(true);
+    expect(textOriginal.every((byte) => byte === 0)).toBe(true);
+
+    const hexArtifact = await stageHexArtifact(registry, 1, "00a1ff");
+    const hexOriginal = Buffer.from([1, 2, 3]);
+    const hexExpected = createHash("sha256").update(hexOriginal).digest("hex");
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Data: hexOriginal,
+    }));
+    const hexPlan = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.patch-hex",
+      patchHandle: hexArtifact.handle,
+      remotePath: "/tmp/edit.bin",
+      expectedSha256: hexExpected,
+    });
+    if (!hexPlan.ok || hexPlan.value.status !== "prepared") throw new Error("Expected hex edit plan");
+    await expect(registry.executeSessionDestructiveActionPlan(1, hexPlan.value.plan.token)).resolves.toMatchObject({
+      ok: true,
+      value: { actionId: "session.filesystem.patch-hex", status: "succeeded" },
+    });
+    expect(client.lastUploadData).toEqual(Buffer.from([0x00, 0xa1, 0xff]));
+    expect(client.uploadSession.mock.calls.at(-1)?.[2].every((byte) => byte === 0)).toBe(true);
+    expect(hexOriginal.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("fails an edit on digest conflict, revokes staged bytes, and never uploads", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const artifact = await stageTextArtifact(registry, 1, "replacement");
+    const expectedSha256 = createHash("sha256").update("original").digest("hex");
+    const changed = Buffer.from("changed");
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Data: changed,
+    }));
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: artifact.handle,
+      remotePath: "/tmp/conflict.txt",
+      encoding: "utf-8",
+      expectedSha256,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected edit plan");
+
+    await expect(registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token)).resolves.toMatchObject({
+      ok: true,
+      value: { status: "failed", message: expect.stringMatching(/changed after it was opened/i) },
+    });
+    expect(changed.every((byte) => byte === 0)).toBe(true);
+    expect(client.uploadSession).not.toHaveBeenCalled();
+    await expect(registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/already-used/),
+    });
+    await expect(registry.runSessionWorkbench(sender(1), {
+      operationId: "session.artifact.save",
+      handle: artifact.handle,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/unavailable/) });
+  });
+
+  it("does not upload when the active target changes during edit preflight", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_a", "session-a"), session("session_b", "session-b")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const sessionA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a")!;
+    const sessionB = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_b")!;
+    await registry.selectTarget(1, sessionA);
+    const artifact = await stageTextArtifact(registry, 1, "replacement");
+    const original = Buffer.from("original");
+    const expectedSha256 = createHash("sha256").update(original).digest("hex");
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: artifact.handle,
+      remotePath: "/tmp/stale.txt",
+      encoding: "utf-8",
+      expectedSha256,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected edit plan");
+    const gate = deferred<sliverpb.Download>();
+    client.downloadFileSession.mockImplementationOnce(async () => gate.promise);
+    const execution = registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+    await vi.waitFor(() => expect(client.downloadFileSession).toHaveBeenCalledOnce());
+    await registry.selectTarget(1, sessionB);
+    gate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: original }));
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: { status: "target-disappeared" },
+    });
+    expect(original.every((byte) => byte === 0)).toBe(true);
+    expect(client.uploadSession).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes edit target rejection from transport loss and zeroizes staged upload buffers", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    for (const [suffix, rejection, status] of [
+      ["rejected", sliverpb.Upload.create({ Response: { Err: "TOP-SECRET target detail" } }), "failed"],
+      ["transport", new Error("14 UNAVAILABLE: TOP-SECRET transport detail"), "outcome-unknown"],
+    ] as const) {
+      const artifact = await stageTextArtifact(registry, 1, `replacement-${suffix}`);
+      const original = Buffer.from(`original-${suffix}`);
+      const expectedSha256 = createHash("sha256").update(original).digest("hex");
+      client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+        Exists: true,
+        IsDir: false,
+        Data: original,
+      }));
+      const prepared = await registry.prepareSessionDestructiveAction(1, {
+        actionId: "session.filesystem.edit-text-overwrite",
+        contentHandle: artifact.handle,
+        remotePath: `/tmp/${suffix}.txt`,
+        encoding: "utf-8",
+        expectedSha256,
+      });
+      if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected edit plan");
+      if (rejection instanceof Error) client.uploadSession.mockRejectedValueOnce(rejection);
+      else client.uploadSession.mockResolvedValueOnce(rejection);
+
+      const result = await registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+      expect(result).toMatchObject({ ok: true, value: { status } });
+      expect(JSON.stringify(result)).not.toContain("TOP-SECRET");
+      expect(client.uploadSession.mock.calls.at(-1)?.[2].every((byte) => byte === 0)).toBe(true);
+      expect(original.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it("rejects staged editor handle/media mismatches and prevents plan replay", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const textArtifact = await stageTextArtifact(registry, 1, "new text");
+    const expectedSha256 = createHash("sha256").update("old text").digest("hex");
+
+    await expect(registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.patch-hex",
+      patchHandle: textArtifact.handle,
+      remotePath: "/tmp/mismatch.bin",
+      expectedSha256,
+    })).resolves.toEqual({
+      ok: false,
+      error: "The staged editor artifact does not match the reviewed edit type",
+    });
+    await expect(registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: "A".repeat(43),
+      remotePath: "/tmp/missing.txt",
+      encoding: "utf-8",
+      expectedSha256,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/unavailable/) });
+
+    const original = Buffer.from("old text");
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Data: original,
+    }));
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: textArtifact.handle,
+      remotePath: "/tmp/replay.txt",
+      encoding: "utf-8",
+      expectedSha256,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected edit plan");
+    await expect(registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token)).resolves.toMatchObject({
+      ok: true,
+      value: { status: "succeeded" },
+    });
+    await expect(registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/already-used/),
+    });
+    expect(client.uploadSession).toHaveBeenCalledOnce();
   });
 
   it("does not expose native paths or raw transport errors through workbench results", async () => {
@@ -2492,7 +3339,8 @@ describe("connection registry with an injected Sliver client", () => {
     const registry = createRegistry(() => client.adapter);
     registry.registerWindow(1);
     await connectSaved(registry, 1);
-    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const selected = registry.snapshot(1).targetContext.selectableTargets[0]!;
+    await registry.selectTarget(1, selected);
     const baselineRefreshes = client.getSessions.mock.calls.length;
 
     const prepared = await registry.prepareSessionDestructiveAction(1, {
@@ -2508,7 +3356,17 @@ describe("connection registry with an injected Sliver client", () => {
         plan: {
           payloadDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
           action: { actionId: "session.filesystem.rm", path: "/tmp/reviewed.txt" },
-          target: { name: "m2-interactive" },
+          target: {
+            backend: {
+              id: createHash("sha256").update(validConfig()).digest("hex"),
+              displayName: "operator",
+            },
+            sessionId: "session_m2",
+            fingerprint: selected.fingerprint,
+            name: "m2-interactive",
+            hostname: "m2-interactive-host",
+            os: "darwin",
+          },
         },
       },
     });
@@ -2530,6 +3388,242 @@ describe("connection registry with an injected Sliver client", () => {
       error: expect.stringMatching(/already-used session action plan/),
     });
     expect(client.rmSession).toHaveBeenCalledOnce();
+  });
+
+  it("refuses recursive removal plans for self and root paths after target-platform normalization", async () => {
+    const client = new FakeSliverClient();
+    const activeSession = session("session_m2", "m2-interactive");
+    activeSession.OS = "windows";
+    client.sessionState.Sessions = [activeSession];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    for (const path of [
+      ".",
+      "..",
+      "/",
+      "\\",
+      ".\\",
+      "C:\\",
+      "C:\\temp\\..",
+      "/tmp/..",
+      "C:",
+      "C:.",
+      "C:..",
+      "C:relative\\child",
+      "\\\\server\\share",
+      "\\\\server\\share\\",
+    ]) {
+      await expect(registry.prepareSessionDestructiveAction(1, {
+        actionId: "session.filesystem.rm",
+        path,
+        recursive: true,
+        force: true,
+      })).resolves.toEqual({
+        ok: false,
+        error: "Recursive removal of a filesystem root, self, or drive-relative path is not allowed",
+      });
+    }
+
+    const internals = registry as unknown as {
+      windows: Map<number, { sessionPlans: Map<string, unknown> }>;
+    };
+    expect(internals.windows.get(1)?.sessionPlans.size).toBe(0);
+    await expect(registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "C:\\temp\\bounded-child",
+      recursive: true,
+      force: true,
+    })).resolves.toMatchObject({ ok: true, value: { status: "prepared" } });
+  });
+
+  it("reports a reviewed target rejection as confirmed failed without reflecting target details", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/rejected.txt",
+      recursive: false,
+      force: false,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected a prepared session plan");
+    client.rmSession.mockResolvedValueOnce(sliverpb.Rm.create({
+      Response: { Err: "TOP-SECRET target rejection at C:\\private\\implant" },
+    }));
+
+    const result = await registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        actionId: "session.filesystem.rm",
+        status: "failed",
+        message: "The target rejected the reviewed action",
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/TOP-SECRET|private\\implant/u);
+    expect(client.rmSession).toHaveBeenCalledOnce();
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          operationId: "session.filesystem.rm",
+          state: "failed",
+          attempts: 1,
+        }],
+      },
+    });
+    expect(JSON.stringify(history)).not.toMatch(/TOP-SECRET|\/tmp\/rejected/u);
+  });
+
+  it("recovers reviewed target-loss uncertainty after an exact target rejection", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/TOP-SECRET-reviewed-late-rejection",
+      recursive: false,
+      force: false,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected a prepared session plan");
+    const mutationGate = deferred<sliverpb.Rm>();
+    client.rmSession.mockImplementationOnce(async () => mutationGate.promise);
+
+    const execution = registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+    await vi.waitFor(() => expect(client.rmSession).toHaveBeenCalledOnce());
+    client.sessionState.Sessions = [];
+    await registry.refresh(1);
+    mutationGate.resolve(sliverpb.Rm.create({ Response: { Err: "TOP-SECRET reviewed exact rejection" } }));
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: { actionId: "session.filesystem.rm", status: "failed" },
+    });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.filesystem.rm", state: "failed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("keeps a reviewed action outcome unknown after transport failure", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/uncertain.txt",
+      recursive: false,
+      force: false,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected a prepared session plan");
+    client.rmSession.mockRejectedValueOnce(new Error("14 UNAVAILABLE: TOP-SECRET transport path"));
+
+    const result = await registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        actionId: "session.filesystem.rm",
+        status: "outcome-unknown",
+        message: "The action was dispatched, but its outcome could not be confirmed",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("TOP-SECRET");
+    expect(client.rmSession).toHaveBeenCalledOnce();
+    await expect(registry.listTargetOperations(1, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          operationId: "session.filesystem.rm",
+          state: "outcome-unknown",
+          attempts: 1,
+        }],
+      },
+    });
+  });
+
+  it("recovers reviewed target-loss uncertainty after an exact success", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/TOP-SECRET-reviewed-late-success",
+      recursive: false,
+      force: false,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected a prepared session plan");
+    const mutationGate = deferred<sliverpb.Rm>();
+    client.rmSession.mockImplementationOnce(async () => mutationGate.promise);
+
+    const execution = registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+    await vi.waitFor(() => expect(client.rmSession).toHaveBeenCalledOnce());
+    client.sessionState.Sessions = [];
+    await registry.refresh(1);
+    mutationGate.resolve(sliverpb.Rm.create());
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: { actionId: "session.filesystem.rm", status: "succeeded" },
+    });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.filesystem.rm", state: "completed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("keeps a reviewed exact response uncertain after the backend incarnation changes", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.rm",
+      path: "/tmp/TOP-SECRET-reviewed-stale-incarnation",
+      recursive: false,
+      force: false,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected a prepared session plan");
+    const mutationGate = deferred<sliverpb.Rm>();
+    client.rmSession.mockImplementationOnce(async () => mutationGate.promise);
+
+    const execution = registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+    await vi.waitFor(() => expect(client.rmSession).toHaveBeenCalledOnce());
+    await registry.disconnect(1);
+    mutationGate.resolve(sliverpb.Rm.create());
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: { actionId: "session.filesystem.rm", status: "outcome-unknown" },
+    });
+    expect(JSON.stringify({ result: await execution, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
   });
 
   it("does not dispatch a reviewed session action after authoritative target disappearance", async () => {
@@ -2664,6 +3758,175 @@ describe("connection registry with an injected Sliver client", () => {
       overwrite: true,
     })).resolves.toEqual({ ok: true, value: { status: "canceled" } });
     expect(electronMocks.showOpenDialog).toHaveBeenCalledOnce();
+    expect(client.uploadSession).not.toHaveBeenCalled();
+  });
+
+  it("does not insert a stale upload plan when selection changes while the native picker is pending", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      session("session_a", "session-a"),
+      session("session_b", "session-b"),
+    ];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const sessionA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a")!;
+    const sessionB = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_b")!;
+    await registry.selectTarget(1, sessionA);
+    const uploadPath = join(root, "TOP-SECRET-deferred-picker.bin");
+    await writeFile(uploadPath, "TOP-SECRET deferred picker bytes", { mode: 0o600 });
+    const picker = deferred<{ canceled: boolean; filePaths: string[] }>();
+    electronMocks.showOpenDialog.mockImplementationOnce(async () => picker.promise);
+    const internals = registry as unknown as {
+      windows: Map<number, {
+        sessionPlans: Map<string, unknown>;
+        sessionPlanAdmissions: Set<string>;
+      }>;
+      sessionArtifacts: {
+        store: (...args: unknown[]) => unknown;
+        usage(ownerWindowId?: number): { itemCount: number; byteCount: number };
+      };
+    };
+    const originalStore = internals.sessionArtifacts.store.bind(internals.sessionArtifacts);
+    let pickedBytes: Buffer | undefined;
+    let selectionChange: ReturnType<ConnectionRegistry["selectTarget"]> | undefined;
+    const storeSpy = vi.spyOn(internals.sessionArtifacts, "store").mockImplementation((...args) => {
+      const input = args[0] as { data?: unknown } | undefined;
+      if (Buffer.isBuffer(input?.data)) pickedBytes = input.data;
+      const metadata = originalStore(...args);
+      selectionChange = registry.selectTarget(1, sessionB);
+      return metadata;
+    });
+
+    const preparation = registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.upload-overwrite",
+      remotePath: "/tmp/TOP-SECRET-stale-plan.bin",
+      isIOC: false,
+      isDirectory: false,
+      overwrite: true,
+    });
+    await vi.waitFor(() => expect(electronMocks.showOpenDialog).toHaveBeenCalledOnce());
+    picker.resolve({ canceled: false, filePaths: [uploadPath] });
+
+    const result = await preparation;
+    await selectionChange;
+    storeSpy.mockRestore();
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/active session changed/) });
+    expect(internals.windows.get(1)?.sessionPlans.size).toBe(0);
+    expect(internals.windows.get(1)?.sessionPlanAdmissions.size).toBe(0);
+    expect(internals.sessionArtifacts.usage(1)).toEqual({ itemCount: 0, byteCount: 0 });
+    expect(pickedBytes?.every((byte) => byte === 0)).toBe(true);
+    expect(client.uploadSession).not.toHaveBeenCalled();
+    expect(JSON.stringify({ result, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("revokes reviewed upload bytes when the exact session disappears before dispatch", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const uploadPath = join(root, "TOP-SECRET-target-loss-upload.bin");
+    await writeFile(uploadPath, "TOP-SECRET reviewed target-loss bytes", { mode: 0o600 });
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [uploadPath] });
+
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.upload-overwrite",
+      remotePath: "/tmp/TOP-SECRET-target-loss.bin",
+      isIOC: false,
+      isDirectory: false,
+      overwrite: true,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected an upload plan");
+    const internals = registry as unknown as {
+      sessionArtifacts: {
+        artifacts: Map<string, { data: Buffer }>;
+        usage(ownerWindowId?: number): { itemCount: number; byteCount: number };
+      };
+    };
+    const ownedBytes = [...internals.sessionArtifacts.artifacts.values()][0]?.data;
+    expect(ownedBytes?.toString()).toBe("TOP-SECRET reviewed target-loss bytes");
+    client.sessionState.Sessions = [];
+
+    const result = await registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        actionId: "session.filesystem.upload-overwrite",
+        status: "target-disappeared",
+      },
+    });
+    expect(client.uploadSession).not.toHaveBeenCalled();
+    expect(ownedBytes?.every((byte) => byte === 0)).toBe(true);
+    expect(internals.sessionArtifacts.usage(1)).toEqual({ itemCount: 0, byteCount: 0 });
+    await expect(
+      registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token),
+    ).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/already-used/) });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          operationId: "session.filesystem.upload-overwrite",
+          state: "target-disappeared",
+          attempts: 0,
+        }],
+      },
+    });
+    expect(JSON.stringify({ result, history, snapshot: registry.snapshot(1) })).not.toContain("TOP-SECRET");
+  });
+
+  it("classifies a reviewed upload rejection as failed and clears every owned copy", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const uploadPath = join(root, "TOP-SECRET-rejected-upload.bin");
+    await writeFile(uploadPath, "TOP-SECRET reviewed rejected bytes", { mode: 0o600 });
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [uploadPath] });
+    const prepared = await registry.prepareSessionDestructiveAction(1, {
+      actionId: "session.filesystem.upload-overwrite",
+      remotePath: "/tmp/TOP-SECRET-rejected.bin",
+      isIOC: false,
+      isDirectory: false,
+      overwrite: true,
+    });
+    if (!prepared.ok || prepared.value.status !== "prepared") throw new Error("Expected an upload plan");
+    const internals = registry as unknown as {
+      sessionArtifacts: { artifacts: Map<string, { data: Buffer }> };
+    };
+    const storedBytes = [...internals.sessionArtifacts.artifacts.values()][0]?.data;
+    client.uploadSession.mockResolvedValueOnce(sliverpb.Upload.create({
+      Response: { Err: "TOP-SECRET target rejection at /private/implant/path" },
+    }));
+
+    const result = await registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token);
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        actionId: "session.filesystem.upload-overwrite",
+        status: "failed",
+        message: "The target rejected the reviewed action",
+      },
+    });
+    expect(client.uploadSession).toHaveBeenCalledOnce();
+    expect(storedBytes?.every((byte) => byte === 0)).toBe(true);
+    expect(client.uploadSession.mock.calls[0]?.[2].every((byte) => byte === 0)).toBe(true);
+    await expect(
+      registry.executeSessionDestructiveActionPlan(1, prepared.value.plan.token),
+    ).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/already-used/) });
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ operationId: "session.filesystem.upload-overwrite", state: "failed", attempts: 1 }],
+      },
+    });
+    expect(JSON.stringify({ result, history, snapshot: registry.snapshot(1) }))
+      .not.toMatch(/TOP-SECRET|private\/implant/u);
   });
 
   it("binds upload-overwrite authorization to the exact native-picked bytes without exposing the local path", async () => {
@@ -2731,18 +3994,22 @@ describe("connection registry with an injected Sliver client", () => {
       maxBytes: 1_024,
     });
     await vi.waitFor(() => expect(client.downloadFileSession).toHaveBeenCalledTimes(2));
-    secondGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: Buffer.from("newer") }));
+    const newerBytes = Buffer.from("newer");
+    secondGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: newerBytes }));
     await expect(second).resolves.toMatchObject({
       ok: true,
       value: { status: "completed", result: { value: { status: "saved" } } },
     });
-    firstGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: Buffer.from("stale") }));
+    const staleBytes = Buffer.from("stale");
+    firstGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: staleBytes }));
 
     await expect(first).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/newer save .* superseded/i),
     });
     expect(await readFile(destination, "utf8")).toBe("newer");
+    expect(newerBytes.every((byte) => byte === 0)).toBe(true);
+    expect(staleBytes.every((byte) => byte === 0)).toBe(true);
   });
 
   it.runIf(process.platform !== "win32")(
@@ -2781,15 +4048,19 @@ describe("connection registry with an injected Sliver client", () => {
         maxBytes: 1_024,
       });
       await vi.waitFor(() => expect(client.downloadFileSession).toHaveBeenCalledTimes(2));
-      secondGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: Buffer.from("newer") }));
+      const newerBytes = Buffer.from("newer");
+      secondGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: newerBytes }));
       await expect(second).resolves.toMatchObject({ ok: true });
-      firstGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: Buffer.from("stale") }));
+      const staleBytes = Buffer.from("stale");
+      firstGate.resolve(sliverpb.Download.create({ Exists: true, IsDir: false, Data: staleBytes }));
 
       await expect(first).resolves.toMatchObject({
         ok: false,
         error: expect.stringMatching(/newer save .* superseded/i),
       });
       expect(await readFile(canonicalDestination, "utf8")).toBe("newer");
+      expect(newerBytes.every((byte) => byte === 0)).toBe(true);
+      expect(staleBytes.every((byte) => byte === 0)).toBe(true);
     },
   );
 
@@ -3172,6 +4443,21 @@ class FakeSliverClient {
   readonly screenshotSession = vi.fn(async () => sliverpb.Screenshot.create({
     Data: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
   }));
+  readonly processDumpSession = vi.fn(async () => sliverpb.ProcessDump.create({
+    Data: Buffer.from("process-dump"),
+  }));
+  readonly startServiceSession = vi.fn(async () => sliverpb.ServiceInfo.create({}));
+  readonly serviceDetailSession = vi.fn(async (_sessionId: string, name: string) => sliverpb.ServiceDetail.create({
+    Detail: {
+      Name: name,
+      DisplayName: name,
+      Description: "Test service",
+      Status: 4,
+      StartupType: 2,
+      BinPath: "C:\\Windows\\service.exe",
+      Account: "LocalSystem",
+    },
+  }));
   readonly uploadSession = vi.fn(async (_sessionId: string, path: string, data: Buffer) => {
     this.lastUploadData = Buffer.from(data);
     return sliverpb.Upload.create({ Path: path });
@@ -3336,6 +4622,9 @@ class FakeSliverClient {
     mkdirSession: this.mkdirSession,
     rmSession: this.rmSession,
     screenshotSession: this.screenshotSession,
+    processDumpSession: this.processDumpSession,
+    startServiceSession: this.startServiceSession,
+    serviceDetailSession: this.serviceDetailSession,
     uploadSession: this.uploadSession,
     downloadFileSession: this.downloadFileSession,
     psSession: this.psSession,
@@ -3429,6 +4718,39 @@ async function connectNamed(registry: ConnectionRegistry, contentsId: number, di
   if (!config) throw new Error(`Expected saved configuration '${displayName}'`);
   const connected = await registry.connectSavedConfig(contentsId, config.id);
   if (!connected.ok) throw new Error(connected.error);
+}
+
+async function stageTextArtifact(
+  registry: ConnectionRegistry,
+  contentsId: number,
+  content: string,
+): Promise<SessionStoredArtifact> {
+  const staged = await registry.runSessionWorkbench(sender(contentsId), {
+    operationId: "session.filesystem.stage-text",
+    content,
+    encoding: "utf-8",
+  });
+  if (
+    !staged.ok || staged.value.status !== "completed" ||
+    staged.value.result.operationId !== "session.filesystem.stage-text"
+  ) throw new Error("Expected staged text artifact");
+  return staged.value.result.value.artifact;
+}
+
+async function stageHexArtifact(
+  registry: ConnectionRegistry,
+  contentsId: number,
+  hex: string,
+): Promise<SessionStoredArtifact> {
+  const staged = await registry.runSessionWorkbench(sender(contentsId), {
+    operationId: "session.filesystem.stage-hex",
+    hex,
+  });
+  if (
+    !staged.ok || staged.value.status !== "completed" ||
+    staged.value.result.operationId !== "session.filesystem.stage-hex"
+  ) throw new Error("Expected staged hex artifact");
+  return staged.value.result.value.artifact;
 }
 
 function domainCallCounts(client: FakeSliverClient): Record<"jobs" | "builds" | "profiles" | "compiler", number> {

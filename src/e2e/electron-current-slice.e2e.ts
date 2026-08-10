@@ -16,6 +16,10 @@ const EVENT_SECRET = "FAKE_EVENT_SECRET_M0_DO_NOT_RENDER";
 const TARGET_SECRET = "FAKE_TARGET_SECRET_M1_DO_NOT_RENDER";
 const TASK_SECRET = "FAKE_TASK_REQUEST_SECRET_M1_DO_NOT_RENDER";
 const M2_ENV_SECRET = "FAKE_M2_ENV_SECRET_DO_NOT_RENDER";
+const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
+const M2_INITIAL_FILE_TEXT = `${M2_FILE_CONTENT}\nsecond deterministic line\n`;
+const M2_EDITED_CONTENT = "FAKE_M2_EDITED_CONTENT_DO_NOT_JOURNAL";
+const M2_SEARCH_PATTERN = "FAKE_M2_SEARCH_PATTERN_DO_NOT_JOURNAL";
 
 test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 90_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -85,7 +89,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       assert.ok(stateAfterConnect.methods.includes(method), `expected ConnectionRegistry to call ${method}`);
     }
 
-    await verifyM1TargetsAndOperations(electronApplication, page);
+    await verifyM1TargetsAndOperations(electronApplication, page, artifactDirectory);
 
     await startAndStopMtlsListener(page);
     const stateAfterStop = await readFakeState(electronApplication);
@@ -111,6 +115,10 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       TARGET_SECRET,
       TASK_SECRET,
       M2_ENV_SECRET,
+      M2_FILE_CONTENT,
+      M2_EDITED_CONTENT,
+      M2_SEARCH_PATTERN,
+      "/Users/e2e/workspace/notes.txt",
       selectedConfigPath,
     ]) {
       assert.ok(!observableText.includes(forbidden), `renderer-visible text exposed ${forbidden}`);
@@ -191,6 +199,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
 async function verifyM1TargetsAndOperations(
   electronApplication: ElectronApplication,
   page: Page,
+  artifactDirectory: string,
 ): Promise<void> {
   const initial = await rendererSnapshot(page);
   assert.deepEqual(initial.sessions.map(({ id, name }) => ({ id, name })), [
@@ -214,7 +223,7 @@ async function verifyM1TargetsAndOperations(
   const sessionRef = requireTargetRef(initial, "session");
   await page.getByRole("row", { name: /m1-session/i }).click();
   await waitForSnapshot(page, (snapshot) => snapshot.targetContext.activeTarget?.id === sessionRef.id);
-  await verifyM2SessionWorkspace(electronApplication, page);
+  await verifyM2SessionWorkspace(electronApplication, page, artifactDirectory);
 
   const sessionPing = requireOperation(await invokeSliver(page, "submitTargetOperation", {
     operationId: "target.ping",
@@ -370,7 +379,10 @@ async function verifyM1TargetsAndOperations(
 
   const operationPage = await invokeSliver(page, "listTargetOperations", { limit: 1 });
   assert.equal(operationPage.ok, true);
-  assert.equal(operationPage.value?.page.total, 5);
+  assert.ok(
+    (operationPage.value?.page.total ?? 0) >= 30,
+    "the unified history must retain the M1 records and the exercised M2 workbench activity",
+  );
   assert.equal(operationPage.value?.page.truncated, true);
   assert.match(operationPage.value?.page.nextCursor ?? "", /^operation:v1:/u);
   const nextOperationPage = await invokeSliver(page, "listTargetOperations", {
@@ -488,6 +500,7 @@ async function verifyM1TargetsAndOperations(
 async function verifyM2SessionWorkspace(
   electronApplication: ElectronApplication,
   page: Page,
+  artifactDirectory: string,
 ): Promise<void> {
   await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
   await page.getByRole("tablist", { name: "Session interaction sections" }).waitFor();
@@ -505,15 +518,63 @@ async function verifyM2SessionWorkspace(
   await page.getByText("Screenshot unavailable", { exact: true }).waitFor();
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
+  const filesystemMode = page.getByRole("radiogroup", { name: "Filesystem mode" });
+  await filesystemMode.waitFor();
   const filesGrid = page.getByRole("grid", { name: "Files in /Users/e2e/workspace" });
   await filesGrid.waitFor();
   await filesGrid.getByText("notes.txt", { exact: true }).waitFor();
   await filesGrid.getByText("projects", { exact: true }).waitFor();
+
+  const notesRow = filesGrid.getByRole("row").filter({ hasText: "notes.txt" });
+  await notesRow.click();
+  const inspector = page.getByRole("dialog", { name: "notes.txt", exact: true });
+  await inspector.waitFor();
+  const fileViews = inspector.getByRole("radiogroup", { name: "File view" });
+  await inspector.getByText(M2_INITIAL_FILE_TEXT, { exact: true }).waitFor();
+  let downloadCount = fakeMethodCount(await readFakeState(electronApplication), "downloadFileSession");
+
+  await fileViews.getByRole("radio", { name: "Head", exact: true }).click();
+  downloadCount += 1;
+  await waitForFakeMethodCount(electronApplication, "downloadFileSession", downloadCount);
+  await fileViews.getByRole("radio", { name: "Tail", exact: true }).click();
+  downloadCount += 1;
+  await waitForFakeMethodCount(electronApplication, "downloadFileSession", downloadCount);
+  await fileViews.getByRole("radio", { name: "Hex", exact: true }).click();
+  downloadCount += 1;
+  await waitForFakeMethodCount(electronApplication, "downloadFileSession", downloadCount);
+  await inspector.getByText(Buffer.from(M2_INITIAL_FILE_TEXT, "utf8").toString("hex"), { exact: true }).waitFor();
+  await fileViews.getByRole("radio", { name: "Cat", exact: true }).click();
+  downloadCount += 1;
+  await waitForFakeMethodCount(electronApplication, "downloadFileSession", downloadCount);
+  await inspector.getByText(M2_INITIAL_FILE_TEXT, { exact: true }).waitFor();
+
+  await inspector.getByRole("button", { name: "Edit", exact: true }).click();
+  await inspector.getByRole("textbox", { name: "UTF-8 text", exact: true }).fill(M2_EDITED_CONTENT);
+  await inspector.getByRole("button", { name: "Review save", exact: true }).click();
+  const saveDialog = page.getByRole("alertdialog", { name: "Save changes to this remote file?", exact: true });
+  await saveDialog.waitFor();
+  const saveReviewText = await saveDialog.innerText();
+  assert.ok(saveReviewText.includes("/Users/e2e/workspace/notes.txt"));
+  assert.match(saveReviewText, /plan payload sha-256/i);
+  assert.ok(!saveReviewText.includes(M2_EDITED_CONTENT), "review metadata must not echo staged editor content");
+  await saveDialog.getByRole("button", { name: "Confirm action", exact: true }).click();
+  await saveDialog.waitFor({ state: "hidden" });
+  await waitForFakeMethodCount(electronApplication, "uploadSession", 1);
+  await page.keyboard.press("Escape");
+  await inspector.waitFor({ state: "hidden" });
+
+  await notesRow.click();
+  await inspector.waitFor();
+  await inspector.getByText(M2_EDITED_CONTENT, { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await inspector.waitFor({ state: "hidden" });
+
   await page.getByLabel("New folder name").fill("m2-e2e-folder");
   await page.getByRole("button", { name: "New folder", exact: true }).click();
   const createdFolderRow = filesGrid.getByRole("row").filter({ hasText: "m2-e2e-folder" });
   await createdFolderRow.waitFor();
-  await createdFolderRow.getByRole("button", { name: "Delete m2-e2e-folder", exact: true }).click();
+  await createdFolderRow.getByRole("button", { name: "More actions for m2-e2e-folder", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Delete/u }).click();
   const deleteDialog = page.getByRole("alertdialog", { name: "Delete this remote item?", exact: true });
   await deleteDialog.waitFor();
   const reviewText = await deleteDialog.innerText();
@@ -523,20 +584,67 @@ async function verifyM2SessionWorkspace(
   await deleteDialog.waitFor({ state: "hidden" });
   await createdFolderRow.waitFor({ state: "hidden" });
 
+  await filesystemMode.getByRole("radio", { name: "Search", exact: true }).click();
+  await page.getByRole("textbox", { name: "Search path", exact: true }).fill("/Users/e2e/workspace");
+  await page.getByRole("textbox", { name: "Pattern", exact: true }).fill(M2_SEARCH_PATTERN);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const searchGrid = page.getByRole("grid", { name: "Filesystem search results" });
+  await searchGrid.waitFor();
+  await searchGrid.getByText("/Users/e2e/workspace/match-001.txt", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Load more matches", exact: true }).click();
+  await searchGrid.getByText("/Users/e2e/workspace/match-105.txt", { exact: true }).waitFor();
+
+  await filesystemMode.getByRole("radio", { name: "Storage", exact: true }).click();
+  const mountsGrid = page.getByRole("grid", { name: "Session mounts" });
+  await mountsGrid.waitFor();
+  await mountsGrid.getByText("Macintosh HD", { exact: true }).waitFor();
+  await page.getByText("Memory files unavailable", { exact: true }).waitFor();
+
   await page.getByRole("tab", { name: "Processes", exact: true }).click();
   const processesGrid = page.getByRole("grid", { name: "Session processes" });
   await processesGrid.waitFor();
   await processesGrid.getByText("launchd", { exact: true }).waitFor();
   await processesGrid.getByText("sliver-m2-session", { exact: true }).waitFor();
+  await page.getByText("Loaded 100 of 108 processes · bounded", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Load more processes", exact: true }).click();
+  await page.getByText("Loaded 108 of 108 processes", { exact: true }).waitFor();
+
+  const processViews = page.getByRole("radiogroup", { name: "Process view" });
+  await processViews.getByRole("radio", { name: "Tree", exact: true }).click();
+  const processTree = page.getByRole("grid", { name: "Session process tree" });
+  await processTree.waitFor();
+  await processTree.getByText("launchd", { exact: true }).waitFor();
+  await processTree.getByText("sliver-m2-session", { exact: true }).waitFor();
+  await processTree.getByText("zsh", { exact: true }).waitFor();
+  const screenshotStateText = await page.locator("body").innerText();
+  for (const forbidden of [M2_ENV_SECRET, M2_FILE_CONTENT, M2_EDITED_CONTENT, M2_SEARCH_PATTERN]) {
+    assert.ok(!screenshotStateText.includes(forbidden), `M2 visual QA state exposed ${forbidden}`);
+  }
+  const m2Screenshot = await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "m2-session-workbench.png"),
+  });
+  for (const forbidden of [M2_ENV_SECRET, M2_FILE_CONTENT, M2_EDITED_CONTENT, M2_SEARCH_PATTERN]) {
+    assert.equal(m2Screenshot.includes(Buffer.from(forbidden)), false, `M2 screenshot bytes exposed ${forbidden}`);
+  }
+  await processViews.getByRole("radio", { name: "List", exact: true }).click();
+  await processesGrid.waitFor();
   await page.getByRole("searchbox", { name: "Filter processes" }).fill("zsh");
+  await page.getByText("Loaded 1 of 1 processes matching “zsh”", { exact: true }).waitFor();
   await processesGrid.getByText("zsh", { exact: true }).waitFor();
   assert.equal(await processesGrid.getByText("launchd", { exact: true }).count(), 0);
+  assert.equal(await page.getByRole("radiogroup", { name: "Process inventory" }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: /^Dump process /u }).count(), 0);
 
   await page.getByRole("tab", { name: "Environment", exact: true }).click();
   const environmentGrid = page.getByRole("grid", { name: "Session environment variables" });
   await environmentGrid.waitFor();
   await environmentGrid.getByText("HOME", { exact: true }).waitFor();
   await environmentGrid.getByText("/Users/e2e", { exact: true }).waitFor();
+  await page.getByText("Loaded 100 of 108 environment variables · bounded", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Load more variables", exact: true }).click();
+  await page.getByText("Loaded 108 of 108 environment variables", { exact: true }).waitFor();
+  await environmentGrid.getByText("M2_PAGE_105", { exact: true }).waitFor();
   const sensitiveRow = environmentGrid.getByRole("row").filter({ hasText: "SLIVER_GUI_M2_API_TOKEN" });
   await sensitiveRow.waitFor();
   await sensitiveRow.getByText("Sensitive", { exact: true }).waitFor();
@@ -552,32 +660,73 @@ async function verifyM2SessionWorkspace(
     "netstatSession",
     "pwdSession",
     "lsSession",
+    "downloadFileSession",
+    "uploadSession",
+    "grepSession",
     "mkdirSession",
     "rmSession",
+    "mountsSession",
     "psSession",
     "listEnvSession",
     "revealEnvSession",
   ]) {
     assert.ok(state.methods.includes(method), `expected the M2 workbench to call ${method}`);
   }
+  assert.equal(state.dialogCalls, 1, "the M2 journey must not invoke native file dialogs");
   assert.ok(!state.methods.includes("currentTokenOwnerSession"), "Darwin must quarantine the Windows-only token owner RPC");
   assert.ok(!state.methods.includes("screenshotSession"), "Darwin must quarantine the unsupported screenshot RPC");
+  assert.ok(!state.methods.includes("processDumpSession"), "Darwin must quarantine the unsupported process dump RPC");
+  assert.ok(!state.methods.includes("servicesSession"), "Darwin must quarantine Windows service inventory RPCs");
+  assert.ok(!state.methods.includes("memfilesListSession"), "Darwin must quarantine Linux memory-file RPCs");
 }
 
 async function verifyM2SessionActivityAndBack(page: Page): Promise<void> {
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
-  const activityGrid = page.getByRole("grid", { name: "Session operation activity" });
+  const activityGrid = page.getByRole("grid", { name: "Session activity" });
   await activityGrid.waitFor();
   await activityGrid.getByText("Ping", { exact: true }).waitFor();
   await activityGrid.getByText("Set environment variable", { exact: true }).waitFor();
-  await activityGrid.getByText("Completed", { exact: true }).first().waitFor();
-  assert.ok(!(await page.locator("body").innerText()).includes(M2_ENV_SECRET));
+  await activityGrid.getByText("Stage text changes", { exact: true }).waitFor();
+  const savedFileActivity = activityGrid.getByRole("row").filter({ hasText: "Save text file" });
+  await savedFileActivity.waitFor();
+  await savedFileActivity.getByText("Completed", { exact: true }).waitFor();
+  const activityText = await activityGrid.innerText();
+  for (const forbidden of [
+    M2_ENV_SECRET,
+    M2_FILE_CONTENT,
+    M2_EDITED_CONTENT,
+    M2_SEARCH_PATTERN,
+    "/Users/e2e/workspace/notes.txt",
+  ]) {
+    assert.ok(!activityText.includes(forbidden), `Activity exposed sensitive operation input ${forbidden}`);
+  }
+  assert.doesNotMatch(activityText, /\/(?:Users|private|tmp|var)\//u, "Activity must not expose local or remote paths");
 
   await page.getByRole("button", { name: "Back to live sessions", exact: true }).click();
   await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
-  await page.locator('[aria-label="Sliver sessions"]').getByText("m1-session", { exact: true }).waitFor();
+  const sessionsGrid = page.locator('[aria-label="Sliver sessions"]');
+  await sessionsGrid.getByText("m1-session", { exact: true }).waitFor();
   assert.equal(await page.getByRole("tablist", { name: "Session interaction sections" }).count(), 0);
   assert.equal(await page.getByText("Selected session", { exact: true }).count(), 0);
+
+  await page.getByRole("button", { name: "Interact with m1-session", exact: true }).click();
+  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  const beaconRef = requireTargetRef(await rendererSnapshot(page), "beacon");
+  const switchResult = await invokeSliver(page, "selectTarget", beaconRef);
+  assert.equal(switchResult.ok, true);
+  await page.getByRole("heading", { name: "Session workspace unavailable", exact: true }).waitFor();
+  const quarantinedText = await page.locator("body").innerText();
+  assert.ok(!quarantinedText.includes(M2_FILE_CONTENT));
+  assert.ok(!quarantinedText.includes(M2_EDITED_CONTENT));
+  assert.equal(await page.getByRole("tablist", { name: "Session interaction sections" }).count(), 0);
+
+  await page.getByRole("button", { name: "Back to sessions", exact: true }).click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Interact with m1-session", exact: true }).click();
+  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  assert.equal((await rendererSnapshot(page)).targetContext.activeTarget?.id, "m1_session");
+  await page.getByRole("button", { name: "Back to live sessions", exact: true }).click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
 }
 
 async function rendererSnapshot(page: Page): Promise<SliverSnapshot> {
@@ -699,6 +848,26 @@ async function startAndStopMtlsListener(page: Page): Promise<void> {
 
 async function readFakeState(electronApplication: ElectronApplication): Promise<FakeStateSnapshot> {
   return electronApplication.evaluate(() => structuredClone(globalThis.__SLIVER_GUI_E2E_STATE__));
+}
+
+function fakeMethodCount(state: FakeStateSnapshot, method: string): number {
+  return state.methods.filter((candidate) => candidate === method).length;
+}
+
+async function waitForFakeMethodCount(
+  electronApplication: ElectronApplication,
+  method: string,
+  minimum: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = 0;
+  while (Date.now() < deadline) {
+    latest = fakeMethodCount(await readFakeState(electronApplication), method);
+    if (latest >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${method} call ${minimum}; observed ${latest}`);
 }
 
 interface FakeStateSnapshot {

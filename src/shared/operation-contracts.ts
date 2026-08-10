@@ -1,4 +1,5 @@
 import type { PageResult } from "./contracts.js";
+import type { SessionWorkbenchOperationId } from "./session-contracts.js";
 import type { TargetMode, TargetRef } from "./target-contracts.js";
 
 export type { TargetMode, TargetRef } from "./target-contracts.js";
@@ -13,6 +14,14 @@ export const TARGET_OPERATION_IDS = Object.freeze([
 ] as const);
 
 export type TargetOperationId = (typeof TARGET_OPERATION_IDS)[number];
+
+/**
+ * Every operation identifier that may appear in the main-owned activity
+ * journal. `TargetOperationId` remains the smaller renderer-submittable M1
+ * dispatcher surface; session workbench identifiers are journal-only here and
+ * keep their own closed input parser.
+ */
+export type OperationRecordId = TargetOperationId | SessionWorkbenchOperationId;
 
 export interface PingOperationInput {
   operationId: "target.ping";
@@ -200,7 +209,7 @@ export type OperationDisposition =
 
 export interface TargetOperationRecord {
   readonly requestId: string;
-  readonly operationId: TargetOperationId;
+  readonly operationId: OperationRecordId;
   readonly target: TargetRef;
   readonly targetName: string;
   readonly backend: OperationBackendSummary;

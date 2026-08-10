@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { TextDecoder } from "node:util";
 
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 import {
+  SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_DEFAULT_PAGE_LIMIT,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
   SESSION_WORKBENCH_MAX_PAGE_LIMIT,
@@ -18,6 +20,7 @@ import {
   type SessionEnvironmentRevealResult,
   type SessionFileEntry,
   type SessionGrepMatch,
+  type SessionHexFileView,
   type SessionMemoryFile,
   type SessionMount,
   type SessionMutationResult,
@@ -30,7 +33,9 @@ import {
   type SessionRegistryReadResult,
   type SessionService,
   type SessionStoredArtifact,
+  type SessionStagedEditorArtifactResult,
   type SessionTargetPlatform,
+  type SessionTextFileView,
   type SessionWorkbenchInput,
   type SessionWorkbenchOperationId,
   type SessionWorkbenchResult,
@@ -138,6 +143,16 @@ export interface SessionWorkbenchArtifactGateway {
     readonly mediaType: "image/jpeg" | "image/png" | "image/webp";
     readonly sha256: string;
   }): Promise<SessionCapturedArtifactResult> | SessionCapturedArtifactResult;
+  /**
+   * Stages borrowed editor bytes as a main-owned artifact. The gateway must clone or
+   * take ownership before settling and must never retain the source Buffer.
+   */
+  stageEditorArtifact(input: {
+    readonly data: Buffer;
+    readonly suggestedBasename: string;
+    readonly mediaType: "text/plain" | "application/octet-stream";
+    readonly sha256: string;
+  }): Promise<SessionStoredArtifact> | SessionStoredArtifact;
   /** Opens the native save dialog for an existing main-owned artifact. */
   prepareStoredArtifactSave(
     handle: string,
@@ -147,6 +162,8 @@ export interface SessionWorkbenchArtifactGateway {
 
 export interface SessionWorkbenchOptions {
   readonly now?: () => number;
+  /** Main-process journal hook invoked immediately before each target RPC. */
+  readonly onDispatch?: (operationId: SessionWorkbenchOperationId) => void;
   /** Main-process journal hook invoked immediately before a direct mutation RPC. */
   readonly onMutationDispatch?: (operationId: SessionWorkbenchOperationId) => void;
 }
@@ -171,6 +188,7 @@ export class SessionWorkbenchRemoteError extends Error {
  */
 export class SessionWorkbench {
   private readonly now: () => number;
+  private readonly onDispatch: ((operationId: SessionWorkbenchOperationId) => void) | undefined;
   private readonly onMutationDispatch: ((operationId: SessionWorkbenchOperationId) => void) | undefined;
 
   constructor(
@@ -179,6 +197,7 @@ export class SessionWorkbench {
     options: SessionWorkbenchOptions = {},
   ) {
     this.now = options.now ?? Date.now;
+    this.onDispatch = options.onDispatch;
     this.onMutationDispatch = options.onMutationDispatch;
   }
 
@@ -191,7 +210,8 @@ export class SessionWorkbench {
 
     switch (input.operationId) {
       case "session.identity.current-token-owner": {
-        const response = await this.client.currentTokenOwnerSession(target.sessionId);
+        const response = await this.remote(input.operationId, () =>
+          this.client.currentTokenOwnerSession(target.sessionId));
         assertImplantResponse(response, "Current token owner");
         return {
           operationId: input.operationId,
@@ -209,7 +229,7 @@ export class SessionWorkbench {
         };
       }
       case "session.environment.list": {
-        const response = await this.client.listEnvSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.listEnvSession(target.sessionId));
         assertImplantResponse(response, "Environment listing");
         const value = boundedPage(response.Variables, input, (variable): SessionEnvironmentEntry => {
           const name = boundedText(variable.Key, 512);
@@ -226,7 +246,8 @@ export class SessionWorkbench {
         return { operationId: input.operationId, value };
       }
       case "session.environment.reveal": {
-        const response = await this.client.revealEnvSession(target.sessionId, input.name);
+        const response = await this.remote(input.operationId, () =>
+          this.client.revealEnvSession(target.sessionId, input.name));
         assertImplantResponse(response, "Environment reveal");
         const variable = response.Variables.find(({ Key }) => Key === input.name);
         if (!variable) throw new SessionWorkbenchRemoteError("Environment variable");
@@ -241,33 +262,38 @@ export class SessionWorkbench {
         return { operationId: input.operationId, value };
       }
       case "session.network.interfaces": {
-        const response = await this.client.ifconfigSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.ifconfigSession(target.sessionId));
         assertImplantResponse(response, "Network interface listing");
         const value = boundedPage(response.NetInterfaces, input, normalizeNetworkInterface);
         return { operationId: input.operationId, value };
       }
       case "session.network.connections": {
-        const response = await this.client.netstatSession(target.sessionId, {
-          tcp: input.tcp,
-          udp: input.udp,
-          ip4: input.ip4,
-          ip6: input.ip6,
-          listening: input.listening,
-        });
+        const response = await this.remote(input.operationId, () =>
+          this.client.netstatSession(target.sessionId, {
+            tcp: input.tcp,
+            udp: input.udp,
+            ip4: input.ip4,
+            ip6: input.ip6,
+            listening: input.listening,
+          }));
         assertImplantResponse(response, "Network connection listing");
         const value = boundedPage(response.Entries, input, normalizeNetworkConnection);
         return { operationId: input.operationId, value };
       }
       case "session.filesystem.pwd": {
-        const response = await this.client.pwdSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.pwdSession(target.sessionId));
         assertImplantResponse(response, "Working directory");
         return { operationId: input.operationId, value: { path: boundedPath(response.Path) } };
       }
       case "session.filesystem.ls": {
-        const response = await this.client.lsSession(target.sessionId, input.path);
+        const response = await this.remote(input.operationId, () => this.client.lsSession(target.sessionId, input.path));
         assertImplantResponse(response, "Directory listing");
         const path = boundedPath(response.Path || input.path);
-        const page = boundedPage(response.Files, input, (file) => normalizeFileEntry(file, path));
+        const page = boundedPage(
+          response.Files.filter((file) => file.Name !== "."),
+          input,
+          (file) => normalizeFileEntry(file, path),
+        );
         const value: SessionDirectoryListing = {
           path,
           exists: response.Exists,
@@ -278,24 +304,43 @@ export class SessionWorkbench {
         };
         return { operationId: input.operationId, value };
       }
+      case "session.filesystem.cat":
+      case "session.filesystem.head":
+      case "session.filesystem.tail":
+        return {
+          operationId: input.operationId,
+          value: await this.readTextFile(
+            target,
+            input.path,
+            input.maxBytes,
+            input.operationId.slice("session.filesystem.".length) as SessionTextFileView["mode"],
+            input.operationId,
+          ),
+        };
+      case "session.filesystem.read-hex":
+        return {
+          operationId: input.operationId,
+          value: await this.readHexFile(target, input.path, input.maxBytes),
+        };
       case "session.filesystem.grep": {
-        const response = await this.client.grepSession(target.sessionId, input.path, input.pattern, {
-          recursive: input.recursive,
-          linesBefore: input.linesBefore,
-          linesAfter: input.linesAfter,
-        });
+        const response = await this.remote(input.operationId, () =>
+          this.client.grepSession(target.sessionId, input.path, input.pattern, {
+            recursive: input.recursive,
+            linesBefore: input.linesBefore,
+            linesAfter: input.linesAfter,
+          }));
         assertImplantResponse(response, "File search");
         const value = boundedPage(grepMatches(response.Results), input, normalizeGrepMatch);
         return { operationId: input.operationId, value };
       }
       case "session.filesystem.mounts": {
-        const response = await this.client.mountsSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.mountsSession(target.sessionId));
         assertImplantResponse(response, "Mount listing");
         const value = boundedPage(response.Info, input, normalizeMount);
         return { operationId: input.operationId, value };
       }
       case "session.filesystem.memfiles.list": {
-        const response = await this.client.memfilesListSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.memfilesListSession(target.sessionId));
         assertImplantResponse(response, "Memory file listing");
         const value = boundedPage(
           response.Files,
@@ -310,7 +355,8 @@ export class SessionWorkbench {
         return { operationId: input.operationId, value };
       }
       case "session.process.list": {
-        const response = await this.client.psSession(target.sessionId, input.fullInfo);
+        const response = await this.remote(input.operationId, () =>
+          this.client.psSession(target.sessionId, input.fullInfo));
         assertImplantResponse(response, "Process listing");
         const query = input.query?.trim().toLocaleLowerCase();
         const value = boundedPage(response.Processes, input, normalizeProcess, (process) =>
@@ -319,7 +365,7 @@ export class SessionWorkbench {
         return { operationId: input.operationId, value };
       }
       case "session.service.list": {
-        const response = await this.client.servicesSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.servicesSession(target.sessionId));
         assertImplantResponse(response, "Service listing");
         if (response.Error && response.Details.length === 0) {
           throw new SessionWorkbenchRemoteError("Service listing");
@@ -335,7 +381,8 @@ export class SessionWorkbench {
         return { operationId: input.operationId, value };
       }
       case "session.service.detail": {
-        const response = await this.client.serviceDetailSession(target.sessionId, input.name);
+        const response = await this.remote(input.operationId, () =>
+          this.client.serviceDetailSession(target.sessionId, input.name));
         assertImplantResponse(response, "Service detail");
         if (!response.Detail) throw new SessionWorkbenchRemoteError("Service detail");
         return {
@@ -347,12 +394,13 @@ export class SessionWorkbench {
         };
       }
       case "session.registry.read": {
-        const response = await this.client.registryReadSession(
-          target.sessionId,
-          input.hive,
-          input.path,
-          input.key,
-        );
+        const response = await this.remote(input.operationId, () =>
+          this.client.registryReadSession(
+            target.sessionId,
+            input.hive,
+            input.path,
+            input.key,
+          ));
         assertImplantResponse(response, "Registry read");
         const value: SessionRegistryReadResult = {
           hive: input.hive,
@@ -363,26 +411,29 @@ export class SessionWorkbench {
         return { operationId: input.operationId, value };
       }
       case "session.registry.list-subkeys": {
-        const response = await this.client.registryListSubkeysSession(target.sessionId, input.hive, input.path);
+        const response = await this.remote(input.operationId, () =>
+          this.client.registryListSubkeysSession(target.sessionId, input.hive, input.path));
         assertImplantResponse(response, "Registry subkey listing");
         const value = boundedPage(response.Subkeys, input, (item) => boundedText(item, MAX_SHORT_TEXT_LENGTH));
         return { operationId: input.operationId, value };
       }
       case "session.registry.list-values": {
-        const response = await this.client.registryListValuesSession(target.sessionId, input.hive, input.path);
+        const response = await this.remote(input.operationId, () =>
+          this.client.registryListValuesSession(target.sessionId, input.hive, input.path));
         assertImplantResponse(response, "Registry value listing");
         const value = boundedPage(response.ValueNames, input, (item) => boundedText(item, 512));
         return { operationId: input.operationId, value };
       }
       case "session.filesystem.cd": {
         this.mutationDispatch(input.operationId);
-        const response = await this.client.cdSession(target.sessionId, input.path);
+        const response = await this.remote(input.operationId, () => this.client.cdSession(target.sessionId, input.path));
         assertImplantResponse(response, "Change directory");
         return { operationId: input.operationId, value: { path: boundedPath(response.Path || input.path) } };
       }
       case "session.filesystem.mkdir": {
         this.mutationDispatch(input.operationId);
-        const response = await this.client.mkdirSession(target.sessionId, input.path);
+        const response = await this.remote(input.operationId, () =>
+          this.client.mkdirSession(target.sessionId, input.path));
         assertImplantResponse(response, "Create directory");
         const value: SessionMutationResult = {
           changed: true,
@@ -393,7 +444,7 @@ export class SessionWorkbench {
       }
       case "session.filesystem.memfiles.add": {
         this.mutationDispatch(input.operationId);
-        const response = await this.client.memfilesAddSession(target.sessionId);
+        const response = await this.remote(input.operationId, () => this.client.memfilesAddSession(target.sessionId));
         assertImplantResponse(response, "Create memory file");
         const value: SessionMutationResult = {
           changed: true,
@@ -404,12 +455,13 @@ export class SessionWorkbench {
       }
       case "session.filesystem.chmod": {
         this.mutationDispatch(input.operationId);
-        const response = await this.client.chmodSession(
-          target.sessionId,
-          input.path,
-          input.fileMode,
-          false,
-        );
+        const response = await this.remote(input.operationId, () =>
+          this.client.chmodSession(
+            target.sessionId,
+            input.path,
+            input.fileMode,
+            false,
+          ));
         assertImplantResponse(response, "Change file mode");
         return {
           operationId: input.operationId,
@@ -418,13 +470,14 @@ export class SessionWorkbench {
       }
       case "session.filesystem.chown": {
         this.mutationDispatch(input.operationId);
-        const response = await this.client.chownSession(
-          target.sessionId,
-          input.path,
-          input.uid,
-          input.gid,
-          false,
-        );
+        const response = await this.remote(input.operationId, () =>
+          this.client.chownSession(
+            target.sessionId,
+            input.path,
+            input.uid,
+            input.gid,
+            false,
+          ));
         assertImplantResponse(response, "Change file ownership");
         return {
           operationId: input.operationId,
@@ -433,12 +486,13 @@ export class SessionWorkbench {
       }
       case "session.filesystem.chtimes": {
         this.mutationDispatch(input.operationId);
-        const response = await this.client.chtimesSession(
-          target.sessionId,
-          input.path,
-          input.accessTime,
-          input.modificationTime,
-        );
+        const response = await this.remote(input.operationId, () =>
+          this.client.chtimesSession(
+            target.sessionId,
+            input.path,
+            input.accessTime,
+            input.modificationTime,
+          ));
         assertImplantResponse(response, "Change file timestamps");
         return {
           operationId: input.operationId,
@@ -447,18 +501,38 @@ export class SessionWorkbench {
       }
       case "session.service.start": {
         this.mutationDispatch(input.operationId);
-        const started = await this.client.startServiceSession(target.sessionId, input.name);
+        const started = await this.remote(input.operationId, () =>
+          this.client.startServiceSession(target.sessionId, input.name));
         assertImplantResponse(started, "Start service");
-        const response = await this.client.serviceDetailSession(target.sessionId, input.name);
-        assertImplantResponse(response, "Service detail");
-        if (!response.Detail) throw new SessionWorkbenchRemoteError("Service detail");
-        return {
-          operationId: input.operationId,
-          value: normalizeService(
-            response.Detail,
-            response.Message ? "The target reported partial service details" : undefined,
-          ),
-        };
+        try {
+          const response = await this.remote(input.operationId, () =>
+            this.client.serviceDetailSession(target.sessionId, input.name));
+          assertImplantResponse(response, "Service detail");
+          if (!response.Detail) throw new SessionWorkbenchRemoteError("Service detail");
+          return {
+            operationId: input.operationId,
+            value: normalizeService(
+              response.Detail,
+              response.Message ? "The target reported partial service details" : undefined,
+            ),
+          };
+        } catch {
+          // The start response is authoritative. A best-effort follow-up detail
+          // read must not turn a confirmed mutation into outcome-unknown.
+          return {
+            operationId: input.operationId,
+            value: {
+              name: boundedText(input.name, MAX_SHORT_TEXT_LENGTH),
+              displayName: boundedText(input.name, MAX_SHORT_TEXT_LENGTH),
+              description: "",
+              status: 0,
+              startupType: 0,
+              binaryPath: "",
+              account: "",
+              message: "Service start was accepted; refreshed service details are unavailable",
+            },
+          };
+        }
       }
       case "session.screenshot.capture":
         return {
@@ -480,6 +554,16 @@ export class SessionWorkbench {
           operationId: input.operationId,
           value: await this.uploadOpenedFile(target, input),
         };
+      case "session.filesystem.stage-text":
+        return {
+          operationId: input.operationId,
+          value: await this.stageEditorText(input.content),
+        };
+      case "session.filesystem.stage-hex":
+        return {
+          operationId: input.operationId,
+          value: await this.stageEditorHex(input.hex),
+        };
       case "session.process.dump":
         return {
           operationId: input.operationId,
@@ -498,8 +582,109 @@ export class SessionWorkbench {
     }
   }
 
+  private async readTextFile(
+    target: NormalizedTarget,
+    remotePath: string,
+    maximumBytes: number,
+    mode: SessionTextFileView["mode"],
+    operationId: "session.filesystem.cat" | "session.filesystem.head" | "session.filesystem.tail",
+  ): Promise<SessionTextFileView> {
+    const requestBytes = editorRequestByteCount(maximumBytes);
+    const response = await this.remote(operationId, () =>
+      this.client.downloadFileSession(target.sessionId, remotePath, {
+        maxBytes: requestBytes,
+        fromEnd: mode === "tail",
+      }));
+    assertImplantResponse(response, "File view");
+    if (!response.Exists || response.IsDir) throw new SessionWorkbenchRemoteError("File view");
+    const data = artifactBuffer(response.Data, requestBytes, "File view");
+    try {
+      const truncated = data.length > maximumBytes;
+      const visible = truncated && mode === "tail"
+        ? data.subarray(data.length - maximumBytes)
+        : data.subarray(0, Math.min(data.length, maximumBytes));
+      const decoded = strictEditorText(visible, truncated, mode);
+      return {
+        path: boundedPath(response.Path || remotePath),
+        mode,
+        encoding: "utf-8",
+        content: decoded.content,
+        bytesRead: decoded.bytesRead,
+        truncated,
+        ...(truncated ? {} : { sha256: sha256Hex(data) }),
+      };
+    } finally {
+      data.fill(0);
+    }
+  }
+
+  private async readHexFile(
+    target: NormalizedTarget,
+    remotePath: string,
+    maximumBytes: number,
+  ): Promise<SessionHexFileView> {
+    const requestBytes = editorRequestByteCount(maximumBytes);
+    const response = await this.remote("session.filesystem.read-hex", () =>
+      this.client.downloadFileSession(target.sessionId, remotePath, {
+        maxBytes: requestBytes,
+        fromEnd: false,
+      }));
+    assertImplantResponse(response, "Hex file view");
+    if (!response.Exists || response.IsDir) throw new SessionWorkbenchRemoteError("Hex file view");
+    const data = artifactBuffer(response.Data, requestBytes, "Hex file view");
+    try {
+      const truncated = data.length > maximumBytes;
+      const visible = data.subarray(0, Math.min(data.length, maximumBytes));
+      return {
+        path: boundedPath(response.Path || remotePath),
+        hex: visible.toString("hex"),
+        bytesRead: visible.length,
+        truncated,
+        ...(truncated ? {} : { sha256: sha256Hex(data) }),
+      };
+    } finally {
+      data.fill(0);
+    }
+  }
+
+  private async stageEditorText(content: string): Promise<SessionStagedEditorArtifactResult> {
+    return await this.stageEditorBytes(Buffer.from(content, "utf8"), "edited-text.txt", "text/plain");
+  }
+
+  private async stageEditorHex(hex: string): Promise<SessionStagedEditorArtifactResult> {
+    return await this.stageEditorBytes(Buffer.from(hex, "hex"), "edited-bytes.bin", "application/octet-stream");
+  }
+
+  private async stageEditorBytes(
+    data: Buffer,
+    suggestedBasename: string,
+    mediaType: "text/plain" | "application/octet-stream",
+  ): Promise<SessionStagedEditorArtifactResult> {
+    if (data.length > SESSION_EDITOR_MAX_BYTES) {
+      data.fill(0);
+      throw new Error("Editor content exceeds the session workbench limit");
+    }
+    const size = data.length;
+    const sha256 = sha256Hex(data);
+    try {
+      const artifact = normalizeStoredArtifact(await this.artifacts.stageEditorArtifact({
+        data,
+        suggestedBasename,
+        mediaType,
+        sha256,
+      }));
+      if (artifact.size !== size || artifact.sha256 !== sha256 || artifact.mediaType !== mediaType) {
+        throw new Error("Editor artifact gateway returned mismatched metadata");
+      }
+      return { status: "staged", artifact };
+    } finally {
+      data.fill(0);
+    }
+  }
+
   private async captureScreenshot(target: NormalizedTarget): Promise<SessionCapturedArtifactResult> {
-    const response = await this.client.screenshotSession(target.sessionId);
+    const response = await this.remote("session.screenshot.capture", () =>
+      this.client.screenshotSession(target.sessionId));
     assertImplantResponse(response, "Screenshot");
     const data = artifactBuffer(response.Data, SCREENSHOT_PREVIEW_MAX_BYTES, "Screenshot");
     const mediaType = imageMediaType(data);
@@ -545,7 +730,8 @@ export class SessionWorkbench {
       mediaType: "application/octet-stream",
     });
     if (!prepared) return { status: "canceled" };
-    const response = await this.client.downloadFileSession(target.sessionId, remotePath, { maxBytes: maximumBytes });
+    const response = await this.remote("session.filesystem.download", () =>
+      this.client.downloadFileSession(target.sessionId, remotePath, { maxBytes: maximumBytes }));
     assertImplantResponse(response, "Download");
     if (!response.Exists || response.IsDir) throw new SessionWorkbenchRemoteError("Download");
     const data = artifactBuffer(response.Data, maximumBytes, "Download");
@@ -570,12 +756,13 @@ export class SessionWorkbench {
     const sha256 = sha256Hex(opened.data);
     try {
       this.mutationDispatch(input.operationId);
-      const response = await this.client.uploadSession(target.sessionId, input.remotePath, opened.data, {
-        isIOC: input.isIOC,
-        fileName: suggestedBasename,
-        isDirectory: input.isDirectory,
-        overwrite: false,
-      });
+      const response = await this.remote(input.operationId, () =>
+        this.client.uploadSession(target.sessionId, input.remotePath, opened.data, {
+          isIOC: input.isIOC,
+          fileName: suggestedBasename,
+          isDirectory: input.isDirectory,
+          overwrite: false,
+        }));
       assertImplantResponse(response, "Upload");
       return {
         status: "uploaded",
@@ -602,12 +789,13 @@ export class SessionWorkbench {
       mediaType: "application/octet-stream",
     });
     if (!prepared) return { status: "canceled" };
-    const response = await this.client.processDumpSession(
-      target.sessionId,
-      pid,
-      timeoutSeconds,
-      timeoutSeconds + 30,
-    );
+    const response = await this.remote("session.process.dump", () =>
+      this.client.processDumpSession(
+        target.sessionId,
+        pid,
+        timeoutSeconds,
+        timeoutSeconds + 30,
+      ));
     assertImplantResponse(response, "Process dump");
     const data = artifactBuffer(response.Data, SESSION_WORKBENCH_MAX_ARTIFACT_BYTES, "Process dump");
     return await this.writeNativeArtifact(prepared, data, suggestedBasename, "application/octet-stream");
@@ -626,12 +814,13 @@ export class SessionWorkbench {
       mediaType: "application/octet-stream",
     });
     if (!prepared) return { status: "canceled" };
-    const response = await this.client.registryReadHiveSession(
-      target.sessionId,
-      rootHive,
-      requestedHive,
-      maximumBytes,
-    );
+    const response = await this.remote("session.registry.read-hive", () =>
+      this.client.registryReadHiveSession(
+        target.sessionId,
+        rootHive,
+        requestedHive,
+        maximumBytes,
+      ));
     assertImplantResponse(response, "Registry hive read");
     const data = artifactBuffer(response.Data, maximumBytes, "Registry hive read");
     return await this.writeNativeArtifact(prepared, data, suggestedBasename, "application/octet-stream");
@@ -659,6 +848,14 @@ export class SessionWorkbench {
       throw new TypeError("Session workbench clock returned an invalid timestamp");
     }
     return value;
+  }
+
+  private async remote<TResult>(
+    operationId: SessionWorkbenchOperationId,
+    invoke: () => Promise<TResult>,
+  ): Promise<TResult> {
+    this.onDispatch?.(operationId);
+    return await invoke();
   }
 
   private mutationDispatch(operationId: SessionWorkbenchOperationId): void {
@@ -776,7 +973,7 @@ function normalizeFileEntry(
   },
   parentPath: string,
 ): SessionFileEntry {
-  const name = boundedText(value.Name, MAX_SHORT_TEXT_LENGTH);
+  const name = strictRemoteChildName(value.Name);
   const modifiedAt = unixSecondsToIso(value.ModTime);
   return {
     name,
@@ -933,6 +1130,35 @@ function artifactBuffer(value: Buffer, maximumBytes: number, label: string): Buf
   return value;
 }
 
+function editorRequestByteCount(maximumBytes: number): number {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > SESSION_EDITOR_MAX_BYTES) {
+    throw new Error("Editor byte limit is invalid");
+  }
+  return maximumBytes + 1;
+}
+
+function strictEditorText(
+  data: Buffer,
+  truncated: boolean,
+  mode: SessionTextFileView["mode"],
+): { content: string; bytesRead: number } {
+  let view = data;
+  if (truncated && mode === "tail") {
+    let offset = 0;
+    while (offset < view.length && (view[offset]! & 0xc0) === 0x80) offset += 1;
+    view = view.subarray(offset);
+  }
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const content = truncated && mode !== "tail"
+      ? decoder.decode(view, { stream: true })
+      : decoder.decode(view);
+    return { content, bytesRead: Buffer.byteLength(content, "utf8") };
+  } catch {
+    throw new Error("The selected remote file is not valid UTF-8 text");
+  }
+}
+
 function imageMediaType(data: Buffer): "image/jpeg" | "image/png" | "image/webp" {
   if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
     return "image/png";
@@ -1076,6 +1302,20 @@ function boundedText(value: unknown, maximum: number = SESSION_WORKBENCH_MAX_TEX
 
 function boundedPath(value: unknown): string {
   return boundedText(value, SESSION_WORKBENCH_MAX_PATH_LENGTH);
+}
+
+function strictRemoteChildName(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > MAX_SHORT_TEXT_LENGTH ||
+    value === "." ||
+    value === ".." ||
+    /[\/\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
+  ) {
+    throw new Error("Directory listing returned an unsafe child name");
+  }
+  return value;
 }
 
 function optionalText(value: unknown, maximum: number): string | undefined {

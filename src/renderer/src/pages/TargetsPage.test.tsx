@@ -259,6 +259,7 @@ function sessionWorkspace(snapshot: SliverSnapshot, onSnapshot = vi.fn()): React
         sessionId: session.id,
         backendEpoch: 7,
         connectionIncarnation: snapshot.connection.incarnation ?? 0,
+        targetFingerprint: sessionRef.fingerprint,
       }}
       session={activeSession}
       snapshot={snapshot}
@@ -345,7 +346,7 @@ describe("TargetsPage", () => {
 
     await waitFor(() => expect(selectTarget).toHaveBeenCalledWith(sessionRef));
     expect(onSnapshot).toHaveBeenCalledWith(selected);
-    expect(onOpenSession).toHaveBeenCalledWith(session);
+    expect(onOpenSession).toHaveBeenCalledWith(session, sessionRef);
     expect(onOpenSession).toHaveBeenCalledOnce();
   });
 
@@ -369,13 +370,38 @@ describe("TargetsPage", () => {
 
     await waitFor(() => expect(selectTarget).toHaveBeenCalledWith(sessionRef));
     expect(selectTarget).toHaveBeenCalledOnce();
-    expect(onOpenSession).toHaveBeenCalledWith(session);
+    expect(onOpenSession).toHaveBeenCalledWith(session, sessionRef);
     expect(onOpenSession).toHaveBeenCalledOnce();
   });
 
   it("does not open a session workspace when the selection response confirms another target", async () => {
     const user = userEvent.setup();
     const selected = targetSnapshot("beacon");
+    const onOpenSession = vi.fn();
+    installAPI({ selectTarget: vi.fn().mockResolvedValue({ ok: true, value: selected }) });
+
+    render(
+      <TargetsPage
+        mode="session"
+        snapshot={targetSnapshot()}
+        onOpenSession={onOpenSession}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("row", { name: /payments/i }));
+    await waitFor(() => expect(window.sliver.selectTarget).toHaveBeenCalledWith(sessionRef));
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it("does not open a same-ID replacement when the selected fingerprint differs from the clicked row", async () => {
+    const user = userEvent.setup();
+    const selected = targetSnapshot("session");
+    selected.targetContext.activeTarget = {
+      ...sessionRef,
+      fingerprint: "f".repeat(64),
+    };
+    selected.targetContext.selectableTargets = [selected.targetContext.activeTarget];
     const onOpenSession = vi.fn();
     installAPI({ selectTarget: vi.fn().mockResolvedValue({ ok: true, value: selected }) });
 
@@ -736,7 +762,7 @@ describe("TargetsPage", () => {
     expect(await screen.findByRole("row", { name: /request-2/i })).toBeInTheDocument();
   });
 
-  it("keeps an operation draft while the authoritative session route remains current", async () => {
+  it("keeps an operation draft across domain revisions and quarantines a fingerprint replacement", async () => {
     const user = userEvent.setup();
     installAPI();
     const initial = targetSnapshot("session");
@@ -770,8 +796,8 @@ describe("TargetsPage", () => {
     changed.targetContext.selectableTargets = [changedRef, beaconRef];
     rerender(sessionWorkspace(changed));
 
-    expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("revision-safe-draft");
-    expect(screen.getByRole("button", { name: "Run rename" })).toBeEnabled();
+    expect(screen.getByRole("heading", { name: "Session workspace unavailable" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "New target name" })).not.toBeInTheDocument();
   });
 
   it("keeps a task modal across domain revisions and closes it for fingerprint or incarnation changes", async () => {

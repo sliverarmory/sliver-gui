@@ -6,6 +6,7 @@ import {
   filterTargets,
   formatDuration,
   isOperationCancelable,
+  operationLabel,
   operationStateColor,
   targetRowKey,
   targetStatus,
@@ -68,6 +69,14 @@ describe("target page model", () => {
     expect(isOperationCancelable({ state: "submitting", cancellation: "not-supported" })).toBe(false);
     expect(isOperationCancelable({ state: "cancel-requested", cancellation: "best-effort-beacon-task" })).toBe(false);
     expect(isOperationCancelable({ state: "completed", cancellation: "best-effort-beacon-task" })).toBe(false);
+  });
+
+  it("labels both dispatcher and exhaustive journal-only session operation IDs", () => {
+    expect(operationLabel("target.ping")).toBe("Ping");
+    expect(operationLabel("session.filesystem.ls")).toBe("List directory");
+    expect(operationLabel("session.filesystem.read-hex")).toBe("Read file as hex");
+    expect(operationLabel("session.filesystem.chmod-recursive")).toBe("Change file modes recursively");
+    expect(operationLabel("session.registry.write")).toBe("Write registry value");
   });
 
   it("formats bounded target timing and task counts for compact tables", () => {

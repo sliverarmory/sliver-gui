@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, posix as posixPath, win32 as win32Path } from "node:path";
 import { createSecureContext } from "node:tls";
 
 import { BrowserWindow, dialog, webContents, type WebContents } from "electron";
@@ -70,6 +70,7 @@ import type {
   TargetOperationState,
 } from "../shared/operation-contracts.js";
 import {
+  SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_ARTIFACT_IDS,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
   sessionOperationSupportsPlatform,
@@ -140,6 +141,11 @@ import {
   type SessionPreparedStoredArtifactSave,
   type SessionWorkbenchArtifactGateway,
 } from "./session-workbench.js";
+import {
+  SessionFileEditConflictError,
+  SessionFileEditPreflightError,
+  verifySessionFileEditPrecondition,
+} from "./session-file-edit.js";
 
 interface CertificatePair {
   cert: Buffer;
@@ -151,6 +157,13 @@ class SessionWorkbenchBoundaryError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SessionWorkbenchBoundaryError";
+  }
+}
+
+class SessionReviewedActionTargetRejectedError extends Error {
+  constructor() {
+    super("The target rejected the reviewed action");
+    this.name = "SessionReviewedActionTargetRejectedError";
   }
 }
 
@@ -226,6 +239,9 @@ const OPERATION_RECONCILE_INTERVAL_MS = 2_000;
 const MAX_POOL_TASK_CLAIMS = 1_000;
 const MAX_POOL_RECOVERABLE_TASK_CLAIMS = 400;
 const POOL_TASK_CLAIM_TTL_MS = 24 * 60 * 60_000;
+const SESSION_MUTATION_TARGET_REJECTED_MESSAGE =
+  "The target rejected the session mutation. Refresh the session state before taking another action.";
+const SESSION_REVIEWED_ACTION_TARGET_REJECTED_MESSAGE = "The target rejected the reviewed action";
 
 const TERMINAL_OPERATION_STATES: ReadonlySet<TargetOperationState> = new Set([
   "completed",
@@ -287,6 +303,7 @@ interface InternalSessionActionPlan {
   epoch: number;
   connectionAttempt: number;
   target: TargetRef;
+  journalTarget: ResolvedOperationTarget;
   input: PrepareSessionDestructiveActionInput;
   payloadDigest: string;
   artifactHandle?: string;
@@ -388,14 +405,13 @@ export class ConnectionRegistry {
       delete context.activeTarget;
       context.beaconWatch = false;
       context.targetPlans.clear();
-      context.sessionPlans.clear();
+      this.revokeSessionTargetCapabilities(context);
       context.sessionPlanAdmissions.clear();
-      for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
-      context.sessionPlanTimers.clear();
       context.sessionWorkbenchAdmissions.clear();
       context.targetPageCursors.clear();
+    } else {
+      this.sessionArtifacts.removeOwner(contentsId);
     }
-    this.sessionArtifacts.removeOwner(contentsId);
     context?.savedConfigs.clear();
     if (context?.poolKey) await this.releasePool(context.poolKey, contentsId).catch(() => undefined);
   }
@@ -409,11 +425,8 @@ export class ConnectionRegistry {
 
     target.connectionAttempt += 1;
     delete target.activeTarget;
-    target.sessionPlans.clear();
+    this.revokeSessionTargetCapabilities(target);
     target.sessionPlanAdmissions.clear();
-    for (const timer of target.sessionPlanTimers.values()) clearTimeout(timer);
-    target.sessionPlanTimers.clear();
-    this.sessionArtifacts.removeOwner(targetContentsId);
     target.poolKey = source.poolKey;
     if (source.configName) target.configName = source.configName;
     else delete target.configName;
@@ -547,12 +560,9 @@ export class ConnectionRegistry {
     delete context.activeTarget;
     context.beaconWatch = false;
     context.targetPlans.clear();
-    context.sessionPlans.clear();
+    this.revokeSessionTargetCapabilities(context);
     context.sessionPlanAdmissions.clear();
-    for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
-    context.sessionPlanTimers.clear();
     context.targetPageCursors.clear();
-    this.sessionArtifacts.removeOwner(contentsId);
     context.snapshot = disconnectedSnapshot();
     this.pushSnapshot(contentsId, context.snapshot);
     if (poolKey) {
@@ -675,6 +685,9 @@ export class ConnectionRegistry {
       const current = pool.targetStore.revalidateTargetRef(target, pool.epoch);
       if (!current) throw new Error("The target is no longer available");
       const context = this.requireWindow(contentsId);
+      if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, current.ref)) {
+        this.revokeSessionTargetCapabilities(context);
+      }
       context.activeTarget = current.ref;
       if (current.target.mode !== "beacon") {
         context.beaconWatch = false;
@@ -690,6 +703,7 @@ export class ConnectionRegistry {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       assertBinding();
       const context = this.requireWindow(contentsId);
+      if (context.activeTarget) this.revokeSessionTargetCapabilities(context);
       delete context.activeTarget;
       context.beaconWatch = false;
       pool.setWindowWatch(contentsId, false);
@@ -1044,27 +1058,53 @@ export class ConnectionRegistry {
       };
       assertBinding();
       const selected = this.requireSelectedSession(sender.id, pool);
-      if (!sessionOperationSupportsPlatform(input.operationId, selected.platform)) {
-        throw new Error(`${input.operationId} is unavailable on ${selected.platform} sessions`);
-      }
-      const scope = this.bindSessionArtifactScope(selected.context, pool, selected.target);
-      const selectedTarget = selected.target.ref;
-      const assertSelectedTarget = (): void => {
-        assertBinding();
-        if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selectedTarget)) {
-          throw new Error("The active session changed while the workbench operation was running");
-        }
-      };
-      let mutationDispatched = false;
-      const workbench = new SessionWorkbench(
-        pool.client,
-        this.sessionArtifactGateway(sender, scope, assertSelectedTarget),
-        {
-          now: this.now,
-          onMutationDispatch: () => { mutationDispatched = true; },
-        },
+      const operationEngine = this.requireOperationEngine(sender.id, selected.context, pool);
+      const journal = operationEngine.beginExternal(
+        input.operationId,
+        resolvedSessionOperationTarget(selected.context, pool, selected.target),
       );
+      let mutationDispatched = false;
+      let mutationDispatchPending = false;
+      let journalSubmitted = false;
+      let confirmedMutationCompleted = false;
       try {
+        if (!sessionOperationSupportsPlatform(input.operationId, selected.platform)) {
+          throw new SessionWorkbenchBoundaryError(
+            `${input.operationId} is unavailable on ${selected.platform} sessions`,
+          );
+        }
+        const scope = this.bindSessionArtifactScope(selected.context, pool, selected.target);
+        const selectedTarget = selected.target.ref;
+        const assertSelectedTarget = (): void => {
+          assertBinding();
+          if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selectedTarget)) {
+            throw new Error("The active session changed while the workbench operation was running");
+          }
+        };
+        const workbench = new SessionWorkbench(
+          pool.client,
+          this.sessionArtifactGateway(sender, scope, assertSelectedTarget),
+          {
+            now: this.now,
+            onMutationDispatch: () => { mutationDispatchPending = true; },
+            onDispatch: () => {
+              if (!journalSubmitted) {
+                const submitted = operationEngine.markExternalSubmitted(journal.requestId);
+                if (submitted.state !== "running") {
+                  throw new SessionWorkbenchBoundaryError(
+                    "The session operation no longer belongs to the active target",
+                  );
+                }
+                journalSubmitted = true;
+              } else if (operationEngine.get(journal.requestId)?.state !== "running") {
+                throw new SessionWorkbenchBoundaryError(
+                  "The session operation no longer belongs to the active target",
+                );
+              }
+              if (mutationDispatchPending) mutationDispatched = true;
+            },
+          },
+        );
         const result = await workbench.run(
           {
             sessionId: selected.target.target.id,
@@ -1080,10 +1120,67 @@ export class ConnectionRegistry {
           },
           input,
         );
+        if (mutationDispatched) {
+          // A target can disappear from authoritative inventory while its
+          // already-dispatched RPC is still returning. Recover that uncertainty
+          // only after this exact decoded success and only while the captured
+          // backend incarnation remains current.
+          assertBinding();
+          let completed = operationEngine.finishExternal(journal.requestId, "completed");
+          if (completed.state === "outcome-unknown") {
+            completed = operationEngine.resolveExternalOutcome(journal.requestId, "completed");
+          }
+          confirmedMutationCompleted = completed.state === "completed";
+        }
         assertSelectedTarget();
+        if (!confirmedMutationCompleted) {
+          if (sessionWorkbenchResultWasCanceled(result)) {
+            operationEngine.finishExternal(
+              journal.requestId,
+              "canceled",
+            );
+          } else {
+            operationEngine.finishExternal(
+              journal.requestId,
+              "completed",
+            );
+          }
+        }
         return { ok: true, value: { status: "completed", result } };
       } catch (error) {
+        if (confirmedMutationCompleted) {
+          throw new SessionWorkbenchBoundaryError(
+            "The session mutation completed for the previously selected session; refresh the session state before continuing",
+          );
+        }
+        if (mutationDispatched && error instanceof SessionWorkbenchRemoteError) {
+          let failed = operationEngine.finishExternal(
+            journal.requestId,
+            "failed",
+          );
+          if (failed.state === "outcome-unknown") {
+            try {
+              assertBinding();
+              failed = operationEngine.resolveExternalOutcome(journal.requestId, "failed");
+            } catch {
+              // A decoded rejection from a stale backend incarnation must not
+              // mutate the closed journal retained for that old connection.
+            }
+          }
+          return {
+            ok: true,
+            value: {
+              status: "failed",
+              operationId: input.operationId as SessionWorkbenchOutcomeUnknownOperationId,
+              message: SESSION_MUTATION_TARGET_REJECTED_MESSAGE,
+            },
+          };
+        }
         if (mutationDispatched) {
+          operationEngine.finishExternal(
+            journal.requestId,
+            "outcome-unknown",
+          );
           return {
             ok: true,
             value: {
@@ -1093,6 +1190,10 @@ export class ConnectionRegistry {
             },
           };
         }
+        operationEngine.finishExternal(
+          journal.requestId,
+          "failed",
+        );
         if (
           error instanceof SessionWorkbenchBoundaryError ||
           error instanceof SessionWorkbenchRemoteError ||
@@ -1119,6 +1220,7 @@ export class ConnectionRegistry {
     const admissionId = randomUUID();
     const workbenchAdmissionId = randomUUID();
     let workbenchAdmissionContext: WindowContext | undefined;
+    let uncommittedPickedArtifact: { scope: SessionArtifactScope; handle: string } | undefined;
     try {
       const context = this.requireWindow(contentsId);
       this.pruneSessionPlans(context);
@@ -1132,25 +1234,46 @@ export class ConnectionRegistry {
       admittedContext = context;
       if (
         input.actionId === "session.filesystem.upload-overwrite" ||
+        input.actionId === "session.filesystem.edit-text-overwrite" ||
+        input.actionId === "session.filesystem.patch-hex" ||
         input.actionId === "session.process.terminate"
       ) {
         this.admitSessionWorkbenchRequest(
           context,
           workbenchAdmissionId,
-          input.actionId === "session.filesystem.upload-overwrite" ? "artifact" : "standard",
+          input.actionId === "session.filesystem.upload-overwrite" ||
+            input.actionId === "session.filesystem.edit-text-overwrite" ||
+            input.actionId === "session.filesystem.patch-hex"
+            ? "artifact"
+            : "standard",
         );
         workbenchAdmissionContext = context;
       }
       return await this.withPool(contentsId, async (pool, assertBinding) => {
         const selected = this.requireSelectedSession(contentsId, pool);
+        const selectedTarget = selected.target.ref;
+        const assertSelectedTarget = (): void => {
+          assertBinding();
+          if (
+            !selected.context.activeTarget ||
+            !sameTargetRefIdentity(selected.context.activeTarget, selectedTarget)
+          ) {
+            throw new SessionWorkbenchBoundaryError(
+              "The active session changed while the reviewed action was being prepared",
+            );
+          }
+        };
         if (!sessionOperationSupportsPlatform(input.actionId, selected.platform)) {
           throw new Error(`${input.actionId} is unavailable on ${selected.platform} sessions`);
         }
         if (
-          input.actionId === "session.filesystem.edit-text-overwrite" ||
-          input.actionId === "session.filesystem.patch-hex"
+          input.actionId === "session.filesystem.rm" &&
+          input.recursive &&
+          recursiveRemovalTargetsSelfOrRoot(input.path, selected.platform)
         ) {
-          throw new Error("Conflict-aware file editing is not yet available in the session-first M2 tranche");
+          throw new Error(
+            "Recursive removal of a filesystem root, self, or drive-relative path is not allowed",
+          );
         }
         const scope = this.bindSessionArtifactScope(selected.context, pool, selected.target);
         let artifactHandle: string | undefined;
@@ -1160,7 +1283,8 @@ export class ConnectionRegistry {
         let expiresAt: number | undefined;
         if (input.actionId === "session.filesystem.upload-overwrite") {
           const picked = await this.chooseSessionUploadArtifact(contentsId, scope);
-          assertBinding();
+          if (picked) uncommittedPickedArtifact = { scope, handle: picked.handle };
+          assertSelectedTarget();
           if (!picked) return { status: "canceled" };
           artifactHandle = picked.handle;
           expiresAt = picked.expiresAt;
@@ -1170,6 +1294,34 @@ export class ConnectionRegistry {
             sha256: picked.sha256,
           };
         }
+        if (
+          input.actionId === "session.filesystem.edit-text-overwrite" ||
+          input.actionId === "session.filesystem.patch-hex"
+        ) {
+          const handle = input.actionId === "session.filesystem.edit-text-overwrite"
+            ? input.contentHandle
+            : input.patchHandle;
+          const metadata = this.sessionArtifacts.metadata(scope, handle);
+          const expectedMediaType = input.actionId === "session.filesystem.edit-text-overwrite"
+            ? "text/plain"
+            : "application/octet-stream";
+          if (metadata.mediaType !== expectedMediaType || metadata.size > SESSION_EDITOR_MAX_BYTES) {
+            throw new SessionWorkbenchBoundaryError(
+              "The staged editor artifact does not match the reviewed edit type",
+            );
+          }
+          const artifactExpiresAt = Date.parse(metadata.expiresAt);
+          if (!Number.isSafeInteger(artifactExpiresAt) || artifactExpiresAt <= this.now()) {
+            throw new SessionWorkbenchBoundaryError("The staged editor artifact expired before review");
+          }
+          artifactHandle = metadata.handle;
+          expiresAt = Math.min(this.now() + SESSION_ACTION_PLAN_TTL_MS, artifactExpiresAt);
+          artifact = {
+            suggestedBasename: metadata.suggestedBasename,
+            size: metadata.size,
+            sha256: metadata.sha256,
+          };
+        }
         if (input.actionId === "session.process.terminate") {
           let response;
           try {
@@ -1177,7 +1329,7 @@ export class ConnectionRegistry {
           } catch {
             throw new Error("Could not verify the selected process before review");
           }
-          assertBinding();
+          assertSelectedTarget();
           if (response.Response?.Err?.trim()) {
             throw new Error("Could not verify the selected process before review");
           }
@@ -1189,6 +1341,7 @@ export class ConnectionRegistry {
         const token = randomUUID();
         expiresAt ??= this.now() + SESSION_ACTION_PLAN_TTL_MS;
         const payloadDigest = sessionActionPayloadDigest(input, artifact, resourceFingerprint);
+        assertSelectedTarget();
         const plan: InternalSessionActionPlan = {
           token,
           expiresAt,
@@ -1197,6 +1350,7 @@ export class ConnectionRegistry {
           epoch: pool.epoch,
           connectionAttempt: selected.context.connectionAttempt,
           target: selected.target.ref,
+          journalTarget: resolvedSessionOperationTarget(selected.context, pool, selected.target),
           input,
           payloadDigest,
           ...(artifactHandle ? { artifactHandle, artifactScope: scope } : {}),
@@ -1221,6 +1375,7 @@ export class ConnectionRegistry {
         }, Math.max(0, expiresAt - this.now()));
         expiryTimer.unref?.();
         selected.context.sessionPlanTimers.set(token, expiryTimer);
+        uncommittedPickedArtifact = undefined;
         return {
           status: "prepared",
           plan: {
@@ -1229,6 +1384,12 @@ export class ConnectionRegistry {
             payloadDigest,
             action: input,
             target: {
+              backend: {
+                id: pool.key,
+                displayName: selected.context.configName ?? "Current configuration",
+              },
+              sessionId: selected.target.target.id,
+              fingerprint: selected.target.ref.fingerprint,
               name: selected.target.target.name,
               hostname: selected.target.target.hostname,
               os: selected.target.target.os,
@@ -1242,6 +1403,16 @@ export class ConnectionRegistry {
     } catch (error) {
       return { ok: false, error: errorMessage(error) };
     } finally {
+      if (uncommittedPickedArtifact) {
+        try {
+          this.sessionArtifacts.remove(
+            uncommittedPickedArtifact.scope,
+            uncommittedPickedArtifact.handle,
+          );
+        } catch {
+          // A target change may already have revoked and cleared these bytes.
+        }
+      }
       admittedContext?.sessionPlanAdmissions.delete(admissionId);
       workbenchAdmissionContext?.sessionWorkbenchAdmissions.delete(workbenchAdmissionId);
       this.sessionWorkbenchGlobalAdmissions.delete(workbenchAdmissionId);
@@ -1257,6 +1428,24 @@ export class ConnectionRegistry {
     let admittedContext: WindowContext | undefined;
     let executionAdmissionId: string | undefined;
     let planConsumed = false;
+    let journalEngine: OperationEngine | undefined;
+    let journalRequestId: string | undefined;
+    let journalFinished = false;
+    const outcomeResult = (
+      status: SessionDestructiveActionOutcome["status"],
+      message: string,
+    ): OperationResult<SessionDestructiveActionOutcome> => {
+      if (!plan) throw new Error("The reviewed session action plan is unavailable");
+      const outcome = sessionActionOutcome(plan, status, message);
+      if (journalEngine && journalRequestId && !journalFinished) {
+        journalEngine.finishExternal(
+          journalRequestId,
+          status === "succeeded" ? "completed" : status,
+        );
+        journalFinished = true;
+      }
+      return { ok: true, value: outcome };
+    };
     try {
       const context = this.requireWindow(contentsId);
       this.pruneSessionPlans(context);
@@ -1282,11 +1471,11 @@ export class ConnectionRegistry {
         context.connectionAttempt !== plan.connectionAttempt ||
         pool.epoch !== plan.epoch
       ) {
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "target-disappeared", "The backend connection changed before dispatch"),
-        };
+        return outcomeResult("target-disappeared", "The backend connection changed before dispatch");
       }
+      journalEngine = this.requireOperationEngine(contentsId, context, pool);
+      const journal = journalEngine.beginExternal(plan.input.actionId, plan.journalTarget);
+      journalRequestId = journal.requestId;
       const boundPlan = plan;
       const bindingCurrent = (): boolean =>
         this.windows.get(contentsId) === context &&
@@ -1297,48 +1486,30 @@ export class ConnectionRegistry {
       try {
         await pool.refreshDomains(["sessions"]);
       } catch {
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "failed", "Could not refresh the reviewed session before dispatch"),
-        };
+        return outcomeResult("failed", "Could not refresh the reviewed session before dispatch");
       }
       if (!bindingCurrent()) {
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "target-disappeared", "The backend connection changed before dispatch"),
-        };
+        return outcomeResult("target-disappeared", "The backend connection changed before dispatch");
       }
       if (plan.expiresAt <= this.now()) throw new Error("The reviewed session action plan expired before dispatch");
       assertTargetDomainAuthoritative(pool, "session");
       const current = pool.targetStore.revalidateTargetRef(plan.target, pool.epoch);
       if (!current || current.target.mode !== "session") {
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "target-disappeared", "The reviewed session is no longer available"),
-        };
+        return outcomeResult("target-disappeared", "The reviewed session is no longer available");
       }
       if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, plan.target)) {
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "target-disappeared", "The active session changed before dispatch"),
-        };
+        return outcomeResult("target-disappeared", "The active session changed before dispatch");
       }
       const platform = sessionPlatform(current.target.os);
       if (!sessionOperationSupportsPlatform(plan.input.actionId, platform)) {
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "failed", `${plan.input.actionId} is unavailable on ${platform} sessions`),
-        };
+        return outcomeResult("failed", `${plan.input.actionId} is unavailable on ${platform} sessions`);
       }
       if (plan.input.actionId === "session.process.terminate") {
         let processes;
         try {
           processes = await pool.client.psSession(current.target.id, true);
         } catch {
-          return {
-            ok: true,
-            value: sessionActionOutcome(plan, "failed", "Could not revalidate the reviewed process before dispatch"),
-          };
+          return outcomeResult("failed", "Could not revalidate the reviewed process before dispatch");
         }
         if (
           !bindingCurrent() ||
@@ -1346,56 +1517,124 @@ export class ConnectionRegistry {
           !sameTargetRefIdentity(context.activeTarget, plan.target) ||
           !pool.targetStore.revalidateTargetRef(plan.target, pool.epoch)
         ) {
-          return {
-            ok: true,
-            value: sessionActionOutcome(plan, "target-disappeared", "The active session changed before dispatch"),
-          };
+          return outcomeResult("target-disappeared", "The active session changed before dispatch");
         }
         if (processes.Response?.Err?.trim()) {
-          return {
-            ok: true,
-            value: sessionActionOutcome(plan, "failed", "Could not revalidate the reviewed process before dispatch"),
-          };
+          return outcomeResult("failed", "Could not revalidate the reviewed process before dispatch");
         }
         const identity = exactSessionProcessIdentity(processes.Processes, plan.input.pid);
         if (!identity || !plan.resourceFingerprint || identity.fingerprint !== plan.resourceFingerprint) {
-          return {
-            ok: true,
-            value: sessionActionOutcome(plan, "failed", "The reviewed process identity changed before dispatch"),
-          };
+          return outcomeResult("failed", "The reviewed process identity changed before dispatch");
+        }
+      }
+      if (isSessionFileEditAction(plan.input)) {
+        try {
+          await verifySessionFileEditPrecondition(
+            pool.client,
+            current.target.id,
+            plan.input.remotePath,
+            plan.input.expectedSha256,
+          );
+        } catch (error) {
+          return outcomeResult(
+            "failed",
+            error instanceof SessionFileEditConflictError
+              ? error.message
+              : error instanceof SessionFileEditPreflightError
+                ? error.message
+                : "The remote file could not be verified before saving",
+          );
+        }
+        if (
+          !bindingCurrent() ||
+          !context.activeTarget ||
+          !sameTargetRefIdentity(context.activeTarget, plan.target) ||
+          !pool.targetStore.revalidateTargetRef(plan.target, pool.epoch)
+        ) {
+          return outcomeResult("target-disappeared", "The active session changed before edit dispatch");
         }
       }
       if (plan.expiresAt <= this.now()) throw new Error("The reviewed session action plan expired before dispatch");
       if (plan.artifactHandle && plan.artifactScope) {
-        const consumed = this.sessionArtifacts.consume(plan.artifactScope, plan.artifactHandle);
+        let consumed;
+        try {
+          consumed = this.sessionArtifacts.consume(plan.artifactScope, plan.artifactHandle);
+        } catch (error) {
+          if (isSessionFileEditAction(plan.input)) {
+            return outcomeResult("failed", "The staged editor artifact is no longer available");
+          }
+          throw error;
+        }
         artifactData = consumed.data;
         if (!plan.artifactSha256 || consumed.metadata.sha256 !== plan.artifactSha256) {
+          if (isSessionFileEditAction(plan.input)) {
+            return outcomeResult("failed", "The staged editor artifact no longer matches the reviewed payload");
+          }
           throw new Error("The reviewed upload bytes no longer match the authorized payload");
         }
+        if (isSessionFileEditAction(plan.input)) {
+          const expectedMediaType = plan.input.actionId === "session.filesystem.edit-text-overwrite"
+            ? "text/plain"
+            : "application/octet-stream";
+          const actualSha256 = createHash("sha256").update(artifactData).digest("hex");
+          if (
+            artifactData.length > SESSION_EDITOR_MAX_BYTES ||
+            consumed.metadata.size !== artifactData.length ||
+            consumed.metadata.mediaType !== expectedMediaType ||
+            actualSha256 !== plan.artifactSha256
+          ) {
+            return outcomeResult("failed", "The staged editor artifact no longer matches the reviewed payload");
+          }
+        }
+      }
+      if (isSessionFileEditAction(plan.input) && !artifactData) {
+        return outcomeResult("failed", "The staged editor artifact is no longer available");
       }
 
       let dispatchStarted = false;
       try {
+        const submitted = journalEngine.markExternalSubmitted(journalRequestId);
+        if (submitted.state !== "running") {
+          throw new SessionWorkbenchBoundaryError(
+            "The reviewed action no longer belongs to the active target",
+          );
+        }
         dispatchStarted = true;
         await executeReviewedSessionAction(pool.client, current.target.id, plan.input, artifactData);
+        if (!bindingCurrent()) {
+          return outcomeResult(
+            "outcome-unknown",
+            "The backend connection changed before the exact action response could be recorded",
+          );
+        }
+        let completed = journalEngine.finishExternal(journalRequestId, "completed");
+        if (completed.state === "outcome-unknown") {
+          completed = journalEngine.resolveExternalOutcome(journalRequestId, "completed");
+        }
+        journalFinished = completed.state === "completed";
         if (this.pools.get(pool.key) === pool) await pool.refreshDomains(["sessions"]).catch(() => undefined);
-        return {
-          ok: true,
-          value: sessionActionOutcome(plan, "succeeded", "The reviewed action completed"),
-        };
+        return outcomeResult("succeeded", "The reviewed action completed");
       } catch (error) {
-        return {
-          ok: true,
-          value: sessionActionOutcome(
-            plan,
-            dispatchStarted ? "outcome-unknown" : "failed",
-            dispatchStarted
-              ? "The action was dispatched, but its outcome could not be confirmed"
-              : errorMessage(error),
-          ),
-        };
+        if (error instanceof SessionReviewedActionTargetRejectedError) {
+          let failed = journalEngine.finishExternal(journalRequestId, "failed");
+          if (failed.state === "outcome-unknown" && bindingCurrent()) {
+            failed = journalEngine.resolveExternalOutcome(journalRequestId, "failed");
+          }
+          journalFinished = failed.state === "failed";
+          return outcomeResult("failed", SESSION_REVIEWED_ACTION_TARGET_REJECTED_MESSAGE);
+        }
+        return outcomeResult(
+          dispatchStarted ? "outcome-unknown" : "failed",
+          dispatchStarted
+            ? "The action was dispatched, but its outcome could not be confirmed"
+            : "The reviewed action could not be submitted",
+        );
       }
     } catch (error) {
+      if (journalEngine && journalRequestId && !journalFinished) {
+        journalEngine.finishExternal(journalRequestId, "failed");
+        journalFinished = true;
+      }
       return { ok: false, error: errorMessage(error) };
     } finally {
       artifactData?.fill(0);
@@ -1474,6 +1713,14 @@ export class ConnectionRegistry {
     };
     this.sessionArtifacts.bind(scope);
     return scope;
+  }
+
+  /** Revoke capabilities bound to the window's previous exact session identity. */
+  private revokeSessionTargetCapabilities(context: WindowContext): void {
+    context.sessionPlans.clear();
+    for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
+    context.sessionPlanTimers.clear();
+    this.sessionArtifacts.removeOwner(context.contentsId);
   }
 
   private sessionArtifactGateway(
@@ -1592,6 +1839,40 @@ export class ConnectionRegistry {
               size: metadata.size,
             },
           };
+        } catch (error) {
+          this.sessionArtifacts.remove(scope, metadata.handle);
+          throw error;
+        }
+      },
+      stageEditorArtifact: (artifact) => {
+        assertCurrent();
+        if (!Buffer.isBuffer(artifact.data) || artifact.data.length > SESSION_EDITOR_MAX_BYTES) {
+          throw new SessionWorkbenchBoundaryError("Editor content exceeds the session workbench limit");
+        }
+        if (artifact.mediaType !== "text/plain" && artifact.mediaType !== "application/octet-stream") {
+          throw new SessionWorkbenchBoundaryError("Editor content has an unsupported media type");
+        }
+        const sha256 = createHash("sha256").update(artifact.data).digest("hex");
+        if (sha256 !== artifact.sha256) {
+          throw new SessionWorkbenchBoundaryError("Editor artifact digest changed before storage");
+        }
+        const metadata = this.sessionArtifacts.store({
+          scope,
+          data: artifact.data,
+          mediaType: artifact.mediaType,
+          suggestedBasename: safeArtifactFileName(artifact.suggestedBasename),
+          ttlMilliseconds: SESSION_ACTION_PLAN_TTL_MS,
+          ownership: "clone",
+        });
+        try {
+          if (
+            metadata.size !== artifact.data.length ||
+            metadata.sha256 !== sha256 ||
+            metadata.mediaType !== artifact.mediaType
+          ) {
+            throw new Error("Editor artifact metadata changed before storage");
+          }
+          return metadata;
         } catch (error) {
           this.sessionArtifacts.remove(scope, metadata.handle);
           throw error;
@@ -2012,7 +2293,9 @@ export class ConnectionRegistry {
         return {
           ownership: operation.ownership,
           localRequestId: operation.requestId,
-          operationId: operation.operationId,
+          // findByTask indexes only dispatcher-owned beacon operations; external
+          // session journal entries can never acquire a task ID.
+          operationId: operation.operationId as TargetOperationId,
           ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
         };
       }
@@ -3030,11 +3313,8 @@ export class ConnectionRegistry {
       delete context.activeTarget;
       context.beaconWatch = false;
       context.targetPlans.clear();
-      context.sessionPlans.clear();
+      this.revokeSessionTargetCapabilities(context);
       context.sessionPlanAdmissions.clear();
-      for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
-      context.sessionPlanTimers.clear();
-      this.sessionArtifacts.removeOwner(contentsId);
 
       if (context.poolKey && context.poolKey !== poolKey) {
         const previousPoolKey = context.poolKey;
@@ -3352,22 +3632,29 @@ export class ConnectionRegistry {
         }
       }
     }
-    const revalidated = context.activeTarget && pool
-      ? pool.targetStore.revalidateTargetRef(context.activeTarget, pool.epoch)
+    const previousActiveTarget = context.activeTarget;
+    const revalidated = previousActiveTarget && pool
+      ? pool.targetStore.revalidateTargetRef(previousActiveTarget, pool.epoch)
       : undefined;
-    const activeDomainAuthoritative = context.activeTarget && pool
-      ? targetDomainAuthoritative(pool, context.activeTarget.mode)
+    const activeDomainAuthoritative = previousActiveTarget && pool
+      ? targetDomainAuthoritative(pool, previousActiveTarget.mode)
       : true;
-    const activeAbsenceAuthoritative = context.activeTarget && pool
-      ? targetDomainAbsenceAuthoritative(pool, context.activeTarget.mode)
+    const activeAbsenceAuthoritative = previousActiveTarget && pool
+      ? targetDomainAbsenceAuthoritative(pool, previousActiveTarget.mode)
       : true;
-    const previousSummary = context.activeTarget && context.snapshot.targetContext.activeTargetSummary?.mode === context.activeTarget.mode &&
-      context.snapshot.targetContext.activeTargetSummary.id === context.activeTarget.id
+    const previousSummary = previousActiveTarget &&
+      context.snapshot.targetContext.activeTargetSummary?.mode === previousActiveTarget.mode &&
+      context.snapshot.targetContext.activeTargetSummary.id === previousActiveTarget.id
       ? context.snapshot.targetContext.activeTargetSummary
       : undefined;
-    if (revalidated) context.activeTarget = revalidated.ref;
-    else if (context.activeTarget && activeAbsenceAuthoritative) {
-      context.operationEngine?.markTargetUnavailable(context.activeTarget);
+    if (revalidated) {
+      if (!sameTargetRefIdentity(previousActiveTarget!, revalidated.ref)) {
+        this.revokeSessionTargetCapabilities(context);
+      }
+      context.activeTarget = revalidated.ref;
+    } else if (previousActiveTarget && activeAbsenceAuthoritative) {
+      context.operationEngine?.markTargetUnavailable(previousActiveTarget);
+      this.revokeSessionTargetCapabilities(context);
       context.beaconWatch = false;
       pool?.setWindowWatch(context.contentsId, false);
       delete context.activeTarget;
@@ -4679,13 +4966,70 @@ async function executeReviewedSessionAction(
         break;
       case "session.filesystem.edit-text-overwrite":
       case "session.filesystem.patch-hex":
-        throw new Error("Conflict-aware file editing is not yet available in the session-first M2 tranche");
+        if (!artifactData) throw new Error("The staged editor artifact is no longer available");
+        response = await client.uploadSession(sessionId, input.remotePath, artifactData, {
+          isIOC: false,
+          isDirectory: false,
+          overwrite: true,
+        });
+        break;
     }
     const targetError = response?.Response?.Err?.trim();
-    if (targetError) throw new Error(targetError);
+    if (targetError) throw new SessionReviewedActionTargetRejectedError();
   } finally {
     registryBinary?.fill(0);
   }
+}
+
+function recursiveRemovalTargetsSelfOrRoot(path: string, platform: SessionTargetPlatform): boolean {
+  const canonicalPath = path.normalize("NFC");
+  if (canonicalPath === "." || canonicalPath === ".." || canonicalPath === "/" || canonicalPath === "\\") {
+    return true;
+  }
+  const pathApi = platform === "windows" ? win32Path : posixPath;
+  if (
+    platform === "windows" &&
+    /^[A-Za-z]:/u.test(canonicalPath) &&
+    !win32Path.isAbsolute(canonicalPath)
+  ) {
+    return true;
+  }
+  const normalizedPath = pathApi.normalize(canonicalPath);
+  const root = pathApi.parse(normalizedPath).root;
+  if (root.length > 0 && normalizedPath === root) return true;
+  const relativeWithoutTrailingSeparators = normalizedPath.replace(/[\\/]+$/u, "");
+  return relativeWithoutTrailingSeparators === "." || relativeWithoutTrailingSeparators === "..";
+}
+
+function isSessionFileEditAction(
+  input: PrepareSessionDestructiveActionInput,
+): input is Extract<
+  PrepareSessionDestructiveActionInput,
+  { actionId: "session.filesystem.edit-text-overwrite" | "session.filesystem.patch-hex" }
+> {
+  return input.actionId === "session.filesystem.edit-text-overwrite" ||
+    input.actionId === "session.filesystem.patch-hex";
+}
+
+function resolvedSessionOperationTarget(
+  context: WindowContext,
+  pool: BackendPool,
+  target: RevalidatedTarget,
+): ResolvedOperationTarget {
+  return {
+    ref: { ...target.ref },
+    summary: { ...target.target },
+    backend: operationBackendSummary(context, pool),
+  };
+}
+
+function sessionWorkbenchResultWasCanceled(result: { value: unknown }): boolean {
+  return Boolean(
+    result.value &&
+    typeof result.value === "object" &&
+    "status" in result.value &&
+    result.value.status === "canceled",
+  );
 }
 
 function sessionRegistryWriteValue(value: SessionRegistryWriteValue):

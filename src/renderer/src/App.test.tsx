@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -571,7 +571,14 @@ describe("Sidebar navigation", () => {
         beaconWatch: false,
       },
     };
-    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial);
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      initial,
+      (listener) => {
+        emitSnapshot = listener;
+      },
+    );
     vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: selected });
     vi.mocked(api.listTargetOperations).mockResolvedValue({
       ok: true,
@@ -588,6 +595,20 @@ describe("Sidebar navigation", () => {
     expect(await screen.findByRole("heading", { name: "payments" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Live sessions" })).not.toBeInTheDocument();
     expect(within(interact).getByRole("row", { name: "Sessions" })).toHaveAttribute("data-current", "true");
+
+    const replacementRef = { ...ref, fingerprint: "b".repeat(64) };
+    await act(async () => {
+      emitSnapshot?.({
+        ...selected,
+        targetContext: {
+          ...selected.targetContext,
+          activeTarget: replacementRef,
+          selectableTargets: [replacementRef],
+        },
+      });
+    });
+    expect(await screen.findByRole("heading", { name: "Session workspace unavailable" })).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(await screen.findByRole("heading", { name: "Live sessions" })).toBeInTheDocument();
   });

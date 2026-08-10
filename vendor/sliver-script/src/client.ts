@@ -103,6 +103,8 @@ export interface SessionDownloadFileOptions {
   stop?: number;
   maxBytes?: number;
   maxLines?: number;
+  /** Read the bounded byte window from the end of the file. */
+  fromEnd?: boolean;
 }
 
 export interface SessionUploadOptions {
@@ -890,6 +892,11 @@ export class SliverClient {
     const start = boundedNonNegativeInteger(options.start ?? 0, "Download start");
     const stop = boundedNonNegativeInteger(options.stop ?? 0, "Download stop");
     const maxLines = boundedNonNegativeInteger(options.maxLines ?? 0, "Download max lines");
+    const fromEnd = options.fromEnd ?? false;
+    if (typeof fromEnd !== "boolean") throw new Error("Download from-end must be a boolean");
+    if (fromEnd && (start !== 0 || stop !== 0 || maxLines !== 0)) {
+      throw new Error("Download from-end cannot be combined with start, stop, or max lines");
+    }
     return withTimeoutSignal(timeoutSeconds, async (signal) => {
       const response = await this.workbenchArtifactRpc.download(
         {
@@ -897,7 +904,7 @@ export class SliverClient {
           Start: String(start),
           Stop: String(stop),
           Recurse: false,
-          MaxBytes: String(maxBytes),
+          MaxBytes: String(fromEnd ? -maxBytes : maxBytes),
           MaxLines: String(maxLines),
           RestrictedToFile: true,
           Request: this.sessionRequest(sessionId, timeoutSeconds),
@@ -942,7 +949,6 @@ export class SliverClient {
           },
           { signal },
         );
-        assertImplantResponse(response.Response?.Err, "Upload");
         return response;
       } finally {
         payload.fill(0);

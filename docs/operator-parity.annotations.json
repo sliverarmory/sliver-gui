@@ -1,9 +1,16 @@
 {
   "schemaVersion": 1,
   "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
-  "reviewVersion": 1,
+  "reviewVersion": 2,
   "reviewPolicy": "Every generated reachable node has an explicit product classification. Regeneration never edits this file.",
   "scopeDecisions": [
+    {
+      "id": "operator-workbench.m2-session-first",
+      "status": "in-progress",
+      "milestone": "M2",
+      "operatorScope": true,
+      "notes": "The dedicated session workbench now exposes the reviewed M2 session paths. M2 remains in progress because supported beacon execution, complete cross-platform and real-server evidence, a central authoritative capability service, anchor-stable continuation cursors, and loot dispositions are still pending."
+    },
     {
       "id": "operator-transport.wireguard",
       "status": "deferred",
@@ -254,7 +261,7 @@
     {
       "id": "implant.cat",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -296,7 +303,7 @@
       "testIds": [
         "parity-contract:implant.cat"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The session file inspector exposes a bounded Cat view with content retained outside broad snapshots and activity records. The supported beacon path and loot disposition remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.cd",
@@ -337,7 +344,7 @@
       "testIds": [
         "parity-contract:implant.cd"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session filesystem browser exposes bounded path navigation through the closed main/wrapper path. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.chmod",
@@ -379,7 +386,7 @@
       "testIds": [
         "parity-contract:implant.chmod"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session file inspector exposes platform-gated mode changes; recursive changes require a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.chown",
@@ -421,7 +428,7 @@
       "testIds": [
         "parity-contract:implant.chown"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session file inspector exposes platform-gated owner changes; recursive changes require a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.chtimes",
@@ -466,7 +473,7 @@
       "testIds": [
         "parity-contract:implant.chtimes"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session file inspector exposes bounded timestamp changes through the closed main/wrapper path. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.close",
@@ -548,7 +555,7 @@
       "testIds": [
         "parity-contract:implant.cp"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session file inspector exposes exact source/destination copy through a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.cursed",
@@ -1016,7 +1023,7 @@
     {
       "id": "implant.edit",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1055,7 +1062,7 @@
       "testIds": [
         "parity-contract:implant.edit"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The session file inspector stages bounded UTF-8 bytes in main and requires a digest-bound, one-use reviewed overwrite plan. The supported beacon path and broader encoding parity remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.env",
@@ -1714,12 +1721,12 @@
       "testIds": [
         "parity-contract:implant.grep"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session Files search mode exposes bounded grep results, context controls, and continuation. The supported beacon path, loot disposition, and anchor-stable cursors remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.head",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1763,12 +1770,12 @@
       "testIds": [
         "parity-contract:implant.head"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The session file inspector exposes a bounded Head view. The supported beacon path, line-count option parity, and loot disposition remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.hex-edit",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -1806,7 +1813,7 @@
       "testIds": [
         "parity-contract:implant.hex-edit"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The session file inspector supports bounded hex inspection and stages validated even-length hex bytes for a digest-bound, one-use reviewed write. The supported beacon path and offset-oriented patch parity remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.ifconfig",
@@ -2147,7 +2154,7 @@
       "testIds": [
         "parity-contract:implant.memfiles"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The Linux session Storage view exposes bounded memory-file inventory through the closed main/wrapper path. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.memfiles.add",
@@ -2186,7 +2193,7 @@
       "testIds": [
         "parity-contract:implant.memfiles.add"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The Linux session Storage view exposes bounded memory-file creation. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.memfiles.rm",
@@ -2225,7 +2232,7 @@
       "testIds": [
         "parity-contract:implant.memfiles.rm"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The Linux session Storage view exposes descriptor-bound memory-file removal through a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.migrate",
@@ -2350,7 +2357,7 @@
       "testIds": [
         "parity-contract:implant.mount"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session Storage view exposes bounded, paged mount inventory through the closed main/wrapper path. The supported beacon path and anchor-stable cursors remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.msf",
@@ -2484,7 +2491,7 @@
       "testIds": [
         "parity-contract:implant.mv"
       ],
-      "notes": "A closed session-only M2 wrapper and main-process workbench contract are implemented. Broader operator-facing controls and the supported beacon path remain pending, so this command is in progress rather than complete."
+      "notes": "The session file inspector exposes exact source/destination move through a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.netstat",
@@ -3246,7 +3253,7 @@
       "testIds": [
         "parity-contract:implant.registry.create"
       ],
-      "notes": "Typed session-only wrapper and plan-confirmed main-process dispatch are implemented. The current registry panel remains read-only and the supported beacon path is pending, so this command is in progress rather than complete."
+      "notes": "The Windows session Registry panel exposes key creation through typed input and a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.delete",
@@ -3287,7 +3294,7 @@
       "testIds": [
         "parity-contract:implant.registry.delete"
       ],
-      "notes": "Typed session-only wrapper and plan-confirmed main-process dispatch are implemented. The current registry panel remains read-only and the supported beacon path is pending, so this command is in progress rather than complete."
+      "notes": "The Windows session Registry panel exposes key deletion through a one-use reviewed plan. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.registry.list-subkeys",
@@ -3497,7 +3504,7 @@
       "testIds": [
         "parity-contract:implant.registry.write"
       ],
-      "notes": "Typed session-only wrapper and plan-confirmed main-process dispatch are implemented. The current registry panel remains read-only and the supported beacon path is pending, so this command is in progress rather than complete."
+      "notes": "The Windows session Registry panel exposes typed string, binary, DWORD, and QWORD writes through one-use reviewed plans. The supported beacon path remains pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.rename",
@@ -4434,7 +4441,7 @@
     {
       "id": "implant.tail",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M2",
       "restrictionReview": {
         "targetModes": [
@@ -4478,7 +4485,7 @@
       "testIds": [
         "parity-contract:implant.tail"
       ],
-      "notes": "Registered implant workflow assigned to M2."
+      "notes": "The session file inspector exposes a bounded Tail view backed by an explicit from-end wrapper request. The supported beacon path, line-count option parity, and loot disposition remain pending, so this command is in progress rather than complete."
     },
     {
       "id": "implant.tasks",

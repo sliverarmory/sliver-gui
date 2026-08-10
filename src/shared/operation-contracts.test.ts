@@ -4,10 +4,14 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type {
   BeaconTaskDetail,
+  OperationRecordId,
   OperationOwnership,
   SafeArtifactHandle,
+  TargetOperationId,
+  TargetOperationInput,
   TargetOperationRecord,
 } from "./operation-contracts.js";
+import type { SessionWorkbenchOperationId } from "./session-contracts.js";
 
 import {
   BEACON_TASK_STATES,
@@ -66,6 +70,11 @@ describe("operation contracts", () => {
       attribution: "unknown";
     }>();
     expectTypeOf<TargetOperationRecord["requestId"]>().toEqualTypeOf<string>();
+    expectTypeOf<TargetOperationRecord["operationId"]>().toEqualTypeOf<OperationRecordId>();
+    expectTypeOf<TargetOperationInput["operationId"]>().toEqualTypeOf<TargetOperationId>();
+    expectTypeOf<SessionWorkbenchOperationId>().toMatchTypeOf<OperationRecordId>();
+    expectTypeOf<Extract<TargetOperationInput["operationId"], `session.${string}`>>()
+      .toEqualTypeOf<never>();
     expectTypeOf<BeaconTaskDetail["errorKind"]>().toEqualTypeOf<
       "target-reported" | "decode-uncertain" | undefined
     >();

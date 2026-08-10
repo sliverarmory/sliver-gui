@@ -53,6 +53,7 @@ export interface SessionWorkspaceRoute {
   sessionId: string;
   backendEpoch: number;
   connectionIncarnation: number;
+  targetFingerprint: string;
 }
 
 export type SessionWorkspacePanelId =
@@ -123,7 +124,7 @@ export function SessionWorkspacePage({
       return next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     });
     setSelectedOperation((current) => current?.requestId === operation.requestId ? operation : current);
-  }, [route.backendEpoch, route.sessionId]);
+  }, [route.backendEpoch, route.sessionId, route.targetFingerprint]);
 
   const loadOperations = useCallback(async (cursor?: string) => {
     if (!isCurrentRef.current) return;
@@ -147,7 +148,7 @@ export function SessionWorkspacePage({
         return;
       }
       const matching = result.value.items.filter((operation) => operationBelongsToRoute(operation, route));
-      setOperations((current) => mergeUniqueOperations(append ? current : matching, append ? matching : current));
+      setOperations((current) => append ? mergeUniqueOperations(current, matching) : matching);
       setNextOperationCursor(result.value.page.nextCursor);
       setOperationsError(undefined);
     } catch (error) {
@@ -167,7 +168,7 @@ export function SessionWorkspacePage({
         else setIsLoadingOperations(false);
       }
     }
-  }, [route.backendEpoch, route.sessionId, routeIdentity]);
+  }, [route.backendEpoch, route.sessionId, route.targetFingerprint, routeIdentity]);
 
   useEffect(() => {
     operationsRequestSequence.current += 1;
@@ -319,8 +320,8 @@ export function SessionWorkspacePage({
             <WorkspaceTab id="files" label="Files" />
             <WorkspaceTab id="processes" label="Processes" />
             <WorkspaceTab id="environment" label="Environment" />
-            <WorkspaceTab id="activity" label="Activity" />
             {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
+            <WorkspaceTab id="activity" label="Activity" />
           </Tabs.List>
         </Tabs.ListContainer>
 
@@ -372,6 +373,15 @@ export function SessionWorkspacePage({
             description: "Environment names and protected values will appear here when requested.",
           })}
         </Tabs.Panel>
+        {isWindows ? (
+          <Tabs.Panel className="pt-6" id="registry">
+            {renderPanel(resolvedPanels.registry, context, {
+              icon: faList,
+              title: "No registry location loaded",
+              description: "Choose a hive and path to inspect Windows registry values for this session.",
+            })}
+          </Tabs.Panel>
+        ) : null}
         <Tabs.Panel className="pt-6" id="activity">
           <SessionActivity
             error={operationsError}
@@ -397,15 +407,6 @@ export function SessionWorkspacePage({
           />
           {resolvedPanels.activity ? <div className="mt-6">{resolvedPanels.activity(context)}</div> : null}
         </Tabs.Panel>
-        {isWindows ? (
-          <Tabs.Panel className="pt-6" id="registry">
-            {renderPanel(resolvedPanels.registry, context, {
-              icon: faList,
-              title: "No registry location loaded",
-              description: "Choose a hive and path to inspect Windows registry values for this session.",
-            })}
-          </Tabs.Panel>
-        ) : null}
       </Tabs>
 
       <OperationDetailModal
@@ -565,25 +566,25 @@ function SessionActivity({
   ], []);
 
   return (
-    <section className="min-w-0 overflow-hidden rounded-2xl bg-surface" aria-labelledby="session-activity-heading">
+    <section className="min-w-0 overflow-hidden rounded-2xl bg-surface" aria-labelledby="m1-operations-heading">
       <div className="flex items-center justify-between gap-4 px-5 py-4 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faClockRotateLeft} /></span>
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-foreground" id="session-activity-heading">Session Activity</h2>
-            <p className="text-xs text-muted">M1 operations for this exact session and backend epoch.</p>
+            <h2 className="text-base font-semibold text-foreground" id="m1-operations-heading">Activity</h2>
+            <p className="text-xs text-muted">M1 and session workbench activity for this exact session.</p>
           </div>
         </div>
         <Tooltip delay={250}>
-          <Button aria-label="Refresh session activity" isIconOnly isPending={isLoading} size="sm" variant="ghost" onPress={onRefresh}>
+          <Button aria-label="Refresh activity" isIconOnly isPending={isLoading} size="sm" variant="ghost" onPress={onRefresh}>
             <FontAwesomeIcon aria-hidden icon={faRotate} />
           </Button>
-          <Tooltip.Content>Refresh session activity</Tooltip.Content>
+          <Tooltip.Content>Refresh activity</Tooltip.Content>
         </Tooltip>
       </div>
       {error ? <p className="bg-danger-soft px-5 py-3 text-xs text-danger-soft-foreground sm:px-6" role="alert">{error}</p> : null}
       <DataGrid
-        aria-label="Session operation activity"
+        aria-label="Session activity"
         columns={columns}
         contentClassName="min-w-[720px]"
         data={operations}
@@ -601,7 +602,7 @@ function SessionActivity({
               <EmptyState.Media variant="icon"><FontAwesomeIcon aria-hidden icon={faClockRotateLeft} /></EmptyState.Media>
               <EmptyState.Title>{isLoading ? "Loading activity" : "No session activity"}</EmptyState.Title>
               <EmptyState.Description>
-                {isLoading ? "Reading the bounded operation history…" : "Operations submitted for this session will appear here."}
+                {isLoading ? "Reading the bounded operation history…" : "M1 and workbench operations for this session will appear here."}
               </EmptyState.Description>
             </EmptyState.Header>
           </EmptyState>
@@ -661,6 +662,7 @@ export function isAuthoritativeSessionRoute(
     activeRef?.mode === "session" &&
     activeRef.id === route.sessionId &&
     activeRef.backendEpoch === route.backendEpoch &&
+    activeRef.fingerprint === route.targetFingerprint &&
     activeSummary?.mode === "session" &&
     activeSummary.id === route.sessionId &&
     session.id === activeSummary.id,
@@ -668,7 +670,7 @@ export function isAuthoritativeSessionRoute(
 }
 
 export function sessionWorkspaceRouteIdentity(route: SessionWorkspaceRoute): string {
-  return `${route.backendEpoch}:${route.connectionIncarnation}:session:${route.sessionId}`;
+  return `${route.backendEpoch}:${route.connectionIncarnation}:session:${route.sessionId}:${route.targetFingerprint}`;
 }
 
 function operationBelongsToRoute(operation: TargetOperationRecord, route: SessionWorkspaceRoute): boolean {
@@ -676,6 +678,7 @@ function operationBelongsToRoute(operation: TargetOperationRecord, route: Sessio
     operation.target.mode === "session" &&
     operation.target.id === route.sessionId &&
     operation.target.backendEpoch === route.backendEpoch &&
+    operation.target.fingerprint === route.targetFingerprint &&
     operation.backend.epoch === route.backendEpoch;
 }
 

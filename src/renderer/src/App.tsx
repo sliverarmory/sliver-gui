@@ -23,7 +23,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { disconnectedSnapshot } from "../../shared/contracts";
 import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
-import type { SessionSummary } from "../../shared/target-contracts";
+import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
@@ -235,9 +235,14 @@ export function App() {
     setSessionWorkspaceRoute(undefined);
     setView(nextView);
   }, []);
-  const openSessionWorkspace = useCallback((session: SessionSummary) => {
+  const openSessionWorkspace = useCallback((session: SessionSummary, target: TargetRef) => {
     const backendEpoch = snapshot.connection.epoch;
-    if (backendEpoch === undefined) {
+    if (
+      backendEpoch === undefined ||
+      target.mode !== "session" ||
+      target.id !== session.id ||
+      target.backendEpoch !== backendEpoch
+    ) {
       toast.warning("Session changed", { description: "Reconnect and select the session again." });
       return;
     }
@@ -245,6 +250,7 @@ export function App() {
       sessionId: session.id,
       backendEpoch,
       connectionIncarnation: snapshot.connection.incarnation ?? 0,
+      targetFingerprint: target.fingerprint,
     });
   }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
 
@@ -324,7 +330,7 @@ export function App() {
               {view === "sessions" ? (
                 sessionWorkspaceRoute ? (
                   <SessionWorkspacePage
-                    key={`session-workspace:${sessionWorkspaceRoute.backendEpoch}:${sessionWorkspaceRoute.connectionIncarnation}:${sessionWorkspaceRoute.sessionId}`}
+                    key={`session-workspace:${sessionWorkspaceRoute.backendEpoch}:${sessionWorkspaceRoute.connectionIncarnation}:${sessionWorkspaceRoute.sessionId}:${sessionWorkspaceRoute.targetFingerprint}`}
                     route={sessionWorkspaceRoute}
                     session={snapshot.targetContext.activeTargetSummary?.mode === "session"
                       ? snapshot.targetContext.activeTargetSummary

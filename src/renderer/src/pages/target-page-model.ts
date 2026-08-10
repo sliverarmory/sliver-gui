@@ -8,10 +8,13 @@ import type {
 import { targetMatchesCatalogQuery } from "../../../shared/target-contracts";
 import type {
   BeaconTaskState,
+  OperationRecordId,
   TargetOperationId,
   TargetOperationRecord,
   TargetOperationState,
 } from "../../../shared/operation-contracts";
+import { isTargetOperationId } from "../../../shared/operation-contracts";
+import type { SessionWorkbenchOperationId } from "../../../shared/session-contracts";
 
 export type TargetModeFilter = "all" | TargetMode;
 
@@ -23,6 +26,58 @@ const OPERATION_LABELS: Readonly<Record<TargetOperationId, string>> = {
   "beacon.reconfigure": "Reconfigure beacon",
   "beacon.open-session": "Open session",
 };
+
+const SESSION_OPERATION_LABELS = {
+  "session.identity.current-token-owner": "Read current token owner",
+  "session.environment.list": "List environment variables",
+  "session.environment.reveal": "Reveal environment variable",
+  "session.network.interfaces": "List network interfaces",
+  "session.network.connections": "List network connections",
+  "session.filesystem.pwd": "Read working directory",
+  "session.filesystem.ls": "List directory",
+  "session.filesystem.cat": "Read file",
+  "session.filesystem.head": "Read file head",
+  "session.filesystem.tail": "Read file tail",
+  "session.filesystem.read-hex": "Read file as hex",
+  "session.filesystem.grep": "Search files",
+  "session.filesystem.mounts": "List mounts",
+  "session.filesystem.memfiles.list": "List memory files",
+  "session.process.list": "List processes",
+  "session.service.list": "List services",
+  "session.service.detail": "Read service details",
+  "session.registry.read": "Read registry value",
+  "session.registry.list-subkeys": "List registry subkeys",
+  "session.registry.list-values": "List registry values",
+  "session.filesystem.cd": "Change working directory",
+  "session.filesystem.mkdir": "Create directory",
+  "session.filesystem.memfiles.add": "Add memory file",
+  "session.filesystem.chmod": "Change file mode",
+  "session.filesystem.chown": "Change file ownership",
+  "session.filesystem.chtimes": "Change file timestamps",
+  "session.service.start": "Start service",
+  "session.screenshot.capture": "Capture screenshot",
+  "session.artifact.save": "Save captured artifact",
+  "session.filesystem.download": "Download file",
+  "session.filesystem.upload-open": "Upload file",
+  "session.filesystem.stage-text": "Stage text changes",
+  "session.filesystem.stage-hex": "Stage hex changes",
+  "session.process.dump": "Dump process",
+  "session.registry.read-hive": "Save registry hive",
+  "session.filesystem.cp": "Copy file",
+  "session.filesystem.mv": "Move file",
+  "session.filesystem.rm": "Remove file",
+  "session.filesystem.chmod-recursive": "Change file modes recursively",
+  "session.filesystem.chown-recursive": "Change file ownership recursively",
+  "session.filesystem.memfiles.rm": "Remove memory file",
+  "session.filesystem.upload-overwrite": "Overwrite file",
+  "session.filesystem.edit-text-overwrite": "Save text file",
+  "session.filesystem.patch-hex": "Save hex changes",
+  "session.process.terminate": "Terminate process",
+  "session.service.stop": "Stop service",
+  "session.registry.write": "Write registry value",
+  "session.registry.create-key": "Create registry key",
+  "session.registry.delete-key": "Delete registry key",
+} as const satisfies Readonly<Record<SessionWorkbenchOperationId, string>>;
 
 export function targetRowKey(target: Pick<TargetSummary, "mode" | "id">): string {
   return `${target.mode}:${target.id}`;
@@ -67,8 +122,9 @@ export function beaconTaskCountLabel(beacon: BeaconSummary): string {
   return nonCompleted > 0 ? `${nonCompleted} non-completed / ${total} total` : `${total} total`;
 }
 
-export function operationLabel(operationId: TargetOperationId): string {
-  return OPERATION_LABELS[operationId];
+export function operationLabel(operationId: OperationRecordId): string {
+  if (isTargetOperationId(operationId)) return OPERATION_LABELS[operationId];
+  return SESSION_OPERATION_LABELS[operationId];
 }
 
 export function operationStateLabel(state: TargetOperationState): string {

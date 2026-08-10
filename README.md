@@ -32,10 +32,16 @@ configuration files and their private keys stay in the Electron main process.
   live session navigates to its dedicated interaction workbench instead of
   expanding an inline selected-session card.
 - A session-first M2 workbench with clean Overview, Files, Processes,
-  Environment, Windows Registry, and Activity panels. It provides bounded
-  identity/network/environment reads, current-directory browsing and native
-  single-file transfers, process and service workflows, registry reads, and
-  main-owned screenshot artifacts with bounded renderer previews.
+  Environment, Windows Registry, and Activity panels. Files includes bounded
+  browser, content-search, and storage modes; Cat, Head, Tail, and Hex views;
+  digest-bound reviewed text/hex saves; native single-file transfers; reviewed
+  copy/move/remove; metadata controls; mount inventory; and Linux memory files.
+- Processes includes bounded continuation, list/tree presentation, filters,
+  platform-gated dumps and termination, plus Windows service workflows. The
+  Windows Registry panel supports bounded browsing and hive save plus reviewed
+  typed write, create-key, and delete-key mutations.
+- Activity unifies M1 and session-workbench history for the exact session while
+  excluding command content, secrets, binary data, and local paths.
 - Session workbench mutations are a closed typed allowlist. Destructive or
   replacement actions use expiring one-use review plans, target and platform
   restrictions are revalidated in Electron main, and local paths and binary
@@ -60,6 +66,13 @@ configuration files and their private keys stay in the Electron main process.
 
 Terminal-backed features such as interactive shell remain planned for a later
 milestone. They will use Ghostty Web when that slice is implemented.
+
+M2 remains **in progress**. The current workbench is session-only; supported
+beacon execution, complete cross-platform real-server evidence, the central
+authoritative capability service, mutation-stable anchor cursors, and remote
+loot dispositions remain open. Current M2 workbench continuation tokens are
+bounded offsets, so a changing remote inventory can still duplicate or skip
+entries between pages.
 
 ## Development
 

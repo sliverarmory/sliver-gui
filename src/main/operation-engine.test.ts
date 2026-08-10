@@ -24,6 +24,237 @@ import {
 } from "./operation-engine.js";
 
 describe("OperationEngine", () => {
+  it("journals main-owned session workbench activity without retaining result contents", () => {
+    const changes: TargetOperationRecord[] = [];
+    const harness = createHarness("session", { onChanged: (record) => changes.push(structuredClone(record)) });
+
+    const started = harness.engine.beginExternal("session.filesystem.ls", harness.active);
+    expect(started).toMatchObject({
+      operationId: "session.filesystem.ls",
+      mode: "session",
+      target: { fingerprint: "session:fingerprint" },
+      state: "submitting",
+      attempts: 0,
+      cancellation: "not-supported",
+      message: "List directory in progress",
+    });
+    expect(Object.isFrozen(started)).toBe(true);
+
+    harness.engine.markExternalSubmitted(started.requestId);
+    const finished = harness.engine.finishExternal(started.requestId, "completed");
+    expect(finished).toMatchObject({
+      state: "completed",
+      attempts: 1,
+      finishedAt: expect.any(String),
+      message: "List directory completed",
+    });
+    expect(finished.disposition).toBeUndefined();
+    expect(harness.engine.list().items.map((record) => record.requestId)).toContain(started.requestId);
+    expect(changes.map((record) => record.state)).toEqual(["submitting", "running", "completed"]);
+    expect(JSON.stringify(harness.engine.list())).not.toContain("remote-file-contents");
+  });
+
+  it("uses descriptor-owned uncertainty for close and target loss", () => {
+    const harness = createHarness("session", { terminalRecordLimit: 4 });
+    const disappeared = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    expect(harness.engine.markTargetUnavailable(harness.active.ref, "secret-path-or-result-content")).toBe(1);
+    expect(harness.engine.get(disappeared.requestId)).toMatchObject({
+      state: "target-disappeared",
+      finishedAt: expect.any(String),
+    });
+    expect(JSON.stringify(harness.engine.get(disappeared.requestId))).not.toContain("secret-path-or-result-content");
+
+    const disappearedAfterSubmission = harness.engine.beginExternal(
+      "session.filesystem.mkdir",
+      harness.active,
+    );
+    harness.engine.markExternalSubmitted(disappearedAfterSubmission.requestId);
+    expect(harness.engine.markTargetUnavailable(harness.active.ref, "gone after dispatch")).toBe(1);
+    expect(harness.engine.get(disappearedAfterSubmission.requestId)).toMatchObject({
+      state: "outcome-unknown",
+      attempts: 1,
+      finishedAt: expect.any(String),
+    });
+
+    const reviewedMutationAfterSubmission = harness.engine.beginExternal(
+      "session.process.terminate",
+      harness.active,
+    );
+    harness.engine.markExternalSubmitted(reviewedMutationAfterSubmission.requestId);
+    expect(harness.engine.markTargetUnavailable(harness.active.ref, "gone during reviewed action")).toBe(1);
+    expect(harness.engine.get(reviewedMutationAfterSubmission.requestId)).toMatchObject({
+      state: "outcome-unknown",
+      attempts: 1,
+      finishedAt: expect.any(String),
+    });
+
+    const submittedMutation = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    harness.engine.markExternalSubmitted(submittedMutation.requestId);
+    const submittedRead = harness.engine.beginExternal("session.filesystem.ls", harness.active);
+    harness.engine.markExternalSubmitted(submittedRead.requestId);
+    const localOnly = harness.engine.beginExternal("session.filesystem.stage-text", harness.active);
+    harness.engine.close();
+
+    expect(harness.engine.get(submittedMutation.requestId)).toMatchObject({ state: "outcome-unknown" });
+    expect(harness.engine.get(submittedRead.requestId)).toMatchObject({ state: "canceled" });
+    expect(harness.engine.get(localOnly.requestId)).toMatchObject({ state: "canceled" });
+    expect(() => harness.engine.beginExternal("session.filesystem.ls", harness.active)).toThrow(/closed/u);
+    expect(harness.engine.markExternalSubmitted(localOnly.requestId)).toMatchObject({ state: "canceled" });
+    expect(harness.engine.finishExternal(submittedMutation.requestId, "completed"))
+      .toMatchObject({ state: "outcome-unknown" });
+  });
+
+  it("enforces outcome-unknown only for submitted state-changing operations", () => {
+    const harness = createHarness("session");
+    const read = harness.engine.beginExternal("session.filesystem.ls", harness.active);
+    harness.engine.markExternalSubmitted(read.requestId);
+    expect(() => harness.engine.finishExternal(read.requestId, "outcome-unknown"))
+      .toThrow(/cannot have an unknown remote-state outcome/u);
+    expect(harness.engine.get(read.requestId)).toMatchObject({ state: "running" });
+    harness.engine.finishExternal(read.requestId, "failed");
+
+    const mutation = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    expect(() => harness.engine.finishExternal(mutation.requestId, "outcome-unknown"))
+      .toThrow(/before submission/u);
+    harness.engine.markExternalSubmitted(mutation.requestId);
+    expect(harness.engine.finishExternal(mutation.requestId, "outcome-unknown"))
+      .toMatchObject({ state: "outcome-unknown", attempts: 1 });
+  });
+
+  it("recovers only submitted external mutation uncertainty after an exact success", () => {
+    const changes: TargetOperationRecord[] = [];
+    const harness = createHarness("session", { onChanged: (record) => changes.push(structuredClone(record)) });
+    const mutation = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    harness.engine.markExternalSubmitted(mutation.requestId);
+    harness.engine.markTargetUnavailable(harness.active.ref, "gone while the exact response was pending");
+
+    expect(harness.engine.resolveExternalOutcome(mutation.requestId, "completed")).toMatchObject({
+      state: "completed",
+      attempts: 1,
+      finishedAt: expect.any(String),
+      message: "Create directory completed",
+    });
+    expect(changes.map(({ state }) => state)).toEqual([
+      "submitting",
+      "running",
+      "outcome-unknown",
+      "completed",
+    ]);
+
+    const unsubmitted = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    expect(() => harness.engine.resolveExternalOutcome(unsubmitted.requestId, "completed"))
+      .toThrow(/submitted external operation/u);
+    const read = harness.engine.beginExternal("session.filesystem.ls", harness.active);
+    harness.engine.markExternalSubmitted(read.requestId);
+    harness.engine.markTargetUnavailable(harness.active.ref);
+    expect(() => harness.engine.resolveExternalOutcome(read.requestId, "completed"))
+      .toThrow(/submitted external operation/u);
+    const failed = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    harness.engine.markExternalSubmitted(failed.requestId);
+    harness.engine.finishExternal(failed.requestId, "failed");
+    expect(() => harness.engine.resolveExternalOutcome(failed.requestId, "completed"))
+      .toThrow(/submitted external operation/u);
+
+    const rejected = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    harness.engine.markExternalSubmitted(rejected.requestId);
+    harness.engine.markTargetUnavailable(harness.active.ref);
+    expect(harness.engine.resolveExternalOutcome(rejected.requestId, "failed")).toMatchObject({
+      state: "failed",
+      attempts: 1,
+      message: "The session operation failed",
+    });
+  });
+
+  it("does not recover external mutation uncertainty after the engine closes", () => {
+    const harness = createHarness("session");
+    const mutation = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+    harness.engine.markExternalSubmitted(mutation.requestId);
+    harness.engine.close();
+
+    expect(harness.engine.resolveExternalOutcome(mutation.requestId, "completed")).toMatchObject({
+      state: "outcome-unknown",
+    });
+  });
+
+  it("orders mixed activity deterministically and keeps cursor pages stable across insertion", async () => {
+    const harness = createHarness("session", {
+      freezeClock: true,
+      ids: ["external_old", "managed_middle", "external_new", "inserted_later"],
+    });
+    const oldest = harness.engine.beginExternal("session.filesystem.ls", harness.active);
+    harness.engine.finishExternal(oldest.requestId, "completed");
+    const managed = await harness.engine.submit({ operationId: "target.ping" });
+    const newest = harness.engine.beginExternal("session.process.list", harness.active);
+    harness.engine.finishExternal(newest.requestId, "completed");
+
+    const firstPage = harness.engine.list({ limit: 2 });
+    expect(firstPage.items.map(({ requestId }) => requestId)).toEqual([newest.requestId, managed.requestId]);
+    expect(firstPage.page).toMatchObject({ total: 3, truncated: true, nextCursor: expect.any(String) });
+    const cursor = firstPage.page.nextCursor;
+    if (!cursor) throw new Error("Expected a cursor for the truncated first page");
+
+    const inserted = harness.engine.beginExternal("session.service.list", harness.active);
+    harness.engine.finishExternal(inserted.requestId, "completed");
+    const secondPage = harness.engine.list({ limit: 2, cursor });
+    expect(secondPage.items.map(({ requestId }) => requestId)).toEqual([oldest.requestId]);
+    expect(secondPage.page).toMatchObject({ total: 4, truncated: false });
+  });
+
+  it("applies one terminal cap across managed and external records", async () => {
+    const harness = createHarness("session", {
+      freezeClock: true,
+      terminalRecordLimit: 2,
+      ids: ["external_1", "managed_1", "external_2", "managed_2"],
+    });
+    const externalOne = harness.engine.beginExternal("session.filesystem.ls", harness.active);
+    harness.engine.finishExternal(externalOne.requestId, "completed");
+    const managedOne = await harness.engine.submit({ operationId: "target.ping" });
+    const externalTwo = harness.engine.beginExternal("session.process.list", harness.active);
+    harness.engine.finishExternal(externalTwo.requestId, "completed");
+    const managedTwo = await harness.engine.submit({ operationId: "target.ping" });
+
+    expect(harness.engine.list().items.map(({ requestId }) => requestId))
+      .toEqual([managedTwo.requestId, externalTwo.requestId]);
+    expect(harness.engine.list().page.total).toBe(2);
+    expect(harness.engine.get(externalOne.requestId)).toBeUndefined();
+    expect(harness.engine.get(managedOne.requestId)).toBeUndefined();
+  });
+
+  it("shares duplicate-ID and active-operation guards across managed and external records", async () => {
+    const duplicate = createHarness("session", { ids: ["same_request", "same_request"] });
+    duplicate.engine.beginExternal("session.filesystem.ls", duplicate.active);
+    await expect(duplicate.engine.submit({ operationId: "target.ping" })).rejects.toThrow(
+      /Duplicate operation request ID/u,
+    );
+    expect(duplicate.client.pingSession).not.toHaveBeenCalled();
+
+    const reverse = createHarness("session", { ids: ["same_reverse", "same_reverse"] });
+    await reverse.engine.submit({ operationId: "target.ping" });
+    expect(() => reverse.engine.beginExternal("session.filesystem.ls", reverse.active))
+      .toThrow(/Duplicate operation request ID/u);
+
+    const bounded = createHarness("session", { activeOperationLimit: 2 });
+    bounded.engine.beginExternal("session.filesystem.ls", bounded.active);
+    bounded.engine.beginExternal("session.process.list", bounded.active);
+    await expect(bounded.engine.submit({ operationId: "target.ping" })).rejects.toThrow(
+      /already has 2 active operations/u,
+    );
+  });
+
+  it("denies cancellation without mutating or re-emitting active external records", async () => {
+    const changes: TargetOperationRecord[] = [];
+    const harness = createHarness("session", { onChanged: (record) => changes.push(structuredClone(record)) });
+    const external = harness.engine.beginExternal("session.filesystem.mkdir", harness.active);
+
+    await expect(harness.engine.cancel(external.requestId)).rejects.toThrow(/cannot be canceled/u);
+    expect(harness.engine.get(external.requestId)).toMatchObject({ state: "submitting", attempts: 0 });
+    expect(changes).toHaveLength(1);
+
+    harness.engine.finishExternal(external.requestId, "canceled");
+    await expect(harness.engine.cancel(external.requestId)).resolves.toMatchObject({ state: "canceled" });
+    expect(changes.map(({ state }) => state)).toEqual(["submitting", "canceled"]);
+  });
+
   it("runs bounded synchronous session reads and mutations without retaining inputs", async () => {
     const harness = createHarness("session");
 
@@ -942,6 +1173,7 @@ describe("OperationEngine", () => {
 
 interface HarnessOptions {
   ids?: string[];
+  freezeClock?: boolean;
   ownerWindowId?: number;
   terminalRecordLimit?: number;
   recoverableTaskRecordLimit?: number;
@@ -974,7 +1206,7 @@ function createHarness(mode: TargetMode, options: HarnessOptions = {}) {
     capability,
     refreshTargets,
     cancelTask,
-    now: () => new Date(clock++),
+    now: () => new Date(options.freezeClock ? clock : clock++),
     idFactory: () => ids.shift() ?? `request_${++generatedId}`,
     ...(options.terminalRecordLimit === undefined
       ? {}

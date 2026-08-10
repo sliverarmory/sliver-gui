@@ -80,14 +80,14 @@
     "appliedAfterProtobufGeneration": true,
     "patch": {
       "path": "protocol/sliver-script-handwritten-overlay.patch",
-      "sha256": "355a8384c3cfb501c64b36e059d1a89d523d0b3e0b72126a25d687909dc1945a"
+      "sha256": "268618833fee1f608e154672c7a9753a548e9bc6ced58233f6f085d92cea5f84"
     },
     "files": [
       {
         "path": "src/client.ts",
         "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
-        "sha256": "acd14ad7514adf6a58e66609ef67391dec05ca659af23aeb2cc09ac26cf50e07",
-        "review": "Route RPCs through bounded control, inventory, task-content, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; map target-controlled errors to fixed messages; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
+        "sha256": "cc8ebdd8deaaca056037aafb0e3b32f5b7a63ccf5675d313d42add279815be5a",
+        "review": "Route RPCs through bounded control, inventory, task-content, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; support bounded from-end downloads for Tail without combining incompatible range options; preserve upload response status for main-owned mutation classification; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; map target-controlled errors to fixed messages; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
       },
       {
         "path": "src/index.ts",

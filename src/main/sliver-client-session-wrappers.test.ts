@@ -80,6 +80,73 @@ describe("explicit Sliver session workbench wrappers", () => {
     );
   });
 
+  it("maps bounded tail reads to negative MaxBytes while decoding against the positive magnitude", async () => {
+    const remoteBytes = Buffer.alloc(65_538, 0x41);
+    const download = vi.fn(async () => ({
+      Data: remoteBytes,
+      Encoder: "",
+      Exists: true,
+      IsDir: false,
+      Response: undefined,
+    }));
+    const client = clientWithRpc({ "workbench-artifact": { download } });
+
+    await expect(client.downloadFileSession(
+      "session-tail",
+      "/tmp/tail.txt",
+      { maxBytes: 65_537, fromEnd: true },
+      0,
+    )).rejects.toThrow(/65537-byte workbench limit/u);
+
+    expect(download).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Path: "/tmp/tail.txt",
+        MaxBytes: "-65537",
+        MaxLines: "0",
+        RestrictedToFile: true,
+      }),
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(remoteBytes.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("always binds a positive byte ceiling when a line ceiling is requested", async () => {
+    const download = vi.fn(async () => ({
+      Data: Buffer.from("line\n"),
+      Encoder: "",
+      Exists: true,
+      IsDir: false,
+      Response: undefined,
+    }));
+    const client = clientWithRpc({ "workbench-artifact": { download } });
+
+    await client.downloadFileSession("session-lines", "/tmp/lines.txt", { maxLines: 5 }, 0);
+
+    expect(download).toHaveBeenCalledWith(
+      expect.objectContaining({ MaxBytes: String(64 * 1_024 * 1_024), MaxLines: "5" }),
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it("rejects ambiguous or invalid from-end download options before dispatch", () => {
+    const download = vi.fn();
+    const client = clientWithRpc({ "workbench-artifact": { download } });
+
+    expect(() => client.downloadFileSession(
+      "session-tail",
+      "/tmp/tail.txt",
+      { maxBytes: 32, fromEnd: true, maxLines: 1 },
+      0,
+    )).toThrow(/cannot be combined/u);
+    expect(() => client.downloadFileSession(
+      "session-tail",
+      "/tmp/tail.txt",
+      { maxBytes: 32, fromEnd: "yes" as never },
+      0,
+    )).toThrow(/must be a boolean/u);
+    expect(download).not.toHaveBeenCalled();
+  });
+
   it("uses the explicit process-dump transport deadline for both RPC cancellation and the common request", async () => {
     const processDump = vi.fn(async (
       _request: { Pid: number; Timeout: number; Request: { Timeout: string } },
@@ -174,9 +241,9 @@ describe("explicit Sliver session workbench wrappers", () => {
     const client = clientWithRpc({ "workbench-artifact": { upload } });
     const source = Buffer.from("operator upload bytes");
 
-    await expect(client.uploadSession("session-upload", "/tmp/upload.bin", source, {}, 0)).rejects.toThrow(
-      "Upload was rejected by the target",
-    );
+    await expect(client.uploadSession("session-upload", "/tmp/upload.bin", source, {}, 0)).resolves.toMatchObject({
+      Response: { Err: "target-controlled failure" },
+    });
     expect(compressed).toBeDefined();
     expect(compressed!.every((byte) => byte === 0)).toBe(true);
     expect(source.toString()).toBe("operator upload bytes");

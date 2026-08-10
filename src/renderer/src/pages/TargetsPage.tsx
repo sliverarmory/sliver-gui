@@ -63,6 +63,7 @@ import type {
   BeaconTaskDetail,
   BeaconTaskSummary,
   OperationDisposition,
+  OperationRecordId,
   TargetOperationId,
   TargetOperationInput,
   TargetOperationRecord,
@@ -89,7 +90,7 @@ export interface TargetsPageProps {
   mode: TargetMode;
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
-  onOpenSession?: (session: SessionSummary) => void;
+  onOpenSession?: (session: SessionSummary, target: TargetRef) => void;
 }
 
 type OperationDraft = {
@@ -607,6 +608,7 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
           selectedRef?.mode !== "session" ||
           selectedRef.id !== ref.id ||
           selectedRef.backendEpoch !== ref.backendEpoch ||
+          selectedRef.fingerprint !== ref.fingerprint ||
           selectedSummary?.mode !== "session" ||
           selectedSummary.id !== ref.id
         ) {
@@ -615,7 +617,7 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
           });
           return;
         }
-        onOpenSession(selectedSummary);
+        onOpenSession(selectedSummary, selectedRef);
       }
     } catch (error) {
       if (
@@ -2324,7 +2326,7 @@ function capabilityLabel(id: TargetCapabilityId): string {
   } as const)[id];
 }
 
-function operationIcon(operationId: TargetOperationId): typeof faPlay {
+function operationIcon(operationId: OperationRecordId): typeof faPlay {
   if (operationId === "target.ping") return faBolt;
   if (operationId === "target.rename") return faPen;
   if (operationId === "target.env-set" || operationId === "target.env-unset") return faTerminal;

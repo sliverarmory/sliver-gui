@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
   SESSION_WORKBENCH_PLATFORM_REQUIREMENTS,
   type SessionWorkbenchInput,
@@ -49,6 +50,10 @@ describe("SessionWorkbench", () => {
       },
       { operationId: "session.filesystem.pwd" },
       { operationId: "session.filesystem.ls", path: "/tmp" },
+      { operationId: "session.filesystem.cat", path: "/tmp/file", maxBytes: 64 },
+      { operationId: "session.filesystem.head", path: "/tmp/file", maxBytes: 64 },
+      { operationId: "session.filesystem.tail", path: "/tmp/file", maxBytes: 64 },
+      { operationId: "session.filesystem.read-hex", path: "/tmp/file", maxBytes: 64 },
       {
         operationId: "session.filesystem.grep",
         path: "/tmp",
@@ -83,6 +88,8 @@ describe("SessionWorkbench", () => {
         modificationTime: "2026-08-09T00:00:00Z",
       },
       { operationId: "session.service.start", name: "Spooler" },
+      { operationId: "session.filesystem.stage-text", content: "edited", encoding: "utf-8" },
+      { operationId: "session.filesystem.stage-hex", hex: "00ff" },
     ];
 
     for (const input of inputs) {
@@ -205,6 +212,31 @@ describe("SessionWorkbench", () => {
     expect(JSON.stringify(result)).not.toMatch(/TOP-SECRET|private\/backend/u);
   });
 
+  it("keeps a confirmed service start successful when the follow-up detail read fails", async () => {
+    const client = fakeClient();
+    vi.mocked(client.startServiceSession).mockResolvedValueOnce({ Response: { Err: "" } } as never);
+    vi.mocked(client.serviceDetailSession).mockRejectedValueOnce(
+      new Error("13 INTERNAL: token=TOP-SECRET at /private/backend/path"),
+    );
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    const result = await workbench.run(target({ platform: "windows", os: "windows" }), {
+      operationId: "session.service.start",
+      name: "Spooler",
+    });
+
+    expect(result).toMatchObject({
+      operationId: "session.service.start",
+      value: {
+        name: "Spooler",
+        message: "Service start was accepted; refreshed service details are unavailable",
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/TOP-SECRET|private\/backend/u);
+    expect(client.startServiceSession).toHaveBeenCalledOnce();
+    expect(client.serviceDetailSession).toHaveBeenCalledOnce();
+  });
+
   it("normalizes hostile nested process, file, and network data without raw protobuf fields", async () => {
     const client = fakeClient();
     vi.mocked(client.psSession).mockResolvedValueOnce({
@@ -221,16 +253,28 @@ describe("SessionWorkbench", () => {
     vi.mocked(client.lsSession).mockResolvedValueOnce({
       Path: "/tmp",
       Exists: true,
-      Files: [{
-        Name: "file.txt",
-        IsDir: false,
-        Size: "00012",
-        ModTime: "1786316400",
-        Mode: "-rw-------",
-        Link: "",
-        Uid: "1000",
-        Gid: "1000",
-      }],
+      Files: [
+        {
+          Name: ".",
+          IsDir: true,
+          Size: "0",
+          ModTime: "1786316400",
+          Mode: "drwx------",
+          Link: "",
+          Uid: "1000",
+          Gid: "1000",
+        },
+        {
+          Name: "file.txt",
+          IsDir: false,
+          Size: "00012",
+          ModTime: "1786316400",
+          Mode: "-rw-------",
+          Link: "",
+          Uid: "1000",
+          Gid: "1000",
+        },
+      ],
       timezone: "PDT",
       timezoneOffset: -25_200,
     } as never);
@@ -284,13 +328,259 @@ describe("SessionWorkbench", () => {
     expect(JSON.stringify({ processes, files, network })).not.toMatch(/Processes|Files|Entries|Response/u);
   });
 
+  it("filters Sliver's synthetic self entry and rejects unsafe actionable child names", async () => {
+    const file = (Name: string) => ({
+      Name,
+      IsDir: false,
+      Size: "1",
+      ModTime: "1786316400",
+      Mode: "-rw-------",
+      Link: "",
+      Uid: "1000",
+      Gid: "1000",
+    });
+    const client = fakeClient();
+    vi.mocked(client.lsSession)
+      .mockResolvedValueOnce({ Path: "/tmp", Exists: true, Files: [file("."), file("ok.txt")] } as never)
+      .mockResolvedValueOnce({ Path: "/tmp", Exists: true, Files: [file("..")] } as never)
+      .mockResolvedValueOnce({ Path: "/tmp", Exists: true, Files: [file("nested/name")] } as never)
+      .mockResolvedValueOnce({ Path: "C:\\Temp", Exists: true, Files: [file("nested\\name")] } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    await expect(workbench.run(target(), {
+      operationId: "session.filesystem.ls",
+      path: "/tmp",
+    })).resolves.toMatchObject({ value: { items: [{ name: "ok.txt", path: "/tmp/ok.txt" }], page: { total: 1 } } });
+    for (const path of ["/tmp", "/tmp", "C:\\Temp"]) {
+      await expect(workbench.run(target(), { operationId: "session.filesystem.ls", path }))
+        .rejects.toThrow(/unsafe child name/u);
+    }
+  });
+
+  it("reads full UTF-8 text with a cap-plus-one request, exact digest, and source zeroization", async () => {
+    const order: string[] = [];
+    const client = fakeClient();
+    const remote = Buffer.from("héllo", "utf8");
+    vi.mocked(client.downloadFileSession).mockImplementationOnce(async () => {
+      order.push("rpc");
+      return { Path: "/tmp/hello.txt", Exists: true, IsDir: false, Data: remote } as never;
+    });
+    const workbench = new SessionWorkbench(client, fakeArtifacts(), {
+      onDispatch: (operationId) => order.push(`dispatch:${operationId}`),
+    });
+
+    const result = await workbench.run(target(), {
+      operationId: "session.filesystem.cat",
+      path: "/tmp/hello.txt",
+      maxBytes: SESSION_EDITOR_MAX_BYTES,
+    });
+
+    expect(order).toEqual(["dispatch:session.filesystem.cat", "rpc"]);
+    expect(client.downloadFileSession).toHaveBeenCalledWith("session-1", "/tmp/hello.txt", {
+      maxBytes: SESSION_EDITOR_MAX_BYTES + 1,
+      fromEnd: false,
+    });
+    expect(result).toEqual({
+      operationId: "session.filesystem.cat",
+      value: {
+        path: "/tmp/hello.txt",
+        mode: "cat",
+        encoding: "utf-8",
+        content: "héllo",
+        bytesRead: 6,
+        truncated: false,
+        sha256: digest(Buffer.from("héllo", "utf8")),
+      },
+    });
+    expect(remote.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("discloses head and tail truncation without a misleading digest and preserves UTF-8 boundaries", async () => {
+    const client = fakeClient();
+    const head = Buffer.from([0x61, 0x62, 0x63, 0xe2, 0x82]);
+    const tail = Buffer.from("€ab", "utf8");
+    vi.mocked(client.downloadFileSession)
+      .mockResolvedValueOnce({ Path: "/tmp/head.txt", Exists: true, IsDir: false, Data: head } as never)
+      .mockResolvedValueOnce({ Path: "/tmp/tail.txt", Exists: true, IsDir: false, Data: tail } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    const headResult = await workbench.run(target(), {
+      operationId: "session.filesystem.head",
+      path: "/tmp/head.txt",
+      maxBytes: 4,
+    });
+    const tailResult = await workbench.run(target(), {
+      operationId: "session.filesystem.tail",
+      path: "/tmp/tail.txt",
+      maxBytes: 4,
+    });
+
+    expect(headResult).toEqual({
+      operationId: "session.filesystem.head",
+      value: {
+        path: "/tmp/head.txt",
+        mode: "head",
+        encoding: "utf-8",
+        content: "abc",
+        bytesRead: 3,
+        truncated: true,
+      },
+    });
+    expect(tailResult).toEqual({
+      operationId: "session.filesystem.tail",
+      value: {
+        path: "/tmp/tail.txt",
+        mode: "tail",
+        encoding: "utf-8",
+        content: "ab",
+        bytesRead: 2,
+        truncated: true,
+      },
+    });
+    expect(client.downloadFileSession).toHaveBeenNthCalledWith(1, "session-1", "/tmp/head.txt", {
+      maxBytes: 5,
+      fromEnd: false,
+    });
+    expect(client.downloadFileSession).toHaveBeenNthCalledWith(2, "session-1", "/tmp/tail.txt", {
+      maxBytes: 5,
+      fromEnd: true,
+    });
+    expect(head.every((byte) => byte === 0)).toBe(true);
+    expect(tail.every((byte) => byte === 0)).toBe(true);
+    expect(JSON.stringify({ headResult, tailResult })).not.toContain("sha256");
+  });
+
+  it("rejects invalid UTF-8 and clears the returned bytes", async () => {
+    const client = fakeClient();
+    const invalid = Buffer.from([0xc3, 0x28]);
+    vi.mocked(client.downloadFileSession).mockResolvedValueOnce({
+      Path: "/tmp/invalid.txt",
+      Exists: true,
+      IsDir: false,
+      Data: invalid,
+    } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    await expect(workbench.run(target(), {
+      operationId: "session.filesystem.cat",
+      path: "/tmp/invalid.txt",
+      maxBytes: 32,
+    })).rejects.toThrow(/not valid UTF-8/u);
+    expect(invalid.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("returns bounded lowercase hex with an exact digest only for complete bytes", async () => {
+    const client = fakeClient();
+    const complete = Buffer.from([0x00, 0xa1, 0xff]);
+    const truncated = Buffer.from([0xde, 0xad, 0xbe]);
+    vi.mocked(client.downloadFileSession)
+      .mockResolvedValueOnce({ Path: "/tmp/full.bin", Exists: true, IsDir: false, Data: complete } as never)
+      .mockResolvedValueOnce({ Path: "/tmp/partial.bin", Exists: true, IsDir: false, Data: truncated } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    const full = await workbench.run(target(), {
+      operationId: "session.filesystem.read-hex",
+      path: "/tmp/full.bin",
+      maxBytes: 3,
+    });
+    const partial = await workbench.run(target(), {
+      operationId: "session.filesystem.read-hex",
+      path: "/tmp/partial.bin",
+      maxBytes: 2,
+    });
+
+    expect(full).toEqual({
+      operationId: "session.filesystem.read-hex",
+      value: {
+        path: "/tmp/full.bin",
+        hex: "00a1ff",
+        bytesRead: 3,
+        truncated: false,
+        sha256: digest(Buffer.from([0x00, 0xa1, 0xff])),
+      },
+    });
+    expect(partial).toEqual({
+      operationId: "session.filesystem.read-hex",
+      value: { path: "/tmp/partial.bin", hex: "dead", bytesRead: 2, truncated: true },
+    });
+    expect(complete.every((byte) => byte === 0)).toBe(true);
+    expect(truncated.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("stages strict text and hex as main-owned artifacts and zeroizes borrowed gateway bytes", async () => {
+    const client = fakeClient();
+    const artifacts = fakeArtifacts();
+    const borrowed: Buffer[] = [];
+    vi.mocked(artifacts.stageEditorArtifact).mockImplementation(async (input) => {
+      borrowed.push(input.data);
+      return storedArtifact(Buffer.from(input.data), input.suggestedBasename, input.mediaType);
+    });
+    const workbench = new SessionWorkbench(client, artifacts);
+
+    const text = await workbench.run(target(), {
+      operationId: "session.filesystem.stage-text",
+      content: "hé",
+      encoding: "utf-8",
+    });
+    const hex = await workbench.run(target(), {
+      operationId: "session.filesystem.stage-hex",
+      hex: "00A1ff",
+    } as never);
+
+    expect(text).toMatchObject({
+      operationId: "session.filesystem.stage-text",
+      value: {
+        status: "staged",
+        artifact: {
+          suggestedBasename: "edited-text.txt",
+          mediaType: "text/plain",
+          size: 3,
+          sha256: digest(Buffer.from("hé", "utf8")),
+        },
+      },
+    });
+    expect(hex).toMatchObject({
+      operationId: "session.filesystem.stage-hex",
+      value: {
+        status: "staged",
+        artifact: {
+          suggestedBasename: "edited-bytes.bin",
+          mediaType: "application/octet-stream",
+          size: 3,
+          sha256: digest(Buffer.from([0x00, 0xa1, 0xff])),
+        },
+      },
+    });
+    expect(borrowed).toHaveLength(2);
+    expect(borrowed.every((data) => data.every((byte) => byte === 0))).toBe(true);
+    expect(client.downloadFileSession).not.toHaveBeenCalled();
+  });
+
+  it("zeroizes staged editor bytes when the artifact gateway rejects", async () => {
+    const artifacts = fakeArtifacts();
+    let borrowed: Buffer | undefined;
+    vi.mocked(artifacts.stageEditorArtifact).mockImplementationOnce(async (input) => {
+      borrowed = input.data;
+      throw new Error("artifact store unavailable");
+    });
+    const workbench = new SessionWorkbench(fakeClient(), artifacts);
+
+    await expect(workbench.run(target(), {
+      operationId: "session.filesystem.stage-hex",
+      hex: "deadc0de",
+    })).rejects.toThrow("artifact store unavailable");
+    expect(borrowed).toBeDefined();
+    expect(borrowed!.every((byte) => byte === 0)).toBe(true);
+  });
+
   it("cancels native save/open workflows before dispatching remote RPCs", async () => {
     const client = fakeClient();
     const artifacts = fakeArtifacts();
     vi.mocked(artifacts.prepareNativeSave).mockResolvedValue(null);
     vi.mocked(artifacts.prepareUploadOpen).mockResolvedValue(null);
     vi.mocked(artifacts.prepareStoredArtifactSave).mockResolvedValue(null);
-    const workbench = new SessionWorkbench(client, artifacts);
+    const onDispatch = vi.fn();
+    const workbench = new SessionWorkbench(client, artifacts, { onDispatch });
 
     await expect(workbench.run(target(), {
       operationId: "session.filesystem.download",
@@ -326,6 +616,28 @@ describe("SessionWorkbench", () => {
     expect(client.uploadSession).not.toHaveBeenCalled();
     expect(artifacts.writeNativeSave).not.toHaveBeenCalled();
     expect(artifacts.writeStoredArtifact).not.toHaveBeenCalled();
+    expect(onDispatch).not.toHaveBeenCalled();
+  });
+
+  it("preserves mutation journaling and target-dispatch ordering", async () => {
+    const order: string[] = [];
+    const client = fakeClient();
+    vi.mocked(client.mkdirSession).mockImplementationOnce(async () => {
+      order.push("rpc");
+      return { Path: "/tmp/new" } as never;
+    });
+    const workbench = new SessionWorkbench(client, fakeArtifacts(), {
+      onMutationDispatch: (operationId) => order.push(`mutation:${operationId}`),
+      onDispatch: (operationId) => order.push(`dispatch:${operationId}`),
+    });
+
+    await workbench.run(target(), { operationId: "session.filesystem.mkdir", path: "/tmp/new" });
+
+    expect(order).toEqual([
+      "mutation:session.filesystem.mkdir",
+      "dispatch:session.filesystem.mkdir",
+      "rpc",
+    ]);
   });
 
   it("gives process dumps a transport deadline longer than the implant deadline", async () => {
@@ -605,6 +917,10 @@ function fakeArtifacts(): SessionWorkbenchArtifactGateway {
       input.data.fill(0);
       return capturedResult(copy, input.suggestedBasename, input.sha256);
     }),
+    stageEditorArtifact: vi.fn().mockImplementation(async (input) => {
+      const copy = Buffer.from(input.data);
+      return storedArtifact(copy, input.suggestedBasename, input.mediaType);
+    }),
     prepareStoredArtifactSave: vi.fn().mockResolvedValue({
       capability: {},
       suggestedBasename: "screen.png",
@@ -632,6 +948,18 @@ function capturedResult(data: Buffer, suggestedBasename: string, sha256: string)
       dataUrl: `data:image/png;base64,${data.toString("base64")}`,
       size: data.length,
     },
+  };
+}
+
+function storedArtifact(data: Buffer, suggestedBasename: string, mediaType: string) {
+  return {
+    handle: "S".repeat(43),
+    suggestedBasename,
+    mediaType,
+    size: data.length,
+    sha256: digest(data),
+    createdAt: new Date(NOW).toISOString(),
+    expiresAt: new Date(NOW + 60_000).toISOString(),
   };
 }
 

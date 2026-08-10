@@ -4,6 +4,7 @@ export const SESSION_WORKBENCH_MAX_CURSOR_LENGTH = 256 as const;
 export const SESSION_WORKBENCH_MAX_PATH_LENGTH = 4_096 as const;
 export const SESSION_WORKBENCH_MAX_TEXT_LENGTH = 65_536 as const;
 export const SESSION_WORKBENCH_MAX_ARTIFACT_BYTES = 67_108_864 as const;
+export const SESSION_EDITOR_MAX_BYTES = 65_536 as const;
 
 export const SESSION_WORKBENCH_QUERY_IDS = [
   "session.identity.current-token-owner",
@@ -13,6 +14,10 @@ export const SESSION_WORKBENCH_QUERY_IDS = [
   "session.network.connections",
   "session.filesystem.pwd",
   "session.filesystem.ls",
+  "session.filesystem.cat",
+  "session.filesystem.head",
+  "session.filesystem.tail",
+  "session.filesystem.read-hex",
   "session.filesystem.grep",
   "session.filesystem.mounts",
   "session.filesystem.memfiles.list",
@@ -39,6 +44,8 @@ export const SESSION_WORKBENCH_ARTIFACT_IDS = [
   "session.artifact.save",
   "session.filesystem.download",
   "session.filesystem.upload-open",
+  "session.filesystem.stage-text",
+  "session.filesystem.stage-hex",
   "session.process.dump",
   "session.registry.read-hive",
 ] as const;
@@ -171,6 +178,26 @@ export interface SessionDirectoryListing extends SessionBoundedPage<SessionFileE
   timezoneOffsetMinutes?: number;
 }
 
+export interface SessionTextFileView {
+  path: string;
+  mode: "cat" | "head" | "tail";
+  encoding: "utf-8";
+  content: string;
+  bytesRead: number;
+  truncated: boolean;
+  /** Present only when the returned bytes are the complete remote file. */
+  sha256?: string;
+}
+
+export interface SessionHexFileView {
+  path: string;
+  hex: string;
+  bytesRead: number;
+  truncated: boolean;
+  /** Present only when the returned bytes are the complete remote file. */
+  sha256?: string;
+}
+
 export interface SessionGrepPosition {
   start: number;
   end: number;
@@ -291,6 +318,11 @@ export type SessionNativeOpenUploadResult =
       status: "canceled";
     };
 
+export interface SessionStagedEditorArtifactResult {
+  status: "staged";
+  artifact: SessionStoredArtifact;
+}
+
 export interface SessionWorkbenchInputMap {
   "session.identity.current-token-owner": { operationId: "session.identity.current-token-owner" };
   "session.environment.list": { operationId: "session.environment.list" } & SessionPageRequest;
@@ -306,6 +338,26 @@ export interface SessionWorkbenchInputMap {
   } & SessionPageRequest;
   "session.filesystem.pwd": { operationId: "session.filesystem.pwd" };
   "session.filesystem.ls": { operationId: "session.filesystem.ls"; path: string } & SessionPageRequest;
+  "session.filesystem.cat": {
+    operationId: "session.filesystem.cat";
+    path: string;
+    maxBytes: number;
+  };
+  "session.filesystem.head": {
+    operationId: "session.filesystem.head";
+    path: string;
+    maxBytes: number;
+  };
+  "session.filesystem.tail": {
+    operationId: "session.filesystem.tail";
+    path: string;
+    maxBytes: number;
+  };
+  "session.filesystem.read-hex": {
+    operationId: "session.filesystem.read-hex";
+    path: string;
+    maxBytes: number;
+  };
   "session.filesystem.grep": {
     operationId: "session.filesystem.grep";
     path: string;
@@ -371,6 +423,15 @@ export interface SessionWorkbenchInputMap {
     isIOC: boolean;
     isDirectory: false;
     overwrite: false;
+  };
+  "session.filesystem.stage-text": {
+    operationId: "session.filesystem.stage-text";
+    content: string;
+    encoding: "utf-8";
+  };
+  "session.filesystem.stage-hex": {
+    operationId: "session.filesystem.stage-hex";
+    hex: string;
   };
   "session.process.dump": {
     operationId: "session.process.dump";
@@ -444,6 +505,12 @@ export interface SessionDestructiveActionPlan {
   payloadDigest: string;
   action: PrepareSessionDestructiveActionInput;
   target: {
+    backend: {
+      id: string;
+      displayName: string;
+    };
+    sessionId: string;
+    fingerprint: string;
     name: string;
     hostname: string;
     os: string;
@@ -494,6 +561,10 @@ export interface SessionWorkbenchResultMap {
   "session.network.connections": SessionBoundedPage<SessionNetworkConnection>;
   "session.filesystem.pwd": SessionWorkingDirectoryResult;
   "session.filesystem.ls": SessionDirectoryListing;
+  "session.filesystem.cat": SessionTextFileView;
+  "session.filesystem.head": SessionTextFileView;
+  "session.filesystem.tail": SessionTextFileView;
+  "session.filesystem.read-hex": SessionHexFileView;
   "session.filesystem.grep": SessionBoundedPage<SessionGrepMatch>;
   "session.filesystem.mounts": SessionBoundedPage<SessionMount>;
   "session.filesystem.memfiles.list": SessionBoundedPage<SessionMemoryFile>;
@@ -514,6 +585,8 @@ export interface SessionWorkbenchResultMap {
   "session.artifact.save": SessionNativeSaveResult;
   "session.filesystem.download": SessionNativeSaveResult;
   "session.filesystem.upload-open": SessionNativeOpenUploadResult;
+  "session.filesystem.stage-text": SessionStagedEditorArtifactResult;
+  "session.filesystem.stage-hex": SessionStagedEditorArtifactResult;
   "session.process.dump": SessionNativeSaveResult;
   "session.registry.read-hive": SessionNativeSaveResult;
   "session.filesystem.cp": SessionDestructiveActionOutcome;
@@ -554,6 +627,11 @@ export type SessionWorkbenchInvocationResult =
       status: "outcome-unknown";
       operationId: SessionWorkbenchOutcomeUnknownOperationId;
       message: string;
+    }
+  | {
+      status: "failed";
+      operationId: SessionWorkbenchOutcomeUnknownOperationId;
+      message: string;
     };
 
 const ALL_PLATFORMS = ["windows", "linux", "darwin"] as const;
@@ -571,6 +649,10 @@ export const SESSION_WORKBENCH_PLATFORM_REQUIREMENTS: Readonly<
   "session.network.connections": ALL_PLATFORMS,
   "session.filesystem.pwd": ALL_PLATFORMS,
   "session.filesystem.ls": ALL_PLATFORMS,
+  "session.filesystem.cat": ALL_PLATFORMS,
+  "session.filesystem.head": ALL_PLATFORMS,
+  "session.filesystem.tail": ALL_PLATFORMS,
+  "session.filesystem.read-hex": ALL_PLATFORMS,
   "session.filesystem.grep": ALL_PLATFORMS,
   "session.filesystem.mounts": ALL_PLATFORMS,
   "session.filesystem.memfiles.list": LINUX_ONLY,
@@ -591,6 +673,8 @@ export const SESSION_WORKBENCH_PLATFORM_REQUIREMENTS: Readonly<
   "session.artifact.save": ALL_PLATFORMS,
   "session.filesystem.download": ALL_PLATFORMS,
   "session.filesystem.upload-open": ALL_PLATFORMS,
+  "session.filesystem.stage-text": ALL_PLATFORMS,
+  "session.filesystem.stage-hex": ALL_PLATFORMS,
   "session.process.dump": LINUX_AND_WINDOWS,
   "session.registry.read-hive": WINDOWS_ONLY,
   "session.filesystem.cp": ALL_PLATFORMS,
@@ -689,6 +773,15 @@ function parseDirectInput(
       };
     case "session.filesystem.ls":
       return { operationId, path: requiredPath(record, "path"), ...page() };
+    case "session.filesystem.cat":
+    case "session.filesystem.head":
+    case "session.filesystem.tail":
+    case "session.filesystem.read-hex":
+      return {
+        operationId,
+        path: requiredPath(record, "path"),
+        maxBytes: requiredInteger(record, "maxBytes", 1, SESSION_EDITOR_MAX_BYTES),
+      };
     case "session.filesystem.grep":
       return {
         operationId,
@@ -764,6 +857,14 @@ function parseDirectInput(
         isDirectory: requiredFalse(record, "isDirectory"),
         overwrite: requiredFalse(record, "overwrite"),
       };
+    case "session.filesystem.stage-text":
+      return {
+        operationId,
+        content: requiredUtf8EditorText(record, "content"),
+        encoding: requiredLiteral(record, "encoding", "utf-8"),
+      };
+    case "session.filesystem.stage-hex":
+      return { operationId, hex: requiredEditorHex(record, "hex") };
     case "session.process.dump":
       return {
         operationId,
@@ -1010,4 +1111,48 @@ function requiredSha256(record: Record<string, unknown>, key: string): string {
   const value = requiredString(record, key, 64);
   if (!/^[0-9a-f]{64}$/iu.test(value)) throw new Error(`${key} must be a SHA-256 digest`);
   return value.toLocaleLowerCase();
+}
+
+function requiredUtf8EditorText(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string") throw new Error(`${key} must be UTF-8 text`);
+  const byteLength = strictUtf8ByteLength(value);
+  if (byteLength > SESSION_EDITOR_MAX_BYTES) {
+    throw new Error(`${key} must not exceed ${SESSION_EDITOR_MAX_BYTES} UTF-8 bytes`);
+  }
+  return value;
+}
+
+function requiredEditorHex(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length > SESSION_EDITOR_MAX_BYTES * 2) {
+    throw new Error(`${key} must encode at most ${SESSION_EDITOR_MAX_BYTES} bytes`);
+  }
+  if (!/^(?:[0-9a-f]{2})*$/iu.test(value)) {
+    throw new Error(`${key} must be even-length hexadecimal`);
+  }
+  return value.toLocaleLowerCase();
+}
+
+function strictUtf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const first = value.charCodeAt(index);
+    if (first <= 0x7f) {
+      bytes += 1;
+    } else if (first <= 0x7ff) {
+      bytes += 2;
+    } else if (first >= 0xd800 && first <= 0xdbff) {
+      const second = value.charCodeAt(index + 1);
+      if (!(second >= 0xdc00 && second <= 0xdfff)) throw new Error("content must be valid UTF-8 text");
+      bytes += 4;
+      index += 1;
+    } else if (first >= 0xdc00 && first <= 0xdfff) {
+      throw new Error("content must be valid UTF-8 text");
+    } else {
+      bytes += 3;
+    }
+    if (bytes > SESSION_EDITOR_MAX_BYTES) return bytes;
+  }
+  return bytes;
 }

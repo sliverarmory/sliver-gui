@@ -1,5 +1,5 @@
 diff --git a/src/client.ts b/src/client.ts
-index c2baf89..a322460 100644
+index c2baf89..b7be3bb 100644
 --- a/src/client.ts
 +++ b/src/client.ts
 @@ -6,13 +6,23 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
@@ -56,7 +56,7 @@ index c2baf89..a322460 100644
  const EVENT_RETRY_INITIAL_MS = 500;
  const EVENT_RETRY_MAX_MS = 10_000;
 
-@@ -68,6 +83,47 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
+@@ -68,6 +83,49 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
    randomizeJARM?: boolean;
  }
 
@@ -80,6 +80,8 @@ index c2baf89..a322460 100644
 +  stop?: number;
 +  maxBytes?: number;
 +  maxLines?: number;
++  /** Read the bounded byte window from the end of the file. */
++  fromEnd?: boolean;
 +}
 +
 +export interface SessionUploadOptions {
@@ -104,7 +106,7 @@ index c2baf89..a322460 100644
  export interface Tunnel {
    readonly id: string;
    readonly stdout$: Observable<Buffer>;
-@@ -76,10 +132,18 @@ export interface Tunnel {
+@@ -76,10 +134,18 @@ export interface Tunnel {
  }
 
  class BaseCommands {
@@ -125,7 +127,7 @@ index c2baf89..a322460 100644
    }
 
    protected async unary<T>(timeoutSeconds: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
-@@ -106,7 +170,10 @@ class BaseCommands {
+@@ -106,7 +172,10 @@ class BaseCommands {
 
    download(path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Buffer> {
      return this.unary(timeoutSeconds, async (signal) => {
@@ -137,7 +139,7 @@ index c2baf89..a322460 100644
        if (download.Encoder === "gzip") {
          return await gunzip(download.Data);
        }
-@@ -120,7 +187,7 @@ class BaseCommands {
+@@ -120,7 +189,7 @@ class BaseCommands {
    upload(path: string, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, async (signal) => {
        const payload = await gzip(data);
@@ -146,7 +148,7 @@ index c2baf89..a322460 100644
          { Path: path, Encoder: "gzip", Data: payload, Request: this.request(timeoutSeconds) },
          { signal },
        );
-@@ -167,7 +234,7 @@ class BaseCommands {
+@@ -167,7 +236,7 @@ class BaseCommands {
 
    processDump(pid: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -155,7 +157,7 @@ index c2baf89..a322460 100644
      );
    }
 
-@@ -213,7 +280,7 @@ class BaseCommands {
+@@ -213,7 +282,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -164,7 +166,7 @@ index c2baf89..a322460 100644
          {
            Pid: pid,
            Data: shellcode,
-@@ -261,7 +328,7 @@ class BaseCommands {
+@@ -261,7 +330,7 @@ class BaseCommands {
 
    executeAssembly(assembly: Buffer, args: string[] = [], process = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -173,7 +175,7 @@ index c2baf89..a322460 100644
          { Assembly: assembly, Arguments: args, Process: process, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -288,7 +355,7 @@ class BaseCommands {
+@@ -288,7 +357,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -182,7 +184,7 @@ index c2baf89..a322460 100644
          { Data: data, ProcessName: processName, Args: args, EntryPoint: entryPoint, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -303,7 +370,7 @@ class BaseCommands {
+@@ -303,7 +372,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -191,7 +193,7 @@ index c2baf89..a322460 100644
          { Data: data, EntryPoint: entrypoint, ProcessName: processName, Args: args, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -312,7 +379,7 @@ class BaseCommands {
+@@ -312,7 +381,7 @@ class BaseCommands {
 
    screenshot(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -200,7 +202,7 @@ index c2baf89..a322460 100644
      );
    }
  }
-@@ -320,16 +387,17 @@ class BaseCommands {
+@@ -320,16 +389,17 @@ class BaseCommands {
  export class InteractiveBeacon extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -220,7 +222,7 @@ index c2baf89..a322460 100644
        BeaconID: this.beaconId,
        SessionID: "",
      };
-@@ -349,7 +417,7 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -349,7 +419,7 @@ export class InteractiveBeacon extends BaseCommands {
        wait: async (waitTimeoutSeconds = timeoutSeconds) => {
          const beaconTask = await waitForBeaconTask(this.taskResult$, taskId, waitTimeoutSeconds);
          const taskContent = await this.unary(waitTimeoutSeconds, (signal) =>
@@ -229,7 +231,7 @@ index c2baf89..a322460 100644
          );
          return Ls.decode(taskContent.Response);
        },
-@@ -365,16 +433,17 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -365,16 +435,17 @@ export class InteractiveBeacon extends BaseCommands {
  export class InteractiveSession extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -249,7 +251,7 @@ index c2baf89..a322460 100644
        BeaconID: "",
        SessionID: this.sessionId,
      };
-@@ -433,8 +502,8 @@ export class SliverClient {
+@@ -433,8 +504,8 @@ export class SliverClient {
    static readonly EVENT_BEACON_TASKRESULT = "beacon-taskresult";
 
    private readonly empty = {};
@@ -260,7 +262,7 @@ index c2baf89..a322460 100644
 
    private eventsAbort: AbortController | null = null;
    private tunnels: TunnelManager | null = null;
-@@ -467,33 +536,56 @@ export class SliverClient {
+@@ -467,33 +538,56 @@ export class SliverClient {
      return `${this.config.lhost}:${this.config.lport}`;
    }
 
@@ -334,7 +336,7 @@ index c2baf89..a322460 100644
 
      this.eventsAbort = new AbortController();
      this.tunnels = new TunnelManager();
-@@ -505,15 +597,21 @@ export class SliverClient {
+@@ -505,15 +599,21 @@ export class SliverClient {
          rpcTarget = this.wireGuardProxy.rpcHost();
        }
 
@@ -361,7 +363,7 @@ index c2baf89..a322460 100644
        this.startEventsStream();
        return this;
      } catch (error) {
-@@ -529,9 +627,11 @@ export class SliverClient {
+@@ -529,9 +629,11 @@ export class SliverClient {
      await this.tunnels?.stop();
      this.tunnels = null;
 
@@ -376,7 +378,7 @@ index c2baf89..a322460 100644
 
      const wireGuardProxy = this.wireGuardProxy;
      this.wireGuardProxy = null;
-@@ -541,14 +641,14 @@ export class SliverClient {
+@@ -541,14 +643,14 @@ export class SliverClient {
    }
 
    private startEventsStream(): void {
@@ -393,7 +395,7 @@ index c2baf89..a322460 100644
          this.eventStreamStateSubject.next({
            status: attempt === 0 ? "connecting" : "retrying",
            attempt,
-@@ -568,7 +668,7 @@ export class SliverClient {
+@@ -568,7 +670,7 @@ export class SliverClient {
            }
          } catch (err) {
            // Abort is expected on disconnect; don't surface it as a retry.
@@ -402,7 +404,7 @@ index c2baf89..a322460 100644
              return;
            }
 
-@@ -597,11 +697,717 @@ export class SliverClient {
+@@ -597,11 +699,721 @@ export class SliverClient {
    }
 
    getSessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Sessions> {
@@ -601,6 +603,11 @@ index c2baf89..a322460 100644
 +    const start = boundedNonNegativeInteger(options.start ?? 0, "Download start");
 +    const stop = boundedNonNegativeInteger(options.stop ?? 0, "Download stop");
 +    const maxLines = boundedNonNegativeInteger(options.maxLines ?? 0, "Download max lines");
++    const fromEnd = options.fromEnd ?? false;
++    if (typeof fromEnd !== "boolean") throw new Error("Download from-end must be a boolean");
++    if (fromEnd && (start !== 0 || stop !== 0 || maxLines !== 0)) {
++      throw new Error("Download from-end cannot be combined with start, stop, or max lines");
++    }
 +    return withTimeoutSignal(timeoutSeconds, async (signal) => {
 +      const response = await this.workbenchArtifactRpc.download(
 +        {
@@ -608,7 +615,7 @@ index c2baf89..a322460 100644
 +          Start: String(start),
 +          Stop: String(stop),
 +          Recurse: false,
-+          MaxBytes: String(maxBytes),
++          MaxBytes: String(fromEnd ? -maxBytes : maxBytes),
 +          MaxLines: String(maxLines),
 +          RestrictedToFile: true,
 +          Request: this.sessionRequest(sessionId, timeoutSeconds),
@@ -653,7 +660,6 @@ index c2baf89..a322460 100644
 +          },
 +          { signal },
 +        );
-+        assertImplantResponse(response.Response?.Err, "Upload");
 +        return response;
 +      } finally {
 +        payload.fill(0);
@@ -1122,7 +1128,7 @@ index c2baf89..a322460 100644
    }
 
    getJobs(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Jobs> {
-@@ -722,11 +1528,11 @@ export class SliverClient {
+@@ -722,11 +1534,11 @@ export class SliverClient {
    }
 
    startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -1136,7 +1142,7 @@ index c2baf89..a322460 100644
    }
 
    generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
-@@ -734,7 +1540,7 @@ export class SliverClient {
+@@ -734,7 +1546,7 @@ export class SliverClient {
    }
 
    generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
@@ -1145,7 +1151,7 @@ index c2baf89..a322460 100644
    }
 
    async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -744,7 +1550,7 @@ export class SliverClient {
+@@ -744,7 +1556,7 @@ export class SliverClient {
 
    generateSpoofMetadata(req: GenerateSpoofMetadataReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
      return withTimeoutSignal(timeoutSeconds, async (signal) => {
@@ -1154,7 +1160,7 @@ index c2baf89..a322460 100644
      });
    }
 
-@@ -755,12 +1561,12 @@ export class SliverClient {
+@@ -755,12 +1567,12 @@ export class SliverClient {
 
    regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
      return withTimeoutSignal(timeoutSeconds, (signal) =>
@@ -1169,7 +1175,7 @@ index c2baf89..a322460 100644
    }
 
    stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -770,7 +1576,7 @@ export class SliverClient {
+@@ -770,7 +1582,7 @@ export class SliverClient {
    }
 
    implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -1178,7 +1184,7 @@ index c2baf89..a322460 100644
    }
 
    deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -784,7 +1590,7 @@ export class SliverClient {
+@@ -784,7 +1596,7 @@ export class SliverClient {
    }
 
    implantProfiles(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -1187,7 +1193,7 @@ index c2baf89..a322460 100644
    }
 
    saveImplantProfile(profile: ImplantProfile, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -799,17 +1605,17 @@ export class SliverClient {
+@@ -799,17 +1611,17 @@ export class SliverClient {
 
    lootAll(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, async (signal) => {
@@ -1208,7 +1214,7 @@ index c2baf89..a322460 100644
    }
 
    lootRemove(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -819,18 +1625,18 @@ export class SliverClient {
+@@ -819,18 +1631,18 @@ export class SliverClient {
    }
 
    lootContent(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -1230,7 +1236,7 @@ index c2baf89..a322460 100644
    }
 
    websiteRemove(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -841,13 +1647,13 @@ export class SliverClient {
+@@ -841,13 +1653,13 @@ export class SliverClient {
 
    websiteAddContent(name: string, contents: Record<string, WebContent>, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, (signal) =>
@@ -1246,7 +1252,7 @@ index c2baf89..a322460 100644
      );
    }
 
-@@ -859,17 +1665,17 @@ export class SliverClient {
+@@ -859,17 +1671,17 @@ export class SliverClient {
 
    // --- High-level helpers (ergonomic wrappers) ---
 
@@ -1267,7 +1273,7 @@ index c2baf89..a322460 100644
      const res = await this.getBeacons(timeoutSeconds);
      return res.Beacons;
    }
-@@ -883,15 +1689,142 @@ export class SliverClient {
+@@ -883,15 +1695,142 @@ export class SliverClient {
      if (!this.tunnels) {
        throw new Error("SliverClient is not connected");
      }

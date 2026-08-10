@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -31,6 +31,14 @@ afterAll(() => {
 afterEach(() => {
   cleanup();
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 const session: SessionSummary = {
   mode: "session",
@@ -68,6 +76,7 @@ const route: SessionWorkspaceRoute = {
   sessionId: session.id,
   backendEpoch: 7,
   connectionIncarnation: 4,
+  targetFingerprint: sessionRef.fingerprint,
 };
 
 function workspaceSnapshot(activeSession = session): SliverSnapshot {
@@ -175,6 +184,7 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Environment" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Registry" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("tab").at(-1)).toHaveAccessibleName("Activity");
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     expect(screen.getByRole("region", { name: "Injected files panel" })).toHaveTextContent("Remote files");
@@ -222,7 +232,30 @@ describe("SessionWorkspacePage", () => {
     expect(listTargetOperations).not.toHaveBeenCalled();
   });
 
-  it("filters Activity to the exact session and backend epoch", async () => {
+  it("quarantines a same-ID session replacement with a different main-issued fingerprint", () => {
+    const { listTargetOperations } = installAPI();
+    const snapshot = workspaceSnapshot();
+    snapshot.targetContext.activeTarget = {
+      ...sessionRef,
+      fingerprint: "b".repeat(64),
+    };
+    snapshot.targetContext.selectableTargets = [snapshot.targetContext.activeTarget];
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={snapshot}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Session workspace unavailable" })).toBeInTheDocument();
+    expect(listTargetOperations).not.toHaveBeenCalled();
+  });
+
+  it("filters Activity to the exact session, backend epoch, and fingerprint", async () => {
     const user = userEvent.setup();
     const otherSession = operation({
       requestId: "request-other-session",
@@ -233,7 +266,11 @@ describe("SessionWorkspacePage", () => {
       target: { ...sessionRef, backendEpoch: 8 },
       backend: { ...operation().backend, epoch: 8 },
     });
-    installAPI([operation(), otherSession, otherEpoch]);
+    const replacement = operation({
+      requestId: "request-replacement",
+      target: { ...sessionRef, fingerprint: "b".repeat(64) },
+    });
+    installAPI([operation(), otherSession, otherEpoch, replacement]);
     const snapshot = workspaceSnapshot();
 
     render(
@@ -251,7 +288,94 @@ describe("SessionWorkspacePage", () => {
     await waitFor(() => {
       expect(screen.queryByRole("row", { name: /request-other-session/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("row", { name: /request-other-epoch/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("row", { name: /request-replacement/i })).not.toBeInTheDocument();
     });
     expect(screen.getByText("1 matching operations loaded")).toBeInTheDocument();
+  });
+
+  it("replaces stale Activity rows on a fresh refresh while append remains bounded", async () => {
+    const user = userEvent.setup();
+    const stale = operation({ requestId: "request-stale" });
+    const current = operation({ requestId: "request-current", updatedAt: "2026-08-09T20:03:01.000Z" });
+    const { listTargetOperations } = installAPI([stale]);
+    const snapshot = workspaceSnapshot();
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={snapshot}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByRole("row", { name: /request-stale/i })).toBeInTheDocument();
+    vi.mocked(listTargetOperations).mockResolvedValueOnce({
+      ok: true,
+      value: { items: [current], page: { limit: 100, total: 1, truncated: false } },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Refresh activity" }));
+    expect(await screen.findByRole("row", { name: /request-current/i })).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /request-stale/i })).not.toBeInTheDocument();
+  });
+
+  it("ignores late results from a same-ID route after its fingerprint is replaced", async () => {
+    const user = userEvent.setup();
+    const oldRequest = deferred<Awaited<ReturnType<SliverDesktopAPI["listTargetOperations"]>>>();
+    const newRequest = deferred<Awaited<ReturnType<SliverDesktopAPI["listTargetOperations"]>>>();
+    const { listTargetOperations } = installAPI();
+    vi.mocked(listTargetOperations)
+      .mockReset()
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockReturnValueOnce(newRequest.promise);
+    const snapshot = workspaceSnapshot();
+    const { rerender } = render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={snapshot}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(listTargetOperations).toHaveBeenCalledTimes(1));
+
+    const replacementRef = { ...sessionRef, fingerprint: "b".repeat(64) };
+    const replacementRoute = { ...route, targetFingerprint: replacementRef.fingerprint };
+    const replacementSnapshot = workspaceSnapshot();
+    replacementSnapshot.targetContext.activeTarget = replacementRef;
+    replacementSnapshot.targetContext.selectableTargets = [replacementRef];
+    rerender(
+      <SessionWorkspacePage
+        route={replacementRoute}
+        session={session}
+        snapshot={replacementSnapshot}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(listTargetOperations).toHaveBeenCalledTimes(2));
+
+    const newest = operation({ requestId: "request-new", target: replacementRef });
+    await act(async () => {
+      newRequest.resolve({
+        ok: true,
+        value: { items: [newest], page: { limit: 100, total: 1, truncated: false } },
+      });
+    });
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByRole("row", { name: /request-new/i })).toBeInTheDocument();
+
+    await act(async () => {
+      oldRequest.resolve({
+        ok: true,
+        value: { items: [operation({ requestId: "request-stale" })], page: { limit: 100, total: 1, truncated: false } },
+      });
+    });
+    expect(screen.getByRole("row", { name: /request-new/i })).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /request-stale/i })).not.toBeInTheDocument();
   });
 });

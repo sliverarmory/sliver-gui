@@ -13,6 +13,7 @@ import type {
   TargetOperationState,
 } from "../shared/operation-contracts.js";
 import { parseTargetOperationInput } from "../shared/operation-contracts.js";
+import type { SessionWorkbenchOperationId } from "../shared/session-contracts.js";
 import type {
   TargetCapabilityId,
   TargetCapabilityState,
@@ -24,6 +25,10 @@ import {
   type CompiledModeBinding,
   type CompiledOperationDescriptor,
 } from "./operation-registry.js";
+import {
+  getSessionOperationDescriptor,
+  type SessionOperationDescriptor,
+} from "./session-operation-registry.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 
 const DEFAULT_TERMINAL_RECORD_LIMIT = 200;
@@ -113,6 +118,7 @@ export interface OperationEngineHost {
 }
 
 interface InternalOperation {
+  sequence: number;
   record: TargetOperationRecord;
   descriptor: CompiledOperationDescriptor;
   dispatchIssued: boolean;
@@ -129,6 +135,13 @@ interface InternalOperation {
   };
 }
 
+interface ExternalOperation {
+  sequence: number;
+  record: TargetOperationRecord;
+  submitted: boolean;
+  descriptor: Readonly<SessionOperationDescriptor>;
+}
+
 type EnvironmentReconciliation = NonNullable<InternalOperation["environmentReconciliation"]>;
 
 /**
@@ -140,11 +153,13 @@ type EnvironmentReconciliation = NonNullable<InternalOperation["environmentRecon
  */
 export class OperationEngine {
   private readonly operations = new Map<string, InternalOperation>();
+  private readonly externalOperations = new Map<string, ExternalOperation>();
   private readonly taskRequests = new Map<string, string>();
   private readonly terminalRecordLimit: number;
   private readonly recoverableTaskRecordLimit: number;
   private readonly recoverableTaskTtlMilliseconds: number;
   private readonly activeOperationLimit: number;
+  private nextSequence = 0;
   private pendingAdmissions = 0;
   private closed = false;
 
@@ -195,6 +210,7 @@ export class OperationEngine {
       const requestId = this.createRequestId();
       const timestamp = this.timestamp();
       internal = {
+        sequence: this.allocateSequence(),
         descriptor,
         dispatchIssued: false,
         cancelWhenTaskKnown: false,
@@ -256,13 +272,138 @@ export class OperationEngine {
     }
   }
 
+  /**
+   * Starts a main-owned journal record for a closed operation surface that is
+   * executed outside the M1 protobuf dispatcher (currently the session
+   * workbench). The caller may only transition this record; renderer input
+   * never supplies request IDs, targets, actors, or backend identity.
+   */
+  beginExternal(
+    operationId: SessionWorkbenchOperationId,
+    target: ResolvedOperationTarget,
+  ): TargetOperationRecord {
+    this.assertOpen();
+    this.pruneTerminalRecords();
+    validateResolvedTarget(target);
+    if (target.ref.mode !== "session") {
+      throw new Error("Session workbench activity must be bound to a session target");
+    }
+    const releaseAdmission = this.reserveActiveOperation();
+    try {
+      const descriptor = getSessionOperationDescriptor(operationId);
+      const requestId = this.createRequestId();
+      const timestamp = this.timestamp();
+      const external: ExternalOperation = {
+        sequence: this.allocateSequence(),
+        submitted: false,
+        descriptor,
+        record: {
+          requestId,
+          operationId,
+          target: cloneTargetRef(target.ref),
+          targetName: boundedText(target.summary.name, MAX_MESSAGE_CHARACTERS),
+          backend: cloneBackend(target.backend),
+          ownership: {
+            origin: "local",
+            ownerWindowId: this.host.ownerWindowId,
+            actor: target.actor ? cloneActor(target.actor) : { attribution: "unknown" },
+          },
+          mode: target.ref.mode,
+          cancellation: descriptor.cancellation,
+          state: "submitting",
+          attempts: 0,
+          progress: progressForState("submitting"),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          message: descriptor.startMessage,
+        },
+      };
+      this.externalOperations.set(requestId, external);
+      this.emitRecord(external.record);
+      return this.publicRecord(external.record);
+    } finally {
+      releaseAdmission();
+    }
+  }
+
+  markExternalSubmitted(requestId: string): TargetOperationRecord {
+    const external = this.requireExternalOperation(requestId);
+    if (isTerminal(external.record.state)) return this.publicRecord(external.record);
+    this.assertOpen();
+    if (!external.submitted) {
+      external.submitted = true;
+      external.record.attempts += 1;
+      external.record.submittedAt = this.timestamp();
+    }
+    this.transitionExternal(external, "running", external.descriptor.startMessage);
+    return this.publicRecord(external.record);
+  }
+
+  finishExternal(
+    requestId: string,
+    state: Extract<
+      TargetOperationState,
+      "completed" | "failed" | "canceled" | "partial" | "outcome-unknown" | "target-disappeared"
+    >,
+  ): TargetOperationRecord {
+    const external = this.requireExternalOperation(requestId);
+    if (isTerminal(external.record.state)) return this.publicRecord(external.record);
+    if (state === "outcome-unknown") {
+      if (!external.submitted) {
+        throw new Error("An operation cannot have an unknown outcome before submission");
+      }
+      if (!external.descriptor.outcomeUnknownAfterSubmission) {
+        throw new Error("This operation cannot have an unknown remote-state outcome");
+      }
+    }
+    external.record.finishedAt = this.timestamp();
+    this.transitionExternal(external, state, externalTerminalMessage(external.descriptor, state));
+    this.pruneTerminalRecords();
+    return this.publicRecord(external.record);
+  }
+
+  /**
+   * Resolve target-loss uncertainty after the already-submitted external RPC
+   * itself returns a decoded, exact success or target rejection. Callers must
+   * separately prove that the backend connection which dispatched the RPC is
+   * still current.
+   */
+  resolveExternalOutcome(
+    requestId: string,
+    state: Extract<TargetOperationState, "completed" | "failed">,
+  ): TargetOperationRecord {
+    const external = this.requireExternalOperation(requestId);
+    if (this.closed) return this.publicRecord(external.record);
+    if (
+      !external.submitted ||
+      !external.descriptor.outcomeUnknownAfterSubmission ||
+      external.record.state !== "outcome-unknown"
+    ) {
+      throw new Error("Only a submitted external operation with an unknown outcome can be recovered");
+    }
+    external.record.finishedAt = this.timestamp();
+    external.record.state = state;
+    external.record.progress = progressForState(state);
+    external.record.updatedAt = this.timestamp();
+    external.record.message = boundedText(
+      externalTerminalMessage(external.descriptor, state),
+      MAX_MESSAGE_CHARACTERS,
+    );
+    this.emitRecord(external.record);
+    this.pruneTerminalRecords();
+    return this.publicRecord(external.record);
+  }
+
   list(request: OperationPageRequest = {}): TargetOperationPage {
     this.pruneTerminalRecords();
     const limit = request.limit ?? DEFAULT_PAGE_LIMIT;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT) {
       throw new TypeError(`Operation page limit must be between 1 and ${MAX_PAGE_LIMIT}`);
     }
-    const records = [...this.operations.values()].reverse();
+    const records = [
+      ...[...this.operations.values()].map(({ record, sequence }) => ({ record, sequence })),
+      ...[...this.externalOperations.values()].map(({ record, sequence }) => ({ record, sequence })),
+    ].sort((left, right) => right.sequence - left.sequence);
     const offset = operationCursorOffset(request.cursor, records);
     const page = records.slice(offset, offset + limit);
     const nextOffset = offset + page.length;
@@ -283,7 +424,12 @@ export class OperationEngine {
   get(requestId: string): TargetOperationRecord | undefined {
     this.pruneTerminalRecords();
     const internal = this.operations.get(requestId);
-    return internal ? this.publicRecord(internal.record) : undefined;
+    const external = this.externalOperations.get(requestId);
+    return internal
+      ? this.publicRecord(internal.record)
+      : external
+        ? this.publicRecord(external.record)
+        : undefined;
   }
 
   findByTask(taskId: string, beaconId: string): TargetOperationRecord | undefined {
@@ -306,6 +452,11 @@ export class OperationEngine {
 
   async cancel(requestId: string): Promise<TargetOperationRecord> {
     this.assertOpen();
+    const external = this.externalOperations.get(requestId);
+    if (external) {
+      if (isTerminal(external.record.state)) return this.publicRecord(external.record);
+      throw new Error("This operation cannot be canceled");
+    }
     const internal = this.requireOperation(requestId);
     if (isTerminal(internal.record.state)) {
       return this.publicRecord(internal.record);
@@ -437,6 +588,21 @@ export class OperationEngine {
         changed += 1;
       }
     }
+    for (const external of [...this.externalOperations.values()]) {
+      if (!isTerminal(external.record.state) && sameTargetIdentity(external.record.target, target)) {
+        const state = external.submitted && external.descriptor.outcomeUnknownAfterSubmission
+          ? "outcome-unknown"
+          : "target-disappeared";
+        external.record.finishedAt = this.timestamp();
+        this.transitionExternal(
+          external,
+          state,
+          externalTerminalMessage(external.descriptor, state),
+        );
+        changed += 1;
+      }
+    }
+    this.pruneTerminalRecords();
     return changed;
   }
 
@@ -451,6 +617,18 @@ export class OperationEngine {
         this.finish(internal, "canceled", "The owning window closed before submission");
       }
     }
+    for (const external of this.externalOperations.values()) {
+      if (isTerminal(external.record.state)) continue;
+      external.record.finishedAt = this.timestamp();
+      this.transitionExternal(
+        external,
+        external.submitted && external.descriptor.outcomeUnknownAfterSubmission ? "outcome-unknown" : "canceled",
+        external.submitted && external.descriptor.outcomeUnknownAfterSubmission
+          ? "The owning window closed before the outcome was confirmed"
+          : "The owning window closed before the operation completed",
+      );
+    }
+    this.pruneTerminalRecords();
   }
 
   private async dispatchWithPolicy(
@@ -536,7 +714,7 @@ export class OperationEngine {
           if (!this.host.claimTask(
             taskId,
             internal.record.requestId,
-            internal.record.operationId,
+            internal.descriptor.id,
             internal.record.target.id,
             internal.pingNonce,
           )) {
@@ -901,9 +1079,13 @@ export class OperationEngine {
   }
 
   private emit(internal: InternalOperation): void {
+    this.emitRecord(internal.record);
+  }
+
+  private emitRecord(record: TargetOperationRecord): void {
     if (!this.host.onChanged) return;
     try {
-      this.host.onChanged(this.publicRecord(internal.record));
+      this.host.onChanged(this.publicRecord(record));
     } catch {
       // A renderer notification failure must not change a server operation.
     }
@@ -931,15 +1113,31 @@ export class OperationEngine {
       this.deleteOperation(requestId);
     }
 
-    const terminalRequestIds = [...this.operations]
-      .filter(([, operation]) =>
-        isTerminal(operation.record.state) &&
-        !(operation.record.state === "outcome-unknown" && operation.record.taskId)
-      )
-      .map(([requestId]) => requestId);
-    const removeCount = terminalRequestIds.length - this.terminalRecordLimit;
-    for (const requestId of terminalRequestIds.slice(0, Math.max(0, removeCount))) {
-      this.deleteOperation(requestId);
+    const terminalRecords = [
+      ...[...this.operations]
+        .filter(([, operation]) =>
+          isTerminal(operation.record.state) &&
+          !(operation.record.state === "outcome-unknown" && operation.record.taskId)
+        )
+        .map(([requestId, operation]) => ({
+          kind: "managed" as const,
+          requestId,
+          updatedAt: operation.record.updatedAt,
+          sequence: operation.sequence,
+        })),
+      ...[...this.externalOperations]
+        .filter(([, operation]) => isTerminal(operation.record.state))
+        .map(([requestId, operation]) => ({
+          kind: "external" as const,
+          requestId,
+          updatedAt: operation.record.updatedAt,
+          sequence: operation.sequence,
+        })),
+    ].sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.sequence - right.sequence);
+    const removeCount = terminalRecords.length - this.terminalRecordLimit;
+    for (const entry of terminalRecords.slice(0, Math.max(0, removeCount))) {
+      if (entry.kind === "external") this.externalOperations.delete(entry.requestId);
+      else this.deleteOperation(entry.requestId);
     }
   }
 
@@ -958,8 +1156,30 @@ export class OperationEngine {
     return internal;
   }
 
+  private requireExternalOperation(requestId: string): ExternalOperation {
+    const external = this.externalOperations.get(requestId);
+    if (!external) throw new Error("Unknown external operation request ID for this window");
+    return external;
+  }
+
+  private transitionExternal(
+    external: ExternalOperation,
+    state: TargetOperationState,
+    message?: string,
+  ): void {
+    if (isTerminal(external.record.state)) return;
+    external.record.state = state;
+    external.record.progress = progressForState(state);
+    external.record.updatedAt = this.timestamp();
+    if (message === undefined) delete external.record.message;
+    else external.record.message = boundedText(message, MAX_MESSAGE_CHARACTERS);
+    this.emitRecord(external.record);
+  }
+
   private reserveActiveOperation(): () => void {
-    const activeCount = [...this.operations.values()].filter(({ record }) => !isTerminal(record.state)).length;
+    const activeCount =
+      [...this.operations.values()].filter(({ record }) => !isTerminal(record.state)).length +
+      [...this.externalOperations.values()].filter(({ record }) => !isTerminal(record.state)).length;
     if (activeCount + this.pendingAdmissions >= this.activeOperationLimit) {
       throw new Error(
         `This window already has ${this.activeOperationLimit} active operations; wait for one to finish before submitting another`,
@@ -979,10 +1199,18 @@ export class OperationEngine {
     if (!TASK_IDENTIFIER.test(requestId)) {
       throw new Error("The operation request ID generator returned an invalid identifier");
     }
-    if (this.operations.has(requestId)) {
+    if (this.operations.has(requestId) || this.externalOperations.has(requestId)) {
       throw new Error("Duplicate operation request ID");
     }
     return requestId;
+  }
+
+  private allocateSequence(): number {
+    this.nextSequence += 1;
+    if (!Number.isSafeInteger(this.nextSequence)) {
+      throw new Error("The operation sequence is exhausted");
+    }
+    return this.nextSequence;
   }
 
   private timestamp(): string {
@@ -1155,6 +1383,29 @@ function successMessage(operationId: TargetOperationInput["operationId"]): strin
   }
 }
 
+function externalTerminalMessage(
+  descriptor: Readonly<SessionOperationDescriptor>,
+  state: Extract<
+    TargetOperationState,
+    "completed" | "failed" | "canceled" | "partial" | "outcome-unknown" | "target-disappeared"
+  >,
+): string {
+  switch (state) {
+    case "completed":
+      return descriptor.completionMessage;
+    case "failed":
+      return "The session operation failed";
+    case "canceled":
+      return "The session operation was canceled";
+    case "partial":
+      return "The session operation completed with incomplete confirmation";
+    case "outcome-unknown":
+      return "The session operation was dispatched, but its outcome could not be confirmed";
+    case "target-disappeared":
+      return "The session target became unavailable before the operation completed";
+  }
+}
+
 function progressForState(state: TargetOperationState): NonNullable<TargetOperationRecord["progress"]> {
   switch (state) {
     case "queued":
@@ -1264,7 +1515,7 @@ function nonceForRequest(targetId: string, operationCount: number): number {
 
 function operationCursorOffset(
   cursor: string | undefined,
-  records: readonly InternalOperation[],
+  records: readonly { record: Pick<TargetOperationRecord, "requestId"> }[],
 ): number {
   if (cursor === undefined) return 0;
   const match = /^operation:v1:([A-Za-z0-9_-]{1,128})$/u.exec(cursor);
