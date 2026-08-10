@@ -295,8 +295,8 @@ Operator-only scope is enforced at the application boundary:
 | Milestone | Outcome | Status | Estimate |
 | --- | --- | --- | --- |
 | M0 | Reproducible protocol baseline and stable current features | **Complete** | 4-6 weeks |
-| M1 | Sessions, beacons, target state, and generic task execution | **Awaiting operator acceptance** | 3-5 weeks |
-| M2 | Core endpoint reconnaissance, files, and processes | Not started | 4-6 weeks |
+| M1 | Sessions, beacons, target state, and generic task execution | **Complete** | 3-5 weeks |
+| M2 | Core endpoint reconnaissance, files, and processes | **In progress** | 4-6 weeks |
 | M3 | Bounded streaming, managed shells, and tunnel lifecycle | Not started | 3-5 weeks |
 | M4 | Execution, post-exploitation, and privilege workflows | Not started | 4-6 weeks |
 | M5 | Forwarding, SOCKS, WireGuard networking, and pivots | Not started | 4-5 weeks |
@@ -310,8 +310,8 @@ Milestone governance is tracked separately from checklist state:
 | Milestone | Owner | Last reviewed | Decision/ADR links | Exit evidence |
 | --- | --- | --- | --- | --- |
 | M0 | Codex / operator accepted | 2026-08-09 | [ADR 0001](docs/adr/0001-platform-support.md) | [M0 verification](docs/m0-verification.md) |
-| M1 | Codex / awaiting operator acceptance | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
-| M2 | Unassigned | 2026-08-09 | TBD | TBD |
+| M1 | Codex / operator accepted | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
+| M2 | Codex / session-first implementation | 2026-08-09 | Session-first scope below | Pending |
 | M3 | Unassigned | 2026-08-09 | TBD | TBD |
 | M4 | Unassigned | 2026-08-09 | TBD | TBD |
 | M5 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -468,7 +468,7 @@ milestone.
 
 ## M1 - Sessions, beacons, targets, and task execution
 
-- Status: **Awaiting operator acceptance**
+- Status: **Complete**
 - Dependencies: M0
 
 ### Authoritative target state
@@ -540,11 +540,18 @@ WireGuard-enabled operator configurations remain deferred from M0.
   selector, and renderer IPC cannot invoke an unregistered or excluded
   administrative method. Package, AI, and MCP adapter-specific enforcement is
   added when those adapters land in M8.
+- [x] The operator tested and explicitly accepted M1 on 2026-08-09, unlocking
+  M2.
 
 ## M2 - Core endpoint workbench
 
-- Status: Not started
+- Status: **In progress**
 - Dependencies: M1
+
+At operator direction, M2 begins with the session interaction workbench and
+session-mode endpoint operations. Beacon-mode M2 support remains part of this
+milestone and is not waived; shared M2 commands and exit criteria stay
+incomplete until their supported beacon paths and cross-mode evidence land.
 
 Read-only inventory and reconnaissance should land before broad mutation and
 execution. File-transfer primitives must land before editors, dump-to-file,

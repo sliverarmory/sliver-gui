@@ -213,7 +213,7 @@
     {
       "id": "implant.background",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -471,7 +471,7 @@
     {
       "id": "implant.close",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -1101,7 +1101,7 @@
     {
       "id": "implant.env.set",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -1140,7 +1140,7 @@
     {
       "id": "implant.env.unset",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -1890,7 +1890,7 @@
     {
       "id": "implant.info",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -1931,7 +1931,7 @@
     {
       "id": "implant.interactive",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -1978,7 +1978,7 @@
     {
       "id": "implant.kill",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -2533,7 +2533,7 @@
     {
       "id": "implant.ping",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -3123,7 +3123,7 @@
     {
       "id": "implant.reconfig",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -3499,7 +3499,7 @@
     {
       "id": "implant.rename",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -4480,7 +4480,7 @@
     {
       "id": "implant.tasks",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -4523,7 +4523,7 @@
     {
       "id": "implant.tasks.cancel",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -4561,7 +4561,7 @@
     {
       "id": "implant.tasks.fetch",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -6017,7 +6017,7 @@
     {
       "id": "server.beacons",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -6059,7 +6059,7 @@
     {
       "id": "server.beacons.prune",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -6095,7 +6095,7 @@
     {
       "id": "server.beacons.rm",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -6129,7 +6129,7 @@
     {
       "id": "server.beacons.watch",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -8016,7 +8016,7 @@
     {
       "id": "server.info",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -9255,7 +9255,7 @@
     {
       "id": "server.sessions",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -9298,7 +9298,7 @@
     {
       "id": "server.sessions.prune",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -10072,7 +10072,7 @@
     {
       "id": "server.use",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -10108,7 +10108,7 @@
     {
       "id": "server.use.beacons",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [
@@ -10142,7 +10142,7 @@
     {
       "id": "server.use.sessions",
       "operatorScope": true,
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M1",
       "restrictionReview": {
         "targetModes": [

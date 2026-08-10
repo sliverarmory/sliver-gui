@@ -1,8 +1,8 @@
 # M1 verification evidence
 
 - Date: 2026-08-09
-- Milestone state: implemented; awaiting operator acceptance
-- M2 state: not started and locked pending M1 acceptance
+- Milestone state: complete; operator accepted
+- M2 state: unlocked and in progress with a session-first scope
 - Local package host: macOS arm64
 - Actual server: loopback `127.0.0.1:53137`, Sliver 1.7.6 dirty
 
@@ -160,6 +160,6 @@ ADR 0001. The local package is unsigned.
 
 ## Operator handoff
 
-The actual loopback Sliver server remains running. The freshly packaged GUI is
-left connected to it for manual M1 verification. M2 must remain not started
-until the operator explicitly accepts M1.
+The operator explicitly accepted M1 on 2026-08-09. The actual loopback Sliver
+server remains available for follow-on verification, and M2 is unlocked with
+the session interaction workbench as its first operator-directed tranche.
