@@ -7,7 +7,7 @@ This report merges deterministic command discovery with reviewed product annotat
 ## Scope decisions
 
 - **operator-workbench.m2-session-first** — complete (M2): The operator accepted and completed the delivered session-first M2 scope on 2026-08-10. Supported beacon execution, complete cross-platform and real-server evidence, a central authoritative capability service, anchor-stable continuation cursors, loot dispositions, and their individual parity rows remain explicitly deferred rather than claimed complete.
-- **operator-streaming.m3-session-shell** — in-progress (M3): The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; same-live-client and same-window reattachment, requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits.
+- **operator-streaming.m3-session-shell** — in-progress (M3): The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits.
 - **operator-transport.wireguard** — deferred (post-M0): WireGuard-enabled operator configurations and packaged helper certification are explicitly deferred; mTLS remains the M0 operator transport baseline. Implant-side WireGuard workflows retain their independently assigned roadmap status.
 
 ## Dynamic audit

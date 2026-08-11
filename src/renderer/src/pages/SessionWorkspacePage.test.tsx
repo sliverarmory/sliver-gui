@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -163,7 +164,12 @@ describe("SessionWorkspacePage", () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
     const filesPanel = vi.fn(() => <section aria-label="Injected files panel">Remote files</section>);
-    const terminalPanel = vi.fn(() => <section aria-label="Injected terminal panel">Managed terminal</section>);
+    const terminalUnmounted = vi.fn();
+    const TerminalProbe = (): React.JSX.Element => {
+      useEffect(() => () => terminalUnmounted(), []);
+      return <section aria-label="Injected terminal panel">Managed terminal</section>;
+    };
+    const terminalPanel = vi.fn(() => <TerminalProbe />);
     installAPI();
     const snapshot = workspaceSnapshot();
 
@@ -197,8 +203,14 @@ describe("SessionWorkspacePage", () => {
     expect(filesPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
 
     await user.click(screen.getByRole("tab", { name: "Terminal" }));
-    expect(screen.getByRole("region", { name: "Injected terminal panel" })).toHaveTextContent("Managed terminal");
+    const mountedTerminal = screen.getByRole("region", { name: "Injected terminal panel" });
+    expect(mountedTerminal).toHaveTextContent("Managed terminal");
     expect(terminalPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
+
+    await user.click(screen.getByRole("tab", { name: "Files" }));
+    expect(terminalUnmounted).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(screen.getByRole("region", { name: "Injected terminal panel" })).toBe(mountedTerminal);
 
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(onBack).toHaveBeenCalledOnce();

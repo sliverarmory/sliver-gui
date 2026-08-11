@@ -43,9 +43,11 @@ configuration files and their private keys stay in the Electron main process.
 - Activity unifies M1 and session-workbench history for the exact session while
   excluding command content, secrets, binary data, and local paths.
 - A session-only managed-shell workspace in the Terminal tab. Operators can
-  start, list, attach, detach, close, and kill shells; use explicit copy and
-  reviewed paste controls; and see lifecycle, pressure, and byte-count metadata
-  without terminal content entering React state, snapshots, Activity, or logs.
+  start, list, select-to-attach, detach, close, and kill shells; pop the exact
+  managed inventory into a main-created dedicated window; use explicit copy
+  and reviewed paste controls; and see lifecycle, pressure, and byte-count
+  metadata without terminal content entering React state, snapshots, Activity,
+  or logs.
 - Session workbench mutations are a closed typed allowlist. Destructive or
   replacement actions use expiring one-use review plans, target and platform
   restrictions are revalidated in Electron main, and local paths and binary
@@ -80,10 +82,12 @@ still duplicate or skip entries between pages.
 M3 does not claim beacon-shell parity because the pinned upstream command tree
 has no beacon shell workflow. It also does not claim forwarding, reverse
 forwarding, or SOCKS; those remain M5. A detached shell can be reattached only
-from the same live client and application window. PTY allocation is requested
-but not confirmed by the upstream protocol, and resize and remote closure are
-best-effort operations. See [M3 verification](docs/m3-verification.md) for the
-exact boundary and deferred evidence.
+from the same live client and its exact owning workspace or main-mediated
+dedicated shell window; generic windows cannot claim or act on it. PTY
+allocation is requested but not confirmed by the upstream protocol, and resize
+and remote closure are best-effort operations. See
+[M3 verification](docs/m3-verification.md) for the exact boundary and deferred
+evidence.
 
 ## Development
 
@@ -267,6 +271,9 @@ packaged executable before launch.
   bounded frames, queues, quotas, and timeouts. The renderer sees opaque
   resource IDs rather than upstream tunnel IDs, and payload bytes never enter
   broad IPC snapshots, React state, Activity, logs, or content-bearing metrics.
+  Pop-out uses a main-owned atomic ownership transfer into one hardened
+  dedicated BrowserWindow; tickets are revoked and reissued for the exact new
+  renderer document rather than made cross-window.
 - `ghostty-web@0.4.0` and its `ghostty-vt.wasm` runtime are pinned and verified
   against packaged provenance before the renderer receives an isolated byte
   copy. The terminal does not fetch code or enable host-effect callbacks;
@@ -290,5 +297,7 @@ packaged executable before launch.
   remote EOF before closing the transport. A missing EOF is not proof that the
   remote process terminated; Kill remains the forceful path.
 - Detached shell scrollback and reattachment stay local to the same live client
-  and application window. Reattachment after application restart, backend
-  replacement, target loss, or another window is not supported.
+  and exact main-owned shell surface. The owning workspace can transfer shells
+  to one hardened dedicated window and re-dock them when it closes; arbitrary
+  windows cannot claim them. Reattachment after application restart, backend
+  replacement, or target loss is not supported.

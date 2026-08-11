@@ -8,6 +8,7 @@ import { _electron as electron, type ElectronApplication, type Page } from "play
 
 import { IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
+import type { SessionShellResourceList } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
 
 const PRIVATE_KEY_SECRET = "FAKE_PRIVATE_KEY_M0_DO_NOT_RENDER";
@@ -143,6 +144,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onSnapshotChanged",
     "onOperationChanged",
     "onBeaconTasksInvalidated",
+    "onSessionShellsChanged",
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
@@ -780,9 +782,31 @@ async function verifyM3SessionTerminal(
     await page.getByText("Shell is not attached", { exact: true }).waitFor();
     assert.equal(await terminal.count(), 0, "detaching must dispose the terminal surface and its payload-bearing state");
 
-    await page.getByRole("button", { name: "Attach", exact: true }).first().click();
+    const detachedInventory = await invokeSliver(page, "listSessionShells", {});
+    assert.equal(detachedInventory.ok, true, detachedInventory.error ?? "managed-shell inventory failed");
+    assert.equal(detachedInventory.value?.resources.length, 1);
+    const [detachedResource] = detachedInventory.value?.resources ?? [];
+    assert.ok(detachedResource, "the detached managed shell must remain in the exact source-window inventory");
+    const shellStartsBeforeSelection = fakeMethodCount(
+      await readFakeState(electronApplication),
+      "startShellSession",
+    );
+    await page
+      .getByRole("complementary", { name: "Managed shell inventory", exact: true })
+      .getByText("Shell 1", { exact: true })
+      .click();
     await page.getByRole("textbox", { name: "Interactive shell for m1-session", exact: true }).waitFor();
     await page.getByText("Attached", { exact: true }).waitFor();
+    assert.equal(
+      fakeMethodCount(await readFakeState(electronApplication), "startShellSession"),
+      shellStartsBeforeSelection,
+      "selecting a detached shell must attach the exact resource without starting another remote shell",
+    );
+    assert.equal(
+      await page.getByRole("button", { name: "Attach", exact: true }).count(),
+      0,
+      "shell selection replaces the former select-then-Attach interaction",
+    );
     const initialPwdCommands = fakeMethodCount(await readFakeState(electronApplication), "shell.command.pwd");
     const reattachedTerminal = page.getByRole("textbox", {
       name: "Interactive shell for m1-session",
@@ -791,6 +815,13 @@ async function verifyM3SessionTerminal(
     await reattachedTerminal.pressSequentially("pwd");
     await reattachedTerminal.press("Enter");
     await waitForFakeMethodCount(electronApplication, "shell.command.pwd", initialPwdCommands + 1);
+
+    await verifyM3ManagedShellPopout(
+      electronApplication,
+      page,
+      detachedResource.resourceId,
+      externalNetworkRequests,
+    );
 
     const initialShellCloses = fakeMethodCount(await readFakeState(electronApplication), "shell.close");
     await page
@@ -817,6 +848,212 @@ async function verifyM3SessionTerminal(
   } finally {
     page.off("request", observeRequest);
   }
+}
+
+async function verifyM3ManagedShellPopout(
+  electronApplication: ElectronApplication,
+  sourcePage: Page,
+  resourceId: string,
+  externalNetworkRequests: string[],
+): Promise<void> {
+  const sourceInventory = await invokeSliver(sourcePage, "listSessionShells", {});
+  assert.equal(sourceInventory.ok, true, sourceInventory.error ?? "source managed-shell inventory failed");
+  assert.deepEqual(sourceInventory.value?.resources.map((resource) => resource.resourceId), [resourceId]);
+
+  const initialWindowCount = electronApplication.windows().length;
+  const initialShellStarts = fakeMethodCount(await readFakeState(electronApplication), "startShellSession");
+  const popoutPageErrors: string[] = [];
+  const observeWindow = (candidate: Page): void => {
+    candidate.on("pageerror", (error) => popoutPageErrors.push(error.message));
+    candidate.on("request", (request) => {
+      if (/^https?:/iu.test(request.url())) externalNetworkRequests.push(request.url());
+    });
+  };
+  electronApplication.on("window", observeWindow);
+
+  let popout: Page | undefined;
+  try {
+    await sourcePage.getByRole("button", { name: "Pop out managed shells", exact: true }).click();
+    popout = await waitForManagedShellWindow(electronApplication, initialWindowCount, sourcePage);
+    await popout.locator('[data-presentation="dedicated"]').waitFor();
+    await popout.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
+    assert.equal(
+      await popout.locator('[aria-label="Workspace navigation"]').count(),
+      0,
+      "the dedicated managed-shell window must not render the full application sidebar",
+    );
+    assert.equal(
+      await popout.getByRole("button", { name: "New window options", exact: true }).count(),
+      0,
+      "the dedicated managed-shell window must not render generic application chrome",
+    );
+    assert.equal(
+      await popout.getByRole("button", { name: "Pop out managed shells", exact: true }).count(),
+      0,
+      "a managed-shell popout must not recursively expose another popout action",
+    );
+
+    const popoutUrl = popout.url();
+    const parsedPopoutUrl = new URL(popoutUrl);
+    assert.equal(parsedPopoutUrl.searchParams.get("surface"), "managed-shells");
+    const decodedPopoutUrl = decodeURIComponent(popoutUrl);
+    const targetFingerprint = (await rendererSnapshot(sourcePage)).targetContext.activeTarget?.fingerprint;
+    for (const forbidden of [
+      resourceId,
+      "m1_session",
+      targetFingerprint,
+      PRIVATE_KEY_SECRET,
+      TOKEN_SECRET,
+      EVENT_SECRET,
+      TARGET_SECRET,
+      TASK_SECRET,
+      M2_ENV_SECRET,
+      M2_FILE_CONTENT,
+      M2_EDITED_CONTENT,
+      M2_SEARCH_PATTERN,
+    ]) {
+      if (forbidden) assert.ok(!decodedPopoutUrl.includes(forbidden), `managed-shell URL exposed ${forbidden}`);
+    }
+    assert.doesNotMatch(
+      decodedPopoutUrl,
+      /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?:$|[^A-Za-z0-9_-])/u,
+      "managed-shell URL must not contain an opaque resource or attachment capability",
+    );
+    assert.equal(await popout.evaluate(() => (
+      globalThis as unknown as { opener?: unknown }
+    ).opener === null), true);
+
+    const popoutPreferences = await electronApplication.evaluate(({ BrowserWindow }, expectedUrl) => {
+      const managedShellWindow = BrowserWindow.getAllWindows().find(
+        (candidate) => candidate.webContents.getURL() === expectedUrl,
+      );
+      if (!managedShellWindow) throw new Error("Expected a dedicated managed-shell BrowserWindow");
+      const preferences = (managedShellWindow.webContents as unknown as {
+        getLastWebPreferences(): Record<string, unknown>;
+      }).getLastWebPreferences();
+      return {
+        contextIsolation: preferences["contextIsolation"],
+        nodeIntegration: preferences["nodeIntegration"],
+        nodeIntegrationInWorker: preferences["nodeIntegrationInWorker"] ?? false,
+        nodeIntegrationInSubFrames: preferences["nodeIntegrationInSubFrames"],
+        sandbox: preferences["sandbox"],
+        webSecurity: preferences["webSecurity"],
+        webviewTag: preferences["webviewTag"],
+      };
+    }, popoutUrl);
+    assert.deepEqual(popoutPreferences, {
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+    });
+
+    const popoutTerminal = popout.getByRole("textbox", {
+      name: "Interactive shell for m1-session",
+      exact: true,
+    });
+    await popoutTerminal.waitFor();
+    await popout.getByText("Attached", { exact: true }).first().waitFor();
+    assert.equal(
+      fakeMethodCount(await readFakeState(electronApplication), "startShellSession"),
+      initialShellStarts,
+      "popping out must move and reattach the exact shell rather than starting a new remote process",
+    );
+
+    const destinationInventory = await invokeSliver(popout, "listSessionShells", {});
+    assert.equal(
+      destinationInventory.ok,
+      true,
+      destinationInventory.error ?? "destination managed-shell inventory failed",
+    );
+    assert.deepEqual(destinationInventory.value?.resources.map((resource) => resource.resourceId), [resourceId]);
+    const emptiedSourceInventory = await invokeSliver(sourcePage, "listSessionShells", {});
+    assert.equal(emptiedSourceInventory.ok, true, emptiedSourceInventory.error ?? "source inventory failed");
+    assert.deepEqual(emptiedSourceInventory.value?.resources, []);
+    assert.equal(
+      await sourcePage.getByRole("textbox", { name: "Interactive shell for m1-session", exact: true }).count(),
+      0,
+      "the source terminal surface must be disposed after ownership moves to the dedicated window",
+    );
+
+    const rejectedSourceAction = await invokeSliver(sourcePage, "actOnSessionShell", {
+      resourceId,
+      action: "close",
+    });
+    assert.equal(rejectedSourceAction.ok, false, "the old source renderer must not act on the transferred shell");
+    assert.match(rejectedSourceAction.error ?? "", /unavailable|window|renderer|resource/iu);
+
+    await installM3HostEffectGuards(popout);
+    const pwdCommands = fakeMethodCount(await readFakeState(electronApplication), "shell.command.pwd");
+    await popoutTerminal.pressSequentially("pwd");
+    await popoutTerminal.press("Enter");
+    await waitForFakeMethodCount(electronApplication, "shell.command.pwd", pwdCommands + 1);
+    const hostileCommands = fakeMethodCount(
+      await readFakeState(electronApplication),
+      "shell.command.hostile-output",
+    );
+    await popoutTerminal.pressSequentially("m3-hostile-output");
+    await popoutTerminal.press("Enter");
+    await waitForFakeMethodCount(
+      electronApplication,
+      "shell.command.hostile-output",
+      hostileCommands + 1,
+    );
+    assert.deepEqual(await readM3HostEffects(popout), emptyM3HostEffects());
+    assert.deepEqual(externalNetworkRequests, [], "the dedicated terminal window must remain network inert");
+
+    await sourcePage.getByRole("button", { name: "Pop out managed shells", exact: true }).click();
+    await waitForWindowCount(electronApplication, initialWindowCount + 1);
+    assert.equal(
+      electronApplication.windows().filter((candidate) => candidate !== sourcePage && !candidate.isClosed()).length,
+      1,
+      "opening the same managed-shell popout twice must focus the existing dedicated window",
+    );
+    assert.deepEqual(await readM3HostEffects(sourcePage), emptyM3HostEffects());
+
+    const shellClosesBeforeRedock = fakeMethodCount(await readFakeState(electronApplication), "shell.close");
+    const popoutClosed = popout.waitForEvent("close");
+    await electronApplication.evaluate(({ BrowserWindow }, expectedUrl) => {
+      const managedShellWindow = BrowserWindow.getAllWindows().find(
+        (candidate) => candidate.webContents.getURL() === expectedUrl,
+      );
+      if (!managedShellWindow) throw new Error("Expected a dedicated managed-shell BrowserWindow to close");
+      managedShellWindow.close();
+    }, popoutUrl);
+    await popoutClosed;
+    popout = undefined;
+    const redockedInventory = await waitForSessionShellInventory(sourcePage, 1);
+    assert.deepEqual(redockedInventory.resources.map((resource) => resource.resourceId), [resourceId]);
+    assert.equal(
+      fakeMethodCount(await readFakeState(electronApplication), "shell.close"),
+      shellClosesBeforeRedock,
+      "closing a dedicated window must re-dock its shell without closing the remote process",
+    );
+    assert.equal(
+      fakeMethodCount(await readFakeState(electronApplication), "startShellSession"),
+      initialShellStarts,
+      "re-docking must not recreate the remote shell",
+    );
+
+    const sourceInventoryPanel = sourcePage.getByRole("complementary", {
+      name: "Managed shell inventory",
+      exact: true,
+    });
+    await sourceInventoryPanel.getByText("Shell 1", { exact: true }).waitFor();
+    await sourceInventoryPanel.getByText("Shell 1", { exact: true }).click();
+    await sourcePage.getByRole("textbox", {
+      name: "Interactive shell for m1-session",
+      exact: true,
+    }).waitFor();
+    await sourcePage.getByText("Attached", { exact: true }).first().waitFor();
+  } finally {
+    electronApplication.off("window", observeWindow);
+    await popout?.close().catch(() => undefined);
+  }
+  assert.deepEqual(popoutPageErrors, []);
 }
 
 interface M3HostEffects {
@@ -1061,6 +1298,64 @@ async function waitForAdditionalWindow(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for inherited application window");
+}
+
+async function waitForManagedShellWindow(
+  electronApplication: ElectronApplication,
+  previousCount: number,
+  sourcePage: Page,
+): Promise<Page> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const pages = electronApplication.windows();
+    for (const candidate of pages) {
+      if (candidate === sourcePage || candidate.isClosed()) continue;
+      const isDedicated = await candidate.locator('[data-presentation="dedicated"]').count().catch(() => 0);
+      if (pages.length > previousCount && isDedicated === 1) return candidate;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for the dedicated managed-shell window");
+}
+
+async function waitForWindowCount(
+  electronApplication: ElectronApplication,
+  expectedCount: number,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = 0;
+  while (Date.now() < deadline) {
+    latest = electronApplication.windows().filter((candidate) => !candidate.isClosed()).length;
+    if (latest === expectedCount) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Application window count did not settle at ${expectedCount}; latest count was ${latest}`);
+}
+
+async function waitForSessionShellInventory(
+  page: Page,
+  expectedCount: number,
+  timeoutMs = 10_000,
+): Promise<SessionShellResourceList> {
+  const deadline = Date.now() + timeoutMs;
+  let latestError = "missing";
+  let latestCount = -1;
+  while (Date.now() < deadline) {
+    const result = await invokeSliver(page, "listSessionShells", {});
+    if (result.ok && result.value) {
+      latestCount = result.value.resources.length;
+      if (latestCount === expectedCount) return result.value;
+      latestError = "none";
+    } else {
+      latestError = result.error ?? "unknown inventory error";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Managed-shell inventory did not settle at ${expectedCount}; ` +
+      `latest count was ${latestCount}, latest error was ${latestError}`,
+  );
 }
 
 async function startAndStopMtlsListener(page: Page): Promise<void> {

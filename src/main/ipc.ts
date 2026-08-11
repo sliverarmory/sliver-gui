@@ -17,9 +17,12 @@ import {
   type IpcInvokeChannel,
   type IpcInvokeResult,
   type ListenerInput,
+  type OpenSessionShellWindowInput,
   type OpenWindowInput,
+  type OperationResult,
   type RemoveSavedConfigInput,
   type SaveProfileInput,
+  type WindowLaunchContext,
 } from "../shared/contracts.js";
 import {
   parseCancelBeaconTaskInput,
@@ -38,6 +41,7 @@ import {
   parsePrepareSessionShellInput,
   parseSessionShellResourceActionInput,
   parseStreamAttachRequest,
+  isOpaqueStreamId,
 } from "../shared/stream-contracts.js";
 import {
   DESTRUCTIVE_TARGET_ACTION_IDS,
@@ -57,6 +61,20 @@ interface TrustedSender {
   contentsId: number;
   rendererProcessId: number;
   rendererFrameToken: string;
+}
+
+export interface TrustedWindowIdentity {
+  readonly contentsId: number;
+  readonly rendererProcessId: number;
+  readonly rendererFrameToken: string;
+}
+
+export interface SessionShellWindowController {
+  open(
+    source: TrustedWindowIdentity,
+    input: OpenSessionShellWindowInput,
+  ): MaybePromise<OperationResult>;
+  claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<WindowLaunchContext>>;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -128,6 +146,7 @@ export function registerIpcHandlers(
   registry: IpcConnectionRegistry,
   createWindow: (inheritFromContentsId?: number) => void,
   rendererUrl: string,
+  sessionShellWindows?: SessionShellWindowController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -149,6 +168,25 @@ export function registerIpcHandlers(
     createWindow(input.inheritConnection ? contentsId : undefined);
     return { ok: true };
   });
+  handleTrusted(
+    IPC.openSessionShellWindow,
+    rendererUrl,
+    parseOpenSessionShellWindowArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, input) => sessionShellWindows?.open(
+      { contentsId, rendererProcessId, rendererFrameToken },
+      input,
+    ) ?? { ok: false, error: "Dedicated managed-shell windows are unavailable" },
+  );
+  handleTrusted(
+    IPC.claimSessionShellWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => sessionShellWindows?.claim({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "This window is not authorized to host managed shells" },
+  );
   handleTrusted(IPC.chooseCertificatePair, rendererUrl, parseNoArguments, ({ sender }) =>
     registry.chooseCertificatePair(sender),
   );
@@ -408,6 +446,24 @@ function parseOpenWindowArguments(args: readonly unknown[]): [input: OpenWindowI
   const value = requireRecord(requireSingleArgument(args, "open-window input"), "open-window input");
   requireExactKeys(value, ["inheritConnection"], "open-window input");
   return [{ inheritConnection: requireBooleanProperty(value, "inheritConnection", "open-window input") }];
+}
+
+function parseOpenSessionShellWindowArguments(
+  args: readonly unknown[],
+): [input: OpenSessionShellWindowInput] {
+  const value = requireRecord(
+    requireSingleArgument(args, "open managed-shell window input"),
+    "open managed-shell window input",
+  );
+  if (Object.keys(value).some((key) => key !== "preferredResourceId")) {
+    throw invalidArguments("open managed-shell window input");
+  }
+  const preferredResourceId = value["preferredResourceId"];
+  if (preferredResourceId === undefined) return [{}];
+  if (typeof preferredResourceId !== "string" || !isOpaqueStreamId(preferredResourceId)) {
+    throw invalidArguments("open managed-shell window input");
+  }
+  return [{ preferredResourceId }];
 }
 
 function parseTargetRefArguments(args: readonly unknown[]): [target: TargetRef] {

@@ -53,6 +53,8 @@ export const IPC_INVOKE = {
   getSnapshot: "sliver:snapshot:get",
   refresh: "sliver:snapshot:refresh",
   openWindow: "sliver:window:open",
+  openSessionShellWindow: "sliver:window:open-session-shells",
+  claimSessionShellWindow: "sliver:window:claim-session-shells",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
   startListener: "sliver:listener:start",
   prepareStopJob: "sliver:job:prepare-stop",
@@ -95,6 +97,7 @@ export const IPC_EVENTS = {
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
+  sessionShellsChanged: "sliver:session-shell:changed",
 } as const;
 
 export const IPC = {
@@ -459,6 +462,18 @@ export interface OpenWindowInput {
   inheritConnection: boolean;
 }
 
+export interface OpenSessionShellWindowInput {
+  readonly preferredResourceId?: string;
+}
+
+export type WindowLaunchContext =
+  | { readonly kind: "workspace" }
+  | {
+      readonly kind: "session-shell";
+      readonly snapshot: SliverSnapshot;
+      readonly preferredResourceId?: string;
+    };
+
 interface IpcInvokeDefinition {
   args: readonly unknown[];
   result: unknown;
@@ -502,6 +517,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.openWindow]: {
     args: [input: OpenWindowInput];
     result: OperationResult;
+  };
+  [IPC.openSessionShellWindow]: {
+    args: [input: OpenSessionShellWindowInput];
+    result: OperationResult;
+  };
+  [IPC.claimSessionShellWindow]: {
+    args: [];
+    result: OperationResult<WindowLaunchContext>;
   };
   [IPC.chooseCertificatePair]: {
     args: [];
@@ -653,6 +676,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
+  onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
 };
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {

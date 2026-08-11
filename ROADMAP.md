@@ -709,7 +709,13 @@ remain M5 work even though they can later reuse this bounded stream foundation.
   the renderer never fetches executable content.
 - [x] Add shell start, list, attach, detach, close, kill, and managed-resource
   switching to the dedicated session Terminal view, with a resizable desktop
-  workspace and a bounded responsive alternative.
+  workspace and a bounded responsive alternative. Selecting a shell now
+  attaches it directly without a second Attach action.
+- [x] Let the owning workspace pop its exact managed-shell inventory into one
+  hardened, main-created dedicated window. Transfer revokes old tickets,
+  preserves opaque resource identity and bounded queues, rebinds exact window,
+  process, frame, and document authority, and re-docks detached resources when
+  the dedicated window closes while the source session remains current.
 - [x] Keep the renderer unable to select a shell path. Electron main chooses
   the reviewed platform default (`/bin/bash` or `powershell.exe`). Linux and
   macOS request a 24x80 PTY but report it as `requested-unconfirmed`; Windows
@@ -718,8 +724,10 @@ remain M5 work even though they can later reuse this bounded stream foundation.
   permits them. Resize remains best effort because upstream sends no
   acknowledgement.
 - [x] Allow intentional detach and one-use reattachment only from the same live
-  client and owning application window. App restart, another window, backend
-  replacement, or target loss cannot reattach the resource.
+  client and exact owning shell surface. A main-mediated transfer can move
+  ownership between the source workspace and its dedicated shell window;
+  arbitrary windows, app restart, backend replacement, or target loss cannot
+  reattach the resource.
 - [x] Add accessible focus behavior plus explicit Copy and Paste controls.
   Multiline or control-character paste requires a content-free confirmation;
   clipboard payloads never enter React state.
@@ -739,7 +747,8 @@ remain M5 work even though they can later reuse this bounded stream foundation.
   process termination. Kill is an explicit forceful action with its own
   confirmation.
 - [x] Never silently recreate a shell after connection loss. Detach preserves
-  only bounded same-window scrollback, which is discarded when the resource
+  only bounded main-owned scrollback for the exact current owner, including an
+  authorized workspace-to-popout transfer; it is discarded when the resource
   closes and cannot be recovered after application restart.
 - [ ] Add port-forward, reverse-port-forward, SOCKS, and later browser-debug
   resources through M5 policy and operator review; they are not M3 parity.
@@ -753,7 +762,9 @@ remain M5 work even though they can later reuse this bounded stream foundation.
   unbounded queues.
 - [x] Automated coverage includes resize, detach/reattach, explicit close and
   kill, stale callbacks, route replacement, target loss, renderer destruction,
-  backend disconnect, Strict Mode remount, and reconnect failure behavior.
+  backend disconnect, Strict Mode remount, reconnect failure behavior,
+  selection-intent inversion, atomic cross-window ownership transfer, stale
+  ticket denial, duplicate-popout focus, and close-time re-docking.
 - [x] Deterministic Electron E2E proves that malicious terminal output cannot
   write the clipboard, open a URI, transfer a file, issue a notification, make
   an external request, or invoke an unconnected host callback.

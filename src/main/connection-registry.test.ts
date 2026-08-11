@@ -4477,6 +4477,357 @@ describe("M3 session shell registry boundary", () => {
     });
   });
 
+  it("claims and returns one exact shell without restarting it or accepting stale renderer authority", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_popout", "popout-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!target) throw new Error("Expected session target ref");
+    await registry.selectTarget(1, target);
+
+    const shell = new FakeShellSession();
+    client.nextShellSession = shell;
+    const opened = await openRegistryShell(registry, 1, 701, "source-document", { requestPty: false });
+    await expect(registry.actOnSessionShell(1, 701, "source-document", {
+      resourceId: opened.plan.resourceId,
+      action: "detach",
+    })).resolves.toMatchObject({ ok: true });
+    const staleAttach = await registry.actOnSessionShell(1, 701, "source-document", {
+      resourceId: opened.plan.resourceId,
+      action: "attach",
+    });
+    if (!staleAttach.ok || !staleAttach.value.attachment) throw new Error("Expected source reattach ticket");
+
+    await expect(registry.claimSessionShellWindow(
+      1,
+      701,
+      "source-document",
+      2,
+      702,
+      "popout-document",
+      target,
+      opened.plan.resourceId,
+    )).resolves.toMatchObject({
+      ok: true,
+      value: {
+        kind: "session-shell",
+        preferredResourceId: opened.plan.resourceId,
+        snapshot: { targetContext: { activeTargetSummary: { id: "session_popout" } } },
+      },
+    });
+    expect(client.startShellSession).toHaveBeenCalledOnce();
+    await expect(registry.listSessionShells(1, 701, "source-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    await expect(registry.listSessionShells(2, 999, "popout-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    await expect(registry.listSessionShells(2, 702, "stale-popout-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    await expect(registry.listSessionShells(2, 702, "popout-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [{ resourceId: opened.plan.resourceId, state: "detached" }] },
+    });
+    await expect(registry.actOnSessionShell(1, 701, "source-document", {
+      resourceId: opened.plan.resourceId,
+      action: "attach",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The stream is unavailable for the current window, backend, target, or renderer",
+    });
+    await expect(registry.actOnSessionShell(2, 999, "popout-document", {
+      resourceId: opened.plan.resourceId,
+      action: "attach",
+    })).resolves.toMatchObject({ ok: false });
+
+    for (const [contentsId, processId, frameToken] of [
+      [1, 701, "source-document"],
+      [2, 702, "popout-document"],
+    ] as const) {
+      const stalePort = new FakeMessagePort();
+      expect(() => registry.attachStream(contentsId, processId, frameToken, {
+        v: STREAM_PROTOCOL_VERSION,
+        attachmentToken: staleAttach.value.attachment!.attachmentToken,
+      }, stalePort.asElectronPort())).toThrow(
+        "The stream is unavailable for the current window, backend, target, or renderer",
+      );
+      expect(stalePort.closed).toBe(true);
+    }
+
+    const destinationAttach = await registry.actOnSessionShell(2, 702, "popout-document", {
+      resourceId: opened.plan.resourceId,
+      action: "attach",
+    });
+    if (!destinationAttach.ok || !destinationAttach.value.attachment) {
+      throw new Error("Expected destination reattach ticket");
+    }
+    const destinationPort = new FakeMessagePort();
+    registry.attachStream(2, 702, "popout-document", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: destinationAttach.value.attachment.attachmentToken,
+    }, destinationPort.asElectronPort());
+    const destinationReady = destinationPort.last("ready");
+    if (!destinationReady) throw new Error("Expected destination ready frame");
+    destinationPort.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "start",
+      streamId: destinationReady.streamId,
+      receiveCreditBytes: 64 * 1_024,
+    });
+    await vi.waitFor(() => expect(destinationPort.last("opened")).toBeDefined());
+    expect(client.startShellSession).toHaveBeenCalledOnce();
+
+    await expect(registry.returnSessionShellWindow(
+      2,
+      702,
+      "popout-document",
+      1,
+      701,
+      "source-document",
+      target,
+    )).resolves.toBe(true);
+    expect(destinationPort.last("closed")).toMatchObject({
+      reason: "operator-detach",
+      disposition: "detached",
+    });
+    await expect(registry.listSessionShells(2, 702, "popout-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    await expect(registry.listSessionShells(1, 701, "source-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [{ resourceId: opened.plan.resourceId, state: "detached" }] },
+    });
+
+    const returnedAttach = await registry.actOnSessionShell(1, 701, "source-document", {
+      resourceId: opened.plan.resourceId,
+      action: "attach",
+    });
+    if (!returnedAttach.ok || !returnedAttach.value.attachment) throw new Error("Expected returned shell ticket");
+    const returnedPort = new FakeMessagePort();
+    registry.attachStream(1, 701, "source-document", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: returnedAttach.value.attachment.attachmentToken,
+    }, returnedPort.asElectronPort());
+    const returnedReady = returnedPort.last("ready");
+    if (!returnedReady) throw new Error("Expected returned ready frame");
+    returnedPort.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "start",
+      streamId: returnedReady.streamId,
+      receiveCreditBytes: 64 * 1_024,
+    });
+    await vi.waitFor(() => expect(returnedPort.last("opened")).toBeDefined());
+    expect(client.startShellSession).toHaveBeenCalledOnce();
+    await registry.actOnSessionShell(1, 701, "source-document", {
+      resourceId: opened.plan.resourceId,
+      action: "close",
+    });
+    expect(shell.close).toHaveBeenCalledOnce();
+  });
+
+  it("tops up an existing dedicated window and accepts a preferred shell already owned there", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_topup", "topup-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0];
+    if (!target) throw new Error("Expected session target ref");
+    await registry.selectTarget(1, target);
+
+    const first = await registry.prepareSessionShell(1, 721, "source-document", { requestPty: false });
+    if (!first.ok) throw new Error(first.error);
+    await expect(registry.claimSessionShellWindow(
+      1, 721, "source-document", 2, 722, "popout-document", target, first.value.resourceId,
+    )).resolves.toMatchObject({
+      ok: true,
+      value: { preferredResourceId: first.value.resourceId },
+    });
+
+    await expect(registry.claimSessionShellWindow(
+      1, 721, "source-document", 2, 722, "popout-document", target, first.value.resourceId,
+    )).resolves.toMatchObject({
+      ok: true,
+      value: { preferredResourceId: first.value.resourceId },
+    });
+
+    const second = await registry.prepareSessionShell(1, 721, "source-document", { requestPty: false });
+    if (!second.ok) throw new Error(second.error);
+    await expect(registry.claimSessionShellWindow(
+      1, 721, "source-document", 2, 722, "popout-document", target, second.value.resourceId,
+    )).resolves.toMatchObject({
+      ok: true,
+      value: { preferredResourceId: second.value.resourceId },
+    });
+    await expect(registry.listSessionShells(1, 721, "source-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    const destination = await registry.listSessionShells(2, 722, "popout-document", {});
+    expect(destination).toMatchObject({ ok: true, value: { resources: expect.any(Array) } });
+    if (!destination.ok) throw new Error(destination.error);
+    expect(destination.value.resources.map(({ resourceId }) => resourceId).sort()).toEqual([
+      first.value.resourceId,
+      second.value.resourceId,
+    ].sort());
+    expect(client.startShellSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves ownership atomic when source identity or preferred shell is stale or foreign", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_popout", "popout-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    registry.registerWindow(3);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+    registry.inheritConnection(1, 3);
+    const sourceTarget = registry.snapshot(1).targetContext.selectableTargets[0];
+    const foreignTarget = registry.snapshot(3).targetContext.selectableTargets[0];
+    if (!sourceTarget || !foreignTarget) throw new Error("Expected shared target refs");
+    await registry.selectTarget(1, sourceTarget);
+    await registry.selectTarget(3, foreignTarget);
+
+    const sourceShell = new FakeShellSession();
+    client.nextShellSession = sourceShell;
+    const source = await openRegistryShell(registry, 1, 711, "source-document", { requestPty: false });
+    const foreignShell = new FakeShellSession();
+    client.nextShellSession = foreignShell;
+    const foreign = await openRegistryShell(registry, 3, 713, "foreign-document", { requestPty: false });
+    const destinationContextBefore = registry.snapshot(2).targetContext;
+
+    for (const [sourceProcessId, sourceFrameToken, preferredResourceId] of [
+      [999, "source-document", source.plan.resourceId],
+      [711, "stale-source-document", source.plan.resourceId],
+      [711, "source-document", foreign.plan.resourceId],
+      [711, "source-document", "Z".repeat(43)],
+    ] as const) {
+      await expect(registry.claimSessionShellWindow(
+        1,
+        sourceProcessId,
+        sourceFrameToken,
+        2,
+        712,
+        "popout-document",
+        sourceTarget,
+        preferredResourceId,
+      )).resolves.toMatchObject({ ok: false });
+      expect(source.port.closed).toBe(false);
+      await expect(registry.listSessionShells(1, 711, "source-document", {})).resolves.toMatchObject({
+        ok: true,
+        value: { resources: [{ resourceId: source.plan.resourceId, state: "attached" }] },
+      });
+      expect(registry.snapshot(2).targetContext).toEqual(destinationContextBefore);
+    }
+    await expect(registry.listSessionShells(3, 713, "foreign-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [{ resourceId: foreign.plan.resourceId, state: "attached" }] },
+    });
+
+    await expect(registry.claimSessionShellWindow(
+      1,
+      711,
+      "source-document",
+      2,
+      712,
+      "popout-document",
+      sourceTarget,
+      source.plan.resourceId,
+    )).resolves.toMatchObject({ ok: true });
+    expect(source.port.last("closed")).toMatchObject({ disposition: "detached" });
+    expect(foreign.port.closed).toBe(false);
+  });
+
+  it("keeps a migrated shell alive across source target switch and close, then closes it on target loss", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      session("session_a", "session-a"),
+      session("session_b", "session-b"),
+    ];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+    const targetA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a");
+    if (!targetA) throw new Error("Expected session A target ref");
+    await registry.selectTarget(1, targetA);
+    const shell = new FakeShellSession();
+    client.nextShellSession = shell;
+    const opened = await openRegistryShell(registry, 1, 721, "source-document", { requestPty: false });
+
+    await expect(registry.claimSessionShellWindow(
+      1,
+      721,
+      "source-document",
+      2,
+      722,
+      "popout-document",
+      targetA,
+      opened.plan.resourceId,
+    )).resolves.toMatchObject({ ok: true });
+    const destinationAttach = await registry.actOnSessionShell(2, 722, "popout-document", {
+      resourceId: opened.plan.resourceId,
+      action: "attach",
+    });
+    if (!destinationAttach.ok || !destinationAttach.value.attachment) {
+      throw new Error("Expected destination ticket");
+    }
+    const destinationPort = new FakeMessagePort();
+    registry.attachStream(2, 722, "popout-document", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: destinationAttach.value.attachment.attachmentToken,
+    }, destinationPort.asElectronPort());
+    const ready = destinationPort.last("ready");
+    if (!ready) throw new Error("Expected destination ready frame");
+    destinationPort.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "start",
+      streamId: ready.streamId,
+      receiveCreditBytes: 64 * 1_024,
+    });
+    await vi.waitFor(() => expect(destinationPort.last("opened")).toBeDefined());
+
+    const currentTargetB = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_b");
+    if (!currentTargetB) throw new Error("Expected current session B target ref");
+    await expect(registry.selectTarget(1, currentTargetB)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTargetSummary: { id: "session_b" } } },
+    });
+    expect(shell.close).not.toHaveBeenCalled();
+    expect(destinationPort.last("closed")).toBeUndefined();
+    await expect(registry.listSessionShells(2, 722, "popout-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [{ resourceId: opened.plan.resourceId, state: "attached" }] },
+    });
+
+    await registry.unregisterWindow(1);
+    expect(shell.close).not.toHaveBeenCalled();
+    expect(destinationPort.last("closed")).toBeUndefined();
+    client.sessionState.Sessions = [session("session_b", "session-b")];
+    await expect(registry.refresh(2)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTarget: null } },
+    });
+    await vi.waitFor(() => expect(shell.close).toHaveBeenCalledOnce());
+    expect(destinationPort.last("closed")).toMatchObject({
+      reason: "target-disappeared",
+      disposition: "closed",
+    });
+  });
+
   it("cleans up A-to-B and background transitions per window, then closes every owner on authoritative loss", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_a", "session-a"), session("session_b", "session-b")];

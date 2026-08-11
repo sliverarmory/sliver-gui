@@ -299,6 +299,7 @@ async function assertPackagedRendererSecurity(
     "onSnapshotChanged",
     "onOperationChanged",
     "onBeaconTasksInvalidated",
+    "onSessionShellsChanged",
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {

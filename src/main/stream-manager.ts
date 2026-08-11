@@ -202,7 +202,7 @@ interface Attachment {
 
 interface StreamResourceRecord {
   readonly resourceId: string;
-  readonly binding: StreamOwnerBinding;
+  binding: StreamOwnerBinding;
   readonly pty: SessionShellPty;
   readonly canResize: boolean;
   readonly createdAtMilliseconds: number;
@@ -487,6 +487,88 @@ export class StreamManager {
     }
   }
 
+  /**
+   * Move every live shell owned by one exact renderer binding to another
+   * application window without exposing a transferable capability to either
+   * renderer. The destination must already be bound to the same backend epoch
+   * and exact session identity.
+   *
+   * Validation and destination admission happen before any ticket,
+   * attachment, resource, or accounting state changes. Once admitted, active
+   * renderer ports are intentionally detached and every old ticket is revoked;
+   * the destination must request a fresh one-use reattachment ticket.
+   */
+  transferSessionShells(
+    sourceBindingInput: StreamOwnerBinding,
+    destinationBindingInput: StreamOwnerBinding,
+  ): readonly string[] {
+    this.assertOpen();
+    const sourceBinding = normalizeBinding(sourceBindingInput);
+    const destinationBinding = normalizeBinding(destinationBindingInput);
+    if (
+      sourceBinding.ownerWindowId === destinationBinding.ownerWindowId ||
+      !sameBackend(sourceBinding, destinationBinding) ||
+      !sameTargetIdentity(sourceBinding.target, destinationBinding.target)
+    ) {
+      throw new StreamAccessError();
+    }
+
+    const resources = [...this.resources.values()].filter((resource) =>
+      resource.state !== "closing" && sameBinding(resource.binding, sourceBinding));
+    if (resources.length === 0) return Object.freeze([]);
+
+    const sourceUsage = this.windowUsage.get(sourceBinding.ownerWindowId);
+    const destinationUsage = this.windowUsage.get(destinationBinding.ownerWindowId) ?? newScopeUsage();
+    const reservedBytes = resources.length * this.limits.reservedBytesPerResource;
+    const queuedBytes = resources.reduce(
+      (total, resource) => total + resource.inputQueuedBytes + resource.outputQueuedBytes,
+      0,
+    );
+    const inFlightBytes = resources.reduce((total, resource) => total + resource.inFlightInputBytes, 0);
+    if (
+      !sourceUsage ||
+      sourceUsage.streamCount < resources.length ||
+      sourceUsage.reservedBytes < reservedBytes ||
+      sourceUsage.queuedBytes < queuedBytes ||
+      sourceUsage.inFlightBytes < inFlightBytes
+    ) {
+      throw new StreamStateError("The source shell accounting is unavailable");
+    }
+    if (
+      destinationUsage.streamCount + resources.length > this.limits.maxStreamsPerWindow ||
+      destinationUsage.reservedBytes + reservedBytes > this.limits.maxReservedBytesPerWindow
+    ) {
+      throw new StreamCapacityError();
+    }
+
+    for (const resource of resources) this.detachResourceForTransfer(resource);
+
+    sourceUsage.streamCount -= resources.length;
+    sourceUsage.reservedBytes -= reservedBytes;
+    sourceUsage.queuedBytes -= queuedBytes;
+    sourceUsage.inFlightBytes -= inFlightBytes;
+    destinationUsage.streamCount += resources.length;
+    destinationUsage.reservedBytes += reservedBytes;
+    destinationUsage.queuedBytes += queuedBytes;
+    destinationUsage.inFlightBytes += inFlightBytes;
+    destinationUsage.highWaterReservedBytes = Math.max(
+      destinationUsage.highWaterReservedBytes,
+      destinationUsage.reservedBytes,
+    );
+    destinationUsage.highWaterQueuedBytes = Math.max(
+      destinationUsage.highWaterQueuedBytes,
+      destinationUsage.queuedBytes,
+    );
+    destinationUsage.highWaterInFlightBytes = Math.max(
+      destinationUsage.highWaterInFlightBytes,
+      destinationUsage.inFlightBytes,
+    );
+    this.windowUsage.set(destinationBinding.ownerWindowId, destinationUsage);
+
+    for (const resource of resources) resource.binding = destinationBinding;
+    return Object.freeze(resources.map((resource) => resource.resourceId));
+  }
+
   listSessionShells(bindingInput: StreamOwnerBinding): SessionShellResourceList {
     const binding = normalizeBinding(bindingInput);
     const resources = [...this.resources.values()]
@@ -737,7 +819,16 @@ export class StreamManager {
       return;
     }
     if (resource.starterPending) {
-      void this.closeResource(resource, "protocol-error");
+      // An opening resource can move between the workspace and its dedicated
+      // window while the one remote start remains pending. The fresh exact
+      // attachment joins that start; it must not submit a second shell RPC.
+      resource.state = "opening";
+      resource.handshakeTimer = managedTimeout(() => {
+        const current = this.resources.get(resource.resourceId);
+        if (current?.state === "opening" && current.starterPending) {
+          void this.closeResource(current, "handshake-timeout");
+        }
+      }, this.limits.handshakeTimeoutMilliseconds);
       return;
     }
 
@@ -960,6 +1051,24 @@ export class StreamManager {
       metrics: this.publicMetrics(resource),
     }, false);
     this.disposeAttachment(resource, attachment);
+    resource.state = "detached";
+    this.touch(resource);
+    this.resetDetachedTimer(resource);
+    this.resetIdleTimer(resource);
+  }
+
+  private detachResourceForTransfer(resource: StreamResourceRecord): void {
+    this.revokeResourceTicket(resource);
+    if (resource.attachment) {
+      this.detachResource(resource, "operator-detach");
+      return;
+    }
+    if (resource.state === "detached" || resource.state === "closing") return;
+
+    clearManagedTimer(resource.handshakeTimer);
+    clearManagedTimer(resource.creditTimer);
+    delete resource.handshakeTimer;
+    delete resource.creditTimer;
     resource.state = "detached";
     this.touch(resource);
     this.resetDetachedTimer(resource);

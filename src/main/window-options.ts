@@ -49,3 +49,22 @@ export function mainWindowOptions(
     webPreferences: secureWebPreferences(preload),
   };
 }
+
+/**
+ * A focused native window for the managed-shell surface. It deliberately uses
+ * the platform title bar instead of the workspace's translucent custom chrome,
+ * so the terminal receives an unambiguous draggable region and native close
+ * semantics on every supported desktop.
+ */
+export function sessionShellWindowOptions(preload: string): BrowserWindowConstructorOptions {
+  return {
+    width: 1180,
+    height: 780,
+    minWidth: 720,
+    minHeight: 540,
+    show: false,
+    title: "Managed Shells",
+    backgroundColor: "#09090b",
+    webPreferences: secureWebPreferences(preload),
+  };
+}

@@ -14,7 +14,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
   const React = await import("react");
   return {
     GhosttyTerminal: React.forwardRef(function MockGhosttyTerminal(
-      props: { ariaLabel?: string; onError?: (error: Error) => void },
+      props: { ariaLabel?: string; onError?: (error: Error) => void; onReady?: () => void },
       ref: React.ForwardedRef<unknown>,
     ) {
       React.useImperativeHandle(ref, () => ({
@@ -22,6 +22,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
         getSelection: shellMocks.getSelection,
         paste: shellMocks.paste,
       }));
+      React.useEffect(() => props.onReady?.(), [props.onReady]);
       return (
         <div aria-label={props.ariaLabel} role="textbox">
           Terminal bytes stay outside React state
@@ -276,7 +277,7 @@ describe("SessionTerminalPanel", () => {
     expect(screen.getByText(/Non-PTY · Windows resize unavailable/u)).toBeInTheDocument();
   });
 
-  it("attaches, reports lifecycle pressure, and routes detach through the managed action API", async () => {
+  it("auto-attaches one detached shell activation, focuses it, and routes detach through the managed action API", async () => {
     const detached = resource({ state: "detached" });
     const transport = fakeTransport();
     shellMocks.open.mockResolvedValue(transport.api);
@@ -290,12 +291,25 @@ describe("SessionTerminalPanel", () => {
     });
     const user = userEvent.setup();
     render(<SessionTerminalPanel route={route} session={session} />);
-    await screen.findByText("Detached");
+    await screen.findByText("Shell 1");
+    expect(screen.getByText("No shell selected")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Attach" })).not.toBeInTheDocument();
+    expect(api.actOnSessionShell).not.toHaveBeenCalled();
 
-    await user.click(screen.getAllByRole("button", { name: "Attach" })[0]!);
+    await user.click(screen.getByText("Shell 1"));
+    await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledTimes(1));
+    expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId, action: "attach" });
     expect(await screen.findByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
+    expect(shellMocks.focus).toHaveBeenCalled();
     act(() => transport.emit({ ...attachedSnapshot(), pressure: "high" }));
     expect(await screen.findByText("Backpressure")).toBeInTheDocument();
+
+    vi.mocked(api.actOnSessionShell).mockClear();
+    shellMocks.focus.mockClear();
+    await user.click(screen.getByText("Shell 1"));
+    expect(api.actOnSessionShell).not.toHaveBeenCalled();
+    expect(transport.detach).not.toHaveBeenCalled();
+    expect(shellMocks.focus).toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Detach" }));
     await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({
@@ -303,6 +317,209 @@ describe("SessionTerminalPanel", () => {
       action: "detach",
     }));
     expect(transport.detach).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes and auto-attaches a main-transferred shell without letting an older inventory win", async () => {
+    const staleInventory = deferred<unknown>();
+    const transferredInventory = deferred<unknown>();
+    const detached = resource({ state: "detached" });
+    const transport = fakeTransport();
+    let notifyShellsChanged: ((preferredResourceId?: string) => void) | undefined;
+    shellMocks.open.mockResolvedValue(transport.api);
+    const listSessionShells = vi.fn()
+      .mockReturnValueOnce(staleInventory.promise)
+      .mockReturnValueOnce(transferredInventory.promise)
+      .mockResolvedValue({ ok: true, value: inventory([detached]) });
+    const api = installAPI({
+      listSessionShells,
+      onSessionShellsChanged: (listener) => {
+        notifyShellsChanged = listener;
+        return vi.fn();
+      },
+      actOnSessionShell: async (_resourceId, action) => ({
+        ok: true,
+        value: {
+          action,
+          resourceId,
+          resource: detached,
+          attachment: {
+            attachmentToken,
+            expiresAt: new Date(Date.now() + 5_000).toISOString(),
+          },
+        },
+      }),
+    });
+
+    render(<SessionTerminalPanel route={route} session={session} />);
+    await waitFor(() => expect(listSessionShells).toHaveBeenCalledOnce());
+    act(() => notifyShellsChanged?.(resourceId));
+    await waitFor(() => expect(listSessionShells).toHaveBeenCalledTimes(2));
+    transferredInventory.resolve({ ok: true, value: inventory([detached]) });
+    staleInventory.resolve({ ok: true, value: inventory([]) });
+
+    expect(await screen.findByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
+    expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId, action: "attach" });
+    await act(async () => undefined);
+    expect(screen.getByText("Shell 1")).toBeInTheDocument();
+    expect(screen.queryByText("No managed shells")).not.toBeInTheDocument();
+  });
+
+  it("coalesces rapid selections, consumes the stale ticket, and adopts only the latest shell", async () => {
+    const firstResourceId = "a".repeat(43);
+    const secondResourceId = "b".repeat(43);
+    const firstToken = "c".repeat(43);
+    const secondToken = "d".repeat(43);
+    const first = resource({
+      resourceId: firstResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:00:00.000Z",
+    });
+    const second = resource({
+      resourceId: secondResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:01:00.000Z",
+    });
+    const firstTicket = deferred<unknown>();
+    const firstOpen = deferred<SessionShellTransport>();
+    const firstTransport = fakeTransport();
+    const secondTransport = fakeTransport();
+    shellMocks.open
+      .mockReturnValueOnce(firstOpen.promise)
+      .mockResolvedValueOnce(secondTransport.api);
+    const api = installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([first, second]) }),
+      actOnSessionShell: async (requestedResourceId, action) => {
+        if (action === "detach") {
+          return { ok: true, value: { action, resourceId: requestedResourceId, resource: first } };
+        }
+        if (requestedResourceId === firstResourceId) return firstTicket.promise;
+        return {
+          ok: true,
+          value: {
+            action,
+            resourceId: secondResourceId,
+            resource: second,
+            attachment: {
+              attachmentToken: secondToken,
+              expiresAt: new Date(Date.now() + 5_000).toISOString(),
+            },
+          },
+        };
+      },
+    });
+    const user = userEvent.setup();
+    render(<SessionTerminalPanel route={route} session={session} />);
+    await screen.findByText("Shell 1");
+
+    await user.click(screen.getByText("Shell 1"));
+    await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({
+      resourceId: firstResourceId,
+      action: "attach",
+    }));
+    await user.click(screen.getByText("Shell 2"));
+    firstTicket.resolve({
+      ok: true,
+      value: {
+        action: "attach",
+        resourceId: firstResourceId,
+        resource: first,
+        attachment: {
+          attachmentToken: firstToken,
+          expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        },
+      },
+    });
+    await waitFor(() => expect(shellMocks.open).toHaveBeenCalledWith(expect.objectContaining({
+      attachmentToken: firstToken,
+      expectedResourceId: firstResourceId,
+    })));
+    expect(shellMocks.open).toHaveBeenCalledTimes(1);
+
+    firstOpen.resolve(firstTransport.api);
+    await waitFor(() => expect(firstTransport.detach).toHaveBeenCalledOnce());
+    await waitFor(() => expect(shellMocks.open).toHaveBeenCalledTimes(2));
+    expect(shellMocks.open).toHaveBeenLastCalledWith(expect.objectContaining({
+      attachmentToken: secondToken,
+      expectedResourceId: secondResourceId,
+    }));
+    expect(await screen.findByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
+    expect(screen.getByText("Shell 2").closest("[role=row]")).toHaveAttribute("aria-selected", "true");
+
+    const attachCalls = api.actOnSessionShell.mock.calls.filter(([input]) => input.action === "attach");
+    expect(attachCalls).toEqual([
+      [{ resourceId: firstResourceId, action: "attach" }],
+      [{ resourceId: secondResourceId, action: "attach" }],
+    ]);
+  });
+
+  it("preserves the latest intent when the active shell is reselected during an in-flight switch", async () => {
+    const firstResourceId = "a".repeat(43);
+    const secondResourceId = "b".repeat(43);
+    const firstToken = "c".repeat(43);
+    const secondToken = "d".repeat(43);
+    const first = resource({
+      resourceId: firstResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:00:00.000Z",
+    });
+    const second = resource({
+      resourceId: secondResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:01:00.000Z",
+    });
+    const detachRequest = deferred<unknown>();
+    const firstTransport = fakeTransport();
+    const replacementTransport = fakeTransport();
+    shellMocks.open
+      .mockResolvedValueOnce(firstTransport.api)
+      .mockResolvedValueOnce(replacementTransport.api);
+    const api = installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([first, second]) }),
+      actOnSessionShell: async (requestedResourceId, action) => {
+        if (action === "detach") return detachRequest.promise;
+        const selected = requestedResourceId === firstResourceId ? first : second;
+        return {
+          ok: true,
+          value: {
+            action,
+            resourceId: requestedResourceId,
+            resource: selected,
+            attachment: {
+              attachmentToken: requestedResourceId === firstResourceId ? firstToken : secondToken,
+              expiresAt: new Date(Date.now() + 5_000).toISOString(),
+            },
+          },
+        };
+      },
+    });
+    const user = userEvent.setup();
+    render(<SessionTerminalPanel route={route} session={session} />);
+    await screen.findByText("Shell 1");
+
+    await user.click(screen.getByText("Shell 1"));
+    await screen.findByRole("textbox", { name: "Interactive shell for payments" });
+    vi.mocked(api.actOnSessionShell).mockClear();
+
+    await user.click(screen.getByText("Shell 2"));
+    await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({
+      resourceId: firstResourceId,
+      action: "detach",
+    }));
+    await user.click(screen.getByText("Shell 1"));
+    detachRequest.resolve({
+      ok: true,
+      value: { action: "detach", resourceId: firstResourceId, resource: first },
+    });
+
+    await waitFor(() => expect(shellMocks.open).toHaveBeenCalledTimes(2));
+    expect(firstTransport.detach).toHaveBeenCalledOnce();
+    expect(shellMocks.open).toHaveBeenLastCalledWith(expect.objectContaining({
+      attachmentToken: firstToken,
+      expectedResourceId: firstResourceId,
+    }));
+    const attachCalls = api.actOnSessionShell.mock.calls.filter(([input]) => input.action === "attach");
+    expect(attachCalls).toEqual([[{ resourceId: firstResourceId, action: "attach" }]]);
+    expect(screen.getByText("Shell 1").closest("[role=row]")).toHaveAttribute("aria-selected", "true");
   });
 
   it.each([
@@ -321,25 +538,35 @@ describe("SessionTerminalPanel", () => {
       copy: "exit outcome may be unknown",
     },
   ])("requires an explicit confirmation before $action", async ({ action, trigger, confirm, heading, copy }) => {
-    const listSessionShells = vi.fn()
-      .mockResolvedValueOnce({ ok: true, value: inventory([resource({ state: "detached" })]) })
-      .mockResolvedValue({ ok: true, value: inventory([]) });
+    const detached = resource({ state: "detached" });
+    const transport = fakeTransport();
+    shellMocks.open.mockResolvedValue(transport.api);
+    const listSessionShells = vi.fn().mockResolvedValue({ ok: true, value: inventory([detached]) });
     const api = installAPI({
       listSessionShells,
       actOnSessionShell: async (_resourceId, requestedAction) => ({
         ok: true,
-        value: { action: requestedAction, resourceId },
+        value: requestedAction === "attach"
+          ? {
+              action: requestedAction,
+              resourceId,
+              resource: detached,
+              attachment: { attachmentToken, expiresAt: new Date(Date.now() + 5_000).toISOString() },
+            }
+          : { action: requestedAction, resourceId },
       }),
     });
     const user = userEvent.setup();
     render(<SessionTerminalPanel route={route} session={session} />);
-    await screen.findByText("Detached");
+    await screen.findByText("Shell 1");
+    await user.click(screen.getByText("Shell 1"));
+    await screen.findByRole("textbox", { name: "Interactive shell for payments" });
 
     await user.click(screen.getByRole("button", { name: trigger }));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent(heading);
     expect(dialog).toHaveTextContent(copy);
-    expect(api.actOnSessionShell).not.toHaveBeenCalled();
+    expect(api.actOnSessionShell).not.toHaveBeenCalledWith({ resourceId, action });
     await user.click(screen.getByRole("button", { name: confirm }));
     await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId, action }));
   });
@@ -409,16 +636,106 @@ describe("SessionTerminalPanel", () => {
     expect(firstTransport.detach).toHaveBeenCalledOnce();
   });
 
-  it("replaces the persistent list with a controlled shell sheet on narrow viewports", async () => {
+  it("attaches a dedicated window preferred resource exactly once", async () => {
+    const detached = resource({ state: "detached" });
+    const transport = fakeTransport();
+    shellMocks.open.mockResolvedValue(transport.api);
+    const api = installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([detached]) }),
+      actOnSessionShell: async (_resourceId, action) => ({
+        ok: true,
+        value: {
+          action,
+          resourceId,
+          resource: detached,
+          attachment: { attachmentToken, expiresAt: new Date(Date.now() + 5_000).toISOString() },
+        },
+      }),
+    });
+    const onPopOut = vi.fn().mockResolvedValue(undefined);
+    const { container, rerender } = render(
+      <SessionTerminalPanel
+        onPopOut={onPopOut}
+        preferredResourceId={resourceId}
+        presentation="dedicated"
+        route={route}
+        session={session}
+      />,
+    );
+
+    expect(await screen.findByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
+    expect(api.actOnSessionShell).toHaveBeenCalledTimes(1);
+    expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId, action: "attach" });
+    expect(container.querySelector("[data-presentation=dedicated]")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Pop out managed shells" })).not.toBeInTheDocument();
+
+    rerender(
+      <SessionTerminalPanel
+        onPopOut={onPopOut}
+        preferredResourceId={resourceId}
+        presentation="dedicated"
+        route={route}
+        session={session}
+      />,
+    );
+    await Promise.resolve();
+    expect(api.actOnSessionShell).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a tooltip-labelled asynchronous pop-out action only in embedded presentation", async () => {
+    const popOutRequest = deferred<void>();
+    const onPopOut = vi.fn(() => popOutRequest.promise);
+    installAPI({ listSessionShells: async () => ({ ok: true, value: inventory([]) }) });
+    const user = userEvent.setup();
+    render(<SessionTerminalPanel onPopOut={onPopOut} route={route} session={session} />);
+    await screen.findByText("No managed shells");
+
+    const trigger = screen.getByRole("button", { name: "Pop out managed shells" });
+    await user.hover(trigger);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Pop out managed shells");
+    await user.click(trigger);
+    await user.click(trigger);
+    expect(onPopOut).toHaveBeenCalledOnce();
+    expect(onPopOut).toHaveBeenCalledWith(undefined);
+
+    popOutRequest.resolve();
+    await waitFor(() => expect(trigger).not.toHaveAttribute("data-pending"));
+  });
+
+  it("keeps the narrow shell sheet open until selection-driven attachment succeeds", async () => {
     setViewport(false);
-    installAPI({ listSessionShells: async () => ({ ok: true, value: inventory([resource()]) }) });
+    const detached = resource({ state: "detached" });
+    const opened = deferred<SessionShellTransport>();
+    const transport = fakeTransport();
+    shellMocks.open.mockReturnValue(opened.promise);
+    installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([detached]) }),
+      actOnSessionShell: async (_resourceId, action) => ({
+        ok: true,
+        value: {
+          action,
+          resourceId,
+          resource: detached,
+          attachment: { attachmentToken, expiresAt: new Date(Date.now() + 5_000).toISOString() },
+        },
+      }),
+    });
     const user = userEvent.setup();
     render(<SessionTerminalPanel route={route} session={session} />);
-    await screen.findByText("Shell is not attached");
+    await screen.findByText("No shell selected");
 
     await user.click(screen.getByRole("button", { name: "Shells" }));
     expect(await screen.findByRole("dialog", { name: "Managed Shells" })).toBeInTheDocument();
     expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+    await user.click(screen.getByText("Shell 1"));
+    await waitFor(() => expect(shellMocks.open).toHaveBeenCalledOnce());
+    expect(screen.getByRole("dialog", { name: "Managed Shells" })).toBeInTheDocument();
+
+    opened.resolve(transport.api);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Managed Shells" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
   });
 });
 
@@ -440,6 +757,7 @@ function installAPI(overrides: {
     resourceId: string,
     action: SessionShellResourceAction,
   ) => Promise<unknown> | unknown;
+  onSessionShellsChanged?: (listener: (preferredResourceId?: string) => void) => () => void;
 } = {}) {
   const getTerminalRuntime = vi.fn(async () => overrides.getTerminalRuntime?.() ?? runtimeResult());
   const listSessionShells = vi.fn(async () => overrides.listSessionShells?.() ?? ({ ok: true, value: inventory([]) }));
@@ -454,6 +772,7 @@ function installAPI(overrides: {
       listSessionShells,
       prepareSessionShell,
       actOnSessionShell,
+      onSessionShellsChanged: overrides.onSessionShellsChanged ?? vi.fn(() => vi.fn()),
     } as unknown as SliverDesktopAPI,
   });
   return { actOnSessionShell, getTerminalRuntime, listSessionShells, prepareSessionShell };

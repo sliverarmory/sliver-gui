@@ -44,6 +44,7 @@ import {
   type SaveProfileInput,
   type SliverSnapshot,
   type StageListenerInput,
+  type WindowLaunchContext,
   SLIVER_PROTOCOL_BASELINE_COMMIT,
 } from "../shared/contracts.js";
 import {
@@ -478,6 +479,133 @@ export class ConnectionRegistry {
     pool.addWindow(targetContentsId);
     this.requireOperationEngine(targetContentsId, target, pool);
     this.pushSnapshot(targetContentsId, target.snapshot);
+  }
+
+  async claimSessionShellWindow(
+    sourceContentsId: number,
+    sourceRendererProcessId: number,
+    sourceRendererFrameToken: string,
+    destinationContentsId: number,
+    destinationRendererProcessId: number,
+    destinationRendererFrameToken: string,
+    expectedTarget: TargetRef,
+    preferredResourceId?: string,
+  ): Promise<OperationResult<WindowLaunchContext>> {
+    try {
+      const source = this.requireWindow(sourceContentsId);
+      const destination = this.requireWindow(destinationContentsId);
+      if (!source.poolKey || source.poolKey !== destination.poolKey) {
+        throw new Error("The managed-shell destination does not share the source backend");
+      }
+      const pool = this.pools.get(source.poolKey);
+      if (!pool || pool.epoch !== expectedTarget.backendEpoch) {
+        throw new Error("The managed-shell backend changed before transfer");
+      }
+      if (
+        !source.activeTarget ||
+        source.activeTarget.mode !== "session" ||
+        !sameTargetRefIdentity(source.activeTarget, expectedTarget)
+      ) {
+        throw new Error("The source session changed before managed shells could be transferred");
+      }
+      assertTargetDomainAuthoritative(pool, "session");
+      const current = pool.targetStore.revalidateTargetRef(expectedTarget, pool.epoch);
+      if (!current || current.target.mode !== "session" || current.target.liveness !== "active") {
+        throw new Error("The source session is no longer active");
+      }
+      const sourceBinding = streamOwnerBinding(
+        source,
+        pool,
+        current.ref,
+        sourceRendererProcessId,
+        sourceRendererFrameToken,
+      );
+      const sourceInventory = this.streams.listSessionShells(sourceBinding);
+      const destinationBinding = streamOwnerBinding(
+        destination,
+        pool,
+        current.ref,
+        destinationRendererProcessId,
+        destinationRendererFrameToken,
+      );
+      const destinationInventory = this.streams.listSessionShells(destinationBinding);
+      if (
+        preferredResourceId !== undefined &&
+        !sourceInventory.resources.some((resource) => resource.resourceId === preferredResourceId) &&
+        !destinationInventory.resources.some((resource) => resource.resourceId === preferredResourceId)
+      ) {
+        throw new Error("The preferred managed shell is no longer owned by either managed-shell surface");
+      }
+      const transferredResourceIds = await this.streams.transferSessionShells(
+        sourceBinding,
+        destinationBinding,
+      );
+      destination.activeTarget = current.ref;
+      destination.snapshot = this.snapshotForWindow(destination, pool.snapshot);
+      this.pushSnapshot(destinationContentsId, destination.snapshot);
+      return {
+        ok: true,
+        value: Object.freeze({
+          kind: "session-shell" as const,
+          snapshot: destination.snapshot,
+          ...(preferredResourceId !== undefined && (
+            transferredResourceIds.includes(preferredResourceId) ||
+            destinationInventory.resources.some((resource) => resource.resourceId === preferredResourceId)
+          )
+            ? { preferredResourceId }
+            : {}),
+        }),
+      };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
+  async returnSessionShellWindow(
+    sourceContentsId: number,
+    sourceRendererProcessId: number,
+    sourceRendererFrameToken: string,
+    destinationContentsId: number,
+    destinationRendererProcessId: number,
+    destinationRendererFrameToken: string,
+    expectedTarget: TargetRef,
+  ): Promise<boolean> {
+    try {
+      const source = this.requireWindow(sourceContentsId);
+      const destination = this.requireWindow(destinationContentsId);
+      if (!source.poolKey || source.poolKey !== destination.poolKey) return false;
+      const pool = this.pools.get(source.poolKey);
+      if (!pool || pool.epoch !== expectedTarget.backendEpoch) return false;
+      if (
+        !source.activeTarget ||
+        !destination.activeTarget ||
+        !sameTargetRefIdentity(source.activeTarget, expectedTarget) ||
+        !sameTargetRefIdentity(destination.activeTarget, expectedTarget)
+      ) return false;
+      const current = pool.targetStore.revalidateTargetRef(expectedTarget, pool.epoch);
+      if (!current || current.target.mode !== "session" || current.target.liveness !== "active") return false;
+      await this.streams.transferSessionShells(
+        streamOwnerBinding(
+          source,
+          pool,
+          current.ref,
+          sourceRendererProcessId,
+          sourceRendererFrameToken,
+        ),
+        streamOwnerBinding(
+          destination,
+          pool,
+          current.ref,
+          destinationRendererProcessId,
+          destinationRendererFrameToken,
+        ),
+      );
+      destination.snapshot = this.snapshotForWindow(destination, pool.snapshot);
+      this.pushSnapshot(destinationContentsId, destination.snapshot);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   snapshot(contentsId: number): SliverSnapshot {
@@ -1312,14 +1440,7 @@ export class ConnectionRegistry {
         const shellPath = input.path ?? (selected.platform === "windows" ? "powershell.exe" : "/bin/bash");
         const rows = normalizedInput.rows ?? 24;
         const columns = normalizedInput.columns ?? 80;
-        const assertSelectedSession = (): RevalidatedTarget => {
-          assertBinding();
-          if (
-            !selected.context.activeTarget ||
-            !sameTargetRefIdentity(selected.context.activeTarget, selectedRef)
-          ) {
-            throw new Error("The active session changed before the shell could be opened");
-          }
+        const assertExactSession = (): RevalidatedTarget => {
           const current = pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch);
           if (!current || current.target.mode !== "session" || current.target.liveness !== "active") {
             throw new Error("The selected session is no longer active");
@@ -1327,7 +1448,7 @@ export class ConnectionRegistry {
           return current;
         };
         const start: StartMainStreamEndpoint = async ({ signal, emitOutput, remoteClose }) => {
-          const current = assertSelectedSession();
+          const current = assertExactSession();
           if (signal.aborted) throw new Error("The shell request was canceled before dispatch");
           const handle = await pool.client.startShellSession(
             current.target.id,
@@ -1369,7 +1490,7 @@ export class ConnectionRegistry {
               await handle.close();
             },
             kill: async (killSignal) => {
-              const exact = assertSelectedSession();
+              const exact = assertExactSession();
               if (killSignal.aborted || signal.aborted) throw new Error("The shell kill request was canceled");
               const response = await pool.client.terminateSessionProcess(exact.target.id, handle.pid, true);
               if (response.Response?.Err?.trim()) throw new Error("The target rejected the shell kill request");

@@ -24,6 +24,8 @@ const invokeArguments = {
   getSnapshot: [],
   refresh: [],
   openWindow: [{ inheritConnection: true }],
+  openSessionShellWindow: [{ preferredResourceId: "R".repeat(43) }],
+  claimSessionShellWindow: [],
   chooseCertificatePair: [],
   startListener: [{ kind: "mtls", host: "127.0.0.1", port: 8888 }],
   prepareStopJob: [7],
@@ -135,6 +137,7 @@ describe("sandboxed preload bridge", () => {
       "onSnapshotChanged",
       "onOperationChanged",
       "onBeaconTasksInvalidated",
+      "onSessionShellsChanged",
       "openStream",
     ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
@@ -155,11 +158,39 @@ describe("sandboxed preload bridge", () => {
       "onSnapshotChanged",
       "onOperationChanged",
       "onBeaconTasksInvalidated",
+      "onSessionShellsChanged",
       "openStream",
     ].sort());
     expect(exposed).not.toHaveProperty("ipcRenderer");
     expect(exposed).not.toHaveProperty("send");
     expect(exposed).not.toHaveProperty("postMessage");
+  });
+
+  it("delivers only exact managed-shell invalidations and removes the listener", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed.onSessionShellsChanged(listener);
+    expect(electronMocks.on).toHaveBeenCalledOnce();
+    const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(channel).toBe(IPC.sessionShellsChanged);
+    if (typeof handler !== "function") throw new Error("Expected the managed-shell event handler");
+
+    handler({} as Electron.IpcRendererEvent, undefined);
+    handler({} as Electron.IpcRendererEvent, "R".repeat(43));
+    handler({} as Electron.IpcRendererEvent, "!".repeat(43));
+    handler({} as Electron.IpcRendererEvent, { resourceId: "R".repeat(43) });
+    expect(listener.mock.calls).toEqual([[undefined], ["R".repeat(43)]]);
+
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
+      IPC.sessionShellsChanged,
+      handler,
+    );
   });
 
   it("hands one port to main and one port to the document using the fixed envelope", () => {

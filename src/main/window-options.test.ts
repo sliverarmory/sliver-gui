@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { mainWindowOptions } from "./window-options.js";
+import { mainWindowOptions, sessionShellWindowOptions } from "./window-options.js";
 
 describe("main window transparency", () => {
   it.each(["darwin", "linux", "win32"] as const)(
@@ -59,5 +59,30 @@ describe("main window transparency", () => {
     });
     expect(linux).not.toHaveProperty("vibrancy");
     expect(linux).not.toHaveProperty("backgroundMaterial");
+  });
+});
+
+describe("managed-shell window", () => {
+  it("uses focused native chrome while preserving the hardened renderer preferences", () => {
+    const options = sessionShellWindowOptions("/absolute/preload.js");
+
+    expect(options).toMatchObject({
+      title: "Managed Shells",
+      width: 1180,
+      height: 780,
+      minWidth: 720,
+      minHeight: 540,
+      show: false,
+      webPreferences: {
+        preload: "/absolute/preload.js",
+        nodeIntegration: false,
+        nodeIntegrationInSubFrames: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        webviewTag: false,
+      },
+    });
+    expect(options).not.toHaveProperty("parent");
   });
 });

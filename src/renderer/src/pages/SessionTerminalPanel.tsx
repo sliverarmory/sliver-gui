@@ -22,6 +22,7 @@ import {
   faRotate,
   faTerminal,
   faTriangleExclamation,
+  faUpRightFromSquare,
 } from "@fortawesome/free-solid-svg-icons";
 
 import type { SessionSummary } from "../../../shared/target-contracts";
@@ -58,9 +59,14 @@ export interface SessionTerminalRoute {
 }
 
 export interface SessionTerminalPanelProps {
+  readonly onPopOut?: (preferredResourceId?: string) => Promise<void>;
+  readonly preferredResourceId?: string;
+  readonly presentation?: SessionTerminalPresentation;
   readonly route: SessionTerminalRoute;
   readonly session: SessionSummary;
 }
+
+export type SessionTerminalPresentation = "embedded" | "dedicated";
 
 type PanelStatus = "loading" | "ready" | "error";
 
@@ -75,6 +81,11 @@ interface PasteReview {
   readonly controlCharacters: number;
 }
 
+interface AttachmentPumpRun {
+  readonly generation: number;
+  readonly promise: Promise<void>;
+}
+
 const initialTransportSnapshot: SessionShellTransportSnapshot = Object.freeze({
   state: "connecting",
   pressure: "normal",
@@ -86,6 +97,9 @@ const initialTransportSnapshot: SessionShellTransportSnapshot = Object.freeze({
 });
 
 export function SessionTerminalPanel({
+  onPopOut,
+  preferredResourceId,
+  presentation = "embedded",
   route,
   session,
 }: SessionTerminalPanelProps): React.JSX.Element {
@@ -93,10 +107,18 @@ export function SessionTerminalPanel({
   const routeIdentityRef = useRef(routeIdentity);
   routeIdentityRef.current = routeIdentity;
   const lifecycleGenerationRef = useRef(0);
+  const inventoryRequestSequenceRef = useRef(0);
   const terminalRef = useRef<GhosttyTerminalHandle>(null);
   const runtimeRef = useRef<TerminalRuntimeAsset | undefined>(undefined);
+  const inventoryRef = useRef<SessionShellResourceList | undefined>(undefined);
   const transportRef = useRef<SessionShellTransport | undefined>(undefined);
   const attachedResourceIdRef = useRef<string | undefined>(undefined);
+  const selectedResourceIdRef = useRef<string | undefined>(undefined);
+  const desiredAttachmentResourceIdRef = useRef<string | undefined>(undefined);
+  const attachmentPumpRef = useRef<AttachmentPumpRun | undefined>(undefined);
+  const startAttachmentPumpRef = useRef<((expectedIdentity: string, generation: number) => void) | undefined>(undefined);
+  const preferredAttachmentKeyRef = useRef<string | undefined>(undefined);
+  const pendingTerminalFocusResourceIdRef = useRef<string | undefined>(undefined);
   const unsubscribeTransportStateRef = useRef<(() => void) | undefined>(undefined);
   const pendingPasteRef = useRef<string | undefined>(undefined);
   const pendingMetricsTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -108,6 +130,7 @@ export function SessionTerminalPanel({
   const [selectedResourceId, setSelectedResourceId] = useState<string>();
   const [isStarting, setIsStarting] = useState(false);
   const [isAttaching, setIsAttaching] = useState(false);
+  const [isPoppingOut, setIsPoppingOut] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [activeAction, setActiveAction] = useState<SessionShellResourceAction>();
   const [pendingResourceAction, setPendingResourceAction] = useState<PendingResourceAction>();
@@ -115,6 +138,7 @@ export function SessionTerminalPanel({
   const [transportSnapshot, setTransportSnapshot] = useState(initialTransportSnapshot);
   const [terminalRevision, setTerminalRevision] = useState(0);
   const [isShellListOpen, setIsShellListOpen] = useState(false);
+  const [transferredPreferredResourceId, setTransferredPreferredResourceId] = useState<string>();
   const isWide = useMediaQuery(WIDE_SHELL_WORKSPACE_QUERY, true);
 
   const isCurrent = useCallback((expectedIdentity = routeIdentity) => (
@@ -128,6 +152,7 @@ export function SessionTerminalPanel({
 
   const releaseTransport = useCallback((disposition: "detach" | "close" = "detach") => {
     clearMetricsTimer();
+    pendingTerminalFocusResourceIdRef.current = undefined;
     unsubscribeTransportStateRef.current?.();
     unsubscribeTransportStateRef.current = undefined;
     const transport = transportRef.current;
@@ -147,27 +172,33 @@ export function SessionTerminalPanel({
     generation = lifecycleGenerationRef.current,
     showProgress = false,
   ): Promise<SessionShellResourceList | undefined> => {
+    const requestSequence = ++inventoryRequestSequenceRef.current;
     if (showProgress) setIsRefreshing(true);
     try {
       const result = await window.sliver.listSessionShells({});
       if (
+        requestSequence !== inventoryRequestSequenceRef.current ||
         generation !== lifecycleGenerationRef.current ||
         !isCurrent(expectedIdentity)
       ) return undefined;
       if (!result.ok || !result.value) throw new Error(result.error ?? "Managed shells are unavailable");
+      inventoryRef.current = result.value;
       setInventory(result.value);
-      setSelectedResourceId((current) => chooseSelectedResource(result.value.resources, current));
+      const nextSelection = chooseSelectedResource(result.value.resources, selectedResourceIdRef.current);
+      selectedResourceIdRef.current = nextSelection;
+      setSelectedResourceId(nextSelection);
       setError(undefined);
       return result.value;
     } catch (caught) {
       if (
+        requestSequence === inventoryRequestSequenceRef.current &&
         generation === lifecycleGenerationRef.current &&
         isCurrent(expectedIdentity)
       ) setError(errorMessage(caught));
       return undefined;
     } finally {
       if (
-        showProgress &&
+        requestSequence === inventoryRequestSequenceRef.current &&
         generation === lifecycleGenerationRef.current &&
         isCurrent(expectedIdentity)
       ) setIsRefreshing(false);
@@ -176,14 +207,22 @@ export function SessionTerminalPanel({
 
   useEffect(() => {
     const generation = ++lifecycleGenerationRef.current;
+    inventoryRequestSequenceRef.current += 1;
     const expectedIdentity = routeIdentity;
     let disposed = false;
     setPanelStatus("loading");
     setError(undefined);
+    inventoryRef.current = undefined;
     setInventory(undefined);
+    selectedResourceIdRef.current = undefined;
     setSelectedResourceId(undefined);
+    setTransferredPreferredResourceId(undefined);
+    desiredAttachmentResourceIdRef.current = undefined;
+    preferredAttachmentKeyRef.current = undefined;
+    pendingTerminalFocusResourceIdRef.current = undefined;
     setIsStarting(false);
     setIsAttaching(false);
+    setIsPoppingOut(false);
     setIsRefreshing(false);
     setActiveAction(undefined);
     setPendingResourceAction(undefined);
@@ -222,6 +261,11 @@ export function SessionTerminalPanel({
     return () => {
       disposed = true;
       lifecycleGenerationRef.current += 1;
+      inventoryRef.current = undefined;
+      selectedResourceIdRef.current = undefined;
+      desiredAttachmentResourceIdRef.current = undefined;
+      preferredAttachmentKeyRef.current = undefined;
+      pendingTerminalFocusResourceIdRef.current = undefined;
       pendingPasteRef.current = undefined;
       releaseTransport();
     };
@@ -264,6 +308,32 @@ export function SessionTerminalPanel({
     }, METRICS_UPDATE_MILLISECONDS);
   }), [clearMetricsTimer, isCurrent, loadInventory]);
 
+  const activateTransport = useCallback(async (
+    transport: SessionShellTransport,
+    resourceId: string,
+    expectedIdentity: string,
+    generation: number,
+  ): Promise<void> => {
+    releaseTransport();
+    transportRef.current = transport;
+    attachedResourceIdRef.current = resourceId;
+    const snapshot = transport.getSnapshot();
+    latestTransportSnapshotRef.current = snapshot;
+    setTransportSnapshot(snapshot);
+    unsubscribeTransportStateRef.current = subscribeToTransportState(
+      transport,
+      expectedIdentity,
+      generation,
+    );
+    selectedResourceIdRef.current = resourceId;
+    setSelectedResourceId(resourceId);
+    pendingTerminalFocusResourceIdRef.current = resourceId;
+    setTerminalRevision((revision) => revision + 1);
+    setIsShellListOpen(false);
+    setTransferredPreferredResourceId(undefined);
+    await loadInventory(expectedIdentity, generation);
+  }, [loadInventory, releaseTransport, subscribeToTransportState]);
+
   const attachWithTicket = useCallback(async (
     resourceId: string,
     attachmentToken: string,
@@ -291,19 +361,7 @@ export function SessionTerminalPanel({
         transport.detach();
         return;
       }
-      transportRef.current = transport;
-      attachedResourceIdRef.current = resourceId;
-      latestTransportSnapshotRef.current = transport.getSnapshot();
-      setTransportSnapshot(transport.getSnapshot());
-      unsubscribeTransportStateRef.current = subscribeToTransportState(
-        transport,
-        expectedIdentity,
-        generation,
-      );
-      setSelectedResourceId(resourceId);
-      setTerminalRevision((revision) => revision + 1);
-      setIsShellListOpen(false);
-      await loadInventory(expectedIdentity, generation);
+      await activateTransport(transport, resourceId, expectedIdentity, generation);
     } catch (caught) {
       if (
         generation === lifecycleGenerationRef.current &&
@@ -315,7 +373,7 @@ export function SessionTerminalPanel({
         isCurrent(expectedIdentity)
       ) setIsAttaching(false);
     }
-  }, [isCurrent, loadInventory, releaseTransport, routeIdentity, subscribeToTransportState]);
+  }, [activateTransport, isCurrent, releaseTransport, routeIdentity]);
 
   const startShell = useCallback(async () => {
     const generation = lifecycleGenerationRef.current;
@@ -349,32 +407,248 @@ export function SessionTerminalPanel({
     }
   }, [attachWithTicket, isCurrent, routeIdentity, session.os]);
 
-  const attachSelected = useCallback(async () => {
-    const resource = inventory?.resources.find((candidate) => candidate.resourceId === selectedResourceId);
-    if (!resource) return;
+  const startAttachmentPump = useCallback((
+    expectedIdentity = routeIdentity,
+    generation = lifecycleGenerationRef.current,
+  ): void => {
+    const existing = attachmentPumpRef.current;
+    if (existing?.generation === generation) return;
+
+    let pump!: Promise<void>;
+    pump = (async () => {
+      setIsAttaching(true);
+      setError(undefined);
+      while (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) {
+        const resourceId = desiredAttachmentResourceIdRef.current;
+        if (!resourceId) break;
+
+        const activeResourceId = attachedResourceIdRef.current;
+        if (activeResourceId === resourceId && transportRef.current) {
+          desiredAttachmentResourceIdRef.current = undefined;
+          pendingTerminalFocusResourceIdRef.current = resourceId;
+          setIsShellListOpen(false);
+          terminalRef.current?.focus();
+          break;
+        }
+
+        if (activeResourceId) {
+          try {
+            const detached = await window.sliver.actOnSessionShell({
+              resourceId: activeResourceId,
+              action: "detach",
+            });
+            if (
+              generation !== lifecycleGenerationRef.current ||
+              !isCurrent(expectedIdentity)
+            ) break;
+            if (!detached.ok) {
+              throw new Error(detached.error ?? "The current managed shell could not be detached");
+            }
+          } catch (caught) {
+            releaseTransport("detach");
+            if (
+              generation === lifecycleGenerationRef.current &&
+              isCurrent(expectedIdentity)
+            ) {
+              desiredAttachmentResourceIdRef.current = undefined;
+              setError(errorMessage(caught));
+              await loadInventory(expectedIdentity, generation);
+            }
+            break;
+          }
+          releaseTransport("detach");
+          await loadInventory(expectedIdentity, generation);
+          continue;
+        }
+
+        const resource = inventoryRef.current?.resources.find((candidate) => candidate.resourceId === resourceId);
+        if (!resource) {
+          if (desiredAttachmentResourceIdRef.current === resourceId) {
+            desiredAttachmentResourceIdRef.current = undefined;
+            setError("The selected managed shell is no longer available");
+          }
+          continue;
+        }
+        if (resource.state !== "detached") {
+          if (desiredAttachmentResourceIdRef.current === resourceId) {
+            desiredAttachmentResourceIdRef.current = undefined;
+            setError(`Only a detached shell can be attached (${shellStateLabel(resource.state)})`);
+          }
+          continue;
+        }
+
+        let attachmentResult;
+        try {
+          attachmentResult = await window.sliver.actOnSessionShell({
+            resourceId,
+            action: "attach",
+          });
+        } catch (caught) {
+          if (
+            generation === lifecycleGenerationRef.current &&
+            isCurrent(expectedIdentity) &&
+            desiredAttachmentResourceIdRef.current === resourceId
+          ) {
+            desiredAttachmentResourceIdRef.current = undefined;
+            setError(errorMessage(caught));
+          }
+          continue;
+        }
+        if (
+          generation !== lifecycleGenerationRef.current ||
+          !isCurrent(expectedIdentity)
+        ) break;
+        if (!attachmentResult.ok || !attachmentResult.value?.attachment) {
+          if (desiredAttachmentResourceIdRef.current === resourceId) {
+            desiredAttachmentResourceIdRef.current = undefined;
+            setError(attachmentResult.error ?? "The managed shell could not be attached");
+          }
+          continue;
+        }
+
+        let transport: SessionShellTransport;
+        try {
+          // Selection freshness is intentionally checked after open. Once main
+          // has issued a one-use ticket it must be consumed even when a newer
+          // row wins, otherwise the resource remains ticket-locked until TTL.
+          transport = await SessionShellTransport.open({
+            attachmentToken: attachmentResult.value.attachment.attachmentToken,
+            expectedResourceId: resourceId,
+            canResize: attachmentResult.value.resource?.canResize ?? resource.canResize,
+            isCurrent: () => (
+              generation === lifecycleGenerationRef.current &&
+              isCurrent(expectedIdentity)
+            ),
+          });
+        } catch (caught) {
+          if (
+            generation === lifecycleGenerationRef.current &&
+            isCurrent(expectedIdentity) &&
+            desiredAttachmentResourceIdRef.current === resourceId
+          ) {
+            desiredAttachmentResourceIdRef.current = undefined;
+            setError(errorMessage(caught));
+          }
+          continue;
+        }
+        if (
+          generation !== lifecycleGenerationRef.current ||
+          !isCurrent(expectedIdentity)
+        ) {
+          transport.detach();
+          break;
+        }
+
+        if (desiredAttachmentResourceIdRef.current !== resourceId) {
+          try {
+            await window.sliver.actOnSessionShell({ resourceId, action: "detach" });
+          } catch {
+            // The local capability is still revoked below. This stale intent
+            // must never surface an error over the latest operator selection.
+          } finally {
+            transport.detach();
+          }
+          if (
+            generation === lifecycleGenerationRef.current &&
+            isCurrent(expectedIdentity)
+          ) await loadInventory(expectedIdentity, generation);
+          continue;
+        }
+
+        await activateTransport(transport, resourceId, expectedIdentity, generation);
+        if (desiredAttachmentResourceIdRef.current === resourceId) {
+          desiredAttachmentResourceIdRef.current = undefined;
+        }
+      }
+    })().finally(() => {
+      if (attachmentPumpRef.current?.promise !== pump) return;
+      attachmentPumpRef.current = undefined;
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) {
+        setIsAttaching(false);
+        if (desiredAttachmentResourceIdRef.current) {
+          queueMicrotask(() => startAttachmentPumpRef.current?.(expectedIdentity, generation));
+        }
+      }
+    });
+    attachmentPumpRef.current = { generation, promise: pump };
+  }, [activateTransport, isCurrent, loadInventory, releaseTransport, routeIdentity]);
+  startAttachmentPumpRef.current = startAttachmentPump;
+
+  const selectAndAttach = useCallback((resourceId: string): void => {
+    selectedResourceIdRef.current = resourceId;
+    setSelectedResourceId(resourceId);
+
+    if (attachedResourceIdRef.current === resourceId && transportRef.current) {
+      pendingTerminalFocusResourceIdRef.current = resourceId;
+      terminalRef.current?.focus();
+      if (attachmentPumpRef.current?.generation === lifecycleGenerationRef.current) {
+        // A detach already in flight cannot be cancelled safely. Preserve the
+        // latest intent so the pump reattaches this resource after detaching it.
+        desiredAttachmentResourceIdRef.current = resourceId;
+        return;
+      }
+      desiredAttachmentResourceIdRef.current = undefined;
+      setIsShellListOpen(false);
+      return;
+    }
+    if (
+      desiredAttachmentResourceIdRef.current === resourceId &&
+      attachmentPumpRef.current?.generation === lifecycleGenerationRef.current
+    ) return;
+
+    const resource = inventoryRef.current?.resources.find((candidate) => candidate.resourceId === resourceId);
+    if (!resource) {
+      setError("The selected managed shell is no longer available");
+      return;
+    }
+    if (resource.state !== "detached") {
+      desiredAttachmentResourceIdRef.current = undefined;
+      setError(`Only a detached shell can be attached (${shellStateLabel(resource.state)})`);
+      return;
+    }
+
+    desiredAttachmentResourceIdRef.current = resourceId;
+    setError(undefined);
+    startAttachmentPump(routeIdentity, lifecycleGenerationRef.current);
+  }, [routeIdentity, startAttachmentPump]);
+
+  useEffect(() => {
+    if (!preferredResourceId || panelStatus !== "ready" || !inventory) return;
+    const key = `${routeIdentity}:${preferredResourceId}`;
+    if (preferredAttachmentKeyRef.current === key) return;
+    if (!inventory.resources.some((resource) => resource.resourceId === preferredResourceId)) return;
+    preferredAttachmentKeyRef.current = key;
+    selectAndAttach(preferredResourceId);
+  }, [inventory, panelStatus, preferredResourceId, routeIdentity, selectAndAttach]);
+
+  useEffect(() => {
+    if (!transferredPreferredResourceId || panelStatus !== "ready" || !inventory) return;
+    if (!inventory.resources.some((resource) => resource.resourceId === transferredPreferredResourceId)) return;
+    setTransferredPreferredResourceId(undefined);
+    selectAndAttach(transferredPreferredResourceId);
+  }, [inventory, panelStatus, selectAndAttach, transferredPreferredResourceId]);
+
+  useEffect(() => window.sliver.onSessionShellsChanged((preferred) => {
     const generation = lifecycleGenerationRef.current;
     const expectedIdentity = routeIdentity;
-    setIsAttaching(true);
+    if (preferred) setTransferredPreferredResourceId(preferred);
+    void loadInventory(expectedIdentity, generation);
+  }), [loadInventory, routeIdentity]);
+
+  const popOut = useCallback(async (): Promise<void> => {
+    if (!onPopOut) return;
+    const generation = lifecycleGenerationRef.current;
+    const expectedIdentity = routeIdentity;
+    setIsPoppingOut(true);
     setError(undefined);
     try {
-      const result = await window.sliver.actOnSessionShell({
-        resourceId: resource.resourceId,
-        action: "attach",
-      });
-      if (
-        generation !== lifecycleGenerationRef.current ||
-        !isCurrent(expectedIdentity)
-      ) return;
-      if (!result.ok || !result.value?.attachment) {
-        throw new Error(result.error ?? "The managed shell could not be attached");
-      }
-      await attachWithTicket(
-        resource.resourceId,
-        result.value.attachment.attachmentToken,
-        resource.canResize,
-        expectedIdentity,
-        generation,
-      );
+      await onPopOut(attachedResourceIdRef.current ?? selectedResourceIdRef.current);
     } catch (caught) {
       if (
         generation === lifecycleGenerationRef.current &&
@@ -384,9 +658,9 @@ export function SessionTerminalPanel({
       if (
         generation === lifecycleGenerationRef.current &&
         isCurrent(expectedIdentity)
-      ) setIsAttaching(false);
+      ) setIsPoppingOut(false);
     }
-  }, [attachWithTicket, inventory?.resources, isCurrent, routeIdentity, selectedResourceId]);
+  }, [isCurrent, onPopOut, routeIdentity]);
 
   const runResourceAction = useCallback(async (
     resourceId: string,
@@ -478,9 +752,11 @@ export function SessionTerminalPanel({
     [...(inventory?.resources ?? [])].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
   ), [inventory?.resources]);
   const selectedResource = resources.find((resource) => resource.resourceId === selectedResourceId);
+  const isDedicated = presentation === "dedicated";
   const activeTransport = transportRef.current;
+  const activeResourceId = attachedResourceIdRef.current;
   const runtime = runtimeRef.current;
-  const terminal = activeTransport && runtime ? (
+  const terminal = activeTransport && runtime && activeResourceId === selectedResourceId ? (
     <GhosttyTerminal
       key={terminalRevision}
       ref={terminalRef}
@@ -488,6 +764,15 @@ export function SessionTerminalPanel({
       className="min-h-[360px]"
       transport={activeTransport}
       wasmBytes={runtime.bytes}
+      onReady={() => {
+        if (
+          pendingTerminalFocusResourceIdRef.current !== activeResourceId ||
+          attachedResourceIdRef.current !== activeResourceId ||
+          !isCurrent()
+        ) return;
+        pendingTerminalFocusResourceIdRef.current = undefined;
+        terminalRef.current?.focus();
+      }}
       onError={(terminalError) => {
         if (!isCurrent()) return;
         setError(terminalError.message);
@@ -506,13 +791,14 @@ export function SessionTerminalPanel({
       isLoading={panelStatus === "loading"}
       resources={resources}
       selectedResourceId={selectedResourceId}
-      onSelect={setSelectedResourceId}
+      isInteractionDisabled={isStarting}
+      onSelect={selectAndAttach}
     />
   );
 
   const terminalSurface = (
     <TerminalSurface
-      activeResourceId={attachedResourceIdRef.current}
+      activeResourceId={activeResourceId}
       error={error}
       isAttaching={isAttaching}
       isStarting={isStarting}
@@ -522,7 +808,6 @@ export function SessionTerminalPanel({
       session={session}
       terminal={terminal}
       transportSnapshot={transportSnapshot}
-      onAttach={() => void attachSelected()}
       onCopy={() => void copySelection()}
       onDetach={() => {
         if (selectedResource) void runResourceAction(selectedResource.resourceId, "detach");
@@ -537,7 +822,13 @@ export function SessionTerminalPanel({
   );
 
   return (
-    <section className="min-w-0 overflow-hidden rounded-2xl bg-surface" aria-labelledby="session-shells-heading">
+    <section
+      aria-labelledby="session-shells-heading"
+      className={isDedicated
+        ? "flex h-screen min-h-0 min-w-0 flex-col overflow-hidden bg-surface"
+        : "min-w-0 overflow-hidden rounded-2xl bg-surface"}
+      data-presentation={presentation}
+    >
       <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faTerminal} /></span>
@@ -547,6 +838,22 @@ export function SessionTerminalPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {onPopOut && !isDedicated ? (
+            <Tooltip delay={250}>
+              <Button
+                aria-label="Pop out managed shells"
+                isDisabled={isStarting || isAttaching}
+                isIconOnly
+                isPending={isPoppingOut}
+                size="sm"
+                variant="ghost"
+                onPress={() => void popOut()}
+              >
+                <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} />
+              </Button>
+              <Tooltip.Content>Pop out managed shells</Tooltip.Content>
+            </Tooltip>
+          ) : null}
           <Tooltip delay={250}>
             <Button
               aria-label="Refresh managed shells"
@@ -560,7 +867,13 @@ export function SessionTerminalPanel({
             </Button>
             <Tooltip.Content>Refresh managed shells</Tooltip.Content>
           </Tooltip>
-          <Button isPending={isStarting} size="sm" variant="primary" onPress={() => void startShell()}>
+          <Button
+            isDisabled={isAttaching || isPoppingOut}
+            isPending={isStarting}
+            size="sm"
+            variant="primary"
+            onPress={() => void startShell()}
+          >
             New shell
           </Button>
         </div>
@@ -573,7 +886,10 @@ export function SessionTerminalPanel({
       ) : null}
 
       {isWide ? (
-        <div className="h-[min(68vh,720px)] min-h-[520px] overflow-hidden bg-background">
+        <div className={isDedicated
+          ? "min-h-0 flex-1 overflow-hidden bg-background"
+          : "h-[min(68vh,720px)] min-h-[520px] overflow-hidden bg-background"}
+        >
           <Resizable autoSaveId="sliver:session-shell-workspace" orientation="horizontal">
             <Resizable.Panel
               defaultSize="288px"
@@ -588,7 +904,9 @@ export function SessionTerminalPanel({
           </Resizable>
         </div>
       ) : (
-        <div className="min-h-[520px] bg-background">{terminalSurface}</div>
+        <div className={isDedicated ? "min-h-0 flex-1 bg-background" : "min-h-[520px] bg-background"}>
+          {terminalSurface}
+        </div>
       )}
 
       {!isWide ? (
@@ -629,12 +947,14 @@ export function SessionTerminalPanel({
 
 function ShellList({
   aggregate,
+  isInteractionDisabled,
   isLoading,
   resources,
   selectedResourceId,
   onSelect,
 }: {
   aggregate: SessionShellResourceList | undefined;
+  isInteractionDisabled: boolean;
   isLoading: boolean;
   resources: readonly SessionShellResource[];
   selectedResourceId: string | undefined;
@@ -654,6 +974,7 @@ function ShellList({
       <ScrollShadow className="min-h-0 flex-1 overflow-y-auto px-2 pb-2" hideScrollBar={false}>
         <ListView
           aria-label="Managed shells"
+          disabledKeys={isInteractionDisabled ? resources.map((resource) => resource.resourceId) : []}
           items={resources}
           renderEmptyState={() => (
             <EmptyState className="min-h-64 px-4 py-10" size="sm">
@@ -678,7 +999,11 @@ function ShellList({
           }}
         >
           {(resource) => (
-            <ListView.Item id={resource.resourceId} textValue={shellStateLabel(resource.state)}>
+            <ListView.Item
+              id={resource.resourceId}
+              textValue={shellListTitle(resources, resource)}
+              onPress={() => onSelect(resource.resourceId)}
+            >
               <ListView.ItemContent>
                 <span aria-hidden className={`size-2 shrink-0 rounded-full ${shellStateDot(resource.state)}`} />
                 <div className="flex min-w-0 flex-col">
@@ -713,7 +1038,6 @@ function TerminalSurface({
   session,
   terminal,
   transportSnapshot,
-  onAttach,
   onCopy,
   onDetach,
   onFocus,
@@ -733,7 +1057,6 @@ function TerminalSurface({
   session: SessionSummary;
   terminal: React.ReactNode;
   transportSnapshot: SessionShellTransportSnapshot;
-  onAttach: () => void;
   onCopy: () => void;
   onDetach: () => void;
   onFocus: () => void;
@@ -758,8 +1081,16 @@ function TerminalSurface({
                 {selectedResource ? "Interactive Session Shell" : "Terminal"}
               </p>
               {selectedResource ? (
-                <Chip color={shellStateColor(isAttached ? transportSnapshot.state : selectedResource.state)} size="sm" variant="soft">
-                  {isAttached ? transportStateLabel(transportSnapshot.state) : shellStateLabel(selectedResource.state)}
+                <Chip
+                  color={shellStateColor(isAttached ? transportSnapshot.state : isAttaching ? "connecting" : selectedResource.state)}
+                  size="sm"
+                  variant="soft"
+                >
+                  {isAttached
+                    ? transportStateLabel(transportSnapshot.state)
+                    : isAttaching
+                      ? "Connecting"
+                      : shellStateLabel(selectedResource.state)}
                 </Chip>
               ) : null}
               {isAttached && transportSnapshot.pressure === "high" ? (
@@ -779,8 +1110,6 @@ function TerminalSurface({
               <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
               <Button isDisabled={isBusy} size="sm" variant="secondary" onPress={onDetach}>Detach</Button>
             </>
-          ) : selectedResource ? (
-            <Button isPending={isAttaching} size="sm" variant="primary" onPress={onAttach}>Attach</Button>
           ) : null}
           {selectedResource ? (
             <>
@@ -815,6 +1144,8 @@ function TerminalSurface({
               <EmptyState.Title>
                 {panelStatus === "loading"
                   ? "Loading terminal runtime"
+                  : isAttaching && selectedResource
+                    ? "Attaching shell"
                   : selectedResource
                     ? "Shell is not attached"
                     : "No shell selected"}
@@ -822,15 +1153,15 @@ function TerminalSurface({
               <EmptyState.Description className="max-w-md text-pretty">
                 {panelStatus === "loading"
                   ? "Verifying the pinned Ghostty runtime and this window’s managed streams…"
+                  : isAttaching && selectedResource
+                    ? "Opening the selected managed shell and its bounded terminal stream…"
                   : selectedResource
-                    ? "Attach this managed shell to resume its bounded terminal stream."
+                    ? "Select this shell again from the managed shell inventory to retry attachment."
                     : "Start a session shell or select an existing detached shell from the inventory."}
               </EmptyState.Description>
             </EmptyState.Header>
             <EmptyState.Content>
-              {selectedResource ? (
-                <Button isPending={isAttaching} onPress={onAttach}>Attach</Button>
-              ) : panelStatus !== "loading" ? (
+              {!selectedResource && panelStatus !== "loading" ? (
                 <Button isPending={isStarting} onPress={onStart}>New shell</Button>
               ) : null}
             </EmptyState.Content>
@@ -1019,9 +1350,7 @@ function chooseSelectedResource(
   current: string | undefined,
 ): string | undefined {
   if (current && resources.some((resource) => resource.resourceId === current)) return current;
-  return resources.find((resource) => resource.state === "attached")?.resourceId ??
-    resources.find((resource) => resource.state === "detached")?.resourceId ??
-    resources[0]?.resourceId;
+  return undefined;
 }
 
 function shellListTitle(resources: readonly SessionShellResource[], resource: SessionShellResource): string {

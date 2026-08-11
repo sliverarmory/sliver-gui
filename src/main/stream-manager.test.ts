@@ -225,6 +225,332 @@ describe("StreamManager admission and attachment capabilities", () => {
   });
 });
 
+describe("StreamManager explicit window ownership transfer", () => {
+  it("moves attached, detached, and prepared shells with live accounting and supports reverse transfer", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    const source = binding();
+    const destination = binding({
+      ownerWindowId: 2,
+      rendererProcessId: 22,
+      rendererFrameToken: "frame-popout",
+      rendererDocumentId: "document-popout",
+      connectionIncarnation: 1,
+    });
+    const writeGate = deferred<void>();
+    const activeEndpoint = endpointHarness({ write: () => writeGate.promise });
+    let activeContext: StartMainStreamEndpointContext | undefined;
+    const active = await openShell(manager, scheduler, {
+      binding: source,
+      receiveCreditBytes: 1,
+      starter: async (context) => {
+        activeContext = context;
+        return activeEndpoint.endpoint;
+      },
+    });
+    active.port.send(dataFrame(active.streamId, 0, arrayBuffer([1, 2, 3, 4])));
+    expect(activeContext?.emitOutput(Uint8Array.from([5, 6, 7, 8]))).toBe(true);
+    await scheduler.flush();
+
+    const detached = await openShell(manager, scheduler, { binding: source });
+    detached.port.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "close",
+      streamId: detached.streamId,
+      disposition: "detach",
+    });
+    const prepared = manager.prepareSessionShell(preparation(source, resolvedStarter()));
+    const backendBefore = manager.metricsForBackend({ backendId: source.backendId, backendEpoch: source.backendEpoch });
+    const processBefore = manager.metricsForProcess();
+    expect(manager.metricsForWindow(source.ownerWindowId)).toMatchObject({
+      activeStreams: 3,
+      attachedStreams: 1,
+      detachedStreams: 1,
+      reservedBytes: 192,
+      queuedBytes: 4,
+      inFlightBytes: 4,
+    });
+
+    const transferred = manager.transferSessionShells(source, destination);
+    expect(Object.isFrozen(transferred)).toBe(true);
+    expect(new Set(transferred)).toEqual(new Set([active.resourceId, detached.resourceId, prepared.resourceId]));
+    expect(lastFrame(active.port, "closed")).toMatchObject({
+      reason: "operator-detach",
+      disposition: "detached",
+    });
+    expect(manager.listSessionShells(source).resources).toEqual([]);
+    expect(manager.listSessionShells(destination).resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceId: active.resourceId, state: "detached" }),
+      expect.objectContaining({ resourceId: detached.resourceId, state: "detached" }),
+      expect.objectContaining({ resourceId: prepared.resourceId, state: "detached" }),
+    ]));
+    expect(manager.metricsForWindow(source.ownerWindowId)).toMatchObject({
+      activeStreams: 0,
+      reservedBytes: 0,
+      queuedBytes: 0,
+      inFlightBytes: 0,
+    });
+    expect(manager.metricsForWindow(destination.ownerWindowId)).toMatchObject({
+      activeStreams: 3,
+      attachedStreams: 0,
+      detachedStreams: 3,
+      reservedBytes: 192,
+      queuedBytes: 4,
+      inFlightBytes: 4,
+    });
+    expect(manager.metricsForBackend({ backendId: source.backendId, backendEpoch: source.backendEpoch }))
+      .toMatchObject({
+        activeStreams: backendBefore.activeStreams,
+        reservedBytes: backendBefore.reservedBytes,
+        queuedBytes: backendBefore.queuedBytes,
+        inFlightBytes: backendBefore.inFlightBytes,
+        openedStreams: backendBefore.openedStreams,
+        closedStreams: backendBefore.closedStreams,
+      });
+    expect(manager.metricsForProcess()).toMatchObject({
+      activeStreams: processBefore.activeStreams,
+      reservedBytes: processBefore.reservedBytes,
+      queuedBytes: processBefore.queuedBytes,
+      inFlightBytes: processBefore.inFlightBytes,
+      openedStreams: processBefore.openedStreams,
+      closedStreams: processBefore.closedStreams,
+    });
+
+    const staleSourcePort = new FakePort();
+    expect(() => manager.attach({
+      binding: source,
+      attachmentToken: prepared.attachment.attachmentToken,
+      port: staleSourcePort,
+    })).toThrow(StreamAccessError);
+    expect(staleSourcePort.closed).toBe(true);
+    const staleDestinationPort = new FakePort();
+    expect(() => manager.attach({
+      binding: destination,
+      attachmentToken: prepared.attachment.attachmentToken,
+      port: staleDestinationPort,
+    })).toThrow(StreamAccessError);
+    expect(staleDestinationPort.closed).toBe(true);
+    await expect(manager.actOnSessionShell(source, {
+      resourceId: prepared.resourceId,
+      action: "attach",
+    })).rejects.toThrow(StreamAccessError);
+
+    const destinationAction = await manager.actOnSessionShell(destination, {
+      resourceId: prepared.resourceId,
+      action: "attach",
+    });
+    const destinationPort = new FakePort();
+    const destinationStreamId = manager.attach({
+      binding: destination,
+      attachmentToken: destinationAction.attachment!.attachmentToken,
+      port: destinationPort,
+    });
+    destinationPort.send(startFrame(destinationStreamId, 16));
+    await scheduler.flush();
+    expect(lastFrame(destinationPort, "opened")).toBeDefined();
+
+    const returned = manager.transferSessionShells(destination, source);
+    expect(Object.isFrozen(returned)).toBe(true);
+    expect(new Set(returned)).toEqual(new Set(transferred));
+    expect(lastFrame(destinationPort, "closed")).toMatchObject({
+      reason: "operator-detach",
+      disposition: "detached",
+    });
+    expect(manager.listSessionShells(destination).resources).toEqual([]);
+    expect(manager.listSessionShells(source).resources).toHaveLength(3);
+
+    const sourceAction = await manager.actOnSessionShell(source, {
+      resourceId: prepared.resourceId,
+      action: "attach",
+    });
+    const returnedPort = new FakePort();
+    const returnedStreamId = manager.attach({
+      binding: source,
+      attachmentToken: sourceAction.attachment!.attachmentToken,
+      port: returnedPort,
+    });
+    returnedPort.send(startFrame(returnedStreamId, 16));
+    await scheduler.flush();
+    expect(lastFrame(returnedPort, "opened")).toBeDefined();
+    await manager.closeWindow(destination.ownerWindowId);
+    expect(manager.listSessionShells(source).resources).toHaveLength(3);
+
+    writeGate.resolve();
+    await scheduler.flush();
+    await manager.close();
+  });
+
+  it("keeps an opening endpoint detached after transfer and reattaches it without a second start", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    const source = binding();
+    const destination = binding({
+      ownerWindowId: 2,
+      rendererProcessId: 22,
+      rendererFrameToken: "frame-popout",
+      rendererDocumentId: "document-popout",
+    });
+    const endpoint = endpointHarness();
+    const startGate = deferred<MainStreamEndpoint>();
+    const start = vi.fn(() => startGate.promise);
+    const plan = manager.prepareSessionShell(preparation(source, start));
+    const sourcePort = new FakePort();
+    const sourceStreamId = manager.attach({
+      binding: source,
+      attachmentToken: plan.attachment.attachmentToken,
+      port: sourcePort,
+    });
+    sourcePort.send(startFrame(sourceStreamId, 16));
+    await scheduler.flush();
+    expect(manager.listSessionShells(source).resources[0]).toMatchObject({ state: "opening" });
+
+    expect(manager.transferSessionShells(source, destination)).toEqual([plan.resourceId]);
+    expect(lastFrame(sourcePort, "closed")).toMatchObject({ disposition: "detached" });
+    expect(manager.listSessionShells(destination).resources[0]).toMatchObject({ state: "detached" });
+    startGate.resolve(endpoint.endpoint);
+    await scheduler.flush();
+    expect(manager.listSessionShells(destination).resources[0]).toMatchObject({
+      state: "detached",
+      canKill: false,
+    });
+
+    const action = await manager.actOnSessionShell(destination, {
+      resourceId: plan.resourceId,
+      action: "attach",
+    });
+    const destinationPort = new FakePort();
+    const destinationStreamId = manager.attach({
+      binding: destination,
+      attachmentToken: action.attachment!.attachmentToken,
+      port: destinationPort,
+    });
+    destinationPort.send(startFrame(destinationStreamId, 16));
+    await scheduler.flush();
+    expect(lastFrame(destinationPort, "opened")).toBeDefined();
+    expect(start).toHaveBeenCalledOnce();
+    await manager.close();
+  });
+
+  it("reattaches a transferred opening resource before its one remote start settles", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    const source = binding();
+    const destination = binding({
+      ownerWindowId: 2,
+      rendererProcessId: 22,
+      rendererFrameToken: "frame-popout",
+      rendererDocumentId: "document-popout",
+    });
+    const endpoint = endpointHarness();
+    const startGate = deferred<MainStreamEndpoint>();
+    const start = vi.fn(() => startGate.promise);
+    const plan = manager.prepareSessionShell(preparation(source, start));
+    const sourcePort = new FakePort();
+    const sourceStreamId = manager.attach({
+      binding: source,
+      attachmentToken: plan.attachment.attachmentToken,
+      port: sourcePort,
+    });
+    sourcePort.send(startFrame(sourceStreamId, 16));
+    await scheduler.flush();
+    expect(manager.listSessionShells(source).resources[0]).toMatchObject({ state: "opening" });
+
+    manager.transferSessionShells(source, destination);
+    const action = await manager.actOnSessionShell(destination, {
+      resourceId: plan.resourceId,
+      action: "attach",
+    });
+    const destinationPort = new FakePort();
+    const destinationStreamId = manager.attach({
+      binding: destination,
+      attachmentToken: action.attachment!.attachmentToken,
+      port: destinationPort,
+    });
+    destinationPort.send(startFrame(destinationStreamId, 16));
+    await scheduler.flush();
+    expect(manager.listSessionShells(destination).resources[0]).toMatchObject({ state: "opening" });
+    expect(lastFrame(destinationPort, "closed")).toBeUndefined();
+    expect(start).toHaveBeenCalledOnce();
+
+    startGate.resolve(endpoint.endpoint);
+    await scheduler.flush();
+    expect(lastFrame(destinationPort, "opened")).toBeDefined();
+    expect(manager.listSessionShells(destination).resources[0]).toMatchObject({ state: "attached" });
+    expect(start).toHaveBeenCalledOnce();
+    await manager.close();
+  });
+
+  it("rejects same-window and foreign-scope transfers without changing ownership", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    const source = binding();
+    const plan = manager.prepareSessionShell(preparation(source, resolvedStarter()));
+
+    for (const invalidDestination of [
+      source,
+      binding({ rendererDocumentId: "another-document" }),
+      binding({ ownerWindowId: 2, backendId: "backend-b" }),
+      binding({ ownerWindowId: 2, backendEpoch: 2 }),
+      binding({ ownerWindowId: 2, targetId: "session-b" }),
+      binding({ ownerWindowId: 2, fingerprint: "b".repeat(64) }),
+    ]) {
+      expect(() => manager.transferSessionShells(source, invalidDestination)).toThrow(StreamAccessError);
+    }
+    expect(manager.listSessionShells(source).resources).toEqual([
+      expect.objectContaining({ resourceId: plan.resourceId, state: "prepared" }),
+    ]);
+    expect(manager.metricsForWindow(source.ownerWindowId)).toMatchObject({
+      activeStreams: 1,
+      reservedBytes: 64,
+      rejectedStreams: "0",
+    });
+    await manager.close();
+  });
+
+  it("leaves attachments, tickets, resources, and accounting unchanged when destination capacity is full", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler, {
+      maxStreamsPerWindow: 2,
+      maxReservedBytesPerWindow: 128,
+    });
+    const source = binding();
+    const destination = binding({
+      ownerWindowId: 2,
+      rendererProcessId: 22,
+      rendererFrameToken: "frame-popout",
+      rendererDocumentId: "document-popout",
+    });
+    const first = manager.prepareSessionShell(preparation(source, resolvedStarter()));
+    const second = manager.prepareSessionShell(preparation(source, resolvedStarter()));
+    const destinationShell = await openShell(manager, scheduler, { binding: destination });
+    const sourceBefore = manager.metricsForWindow(source.ownerWindowId);
+    const destinationBefore = manager.metricsForWindow(destination.ownerWindowId);
+    const backendBefore = manager.metricsForBackend({ backendId: source.backendId, backendEpoch: source.backendEpoch });
+    const processBefore = manager.metricsForProcess();
+
+    expect(() => manager.transferSessionShells(source, destination)).toThrow(StreamCapacityError);
+    expect(manager.metricsForWindow(source.ownerWindowId)).toEqual(sourceBefore);
+    expect(manager.metricsForWindow(destination.ownerWindowId)).toEqual(destinationBefore);
+    expect(manager.metricsForBackend({ backendId: source.backendId, backendEpoch: source.backendEpoch }))
+      .toEqual(backendBefore);
+    expect(manager.metricsForProcess()).toEqual(processBefore);
+    expect(destinationShell.port.closed).toBe(false);
+    expect(manager.listSessionShells(source).resources).toEqual([
+      expect.objectContaining({ resourceId: first.resourceId, state: "prepared" }),
+      expect.objectContaining({ resourceId: second.resourceId, state: "prepared" }),
+    ]);
+
+    const sourcePort = new FakePort();
+    expect(() => manager.attach({
+      binding: source,
+      attachmentToken: first.attachment.attachmentToken,
+      port: sourcePort,
+    })).not.toThrow();
+    expect(sourcePort.closed).toBe(false);
+    await manager.close();
+  });
+});
+
 describe("StreamManager protocol and data lifetime", () => {
   it.each([
     ["extra key", (streamId: string, data: ArrayBuffer) => ({

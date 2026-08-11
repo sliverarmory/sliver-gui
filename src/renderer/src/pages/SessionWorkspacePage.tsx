@@ -115,6 +115,7 @@ export function SessionWorkspacePage({
   const [actionResult, setActionResult] = useState<TargetActionExecutionResult>();
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
+  const [terminalVisitedRouteIdentity, setTerminalVisitedRouteIdentity] = useState<string>();
   const operationsRequestSequence = useRef(0);
   const operationDetailRequestSequence = useRef(0);
 
@@ -254,6 +255,14 @@ export function SessionWorkspacePage({
     }
   }, [onSnapshot, reviewPlan, routeIdentity]);
 
+  const popOutManagedShells = useCallback(async (preferredResourceId?: string): Promise<void> => {
+    if (!isCurrentRef.current) throw new Error("The active session changed before managed shells could be popped out");
+    const result = await window.sliver.openSessionShellWindow(
+      preferredResourceId === undefined ? {} : { preferredResourceId },
+    );
+    if (!result.ok) throw new Error(result.error ?? "Managed shells could not be popped out");
+  }, []);
+
   if (!currentSession) {
     return (
       <section className="page-stack" aria-labelledby="session-workspace-unavailable-heading">
@@ -315,7 +324,13 @@ export function SessionWorkspacePage({
         </dl>
       </header>
 
-      <Tabs defaultSelectedKey="overview" variant="secondary">
+      <Tabs
+        defaultSelectedKey="overview"
+        variant="secondary"
+        onSelectionChange={(key) => {
+          if (String(key) === "terminal") setTerminalVisitedRouteIdentity(routeIdentity);
+        }}
+      >
         <Tabs.ListContainer>
           <Tabs.List aria-label="Session interaction sections">
             <WorkspaceTab id="overview" label="Overview" />
@@ -385,10 +400,18 @@ export function SessionWorkspacePage({
             })}
           </Tabs.Panel>
         ) : null}
-        <Tabs.Panel className="pt-6" id="terminal">
-          {resolvedPanels.terminal
-            ? resolvedPanels.terminal(context)
-            : <SessionTerminalPanel route={route} session={currentSession} />}
+        <Tabs.Panel shouldForceMount className="pt-6" id="terminal">
+          {terminalVisitedRouteIdentity === routeIdentity
+            ? resolvedPanels.terminal
+              ? resolvedPanels.terminal(context)
+              : (
+                  <SessionTerminalPanel
+                    route={route}
+                    session={currentSession}
+                    onPopOut={popOutManagedShells}
+                  />
+                )
+            : null}
         </Tabs.Panel>
         <Tabs.Panel className="pt-6" id="activity">
           <SessionActivity

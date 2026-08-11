@@ -5,15 +5,18 @@ import { config } from "@fortawesome/fontawesome-svg-core";
 import "@fortawesome/fontawesome-svg-core/styles.css";
 import "./styles.css";
 import { App } from "./App";
+import { SessionShellWindowApp } from "./SessionShellWindowApp";
 
 config.autoAddCss = false;
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Renderer root element was not found");
 
+const isManagedShellWindow = new URLSearchParams(window.location.search).get("surface") === "managed-shells";
+
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <App />
+    {isManagedShellWindow ? <SessionShellWindowApp /> : <App />}
     <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

@@ -16,7 +16,14 @@ parity remain assigned to M5.
 
 - The dedicated session workbench now places **Terminal** immediately before
   **Activity**. Its managed-shell workspace supports start, bounded inventory,
-  attach, detach, close, kill, and switching among multiple managed shells.
+  selection-driven attach, detach, close, kill, and switching among multiple
+  managed shells. Selecting a detached shell attaches it directly; there is no
+  separate Attach button.
+- The workspace can transfer its exact managed-shell inventory into one
+  hardened, main-created dedicated window. The URL contains only the static
+  presentation marker; target references, resource IDs, and attachment tickets
+  remain main-owned. Closing that window re-docks the shells when the original
+  workspace is still bound to the same exact session.
 - Desktop layouts use a resizable shell inventory and terminal area. Narrow
   layouts replace the persistent inventory with a controlled responsive sheet.
 - The renderer cannot select a shell path. Electron main chooses the reviewed
@@ -92,9 +99,13 @@ and other host-effect callbacks are not connected to remote output.
 
 - Intentional detach disposes the payload-bearing terminal surface and retains
   only bounded main-owned scrollback for a one-use reattachment.
-- Reattachment is available only to the same live client and owning application
-  window. It does not survive application restart and cannot move to another
-  window, backend connection, connection incarnation, or target.
+- Reattachment is available only to the same live client and exact owning shell
+  surface. Main can atomically transfer ownership between a source workspace
+  and its one dedicated shell window: old tickets are revoked, active ports are
+  detached, resource IDs and bounded queues are preserved, and fresh tickets
+  bind the destination renderer process, frame, and document. Generic or stale
+  windows remain denied. Reattachment does not survive application restart,
+  backend replacement, connection-incarnation change, or target loss.
 - Navigation away from the exact session quarantines stale callbacks and
   detaches the renderer. Unexpected port loss, route replacement, window close,
   renderer destruction, target loss, backend disconnect, connection rebind,
@@ -115,21 +126,23 @@ integration:
 npm test
 ```
 
-Result: **54 test files passed and one was skipped; 651 tests passed and two
-were skipped** in 6.12 seconds.
+Result: **55 test files passed and one was skipped; 671 tests passed and two
+were skipped** in 5.63 seconds.
 
 The deterministic Electron lane rebuilt the production renderer, frozen
 preload, trusted IPC, and injected-client boundary and exercised start, terminal
-input/output, initial resize, hostile output, detach/reattach, close review,
-target quarantine, content-free diagnostics, and external-network denial:
+input/output, initial resize, hostile output, selection-driven reattachment,
+atomic pop-out/re-dock without shell recreation, source-authority denial,
+duplicate-window focus, close review, target quarantine, content-free
+diagnostics, and external-network denial:
 
 ```sh
 npm run test:e2e:electron
 ```
 
-Result: **1 test passed, zero failed, zero skipped** in 13.85 seconds. The
+Result: **1 test passed, zero failed, zero skipped** in 13.51 seconds. The
 deterministic capture at `artifacts/e2e/m3-session-terminal.png` had SHA-256
-`5f8bc16199d49edeb5f450d55913b7bf6c072868539c6fd9b8943cec27ac9185`.
+`9d7f36669824ed88f1cbd9684cd51be764bcf45662257cc83cb50545d87d9c41`.
 
 The pinned provenance and reviewed parity lanes are:
 
@@ -165,8 +178,8 @@ The harness realpaths the selected executable, derives its exact adjacent
 `resources/app.asar`, and runs the production-content verifier against that
 archive before launch. The final macOS arm64 package evidence was:
 
-- `app.asar`: 15,187,490 bytes, SHA-256
-  `bc6faa837938458c0efb3d92f8e33b2173140fc399c395a1d0771e3a1084f228`.
+- `app.asar`: 15,228,926 bytes, SHA-256
+  `7f4e80ad525e0926d38bc4c70f5c80af4538e9c583ce00c7900ef1590e13b4ed`.
 - executable: 33,968 bytes, SHA-256
   `34465676648bf5e5892e8f7791929be7ee01973a5317260f4f741ab7110cfef6`.
 
@@ -188,15 +201,18 @@ cleanup scope is understood.
 3. On Linux or macOS, resize the workspace and confirm the UI continues to say
    the PTY and resize are requested or unconfirmed. On Windows, confirm resize
    is unavailable.
-4. Detach, verify the terminal surface disappears, then attach from the same
-   live window and confirm the shell remains usable.
-5. Verify multiline/control-character paste requires confirmation without
+4. Detach, verify the terminal surface disappears, then select the shell in the
+   **Shells** inventory and confirm it attaches immediately and remains usable.
+5. Choose **Pop out managed shells**. Confirm the same shell opens in the
+   dedicated window without starting another remote process, accepts input,
+   and re-docks when that window closes.
+6. Verify multiline/control-character paste requires confirmation without
    displaying the payload in the review.
-6. Review Close and Kill independently. Treat Close as local closure plus a
+7. Review Close and Kill independently. Treat Close as local closure plus a
    best-effort remote request, not proof of remote process termination.
-7. Confirm no shell content appears in Activity, broad snapshots, diagnostics,
+8. Confirm no shell content appears in Activity, broad snapshots, diagnostics,
    or metrics.
-8. Explicitly accept or reject M3. Do not begin M4 on the basis of automated
+9. Explicitly accept or reject M3. Do not begin M4 on the basis of automated
    evidence alone.
 
 ## Deferred evidence and parity

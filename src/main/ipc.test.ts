@@ -307,6 +307,42 @@ describe("trusted Electron IPC boundary", () => {
     expect(saveProfile).toHaveBeenCalledWith(77, profileSave);
   });
 
+  it("opens and claims only main-owned managed-shell windows with exact renderer identity", async () => {
+    const open = vi.fn(async () => ({ ok: true as const }));
+    const claim = vi.fn(async () => ({ ok: false as const, error: "claim probe" }));
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL, { open, claim });
+    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const resourceId = "P".repeat(43);
+
+    await expect(electronMocks.handlers.get(IPC.openSessionShellWindow)?.(event, {
+      preferredResourceId: resourceId,
+    })).resolves.toEqual({ ok: true });
+    await expect(electronMocks.handlers.get(IPC.claimSessionShellWindow)?.(event)).resolves.toEqual({
+      ok: false,
+      error: "claim probe",
+    });
+    expect(open).toHaveBeenCalledWith(
+      { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" },
+      { preferredResourceId: resourceId },
+    );
+    expect(claim).toHaveBeenCalledWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+
+    expect(() => electronMocks.handlers.get(IPC.openSessionShellWindow)?.(event, {
+      preferredResourceId: "not-an-opaque-resource",
+    })).toThrow(/invalid open managed-shell window input/i);
+    expect(() => electronMocks.handlers.get(IPC.openSessionShellWindow)?.(event, {
+      preferredResourceId: resourceId,
+      targetId: "attacker-selected-session",
+    })).toThrow(/invalid open managed-shell window input/i);
+    expect(() => electronMocks.handlers.get(IPC.claimSessionShellWindow)?.(event, {})).toThrow(
+      /invalid arguments/i,
+    );
+  });
+
   it("accepts only main-issued target references and compiled operation identifiers", async () => {
     const listTargets = vi.fn(async () => ({ ok: true as const, value: { items: [], page: { limit: 100, total: 0, truncated: false } } }));
     const selectTarget = vi.fn(async () => ({ ok: false as const, error: "selection probe" }));

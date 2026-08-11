@@ -10,6 +10,7 @@ import {
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
+  isOpaqueStreamId,
   parseStreamAttachRequest,
 } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
@@ -99,6 +100,16 @@ const api: SliverDesktopAPI = {
     const handler = (_event: Electron.IpcRendererEvent, target: TargetRef) => listener(target);
     ipcRenderer.on(IPC.beaconTasksInvalidated, handler);
     return () => ipcRenderer.removeListener(IPC.beaconTasksInvalidated, handler);
+  },
+  onSessionShellsChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, preferredResourceId?: unknown) => {
+      if (
+        preferredResourceId === undefined ||
+        (typeof preferredResourceId === "string" && isOpaqueStreamId(preferredResourceId))
+      ) listener(preferredResourceId);
+    };
+    ipcRenderer.on(IPC.sessionShellsChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.sessionShellsChanged, handler);
   },
 };
 

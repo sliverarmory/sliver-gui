@@ -72,12 +72,15 @@ function installSliverAPI(
     listTargets: vi.fn(failedOperation),
     listTargetOperations: vi.fn(failedOperation),
     onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
+    onSessionShellsChanged: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
       captureSnapshotListener?.(listener);
       return vi.fn();
     }),
+    openSessionShellWindow: vi.fn(failedOperation),
+    claimSessionShellWindow: vi.fn(failedOperation),
     openWindow: vi.fn(failedOperation),
     prepareStopAllJobs: vi.fn(failedOperation),
     prepareStopJob: vi.fn(failedOperation),

@@ -16,7 +16,7 @@
       "status": "in-progress",
       "milestone": "M3",
       "operatorScope": true,
-      "notes": "The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; same-live-client and same-window reattachment, requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits."
+      "notes": "The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits."
     },
     {
       "id": "operator-transport.wireguard",
@@ -4097,7 +4097,7 @@
         "parity-contract:implant.shell.attach",
         "session-shell-attach-stream"
       ],
-      "notes": "The GUI can attach and intentionally reattach to one managed shell only from the same live client and owning application window. Reattachment after restart, window change, backend replacement, or target loss is not claimed; operator acceptance remains pending."
+      "notes": "Selecting a managed shell attaches it directly. Reattachment stays within the same live client and exact main-owned shell surface; the owning workspace can atomically transfer resources to its hardened dedicated shell window, but generic windows remain denied. Reattachment after restart, backend replacement, or target loss is not claimed; operator acceptance remains pending."
     },
     {
       "id": "implant.shell.kill",

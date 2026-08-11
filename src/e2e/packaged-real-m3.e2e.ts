@@ -219,11 +219,26 @@ test(
       assert.equal(detached.resourceId, resource.resourceId);
       await assertRemoteProcessPresent(client, authorizedSession, ownedShellProcess);
 
-      await page.getByRole("button", { name: "Attach", exact: true }).first().click();
+      await page
+        .getByRole("complementary", { name: "Managed shell inventory", exact: true })
+        .getByText("Shell 1", { exact: true })
+        .click();
       const reattachedTerminal = page.getByRole("textbox", { name: terminalLabel, exact: true });
       await reattachedTerminal.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.locator('[data-terminal-state="ready"]').waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.getByText("Attached", { exact: true }).first().waitFor();
+      assert.equal(
+        await page.getByRole("button", { name: "Attach", exact: true }).count(),
+        0,
+        "selection must replace the former select-then-Attach interaction",
+      );
+      const reattachedResource = await waitForManagedResourceState(page, resource.resourceId, "attached");
+      assert.equal(reattachedResource.resourceId, resource.resourceId);
+      assert.deepEqual(
+        await findUniqueNewShellProcess(client, authorizedSession, baselineProcessIds),
+        ownedShellProcess,
+        "selection-driven attachment must reuse the exact managed shell process",
+      );
       const reattachedMarker = syntheticMarker("REATTACHED");
       await sendSyntheticCommandAndVerifyOutput(
         page,
