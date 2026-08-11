@@ -296,8 +296,8 @@ Operator-only scope is enforced at the application boundary:
 | --- | --- | --- | --- |
 | M0 | Reproducible protocol baseline and stable current features | **Complete** | 4-6 weeks |
 | M1 | Sessions, beacons, target state, and generic task execution | **Complete** | 3-5 weeks |
-| M2 | Core endpoint reconnaissance, files, and processes | **In progress** | 4-6 weeks |
-| M3 | Bounded streaming, managed shells, and tunnel lifecycle | Not started | 3-5 weeks |
+| M2 | Core endpoint reconnaissance, files, and processes | **Accepted (session-first scope)** | 4-6 weeks |
+| M3 | Bounded streaming, managed shells, and tunnel lifecycle | **In progress** | 3-5 weeks |
 | M4 | Execution, post-exploitation, and privilege workflows | Not started | 4-6 weeks |
 | M5 | Forwarding, SOCKS, WireGuard networking, and pivots | Not started | 4-5 weeks |
 | M6 | Operator data, collaboration, monitoring, and cracking | Not started | 4-6 weeks |
@@ -311,8 +311,8 @@ Milestone governance is tracked separately from checklist state:
 | --- | --- | --- | --- | --- |
 | M0 | Codex / operator accepted | 2026-08-09 | [ADR 0001](docs/adr/0001-platform-support.md) | [M0 verification](docs/m0-verification.md) |
 | M1 | Codex / operator accepted | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
-| M2 | Codex / session-first implementation | 2026-08-09 | Session-first scope below | [Session-first verification](docs/m2-session-verification.md) |
-| M3 | Unassigned | 2026-08-09 | TBD | TBD |
+| M2 | Codex / operator accepted (session-first scope) | 2026-08-10 | Session-first scope below | [Session-first verification](docs/m2-session-verification.md) |
+| M3 | Codex / implementation | 2026-08-10 | Streaming and terminal boundaries below | Evidence pending |
 | M4 | Unassigned | 2026-08-09 | TBD | TBD |
 | M5 | Unassigned | 2026-08-09 | TBD | TBD |
 | M6 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -545,13 +545,14 @@ WireGuard-enabled operator configurations remain deferred from M0.
 
 ## M2 - Core endpoint workbench
 
-- Status: **In progress**
+- Status: **Accepted - session-first scope**
 - Dependencies: M1
 
-At operator direction, M2 begins with the session interaction workbench and
-session-mode endpoint operations. Beacon-mode M2 support remains part of this
-milestone and is not waived; shared M2 commands and exit criteria stay
-incomplete until their supported beacon paths and cross-mode evidence land.
+The operator accepted the delivered session-first M2 scope on 2026-08-10 and
+explicitly authorized M3. Beacon-mode operations, cross-platform certification,
+the central capability service, mutation-stable cursors, and loot dispositions
+remain recorded as deferred work; scoped acceptance does not claim those parity
+rows or unchecked exit criteria complete.
 
 The first session tranche now has a dedicated workbench route opened from a
 Live Sessions row. It replaces the former inline selected-session card with
@@ -658,11 +659,15 @@ paths, and full cross-platform evidence remain M2 work.
   continuation, review, and confirmation states.
 - [ ] Repeat the supported matrix against authorized Windows and Linux targets,
   add beacon-mode fault evidence, complete the authoritative capability service,
-  and add explicit native-save-versus-loot dispositions before M2 acceptance.
+  and add explicit native-save-versus-loot dispositions before claiming full
+  cross-mode M2 parity.
+- [x] The operator accepted the delivered session-first M2 scope on 2026-08-10
+  and explicitly authorized M3; unresolved parity and certification work remains
+  recorded without being claimed complete.
 
 ## M3 - Streaming, managed shells, and tunnel lifecycle
 
-- Status: Not started
+- Status: **In progress**
 - Dependencies: M1
 
 ### Streaming plane

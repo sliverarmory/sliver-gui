@@ -64,15 +64,14 @@ configuration files and their private keys stay in the Electron main process.
 - Accessible confirmation dialogs for destructive actions and local Font
   Awesome SVG icons.
 
-Terminal-backed features such as interactive shell remain planned for a later
-milestone. They will use Ghostty Web when that slice is implemented.
-
-M2 remains **in progress**. The current workbench is session-only; supported
+The operator accepted the session-first M2 scope on 2026-08-10 and unlocked M3.
+M3 is now implementing bounded streaming and managed interactive shells with
+packaged Ghostty Web. Deferred M2 work remains visible in the roadmap: supported
 beacon execution, complete cross-platform real-server evidence, the central
 authoritative capability service, mutation-stable anchor cursors, and remote
-loot dispositions remain open. Current M2 workbench continuation tokens are
-bounded offsets, so a changing remote inventory can still duplicate or skip
-entries between pages.
+loot dispositions. Current workbench continuation tokens are bounded offsets,
+so a changing remote inventory can still duplicate or skip entries between
+pages.
 
 ## Development
 

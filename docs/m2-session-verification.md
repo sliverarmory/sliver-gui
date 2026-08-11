@@ -1,13 +1,13 @@
 # M2 session-first verification
 
-Date: 2026-08-09
-Status: **Session tranche implemented; M2 remains in progress**
+Date: 2026-08-10
+Status: **Operator accepted the delivered session-first scope**
 
-This document records the delivered session-only M2 tranche. It is not an M2
-acceptance record. Supported beacon paths, complete Windows/Linux real-target
-evidence, the central authoritative capability service, mutation-stable
-workbench cursors, and explicit loot dispositions remain required by
-`ROADMAP.md`.
+This document records the session-only M2 tranche accepted by the operator on
+2026-08-10, which explicitly unlocked M3. This is scoped acceptance, not a claim
+that deferred beacon paths, Windows/Linux certification, the central
+authoritative capability service, mutation-stable cursors, loot dispositions,
+or unchecked parity rows are complete.
 
 ## Delivered operator path
 
@@ -158,7 +158,7 @@ an exact loopback-only HTTPS listener, and observed as an authoritative live
 session. This is useful session availability evidence, not cross-platform M2
 acceptance.
 
-## Remaining before M2 completion
+## Deferred after session-first acceptance
 
 - Add supported beacon-mode M2 operations and prove synchronous session versus
   asynchronous beacon behavior for each applicable family.

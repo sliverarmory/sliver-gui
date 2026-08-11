@@ -2,7 +2,7 @@
 
 - Date: 2026-08-09
 - Milestone state: complete; operator accepted
-- M2 state: unlocked and in progress with a session-first scope
+- M2 state: session-first scope accepted on 2026-08-10; M3 unlocked
 - Local package host: macOS arm64
 - Actual server: loopback `127.0.0.1:53137`, Sliver 1.7.6 dirty
 
