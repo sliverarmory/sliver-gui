@@ -23,6 +23,8 @@ if (git(source, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
 const overlayFiles = [
   "src/client.ts",
   "src/index.ts",
+  "src/internal/asyncQueue.ts",
+  "src/internal/tunnelManager.ts",
   "src/internal/timeout.ts",
   "src/messageBudget.ts",
 ];

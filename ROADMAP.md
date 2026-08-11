@@ -160,7 +160,8 @@ The current application already provides the first operator slices:
 - [x] Cross-platform package-build and tagged-release workflow definitions.
 - [x] Authoritative session and beacon state.
 - [x] Generic operator action and beacon task engine.
-- [ ] Interactive terminal and bounded tunnel streaming.
+- [x] Session-only interactive terminal and bounded MessagePort streaming.
+- [ ] Forwarding, reverse forwarding, SOCKS, and other tunnel workflows.
 - [ ] Broad terminal-client operator feature coverage.
 
 Packaged operator transport is currently mTLS-only. WireGuard operator
@@ -296,8 +297,8 @@ Operator-only scope is enforced at the application boundary:
 | --- | --- | --- | --- |
 | M0 | Reproducible protocol baseline and stable current features | **Complete** | 4-6 weeks |
 | M1 | Sessions, beacons, target state, and generic task execution | **Complete** | 3-5 weeks |
-| M2 | Core endpoint reconnaissance, files, and processes | **Accepted (session-first scope)** | 4-6 weeks |
-| M3 | Bounded streaming, managed shells, and tunnel lifecycle | **In progress** | 3-5 weeks |
+| M2 | Core endpoint reconnaissance, files, and processes | **Complete (accepted session-first scope)** | 4-6 weeks |
+| M3 | Bounded session streaming and managed shells | **Awaiting operator acceptance** | 3-5 weeks |
 | M4 | Execution, post-exploitation, and privilege workflows | Not started | 4-6 weeks |
 | M5 | Forwarding, SOCKS, WireGuard networking, and pivots | Not started | 4-5 weeks |
 | M6 | Operator data, collaboration, monitoring, and cracking | Not started | 4-6 weeks |
@@ -312,7 +313,7 @@ Milestone governance is tracked separately from checklist state:
 | M0 | Codex / operator accepted | 2026-08-09 | [ADR 0001](docs/adr/0001-platform-support.md) | [M0 verification](docs/m0-verification.md) |
 | M1 | Codex / operator accepted | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
 | M2 | Codex / operator accepted (session-first scope) | 2026-08-10 | Session-first scope below | [Session-first verification](docs/m2-session-verification.md) |
-| M3 | Codex / implementation | 2026-08-10 | Streaming and terminal boundaries below | Evidence pending |
+| M3 | Codex / operator acceptance pending | 2026-08-10 | Streaming and terminal boundaries below | [M3 verification](docs/m3-verification.md) |
 | M4 | Unassigned | 2026-08-09 | TBD | TBD |
 | M5 | Unassigned | 2026-08-09 | TBD | TBD |
 | M6 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -545,7 +546,7 @@ WireGuard-enabled operator configurations remain deferred from M0.
 
 ## M2 - Core endpoint workbench
 
-- Status: **Accepted - session-first scope**
+- Status: **Complete - accepted session-first scope**
 - Dependencies: M1
 
 The operator accepted the delivered session-first M2 scope on 2026-08-10 and
@@ -665,66 +666,107 @@ paths, and full cross-platform evidence remain M2 work.
   and explicitly authorized M3; unresolved parity and certification work remains
   recorded without being claimed complete.
 
-## M3 - Streaming, managed shells, and tunnel lifecycle
+## M3 - Bounded session streaming and managed shells
 
-- Status: **In progress**
-- Dependencies: M1
+- Status: **Awaiting operator acceptance**
+- Dependencies: M1 and the delivered M2 session workbench
+
+The session-shell-only M3 implementation was delivered on 2026-08-10. Technical
+checks are recorded in [M3 verification](docs/m3-verification.md), but the
+milestone remains open until the operator accepts it. M4 has not started.
+
+This scope follows the pinned upstream command tree: interactive shell commands
+exist for sessions only, so M3 makes no beacon-shell claim. Port forwarding,
+reverse forwarding, SOCKS, WireGuard networking, and generic tunnel lifecycle
+remain M5 work even though they can later reuse this bounded stream foundation.
 
 ### Streaming plane
 
-- [ ] Add a main/preload streaming API using MessagePort or transferable bounded
-  chunks rather than one IPC invocation per byte.
-- [ ] Define stream IDs, window ownership, write serialization, backpressure,
-  idle timeouts, and close reasons.
-- [ ] Use credit-based flow control with bounded control frames, fair scheduling,
-  and enforced quotas for bytes and concurrent streams at the per-stream,
-  per-window, per-backend, and whole-process levels.
-- [ ] Reject data and control writes after terminal close; a group of
-  individually bounded streams must not exhaust the main process.
-- [ ] Ensure renderer destruction, backend disconnect, target loss, and explicit
-  cancellation deterministically close or safely detach streams.
-- [ ] Add streaming metrics that reveal counts and pressure without logging
-  content.
+- [x] Add a versioned main/preload MessagePort plane instead of one IPC invoke
+  per byte. The preload transfers exactly one port in a fixed envelope.
+- [x] Bind an expiring one-use attachment ticket to the exact window, renderer
+  process, frame, document, backend, connection incarnation, and session target.
+  Upstream tunnel IDs remain main-only; the renderer receives opaque resource
+  and per-attachment stream IDs.
+- [x] Enforce exact frame shapes, 16 KiB data frames, ordered sequence numbers,
+  credit-based flow control, bounded early output and detached scrollback,
+  control-rate limits, fair scheduling, and per-stream, per-window, per-backend,
+  and whole-process quotas and timeouts.
+- [x] Reject duplicate starts, over-credit data, resize misuse, malformed frames,
+  and all writes after close while zeroizing owned payload buffers at
+  ownership boundaries.
+- [x] Close or explicitly detach on navigation, renderer destruction, backend
+  disconnect, connection replacement, target loss, timeout, and operator action.
+- [x] Expose lifecycle, pressure, byte-count, queue-depth, and close-reason
+  metadata without terminal content in React state, broad snapshots, Activity,
+  logs, or metrics.
 
 ### Managed terminal
 
-- [ ] Integrate Ghostty Web from packaged local assets.
-- [ ] Add shell start, list, attach, detach, kill, and tab management.
-- [ ] Forward terminal resize for supported Linux/macOS PTYs and expose the
-  correct non-PTY behavior elsewhere.
-- [ ] Preserve shell ownership across navigation and allow intentional
-  detach/reattach within the owning window.
-- [ ] Add accessible keyboard/focus behavior and explicit copy/paste controls.
-- [ ] Treat terminal output as hostile. Disable or mediate OSC 52 clipboard
-  writes, URI opening, notifications, title changes, inline images, file
-  transfer sequences, and every terminal-emulator callback with host effects.
-- [ ] Narrowly extend CSP for required local WASM/worker assets while retaining
-  `connect-src 'none'` and blocking remote script execution.
+- [x] Integrate pinned `ghostty-web@0.4.0` and its packaged
+  `ghostty-vt.wasm`. Electron main verifies the exact local asset provenance
+  before returning an independent byte copy for each isolated terminal runtime;
+  the renderer never fetches executable content.
+- [x] Add shell start, list, attach, detach, close, kill, and managed-resource
+  switching to the dedicated session Terminal view, with a resizable desktop
+  workspace and a bounded responsive alternative.
+- [x] Keep the renderer unable to select a shell path. Electron main chooses
+  the reviewed platform default (`/bin/bash` or `powershell.exe`). Linux and
+  macOS request a 24x80 PTY but report it as `requested-unconfirmed`; Windows
+  is forced to non-PTY mode without resize frames.
+- [x] Forward clamped, debounced resize requests only when the managed resource
+  permits them. Resize remains best effort because upstream sends no
+  acknowledgement.
+- [x] Allow intentional detach and one-use reattachment only from the same live
+  client and owning application window. App restart, another window, backend
+  replacement, or target loss cannot reattach the resource.
+- [x] Add accessible focus behavior plus explicit Copy and Paste controls.
+  Multiline or control-character paste requires a content-free confirmation;
+  clipboard payloads never enter React state.
+- [x] Treat output as hostile by filtering OSC, DCS, APC, PM, SOS, hyperlinks,
+  clipboard writes, inline files, title changes, bells, and other terminal host
+  effects before rendering.
+- [x] Narrow CSP only with `wasm-unsafe-eval` for the verified local runtime;
+  retain `connect-src 'none'`, `worker-src 'none'`, no `unsafe-eval`, and no
+  remote script or worker source.
 
-### Local stream and remote-resource lifecycle
+### Lifecycle limitations and deferrals
 
-- [ ] Track local stream-backed resource purpose, local endpoint, remote
-  endpoint, target, owner,
-  creation time, byte counts, state, and close reason.
-- [ ] Use the local lifecycle manager for shells, local port forwarding, SOCKS,
-  and later browser-debug/Cursed tunnels.
-- [ ] Track remote persistent resources such as pivot and implant listeners in a
-  separate reconciled store. They may share presentation DTOs, but window close
-  must never implicitly stop a remote listener.
-- [ ] Define reconnect behavior per local stream type; never silently recreate a
-  sensitive listener without an explicit policy.
+- [x] Keep the delivered lifecycle registry session-shell-specific. Explicit
+  Close always closes the local managed stream and sends bounded best-effort
+  `exit` and `logout` requests, then waits boundedly for the exact remote EOF
+  before closing the transport. A missing EOF still does not prove remote
+  process termination. Kill is an explicit forceful action with its own
+  confirmation.
+- [x] Never silently recreate a shell after connection loss. Detach preserves
+  only bounded same-window scrollback, which is discarded when the resource
+  closes and cannot be recovered after application restart.
+- [ ] Add port-forward, reverse-port-forward, SOCKS, and later browser-debug
+  resources through M5 policy and operator review; they are not M3 parity.
+- [ ] Package and certify the WireGuard operator helper. M3 evidence is currently
+  limited to mTLS and does not claim WireGuard operator transport.
 
 ### M3 exit criteria
 
-- [ ] Concurrent multi-megabyte binary streams complete without corruption or
-  unbounded memory growth.
-- [ ] Resize, detach/reattach, explicit close, target loss, renderer destruction,
-  and backend disconnect are covered.
-- [ ] Packaged mTLS and WireGuard shell tests pass on all operator platforms.
-- [ ] Malicious escape-sequence E2E proves terminal output cannot write the
-  clipboard, open a URI, transfer a file, trigger a notification, or execute a
-  privileged host callback without the explicit permitted interaction.
-- [ ] No renderer network permission or arbitrary worker/script source is added.
+- [x] Automated multi-megabyte duplex, fairness, quota, timeout, sequence,
+  backpressure, and zeroization tests complete without digest drift or
+  unbounded queues.
+- [x] Automated coverage includes resize, detach/reattach, explicit close and
+  kill, stale callbacks, route replacement, target loss, renderer destruction,
+  backend disconnect, Strict Mode remount, and reconnect failure behavior.
+- [x] Deterministic Electron E2E proves that malicious terminal output cannot
+  write the clipboard, open a URI, transfer a file, issue a notification, make
+  an external request, or invoke an unconnected host callback.
+- [x] No renderer network permission, arbitrary worker/script source, raw tunnel
+  authority, or content-bearing diagnostics are added.
+- [x] The fresh macOS arm64 package passes the opt-in real-session shell lane
+  against one exact authorized darwin/arm64 target over literal-loopback mTLS,
+  including input/output, resize, detach/reattach, reviewed Close, exact child
+  disappearance, empty resource accounting, and unchanged session identity.
+- [ ] Finish Windows and Linux package/target evidence. WireGuard helper
+  evidence remains deferred.
+- [ ] The operator tests and explicitly accepts the delivered M3 scope before
+  M4 begins.
 
 ## M4 - Execution, post-exploitation, and privileges
 
@@ -776,16 +818,21 @@ paths, and full cross-platform evidence remain M2 work.
 ## M5 - Forwarding, SOCKS, WireGuard networking, and pivots
 
 - Status: Not started
-- Dependencies: M1; local stream-backed forwarding and SOCKS require M3
+- Dependencies: M1; after operator acceptance, local stream-backed forwarding
+  and SOCKS can extend the M3 bounded-stream foundation
 
 ### Target networking
 
 - [ ] Interface and connection inventory.
-- [ ] Local port-forward add/list/remove.
-- [ ] Reverse port-forward add/list/remove.
-- [ ] Session SOCKS start/list/stop.
-- [ ] GUI-local SOCKS inventory and stop operations using the M3 local-resource
-  registry; this is client state, not server-owned SOCKS inventory.
+- [ ] Local port-forward list/add/remove parity (`implant.portfwd`,
+  `implant.portfwd.add`, and `implant.portfwd.rm`).
+- [ ] Reverse port-forward list/add/remove parity (`implant.rportfwd`,
+  `implant.rportfwd.add`, and `implant.rportfwd.rm`).
+- [ ] Session SOCKS list/start/stop parity (`implant.socks5`,
+  `implant.socks5.start`, and `implant.socks5.stop`).
+- [ ] GUI-local SOCKS inventory and stop operations by extending the
+  shell-specific M3 resource foundation under M5 policy; this is client state,
+  not server-owned SOCKS inventory.
 - [ ] WireGuard session port-forward and SOCKS workflows with session and
   transport gating; these are not beacon workflows.
 - [ ] Bind locally exposed forwarding, SOCKS, and proxy endpoints to loopback by

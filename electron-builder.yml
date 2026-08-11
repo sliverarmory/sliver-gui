@@ -9,6 +9,9 @@ files:
   - package.json
   - LICENSE
   - THIRD_PARTY_NOTICES.md
+  - node_modules/ghostty-web/LICENSE
+  - node_modules/ghostty-web/package.json
+  - node_modules/ghostty-web/ghostty-vt.wasm
   - vendor/sliver-script/LICENSE
   - vendor/sliver-script/README.md
   - vendor/sliver-script/VENDORED.md
@@ -20,6 +23,7 @@ files:
   - protocol/sliver-baseline.json
   - protocol/sliver-script-provenance.json
   - protocol/sliver-script-handwritten-overlay.patch
+  - protocol/ghostty-web-provenance.json
   - docs/operator-parity.generated.json
   - docs/operator-parity.annotations.json
   - docs/operator-parity.schema.json

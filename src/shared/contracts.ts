@@ -33,6 +33,15 @@ import type {
   SessionWorkbenchInput,
   SessionWorkbenchInvocationResult,
 } from "./session-contracts.js";
+import type {
+  ListSessionShellsInput,
+  PrepareSessionShellInput,
+  SessionShellPlan,
+  SessionShellResourceActionInput,
+  SessionShellResourceActionResult,
+  SessionShellResourceList,
+  TerminalRuntimeAsset,
+} from "./stream-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -72,6 +81,14 @@ export const IPC_INVOKE = {
   runSessionWorkbench: "sliver:session-workbench:run",
   prepareSessionDestructiveAction: "sliver:session-workbench:prepare-action",
   executeSessionDestructiveActionPlan: "sliver:session-workbench:execute-action-plan",
+  prepareSessionShell: "sliver:session-shell:prepare",
+  listSessionShells: "sliver:session-shell:list",
+  actOnSessionShell: "sliver:session-shell:act",
+  getTerminalRuntime: "sliver:terminal-runtime:get",
+} as const;
+
+export const IPC_STREAM = {
+  attach: "sliver:stream:attach",
 } as const;
 
 export const IPC_EVENTS = {
@@ -83,6 +100,7 @@ export const IPC_EVENTS = {
 export const IPC = {
   ...IPC_INVOKE,
   ...IPC_EVENTS,
+  ...IPC_STREAM,
 } as const;
 
 export type IpcInvokeChannel = (typeof IPC_INVOKE)[keyof typeof IPC_INVOKE];
@@ -597,6 +615,22 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: ExecuteSessionDestructiveActionPlanInput];
     result: OperationResult<SessionDestructiveActionOutcome>;
   };
+  [IPC.prepareSessionShell]: {
+    args: [input: PrepareSessionShellInput];
+    result: OperationResult<SessionShellPlan>;
+  };
+  [IPC.listSessionShells]: {
+    args: [input: ListSessionShellsInput];
+    result: OperationResult<SessionShellResourceList>;
+  };
+  [IPC.actOnSessionShell]: {
+    args: [input: SessionShellResourceActionInput];
+    result: OperationResult<SessionShellResourceActionResult>;
+  };
+  [IPC.getTerminalRuntime]: {
+    args: [];
+    result: OperationResult<TerminalRuntimeAsset>;
+  };
 }>;
 
 export type IpcInvokeArgs<Channel extends IpcInvokeChannel> = IpcInvokeContract[Channel]["args"];
@@ -610,6 +644,12 @@ export type SliverDesktopInvokeAPI = {
 };
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
+  /**
+   * Transfer one narrow MessagePort capability to the trusted main process.
+   * The port is delivered back to this document through a fixed window-message
+   * envelope; no ipcRenderer or raw backend object crosses the preload bridge.
+   */
+  openStream: (attachmentToken: string, correlationId: string) => void;
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;

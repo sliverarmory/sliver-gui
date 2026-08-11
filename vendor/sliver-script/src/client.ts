@@ -11,6 +11,7 @@ import { TunnelManager } from "./internal/tunnelManager";
 import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
 import {
   RPC_MESSAGE_DOMAINS,
+  TUNNEL_STREAM_MAX_PAYLOAD_BYTES,
   WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
   rpcMessageChannelOptions,
   rpcTlsAuthorityOverride,
@@ -129,7 +130,33 @@ export type SessionRegistryWriteValue =
 export interface Tunnel {
   readonly id: string;
   readonly stdout$: Observable<Buffer>;
-  write(data: Buffer | string): void;
+  write(data: Buffer | string): Promise<void>;
+  close(): Promise<void>;
+}
+
+export const SHELL_OUTPUT_BUFFER_DEFAULT_BYTES = 512 * 1024;
+export const SHELL_OUTPUT_BUFFER_MAX_BYTES = 4 * 1024 * 1024;
+export const SHELL_WRITE_MAX_BYTES = 4 * 1024 * 1024;
+export const SHELL_TERMINAL_DIMENSION_MAX = 1_000;
+export const SHELL_GRACEFUL_CLOSE_TIMEOUT_MILLISECONDS = 2_000;
+
+export interface ShellSessionOptions {
+  readonly path: string;
+  readonly pty: boolean;
+  readonly rows: number;
+  readonly cols: number;
+  readonly outputBufferBytes?: number;
+}
+
+/** Main-process-only handle for one managed session shell. */
+export interface ShellSessionHandle {
+  readonly id: string;
+  readonly pid: number;
+  readonly path: string;
+  readonly ptyRequested: boolean;
+  readonly output: AsyncIterable<Uint8Array>;
+  write(chunk: Uint8Array | string): Promise<void>;
+  resize(rows: number, cols: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -467,30 +494,47 @@ export class InteractiveSession extends BaseCommands {
       map((msg) => msg.Data),
     );
 
-    // Bind tunnel to the tunnel stream.
-    this.tunnels.send({ TunnelID: tunnelId, SessionID: this.sessionId });
+    try {
+      // Bind tunnel to the tunnel stream.
+      await this.tunnels.send({
+        TunnelID: tunnelId,
+        SessionID: this.sessionId,
+        Data: Buffer.alloc(0),
+      });
 
-    // Ask the implant to open a shell on the bound tunnel.
-    await this.unary(timeoutSeconds, (signal) =>
-      this.rpc.shell(
-        {
-          Path: path,
-          EnablePTY: pty,
-          TunnelID: tunnelId,
-          Request: this.request(timeoutSeconds),
-        },
-        { signal },
-      ),
-    );
+      // Ask the implant to open a shell on the bound tunnel.
+      const shell = await this.unary(timeoutSeconds, (signal) =>
+        this.rpc.shell(
+          {
+            Path: path,
+            EnablePTY: pty,
+            Pid: 0,
+            Rows: 0,
+            Cols: 0,
+            TunnelID: tunnelId,
+            Request: this.request(timeoutSeconds),
+          },
+          { signal },
+        ),
+      );
+      if (shell.Response?.Err) throw new Error("Shell was rejected by the target");
+    } catch {
+      this.tunnels.cancelTunnel(tunnelId);
+      await this.unary(DEFAULT_TIMEOUT_SECONDS, (signal) =>
+        this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: this.sessionId }, { signal }),
+      ).catch(() => undefined);
+      throw new Error("Unable to start shell session");
+    }
 
     return {
       id: tunnelId,
       stdout$,
       write: (data: Buffer | string) => {
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        this.tunnels.send({ TunnelID: tunnelId, SessionID: this.sessionId, Data: buf });
+        return this.tunnels.send({ TunnelID: tunnelId, SessionID: this.sessionId, Data: buf });
       },
       close: async () => {
+        this.tunnels.cancelTunnel(tunnelId);
         await this.unary(DEFAULT_TIMEOUT_SECONDS, (signal) =>
           this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: this.sessionId }, { signal }),
         );
@@ -613,7 +657,7 @@ export class SliverClient {
       // Ensure auth and connectivity are working before we start streams.
       await this.getVersion();
 
-      this.tunnels.start(this.rpc);
+      this.tunnels.start(this.clientFor("tunnel-stream"));
       this.startEventsStream();
       return this;
     } catch (error) {
@@ -1691,6 +1735,215 @@ export class SliverClient {
     return res.Active;
   }
 
+  /**
+   * Opens a session shell through the bounded tunnel stream. This handle is
+   * intentionally part of the reviewed main-process adapter only; renderers
+   * receive a separate MessagePort protocol, never this RPC-capable object.
+   */
+  async startShellSession(
+    sessionId: string,
+    options: ShellSessionOptions,
+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+  ): Promise<ShellSessionHandle> {
+    assertNonEmptyString(sessionId, "Session id");
+    if (!options || typeof options !== "object") throw new Error("Shell options are required");
+    assertNonEmptyString(options.path, "Shell path");
+    if (typeof options.pty !== "boolean") throw new Error("Shell PTY flag must be a boolean");
+    const rows = shellTerminalDimension(options.rows, "Shell rows");
+    const cols = shellTerminalDimension(options.cols, "Shell columns");
+    const outputBufferBytes = shellOutputBufferBytes(options.outputBufferBytes);
+    const request = this.sessionRequest(sessionId, timeoutSeconds);
+
+    const tunnels = this.tunnels;
+    if (!tunnels) throw new Error("SliverClient is not connected");
+
+    let tunnelId = "";
+    let lifecycle: "starting" | "open" | "closing" | "closed" = "starting";
+    let closePromise: Promise<void> | null = null;
+    let writeTail: Promise<void> = Promise.resolve();
+    let resolveRemoteClosed: (() => void) | undefined;
+    const remoteClosed = new Promise<void>((resolve) => {
+      resolveRemoteClosed = resolve;
+    });
+
+    const bestEffortRemoteClose = async (): Promise<void> => {
+      if (!tunnelId) return;
+      await withTimeoutSignal(timeoutSeconds, (signal) =>
+        this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: sessionId }, { signal }),
+      ).catch(() => undefined);
+    };
+
+    const sendGracefulExit = async (): Promise<void> => {
+      await writeTail.catch(() => undefined);
+      for (const command of ["exit\n", "logout\n"] as const) {
+        const bytes = Buffer.from(command);
+        try {
+          await tunnels.send({
+            TunnelID: tunnelId,
+            SessionID: sessionId,
+            Data: bytes,
+          });
+        } catch {
+          return;
+        } finally {
+          bytes.fill(0);
+        }
+      }
+    };
+
+    const boundedGracefulExit = async (): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            await sendGracefulExit();
+            // TunnelManager.send() resolves when the gRPC request stream pulls
+            // a frame, not when the implant consumes it. Hold CloseTunnel long
+            // enough for the exact remote EOF so it cannot overtake exit/logout.
+            await remoteClosed;
+          })(),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, SHELL_GRACEFUL_CLOSE_TIMEOUT_MILLISECONDS);
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const closeManagedTunnel = (requestGracefulExit = false): Promise<void> => {
+      if (closePromise) return closePromise;
+      lifecycle = "closing";
+      closePromise = (async () => {
+        if (requestGracefulExit && tunnelId) await boundedGracefulExit();
+        if (tunnelId) tunnels.cancelTunnel(tunnelId);
+        await bestEffortRemoteClose();
+      })().finally(() => {
+          lifecycle = "closed";
+        });
+      return closePromise;
+    };
+
+    try {
+      const created = await withTimeoutSignal(timeoutSeconds, (signal) =>
+        this.rpc.createTunnel({ SessionID: sessionId }, { signal }),
+      );
+      tunnelId = created.TunnelID.trim();
+      if (!tunnelId) throw new Error("Missing tunnel id");
+
+      const output = tunnels.openOutput(tunnelId, {
+        maxBufferedBytes: outputBufferBytes,
+        onClosed: () => {
+          lifecycle = "closed";
+          resolveRemoteClosed?.();
+          closePromise ??= Promise.resolve();
+        },
+        onFailure: () => {
+          void closeManagedTunnel();
+        },
+      });
+
+      // The zero-data bind must be pulled by TunnelData before Shell can race
+      // an early prompt back to this process.
+      await tunnels.send({
+        TunnelID: tunnelId,
+        SessionID: sessionId,
+        Data: Buffer.alloc(0),
+      });
+
+      const shell = await withTimeoutSignal(timeoutSeconds, (signal) =>
+        this.rpc.shell(
+          {
+            Path: options.path,
+            EnablePTY: options.pty,
+            Pid: 0,
+            Rows: rows,
+            Cols: cols,
+            TunnelID: tunnelId,
+            Request: request,
+          },
+          { signal },
+        ),
+      );
+      if (shell.Response?.Err) throw new Error("Shell rejected");
+      // A force-terminate action is exposed only for this exact child PID.
+      // Never mint that authority for process-group/idle/kernel sentinel IDs.
+      if (!Number.isSafeInteger(shell.Pid) || shell.Pid <= 1 || shell.Pid > 0x7fff_ffff) {
+        throw new Error("Invalid shell pid");
+      }
+      if (shell.TunnelID && shell.TunnelID !== tunnelId) throw new Error("Mismatched shell tunnel");
+      if (lifecycle !== "starting") throw new Error("Shell closed during startup");
+      lifecycle = "open";
+
+      const ensureOpen = (): void => {
+        if (lifecycle !== "open") throw new Error("Shell session is closed");
+      };
+      const ensureNotClosed = (): void => {
+        if (lifecycle === "closed") throw new Error("Shell session is closed");
+      };
+
+      return {
+        id: tunnelId,
+        pid: shell.Pid,
+        path: options.path,
+        ptyRequested: options.pty,
+        output,
+        write: async (chunk) => {
+          ensureOpen();
+          const bytes = shellWriteBytes(chunk);
+          const operation = writeTail.then(async () => {
+            ensureNotClosed();
+            try {
+              for (let offset = 0; offset < bytes.length; offset += TUNNEL_STREAM_MAX_PAYLOAD_BYTES) {
+                ensureNotClosed();
+                await tunnels.send({
+                  TunnelID: tunnelId,
+                  SessionID: sessionId,
+                  Data: bytes.subarray(offset, offset + TUNNEL_STREAM_MAX_PAYLOAD_BYTES),
+                });
+              }
+            } catch {
+              throw new Error("Unable to write to shell session");
+            } finally {
+              bytes.fill(0);
+            }
+          });
+          writeTail = operation.catch(() => undefined);
+          return operation;
+        },
+        resize: async (nextRows, nextCols) => {
+          ensureOpen();
+          if (!options.pty) throw new Error("Shell resize requires a PTY");
+          const validatedRows = shellTerminalDimension(nextRows, "Shell rows");
+          const validatedCols = shellTerminalDimension(nextCols, "Shell columns");
+          try {
+            await withTimeoutSignal(timeoutSeconds, (signal) =>
+              this.rpc.shellResize(
+                {
+                  Rows: validatedRows,
+                  Cols: validatedCols,
+                  TunnelID: tunnelId,
+                  Request: this.sessionRequest(sessionId, timeoutSeconds),
+                },
+                { signal },
+              ),
+            );
+          } catch {
+            throw new Error("Unable to resize shell session");
+          }
+        },
+        close: () => closeManagedTunnel(true),
+      };
+    } catch {
+      // The Shell RPC can lose its response after the implant has already
+      // spawned the child. Once a tunnel exists, mirror the canonical client
+      // and attempt a bounded graceful exit before revoking the transport.
+      await closeManagedTunnel(Boolean(tunnelId));
+      throw new Error("Unable to start shell session");
+    }
+  }
+
   interactSession(sessionId: string): InteractiveSession {
     if (!this.tunnels) {
       throw new Error("SliverClient is not connected");
@@ -1708,7 +1961,36 @@ export class SliverClient {
 }
 
 function assertNonEmptyString(value: string, label: string): void {
-  if (!value.trim()) throw new Error(`${label} must not be empty`);
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must not be empty`);
+}
+
+function shellTerminalDimension(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > SHELL_TERMINAL_DIMENSION_MAX) {
+    throw new Error(`${label} must be between 1 and ${SHELL_TERMINAL_DIMENSION_MAX}`);
+  }
+  return value;
+}
+
+function shellOutputBufferBytes(value: number | undefined): number {
+  if (value === undefined) return SHELL_OUTPUT_BUFFER_DEFAULT_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error("Shell output buffer must be a positive safe integer");
+  }
+  return Math.min(value, SHELL_OUTPUT_BUFFER_MAX_BYTES);
+}
+
+function shellWriteBytes(value: Uint8Array | string): Buffer {
+  if (typeof value === "string") {
+    if (Buffer.byteLength(value) > SHELL_WRITE_MAX_BYTES) {
+      throw new Error(`Shell write must not exceed ${SHELL_WRITE_MAX_BYTES} bytes`);
+    }
+    return Buffer.from(value);
+  }
+  if (!(value instanceof Uint8Array)) throw new Error("Shell write must be bytes or text");
+  if (value.byteLength > SHELL_WRITE_MAX_BYTES) {
+    throw new Error(`Shell write must not exceed ${SHELL_WRITE_MAX_BYTES} bytes`);
+  }
+  return Buffer.from(value);
 }
 
 function boundedNonNegativeInteger(value: number, label: string): number {

@@ -3,7 +3,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { BrowserWindow, Session } from "electron";
+import type { BrowserWindow, Session, WebContents } from "electron";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -36,8 +36,10 @@ function expectStrictJavaScriptPolicy(policy: string): void {
   expect(directives.get("script-src-attr")).toEqual(["'none'"]);
   expect(scriptValues).not.toContain("'unsafe-inline'");
   expect(scriptValues).not.toContain("'unsafe-eval'");
-  expect(scriptValues).not.toContain("'wasm-unsafe-eval'");
+  expect(directives.get("script-src")).toContain("'wasm-unsafe-eval'");
+  expect(directives.get("script-src-elem")).not.toContain("'wasm-unsafe-eval'");
   expect(scriptValues.every((value) => !value.startsWith("data:"))).toBe(true);
+  expect(directives.get("worker-src")).toEqual(["'none'"]);
 }
 
 describe("Electron content security policy", () => {
@@ -47,7 +49,7 @@ describe("Electron content security policy", () => {
 
     expectStrictJavaScriptPolicy(policy);
     expect(directives.get("default-src")).toEqual(["'self'"]);
-    expect(directives.get("script-src")).toEqual(["'self'"]);
+    expect(directives.get("script-src")).toEqual(["'self'", "'wasm-unsafe-eval'"]);
     expect(directives.get("script-src-elem")).toEqual(["'self'"]);
     expect(directives.get("connect-src")).toEqual(["'none'"]);
     expect(directives.get("object-src")).toEqual(["'none'"]);
@@ -59,8 +61,15 @@ describe("Electron content security policy", () => {
     const directives = parsePolicy(policy);
 
     expectStrictJavaScriptPolicy(policy);
-    expect(directives.get("script-src")).toEqual(["'self'", "http://127.0.0.1:5173"]);
-    expect(directives.get("script-src-elem")).toEqual(["'self'", "http://127.0.0.1:5173"]);
+    expect(directives.get("script-src")).toEqual([
+      "'self'",
+      "'wasm-unsafe-eval'",
+      "http://127.0.0.1:5173",
+    ]);
+    expect(directives.get("script-src-elem")).toEqual([
+      "'self'",
+      "http://127.0.0.1:5173",
+    ]);
     expect(directives.get("connect-src")).toEqual([
       "'self'",
       "http://127.0.0.1:5173",
@@ -75,8 +84,20 @@ describe("Electron content security policy", () => {
     ) => void;
 
     let headersCallback: HeadersCallback | undefined;
-    let permissionCheck: (() => boolean) | undefined;
-    let permissionRequest: ((contents: unknown, permission: string, callback: (allowed: boolean) => void) => void) | undefined;
+    type PermissionCheck = (
+      contents: WebContents | null,
+      permission: string,
+      requestingOrigin: string,
+      details: { requestingUrl?: string; isMainFrame: boolean },
+    ) => boolean;
+    type PermissionRequest = (
+      contents: WebContents,
+      permission: string,
+      callback: (allowed: boolean) => void,
+      details: { requestingUrl: string; isMainFrame: boolean },
+    ) => void;
+    let permissionCheck: PermissionCheck | undefined;
+    let permissionRequest: PermissionRequest | undefined;
     let devicePermission: (() => boolean) | undefined;
     const electronSession = {
       webRequest: {
@@ -84,11 +105,11 @@ describe("Electron content security policy", () => {
           headersCallback = callback;
         }),
       },
-      setPermissionCheckHandler: vi.fn((callback: () => boolean) => {
+      setPermissionCheckHandler: vi.fn((callback: PermissionCheck) => {
         permissionCheck = callback;
       }),
       setPermissionRequestHandler: vi.fn(
-        (callback: (contents: unknown, permission: string, done: (allowed: boolean) => void) => void) => {
+        (callback: PermissionRequest) => {
           permissionRequest = callback;
         },
       ),
@@ -110,12 +131,81 @@ describe("Electron content security policy", () => {
 
     expect(responseHeaders?.["X-Test"]).toEqual(["preserved"]);
     expect(responseHeaders?.["Content-Security-Policy"]).toEqual([productionContentSecurityPolicy()]);
-    expect(permissionCheck?.()).toBe(false);
+    expect(permissionCheck?.(null, "clipboard-read", "file://", {
+      requestingUrl: "file:///tmp/untrusted.html",
+      isMainFrame: true,
+    })).toBe(false);
     expect(devicePermission?.()).toBe(false);
 
     const permissionResult = vi.fn();
-    permissionRequest?.({}, "camera", permissionResult);
+    permissionRequest?.({} as WebContents, "camera", permissionResult, {
+      requestingUrl: "file:///tmp/untrusted.html",
+      isMainFrame: true,
+    });
     expect(permissionResult).toHaveBeenCalledWith(false);
+  });
+
+  it("allows only explicit clipboard permissions from the exact trusted main frame", () => {
+    type PermissionCheck = (
+      contents: WebContents | null,
+      permission: string,
+      requestingOrigin: string,
+      details: { requestingUrl?: string; isMainFrame: boolean },
+    ) => boolean;
+    type PermissionRequest = (
+      contents: WebContents,
+      permission: string,
+      callback: (allowed: boolean) => void,
+      details: { requestingUrl: string; isMainFrame: boolean },
+    ) => void;
+    let permissionCheck: PermissionCheck | undefined;
+    let permissionRequest: PermissionRequest | undefined;
+    const electronSession = {
+      webRequest: { onHeadersReceived: vi.fn() },
+      setPermissionCheckHandler: vi.fn((callback: PermissionCheck) => {
+        permissionCheck = callback;
+      }),
+      setPermissionRequestHandler: vi.fn((callback: PermissionRequest) => {
+        permissionRequest = callback;
+      }),
+      setDevicePermissionHandler: vi.fn(),
+    };
+    const trustedRendererUrl = pathToFileURL(resolve("dist/renderer/index.html")).href;
+    const trustedContents = {
+      isDestroyed: () => false,
+      getURL: () => `${trustedRendererUrl}?window=1`,
+    } as unknown as WebContents;
+    configureSessionSecurity(
+      electronSession as unknown as Session,
+      undefined,
+      trustedRendererUrl,
+    );
+
+    for (const permission of ["clipboard-read", "clipboard-sanitized-write"]) {
+      expect(permissionCheck?.(trustedContents, permission, "file://", {
+        requestingUrl: `${trustedRendererUrl}#terminal`,
+        isMainFrame: true,
+      })).toBe(true);
+      const allowed = vi.fn();
+      permissionRequest?.(trustedContents, permission, allowed, {
+        requestingUrl: `${trustedRendererUrl}#terminal`,
+        isMainFrame: true,
+      });
+      expect(allowed).toHaveBeenCalledWith(true);
+    }
+
+    expect(permissionCheck?.(trustedContents, "notifications", "file://", {
+      requestingUrl: trustedRendererUrl,
+      isMainFrame: true,
+    })).toBe(false);
+    expect(permissionCheck?.(trustedContents, "clipboard-read", "file://", {
+      requestingUrl: trustedRendererUrl,
+      isMainFrame: false,
+    })).toBe(false);
+    expect(permissionCheck?.(trustedContents, "clipboard-read", "file://", {
+      requestingUrl: pathToFileURL(resolve("dist/renderer/other.html")).href,
+      isMainFrame: true,
+    })).toBe(false);
   });
 });
 

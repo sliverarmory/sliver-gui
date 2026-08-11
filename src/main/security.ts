@@ -1,11 +1,11 @@
 import { fileURLToPath } from "node:url";
 
-import type { BrowserWindow, Session, WebPreferences } from "electron";
+import type { BrowserWindow, Session, WebContents, WebPreferences } from "electron";
 
 export function productionContentSecurityPolicy(): string {
   return [
     "default-src 'self'",
-    "script-src 'self'",
+    "script-src 'self' 'wasm-unsafe-eval'",
     "script-src-elem 'self'",
     "script-src-attr 'none'",
     "style-src 'self' 'unsafe-inline'",
@@ -27,7 +27,7 @@ export function developmentContentSecurityPolicy(devServerUrl: string): string {
   const websocketOrigin = origin.replace(/^http/, "ws");
   return [
     "default-src 'self'",
-    `script-src 'self' ${origin}`,
+    `script-src 'self' 'wasm-unsafe-eval' ${origin}`,
     `script-src-elem 'self' ${origin}`,
     "script-src-attr 'none'",
     "style-src 'self' 'unsafe-inline'",
@@ -61,7 +61,11 @@ export function secureWebPreferences(preload: string): WebPreferences {
   };
 }
 
-export function configureSessionSecurity(session: Session, devServerUrl?: string): void {
+export function configureSessionSecurity(
+  session: Session,
+  devServerUrl?: string,
+  trustedRendererUrl?: string,
+): void {
   const csp = devServerUrl
     ? developmentContentSecurityPolicy(devServerUrl)
     : productionContentSecurityPolicy();
@@ -72,9 +76,44 @@ export function configureSessionSecurity(session: Session, devServerUrl?: string
     callback({ responseHeaders });
   });
 
-  session.setPermissionCheckHandler(() => false);
-  session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  session.setPermissionCheckHandler((webContents, permission, _requestingOrigin, details) => (
+    permitsExplicitClipboard(
+      webContents,
+      permission,
+      details.requestingUrl,
+      details.isMainFrame,
+      trustedRendererUrl,
+    )
+  ));
+  session.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    callback(permitsExplicitClipboard(
+      webContents,
+      permission,
+      "requestingUrl" in details ? details.requestingUrl : undefined,
+      "isMainFrame" in details && details.isMainFrame,
+      trustedRendererUrl,
+    ));
+  });
   session.setDevicePermissionHandler(() => false);
+}
+
+function permitsExplicitClipboard(
+  webContents: WebContents | null,
+  permission: string,
+  requestingUrl: string | undefined,
+  isMainFrame: boolean,
+  trustedRendererUrl: string | undefined,
+): boolean {
+  if (
+    !trustedRendererUrl ||
+    !webContents ||
+    webContents.isDestroyed() ||
+    !isMainFrame ||
+    (permission !== "clipboard-read" && permission !== "clipboard-sanitized-write") ||
+    !requestingUrl
+  ) return false;
+  return isTrustedRendererUrl(webContents.getURL(), trustedRendererUrl) &&
+    isTrustedRendererUrl(requestingUrl, trustedRendererUrl);
 }
 
 export function isTrustedRendererUrl(candidateUrl: string, expectedRendererUrl: string): boolean {

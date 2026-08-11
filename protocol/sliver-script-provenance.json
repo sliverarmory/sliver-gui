@@ -59,16 +59,8 @@
       "sha256": "2e643c622faa5724f6f9aa76ea9fe1d3c98c7c2743d40374226a93a36755f11c"
     },
     {
-      "path": "src/internal/asyncQueue.ts",
-      "sha256": "9804cd42b895dc24895e91e1bbe5b732526a28c371e56d9d1b386d302749da41"
-    },
-    {
       "path": "src/internal/credentials.ts",
       "sha256": "599f662bc088be6382c73d903eb78638ec17cb54f70a9fd067e4803e3ecca950"
-    },
-    {
-      "path": "src/internal/tunnelManager.ts",
-      "sha256": "fb6e1f4fc1b4eefda29bd57d95cfc1eec46e1f50ae43e41cbab9bf08219bca07"
     },
     {
       "path": "src/internal/wgProxy.ts",
@@ -80,20 +72,32 @@
     "appliedAfterProtobufGeneration": true,
     "patch": {
       "path": "protocol/sliver-script-handwritten-overlay.patch",
-      "sha256": "268618833fee1f608e154672c7a9753a548e9bc6ced58233f6f085d92cea5f84"
+      "sha256": "e84664a3279b67fa1729f95fdd1953b862f5c4b26f9c6c1dc2c3fae4e67e77c8"
     },
     "files": [
       {
         "path": "src/client.ts",
         "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
-        "sha256": "cc8ebdd8deaaca056037aafb0e3b32f5b7a63ccf5675d313d42add279815be5a",
-        "review": "Route RPCs through bounded control, inventory, task-content, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; support bounded from-end downloads for Tail without combining incompatible range options; preserve upload response status for main-owned mutation classification; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; map target-controlled errors to fixed messages; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
+        "sha256": "f5bb909c322aabd33ba0805ff28c556e8c8e69e83afbb98e3abee9196c497459",
+        "review": "Route RPCs through bounded control, inventory, task-content, tunnel-stream, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; add a main-only managed session-shell handle with early-output-safe binding, bounded chunked writes, PTY-gated resize, idempotent cleanup, fixed target-error mapping, and bounded canonical exit/logout signaling before CloseTunnel for explicit close and lost-response startup cleanup; support bounded from-end downloads for Tail without combining incompatible range options; preserve upload response status for main-owned mutation classification; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
       },
       {
         "path": "src/index.ts",
         "baseSha256": "37a8c9139932f7f1600f2da3b83e659e6706787ebdd69bad31d1c05de54af3d7",
         "sha256": "ff338f7605ee0d4b310a15d4a2a462b490a9d3438f8d3efe5bd124834c924f85",
         "review": "Export the reviewed message-budget API, exact timeout conversion helper, and validated timeout signal helper."
+      },
+      {
+        "path": "src/internal/asyncQueue.ts",
+        "baseSha256": "9804cd42b895dc24895e91e1bbe5b732526a28c371e56d9d1b386d302749da41",
+        "sha256": "39ddbf19932d68b621d0069a295f294f846bd9f38906fdec92d9157a1f235790",
+        "review": "Replace the unbounded generic queue with an explicitly item- and byte-budgeted single-consumer queue that fails atomically on overflow, zeroizes disposed byte payloads through owner callbacks, and has deterministic close, failure, and consumer-cancel behavior."
+      },
+      {
+        "path": "src/internal/tunnelManager.ts",
+        "baseSha256": "fb6e1f4fc1b4eefda29bd57d95cfc1eec46e1f50ae43e41cbab9bf08219bca07",
+        "sha256": "0f026953ba8c66ac4ad3709b57ac61622915086bcaf1f7aa8b2fa9303c85d404",
+        "review": "Replace the shared unbounded tunnel writer with a bounded per-tunnel round-robin scheduler, delivery backpressure, fixed active/frame/byte quotas, stable payload copies, early-output queues, content-free statistics, and deterministic close, overflow, transport-failure, cancellation, and zeroization behavior."
       },
       {
         "path": "src/internal/timeout.ts",
@@ -104,8 +108,8 @@
       {
         "path": "src/messageBudget.ts",
         "baseSha256": null,
-        "sha256": "bc3919484bc602a731772d67009790e8817a87414ab2c4316b6e141daa7bf57d",
-        "review": "Define immutable per-domain send and receive allocation limits, including an isolated 80 KiB task-content response ceiling and a separate 66 MiB wire budget with a 64 MiB decoded ceiling for session workbench artifacts, plus IP-safe TLS authority selection."
+        "sha256": "a6c741989b60af5a879b1623e9b6b06f8a53524022168b6e7c7795d3df5e1788",
+        "review": "Define immutable per-domain send and receive allocation limits, including an isolated 80 KiB task-content response ceiling, a 66 KiB tunnel-stream wire budget with a 64 KiB payload ceiling, and a separate 66 MiB wire budget with a 64 MiB decoded ceiling for session workbench artifacts, plus IP-safe TLS authority selection."
       }
     ]
   },

@@ -63,11 +63,16 @@ const invokeArguments = {
     force: false,
   }],
   executeSessionDestructiveActionPlan: [{ token: "8e577480-5dc2-4dde-aa58-23c8f1770627" }],
+  prepareSessionShell: [{ path: "/bin/zsh", requestPty: true, rows: 30, columns: 100 }],
+  listSessionShells: [{}],
+  actOnSessionShell: [{ resourceId: "R".repeat(43), action: "attach" }],
+  getTerminalRuntime: [],
 } satisfies InvokeArgumentsByMethod;
 
 const electronMocks = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn<(name: string, api: SliverDesktopAPI) => void>(),
   invoke: vi.fn((channel: string, ...args: unknown[]) => ({ channel, args })),
+  postMessage: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
 }));
@@ -76,10 +81,26 @@ vi.mock("electron", () => ({
   contextBridge: { exposeInMainWorld: electronMocks.exposeInMainWorld },
   ipcRenderer: {
     invoke: electronMocks.invoke,
+    postMessage: electronMocks.postMessage,
     on: electronMocks.on,
     removeListener: electronMocks.removeListener,
   },
 }));
+
+const createdChannels: TestMessageChannel[] = [];
+
+class TestMessageChannel {
+  readonly port1 = { close: vi.fn() };
+  readonly port2 = { close: vi.fn() };
+
+  constructor() {
+    createdChannels.push(this);
+  }
+}
+
+const windowPostMessage = vi.fn();
+vi.stubGlobal("MessageChannel", TestMessageChannel);
+vi.stubGlobal("window", { postMessage: windowPostMessage });
 
 await import("./index.js");
 
@@ -114,6 +135,7 @@ describe("sandboxed preload bridge", () => {
       "onSnapshotChanged",
       "onOperationChanged",
       "onBeaconTasksInvalidated",
+      "openStream",
     ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
       electronMocks.invoke.mockClear();
@@ -121,5 +143,94 @@ describe("sandboxed preload bridge", () => {
       await Reflect.apply(exposed[method], exposed, args);
       expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC_INVOKE[method], ...args);
     }
+  });
+
+  it("keeps the preload allowlist narrow and exposes no raw Electron transport", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+
+    expect(Object.keys(exposed).sort()).toEqual([
+      ...Object.keys(IPC_INVOKE),
+      "onSnapshotChanged",
+      "onOperationChanged",
+      "onBeaconTasksInvalidated",
+      "openStream",
+    ].sort());
+    expect(exposed).not.toHaveProperty("ipcRenderer");
+    expect(exposed).not.toHaveProperty("send");
+    expect(exposed).not.toHaveProperty("postMessage");
+  });
+
+  it("hands one port to main and one port to the document using the fixed envelope", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const attachmentToken = "A".repeat(43);
+    const correlationId = "8e577480-5dc2-4dde-aa58-23c8f1770627";
+    createdChannels.length = 0;
+    electronMocks.postMessage.mockClear();
+    windowPostMessage.mockClear();
+
+    exposed.openStream(attachmentToken, correlationId);
+
+    const channel = createdChannels[0];
+    if (!channel) throw new Error("Expected a MessageChannel");
+    const mainRequest = { v: 1, attachmentToken };
+    expect(electronMocks.postMessage).toHaveBeenCalledExactlyOnceWith(IPC.attach, mainRequest, [channel.port1]);
+    expect(Object.isFrozen(electronMocks.postMessage.mock.calls[0]?.[1])).toBe(true);
+    expect(windowPostMessage).toHaveBeenCalledExactlyOnceWith(
+      {
+        source: "sliver-preload",
+        type: "stream-port",
+        v: 1,
+        correlationId,
+      },
+      "*",
+      [channel.port2],
+    );
+    expect(Object.isFrozen(windowPostMessage.mock.calls[0]?.[0])).toBe(true);
+    expect(electronMocks.postMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      windowPostMessage.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it.each([
+    ["short-token", "8e577480-5dc2-4dde-aa58-23c8f1770627"],
+    ["A".repeat(43), "8e577480-5dc2-1dde-aa58-23c8f1770627"],
+    ["A".repeat(43), "8e577480-5dc2-4dde-7a58-23c8f1770627"],
+  ])("rejects invalid stream capabilities before allocating a MessageChannel", (attachmentToken, correlationId) => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    createdChannels.length = 0;
+    electronMocks.postMessage.mockClear();
+    windowPostMessage.mockClear();
+
+    expect(() => exposed.openStream(attachmentToken, correlationId)).toThrow();
+    expect(createdChannels).toHaveLength(0);
+    expect(electronMocks.postMessage).not.toHaveBeenCalled();
+    expect(windowPostMessage).not.toHaveBeenCalled();
+  });
+
+  it("closes both local ports if the bridge cannot transfer the main-process capability", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    createdChannels.length = 0;
+    windowPostMessage.mockClear();
+    electronMocks.postMessage.mockReset();
+    electronMocks.postMessage.mockImplementationOnce(() => {
+      throw new Error("transfer failed");
+    });
+
+    expect(() => exposed.openStream("A".repeat(43), "8e577480-5dc2-4dde-aa58-23c8f1770627")).toThrow(
+      /transfer failed/,
+    );
+    const channel = createdChannels[0];
+    if (!channel) throw new Error("Expected a MessageChannel");
+    expect(channel.port1.close).toHaveBeenCalledOnce();
+    expect(channel.port2.close).toHaveBeenCalledOnce();
+    expect(windowPostMessage).not.toHaveBeenCalled();
   });
 });

@@ -1,11 +1,12 @@
 // @vitest-environment node
 
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { WebContents } from "electron";
+import type { MessagePortMain, WebContents } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
 import { clientpb, sliverpb, type SliverEventStreamState } from "sliver-script";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,12 +14,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
 import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
+import {
+  STREAM_PROTOCOL_VERSION,
+  type PrepareSessionShellInput,
+  type SessionShellPlan,
+  type StreamClientFrame,
+  type StreamServerFrame,
+  type TerminalRuntimeAsset,
+} from "../shared/stream-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   fromWebContents: vi.fn(),
   fromId: vi.fn(),
   showOpenDialog: vi.fn(),
   showSaveDialog: vi.fn(),
+}));
+
+const terminalRuntimeMocks = vi.hoisted(() => ({
+  loadTerminalRuntime: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
@@ -28,6 +41,10 @@ vi.mock("electron", () => ({
     showSaveDialog: electronMocks.showSaveDialog,
   },
   webContents: { fromId: electronMocks.fromId },
+}));
+
+vi.mock("./terminal-runtime.js", () => ({
+  loadTerminalRuntime: terminalRuntimeMocks.loadTerminalRuntime,
 }));
 
 import {
@@ -56,6 +73,8 @@ beforeEach(async () => {
   electronMocks.showOpenDialog.mockReset();
   electronMocks.showSaveDialog.mockReset();
   electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
+  terminalRuntimeMocks.loadTerminalRuntime.mockReset();
+  terminalRuntimeMocks.loadTerminalRuntime.mockResolvedValue(terminalRuntimeAsset());
 });
 
 afterEach(async () => {
@@ -4314,6 +4333,326 @@ describe("connection registry with an injected Sliver client", () => {
   });
 });
 
+describe("M3 session shell registry boundary", () => {
+  it("binds a prepared shell to the exact window and renderer document while preserving early output", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m3", "m3-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+
+    await expect(registry.prepareSessionShell(1, 101, "document-a", { requestPty: true })).resolves.toEqual({
+      ok: false,
+      error: "Select an active session before using the session workbench",
+    });
+    const firstTarget = registry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    const secondTarget = registry.snapshot(2).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!firstTarget || !secondTarget) throw new Error("Expected shared session target refs");
+    await registry.selectTarget(1, firstTarget);
+    await registry.selectTarget(2, secondTarget);
+
+    const earlyPrompt = Uint8Array.from(Buffer.from("early-shell-prompt> ", "utf8"));
+    const shell = new FakeShellSession(earlyPrompt);
+    client.nextShellSession = shell;
+    const prepared = await registry.prepareSessionShell(1, 101, "document-a", {
+      requestPty: true,
+      rows: 41,
+      columns: 119,
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    expect(prepared.value).toMatchObject({
+      kind: "session-shell",
+      pty: "requested-unconfirmed",
+      canResize: true,
+    });
+
+    await expect(registry.listSessionShells(1, 101, "document-stale", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    await expect(registry.listSessionShells(2, 202, "document-b", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [] },
+    });
+    await expect(registry.actOnSessionShell(1, 101, "document-stale", {
+      resourceId: prepared.value.resourceId,
+      action: "close",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The stream is unavailable for the current window, backend, target, or renderer",
+    });
+    expect(client.startShellSession).not.toHaveBeenCalled();
+
+    const crossWindowPort = new FakeMessagePort();
+    expect(() => registry.attachStream(2, 202, "document-b", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: prepared.value.attachment.attachmentToken,
+    }, crossWindowPort.asElectronPort())).toThrow(
+      "The stream is unavailable for the current window, backend, target, or renderer",
+    );
+    expect(crossWindowPort.closed).toBe(true);
+
+    const staleDocumentPort = new FakeMessagePort();
+    expect(() => registry.attachStream(1, 101, "document-stale", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: prepared.value.attachment.attachmentToken,
+    }, staleDocumentPort.asElectronPort())).toThrow(
+      "The stream is unavailable for the current window, backend, target, or renderer",
+    );
+    expect(staleDocumentPort.closed).toBe(true);
+
+    const port = new FakeMessagePort();
+    registry.attachStream(1, 101, "document-a", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: prepared.value.attachment.attachmentToken,
+    }, port.asElectronPort());
+    const ready = port.last("ready");
+    if (!ready) throw new Error("Expected ready frame");
+    port.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "start",
+      streamId: ready.streamId,
+      receiveCreditBytes: 64 * 1_024,
+    });
+
+    await vi.waitFor(() => expect(client.startShellSession).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(port.last("opened")).toBeDefined());
+    await vi.waitFor(() => expect(port.last("data")).toBeDefined());
+    expect(client.startShellSession).toHaveBeenCalledWith("session_m3", {
+      path: "/bin/bash",
+      pty: true,
+      rows: 41,
+      cols: 119,
+    }, 30);
+    expect(Buffer.from(new Uint8Array(port.last("data")!.data)).toString("utf8")).toBe("early-shell-prompt> ");
+    expect([...earlyPrompt]).toEqual(new Array(earlyPrompt.length).fill(0));
+    await expect(registry.listSessionShells(1, 101, "document-a", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [{ resourceId: prepared.value.resourceId, state: "attached" }] },
+    });
+
+    await expect(registry.actOnSessionShell(1, 101, "document-a", {
+      resourceId: prepared.value.resourceId,
+      action: "close",
+    })).resolves.toEqual({
+      ok: true,
+      value: { action: "close", resourceId: prepared.value.resourceId },
+    });
+    expect(shell.close).toHaveBeenCalledOnce();
+  });
+
+  it("coerces Windows PTY requests off and uses bounded platform defaults", async () => {
+    const client = new FakeSliverClient();
+    const windowsSession = session("session_windows", "windows-interactive");
+    windowsSession.OS = "windows";
+    windowsSession.Arch = "amd64";
+    client.sessionState.Sessions = [windowsSession];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0];
+    if (!target) throw new Error("Expected Windows session ref");
+    await registry.selectTarget(1, target);
+
+    const shell = new FakeShellSession();
+    client.nextShellSession = shell;
+    const opened = await openRegistryShell(registry, 1, 303, "windows-document", {
+      requestPty: true,
+      rows: 55,
+      columns: 144,
+    });
+
+    expect(opened.plan).toMatchObject({ pty: "disabled", canResize: false });
+    expect(client.startShellSession).toHaveBeenCalledWith("session_windows", {
+      path: "powershell.exe",
+      pty: false,
+      rows: 24,
+      cols: 80,
+    }, 30);
+    await registry.actOnSessionShell(1, 303, "windows-document", {
+      resourceId: opened.plan.resourceId,
+      action: "close",
+    });
+  });
+
+  it("cleans up A-to-B and background transitions per window, then closes every owner on authoritative loss", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_a", "session-a"), session("session_b", "session-b")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+    const targetA1 = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a");
+    const targetA2 = registry.snapshot(2).targetContext.selectableTargets.find(({ id }) => id === "session_a");
+    const targetB1 = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_b");
+    if (!targetA1 || !targetA2 || !targetB1) throw new Error("Expected both session refs");
+    await registry.selectTarget(1, targetA1);
+    await registry.selectTarget(2, targetA2);
+
+    const firstShell = new FakeShellSession();
+    client.nextShellSession = firstShell;
+    await openRegistryShell(registry, 1, 401, "window-one-document", { requestPty: false });
+    const secondShell = new FakeShellSession();
+    client.nextShellSession = secondShell;
+    const second = await openRegistryShell(registry, 2, 402, "window-two-document", { requestPty: false });
+
+    await expect(registry.selectTarget(1, targetB1)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTargetSummary: { id: "session_b" } } },
+    });
+    expect(firstShell.close).toHaveBeenCalledOnce();
+    expect(secondShell.close).not.toHaveBeenCalled();
+    await expect(registry.listSessionShells(2, 402, "window-two-document", {})).resolves.toMatchObject({
+      ok: true,
+      value: { resources: [{ resourceId: second.plan.resourceId, state: "attached" }] },
+    });
+
+    await expect(registry.backgroundTarget(2)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTarget: null } },
+    });
+    expect(secondShell.close).toHaveBeenCalledOnce();
+
+    const currentA = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_a");
+    if (!currentA) throw new Error("Expected current A target ref");
+    await registry.selectTarget(1, currentA);
+    const lostShell = new FakeShellSession();
+    client.nextShellSession = lostShell;
+    await openRegistryShell(registry, 1, 401, "window-one-document", { requestPty: false });
+    client.sessionState.Sessions = [session("session_b", "session-b")];
+
+    await expect(registry.refresh(1)).resolves.toMatchObject({
+      ok: true,
+      value: { targetContext: { activeTarget: null } },
+    });
+    await vi.waitFor(() => expect(lostShell.close).toHaveBeenCalledOnce());
+  });
+
+  it("exposes only a fixed close disposition when shell startup fails with sensitive diagnostics", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m3", "m3-interactive")];
+    client.startShellSession.mockRejectedValueOnce(
+      new Error("token=TOP-SECRET password=HUNTER2 path=/Users/operator/private-shell"),
+    );
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0];
+    if (!target) throw new Error("Expected session ref");
+    await registry.selectTarget(1, target);
+
+    const prepared = await registry.prepareSessionShell(1, 501, "failure-document", { requestPty: false });
+    if (!prepared.ok) throw new Error(prepared.error);
+    const port = new FakeMessagePort();
+    registry.attachStream(1, 501, "failure-document", {
+      v: STREAM_PROTOCOL_VERSION,
+      attachmentToken: prepared.value.attachment.attachmentToken,
+    }, port.asElectronPort());
+    const ready = port.last("ready");
+    if (!ready) throw new Error("Expected ready frame");
+    port.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "start",
+      streamId: ready.streamId,
+      receiveCreditBytes: 64 * 1_024,
+    });
+
+    await vi.waitFor(() => expect(port.last("closed")).toMatchObject({
+      reason: "transport-error",
+      disposition: "closed",
+    }));
+    expect(JSON.stringify(port.frames)).not.toMatch(/TOP-SECRET|HUNTER2|private-shell/u);
+    await vi.waitFor(async () => {
+      await expect(registry.listSessionShells(1, 501, "failure-document", {})).resolves.toMatchObject({
+        ok: true,
+        value: { resources: [] },
+      });
+    });
+  });
+
+  it("bounds shell preparation across a coalesced refresh and releases admission after settlement", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m3", "m3-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0];
+    if (!target) throw new Error("Expected session ref");
+    await registry.selectTarget(1, target);
+    const baselineSessionCalls = client.getSessions.mock.calls.length;
+    const refreshGate = deferred<clientpb.Sessions>();
+    client.nextSessionsPromise = refreshGate.promise;
+    const internals = registry as unknown as {
+      windows: Map<number, { sessionShellPrepareAdmissions: Set<string> }>;
+    };
+
+    const first = registry.prepareSessionShell(1, 601, "prepare-one", { requestPty: false });
+    await vi.waitFor(() => expect(client.getSessions).toHaveBeenCalledTimes(baselineSessionCalls + 1));
+    const second = registry.prepareSessionShell(1, 602, "prepare-two", { requestPty: false });
+    await vi.waitFor(() => expect(internals.windows.get(1)?.sessionShellPrepareAdmissions.size).toBe(2));
+    await expect(registry.prepareSessionShell(1, 603, "prepare-three", {
+      requestPty: false,
+    })).resolves.toEqual({
+      ok: false,
+      error: "Too many shell preparations are already running in this window",
+    });
+    expect(client.getSessions).toHaveBeenCalledTimes(baselineSessionCalls + 1);
+
+    refreshGate.resolve(clientpb.Sessions.create(client.sessionState));
+    const prepared = await Promise.all([first, second]);
+    for (const result of prepared) expect(result).toMatchObject({ ok: true });
+    expect(internals.windows.get(1)?.sessionShellPrepareAdmissions.size).toBe(0);
+    const released = await registry.prepareSessionShell(1, 603, "prepare-three", { requestPty: false });
+    expect(released).toMatchObject({ ok: true });
+
+    const plans = [...prepared, released].flatMap((result) => result.ok ? [result.value] : []);
+    const documents = [
+      { processId: 601, frameToken: "prepare-one" },
+      { processId: 602, frameToken: "prepare-two" },
+      { processId: 603, frameToken: "prepare-three" },
+    ];
+    for (const [index, plan] of plans.entries()) {
+      const document = documents[index];
+      if (!document) throw new Error("Expected preparation document binding");
+      await expect(registry.actOnSessionShell(1, document.processId, document.frameToken, {
+        resourceId: plan.resourceId,
+        action: "close",
+      })).resolves.toMatchObject({ ok: true });
+    }
+  });
+
+  it("bounds terminal runtime copies per window without a rejected duplicate releasing the live admission", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    const gate = deferred<TerminalRuntimeAsset>();
+    terminalRuntimeMocks.loadTerminalRuntime.mockImplementationOnce(() => gate.promise);
+
+    const first = registry.getTerminalRuntime(1);
+    await vi.waitFor(() => expect(terminalRuntimeMocks.loadTerminalRuntime).toHaveBeenCalledOnce());
+    await expect(registry.getTerminalRuntime(1)).resolves.toEqual({
+      ok: false,
+      error: "The verified packaged terminal runtime is unavailable",
+    });
+    await expect(registry.getTerminalRuntime(1)).resolves.toEqual({
+      ok: false,
+      error: "The verified packaged terminal runtime is unavailable",
+    });
+    expect(terminalRuntimeMocks.loadTerminalRuntime).toHaveBeenCalledOnce();
+
+    const asset = terminalRuntimeAsset();
+    gate.resolve(asset);
+    await expect(first).resolves.toEqual({ ok: true, value: asset });
+    await expect(registry.getTerminalRuntime(1)).resolves.toMatchObject({
+      ok: true,
+      value: { version: "0.4.0", sha256: "a".repeat(64) },
+    });
+    expect(terminalRuntimeMocks.loadTerminalRuntime).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("server compatibility and event redaction", () => {
   it("distinguishes the pinned baseline, unverified compatible builds, and unsupported majors", () => {
     expect(negotiateServerVersion(version({ Commit: SLIVER_PROTOCOL_BASELINE_COMMIT }))).toEqual({
@@ -4358,6 +4697,7 @@ class FakeSliverClient {
   nextProfilesPromise: Promise<clientpb.ImplantProfiles> | undefined;
   nextSessionsPromise: Promise<clientpb.Sessions> | undefined;
   nextBeaconsPromise: Promise<clientpb.Beacons> | undefined;
+  nextShellSession: FakeShellSession | undefined;
   lastUploadData: Buffer | undefined;
 
   readonly connect = vi.fn(async (): Promise<unknown> => {
@@ -4479,6 +4819,11 @@ class FakeSliverClient {
     }],
   }));
   readonly terminateSessionProcess = vi.fn(async () => sliverpb.Terminate.create({}));
+  readonly startShellSession = vi.fn(async () => {
+    const shell = this.nextShellSession ?? new FakeShellSession();
+    this.nextShellSession = undefined;
+    return shell;
+  });
   readonly setEnvSession = vi.fn(async (_sessionId: string, name: string, value: string) => {
     this.environmentState.set(name, value);
     return sliverpb.SetEnv.create({});
@@ -4629,6 +4974,7 @@ class FakeSliverClient {
     downloadFileSession: this.downloadFileSession,
     psSession: this.psSession,
     terminateSessionProcess: this.terminateSessionProcess,
+    startShellSession: this.startShellSession,
     setEnvSession: this.setEnvSession,
     setEnvBeacon: this.setEnvBeacon,
     unsetEnvSession: this.unsetEnvSession,
@@ -4690,6 +5036,123 @@ class FakeSliverClient {
       Response: { Async: true, BeaconID: beaconId, TaskID: id, Err: "" },
     };
   }
+}
+
+class FakeShellOutput implements AsyncIterable<Uint8Array> {
+  private readonly queued: Uint8Array[] = [];
+  private readonly waiters: Array<(value: Uint8Array | undefined) => void> = [];
+  private ended = false;
+
+  constructor(initial?: Uint8Array) {
+    if (initial) this.queued.push(initial);
+  }
+
+  close(): void {
+    if (this.ended) return;
+    this.ended = true;
+    for (const resolve of this.waiters.splice(0)) resolve(undefined);
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    while (true) {
+      const queued = this.queued.shift();
+      if (queued) {
+        yield queued;
+        continue;
+      }
+      if (this.ended) return;
+      const next = await new Promise<Uint8Array | undefined>((resolve) => this.waiters.push(resolve));
+      if (!next) return;
+      yield next;
+    }
+  }
+}
+
+class FakeShellSession {
+  readonly id = "main-only-tunnel-id";
+  readonly pid = 7_733;
+  readonly path = "/bin/bash";
+  readonly ptyRequested = true;
+  readonly output: FakeShellOutput;
+  readonly write = vi.fn(async (_chunk: Uint8Array | string) => undefined);
+  readonly resize = vi.fn(async (_rows: number, _columns: number) => undefined);
+  readonly close = vi.fn(async () => this.output.close());
+
+  constructor(initialOutput?: Uint8Array) {
+    this.output = new FakeShellOutput(initialOutput);
+  }
+}
+
+class FakeMessagePort extends EventEmitter {
+  readonly frames: StreamServerFrame[] = [];
+  closed = false;
+  started = false;
+
+  asElectronPort(): MessagePortMain {
+    return this as unknown as MessagePortMain;
+  }
+
+  postMessage(frame: StreamServerFrame): void {
+    if (this.closed) throw new Error("port closed");
+    this.frames.push(structuredClone(frame));
+  }
+
+  start(): void {
+    this.started = true;
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  send(frame: StreamClientFrame): void {
+    this.emit("message", { data: frame });
+  }
+
+  last<T extends StreamServerFrame["type"]>(type: T): Extract<StreamServerFrame, { type: T }> | undefined {
+    return this.frames.findLast(
+      (frame): frame is Extract<StreamServerFrame, { type: T }> => frame.type === type,
+    );
+  }
+}
+
+async function openRegistryShell(
+  registry: ConnectionRegistry,
+  contentsId: number,
+  rendererProcessId: number,
+  rendererFrameToken: string,
+  input: PrepareSessionShellInput,
+): Promise<{ plan: SessionShellPlan; port: FakeMessagePort }> {
+  const prepared = await registry.prepareSessionShell(
+    contentsId,
+    rendererProcessId,
+    rendererFrameToken,
+    input,
+  );
+  if (!prepared.ok) throw new Error(prepared.error);
+  const port = new FakeMessagePort();
+  registry.attachStream(contentsId, rendererProcessId, rendererFrameToken, {
+    v: STREAM_PROTOCOL_VERSION,
+    attachmentToken: prepared.value.attachment.attachmentToken,
+  }, port.asElectronPort());
+  const ready = port.last("ready");
+  if (!ready) throw new Error("Expected ready frame");
+  port.send({
+    v: STREAM_PROTOCOL_VERSION,
+    type: "start",
+    streamId: ready.streamId,
+    receiveCreditBytes: 64 * 1_024,
+  });
+  await vi.waitFor(() => expect(port.last("opened")).toBeDefined());
+  return { plan: prepared.value, port };
+}
+
+function terminalRuntimeAsset(): TerminalRuntimeAsset {
+  return {
+    version: "0.4.0",
+    sha256: "a".repeat(64),
+    bytes: Uint8Array.from([0, 97, 115, 109]),
+  };
 }
 
 function createRegistry(factory: () => SliverClientAdapter): ConnectionRegistry {

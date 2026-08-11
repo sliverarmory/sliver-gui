@@ -42,6 +42,10 @@ configuration files and their private keys stay in the Electron main process.
   typed write, create-key, and delete-key mutations.
 - Activity unifies M1 and session-workbench history for the exact session while
   excluding command content, secrets, binary data, and local paths.
+- A session-only managed-shell workspace in the Terminal tab. Operators can
+  start, list, attach, detach, close, and kill shells; use explicit copy and
+  reviewed paste controls; and see lifecycle, pressure, and byte-count metadata
+  without terminal content entering React state, snapshots, Activity, or logs.
 - Session workbench mutations are a closed typed allowlist. Destructive or
   replacement actions use expiring one-use review plans, target and platform
   restrictions are revalidated in Electron main, and local paths and binary
@@ -64,14 +68,22 @@ configuration files and their private keys stay in the Electron main process.
 - Accessible confirmation dialogs for destructive actions and local Font
   Awesome SVG icons.
 
-The operator accepted the session-first M2 scope on 2026-08-10 and unlocked M3.
-M3 is now implementing bounded streaming and managed interactive shells with
-packaged Ghostty Web. Deferred M2 work remains visible in the roadmap: supported
-beacon execution, complete cross-platform real-server evidence, the central
-authoritative capability service, mutation-stable anchor cursors, and remote
-loot dispositions. Current workbench continuation tokens are bounded offsets,
-so a changing remote inventory can still duplicate or skip entries between
-pages.
+The operator accepted and completed the session-first M2 scope on 2026-08-10,
+unlocking M3. The session-shell-only M3 implementation is delivered and
+**awaiting operator acceptance**; M4 has not started. Deferred M2 work remains
+visible in the roadmap: supported beacon execution, complete cross-platform
+real-server evidence, the central authoritative capability service,
+mutation-stable anchor cursors, and remote loot dispositions. Current workbench
+continuation tokens are bounded offsets, so a changing remote inventory can
+still duplicate or skip entries between pages.
+
+M3 does not claim beacon-shell parity because the pinned upstream command tree
+has no beacon shell workflow. It also does not claim forwarding, reverse
+forwarding, or SOCKS; those remain M5. A detached shell can be reattached only
+from the same live client and application window. PTY allocation is requested
+but not confirmed by the upstream protocol, and resize and remote closure are
+best-effort operations. See [M3 verification](docs/m3-verification.md) for the
+exact boundary and deferred evidence.
 
 ## Development
 
@@ -113,6 +125,8 @@ Useful checks:
 npm run typecheck
 npm test
 npm run protocol:check
+npm run protocol:ghostty
+npm run parity:check
 npm run test:e2e:electron
 npm run test:e2e:m1
 npm run build
@@ -124,9 +138,10 @@ npm run test:m0
 `npm run protocol:check` is authoritative under the locked CI toolchain: Node
 24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` retains the
 M0 current-platform regression gate. `npm run test:e2e:electron` exercises the
-M1 target/task path and the dedicated session-first M2 workbench through the
-production renderer, frozen preload, trusted IPC, and an injected Sliver
-client; `npm run test:e2e:m1` remains an alias for that current-slice lane.
+M1 target/task path, the dedicated session-first M2 workbench, and the
+deterministic M3 managed-shell path through the production renderer, frozen
+preload, trusted IPC, and an injected Sliver client; `npm run test:e2e:m1`
+remains an alias for that current-slice lane.
 Opt-in actual-server package tests remain separate because they require an
 authorized disposable server and operator configuration.
 
@@ -210,20 +225,52 @@ cancellation. Cleanup is restricted to captured test-owned process, target,
 listener, profile, and build identities; no wildcard or server-wide clean is
 used.
 
+To exercise the M3 shell path, select one exact pre-authorized live session in
+an isolated packaged-app window:
+
+```sh
+SLIVER_GUI_M3_REAL_E2E=1 \
+SLIVER_GUI_E2E_CONFIG=/absolute/path/operator.cfg \
+SLIVER_GUI_E2E_SESSION_ID=<exact-session-id> \
+npm run test:e2e:packaged-real-m3
+```
+
+`SLIVER_GUI_E2E_SESSION_NAME` may be used instead of the exact ID when it
+matches exactly one live session. The harness starts one child shell and limits
+cleanup to captured managed-resource IDs. Failure cleanup may invoke Kill only
+through that exact main-owned resource; it never terminates an implant or
+performs wildcard cleanup. Because upstream shell closure is best effort, an
+unconfirmed orphan is a test failure rather than permission for broader remote
+cleanup. The harness also verifies the exact `app.asar` adjacent to the selected
+packaged executable before launch.
+
 ## Security boundary
 
 - `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`,
   `webSecurity: true`, and webviews disabled.
 - The main window installs a response-header Content Security Policy. Script
-  directives allow only local bundled JavaScript and explicitly forbid inline
-  scripts, eval-like execution, inline event handlers, workers, remote
-  connections, objects, and frames.
-- Navigation, new windows, permissions, and device access are denied. IPC
-  accepts only the exact trusted renderer URL, its main frame, and its owning
-  BrowserWindow.
+  directives allow local bundled JavaScript plus the narrow
+  `wasm-unsafe-eval` capability needed to instantiate the verified local
+  Ghostty runtime. Inline scripts, `unsafe-eval`, event handlers, workers,
+  remote connections, objects, and frames remain blocked; `connect-src` and
+  `worker-src` remain `none`.
+- Navigation, new windows, device access, and all unrelated permissions are
+  denied. The session grants only `clipboard-read` and
+  `clipboard-sanitized-write` to the exact trusted main frame for the explicit
+  operator Copy/Paste controls, which also require active user interaction.
+  IPC accepts only that renderer URL, frame, and owning BrowserWindow.
 - The preload exposes a frozen, typed set of narrowly scoped operations. Raw
   gRPC clients, tokens, certificates, keys, and arbitrary filesystem access are
   never exposed to renderer code.
+- Interactive shell bytes use a versioned MessagePort plane with one-use,
+  exact-window attachment capabilities, strict sequence and credit accounting,
+  bounded frames, queues, quotas, and timeouts. The renderer sees opaque
+  resource IDs rather than upstream tunnel IDs, and payload bytes never enter
+  broad IPC snapshots, React state, Activity, logs, or content-bearing metrics.
+- `ghostty-web@0.4.0` and its `ghostty-vt.wasm` runtime are pinned and verified
+  against packaged provenance before the renderer receives an isolated byte
+  copy. The terminal does not fetch code or enable host-effect callbacks;
+  hostile OSC and string-control sequences are filtered before rendering.
 - Server events are invalidation hints rather than authoritative state. The GUI
   refetches snapshots after relevant events, mutations, and reconnects because
   the upstream event broker can drop events under pressure.
@@ -235,5 +282,13 @@ used.
 - The console's `RestartJobs` behavior is not exposed because the backend RPC
   does not safely represent a single listener restart. Stop and explicit start
   are supported.
-- Ghostty Web is not loaded in this slice, so the strict CSP does not yet need a
-  WebAssembly or worker exception.
+- The upstream shell API does not report whether a requested PTY was actually
+  allocated. Linux and macOS therefore display `requested-unconfirmed` and
+  treat resize as best effort; Windows shells are forced to non-PTY mode.
+- Shell Close confirms local managed-stream closure and sends bounded
+  best-effort `exit` and `logout` requests, then waits boundedly for the exact
+  remote EOF before closing the transport. A missing EOF is not proof that the
+  remote process terminated; Kill remains the forceful path.
+- Detached shell scrollback and reattachment stay local to the same live client
+  and application window. Reattachment after application restart, backend
+  replacement, target loss, or another window is not supported.

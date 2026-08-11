@@ -1,4 +1,11 @@
-import { BrowserWindow, ipcMain, type IpcMainInvokeEvent, type WebContents } from "electron";
+import {
+  BrowserWindow,
+  ipcMain,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
+  type MessagePortMain,
+  type WebContents,
+} from "electron";
 
 import {
   IPC,
@@ -27,6 +34,12 @@ import {
   parseSessionWorkbenchInput,
 } from "../shared/session-contracts.js";
 import {
+  parseListSessionShellsInput,
+  parsePrepareSessionShellInput,
+  parseSessionShellResourceActionInput,
+  parseStreamAttachRequest,
+} from "../shared/stream-contracts.js";
+import {
   DESTRUCTIVE_TARGET_ACTION_IDS,
   MAX_TARGET_CATALOG_CURSOR_LENGTH,
   MAX_TARGET_CATALOG_PAGE_SIZE,
@@ -42,6 +55,8 @@ import { isTrustedRendererUrl } from "./security.js";
 interface TrustedSender {
   sender: WebContents;
   contentsId: number;
+  rendererProcessId: number;
+  rendererFrameToken: string;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -86,6 +101,11 @@ export type IpcConnectionRegistry = Pick<
   | "runSessionWorkbench"
   | "prepareSessionDestructiveAction"
   | "executeSessionDestructiveActionPlan"
+  | "prepareSessionShell"
+  | "listSessionShells"
+  | "actOnSessionShell"
+  | "getTerminalRuntime"
+  | "attachStream"
 >;
 
 const IMPLANT_TYPES = ["session", "beacon"] as const;
@@ -99,6 +119,10 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 const MAX_SHORT_STRING_LENGTH = 256;
 const MAX_LONG_STRING_LENGTH = 32 * 1024;
 const MAX_STRING_ARRAY_ITEMS = 500;
+
+let registeredStreamAttachListener:
+  | ((event: IpcMainEvent, ...args: unknown[]) => void)
+  | undefined;
 
 export function registerIpcHandlers(
   registry: IpcConnectionRegistry,
@@ -224,10 +248,44 @@ export function registerIpcHandlers(
     parseExecuteSessionDestructiveActionPlanArguments,
     ({ contentsId }, input) => registry.executeSessionDestructiveActionPlan(contentsId, input.token),
   );
+  handleTrusted(
+    IPC.prepareSessionShell,
+    rendererUrl,
+    parsePrepareSessionShellArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, input) =>
+      registry.prepareSessionShell(contentsId, rendererProcessId, rendererFrameToken, input),
+  );
+  handleTrusted(
+    IPC.listSessionShells,
+    rendererUrl,
+    parseListSessionShellsArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, input) =>
+      registry.listSessionShells(contentsId, rendererProcessId, rendererFrameToken, input),
+  );
+  handleTrusted(
+    IPC.actOnSessionShell,
+    rendererUrl,
+    parseSessionShellResourceActionArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, input) =>
+      registry.actOnSessionShell(contentsId, rendererProcessId, rendererFrameToken, input),
+  );
+  handleTrusted(IPC.getTerminalRuntime, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.getTerminalRuntime(contentsId),
+  );
+
+  if (registeredStreamAttachListener) {
+    ipcMain.removeListener(IPC.attach, registeredStreamAttachListener);
+  }
+  registeredStreamAttachListener = createStreamAttachListener(registry, rendererUrl);
+  ipcMain.on(IPC.attach, registeredStreamAttachListener);
 }
 
 export function unregisterIpcHandlers(): void {
   for (const channel of Object.values(IPC_INVOKE)) ipcMain.removeHandler(channel);
+  if (registeredStreamAttachListener) {
+    ipcMain.removeListener(IPC.attach, registeredStreamAttachListener);
+    registeredStreamAttachListener = undefined;
+  }
 }
 
 export function isTrustedSender(sender: WebContents, rendererUrl: string): boolean {
@@ -239,7 +297,7 @@ export function isTrustedSender(sender: WebContents, rendererUrl: string): boole
   }
 }
 
-function requireTrustedSender(event: IpcMainInvokeEvent, rendererUrl: string): TrustedSender {
+function requireTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent, rendererUrl: string): TrustedSender {
   const { sender, senderFrame } = event;
   if (!senderFrame || senderFrame.isDestroyed() || !isTrustedSender(sender, rendererUrl)) {
     throw new Error("Rejected IPC invocation from an untrusted renderer");
@@ -252,7 +310,56 @@ function requireTrustedSender(event: IpcMainInvokeEvent, rendererUrl: string): T
   ) {
     throw new Error("Rejected IPC invocation from an untrusted renderer");
   }
-  return { sender, contentsId: sender.id };
+  return {
+    sender,
+    contentsId: sender.id,
+    rendererProcessId: senderFrame.processId,
+    rendererFrameToken: senderFrame.frameToken,
+  };
+}
+
+function createStreamAttachListener(
+  registry: IpcConnectionRegistry,
+  rendererUrl: string,
+): (event: IpcMainEvent, ...args: unknown[]) => void {
+  return (event, ...rawArguments): void => {
+    const ports = [...event.ports];
+    try {
+      if (ports.length !== 1) throw new Error("Rejected stream attachment without exactly one transferred port");
+      const sender = requireTrustedSender(event, rendererUrl);
+      requireArgumentCount(rawArguments, 1, "stream attach request");
+      const request = parseStreamAttachRequest(rawArguments[0]);
+      const result: unknown = registry.attachStream(
+        sender.contentsId,
+        sender.rendererProcessId,
+        sender.rendererFrameToken,
+        request,
+        ports[0] as MessagePortMain,
+      );
+      if (isPromiseLike(result)) {
+        void Promise.resolve(result).catch(() => closeTransferredPorts(ports));
+      }
+    } catch {
+      closeTransferredPorts(ports);
+    }
+  };
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === "object" && value !== null) || typeof value === "function"
+  ) && "then" in value && typeof value.then === "function";
+}
+
+function closeTransferredPorts(ports: readonly MessagePortMain[]): void {
+  for (const port of ports) {
+    try {
+      port.close();
+    } catch {
+      // The boundary must attempt every supplied port even if one host object
+      // has already been closed or otherwise rejects the close operation.
+    }
+  }
 }
 
 function handleTrusted<Channel extends IpcInvokeChannel>(
@@ -425,6 +532,27 @@ function parseExecuteSessionDestructiveActionPlanArguments(
 ): [input: ReturnType<typeof parseExecuteSessionDestructiveActionPlanInput>] {
   requireArgumentCount(args, 1, "session destructive action execution");
   return [parseExecuteSessionDestructiveActionPlanInput(args[0])];
+}
+
+function parsePrepareSessionShellArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parsePrepareSessionShellInput>] {
+  requireArgumentCount(args, 1, "session shell input");
+  return [parsePrepareSessionShellInput(args[0])];
+}
+
+function parseListSessionShellsArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseListSessionShellsInput>] {
+  requireArgumentCount(args, 1, "session shell list input");
+  return [parseListSessionShellsInput(args[0])];
+}
+
+function parseSessionShellResourceActionArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseSessionShellResourceActionInput>] {
+  requireArgumentCount(args, 1, "session shell resource action");
+  return [parseSessionShellResourceActionInput(args[0])];
 }
 
 function parseListenerArguments(args: readonly unknown[]): [input: ListenerInput] {

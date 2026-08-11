@@ -1,5 +1,6 @@
-import { readdir, readFile, stat } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { extractFile, listPackage, statFile } from "@electron/asar";
@@ -8,6 +9,10 @@ const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(rootDir, "dist");
 const releaseDir = join(rootDir, "release");
 const verifyPackaged = process.argv.includes("--packaged");
+const exactArchiveArgument = argumentValue("--archive");
+if (exactArchiveArgument && !verifyPackaged) {
+  throw new Error("--archive requires --packaged");
+}
 const bannedProductionMarkers = [
   "__SLIVER_GUI_E2E_STATE__",
   "FAKE_TOKEN_M0_DO_NOT_RENDER",
@@ -20,6 +25,9 @@ const requiredBuilderPaths = [
   "package.json",
   "LICENSE",
   "THIRD_PARTY_NOTICES.md",
+  "node_modules/ghostty-web/LICENSE",
+  "node_modules/ghostty-web/package.json",
+  "node_modules/ghostty-web/ghostty-vt.wasm",
   "vendor/sliver-script/LICENSE",
   "vendor/sliver-script/README.md",
   "vendor/sliver-script/VENDORED.md",
@@ -31,6 +39,7 @@ const requiredBuilderPaths = [
   "protocol/sliver-baseline.json",
   "protocol/sliver-script-provenance.json",
   "protocol/sliver-script-handwritten-overlay.patch",
+  "protocol/ghostty-web-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -42,6 +51,9 @@ const requiredPackagedFiles = [
   "LICENSE",
   "THIRD_PARTY_NOTICES.md",
   "package.json",
+  "node_modules/ghostty-web/LICENSE",
+  "node_modules/ghostty-web/package.json",
+  "node_modules/ghostty-web/ghostty-vt.wasm",
   "dist/THIRD_PARTY_LICENSES.txt",
   "dist/main/index.js",
   "dist/preload/index.cjs",
@@ -55,6 +67,7 @@ const requiredPackagedFiles = [
   "protocol/sliver-baseline.json",
   "protocol/sliver-script-provenance.json",
   "protocol/sliver-script-handwritten-overlay.patch",
+  "protocol/ghostty-web-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -101,6 +114,7 @@ for (const requiredText of [
   "@heroui-pro/react@1.0.0-beta.8",
   "HeroUI Pro License Agreement",
   "react@19.2.8",
+  "ghostty-web@0.4.0",
   "Inventory entries:",
 ]) {
   if (!licenseInventory.includes(requiredText)) {
@@ -121,15 +135,42 @@ for (const forbiddenPath of [".e2e-dist", "src/e2e", "tsconfig.e2e", "artifacts/
 }
 
 if (verifyPackaged) {
+  const archives = exactArchiveArgument
+    ? [await exactPackagedArchive(exactArchiveArgument)]
+    : [await newestPackagedArchive()];
+
+  for (const archive of archives) verifyArchive(archive);
+  console.log(`Verified ${archives.length} packaged app.asar archive(s) contain no E2E or secret fixtures`);
+}
+
+function argumentValue(name) {
+  const indexes = process.argv.flatMap((argument, index) => argument === name ? [index] : []);
+  if (indexes.length > 1) throw new Error(`${name} may be specified only once`);
+  if (indexes.length === 0) return undefined;
+  const value = process.argv[indexes[0] + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+  return value;
+}
+
+async function exactPackagedArchive(configuredPath) {
+  if (!isAbsolute(configuredPath)) throw new Error("--archive must be an absolute app.asar path");
+  const archive = await realpath(configuredPath);
+  const metadata = await stat(archive);
+  if (!metadata.isFile() || !archiveMatchesCurrentPlatform(archive)) {
+    throw new Error(`The exact archive is not a packaged app.asar for ${process.platform}`);
+  }
+  return archive;
+}
+
+async function newestPackagedArchive() {
   const packagedFiles = await listFiles(releaseDir);
   const candidates = packagedFiles.filter(
     (filePath) => filePath.endsWith("app.asar") && archiveMatchesCurrentPlatform(filePath),
   );
-  if (candidates.length === 0) throw new Error(`No packaged app.asar was found for ${process.platform} under ${releaseDir}`);
-  const archives = [await newestFile(candidates)];
-
-  for (const archive of archives) verifyArchive(archive);
-  console.log(`Verified ${archives.length} packaged app.asar archive(s) contain no E2E or secret fixtures`);
+  if (candidates.length === 0) {
+    throw new Error(`No packaged app.asar was found for ${process.platform} under ${releaseDir}`);
+  }
+  return newestFile(candidates);
 }
 
 function archiveMatchesCurrentPlatform(filePath) {
@@ -163,6 +204,11 @@ function verifyArchive(archivePath) {
       throw new Error(`Packaged archive is missing required application/source evidence: ${requiredPath}`);
     }
   }
+  const terminalRuntime = extractFile(archivePath, "node_modules/ghostty-web/ghostty-vt.wasm", false);
+  const terminalRuntimeSha256 = sha256(terminalRuntime);
+  if (terminalRuntime.byteLength !== 423_045 || terminalRuntimeSha256 !== "d6f0326f1874ad2ce9f289e3a4a0c5f3507d4cb38d8747e4b287def470a0c60a") {
+    throw new Error(`Packaged Ghostty runtime failed its integrity check: ${archivePath}`);
+  }
   for (const requiredPrefix of requiredPackagedPrefixes) {
     if (!normalizedEntries.some((entry) => entry.startsWith(requiredPrefix))) {
       throw new Error(`Packaged archive has no files under required application/source path: ${requiredPrefix}`);
@@ -174,6 +220,10 @@ function verifyArchive(archivePath) {
     if (!("size" in metadata)) continue;
     assertNoBannedMarkers(extractFile(archivePath, entry, false), `${archivePath}:${entry}`);
   }
+}
+
+function sha256(content) {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 function assertNoBannedMarkers(content, label) {

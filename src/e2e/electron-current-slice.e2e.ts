@@ -139,6 +139,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 async function assertRendererSecurity(electronApplication: ElectronApplication, page: Page): Promise<void> {
   const expectedApiKeys = [
     ...Object.keys(IPC_INVOKE),
+    "openStream",
     "onSnapshotChanged",
     "onOperationChanged",
     "onBeaconTasksInvalidated",
@@ -463,6 +464,18 @@ async function verifyM1TargetsAndOperations(
     await secondPage.getByRole("button", { name: "Interact with m1-session", exact: true }).click();
     await secondPage.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
 
+    // Leave a second-window shell detached, then remove its exact session.
+    // Target disappearance must close the main-owned resource and quarantine
+    // every renderer surface that could otherwise retain stale terminal data.
+    await secondPage.getByRole("tab", { name: "Terminal", exact: true }).click();
+    await secondPage.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
+    const secondShellStarts = fakeMethodCount(await readFakeState(electronApplication), "startShellSession");
+    await secondPage.getByRole("button", { name: "New shell", exact: true }).first().click();
+    await waitForFakeMethodCount(electronApplication, "startShellSession", secondShellStarts + 1);
+    await secondPage.getByRole("textbox", { name: "Interactive shell for m1-session", exact: true }).waitFor();
+    await secondPage.getByText("Attached", { exact: true }).waitFor();
+    await secondPage.getByRole("tab", { name: "Overview", exact: true }).click();
+
     const closePlan = await invokeSliver(secondPage, "prepareTargetAction", { actionId: "session.close" });
     assert.equal(closePlan.ok, true);
     assert.equal(closePlan.value?.impact.targets.length, 1);
@@ -480,12 +493,20 @@ async function verifyM1TargetsAndOperations(
     await closeReview.getByRole("button", { name: "Cancel", exact: true }).click();
     await closeReview.waitFor({ state: "hidden" });
 
+    const shellClosesBeforeTargetLoss = fakeMethodCount(await readFakeState(electronApplication), "shell.close");
     const closeResult = await invokeSliver(secondPage, "executeTargetActionPlan", {
       token: closePlan.value!.token,
     });
     assert.equal(closeResult.ok, true);
     assert.equal(closeResult.value?.outcomes[0]?.status, "succeeded");
+    await waitForFakeMethodCount(electronApplication, "shell.close", shellClosesBeforeTargetLoss + 1);
     await secondPage.getByRole("heading", { name: "Session workspace unavailable", exact: true }).waitFor();
+    assert.equal(
+      await secondPage.getByRole("textbox", { name: "Interactive shell for m1-session", exact: true }).count(),
+      0,
+      "session loss must dispose the stale terminal surface",
+    );
+    assert.equal(await secondPage.getByRole("tablist", { name: "Session interaction sections" }).count(), 0);
     const replay = await invokeSliver(secondPage, "executeTargetActionPlan", {
       token: closePlan.value!.token,
     });
@@ -678,6 +699,230 @@ async function verifyM2SessionWorkspace(
   assert.ok(!state.methods.includes("processDumpSession"), "Darwin must quarantine the unsupported process dump RPC");
   assert.ok(!state.methods.includes("servicesSession"), "Darwin must quarantine Windows service inventory RPCs");
   assert.ok(!state.methods.includes("memfilesListSession"), "Darwin must quarantine Linux memory-file RPCs");
+
+  await verifyM3SessionTerminal(electronApplication, page, artifactDirectory);
+}
+
+async function verifyM3SessionTerminal(
+  electronApplication: ElectronApplication,
+  page: Page,
+  artifactDirectory: string,
+): Promise<void> {
+  const externalNetworkRequests: string[] = [];
+  const observeRequest = (request: { url(): string }) => {
+    if (/^https?:/iu.test(request.url())) externalNetworkRequests.push(request.url());
+  };
+  page.on("request", observeRequest);
+  try {
+    await installM3HostEffectGuards(page);
+    await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+    await page.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
+    await page.getByText("No managed shells", { exact: true }).waitFor();
+
+    const initialState = await readFakeState(electronApplication);
+    const initialShellStarts = fakeMethodCount(initialState, "startShellSession");
+    const initialEarlyPrompts = fakeMethodCount(initialState, "shell.early-output");
+    const initialResizes = fakeMethodCount(initialState, "shell.resize");
+    await page.getByRole("button", { name: "New shell", exact: true }).first().click();
+    await waitForFakeMethodCount(electronApplication, "startShellSession", initialShellStarts + 1);
+    await waitForFakeMethodCount(electronApplication, "shell.early-output", initialEarlyPrompts + 1);
+
+    const terminal = page.getByRole("textbox", { name: "Interactive shell for m1-session", exact: true });
+    await terminal.waitFor();
+    await page.getByText("Attached", { exact: true }).waitFor();
+    await waitForFakeMethodCount(electronApplication, "shell.resize", initialResizes + 1);
+    await waitForNonZeroTerminalMetric(page, "Bytes in");
+
+    const initialWhoamiCommands = fakeMethodCount(await readFakeState(electronApplication), "shell.command.whoami");
+    try {
+      await terminal.pressSequentially("whoami");
+      await terminal.press("Enter", { timeout: 2_000 });
+    } catch (error) {
+      const calls = (await readFakeState(electronApplication)).methods.slice(-20).join(", ");
+      throw new Error(`Ghostty input surface disappeared; recent fake calls: ${calls}`, { cause: error });
+    }
+    await waitForFakeMethodCount(electronApplication, "shell.command.whoami", initialWhoamiCommands + 1);
+
+    const initialHostileCommands = fakeMethodCount(
+      await readFakeState(electronApplication),
+      "shell.command.hostile-output",
+    );
+    await terminal.pressSequentially("m3-hostile-output");
+    await terminal.press("Enter");
+    await waitForFakeMethodCount(
+      electronApplication,
+      "shell.command.hostile-output",
+      initialHostileCommands + 1,
+    );
+    await waitForNonZeroTerminalMetric(page, "Bytes out");
+
+    const m3Screenshot = await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDirectory, "m3-session-terminal.png"),
+    });
+    for (const forbidden of [
+      PRIVATE_KEY_SECRET,
+      TOKEN_SECRET,
+      TARGET_SECRET,
+      M2_ENV_SECRET,
+      M2_FILE_CONTENT,
+      M2_EDITED_CONTENT,
+      M2_SEARCH_PATTERN,
+      "MACHINE_CLIPBOARD_PROBE",
+      "HOSTILE_DOWNLOAD_PROBE",
+    ]) {
+      assert.equal(m3Screenshot.includes(Buffer.from(forbidden)), false, `M3 screenshot bytes exposed ${forbidden}`);
+    }
+    assert.deepEqual(await readM3HostEffects(page), emptyM3HostEffects());
+    assert.deepEqual(externalNetworkRequests, [], "terminal output must not initiate an external network request");
+
+    await page.getByRole("button", { name: "Detach", exact: true }).click();
+    await page.getByText("Shell is not attached", { exact: true }).waitFor();
+    assert.equal(await terminal.count(), 0, "detaching must dispose the terminal surface and its payload-bearing state");
+
+    await page.getByRole("button", { name: "Attach", exact: true }).first().click();
+    await page.getByRole("textbox", { name: "Interactive shell for m1-session", exact: true }).waitFor();
+    await page.getByText("Attached", { exact: true }).waitFor();
+    const initialPwdCommands = fakeMethodCount(await readFakeState(electronApplication), "shell.command.pwd");
+    const reattachedTerminal = page.getByRole("textbox", {
+      name: "Interactive shell for m1-session",
+      exact: true,
+    });
+    await reattachedTerminal.pressSequentially("pwd");
+    await reattachedTerminal.press("Enter");
+    await waitForFakeMethodCount(electronApplication, "shell.command.pwd", initialPwdCommands + 1);
+
+    const initialShellCloses = fakeMethodCount(await readFakeState(electronApplication), "shell.close");
+    await page
+      .getByRole("toolbar", { name: "Terminal actions", exact: true })
+      .getByRole("button", { name: "Close", exact: true })
+      .click();
+    const closeReview = page.getByRole("alertdialog", { name: "Close this managed shell?", exact: true });
+    await closeReview.waitFor();
+    const closeReviewText = await closeReview.innerText();
+    assert.match(closeReviewText, /closes the local managed stream/i);
+    assert.match(closeReviewText, /bounded best-effort exit and logout requests/i);
+    assert.match(closeReviewText, /does not confirm remote process termination/i);
+    await closeReview.getByRole("button", { name: "Close shell", exact: true }).click();
+    await waitForFakeMethodCount(electronApplication, "shell.close", initialShellCloses + 1);
+    await page.getByText("No managed shells", { exact: true }).waitFor();
+    await page.getByText("No shell selected", { exact: true }).waitFor();
+    assert.deepEqual(await readM3HostEffects(page), emptyM3HostEffects());
+    assert.deepEqual(externalNetworkRequests, [], "the M3 journey must remain network inert");
+    assert.equal(
+      (await readFakeState(electronApplication)).dialogCalls,
+      1,
+      "terminal output and shell lifecycle actions must not invoke a native dialog",
+    );
+  } finally {
+    page.off("request", observeRequest);
+  }
+}
+
+interface M3HostEffects {
+  clipboardWrites: number;
+  dialogs: number;
+  downloads: number;
+  fetches: number;
+  notifications: number;
+  windowOpens: number;
+}
+
+function emptyM3HostEffects(): M3HostEffects {
+  return {
+    clipboardWrites: 0,
+    dialogs: 0,
+    downloads: 0,
+    fetches: 0,
+    notifications: 0,
+    windowOpens: 0,
+  };
+}
+
+async function installM3HostEffectGuards(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const effects = {
+      clipboardWrites: 0,
+      dialogs: 0,
+      downloads: 0,
+      fetches: 0,
+      notifications: 0,
+      windowOpens: 0,
+    };
+    const browserGlobal = globalThis as unknown as {
+      __SLIVER_GUI_M3_HOST_EFFECTS__: typeof effects;
+      alert: (message?: unknown) => void;
+      confirm: (message?: unknown) => boolean;
+      document: { createElement(name: string): object };
+      fetch: typeof fetch;
+      open: (...args: unknown[]) => unknown;
+      prompt: (message?: unknown, defaultValue?: string) => string | null;
+    };
+    browserGlobal.__SLIVER_GUI_M3_HOST_EFFECTS__ = effects;
+
+    const originalFetch = globalThis.fetch.bind(globalThis);
+    browserGlobal.fetch = ((...args: Parameters<typeof fetch>) => {
+      effects.fetches += 1;
+      return originalFetch(...args);
+    }) as typeof fetch;
+    browserGlobal.open = (() => {
+      effects.windowOpens += 1;
+      return null;
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        readText: async () => "",
+        writeText: async () => {
+          effects.clipboardWrites += 1;
+        },
+      },
+    });
+    Object.defineProperty(globalThis, "Notification", {
+      configurable: true,
+      value: function NotificationProbe() {
+        effects.notifications += 1;
+      },
+    });
+    browserGlobal.alert = () => {
+      effects.dialogs += 1;
+    };
+    browserGlobal.confirm = () => {
+      effects.dialogs += 1;
+      return false;
+    };
+    browserGlobal.prompt = () => {
+      effects.dialogs += 1;
+      return null;
+    };
+    const anchorPrototype = Object.getPrototypeOf(browserGlobal.document.createElement("a")) as { click(): void };
+    anchorPrototype.click = function blockedM3Download() {
+      effects.downloads += 1;
+    };
+  });
+}
+
+async function readM3HostEffects(page: Page): Promise<M3HostEffects> {
+  return page.evaluate(() => structuredClone(
+    (globalThis as unknown as { __SLIVER_GUI_M3_HOST_EFFECTS__: M3HostEffects })
+      .__SLIVER_GUI_M3_HOST_EFFECTS__,
+  ));
+}
+
+async function waitForNonZeroTerminalMetric(
+  page: Page,
+  label: "Bytes in" | "Bytes out",
+  timeoutMs = 10_000,
+): Promise<void> {
+  const metric = page.getByText(label, { exact: true }).locator("..").locator("dd");
+  const deadline = Date.now() + timeoutMs;
+  let latest = "missing";
+  while (Date.now() < deadline) {
+    latest = (await metric.textContent().catch(() => null))?.trim() ?? "missing";
+    if (latest !== "missing" && latest !== "0") return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`${label} did not become non-zero; latest value was ${latest}`);
 }
 
 async function verifyM2SessionActivityAndBack(page: Page): Promise<void> {
@@ -862,12 +1107,18 @@ async function waitForFakeMethodCount(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let latest = 0;
+  let latestMethods: string[] = [];
   while (Date.now() < deadline) {
-    latest = fakeMethodCount(await readFakeState(electronApplication), method);
+    const state = await readFakeState(electronApplication);
+    latestMethods = state.methods;
+    latest = fakeMethodCount(state, method);
     if (latest >= minimum) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`Timed out waiting for ${method} call ${minimum}; observed ${latest}`);
+  throw new Error(
+    `Timed out waiting for ${method} call ${minimum}; observed ${latest}; ` +
+      `recent fake calls: ${latestMethods.slice(-20).join(", ") || "none"}`,
+  );
 }
 
 interface FakeStateSnapshot {

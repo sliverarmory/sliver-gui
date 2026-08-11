@@ -85,6 +85,9 @@ jobs:
           HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
         run: npm ci --strict-allow-scripts
 
+      - name: Verify pinned terminal runtime
+        run: npm run protocol:ghostty
+
       - name: Exercise renderer, preload, IPC, and registry
         run: xvfb-run --auto-servernum npm run test:e2e:electron
 

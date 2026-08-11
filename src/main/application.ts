@@ -51,6 +51,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
     hardenWindow(window, rendererUrl);
     window.once("ready-to-show", () => window.show());
+    window.webContents.on("did-start-navigation", (details) => {
+      if (details.isMainFrame && !details.isSameDocument) {
+        void registry.closeWindowStreams(contentsId, "navigation").catch(() => undefined);
+      }
+    });
+    window.webContents.on("render-process-gone", () => {
+      void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
+    });
+    window.webContents.on("destroyed", () => {
+      void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
+    });
     window.on("closed", () => {
       windows.delete(window);
       const cleanup = registry.unregisterWindow(contentsId).catch(() => undefined);
@@ -127,7 +138,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   };
 
   await app.whenReady();
-  configureSessionSecurity(session.defaultSession, developmentRendererUrl);
+  configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
   registerIpcHandlers(registry, (inheritFromContentsId) => createWindow(inheritFromContentsId), rendererUrl);
   installMenu();
   app.on("activate", onActivate);
@@ -140,7 +151,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("activate", onActivate);
       app.removeListener("window-all-closed", onWindowAllClosed);
       unregisterIpcHandlers();
-      for (const window of [...windows]) window.close();
+      for (const window of [...windows]) {
+        await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
+        window.close();
+      }
       await Promise.allSettled([...pendingWindowCleanup]);
     },
   };

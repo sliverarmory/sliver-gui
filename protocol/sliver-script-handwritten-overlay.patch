@@ -1,8 +1,8 @@
 diff --git a/src/client.ts b/src/client.ts
-index c2baf89..b7be3bb 100644
+index c2baf89..4dc189d 100644
 --- a/src/client.ts
 +++ b/src/client.ts
-@@ -6,13 +6,23 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
+@@ -6,13 +6,24 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
 
  import type { SliverClientConfig } from "./config";
  import { createSliverRpcCredentials } from "./internal/credentials";
@@ -12,6 +12,7 @@ index c2baf89..b7be3bb 100644
  import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
 +import {
 +  RPC_MESSAGE_DOMAINS,
++  TUNNEL_STREAM_MAX_PAYLOAD_BYTES,
 +  WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
 +  rpcMessageChannelOptions,
 +  rpcTlsAuthorityOverride,
@@ -27,7 +28,7 @@ index c2baf89..b7be3bb 100644
    Sessions,
    Version,
    Beacons,
-@@ -30,18 +40,23 @@ import type {
+@@ -30,18 +41,23 @@ import type {
    StagerListenerReq,
    UniqueWGIP,
  } from "./pb/clientpb/client";
@@ -56,7 +57,7 @@ index c2baf89..b7be3bb 100644
  const EVENT_RETRY_INITIAL_MS = 500;
  const EVENT_RETRY_MAX_MS = 10_000;
 
-@@ -68,6 +83,49 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
+@@ -68,18 +84,95 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
    randomizeJARM?: boolean;
  }
 
@@ -106,7 +107,35 @@ index c2baf89..b7be3bb 100644
  export interface Tunnel {
    readonly id: string;
    readonly stdout$: Observable<Buffer>;
-@@ -76,10 +134,18 @@ export interface Tunnel {
+-  write(data: Buffer | string): void;
++  write(data: Buffer | string): Promise<void>;
++  close(): Promise<void>;
++}
++
++export const SHELL_OUTPUT_BUFFER_DEFAULT_BYTES = 512 * 1024;
++export const SHELL_OUTPUT_BUFFER_MAX_BYTES = 4 * 1024 * 1024;
++export const SHELL_WRITE_MAX_BYTES = 4 * 1024 * 1024;
++export const SHELL_TERMINAL_DIMENSION_MAX = 1_000;
++export const SHELL_GRACEFUL_CLOSE_TIMEOUT_MILLISECONDS = 2_000;
++
++export interface ShellSessionOptions {
++  readonly path: string;
++  readonly pty: boolean;
++  readonly rows: number;
++  readonly cols: number;
++  readonly outputBufferBytes?: number;
++}
++
++/** Main-process-only handle for one managed session shell. */
++export interface ShellSessionHandle {
++  readonly id: string;
++  readonly pid: number;
++  readonly path: string;
++  readonly ptyRequested: boolean;
++  readonly output: AsyncIterable<Uint8Array>;
++  write(chunk: Uint8Array | string): Promise<void>;
++  resize(rows: number, cols: number): Promise<void>;
+   close(): Promise<void>;
  }
 
  class BaseCommands {
@@ -127,7 +156,7 @@ index c2baf89..b7be3bb 100644
    }
 
    protected async unary<T>(timeoutSeconds: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
-@@ -106,7 +172,10 @@ class BaseCommands {
+@@ -106,7 +199,10 @@ class BaseCommands {
 
    download(path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Buffer> {
      return this.unary(timeoutSeconds, async (signal) => {
@@ -139,7 +168,7 @@ index c2baf89..b7be3bb 100644
        if (download.Encoder === "gzip") {
          return await gunzip(download.Data);
        }
-@@ -120,7 +189,7 @@ class BaseCommands {
+@@ -120,7 +216,7 @@ class BaseCommands {
    upload(path: string, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, async (signal) => {
        const payload = await gzip(data);
@@ -148,7 +177,7 @@ index c2baf89..b7be3bb 100644
          { Path: path, Encoder: "gzip", Data: payload, Request: this.request(timeoutSeconds) },
          { signal },
        );
-@@ -167,7 +236,7 @@ class BaseCommands {
+@@ -167,7 +263,7 @@ class BaseCommands {
 
    processDump(pid: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -157,7 +186,7 @@ index c2baf89..b7be3bb 100644
      );
    }
 
-@@ -213,7 +282,7 @@ class BaseCommands {
+@@ -213,7 +309,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -166,7 +195,7 @@ index c2baf89..b7be3bb 100644
          {
            Pid: pid,
            Data: shellcode,
-@@ -261,7 +330,7 @@ class BaseCommands {
+@@ -261,7 +357,7 @@ class BaseCommands {
 
    executeAssembly(assembly: Buffer, args: string[] = [], process = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -175,7 +204,7 @@ index c2baf89..b7be3bb 100644
          { Assembly: assembly, Arguments: args, Process: process, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -288,7 +357,7 @@ class BaseCommands {
+@@ -288,7 +384,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -184,7 +213,7 @@ index c2baf89..b7be3bb 100644
          { Data: data, ProcessName: processName, Args: args, EntryPoint: entryPoint, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -303,7 +372,7 @@ class BaseCommands {
+@@ -303,7 +399,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -193,7 +222,7 @@ index c2baf89..b7be3bb 100644
          { Data: data, EntryPoint: entrypoint, ProcessName: processName, Args: args, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -312,7 +381,7 @@ class BaseCommands {
+@@ -312,7 +408,7 @@ class BaseCommands {
 
    screenshot(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -202,7 +231,7 @@ index c2baf89..b7be3bb 100644
      );
    }
  }
-@@ -320,16 +389,17 @@ class BaseCommands {
+@@ -320,16 +416,17 @@ class BaseCommands {
  export class InteractiveBeacon extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -222,7 +251,7 @@ index c2baf89..b7be3bb 100644
        BeaconID: this.beaconId,
        SessionID: "",
      };
-@@ -349,7 +419,7 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -349,7 +446,7 @@ export class InteractiveBeacon extends BaseCommands {
        wait: async (waitTimeoutSeconds = timeoutSeconds) => {
          const beaconTask = await waitForBeaconTask(this.taskResult$, taskId, waitTimeoutSeconds);
          const taskContent = await this.unary(waitTimeoutSeconds, (signal) =>
@@ -231,7 +260,7 @@ index c2baf89..b7be3bb 100644
          );
          return Ls.decode(taskContent.Response);
        },
-@@ -365,16 +435,17 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -365,16 +462,17 @@ export class InteractiveBeacon extends BaseCommands {
  export class InteractiveSession extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -251,7 +280,71 @@ index c2baf89..b7be3bb 100644
        BeaconID: "",
        SessionID: this.sessionId,
      };
-@@ -433,8 +504,8 @@ export class SliverClient {
+@@ -396,30 +494,47 @@ export class InteractiveSession extends BaseCommands {
+       map((msg) => msg.Data),
+     );
+
+-    // Bind tunnel to the tunnel stream.
+-    this.tunnels.send({ TunnelID: tunnelId, SessionID: this.sessionId });
+-
+-    // Ask the implant to open a shell on the bound tunnel.
+-    await this.unary(timeoutSeconds, (signal) =>
+-      this.rpc.shell(
+-        {
+-          Path: path,
+-          EnablePTY: pty,
+-          TunnelID: tunnelId,
+-          Request: this.request(timeoutSeconds),
+-        },
+-        { signal },
+-      ),
+-    );
++    try {
++      // Bind tunnel to the tunnel stream.
++      await this.tunnels.send({
++        TunnelID: tunnelId,
++        SessionID: this.sessionId,
++        Data: Buffer.alloc(0),
++      });
++
++      // Ask the implant to open a shell on the bound tunnel.
++      const shell = await this.unary(timeoutSeconds, (signal) =>
++        this.rpc.shell(
++          {
++            Path: path,
++            EnablePTY: pty,
++            Pid: 0,
++            Rows: 0,
++            Cols: 0,
++            TunnelID: tunnelId,
++            Request: this.request(timeoutSeconds),
++          },
++          { signal },
++        ),
++      );
++      if (shell.Response?.Err) throw new Error("Shell was rejected by the target");
++    } catch {
++      this.tunnels.cancelTunnel(tunnelId);
++      await this.unary(DEFAULT_TIMEOUT_SECONDS, (signal) =>
++        this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: this.sessionId }, { signal }),
++      ).catch(() => undefined);
++      throw new Error("Unable to start shell session");
++    }
+
+     return {
+       id: tunnelId,
+       stdout$,
+       write: (data: Buffer | string) => {
+         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+-        this.tunnels.send({ TunnelID: tunnelId, SessionID: this.sessionId, Data: buf });
++        return this.tunnels.send({ TunnelID: tunnelId, SessionID: this.sessionId, Data: buf });
+       },
+       close: async () => {
++        this.tunnels.cancelTunnel(tunnelId);
+         await this.unary(DEFAULT_TIMEOUT_SECONDS, (signal) =>
+           this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: this.sessionId }, { signal }),
+         );
+@@ -433,8 +548,8 @@ export class SliverClient {
    static readonly EVENT_BEACON_TASKRESULT = "beacon-taskresult";
 
    private readonly empty = {};
@@ -262,7 +355,7 @@ index c2baf89..b7be3bb 100644
 
    private eventsAbort: AbortController | null = null;
    private tunnels: TunnelManager | null = null;
-@@ -467,33 +538,56 @@ export class SliverClient {
+@@ -467,33 +582,56 @@ export class SliverClient {
      return `${this.config.lhost}:${this.config.lport}`;
    }
 
@@ -336,7 +429,7 @@ index c2baf89..b7be3bb 100644
 
      this.eventsAbort = new AbortController();
      this.tunnels = new TunnelManager();
-@@ -505,15 +599,21 @@ export class SliverClient {
+@@ -505,15 +643,21 @@ export class SliverClient {
          rpcTarget = this.wireGuardProxy.rpcHost();
        }
 
@@ -359,11 +452,11 @@ index c2baf89..b7be3bb 100644
        await this.getVersion();
 
 -      this.tunnels.start(this.rpcClient);
-+      this.tunnels.start(this.rpc);
++      this.tunnels.start(this.clientFor("tunnel-stream"));
        this.startEventsStream();
        return this;
      } catch (error) {
-@@ -529,9 +629,11 @@ export class SliverClient {
+@@ -529,9 +673,11 @@ export class SliverClient {
      await this.tunnels?.stop();
      this.tunnels = null;
 
@@ -378,7 +471,7 @@ index c2baf89..b7be3bb 100644
 
      const wireGuardProxy = this.wireGuardProxy;
      this.wireGuardProxy = null;
-@@ -541,14 +643,14 @@ export class SliverClient {
+@@ -541,14 +687,14 @@ export class SliverClient {
    }
 
    private startEventsStream(): void {
@@ -395,7 +488,7 @@ index c2baf89..b7be3bb 100644
          this.eventStreamStateSubject.next({
            status: attempt === 0 ? "connecting" : "retrying",
            attempt,
-@@ -568,7 +670,7 @@ export class SliverClient {
+@@ -568,7 +714,7 @@ export class SliverClient {
            }
          } catch (err) {
            // Abort is expected on disconnect; don't surface it as a retry.
@@ -404,7 +497,7 @@ index c2baf89..b7be3bb 100644
              return;
            }
 
-@@ -597,11 +699,721 @@ export class SliverClient {
+@@ -597,194 +743,904 @@ export class SliverClient {
    }
 
    getSessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Sessions> {
@@ -415,20 +508,28 @@ index c2baf89..b7be3bb 100644
    getBeacons(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Beacons> {
 -    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getBeacons(this.empty, { signal }));
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.getBeacons(this.empty, { signal }));
-+  }
-+
+   }
+
+-  getJobs(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Jobs> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getJobs(this.empty, { signal }));
 +  renameSession(sessionId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.rename({ SessionID: sessionId, BeaconID: "", Name: name }, { signal }),
 +    );
-+  }
-+
+   }
+
+-  killJob(jobId: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.killJob({ ID: jobId }, { signal }));
 +  renameBeacon(beaconId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.rename({ SessionID: "", BeaconID: beaconId, Name: name }, { signal }),
 +    );
-+  }
-+
+   }
+
+-  restartJobs(jobIds: number[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+-    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      await this.rpc.restartJobs({ JobIDs: jobIds }, { signal });
+-    });
 +  pingSession(sessionId: string, nonce: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Ping> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.ping(
@@ -436,8 +537,10 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  startMTLSListener(host: string, port: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startMTLSListener({ Host: host, Port: port }, { signal }));
 +  pingBeacon(beaconId: string, nonce: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Ping> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.ping(
@@ -445,31 +548,77 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  startWGListener(
+-    host: string,
+-    port: number,
+-    tunIP: string,
+-    nPort: number,
+-    keyPort: number,
+-    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+-  ) {
 +  getEnvSession(sessionId: string, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
-+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.startWGListener({ Host: host, Port: port, TunIP: tunIP, NPort: nPort, KeyPort: keyPort }, { signal }),
 +      this.rpc.getEnv(
 +        { Name: name, Request: this.sessionRequest(sessionId, timeoutSeconds) },
 +        { signal },
 +      ),
-+    );
-+  }
-+
+     );
+   }
+
+-  startDNSListener(
+-    domains: string[],
+-    canaries: boolean,
+-    host: string,
+-    port: number,
+-    enforceOTP = false,
+-    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+-  ) {
 +  getEnvBeacon(beaconId: string, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
-+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.startDNSListener(
+-        { Domains: domains, Canaries: canaries, Host: host, Port: port, EnforceOTP: enforceOTP },
 +      this.rpc.getEnv(
 +        { Name: name, Request: this.beaconRequest(beaconId, timeoutSeconds) },
-+        { signal },
-+      ),
-+    );
-+  }
-+
+         { signal },
+       ),
+     );
+   }
+
+-  startHTTPListener(
+-    domain: string,
+-    host: string,
+-    port: number,
+-    website = "",
+-    enforceOTP = true,
 +  setEnvSession(
 +    sessionId: string,
 +    key: string,
 +    value: string,
-+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+-  ) {
+-    return this.startHTTPListenerWithOptions({ domain, host, port, website, enforceOTP }, timeoutSeconds);
+-  }
+-
+-  startHTTPListenerWithOptions(options: HTTPListenerOptions, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    const request: HTTPListenerReq = {
+-      Domain: options.domain ?? "",
+-      Host: options.host,
+-      Port: options.port,
+-      Secure: false,
+-      Website: options.website ?? "",
+-      Cert: Buffer.alloc(0),
+-      Key: Buffer.alloc(0),
+-      ACME: false,
+-      EnforceOTP: options.enforceOTP ?? true,
+-      LongPollTimeout: options.longPollTimeoutNanoseconds ?? "1000000000",
+-      LongPollJitter: options.longPollJitterNanoseconds ?? "2000000000",
+-      RandomizeJARM: false,
+-    };
+-
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startHTTPListener(request, { signal }));
 +  ): Promise<SetEnv> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.setEnv(
@@ -480,13 +629,26 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  startHTTPSListener(
+-    domain: string,
+-    host: string,
+-    port: number,
+-    website = "",
+-    acme = false,
+-    cert?: Buffer,
+-    key?: Buffer,
+-    enforceOTP = true,
 +  setEnvBeacon(
 +    beaconId: string,
 +    key: string,
 +    value: string,
-+    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+     timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
+-  ) {
+-    return this.startHTTPSListenerWithOptions(
+-      { domain, host, port, website, acme, cert, key, enforceOTP },
+-      timeoutSeconds,
 +  ): Promise<SetEnv> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.setEnv(
@@ -496,9 +658,26 @@ index c2baf89..b7be3bb 100644
 +        },
 +        { signal },
 +      ),
-+    );
-+  }
-+
+     );
+   }
+
+-  startHTTPSListenerWithOptions(options: HTTPSListenerOptions, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    const request: HTTPListenerReq = {
+-      Domain: options.domain ?? "",
+-      Host: options.host,
+-      Port: options.port,
+-      Secure: true,
+-      Website: options.website ?? "",
+-      ACME: options.acme ?? false,
+-      Cert: options.cert ?? Buffer.alloc(0),
+-      Key: options.key ?? Buffer.alloc(0),
+-      EnforceOTP: options.enforceOTP ?? true,
+-      LongPollTimeout: options.longPollTimeoutNanoseconds ?? "1000000000",
+-      LongPollJitter: options.longPollJitterNanoseconds ?? "2000000000",
+-      RandomizeJARM: options.randomizeJARM ?? true,
+-    };
+-
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startHTTPSListener(request, { signal }));
 +  unsetEnvSession(sessionId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UnsetEnv> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.unsetEnv(
@@ -506,8 +685,10 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  startTCPStagerListener(host: string, port: number, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return this.startTCPStagerListenerWithOptions({ Protocol: 0, Host: host, Port: port, Data: data, ProfileName: "" }, timeoutSeconds);
 +  unsetEnvBeacon(beaconId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UnsetEnv> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.unsetEnv(
@@ -515,10 +696,15 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startTCPStagerListener(request, { signal }));
+-  }
 +  // --- Explicit M2 session workbench APIs ---
-+
+
+-  getCompiler(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Compiler> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getCompiler(this.empty, { signal }));
 +  currentTokenOwnerSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.currentTokenOwner(
@@ -526,17 +712,24 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateUniqueIP(this.empty, { signal }));
 +  listEnvSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
 +    return this.getEnvSession(sessionId, "", timeoutSeconds);
-+  }
-+
+   }
+
+-  generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generate({ Config: config, Name: name }, { signal }));
 +  revealEnvSession(sessionId: string, exactName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
 +    assertNonEmptyString(exactName, "Environment variable name");
 +    return this.getEnvSession(sessionId, exactName, timeoutSeconds);
-+  }
-+
+   }
+
+-  async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    const res = await this.generateImplant(config, "", timeoutSeconds);
+-    return res.File;
 +  ifconfigSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.ifconfig(
@@ -544,8 +737,12 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  generateSpoofMetadata(req: GenerateSpoofMetadataReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+-    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      await this.rpc.generateSpoofMetadata(req, { signal });
+-    });
 +  netstatSession(
 +    sessionId: string,
 +    options: SessionNetstatOptions,
@@ -564,8 +761,11 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  async regenerate(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    const res = await this.regenerateImplant(implantName, timeoutSeconds);
+-    return res.File;
 +  pwdSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.pwd(
@@ -573,17 +773,21 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
 +  cdSession(sessionId: string, path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.regenerate({ ImplantName: implantName }, { signal }),
 +      this.rpc.cd(
 +        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
 +        { signal },
 +      ),
-+    );
-+  }
-+
+     );
+   }
+
+-  generateStage(request: GenerateStageReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateStage(request, { signal }));
 +  lsSession(sessionId: string, path = ".", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.ls(
@@ -591,8 +795,9 @@ index c2baf89..b7be3bb 100644
 +        { signal },
 +      ),
 +    );
-+  }
-+
+   }
+
+-  stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
 +  downloadFileSession(
 +    sessionId: string,
 +    path: string,
@@ -608,7 +813,8 @@ index c2baf89..b7be3bb 100644
 +    if (fromEnd && (start !== 0 || stop !== 0 || maxLines !== 0)) {
 +      throw new Error("Download from-end cannot be combined with start, stop, or max lines");
 +    }
-+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+     return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      await this.rpc.stageImplantBuild({ Build: buildNames }, { signal });
 +      const response = await this.workbenchArtifactRpc.download(
 +        {
 +          Path: path,
@@ -633,9 +839,14 @@ index c2baf89..b7be3bb 100644
 +        response.Data.fill(0);
 +        throw error;
 +      }
-+    });
-+  }
-+
+     });
+   }
+
+-  implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantBuilds(this.empty, { signal }));
+-  }
+-
+-  deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
 +  uploadSession(
 +    sessionId: string,
 +    path: string,
@@ -644,7 +855,8 @@ index c2baf89..b7be3bb 100644
 +    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
 +  ) {
 +    assertBoundedArtifact(data, "Upload");
-+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+     return withTimeoutSignal(timeoutSeconds, async (signal) => {
+-      await this.rpc.deleteImplantBuild({ Name: name }, { signal });
 +      const payload = await gzip(data);
 +      try {
 +        const response = await this.workbenchArtifactRpc.upload(
@@ -664,9 +876,13 @@ index c2baf89..b7be3bb 100644
 +      } finally {
 +        payload.fill(0);
 +      }
-+    });
-+  }
-+
+     });
+   }
+
+-  canaries(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.canaries(this.empty, { signal }));
+-  }
+-
 +  grepSession(
 +    sessionId: string,
 +    path: string,
@@ -1125,75 +1341,194 @@ index c2baf89..b7be3bb 100644
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.cancelBeaconTask({ ID: taskId }, { signal }),
 +    );
-   }
-
-   getJobs(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Jobs> {
-@@ -722,11 +1534,11 @@ export class SliverClient {
-   }
-
-   startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startTCPStagerListener(request, { signal }));
++  }
++
++  getJobs(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Jobs> {
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getJobs(this.empty, { signal }));
++  }
++
++  killJob(jobId: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.killJob({ ID: jobId }, { signal }));
++  }
++
++  restartJobs(jobIds: number[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      await this.rpc.restartJobs({ JobIDs: jobIds }, { signal });
++    });
++  }
++
++  startMTLSListener(host: string, port: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startMTLSListener({ Host: host, Port: port }, { signal }));
++  }
++
++  startWGListener(
++    host: string,
++    port: number,
++    tunIP: string,
++    nPort: number,
++    keyPort: number,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.startWGListener({ Host: host, Port: port, TunIP: tunIP, NPort: nPort, KeyPort: keyPort }, { signal }),
++    );
++  }
++
++  startDNSListener(
++    domains: string[],
++    canaries: boolean,
++    host: string,
++    port: number,
++    enforceOTP = false,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.startDNSListener(
++        { Domains: domains, Canaries: canaries, Host: host, Port: port, EnforceOTP: enforceOTP },
++        { signal },
++      ),
++    );
++  }
++
++  startHTTPListener(
++    domain: string,
++    host: string,
++    port: number,
++    website = "",
++    enforceOTP = true,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.startHTTPListenerWithOptions({ domain, host, port, website, enforceOTP }, timeoutSeconds);
++  }
++
++  startHTTPListenerWithOptions(options: HTTPListenerOptions, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    const request: HTTPListenerReq = {
++      Domain: options.domain ?? "",
++      Host: options.host,
++      Port: options.port,
++      Secure: false,
++      Website: options.website ?? "",
++      Cert: Buffer.alloc(0),
++      Key: Buffer.alloc(0),
++      ACME: false,
++      EnforceOTP: options.enforceOTP ?? true,
++      LongPollTimeout: options.longPollTimeoutNanoseconds ?? "1000000000",
++      LongPollJitter: options.longPollJitterNanoseconds ?? "2000000000",
++      RandomizeJARM: false,
++    };
++
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startHTTPListener(request, { signal }));
++  }
++
++  startHTTPSListener(
++    domain: string,
++    host: string,
++    port: number,
++    website = "",
++    acme = false,
++    cert?: Buffer,
++    key?: Buffer,
++    enforceOTP = true,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.startHTTPSListenerWithOptions(
++      { domain, host, port, website, acme, cert, key, enforceOTP },
++      timeoutSeconds,
++    );
++  }
++
++  startHTTPSListenerWithOptions(options: HTTPSListenerOptions, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    const request: HTTPListenerReq = {
++      Domain: options.domain ?? "",
++      Host: options.host,
++      Port: options.port,
++      Secure: true,
++      Website: options.website ?? "",
++      ACME: options.acme ?? false,
++      Cert: options.cert ?? Buffer.alloc(0),
++      Key: options.key ?? Buffer.alloc(0),
++      EnforceOTP: options.enforceOTP ?? true,
++      LongPollTimeout: options.longPollTimeoutNanoseconds ?? "1000000000",
++      LongPollJitter: options.longPollJitterNanoseconds ?? "2000000000",
++      RandomizeJARM: options.randomizeJARM ?? true,
++    };
++
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startHTTPSListener(request, { signal }));
++  }
++
++  startTCPStagerListener(host: string, port: number, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return this.startTCPStagerListenerWithOptions({ Protocol: 0, Host: host, Port: port, Data: data, ProfileName: "" }, timeoutSeconds);
++  }
++
++  startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.startTCPStagerListener(request, { signal }));
-   }
-
-   getCompiler(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Compiler> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getCompiler(this.empty, { signal }));
++  }
++
++  getCompiler(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Compiler> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.getCompiler(this.empty, { signal }));
-   }
-
-   generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
-@@ -734,7 +1546,7 @@ export class SliverClient {
-   }
-
-   generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generate({ Config: config, Name: name }, { signal }));
++  }
++
++  generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateUniqueIP(this.empty, { signal }));
++  }
++
++  generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.generate({ Config: config, Name: name }, { signal }));
-   }
-
-   async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -744,7 +1556,7 @@ export class SliverClient {
-
-   generateSpoofMetadata(req: GenerateSpoofMetadataReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-     return withTimeoutSignal(timeoutSeconds, async (signal) => {
--      await this.rpc.generateSpoofMetadata(req, { signal });
++  }
++
++  async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    const res = await this.generateImplant(config, "", timeoutSeconds);
++    return res.File;
++  }
++
++  generateSpoofMetadata(req: GenerateSpoofMetadataReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
 +      await this.artifactRpc.generateSpoofMetadata(req, { signal });
-     });
-   }
-
-@@ -755,12 +1567,12 @@ export class SliverClient {
-
-   regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
-     return withTimeoutSignal(timeoutSeconds, (signal) =>
--      this.rpc.regenerate({ ImplantName: implantName }, { signal }),
++    });
++  }
++
++  async regenerate(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    const res = await this.regenerateImplant(implantName, timeoutSeconds);
++    return res.File;
++  }
++
++  regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.artifactRpc.regenerate({ ImplantName: implantName }, { signal }),
-     );
-   }
-
-   generateStage(request: GenerateStageReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateStage(request, { signal }));
++    );
++  }
++
++  generateStage(request: GenerateStageReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.generateStage(request, { signal }));
-   }
-
-   stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -770,7 +1582,7 @@ export class SliverClient {
-   }
-
-   implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantBuilds(this.empty, { signal }));
++  }
++
++  stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      await this.rpc.stageImplantBuild({ Build: buildNames }, { signal });
++    });
++  }
++
++  implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.implantBuilds(this.empty, { signal }));
-   }
-
-   deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -784,7 +1596,7 @@ export class SliverClient {
-   }
-
++  }
++
++  deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      await this.rpc.deleteImplantBuild({ Name: name }, { signal });
++    });
++  }
++
++  canaries(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.canaries(this.empty, { signal }));
++  }
++
    implantProfiles(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 -    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantProfiles(this.empty, { signal }));
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.implantProfiles(this.empty, { signal }));
    }
 
    saveImplantProfile(profile: ImplantProfile, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -799,17 +1611,17 @@ export class SliverClient {
+@@ -799,17 +1655,17 @@ export class SliverClient {
 
    lootAll(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, async (signal) => {
@@ -1214,7 +1549,7 @@ index c2baf89..b7be3bb 100644
    }
 
    lootRemove(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -819,18 +1631,18 @@ export class SliverClient {
+@@ -819,18 +1675,18 @@ export class SliverClient {
    }
 
    lootContent(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -1236,7 +1571,7 @@ index c2baf89..b7be3bb 100644
    }
 
    websiteRemove(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -841,13 +1653,13 @@ export class SliverClient {
+@@ -841,13 +1697,13 @@ export class SliverClient {
 
    websiteAddContent(name: string, contents: Record<string, WebContent>, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, (signal) =>
@@ -1252,7 +1587,7 @@ index c2baf89..b7be3bb 100644
      );
    }
 
-@@ -859,17 +1671,17 @@ export class SliverClient {
+@@ -859,17 +1715,17 @@ export class SliverClient {
 
    // --- High-level helpers (ergonomic wrappers) ---
 
@@ -1273,7 +1608,220 @@ index c2baf89..b7be3bb 100644
      const res = await this.getBeacons(timeoutSeconds);
      return res.Beacons;
    }
-@@ -883,15 +1695,142 @@ export class SliverClient {
+@@ -879,19 +1735,384 @@ export class SliverClient {
+     return res.Active;
+   }
+
++  /**
++   * Opens a session shell through the bounded tunnel stream. This handle is
++   * intentionally part of the reviewed main-process adapter only; renderers
++   * receive a separate MessagePort protocol, never this RPC-capable object.
++   */
++  async startShellSession(
++    sessionId: string,
++    options: ShellSessionOptions,
++    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
++  ): Promise<ShellSessionHandle> {
++    assertNonEmptyString(sessionId, "Session id");
++    if (!options || typeof options !== "object") throw new Error("Shell options are required");
++    assertNonEmptyString(options.path, "Shell path");
++    if (typeof options.pty !== "boolean") throw new Error("Shell PTY flag must be a boolean");
++    const rows = shellTerminalDimension(options.rows, "Shell rows");
++    const cols = shellTerminalDimension(options.cols, "Shell columns");
++    const outputBufferBytes = shellOutputBufferBytes(options.outputBufferBytes);
++    const request = this.sessionRequest(sessionId, timeoutSeconds);
++
++    const tunnels = this.tunnels;
++    if (!tunnels) throw new Error("SliverClient is not connected");
++
++    let tunnelId = "";
++    let lifecycle: "starting" | "open" | "closing" | "closed" = "starting";
++    let closePromise: Promise<void> | null = null;
++    let writeTail: Promise<void> = Promise.resolve();
++    let resolveRemoteClosed: (() => void) | undefined;
++    const remoteClosed = new Promise<void>((resolve) => {
++      resolveRemoteClosed = resolve;
++    });
++
++    const bestEffortRemoteClose = async (): Promise<void> => {
++      if (!tunnelId) return;
++      await withTimeoutSignal(timeoutSeconds, (signal) =>
++        this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: sessionId }, { signal }),
++      ).catch(() => undefined);
++    };
++
++    const sendGracefulExit = async (): Promise<void> => {
++      await writeTail.catch(() => undefined);
++      for (const command of ["exit\n", "logout\n"] as const) {
++        const bytes = Buffer.from(command);
++        try {
++          await tunnels.send({
++            TunnelID: tunnelId,
++            SessionID: sessionId,
++            Data: bytes,
++          });
++        } catch {
++          return;
++        } finally {
++          bytes.fill(0);
++        }
++      }
++    };
++
++    const boundedGracefulExit = async (): Promise<void> => {
++      let timer: ReturnType<typeof setTimeout> | undefined;
++      try {
++        await Promise.race([
++          (async () => {
++            await sendGracefulExit();
++            // TunnelManager.send() resolves when the gRPC request stream pulls
++            // a frame, not when the implant consumes it. Hold CloseTunnel long
++            // enough for the exact remote EOF so it cannot overtake exit/logout.
++            await remoteClosed;
++          })(),
++          new Promise<void>((resolve) => {
++            timer = setTimeout(resolve, SHELL_GRACEFUL_CLOSE_TIMEOUT_MILLISECONDS);
++            timer.unref?.();
++          }),
++        ]);
++      } finally {
++        if (timer) clearTimeout(timer);
++      }
++    };
++
++    const closeManagedTunnel = (requestGracefulExit = false): Promise<void> => {
++      if (closePromise) return closePromise;
++      lifecycle = "closing";
++      closePromise = (async () => {
++        if (requestGracefulExit && tunnelId) await boundedGracefulExit();
++        if (tunnelId) tunnels.cancelTunnel(tunnelId);
++        await bestEffortRemoteClose();
++      })().finally(() => {
++          lifecycle = "closed";
++        });
++      return closePromise;
++    };
++
++    try {
++      const created = await withTimeoutSignal(timeoutSeconds, (signal) =>
++        this.rpc.createTunnel({ SessionID: sessionId }, { signal }),
++      );
++      tunnelId = created.TunnelID.trim();
++      if (!tunnelId) throw new Error("Missing tunnel id");
++
++      const output = tunnels.openOutput(tunnelId, {
++        maxBufferedBytes: outputBufferBytes,
++        onClosed: () => {
++          lifecycle = "closed";
++          resolveRemoteClosed?.();
++          closePromise ??= Promise.resolve();
++        },
++        onFailure: () => {
++          void closeManagedTunnel();
++        },
++      });
++
++      // The zero-data bind must be pulled by TunnelData before Shell can race
++      // an early prompt back to this process.
++      await tunnels.send({
++        TunnelID: tunnelId,
++        SessionID: sessionId,
++        Data: Buffer.alloc(0),
++      });
++
++      const shell = await withTimeoutSignal(timeoutSeconds, (signal) =>
++        this.rpc.shell(
++          {
++            Path: options.path,
++            EnablePTY: options.pty,
++            Pid: 0,
++            Rows: rows,
++            Cols: cols,
++            TunnelID: tunnelId,
++            Request: request,
++          },
++          { signal },
++        ),
++      );
++      if (shell.Response?.Err) throw new Error("Shell rejected");
++      // A force-terminate action is exposed only for this exact child PID.
++      // Never mint that authority for process-group/idle/kernel sentinel IDs.
++      if (!Number.isSafeInteger(shell.Pid) || shell.Pid <= 1 || shell.Pid > 0x7fff_ffff) {
++        throw new Error("Invalid shell pid");
++      }
++      if (shell.TunnelID && shell.TunnelID !== tunnelId) throw new Error("Mismatched shell tunnel");
++      if (lifecycle !== "starting") throw new Error("Shell closed during startup");
++      lifecycle = "open";
++
++      const ensureOpen = (): void => {
++        if (lifecycle !== "open") throw new Error("Shell session is closed");
++      };
++      const ensureNotClosed = (): void => {
++        if (lifecycle === "closed") throw new Error("Shell session is closed");
++      };
++
++      return {
++        id: tunnelId,
++        pid: shell.Pid,
++        path: options.path,
++        ptyRequested: options.pty,
++        output,
++        write: async (chunk) => {
++          ensureOpen();
++          const bytes = shellWriteBytes(chunk);
++          const operation = writeTail.then(async () => {
++            ensureNotClosed();
++            try {
++              for (let offset = 0; offset < bytes.length; offset += TUNNEL_STREAM_MAX_PAYLOAD_BYTES) {
++                ensureNotClosed();
++                await tunnels.send({
++                  TunnelID: tunnelId,
++                  SessionID: sessionId,
++                  Data: bytes.subarray(offset, offset + TUNNEL_STREAM_MAX_PAYLOAD_BYTES),
++                });
++              }
++            } catch {
++              throw new Error("Unable to write to shell session");
++            } finally {
++              bytes.fill(0);
++            }
++          });
++          writeTail = operation.catch(() => undefined);
++          return operation;
++        },
++        resize: async (nextRows, nextCols) => {
++          ensureOpen();
++          if (!options.pty) throw new Error("Shell resize requires a PTY");
++          const validatedRows = shellTerminalDimension(nextRows, "Shell rows");
++          const validatedCols = shellTerminalDimension(nextCols, "Shell columns");
++          try {
++            await withTimeoutSignal(timeoutSeconds, (signal) =>
++              this.rpc.shellResize(
++                {
++                  Rows: validatedRows,
++                  Cols: validatedCols,
++                  TunnelID: tunnelId,
++                  Request: this.sessionRequest(sessionId, timeoutSeconds),
++                },
++                { signal },
++              ),
++            );
++          } catch {
++            throw new Error("Unable to resize shell session");
++          }
++        },
++        close: () => closeManagedTunnel(true),
++      };
++    } catch {
++      // The Shell RPC can lose its response after the implant has already
++      // spawned the child. Once a tunnel exists, mirror the canonical client
++      // and attempt a bounded graceful exit before revoking the transport.
++      await closeManagedTunnel(Boolean(tunnelId));
++      throw new Error("Unable to start shell session");
++    }
++  }
++
+   interactSession(sessionId: string): InteractiveSession {
      if (!this.tunnels) {
        throw new Error("SliverClient is not connected");
      }
@@ -1293,7 +1841,36 @@ index c2baf89..b7be3bb 100644
 +}
 +
 +function assertNonEmptyString(value: string, label: string): void {
-+  if (!value.trim()) throw new Error(`${label} must not be empty`);
++  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must not be empty`);
++}
++
++function shellTerminalDimension(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value < 1 || value > SHELL_TERMINAL_DIMENSION_MAX) {
++    throw new Error(`${label} must be between 1 and ${SHELL_TERMINAL_DIMENSION_MAX}`);
++  }
++  return value;
++}
++
++function shellOutputBufferBytes(value: number | undefined): number {
++  if (value === undefined) return SHELL_OUTPUT_BUFFER_DEFAULT_BYTES;
++  if (!Number.isSafeInteger(value) || value < 1) {
++    throw new Error("Shell output buffer must be a positive safe integer");
++  }
++  return Math.min(value, SHELL_OUTPUT_BUFFER_MAX_BYTES);
++}
++
++function shellWriteBytes(value: Uint8Array | string): Buffer {
++  if (typeof value === "string") {
++    if (Buffer.byteLength(value) > SHELL_WRITE_MAX_BYTES) {
++      throw new Error(`Shell write must not exceed ${SHELL_WRITE_MAX_BYTES} bytes`);
++    }
++    return Buffer.from(value);
++  }
++  if (!(value instanceof Uint8Array)) throw new Error("Shell write must be bytes or text");
++  if (value.byteLength > SHELL_WRITE_MAX_BYTES) {
++    throw new Error(`Shell write must not exceed ${SHELL_WRITE_MAX_BYTES} bytes`);
++  }
++  return Buffer.from(value);
 +}
 +
 +function boundedNonNegativeInteger(value: number, label: string): number {
@@ -1431,6 +2008,181 @@ index 5920285..006d7ba 100644
  export * as commonpb from "./pb/commonpb/common";
  export * as clientpb from "./pb/clientpb/client";
  export * as sliverpb from "./pb/sliverpb/sliver";
+diff --git a/src/internal/asyncQueue.ts b/src/internal/asyncQueue.ts
+index a250241..2565764 100644
+--- a/src/internal/asyncQueue.ts
++++ b/src/internal/asyncQueue.ts
+@@ -1,61 +1,126 @@
++export interface AsyncQueueOptions<T> {
++  readonly maxItems: number;
++  readonly maxWeight: number;
++  readonly weight: (item: T) => number;
++  readonly overflowError: () => Error;
++  readonly dispose?: (item: T) => void;
++  readonly onConsumerCancel?: () => void;
++}
++
++/**
++ * A single-consumer async queue with explicit item and byte-equivalent caps.
++ *
++ * The queue intentionally has no unbounded defaults. Stream owners must pick a
++ * reviewed budget for every use instead of silently inheriting an allocation.
++ */
+ export class AsyncQueue<T> implements AsyncIterable<T> {
+   private readonly queue: T[] = [];
+-  private readonly pending: Array<{
++  private pending: {
+     resolve: (result: IteratorResult<T>) => void;
+     reject: (err: unknown) => void;
+-  }> = [];
++  } | null = null;
+
++  private queuedWeight = 0;
+   private closed = false;
+   private failure: unknown | null = null;
+
+-  push(item: T): void {
+-    if (this.closed) {
+-      throw new Error("AsyncQueue is closed");
++  constructor(private readonly options: AsyncQueueOptions<T>) {
++    if (!Number.isSafeInteger(options.maxItems) || options.maxItems < 1) {
++      throw new Error("AsyncQueue maxItems must be a positive safe integer");
++    }
++    if (!Number.isSafeInteger(options.maxWeight) || options.maxWeight < 1) {
++      throw new Error("AsyncQueue maxWeight must be a positive safe integer");
+     }
++  }
++
++  /** Returns false after atomically failing the queue on overflow. */
++  push(item: T): boolean {
++    if (this.closed) return false;
+
+-    const waiter = this.pending.shift();
++    const weight = this.itemWeight(item);
++    const waiter = this.pending;
+     if (waiter) {
++      this.pending = null;
+       waiter.resolve({ value: item, done: false });
+-      return;
++      return true;
++    }
++
++    if (this.queue.length >= this.options.maxItems || this.queuedWeight + weight > this.options.maxWeight) {
++      this.options.dispose?.(item);
++      this.fail(this.options.overflowError());
++      return false;
+     }
+
+     this.queue.push(item);
++    this.queuedWeight += weight;
++    return true;
+   }
+
++  /** Closes after already-buffered items have been consumed. */
+   close(): void {
+     if (this.closed) return;
+     this.closed = true;
+-    for (const waiter of this.pending.splice(0, this.pending.length)) {
++    if (this.queue.length === 0 && this.pending) {
++      const waiter = this.pending;
++      this.pending = null;
+       waiter.resolve({ value: undefined as never, done: true });
+     }
+   }
+
++  /** Fails immediately and securely disposes every buffered item. */
+   fail(err: unknown): void {
+-    if (this.closed) return;
++    if (this.closed && this.failure === null) return;
++    if (this.failure !== null) return;
++
+     this.failure = err;
+     this.closed = true;
+-    for (const waiter of this.pending.splice(0, this.pending.length)) {
++    this.disposeQueuedItems();
++    if (this.pending) {
++      const waiter = this.pending;
++      this.pending = null;
+       waiter.reject(err);
+     }
+   }
+
++  /** Cancels immediately without exposing buffered data to a future consumer. */
++  cancel(): void {
++    if (this.closed && this.queue.length === 0) return;
++    this.closed = true;
++    this.disposeQueuedItems();
++    if (this.pending) {
++      const waiter = this.pending;
++      this.pending = null;
++      waiter.resolve({ value: undefined as never, done: true });
++    }
++  }
++
++  get bufferedItems(): number {
++    return this.queue.length;
++  }
++
++  get bufferedWeight(): number {
++    return this.queuedWeight;
++  }
++
+   [Symbol.asyncIterator](): AsyncIterator<T> {
+     return {
+       next: () => this.next(),
+       return: async () => {
+-        this.close();
++        this.cancel();
++        this.options.onConsumerCancel?.();
+         return { value: undefined as never, done: true };
+       },
+     };
+   }
+
+   private next(): Promise<IteratorResult<T>> {
+-    if (this.failure) {
++    if (this.failure !== null) {
+       return Promise.reject(this.failure);
+     }
+
+-    const item = this.queue.shift();
+-    if (item !== undefined) {
++    if (this.queue.length > 0) {
++      const item = this.queue.shift()!;
++      this.queuedWeight -= this.itemWeight(item);
+       return Promise.resolve({ value: item, done: false });
+     }
+
+@@ -63,9 +128,27 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
+       return Promise.resolve({ value: undefined as never, done: true });
+     }
+
++    if (this.pending) {
++      return Promise.reject(new Error("AsyncQueue supports one pending consumer read"));
++    }
++
+     return new Promise((resolve, reject) => {
+-      this.pending.push({ resolve, reject });
++      this.pending = { resolve, reject };
+     });
+   }
+-}
+
++  private itemWeight(item: T): number {
++    const weight = this.options.weight(item);
++    if (!Number.isSafeInteger(weight) || weight < 0 || weight > this.options.maxWeight) {
++      throw new Error("AsyncQueue item has an invalid weight");
++    }
++    return weight;
++  }
++
++  private disposeQueuedItems(): void {
++    for (const item of this.queue.splice(0, this.queue.length)) {
++      this.options.dispose?.(item);
++    }
++    this.queuedWeight = 0;
++  }
++}
 diff --git a/src/internal/timeout.ts b/src/internal/timeout.ts
 index 8df4201..e4c10f2 100644
 --- a/src/internal/timeout.ts
@@ -1495,12 +2247,435 @@ index 8df4201..e4c10f2 100644
 +  }
 +  return timeoutSeconds;
 +}
+diff --git a/src/internal/tunnelManager.ts b/src/internal/tunnelManager.ts
+index 79c0d20..c5251c4 100644
+--- a/src/internal/tunnelManager.ts
++++ b/src/internal/tunnelManager.ts
+@@ -1,13 +1,225 @@
+ import { Subject, type Observable } from "rxjs";
+
++import { TUNNEL_STREAM_MAX_PAYLOAD_BYTES } from "../messageBudget";
+ import type { SliverRPCClient, DeepPartial } from "../pb/rpcpb/services";
+ import type { TunnelData } from "../pb/sliverpb/sliver";
+
+ import { AsyncQueue } from "./asyncQueue";
+
++export const TUNNEL_MANAGER_MAX_ACTIVE_TUNNELS = 64;
++export const TUNNEL_MANAGER_MAX_BUFFERED_OUTPUT_FRAMES = 1_024;
++export const TUNNEL_MANAGER_MAX_QUEUED_FRAMES_PER_TUNNEL = 8;
++export const TUNNEL_MANAGER_MAX_QUEUED_BYTES_PER_TUNNEL = 256 * 1024;
++export const TUNNEL_MANAGER_MAX_TOTAL_QUEUED_BYTES = 4 * 1024 * 1024;
++
++const SAFE_TUNNEL_CLOSED_ERROR = "Tunnel is closed";
++const SAFE_TUNNEL_OVERFLOW_ERROR = "Tunnel output exceeded its bounded buffer";
++const SAFE_TUNNEL_TRANSPORT_ERROR = "Tunnel transport disconnected";
++
++export interface TunnelOutputOptions {
++  readonly maxBufferedBytes: number;
++  readonly onClosed?: () => void;
++  readonly onFailure?: (reason: "cancelled" | "overflow" | "transport") => void;
++}
++
++export interface TunnelManagerStats {
++  readonly activeTunnels: number;
++  readonly queuedFrames: number;
++  readonly queuedBytes: number;
++}
++
++interface TunnelState {
++  readonly subject: Subject<TunnelData>;
++  output?: AsyncQueue<Uint8Array>;
++  onClosed?: () => void;
++  onFailure?: (reason: "cancelled" | "overflow" | "transport") => void;
++}
++
++interface PendingFrame {
++  readonly message: DeepPartial<TunnelData>;
++  readonly cost: number;
++  readonly resolve: () => void;
++  readonly reject: (error: Error) => void;
++}
++
++interface OutgoingTunnelState {
++  readonly frames: PendingFrame[];
++  queuedBytes: number;
++  scheduled: boolean;
++}
++
++/**
++ * Per-tunnel round-robin scheduler used as the request side of TunnelData.
++ * A sender's promise resolves only when nice-grpc pulls that frame, providing
++ * real backpressure instead of acknowledging an unbounded in-memory enqueue.
++ */
++class FairTunnelSendQueue implements AsyncIterable<DeepPartial<TunnelData>> {
++  private readonly byTunnelId = new Map<string, OutgoingTunnelState>();
++  private readonly readyTunnelIds: string[] = [];
++  private pendingRead: {
++    resolve: (result: IteratorResult<DeepPartial<TunnelData>>) => void;
++    reject: (error: Error) => void;
++  } | null = null;
++
++  private totalQueuedBytes = 0;
++  private closed = false;
++  private failure: Error | null = null;
++
++  register(tunnelId: string): void {
++    if (this.closed) throw new Error(SAFE_TUNNEL_CLOSED_ERROR);
++    if (this.byTunnelId.has(tunnelId)) return;
++    if (this.byTunnelId.size >= TUNNEL_MANAGER_MAX_ACTIVE_TUNNELS) {
++      throw new Error("Tunnel capacity is exhausted");
++    }
++    this.byTunnelId.set(tunnelId, { frames: [], queuedBytes: 0, scheduled: false });
++  }
++
++  enqueue(message: DeepPartial<TunnelData>): Promise<void> {
++    if (this.closed) return Promise.reject(this.failure ?? new Error(SAFE_TUNNEL_CLOSED_ERROR));
++
++    const tunnelId = message.TunnelID?.trim();
++    if (!tunnelId) return Promise.reject(new Error("Tunnel id is required"));
++
++    const state = this.byTunnelId.get(tunnelId);
++    if (!state) return Promise.reject(new Error(SAFE_TUNNEL_CLOSED_ERROR));
++
++    const dataLength = message.Data?.length ?? 0;
++    if (dataLength > TUNNEL_STREAM_MAX_PAYLOAD_BYTES) {
++      return Promise.reject(new Error("Tunnel frame exceeds the reviewed payload limit"));
++    }
++    const cost = Math.max(dataLength, 1);
++    if (
++      state.frames.length >= TUNNEL_MANAGER_MAX_QUEUED_FRAMES_PER_TUNNEL
++      || state.queuedBytes + cost > TUNNEL_MANAGER_MAX_QUEUED_BYTES_PER_TUNNEL
++      || this.totalQueuedBytes + cost > TUNNEL_MANAGER_MAX_TOTAL_QUEUED_BYTES
++    ) {
++      return Promise.reject(new Error("Tunnel write exceeded its bounded queue"));
++    }
++
++    return new Promise<void>((resolve, reject) => {
++      const stableMessage = message.Data
++        ? { ...message, Data: Buffer.from(message.Data) }
++        : message;
++      state.frames.push({ message: stableMessage, cost, resolve, reject });
++      state.queuedBytes += cost;
++      this.totalQueuedBytes += cost;
++      this.schedule(tunnelId, state);
++      this.flushPendingRead();
++    });
++  }
++
++  unregister(tunnelId: string, error = new Error(SAFE_TUNNEL_CLOSED_ERROR)): void {
++    const state = this.byTunnelId.get(tunnelId);
++    if (!state) return;
++
++    this.byTunnelId.delete(tunnelId);
++    for (const frame of state.frames.splice(0, state.frames.length)) {
++      this.totalQueuedBytes -= frame.cost;
++      frame.message.Data?.fill(0);
++      frame.reject(error);
++    }
++    state.queuedBytes = 0;
++    for (let index = this.readyTunnelIds.length - 1; index >= 0; index -= 1) {
++      if (this.readyTunnelIds[index] === tunnelId) this.readyTunnelIds.splice(index, 1);
++    }
++  }
++
++  close(): void {
++    if (this.closed) return;
++    this.closed = true;
++    this.rejectAll(new Error(SAFE_TUNNEL_CLOSED_ERROR));
++    if (this.pendingRead) {
++      const waiter = this.pendingRead;
++      this.pendingRead = null;
++      waiter.resolve({ value: undefined as never, done: true });
++    }
++  }
++
++  fail(): void {
++    if (this.failure) return;
++    this.failure = new Error(SAFE_TUNNEL_TRANSPORT_ERROR);
++    this.closed = true;
++    this.rejectAll(this.failure);
++    if (this.pendingRead) {
++      const waiter = this.pendingRead;
++      this.pendingRead = null;
++      waiter.reject(this.failure);
++    }
++  }
++
++  stats(): Pick<TunnelManagerStats, "queuedFrames" | "queuedBytes"> {
++    let queuedFrames = 0;
++    for (const state of this.byTunnelId.values()) queuedFrames += state.frames.length;
++    return { queuedFrames, queuedBytes: this.totalQueuedBytes };
++  }
++
++  [Symbol.asyncIterator](): AsyncIterator<DeepPartial<TunnelData>> {
++    return {
++      next: () => this.next(),
++      return: async () => {
++        this.close();
++        return { value: undefined as never, done: true };
++      },
++    };
++  }
++
++  private next(): Promise<IteratorResult<DeepPartial<TunnelData>>> {
++    if (this.failure) return Promise.reject(this.failure);
++    const frame = this.takeNextFrame();
++    if (frame) return Promise.resolve({ value: frame.message, done: false });
++    if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
++    if (this.pendingRead) {
++      return Promise.reject(new Error("Tunnel stream supports one pending transport read"));
++    }
++    return new Promise((resolve, reject) => {
++      this.pendingRead = { resolve, reject };
++    });
++  }
++
++  private schedule(tunnelId: string, state: OutgoingTunnelState): void {
++    if (state.scheduled || state.frames.length === 0) return;
++    state.scheduled = true;
++    this.readyTunnelIds.push(tunnelId);
++  }
++
++  private takeNextFrame(): PendingFrame | null {
++    while (this.readyTunnelIds.length > 0) {
++      const tunnelId = this.readyTunnelIds.shift()!;
++      const state = this.byTunnelId.get(tunnelId);
++      if (!state) continue;
++
++      state.scheduled = false;
++      const frame = state.frames.shift();
++      if (!frame) continue;
++
++      state.queuedBytes -= frame.cost;
++      this.totalQueuedBytes -= frame.cost;
++      this.schedule(tunnelId, state);
++      frame.resolve();
++      return frame;
++    }
++    return null;
++  }
++
++  private flushPendingRead(): void {
++    if (!this.pendingRead) return;
++    const frame = this.takeNextFrame();
++    if (!frame) return;
++    const waiter = this.pendingRead;
++    this.pendingRead = null;
++    waiter.resolve({ value: frame.message, done: false });
++  }
++
++  private rejectAll(error: Error): void {
++    for (const tunnelId of [...this.byTunnelId.keys()]) this.unregister(tunnelId, error);
++    this.readyTunnelIds.splice(0, this.readyTunnelIds.length);
++    this.totalQueuedBytes = 0;
++  }
++}
++
+ export class TunnelManager {
+-  private readonly outgoing = new AsyncQueue<DeepPartial<TunnelData>>();
+-  private readonly byTunnelId = new Map<string, Subject<TunnelData>>();
++  private readonly outgoing = new FairTunnelSendQueue();
++  private readonly byTunnelId = new Map<string, TunnelState>();
+   private readonly abort = new AbortController();
+
+   private running: Promise<void> | null = null;
+@@ -18,50 +230,162 @@ export class TunnelManager {
+     this.running = (async () => {
+       try {
+         const stream = rpc.tunnelData(this.outgoing, { signal: this.abort.signal });
+-        for await (const msg of stream) {
+-          const tunnelId = msg.TunnelID;
+-          const subject = this.byTunnelId.get(tunnelId);
+-          if (!subject) continue;
+-
+-          subject.next(msg);
+-          if (msg.Closed) {
+-            subject.complete();
+-            this.byTunnelId.delete(tunnelId);
++        for await (const msg of stream) this.receive(msg);
++        if (!this.abort.signal.aborted) throw new Error(SAFE_TUNNEL_TRANSPORT_ERROR);
++      } catch {
++        if (!this.abort.signal.aborted) {
++          this.outgoing.fail();
++          for (const tunnelId of [...this.byTunnelId.keys()]) {
++            this.failTunnel(tunnelId, "transport");
+           }
+         }
+-      } catch (err) {
+-        for (const subject of this.byTunnelId.values()) {
+-          subject.error(err);
+-        }
+-        this.byTunnelId.clear();
+-        this.outgoing.fail(err);
+       }
+     })();
+   }
+
++  /** Legacy RxJS compatibility. New main-process callers use openOutput(). */
+   subscribe(tunnelId: string): Observable<TunnelData> {
+-    let subject = this.byTunnelId.get(tunnelId);
+-    if (!subject) {
+-      subject = new Subject<TunnelData>();
+-      this.byTunnelId.set(tunnelId, subject);
++    return this.ensureTunnel(tunnelId).subject.asObservable();
++  }
++
++  openOutput(tunnelId: string, options: TunnelOutputOptions): AsyncIterable<Uint8Array> {
++    if (!Number.isSafeInteger(options.maxBufferedBytes) || options.maxBufferedBytes < 1) {
++      throw new Error("Tunnel output budget must be a positive safe integer");
+     }
+-    return subject.asObservable();
++
++    const state = this.ensureTunnel(tunnelId);
++    if (state.output) throw new Error("Tunnel output is already registered");
++
++    state.onClosed = options.onClosed;
++    state.onFailure = options.onFailure;
++    state.output = new AsyncQueue<Uint8Array>({
++      maxItems: TUNNEL_MANAGER_MAX_BUFFERED_OUTPUT_FRAMES,
++      maxWeight: options.maxBufferedBytes,
++      weight: (chunk) => chunk.byteLength,
++      overflowError: () => new Error(SAFE_TUNNEL_OVERFLOW_ERROR),
++      dispose: clearBytes,
++      onConsumerCancel: () => {
++        this.cancelTunnel(tunnelId);
++        invokeFailure(options.onFailure, "cancelled");
++      },
++    });
++    return state.output;
++  }
++
++  send(msg: DeepPartial<TunnelData>): Promise<void> {
++    return this.outgoing.enqueue(msg);
+   }
+
+-  send(msg: DeepPartial<TunnelData>): void {
+-    this.outgoing.push(msg);
++  cancelTunnel(tunnelId: string): void {
++    const state = this.byTunnelId.get(tunnelId);
++    if (!state) return;
++    this.byTunnelId.delete(tunnelId);
++    this.outgoing.unregister(tunnelId);
++    state.output?.cancel();
++    state.subject.complete();
++  }
++
++  stats(): TunnelManagerStats {
++    return {
++      activeTunnels: this.byTunnelId.size,
++      ...this.outgoing.stats(),
++    };
+   }
+
+   async stop(): Promise<void> {
+     this.abort.abort();
+     this.outgoing.close();
+-    if (this.running) {
+-      await this.running;
+-    }
++    if (this.running) await this.running;
+     this.running = null;
+-    for (const subject of this.byTunnelId.values()) {
+-      subject.complete();
++    for (const tunnelId of [...this.byTunnelId.keys()]) this.failTunnel(tunnelId, "transport");
++  }
++
++  private ensureTunnel(tunnelId: string): TunnelState {
++    const normalized = tunnelId.trim();
++    if (!normalized) throw new Error("Tunnel id is required");
++
++    let state = this.byTunnelId.get(normalized);
++    if (state) return state;
++    if (this.byTunnelId.size >= TUNNEL_MANAGER_MAX_ACTIVE_TUNNELS) {
++      throw new Error("Tunnel capacity is exhausted");
++    }
++
++    state = { subject: new Subject<TunnelData>() };
++    this.byTunnelId.set(normalized, state);
++    try {
++      this.outgoing.register(normalized);
++    } catch (error) {
++      this.byTunnelId.delete(normalized);
++      throw error;
++    }
++    return state;
++  }
++
++  private receive(msg: TunnelData): void {
++    const tunnelId = msg.TunnelID;
++    const state = this.byTunnelId.get(tunnelId);
++    if (!state) return;
++
++    if (msg.Data.length > TUNNEL_STREAM_MAX_PAYLOAD_BYTES) {
++      msg.Data.fill(0);
++      this.failTunnel(tunnelId, "overflow");
++      return;
++    }
++
++    state.subject.next(msg);
++    if (msg.Data.length > 0 && state.output) {
++      const copy = Uint8Array.from(msg.Data);
++      if (!state.output.push(copy)) {
++        this.byTunnelId.delete(tunnelId);
++        this.outgoing.unregister(tunnelId, new Error(SAFE_TUNNEL_OVERFLOW_ERROR));
++        state.subject.complete();
++        invokeFailure(state.onFailure, "overflow");
++        return;
++      }
++    }
++
++    if (msg.Closed) {
++      this.byTunnelId.delete(tunnelId);
++      this.outgoing.unregister(tunnelId);
++      state.output?.close();
++      state.subject.complete();
++      invokeClosed(state.onClosed);
+     }
+-    this.byTunnelId.clear();
++  }
++
++  private failTunnel(tunnelId: string, reason: "overflow" | "transport"): void {
++    const state = this.byTunnelId.get(tunnelId);
++    if (!state) return;
++    this.byTunnelId.delete(tunnelId);
++    const error = new Error(reason === "overflow" ? SAFE_TUNNEL_OVERFLOW_ERROR : SAFE_TUNNEL_TRANSPORT_ERROR);
++    this.outgoing.unregister(tunnelId, error);
++    state.output?.fail(error);
++    state.subject.complete();
++    invokeFailure(state.onFailure, reason);
++  }
++}
++
++function clearBytes(value: Uint8Array): void {
++  value.fill(0);
++}
++
++function invokeClosed(callback: (() => void) | undefined): void {
++  if (!callback) return;
++  try {
++    callback();
++  } catch {
++    // Lifecycle callbacks are advisory and must not kill the transport loop.
++  }
++}
++
++function invokeFailure(
++  callback: ((reason: "cancelled" | "overflow" | "transport") => void) | undefined,
++  reason: "cancelled" | "overflow" | "transport",
++): void {
++  if (!callback) return;
++  try {
++    callback(reason);
++  } catch {
++    // Lifecycle callbacks are advisory and must not kill the transport loop.
+   }
+ }
 diff --git a/src/messageBudget.ts b/src/messageBudget.ts
 new file mode 100644
-index 0000000..54ae92c
+index 0000000..605b6ae
 --- /dev/null
 +++ b/src/messageBudget.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,98 @@
 +import { isIP } from "node:net";
 +
 +const KiB = 1024;
@@ -1515,11 +2690,16 @@ index 0000000..54ae92c
 + * 256 MiB artifact allocation.
 + */
 +export const WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES = 66 * MiB;
++/** Maximum terminal/tunnel data carried by one protobuf frame. */
++export const TUNNEL_STREAM_MAX_PAYLOAD_BYTES = 64 * KiB;
++/** Room for the bounded payload plus tunnel identifiers and protobuf framing. */
++export const TUNNEL_STREAM_RPC_MESSAGE_BYTES = 66 * KiB;
 +
 +export const RPC_MESSAGE_DOMAINS = [
 +  "control",
 +  "inventory",
 +  "task-content",
++  "tunnel-stream",
 +  "workbench-artifact",
 +  "artifact",
 +] as const;
@@ -1546,6 +2726,12 @@ index 0000000..54ae92c
 +  "task-content": Object.freeze({
 +    maxSendBytes: 1 * MiB,
 +    maxReceiveBytes: 80 * KiB,
++  }),
++  // M3 interactive streams use small, independently bounded frames. Never
++  // grant a long-lived duplex tunnel an inventory or artifact-sized decoder.
++  "tunnel-stream": Object.freeze({
++    maxSendBytes: TUNNEL_STREAM_RPC_MESSAGE_BYTES,
++    maxReceiveBytes: TUNNEL_STREAM_RPC_MESSAGE_BYTES,
 +  }),
 +  // M2 endpoint-workbench binary RPCs are hard-capped at 64 MiB decoded. Keep
 +  // them isolated so neither control traffic nor these helpers inherit the

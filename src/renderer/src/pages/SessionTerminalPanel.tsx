@@ -1,0 +1,1123 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { Selection } from "react-aria-components";
+import {
+  AlertDialog,
+  Button,
+  Chip,
+  ScrollShadow,
+  Toolbar,
+  Tooltip,
+  toast,
+} from "@heroui/react";
+import { EmptyState, ListView, Sheet } from "@heroui-pro/react";
+import { Resizable } from "@heroui-pro/react/resizable";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import {
+  faRotate,
+  faTerminal,
+  faTriangleExclamation,
+} from "@fortawesome/free-solid-svg-icons";
+
+import type { SessionSummary } from "../../../shared/target-contracts";
+import type {
+  PrepareSessionShellInput,
+  SessionShellResource,
+  SessionShellResourceAction,
+  SessionShellResourceList,
+  TerminalRuntimeAsset,
+} from "../../../shared/stream-contracts";
+import {
+  GhosttyTerminal,
+  type GhosttyTerminalHandle,
+} from "../components/GhosttyTerminal";
+import {
+  SessionShellTransport,
+  type SessionShellTransportSnapshot,
+} from "../components/session-shell-transport";
+
+const DEFAULT_ROWS = 24;
+const DEFAULT_COLUMNS = 80;
+const MAX_PASTE_BYTES = 64 * 1_024;
+const METRICS_UPDATE_MILLISECONDS = 250;
+const WIDE_SHELL_WORKSPACE_QUERY = "(min-width: 768px)";
+
+let cachedTerminalRuntime: TerminalRuntimeAsset | undefined;
+let pendingTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
+
+export interface SessionTerminalRoute {
+  readonly sessionId: string;
+  readonly backendEpoch: number;
+  readonly connectionIncarnation: number;
+  readonly targetFingerprint: string;
+}
+
+export interface SessionTerminalPanelProps {
+  readonly route: SessionTerminalRoute;
+  readonly session: SessionSummary;
+}
+
+type PanelStatus = "loading" | "ready" | "error";
+
+interface PendingResourceAction {
+  readonly resourceId: string;
+  readonly action: "close" | "kill";
+}
+
+interface PasteReview {
+  readonly bytes: number;
+  readonly lines: number;
+  readonly controlCharacters: number;
+}
+
+const initialTransportSnapshot: SessionShellTransportSnapshot = Object.freeze({
+  state: "connecting",
+  pressure: "normal",
+  queuedInputBytes: 0,
+  queuedOutputBytes: 0,
+  inputCreditBytes: 0,
+  bytesFromRemote: "0",
+  bytesToRemote: "0",
+});
+
+export function SessionTerminalPanel({
+  route,
+  session,
+}: SessionTerminalPanelProps): React.JSX.Element {
+  const routeIdentity = terminalRouteIdentity(route);
+  const routeIdentityRef = useRef(routeIdentity);
+  routeIdentityRef.current = routeIdentity;
+  const lifecycleGenerationRef = useRef(0);
+  const terminalRef = useRef<GhosttyTerminalHandle>(null);
+  const runtimeRef = useRef<TerminalRuntimeAsset | undefined>(undefined);
+  const transportRef = useRef<SessionShellTransport | undefined>(undefined);
+  const attachedResourceIdRef = useRef<string | undefined>(undefined);
+  const unsubscribeTransportStateRef = useRef<(() => void) | undefined>(undefined);
+  const pendingPasteRef = useRef<string | undefined>(undefined);
+  const pendingMetricsTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const latestTransportSnapshotRef = useRef(initialTransportSnapshot);
+
+  const [panelStatus, setPanelStatus] = useState<PanelStatus>("loading");
+  const [error, setError] = useState<string>();
+  const [inventory, setInventory] = useState<SessionShellResourceList>();
+  const [selectedResourceId, setSelectedResourceId] = useState<string>();
+  const [isStarting, setIsStarting] = useState(false);
+  const [isAttaching, setIsAttaching] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [activeAction, setActiveAction] = useState<SessionShellResourceAction>();
+  const [pendingResourceAction, setPendingResourceAction] = useState<PendingResourceAction>();
+  const [pasteReview, setPasteReview] = useState<PasteReview>();
+  const [transportSnapshot, setTransportSnapshot] = useState(initialTransportSnapshot);
+  const [terminalRevision, setTerminalRevision] = useState(0);
+  const [isShellListOpen, setIsShellListOpen] = useState(false);
+  const isWide = useMediaQuery(WIDE_SHELL_WORKSPACE_QUERY, true);
+
+  const isCurrent = useCallback((expectedIdentity = routeIdentity) => (
+    routeIdentityRef.current === expectedIdentity
+  ), [routeIdentity]);
+
+  const clearMetricsTimer = useCallback(() => {
+    if (pendingMetricsTimerRef.current) clearTimeout(pendingMetricsTimerRef.current);
+    pendingMetricsTimerRef.current = undefined;
+  }, []);
+
+  const releaseTransport = useCallback((disposition: "detach" | "close" = "detach") => {
+    clearMetricsTimer();
+    unsubscribeTransportStateRef.current?.();
+    unsubscribeTransportStateRef.current = undefined;
+    const transport = transportRef.current;
+    transportRef.current = undefined;
+    attachedResourceIdRef.current = undefined;
+    if (transport) {
+      if (disposition === "close") transport.close();
+      else transport.detach();
+    }
+    latestTransportSnapshotRef.current = initialTransportSnapshot;
+    setTransportSnapshot(initialTransportSnapshot);
+    setTerminalRevision((revision) => revision + 1);
+  }, [clearMetricsTimer]);
+
+  const loadInventory = useCallback(async (
+    expectedIdentity = routeIdentity,
+    generation = lifecycleGenerationRef.current,
+    showProgress = false,
+  ): Promise<SessionShellResourceList | undefined> => {
+    if (showProgress) setIsRefreshing(true);
+    try {
+      const result = await window.sliver.listSessionShells({});
+      if (
+        generation !== lifecycleGenerationRef.current ||
+        !isCurrent(expectedIdentity)
+      ) return undefined;
+      if (!result.ok || !result.value) throw new Error(result.error ?? "Managed shells are unavailable");
+      setInventory(result.value);
+      setSelectedResourceId((current) => chooseSelectedResource(result.value.resources, current));
+      setError(undefined);
+      return result.value;
+    } catch (caught) {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setError(errorMessage(caught));
+      return undefined;
+    } finally {
+      if (
+        showProgress &&
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setIsRefreshing(false);
+    }
+  }, [isCurrent, routeIdentity]);
+
+  useEffect(() => {
+    const generation = ++lifecycleGenerationRef.current;
+    const expectedIdentity = routeIdentity;
+    let disposed = false;
+    setPanelStatus("loading");
+    setError(undefined);
+    setInventory(undefined);
+    setSelectedResourceId(undefined);
+    setIsStarting(false);
+    setIsAttaching(false);
+    setIsRefreshing(false);
+    setActiveAction(undefined);
+    setPendingResourceAction(undefined);
+    pendingPasteRef.current = undefined;
+    setPasteReview(undefined);
+    releaseTransport();
+
+    void (async () => {
+      try {
+        const runtime = await loadCachedTerminalRuntime();
+        if (
+          disposed ||
+          generation !== lifecycleGenerationRef.current ||
+          !isCurrent(expectedIdentity)
+        ) return;
+        runtimeRef.current = runtime;
+        await loadInventory(expectedIdentity, generation);
+        if (
+          disposed ||
+          generation !== lifecycleGenerationRef.current ||
+          !isCurrent(expectedIdentity)
+        ) return;
+        setPanelStatus("ready");
+      } catch (caught) {
+        if (
+          !disposed &&
+          generation === lifecycleGenerationRef.current &&
+          isCurrent(expectedIdentity)
+        ) {
+          setError(errorMessage(caught));
+          setPanelStatus("error");
+        }
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      lifecycleGenerationRef.current += 1;
+      pendingPasteRef.current = undefined;
+      releaseTransport();
+    };
+  }, [isCurrent, loadInventory, releaseTransport, routeIdentity]);
+
+  const subscribeToTransportState = useCallback((
+    transport: SessionShellTransport,
+    expectedIdentity: string,
+    generation: number,
+  ) => transport.subscribeState((snapshot) => {
+    if (
+      transportRef.current !== transport ||
+      generation !== lifecycleGenerationRef.current ||
+      !isCurrent(expectedIdentity)
+    ) return;
+    const previous = latestTransportSnapshotRef.current;
+    latestTransportSnapshotRef.current = snapshot;
+    const urgent = snapshot.state !== previous.state || snapshot.pressure !== previous.pressure;
+    if (urgent) {
+      clearMetricsTimer();
+      setTransportSnapshot(snapshot);
+      if (snapshot.state === "closed" || snapshot.state === "detached" || snapshot.state === "failed") {
+        unsubscribeTransportStateRef.current?.();
+        unsubscribeTransportStateRef.current = undefined;
+        transportRef.current = undefined;
+        attachedResourceIdRef.current = undefined;
+        setTerminalRevision((revision) => revision + 1);
+        void loadInventory(expectedIdentity, generation);
+      }
+      return;
+    }
+    if (pendingMetricsTimerRef.current) return;
+    pendingMetricsTimerRef.current = setTimeout(() => {
+      pendingMetricsTimerRef.current = undefined;
+      if (
+        transportRef.current === transport &&
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setTransportSnapshot(latestTransportSnapshotRef.current);
+    }, METRICS_UPDATE_MILLISECONDS);
+  }), [clearMetricsTimer, isCurrent, loadInventory]);
+
+  const attachWithTicket = useCallback(async (
+    resourceId: string,
+    attachmentToken: string,
+    canResize: boolean,
+    expectedIdentity = routeIdentity,
+    generation = lifecycleGenerationRef.current,
+  ): Promise<void> => {
+    setIsAttaching(true);
+    setError(undefined);
+    releaseTransport();
+    try {
+      const transport = await SessionShellTransport.open({
+        attachmentToken,
+        expectedResourceId: resourceId,
+        canResize,
+        isCurrent: () => (
+          generation === lifecycleGenerationRef.current &&
+          isCurrent(expectedIdentity)
+        ),
+      });
+      if (
+        generation !== lifecycleGenerationRef.current ||
+        !isCurrent(expectedIdentity)
+      ) {
+        transport.detach();
+        return;
+      }
+      transportRef.current = transport;
+      attachedResourceIdRef.current = resourceId;
+      latestTransportSnapshotRef.current = transport.getSnapshot();
+      setTransportSnapshot(transport.getSnapshot());
+      unsubscribeTransportStateRef.current = subscribeToTransportState(
+        transport,
+        expectedIdentity,
+        generation,
+      );
+      setSelectedResourceId(resourceId);
+      setTerminalRevision((revision) => revision + 1);
+      setIsShellListOpen(false);
+      await loadInventory(expectedIdentity, generation);
+    } catch (caught) {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setError(errorMessage(caught));
+    } finally {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setIsAttaching(false);
+    }
+  }, [isCurrent, loadInventory, releaseTransport, routeIdentity, subscribeToTransportState]);
+
+  const startShell = useCallback(async () => {
+    const generation = lifecycleGenerationRef.current;
+    const expectedIdentity = routeIdentity;
+    setIsStarting(true);
+    setError(undefined);
+    try {
+      const result = await window.sliver.prepareSessionShell(defaultSessionShellInput(session.os));
+      if (
+        generation !== lifecycleGenerationRef.current ||
+        !isCurrent(expectedIdentity)
+      ) return;
+      if (!result.ok || !result.value) throw new Error(result.error ?? "The shell could not be prepared");
+      await attachWithTicket(
+        result.value.resourceId,
+        result.value.attachment.attachmentToken,
+        result.value.canResize,
+        expectedIdentity,
+        generation,
+      );
+    } catch (caught) {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setError(errorMessage(caught));
+    } finally {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setIsStarting(false);
+    }
+  }, [attachWithTicket, isCurrent, routeIdentity, session.os]);
+
+  const attachSelected = useCallback(async () => {
+    const resource = inventory?.resources.find((candidate) => candidate.resourceId === selectedResourceId);
+    if (!resource) return;
+    const generation = lifecycleGenerationRef.current;
+    const expectedIdentity = routeIdentity;
+    setIsAttaching(true);
+    setError(undefined);
+    try {
+      const result = await window.sliver.actOnSessionShell({
+        resourceId: resource.resourceId,
+        action: "attach",
+      });
+      if (
+        generation !== lifecycleGenerationRef.current ||
+        !isCurrent(expectedIdentity)
+      ) return;
+      if (!result.ok || !result.value?.attachment) {
+        throw new Error(result.error ?? "The managed shell could not be attached");
+      }
+      await attachWithTicket(
+        resource.resourceId,
+        result.value.attachment.attachmentToken,
+        resource.canResize,
+        expectedIdentity,
+        generation,
+      );
+    } catch (caught) {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setError(errorMessage(caught));
+    } finally {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setIsAttaching(false);
+    }
+  }, [attachWithTicket, inventory?.resources, isCurrent, routeIdentity, selectedResourceId]);
+
+  const runResourceAction = useCallback(async (
+    resourceId: string,
+    action: SessionShellResourceAction,
+  ) => {
+    const generation = lifecycleGenerationRef.current;
+    const expectedIdentity = routeIdentity;
+    setActiveAction(action);
+    setError(undefined);
+    try {
+      const result = await window.sliver.actOnSessionShell({ resourceId, action });
+      if (
+        generation !== lifecycleGenerationRef.current ||
+        !isCurrent(expectedIdentity)
+      ) return;
+      if (!result.ok || !result.value) throw new Error(result.error ?? `The shell could not be ${action}ed`);
+      if (resourceId === attachedResourceIdRef.current && action !== "attach") {
+        releaseTransport(action === "detach" ? "detach" : "close");
+      }
+      setPendingResourceAction(undefined);
+      await loadInventory(expectedIdentity, generation);
+    } catch (caught) {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setError(errorMessage(caught));
+    } finally {
+      if (
+        generation === lifecycleGenerationRef.current &&
+        isCurrent(expectedIdentity)
+      ) setActiveAction(undefined);
+    }
+  }, [isCurrent, loadInventory, releaseTransport, routeIdentity]);
+
+  const copySelection = useCallback(async () => {
+    try {
+      requireActiveClipboardGesture();
+      const selection = terminalRef.current?.getSelection() ?? "";
+      if (!selection) {
+        toast.warning("Nothing selected", { description: "Select terminal text before copying." });
+        return;
+      }
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard write is unavailable");
+      await navigator.clipboard.writeText(selection);
+      toast.success("Selection copied");
+    } catch (caught) {
+      toast.danger("Could not copy selection", { description: errorMessage(caught) });
+    }
+  }, []);
+
+  const requestPaste = useCallback(async () => {
+    try {
+      requireActiveClipboardGesture();
+      if (!navigator.clipboard?.readText) throw new Error("Clipboard read is unavailable");
+      const text = await navigator.clipboard.readText();
+      const review = inspectPaste(text);
+      if (review.bytes === 0) {
+        toast.warning("Clipboard is empty");
+        return;
+      }
+      if (review.bytes > MAX_PASTE_BYTES) throw new Error(`Clipboard text exceeds ${MAX_PASTE_BYTES} bytes`);
+      if (text.includes("\0")) throw new Error("Clipboard text contains a NUL byte");
+      if (requiresPasteConfirmation(review)) {
+        pendingPasteRef.current = text;
+        setPasteReview(review);
+        return;
+      }
+      terminalRef.current?.paste(text);
+      terminalRef.current?.focus();
+    } catch (caught) {
+      toast.danger("Could not paste", { description: errorMessage(caught) });
+    }
+  }, []);
+
+  const confirmPaste = useCallback(() => {
+    const text = pendingPasteRef.current;
+    pendingPasteRef.current = undefined;
+    setPasteReview(undefined);
+    if (!text || !isCurrent()) return;
+    try {
+      terminalRef.current?.paste(text);
+      terminalRef.current?.focus();
+    } catch (caught) {
+      toast.danger("Could not paste", { description: errorMessage(caught) });
+    }
+  }, [isCurrent]);
+
+  const resources = useMemo(() => (
+    [...(inventory?.resources ?? [])].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  ), [inventory?.resources]);
+  const selectedResource = resources.find((resource) => resource.resourceId === selectedResourceId);
+  const activeTransport = transportRef.current;
+  const runtime = runtimeRef.current;
+  const terminal = activeTransport && runtime ? (
+    <GhosttyTerminal
+      key={terminalRevision}
+      ref={terminalRef}
+      ariaLabel={`Interactive shell for ${session.name || session.hostname || session.id}`}
+      className="min-h-[360px]"
+      transport={activeTransport}
+      wasmBytes={runtime.bytes}
+      onError={(terminalError) => {
+        if (!isCurrent()) return;
+        setError(terminalError.message);
+        // A verified-runtime or terminal initialization failure leaves no
+        // usable operator surface. Close the exact attached capability so its
+        // remote shell and bounded output subscription cannot survive behind
+        // a failed terminal.
+        releaseTransport("close");
+      }}
+    />
+  ) : null;
+
+  const shellList = (
+    <ShellList
+      aggregate={inventory}
+      isLoading={panelStatus === "loading"}
+      resources={resources}
+      selectedResourceId={selectedResourceId}
+      onSelect={setSelectedResourceId}
+    />
+  );
+
+  const terminalSurface = (
+    <TerminalSurface
+      activeResourceId={attachedResourceIdRef.current}
+      error={error}
+      isAttaching={isAttaching}
+      isStarting={isStarting}
+      isWide={isWide}
+      panelStatus={panelStatus}
+      selectedResource={selectedResource}
+      session={session}
+      terminal={terminal}
+      transportSnapshot={transportSnapshot}
+      onAttach={() => void attachSelected()}
+      onCopy={() => void copySelection()}
+      onDetach={() => {
+        if (selectedResource) void runResourceAction(selectedResource.resourceId, "detach");
+      }}
+      onFocus={() => terminalRef.current?.focus()}
+      onOpenShellList={() => setIsShellListOpen(true)}
+      onPaste={() => void requestPaste()}
+      onRequestClose={(resourceId) => setPendingResourceAction({ resourceId, action: "close" })}
+      onRequestKill={(resourceId) => setPendingResourceAction({ resourceId, action: "kill" })}
+      onStart={() => void startShell()}
+    />
+  );
+
+  return (
+    <section className="min-w-0 overflow-hidden rounded-2xl bg-surface" aria-labelledby="session-shells-heading">
+      <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faTerminal} /></span>
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-foreground" id="session-shells-heading">Managed Shells</h2>
+            <p className="text-xs text-muted">Bounded, session-only interactive streams owned by this window.</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Tooltip delay={250}>
+            <Button
+              aria-label="Refresh managed shells"
+              isIconOnly
+              isPending={isRefreshing}
+              size="sm"
+              variant="ghost"
+              onPress={() => void loadInventory(routeIdentity, lifecycleGenerationRef.current, true)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faRotate} />
+            </Button>
+            <Tooltip.Content>Refresh managed shells</Tooltip.Content>
+          </Tooltip>
+          <Button isPending={isStarting} size="sm" variant="primary" onPress={() => void startShell()}>
+            New shell
+          </Button>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="bg-danger-soft px-5 py-3 text-xs text-danger-soft-foreground sm:px-6" role="alert">
+          {error}
+        </div>
+      ) : null}
+
+      {isWide ? (
+        <div className="h-[min(68vh,720px)] min-h-[520px] overflow-hidden bg-background">
+          <Resizable autoSaveId="sliver:session-shell-workspace" orientation="horizontal">
+            <Resizable.Panel
+              defaultSize="288px"
+              groupResizeBehavior="preserve-pixel-size"
+              maxSize="420px"
+              minSize="240px"
+            >
+              {shellList}
+            </Resizable.Panel>
+            <Resizable.Handle type="line" variant="secondary" withIndicator />
+            <Resizable.Panel minSize={45}>{terminalSurface}</Resizable.Panel>
+          </Resizable>
+        </div>
+      ) : (
+        <div className="min-h-[520px] bg-background">{terminalSurface}</div>
+      )}
+
+      {!isWide ? (
+        <Sheet isOpen={isShellListOpen} placement="right" onOpenChange={setIsShellListOpen}>
+          <Sheet.Backdrop variant="blur">
+            <Sheet.Content className="h-full w-[min(88vw,360px)]">
+              <Sheet.Dialog className="h-full">
+                <Sheet.CloseTrigger />
+                <Sheet.Header>
+                  <Sheet.Heading>Managed Shells</Sheet.Heading>
+                </Sheet.Header>
+                <Sheet.Body className="min-h-0 p-0">{shellList}</Sheet.Body>
+              </Sheet.Dialog>
+            </Sheet.Content>
+          </Sheet.Backdrop>
+        </Sheet>
+      ) : null}
+
+      <ResourceActionDialog
+        action={pendingResourceAction}
+        isPending={activeAction === pendingResourceAction?.action}
+        onCancel={() => {
+          if (!activeAction) setPendingResourceAction(undefined);
+        }}
+        onConfirm={(pending) => void runResourceAction(pending.resourceId, pending.action)}
+      />
+      <PasteReviewDialog
+        review={pasteReview}
+        onCancel={() => {
+          pendingPasteRef.current = undefined;
+          setPasteReview(undefined);
+        }}
+        onConfirm={confirmPaste}
+      />
+    </section>
+  );
+}
+
+function ShellList({
+  aggregate,
+  isLoading,
+  resources,
+  selectedResourceId,
+  onSelect,
+}: {
+  aggregate: SessionShellResourceList | undefined;
+  isLoading: boolean;
+  resources: readonly SessionShellResource[];
+  selectedResourceId: string | undefined;
+  onSelect: (resourceId: string) => void;
+}): React.JSX.Element {
+  const selection = useMemo<Selection>(() => (
+    selectedResourceId ? new Set([selectedResourceId]) : new Set()
+  ), [selectedResourceId]);
+  return (
+    <aside className="flex h-full min-h-0 flex-col bg-surface-secondary" aria-label="Managed shell inventory">
+      <div className="px-4 pb-3 pt-4">
+        <p className="text-sm font-medium text-foreground">Shells</p>
+        <p className="mt-0.5 text-xs tabular-nums text-muted">
+          {aggregate ? `${aggregate.metrics.activeStreams} active · ${aggregate.metrics.detachedStreams} detached` : "Window-scoped inventory"}
+        </p>
+      </div>
+      <ScrollShadow className="min-h-0 flex-1 overflow-y-auto px-2 pb-2" hideScrollBar={false}>
+        <ListView
+          aria-label="Managed shells"
+          items={resources}
+          renderEmptyState={() => (
+            <EmptyState className="min-h-64 px-4 py-10" size="sm">
+              <EmptyState.Header>
+                <EmptyState.Media variant="icon"><FontAwesomeIcon aria-hidden icon={faTerminal} /></EmptyState.Media>
+                <EmptyState.Title>{isLoading ? "Loading shells" : "No managed shells"}</EmptyState.Title>
+                <EmptyState.Description>
+                  {isLoading ? "Reading this window’s bounded stream inventory…" : "Start a shell to create a session-only managed stream."}
+                </EmptyState.Description>
+              </EmptyState.Header>
+            </EmptyState>
+          )}
+          selectedKeys={selection}
+          selectionBehavior="replace"
+          selectionMode="single"
+          variant="secondary"
+          onAction={(key) => onSelect(String(key))}
+          onSelectionChange={(keys) => {
+            if (keys === "all") return;
+            const key = [...keys][0];
+            if (key !== undefined) onSelect(String(key));
+          }}
+        >
+          {(resource) => (
+            <ListView.Item id={resource.resourceId} textValue={shellStateLabel(resource.state)}>
+              <ListView.ItemContent>
+                <span aria-hidden className={`size-2 shrink-0 rounded-full ${shellStateDot(resource.state)}`} />
+                <div className="flex min-w-0 flex-col">
+                  <ListView.Title>{shellListTitle(resources, resource)}</ListView.Title>
+                  <ListView.Description>
+                    {shellStateLabel(resource.state)} · {ptyLabel(resource.pty)}
+                  </ListView.Description>
+                </div>
+              </ListView.ItemContent>
+              <ListView.ItemAction>
+                <span className="text-[11px] tabular-nums text-muted">{formatShortTime(resource.lastActivityAt)}</span>
+              </ListView.ItemAction>
+            </ListView.Item>
+          )}
+        </ListView>
+      </ScrollShadow>
+      <p className="px-4 py-3 text-[11px] leading-relaxed text-muted">
+        Payload bytes stay inside the terminal transport and are never added to activity history.
+      </p>
+    </aside>
+  );
+}
+
+function TerminalSurface({
+  activeResourceId,
+  error,
+  isAttaching,
+  isStarting,
+  isWide,
+  panelStatus,
+  selectedResource,
+  session,
+  terminal,
+  transportSnapshot,
+  onAttach,
+  onCopy,
+  onDetach,
+  onFocus,
+  onOpenShellList,
+  onPaste,
+  onRequestClose,
+  onRequestKill,
+  onStart,
+}: {
+  activeResourceId: string | undefined;
+  error: string | undefined;
+  isAttaching: boolean;
+  isStarting: boolean;
+  isWide: boolean;
+  panelStatus: PanelStatus;
+  selectedResource: SessionShellResource | undefined;
+  session: SessionSummary;
+  terminal: React.ReactNode;
+  transportSnapshot: SessionShellTransportSnapshot;
+  onAttach: () => void;
+  onCopy: () => void;
+  onDetach: () => void;
+  onFocus: () => void;
+  onOpenShellList: () => void;
+  onPaste: () => void;
+  onRequestClose: (resourceId: string) => void;
+  onRequestKill: (resourceId: string) => void;
+  onStart: () => void;
+}): React.JSX.Element {
+  const isAttached = Boolean(selectedResource && activeResourceId === selectedResource.resourceId && terminal);
+  const isBusy = isStarting || isAttaching;
+  return (
+    <div className="flex h-full min-h-[520px] min-w-0 flex-col bg-background">
+      <div className="flex flex-col gap-3 bg-surface px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex min-w-0 items-center gap-2">
+          {!isWide ? (
+            <Button size="sm" variant="secondary" onPress={onOpenShellList}>Shells</Button>
+          ) : null}
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="truncate text-sm font-medium text-foreground">
+                {selectedResource ? "Interactive Session Shell" : "Terminal"}
+              </p>
+              {selectedResource ? (
+                <Chip color={shellStateColor(isAttached ? transportSnapshot.state : selectedResource.state)} size="sm" variant="soft">
+                  {isAttached ? transportStateLabel(transportSnapshot.state) : shellStateLabel(selectedResource.state)}
+                </Chip>
+              ) : null}
+              {isAttached && transportSnapshot.pressure === "high" ? (
+                <Chip color="warning" size="sm" variant="soft">Backpressure</Chip>
+              ) : null}
+            </div>
+            <p className="mt-0.5 text-xs text-muted">
+              {selectedResource ? `${ptyLabel(selectedResource.pty)} · ${resizeLabel(session, selectedResource)}` : "Select a managed shell or start a new one."}
+            </p>
+          </div>
+        </div>
+        <Toolbar aria-label="Terminal actions" className="flex-wrap gap-1">
+          {isAttached ? (
+            <>
+              <Button size="sm" variant="ghost" onPress={onFocus}>Focus</Button>
+              <Button size="sm" variant="ghost" onPress={onCopy}>Copy</Button>
+              <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
+              <Button isDisabled={isBusy} size="sm" variant="secondary" onPress={onDetach}>Detach</Button>
+            </>
+          ) : selectedResource ? (
+            <Button isPending={isAttaching} size="sm" variant="primary" onPress={onAttach}>Attach</Button>
+          ) : null}
+          {selectedResource ? (
+            <>
+              <Button
+                isDisabled={isBusy}
+                size="sm"
+                variant="danger-soft"
+                onPress={() => onRequestClose(selectedResource.resourceId)}
+              >
+                Close
+              </Button>
+              <Button
+                isDisabled={isBusy || !selectedResource.canKill}
+                size="sm"
+                variant="danger-soft"
+                onPress={() => onRequestKill(selectedResource.resourceId)}
+              >
+                Kill
+              </Button>
+            </>
+          ) : null}
+        </Toolbar>
+      </div>
+
+      <div className="min-h-0 flex-1">
+        {terminal ?? (
+          <EmptyState className="h-full min-h-[420px] px-6 py-12">
+            <EmptyState.Header>
+              <EmptyState.Media variant="icon">
+                <FontAwesomeIcon aria-hidden icon={error || panelStatus === "error" ? faTriangleExclamation : faTerminal} />
+              </EmptyState.Media>
+              <EmptyState.Title>
+                {panelStatus === "loading"
+                  ? "Loading terminal runtime"
+                  : selectedResource
+                    ? "Shell is not attached"
+                    : "No shell selected"}
+              </EmptyState.Title>
+              <EmptyState.Description className="max-w-md text-pretty">
+                {panelStatus === "loading"
+                  ? "Verifying the pinned Ghostty runtime and this window’s managed streams…"
+                  : selectedResource
+                    ? "Attach this managed shell to resume its bounded terminal stream."
+                    : "Start a session shell or select an existing detached shell from the inventory."}
+              </EmptyState.Description>
+            </EmptyState.Header>
+            <EmptyState.Content>
+              {selectedResource ? (
+                <Button isPending={isAttaching} onPress={onAttach}>Attach</Button>
+              ) : panelStatus !== "loading" ? (
+                <Button isPending={isStarting} onPress={onStart}>New shell</Button>
+              ) : null}
+            </EmptyState.Content>
+          </EmptyState>
+        )}
+      </div>
+
+      {selectedResource ? (
+        <dl className="grid grid-cols-2 gap-x-5 gap-y-2 bg-surface px-4 py-3 text-[11px] sm:grid-cols-4">
+          <Metric label="Input queued" value={formatBytes(isAttached ? transportSnapshot.queuedInputBytes : selectedResource.metrics.queuedInputBytes)} />
+          <Metric label="Output queued" value={formatBytes(isAttached ? transportSnapshot.queuedOutputBytes : selectedResource.metrics.queuedOutputBytes)} />
+          <Metric label="Bytes in" value={formatCount(isAttached ? transportSnapshot.bytesFromRemote : selectedResource.metrics.bytesToRenderer)} />
+          <Metric label="Bytes out" value={formatCount(isAttached ? transportSnapshot.bytesToRemote : selectedResource.metrics.bytesFromRenderer)} />
+        </dl>
+      ) : null}
+    </div>
+  );
+}
+
+function ResourceActionDialog({
+  action,
+  isPending,
+  onCancel,
+  onConfirm,
+}: {
+  action: PendingResourceAction | undefined;
+  isPending: boolean;
+  onCancel: () => void;
+  onConfirm: (action: PendingResourceAction) => void;
+}): React.JSX.Element {
+  return (
+    <AlertDialog.Backdrop
+      isOpen={action !== undefined}
+      variant="blur"
+      onOpenChange={(open) => {
+        if (!open && !isPending) onCancel();
+      }}
+    >
+      <AlertDialog.Container placement="center" size="sm">
+        <AlertDialog.Dialog className="sm:max-w-[420px]">
+          <AlertDialog.Header>
+            <AlertDialog.Icon status="danger"><FontAwesomeIcon aria-hidden icon={faTriangleExclamation} /></AlertDialog.Icon>
+            <AlertDialog.Heading>{action?.action === "kill" ? "Kill this shell process?" : "Close this managed shell?"}</AlertDialog.Heading>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            <p className="text-sm leading-relaxed text-muted">
+              {action?.action === "kill"
+                ? "This requests termination of the remote shell process. Its exit outcome may be unknown if the session disconnects."
+                : "This closes the local managed stream and sends bounded best-effort exit and logout requests before closing the transport. It does not confirm remote process termination. Detached scrollback cannot be recovered."}
+            </p>
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <Button isDisabled={isPending} size="sm" variant="tertiary" onPress={onCancel}>Cancel</Button>
+            <Button
+              isPending={isPending}
+              size="sm"
+              variant="danger"
+              onPress={() => {
+                if (action) onConfirm(action);
+              }}
+            >
+              {action?.action === "kill" ? "Kill process" : "Close shell"}
+            </Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Dialog>
+      </AlertDialog.Container>
+    </AlertDialog.Backdrop>
+  );
+}
+
+function PasteReviewDialog({
+  review,
+  onCancel,
+  onConfirm,
+}: {
+  review: PasteReview | undefined;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): React.JSX.Element {
+  return (
+    <AlertDialog.Backdrop
+      isOpen={review !== undefined}
+      variant="blur"
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+    >
+      <AlertDialog.Container placement="center" size="sm">
+        <AlertDialog.Dialog className="sm:max-w-[420px]">
+          <AlertDialog.Header>
+            <AlertDialog.Icon status="warning"><FontAwesomeIcon aria-hidden icon={faTriangleExclamation} /></AlertDialog.Icon>
+            <AlertDialog.Heading>Paste reviewed clipboard text?</AlertDialog.Heading>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            <p className="text-sm leading-relaxed text-muted">
+              The clipboard contains {review?.lines ?? 0} lines and {review?.controlCharacters ?? 0} control characters ({formatBytes(review?.bytes ?? 0)}). Its contents are intentionally hidden. Pasting may execute multiple commands.
+            </p>
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <Button size="sm" variant="tertiary" onPress={onCancel}>Cancel</Button>
+            <Button size="sm" variant="primary" onPress={onConfirm}>Paste anyway</Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Dialog>
+      </AlertDialog.Container>
+    </AlertDialog.Backdrop>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }): React.JSX.Element {
+  return (
+    <div className="min-w-0">
+      <dt className="text-muted">{label}</dt>
+      <dd className="mt-0.5 truncate font-mono tabular-nums text-foreground">{value}</dd>
+    </div>
+  );
+}
+
+export function defaultSessionShellInput(os: string): PrepareSessionShellInput {
+  if (isWindows(os)) return Object.freeze({ requestPty: false });
+  return Object.freeze({
+    requestPty: true,
+    rows: DEFAULT_ROWS,
+    columns: DEFAULT_COLUMNS,
+  });
+}
+
+export function inspectPaste(text: string): PasteReview {
+  const controlCharacters = [...text].filter((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+  }).length;
+  return Object.freeze({
+    bytes: new TextEncoder().encode(text).byteLength,
+    lines: text.length === 0 ? 0 : text.split(/\r\n|\r|\n/u).length,
+    controlCharacters,
+  });
+}
+
+export function requiresPasteConfirmation(review: PasteReview): boolean {
+  return review.lines > 1 || review.controlCharacters > 0;
+}
+
+async function loadCachedTerminalRuntime(): Promise<TerminalRuntimeAsset> {
+  if (cachedTerminalRuntime) return cachedTerminalRuntime;
+  if (pendingTerminalRuntime) return pendingTerminalRuntime;
+
+  const request = window.sliver.getTerminalRuntime()
+    .then((result) => {
+      if (!result.ok || !result.value) {
+        throw new Error(result.error ?? "Terminal runtime is unavailable");
+      }
+      const source = result.value.bytes;
+      const bytes = new Uint8Array(new ArrayBuffer(source.byteLength));
+      bytes.set(source);
+      cachedTerminalRuntime = Object.freeze({
+        version: result.value.version,
+        sha256: result.value.sha256,
+        bytes,
+      });
+      return cachedTerminalRuntime;
+    })
+    .catch((error: unknown) => {
+      cachedTerminalRuntime = undefined;
+      throw error;
+    })
+    .finally(() => {
+      if (pendingTerminalRuntime === request) pendingTerminalRuntime = undefined;
+    });
+  pendingTerminalRuntime = request;
+  return request;
+}
+
+/** Renderer-window cache control for isolated tests. Production retains the
+ * verified inert WASM for the lifetime of this renderer document. */
+export function clearSessionTerminalRuntimeCacheForTests(): void {
+  cachedTerminalRuntime = undefined;
+  pendingTerminalRuntime = undefined;
+}
+
+function terminalRouteIdentity(route: SessionTerminalRoute): string {
+  return `${route.backendEpoch}:${route.connectionIncarnation}:session:${route.sessionId}:${route.targetFingerprint}`;
+}
+
+function chooseSelectedResource(
+  resources: readonly SessionShellResource[],
+  current: string | undefined,
+): string | undefined {
+  if (current && resources.some((resource) => resource.resourceId === current)) return current;
+  return resources.find((resource) => resource.state === "attached")?.resourceId ??
+    resources.find((resource) => resource.state === "detached")?.resourceId ??
+    resources[0]?.resourceId;
+}
+
+function shellListTitle(resources: readonly SessionShellResource[], resource: SessionShellResource): string {
+  return `Shell ${Math.max(1, resources.findIndex((candidate) => candidate.resourceId === resource.resourceId) + 1)}`;
+}
+
+function shellStateLabel(state: SessionShellResource["state"]): string {
+  switch (state) {
+    case "prepared": return "Prepared";
+    case "handshaking": return "Handshaking";
+    case "opening": return "Opening";
+    case "attached": return "Attached";
+    case "detached": return "Detached";
+    case "closing": return "Closing";
+  }
+}
+
+function transportStateLabel(state: SessionShellTransportSnapshot["state"]): string {
+  switch (state) {
+    case "connecting": return "Connecting";
+    case "opening": return "Opening";
+    case "attached": return "Attached";
+    case "detached": return "Detached";
+    case "closed": return "Closed";
+    case "failed": return "Failed";
+  }
+}
+
+function shellStateColor(
+  state: SessionShellResource["state"] | SessionShellTransportSnapshot["state"],
+): "default" | "success" | "warning" | "danger" {
+  if (state === "attached") return "success";
+  if (state === "closing" || state === "opening" || state === "handshaking" || state === "connecting") return "warning";
+  if (state === "failed") return "danger";
+  return "default";
+}
+
+function shellStateDot(state: SessionShellResource["state"]): string {
+  if (state === "attached") return "bg-success";
+  if (state === "closing" || state === "opening" || state === "handshaking") return "bg-warning";
+  return "bg-muted";
+}
+
+function ptyLabel(pty: SessionShellResource["pty"]): string {
+  return pty === "requested-unconfirmed" ? "PTY requested · unconfirmed" : "Non-PTY";
+}
+
+function resizeLabel(session: SessionSummary, resource: SessionShellResource): string {
+  if (isWindows(session.os)) return "Windows resize unavailable";
+  return resource.canResize ? "Resize requested · unconfirmed" : "Resize unavailable";
+}
+
+function isWindows(os: string): boolean {
+  return os.toLocaleLowerCase().includes("windows");
+}
+
+function requireActiveClipboardGesture(): void {
+  if (navigator.userActivation && !navigator.userActivation.isActive) {
+    throw new Error("Clipboard access requires an explicit operator action");
+  }
+}
+
+function formatShortTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? "Unknown"
+    : new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_024 * 1_024) return `${(value / 1_024).toFixed(1)} KiB`;
+  return `${(value / (1_024 * 1_024)).toFixed(1)} MiB`;
+}
+
+function formatCount(value: string): string {
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0) return value;
+  return new Intl.NumberFormat().format(count);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function useMediaQuery(query: string, fallback: boolean): boolean {
+  const [matches, setMatches] = useState(() => (
+    typeof window.matchMedia === "function" ? window.matchMedia(query).matches : fallback
+  ));
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(query);
+    setMatches(media.matches);
+    const listener = (event: MediaQueryListEvent) => setMatches(event.matches);
+    media.addEventListener("change", listener);
+    return () => media.removeEventListener("change", listener);
+  }, [query]);
+  return matches;
+}

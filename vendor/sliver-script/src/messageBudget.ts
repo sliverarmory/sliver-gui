@@ -12,11 +12,16 @@ export const WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES = 64 * MiB;
  * 256 MiB artifact allocation.
  */
 export const WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES = 66 * MiB;
+/** Maximum terminal/tunnel data carried by one protobuf frame. */
+export const TUNNEL_STREAM_MAX_PAYLOAD_BYTES = 64 * KiB;
+/** Room for the bounded payload plus tunnel identifiers and protobuf framing. */
+export const TUNNEL_STREAM_RPC_MESSAGE_BYTES = 66 * KiB;
 
 export const RPC_MESSAGE_DOMAINS = [
   "control",
   "inventory",
   "task-content",
+  "tunnel-stream",
   "workbench-artifact",
   "artifact",
 ] as const;
@@ -43,6 +48,12 @@ export const RPC_MESSAGE_BUDGETS = Object.freeze({
   "task-content": Object.freeze({
     maxSendBytes: 1 * MiB,
     maxReceiveBytes: 80 * KiB,
+  }),
+  // M3 interactive streams use small, independently bounded frames. Never
+  // grant a long-lived duplex tunnel an inventory or artifact-sized decoder.
+  "tunnel-stream": Object.freeze({
+    maxSendBytes: TUNNEL_STREAM_RPC_MESSAGE_BYTES,
+    maxReceiveBytes: TUNNEL_STREAM_RPC_MESSAGE_BYTES,
   }),
   // M2 endpoint-workbench binary RPCs are hard-capped at 64 MiB decoded. Keep
   // them isolated so neither control traffic nor these helpers inherit the

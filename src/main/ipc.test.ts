@@ -1,7 +1,13 @@
 // @vitest-environment node
 
-import type { IpcMainInvokeEvent, WebContents, WebFrameMain } from "electron";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  IpcMainEvent,
+  IpcMainInvokeEvent,
+  MessagePortMain,
+  WebContents,
+  WebFrameMain,
+} from "electron";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   IPC,
@@ -14,8 +20,11 @@ import { defaultGenerateInput } from "../shared/generate-defaults.js";
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
+  listeners: new Map<string, (event: IpcMainEvent, ...args: unknown[]) => void>(),
   handle: vi.fn(),
+  on: vi.fn(),
   removeHandler: vi.fn(),
+  removeListener: vi.fn(),
   fromWebContents: vi.fn(),
 }));
 
@@ -23,25 +32,39 @@ vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
   ipcMain: {
     handle: electronMocks.handle,
+    on: electronMocks.on,
     removeHandler: electronMocks.removeHandler,
+    removeListener: electronMocks.removeListener,
   },
 }));
 
-import { registerIpcHandlers, type IpcConnectionRegistry } from "./ipc.js";
+import { registerIpcHandlers, unregisterIpcHandlers, type IpcConnectionRegistry } from "./ipc.js";
 
 const RENDERER_URL = "http://127.0.0.1:5173";
 
 beforeEach(() => {
+  unregisterIpcHandlers();
   electronMocks.handlers.clear();
+  electronMocks.listeners.clear();
   electronMocks.handle.mockReset();
   electronMocks.handle.mockImplementation(
     (channel: string, handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => {
       electronMocks.handlers.set(channel, handler);
     },
   );
+  electronMocks.on.mockReset();
+  electronMocks.on.mockImplementation(
+    (channel: string, listener: (event: IpcMainEvent, ...args: unknown[]) => void) => {
+      electronMocks.listeners.set(channel, listener);
+    },
+  );
+  electronMocks.removeHandler.mockReset();
+  electronMocks.removeListener.mockReset();
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue({});
 });
+
+afterEach(() => unregisterIpcHandlers());
 
 describe("trusted Electron IPC boundary", () => {
   it("registers every shared invoke channel exactly once", () => {
@@ -49,6 +72,17 @@ describe("trusted Electron IPC boundary", () => {
 
     expect([...electronMocks.handlers.keys()].sort()).toEqual(Object.values(IPC_INVOKE).sort());
     expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length);
+  });
+
+  it("registers and unregisters exactly one dedicated stream-port listener", () => {
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    const listener = electronMocks.listeners.get(IPC.attach);
+
+    expect(listener).toBeTypeOf("function");
+    expect(electronMocks.on).toHaveBeenCalledExactlyOnceWith(IPC.attach, listener);
+
+    unregisterIpcHandlers();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.attach, listener);
   });
 
   it("accepts the registered main frame and captures its webContents ID", () => {
@@ -411,6 +445,142 @@ describe("trusted Electron IPC boundary", () => {
       targetId: "session_1",
     })).toThrow(/unexpected session input field/i);
   });
+
+  it("parses shell invokes and binds preparation to the exact renderer document", async () => {
+    const prepareSessionShell = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
+    const listSessionShells = vi.fn(async () => ({ ok: false as const, error: "list probe" }));
+    const actOnSessionShell = vi.fn(async () => ({ ok: false as const, error: "action probe" }));
+    const getTerminalRuntime = vi.fn(async () => ({ ok: false as const, error: "runtime probe" }));
+    registerIpcHandlers(
+      registryMock({ prepareSessionShell, listSessionShells, actOnSessionShell, getTerminalRuntime }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const resourceId = "R".repeat(43);
+
+    await electronMocks.handlers.get(IPC.prepareSessionShell)?.(event, {
+      path: "/bin/zsh",
+      requestPty: true,
+      rows: 30,
+      columns: 100,
+    });
+    await electronMocks.handlers.get(IPC.listSessionShells)?.(event, {});
+    await electronMocks.handlers.get(IPC.actOnSessionShell)?.(event, { resourceId, action: "attach" });
+    await electronMocks.handlers.get(IPC.getTerminalRuntime)?.(event);
+
+    expect(prepareSessionShell).toHaveBeenCalledWith(77, 100, "main-frame", {
+      path: "/bin/zsh",
+      requestPty: true,
+      rows: 30,
+      columns: 100,
+    });
+    expect(listSessionShells).toHaveBeenCalledWith(77, 100, "main-frame", {});
+    expect(actOnSessionShell).toHaveBeenCalledWith(77, 100, "main-frame", { resourceId, action: "attach" });
+    expect(getTerminalRuntime).toHaveBeenCalledWith(77);
+
+    expect(() => electronMocks.handlers.get(IPC.prepareSessionShell)?.(event, {
+      requestPty: false,
+      rows: 30,
+      columns: 100,
+    })).toThrow(/dimensions require requestPty/i);
+    expect(() => electronMocks.handlers.get(IPC.listSessionShells)?.(event, { targetId: "session_1" })).toThrow(
+      /unexpected .* field/i,
+    );
+    expect(() => electronMocks.handlers.get(IPC.actOnSessionShell)?.(event, {
+      resourceId,
+      action: "raw-tunnel",
+    })).toThrow(/unsupported/i);
+  });
+
+  it("transfers one validated stream port with the exact main-frame identity", () => {
+    const attachStream = vi.fn();
+    registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
+    const port = messagePort();
+    const { event } = streamEvent("http://127.0.0.1:5173/sessions/session_1", 77, [port]);
+    const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
+
+    requireStreamListener()(event, request);
+
+    expect(attachStream).toHaveBeenCalledExactlyOnceWith(77, 100, "main-frame", request, port);
+    expect(Object.isFrozen(attachStream.mock.calls[0]?.[3])).toBe(true);
+    expect(port.close).not.toHaveBeenCalled();
+  });
+
+  it("rejects hostile stream senders and closes their transferred capability", () => {
+    const attachStream = vi.fn();
+    registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
+    const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
+    const hostilePort = messagePort();
+    const hostile = streamEvent("http://127.0.0.1:5173.evil.test/", 77, [hostilePort]);
+
+    requireStreamListener()(hostile.event, request);
+
+    const childPort = messagePort();
+    const child = streamEvent("http://127.0.0.1:5173/", 77, [childPort]);
+    Object.defineProperty(child.event, "senderFrame", {
+      value: { ...child.mainFrame, frameToken: "child-frame" } as WebFrameMain,
+    });
+    requireStreamListener()(child.event, request);
+
+    expect(attachStream).not.toHaveBeenCalled();
+    expect(hostilePort.close).toHaveBeenCalledOnce();
+    expect(childPort.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects zero or multiple stream ports and attempts to close every supplied port", () => {
+    const attachStream = vi.fn();
+    registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
+    const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
+    const empty = streamEvent("http://127.0.0.1:5173/", 77, []);
+    requireStreamListener()(empty.event, request);
+
+    const first = messagePort(() => {
+      throw new Error("already closed");
+    });
+    const second = messagePort();
+    const multiple = streamEvent("http://127.0.0.1:5173/", 77, [first, second]);
+    requireStreamListener()(multiple.event, request);
+
+    expect(attachStream).not.toHaveBeenCalled();
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(second.close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the transferred port when the attachment request is malformed", () => {
+    const attachStream = vi.fn();
+    registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
+    const port = messagePort();
+    const { event } = streamEvent("http://127.0.0.1:5173/", 77, [port]);
+
+    requireStreamListener()(event, {
+      v: 1,
+      attachmentToken: "A".repeat(43),
+      tunnelId: 7,
+    });
+
+    expect(attachStream).not.toHaveBeenCalled();
+    expect(port.close).toHaveBeenCalledOnce();
+  });
+
+  it("delegates attachment-token replay detection to the main-owned registry", () => {
+    const attachStream = vi.fn()
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error("replayed token");
+      });
+    registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
+    const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
+    const first = messagePort();
+    const second = messagePort();
+
+    requireStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [first]).event, request);
+    requireStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [second]).event, request);
+
+    expect(attachStream).toHaveBeenCalledTimes(2);
+    expect(first.close).not.toHaveBeenCalled();
+    expect(second.close).toHaveBeenCalledOnce();
+  });
 });
 
 function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnectionRegistry {
@@ -455,7 +625,44 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     runSessionWorkbench: vi.fn(unavailable),
     prepareSessionDestructiveAction: vi.fn(unavailable),
     executeSessionDestructiveActionPlan: vi.fn(unavailable),
+    prepareSessionShell: vi.fn(unavailable),
+    listSessionShells: vi.fn(unavailable),
+    actOnSessionShell: vi.fn(unavailable),
+    getTerminalRuntime: vi.fn(unavailable),
+    attachStream: vi.fn(),
     ...overrides,
+  };
+}
+
+function requireStreamListener(): (event: IpcMainEvent, ...args: unknown[]) => void {
+  const listener = electronMocks.listeners.get(IPC.attach);
+  if (!listener) throw new Error("Expected the stream attach listener to be registered");
+  return listener;
+}
+
+function messagePort(closeImplementation?: () => void): MessagePortMain & { close: ReturnType<typeof vi.fn> } {
+  const close = vi.fn(closeImplementation);
+  return { close } as unknown as MessagePortMain & { close: ReturnType<typeof vi.fn> };
+}
+
+function streamEvent(
+  url: string,
+  contentsId: number,
+  ports: readonly MessagePortMain[],
+): {
+  event: IpcMainEvent;
+  mainFrame: WebFrameMain;
+  sender: WebContents;
+} {
+  const { mainFrame, sender } = invokeEvent(url, contentsId);
+  return {
+    event: {
+      sender,
+      senderFrame: mainFrame,
+      ports,
+    } as IpcMainEvent,
+    mainFrame,
+    sender,
   };
 }
 

@@ -108,6 +108,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   });
   let nextJobId = 42;
   let nextTaskId = 1;
+  let nextShellId = 1;
   let jobs: clientpb.Job[] = [
     {
       ID: 41,
@@ -187,6 +188,69 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       record("disconnect");
       testState.disconnects += 1;
       eventStreamState.next({ status: "stopped", attempt: 0 });
+    },
+    async startShellSession(sessionId, options) {
+      record("startShellSession");
+      requireSession(sessionId);
+      const output = new FakeShellOutput();
+      const shellId = `fake-shell-${nextShellId++}`;
+      let commandBuffer = "";
+      // Deliberately buffer the prompt before the main process can return the
+      // attachment ticket. The Electron journey therefore exercises the
+      // detached early-output path instead of relying on a favorable race.
+      record("shell.early-output");
+      output.push(`Sliver GUI M3 shell (${shellId})\r\ne2e-user@m1-session-host $ `);
+      return {
+        id: shellId,
+        pid: 41_012,
+        path: options.path,
+        ptyRequested: options.pty,
+        output,
+        async write(chunk: Uint8Array | string) {
+          record("shell.write");
+          const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+          output.push(text.replace(/\r\n|\r|\n/gu, "\r\n"));
+          const commands = `${commandBuffer}${text}`.split(/\r\n|\r|\n/gu);
+          commandBuffer = commands.pop() ?? "";
+          for (const commandText of commands) {
+            const command = commandText.trim();
+            if (!command) {
+              output.push("e2e-user@m1-session-host $ ");
+            } else if (/^whoami$/iu.test(command)) {
+              record("shell.command.whoami");
+              output.push("e2e-user\r\ne2e-user@m1-session-host $ ");
+            } else if (/^pwd$/iu.test(command)) {
+              record("shell.command.pwd");
+              output.push("/Users/e2e/workspace\r\ne2e-user@m1-session-host $ ");
+            } else if (/^m3-hostile-output$/iu.test(command)) {
+              record("shell.command.hostile-output");
+              output.push([
+                "Host-effect probes quarantined\r\n",
+                "\u001b]0;hostile terminal title\u0007",
+                "\u001b]8;;https://terminal-output.invalid/blocked\u001b\\hostile-link\u001b]8;;\u001b\\",
+                "\u001b]52;c;TUFDSElORV9DTElQQk9BUkRfUFJPQkU=\u0007",
+                "\u001bP$qhostile-device-control\u001b\\",
+                "\u001b_Gf=100;HOSTILE_KITTY_TRANSFER\u001b\\",
+                "\u001b]1337;File=name=cHJvYmUudHh0:SE9TVElMRV9ET1dOTE9BRF9QUk9CRQ==\u0007",
+                "\u0007e2e-user@m1-session-host $ ",
+              ].join(""));
+            } else if (/^(exit|logout)$/iu.test(command)) {
+              record("shell.command.exit");
+              output.push("logout\r\n");
+              output.close();
+            } else {
+              output.push(`command not found: ${command.slice(0, 80)}\r\ne2e-user@m1-session-host $ `);
+            }
+          }
+        },
+        async resize() {
+          record("shell.resize");
+        },
+        async close() {
+          record("shell.close");
+          output.close();
+        },
+      };
     },
     async getVersion() {
       record("getVersion");
@@ -967,4 +1031,50 @@ function requiredArgument(prefix: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+class FakeShellOutput implements AsyncIterable<Uint8Array> {
+  private readonly queue: Uint8Array[] = [];
+  private waiter: ((result: IteratorResult<Uint8Array>) => void) | undefined;
+  private closed = false;
+
+  push(value: string): void {
+    if (this.closed) return;
+    const bytes = Uint8Array.from(Buffer.from(value, "utf8"));
+    if (this.waiter) {
+      const waiter = this.waiter;
+      this.waiter = undefined;
+      waiter({ value: bytes, done: false });
+      return;
+    }
+    this.queue.push(bytes);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.waiter) {
+      const waiter = this.waiter;
+      this.waiter = undefined;
+      waiter({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    return {
+      next: () => {
+        const next = this.queue.shift();
+        if (next) return Promise.resolve({ value: next, done: false });
+        if (this.closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise<IteratorResult<Uint8Array>>((resolve) => {
+          this.waiter = resolve;
+        });
+      },
+      return: async () => {
+        this.close();
+        for (const bytes of this.queue.splice(0)) bytes.fill(0);
+        return { value: undefined, done: true };
+      },
+    };
+  }
 }

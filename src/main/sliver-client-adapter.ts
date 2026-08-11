@@ -86,7 +86,8 @@ export type SliverClientMethod =
   | "registryReadHiveSession"
   | "registryWriteSession"
   | "registryCreateKeySession"
-  | "registryDeleteKeySession";
+  | "registryDeleteKeySession"
+  | "startShellSession";
 
 export type SliverClientAdapter = Pick<
   SliverClient,

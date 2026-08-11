@@ -4,7 +4,14 @@ import { homedir } from "node:os";
 import { basename, dirname, join, posix as posixPath, win32 as win32Path } from "node:path";
 import { createSecureContext } from "node:tls";
 
-import { BrowserWindow, dialog, webContents, type WebContents } from "electron";
+import {
+  BrowserWindow,
+  dialog,
+  webContents,
+  type MessageEvent,
+  type MessagePortMain,
+  type WebContents,
+} from "electron";
 import {
   SliverClient,
   clientpb,
@@ -85,6 +92,17 @@ import {
   type SessionWorkbenchOutcomeUnknownOperationId,
 } from "../shared/session-contracts.js";
 import {
+  type ListSessionShellsInput,
+  type PrepareSessionShellInput,
+  type SessionShellPlan,
+  type SessionShellResourceActionInput,
+  type SessionShellResourceActionResult,
+  type SessionShellResourceList,
+  type StreamAttachRequest,
+  type StreamCloseReason,
+  type TerminalRuntimeAsset,
+} from "../shared/stream-contracts.js";
+import {
   artifactFormatFromProto,
   buildImplantConfig,
   ensureTrailingDot,
@@ -146,6 +164,14 @@ import {
   SessionFileEditPreflightError,
   verifySessionFileEditPrecondition,
 } from "./session-file-edit.js";
+import {
+  StreamManager,
+  type MainStreamEndpoint,
+  type StartMainStreamEndpoint,
+  type StreamAttachmentPort,
+  type StreamOwnerBinding,
+} from "./stream-manager.js";
+import { loadTerminalRuntime } from "./terminal-runtime.js";
 
 interface CertificatePair {
   cert: Buffer;
@@ -185,6 +211,7 @@ interface WindowContext {
   sessionPlanAdmissions: Set<string>;
   sessionPlanTimers: Map<string, NodeJS.Timeout>;
   sessionWorkbenchAdmissions: Map<string, "standard" | "artifact">;
+  sessionShellPrepareAdmissions: Set<string>;
   taskListAdmissions: Set<string>;
   taskDetailAdmissions: Set<string>;
   taskCancelAdmissions: Set<string>;
@@ -207,6 +234,8 @@ interface ManualRefreshState {
 }
 
 const GENERATE_TIMEOUT_SECONDS = 15 * 60;
+const MAX_WINDOW_SESSION_SHELL_PREPARES = 2;
+const MAX_GLOBAL_SESSION_SHELL_PREPARES = 16;
 const MAX_RECENT_EVENTS = 50;
 const RECONCILE_INTERVAL_MS = 30_000;
 const CERTIFICATE_CAPABILITY_TTL_MS = 5 * 60_000;
@@ -349,7 +378,10 @@ export class ConnectionRegistry {
   private readonly pools = new Map<string, BackendPool>();
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
   private readonly sessionArtifacts: SessionArtifactStore;
+  private readonly streams: StreamManager;
   private readonly sessionWorkbenchGlobalAdmissions = new Map<string, "standard" | "artifact">();
+  private readonly terminalRuntimeAdmissions = new Set<number>();
+  private readonly sessionShellPrepareGlobalAdmissions = new Set<string>();
   private readonly sessionSaveIntents = new Map<string, SessionSaveIntent>();
   private readonly sessionSaveLocks = new Map<string, Promise<void>>();
   private sessionSaveReservationTail: Promise<void> = Promise.resolve();
@@ -368,6 +400,7 @@ export class ConnectionRegistry {
     this.clientFactory = normalized.clientFactory ?? ((config) => new SliverClient(config));
     this.now = normalized.now ?? Date.now;
     this.sessionArtifacts = new SessionArtifactStore({ now: this.now });
+    this.streams = new StreamManager({ now: this.now });
   }
 
   registerWindow(contentsId: number): void {
@@ -386,6 +419,7 @@ export class ConnectionRegistry {
       sessionPlanAdmissions: new Set(),
       sessionPlanTimers: new Map(),
       sessionWorkbenchAdmissions: new Map(),
+      sessionShellPrepareAdmissions: new Set(),
       taskListAdmissions: new Set(),
       taskDetailAdmissions: new Set(),
       taskCancelAdmissions: new Set(),
@@ -408,12 +442,21 @@ export class ConnectionRegistry {
       this.revokeSessionTargetCapabilities(context);
       context.sessionPlanAdmissions.clear();
       context.sessionWorkbenchAdmissions.clear();
+      context.sessionShellPrepareAdmissions.clear();
       context.targetPageCursors.clear();
     } else {
       this.sessionArtifacts.removeOwner(contentsId);
     }
     context?.savedConfigs.clear();
+    await this.streams.closeWindow(contentsId, "window-closed").catch(() => undefined);
     if (context?.poolKey) await this.releasePool(context.poolKey, contentsId).catch(() => undefined);
+  }
+
+  async closeWindowStreams(
+    contentsId: number,
+    reason: Extract<StreamCloseReason, "navigation" | "renderer-gone" | "application-shutdown">,
+  ): Promise<void> {
+    await this.streams.closeWindow(contentsId, reason);
   }
 
   inheritConnection(sourceContentsId: number, targetContentsId: number): void {
@@ -423,6 +466,7 @@ export class ConnectionRegistry {
     const pool = this.pools.get(source.poolKey);
     if (!pool) return;
 
+    void this.streams.closeWindow(targetContentsId, "backend-rebound");
     target.connectionAttempt += 1;
     delete target.activeTarget;
     this.revokeSessionTargetCapabilities(target);
@@ -549,6 +593,7 @@ export class ConnectionRegistry {
 
   async disconnect(contentsId: number): Promise<OperationResult<SliverSnapshot>> {
     const context = this.requireWindow(contentsId);
+    await this.streams.closeWindow(contentsId, "backend-disconnected").catch(() => undefined);
     context.connectionAttempt += 1;
     delete context.manualRefresh;
     const poolKey = context.poolKey;
@@ -686,9 +731,16 @@ export class ConnectionRegistry {
       if (!current) throw new Error("The target is no longer available");
       const context = this.requireWindow(contentsId);
       if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, current.ref)) {
+        const closePreviousShells = context.activeTarget?.mode === "session";
+        // Change selected-target authority before yielding so an in-flight
+        // picker or reviewed-plan preparation cannot commit against the old
+        // session while its streams are closing.
+        context.activeTarget = current.ref;
         this.revokeSessionTargetCapabilities(context);
+        if (closePreviousShells) await this.streams.closeWindow(contentsId, "target-rebound");
+      } else {
+        context.activeTarget = current.ref;
       }
-      context.activeTarget = current.ref;
       if (current.target.mode !== "beacon") {
         context.beaconWatch = false;
         pool.setWindowWatch(contentsId, false);
@@ -703,8 +755,14 @@ export class ConnectionRegistry {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       assertBinding();
       const context = this.requireWindow(contentsId);
-      if (context.activeTarget) this.revokeSessionTargetCapabilities(context);
-      delete context.activeTarget;
+      const previousActiveTarget = context.activeTarget;
+      if (previousActiveTarget) {
+        delete context.activeTarget;
+        this.revokeSessionTargetCapabilities(context);
+        if (previousActiveTarget.mode === "session") {
+          await this.streams.closeWindow(contentsId, "target-rebound");
+        }
+      }
       context.beaconWatch = false;
       pool.setWindowWatch(contentsId, false);
       context.snapshot = this.snapshotForWindow(context, pool.snapshot);
@@ -1210,6 +1268,219 @@ export class ConnectionRegistry {
       admittedContext?.sessionWorkbenchAdmissions.delete(admissionId);
       this.sessionWorkbenchGlobalAdmissions.delete(admissionId);
     }
+  }
+
+  async prepareSessionShell(
+    contentsId: number,
+    rendererProcessId: number,
+    rendererFrameToken: string,
+    input: PrepareSessionShellInput,
+  ): Promise<OperationResult<SessionShellPlan>> {
+    const admissionId = randomUUID();
+    let admittedContext: WindowContext | undefined;
+    try {
+      const context = this.requireWindow(contentsId);
+      if (context.sessionShellPrepareAdmissions.size >= MAX_WINDOW_SESSION_SHELL_PREPARES) {
+        throw new Error("Too many shell preparations are already running in this window");
+      }
+      if (this.sessionShellPrepareGlobalAdmissions.size >= MAX_GLOBAL_SESSION_SHELL_PREPARES) {
+        throw new Error("The global shell preparation capacity is currently full");
+      }
+      context.sessionShellPrepareAdmissions.add(admissionId);
+      this.sessionShellPrepareGlobalAdmissions.add(admissionId);
+      admittedContext = context;
+      return await this.withPool(contentsId, async (pool, assertBinding) => {
+        await pool.refreshDomains(["sessions"]);
+        assertBinding();
+        const selected = this.requireSelectedSession(contentsId, pool);
+        const selectedRef = selected.target.ref;
+        const binding = streamOwnerBinding(
+          selected.context,
+          pool,
+          selectedRef,
+          rendererProcessId,
+          rendererFrameToken,
+        );
+        const requestPty = input.requestPty && selected.platform !== "windows";
+        const normalizedInput: PrepareSessionShellInput = {
+          requestPty,
+          ...(input.path === undefined ? {} : { path: input.path }),
+          ...(requestPty && input.rows !== undefined && input.columns !== undefined
+            ? { rows: input.rows, columns: input.columns }
+            : {}),
+        };
+        const shellPath = input.path ?? (selected.platform === "windows" ? "powershell.exe" : "/bin/bash");
+        const rows = normalizedInput.rows ?? 24;
+        const columns = normalizedInput.columns ?? 80;
+        const assertSelectedSession = (): RevalidatedTarget => {
+          assertBinding();
+          if (
+            !selected.context.activeTarget ||
+            !sameTargetRefIdentity(selected.context.activeTarget, selectedRef)
+          ) {
+            throw new Error("The active session changed before the shell could be opened");
+          }
+          const current = pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch);
+          if (!current || current.target.mode !== "session" || current.target.liveness !== "active") {
+            throw new Error("The selected session is no longer active");
+          }
+          return current;
+        };
+        const start: StartMainStreamEndpoint = async ({ signal, emitOutput, remoteClose }) => {
+          const current = assertSelectedSession();
+          if (signal.aborted) throw new Error("The shell request was canceled before dispatch");
+          const handle = await pool.client.startShellSession(
+            current.target.id,
+            {
+              path: shellPath,
+              pty: requestPty,
+              rows,
+              cols: columns,
+            },
+            30,
+          );
+          if (signal.aborted) {
+            await handle.close().catch(() => undefined);
+            throw new Error("The shell request was canceled during startup");
+          }
+
+          void (async () => {
+            try {
+              for await (const chunk of handle.output) {
+                try {
+                  if (!emitOutput(chunk)) break;
+                } finally {
+                  chunk.fill(0);
+                }
+              }
+              remoteClose("remote-close");
+            } catch {
+              remoteClose("transport-error");
+            }
+          })();
+
+          const endpoint: MainStreamEndpoint = {
+            write: async (data, writeSignal) => {
+              if (writeSignal.aborted || signal.aborted) throw new Error("The shell stream is closing");
+              await handle.write(data);
+              if (writeSignal.aborted || signal.aborted) throw new Error("The shell write did not settle in time");
+            },
+            close: async () => {
+              await handle.close();
+            },
+            kill: async (killSignal) => {
+              const exact = assertSelectedSession();
+              if (killSignal.aborted || signal.aborted) throw new Error("The shell kill request was canceled");
+              const response = await pool.client.terminateSessionProcess(exact.target.id, handle.pid, true);
+              if (response.Response?.Err?.trim()) throw new Error("The target rejected the shell kill request");
+            },
+            ...(requestPty
+              ? {
+                  resize: async (nextRows: number, nextColumns: number, resizeSignal: AbortSignal) => {
+                    if (resizeSignal.aborted || signal.aborted) throw new Error("The shell resize was canceled");
+                    await handle.resize(nextRows, nextColumns);
+                  },
+                }
+              : {}),
+          };
+          return endpoint;
+        };
+        return this.streams.prepareSessionShell({ binding, input: normalizedInput, start });
+      });
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      admittedContext?.sessionShellPrepareAdmissions.delete(admissionId);
+      this.sessionShellPrepareGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async listSessionShells(
+    contentsId: number,
+    rendererProcessId: number,
+    rendererFrameToken: string,
+    input: ListSessionShellsInput,
+  ): Promise<OperationResult<SessionShellResourceList>> {
+    void input;
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      assertBinding();
+      const selected = this.requireSelectedSession(contentsId, pool);
+      return this.streams.listSessionShells(streamOwnerBinding(
+        selected.context,
+        pool,
+        selected.target.ref,
+        rendererProcessId,
+        rendererFrameToken,
+      ));
+    });
+  }
+
+  async actOnSessionShell(
+    contentsId: number,
+    rendererProcessId: number,
+    rendererFrameToken: string,
+    input: SessionShellResourceActionInput,
+  ): Promise<OperationResult<SessionShellResourceActionResult>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      assertBinding();
+      const selected = this.requireSelectedSession(contentsId, pool);
+      const binding = streamOwnerBinding(
+        selected.context,
+        pool,
+        selected.target.ref,
+        rendererProcessId,
+        rendererFrameToken,
+      );
+      const result = await this.streams.actOnSessionShell(binding, input);
+      assertBinding();
+      return result;
+    });
+  }
+
+  async getTerminalRuntime(contentsId: number): Promise<OperationResult<TerminalRuntimeAsset>> {
+    let admitted = false;
+    try {
+      const context = this.requireWindow(contentsId);
+      if (this.terminalRuntimeAdmissions.has(contentsId)) {
+        throw new Error("A terminal runtime request is already in progress for this window");
+      }
+      this.terminalRuntimeAdmissions.add(contentsId);
+      admitted = true;
+      const asset = await loadTerminalRuntime();
+      if (this.windows.get(contentsId) !== context) throw new Error("Application window changed during runtime load");
+      return { ok: true, value: asset };
+    } catch {
+      return { ok: false, error: "The verified packaged terminal runtime is unavailable" };
+    } finally {
+      if (admitted) this.terminalRuntimeAdmissions.delete(contentsId);
+    }
+  }
+
+  attachStream(
+    contentsId: number,
+    rendererProcessId: number,
+    rendererFrameToken: string,
+    request: StreamAttachRequest,
+    port: MessagePortMain,
+  ): void {
+    const context = this.requireWindow(contentsId);
+    const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+    const usableStatuses = new Set(["connected", "degraded", "reconnecting"]);
+    if (!pool || !usableStatuses.has(pool.snapshot.connection.status)) {
+      throw new Error("Connect to a Sliver server before attaching a stream");
+    }
+    const selected = this.requireSelectedSession(contentsId, pool);
+    this.streams.attach({
+      binding: streamOwnerBinding(
+        selected.context,
+        pool,
+        selected.target.ref,
+        rendererProcessId,
+        rendererFrameToken,
+      ),
+      attachmentToken: request.attachmentToken,
+      port: electronStreamPort(port),
+    });
   }
 
   async prepareSessionDestructiveAction(
@@ -3304,6 +3575,7 @@ export class ConnectionRegistry {
       }
       const poolKey = createHash("sha256").update(data).digest("hex");
       const context = this.requireWindow(contentsId);
+      await this.streams.closeWindow(contentsId, "backend-rebound").catch(() => undefined);
       attempt = ++context.connectionAttempt;
       delete context.manualRefresh;
       context.configName = configName;
@@ -3597,6 +3869,10 @@ export class ConnectionRegistry {
     pool.removeWindow(contentsId);
     if (pool.windowCount === 0) {
       this.pools.delete(poolKey);
+      await this.streams.closeBackend(
+        { backendId: pool.key, backendEpoch: pool.epoch },
+        "backend-disconnected",
+      ).catch(() => undefined);
       for (const [key, snapshot] of this.targetCatalogSnapshots) {
         if (snapshot.poolKey !== poolKey) continue;
         this.targetCatalogSnapshots.delete(key);
@@ -3649,11 +3925,23 @@ export class ConnectionRegistry {
       : undefined;
     if (revalidated) {
       if (!sameTargetRefIdentity(previousActiveTarget!, revalidated.ref)) {
+        if (pool && previousActiveTarget?.mode === "session") {
+          void this.streams.closeTarget(
+            { backendId: pool.key, backendEpoch: pool.epoch, target: previousActiveTarget },
+            "target-rebound",
+          );
+        }
         this.revokeSessionTargetCapabilities(context);
       }
       context.activeTarget = revalidated.ref;
     } else if (previousActiveTarget && activeAbsenceAuthoritative) {
       context.operationEngine?.markTargetUnavailable(previousActiveTarget);
+      if (pool && previousActiveTarget.mode === "session") {
+        void this.streams.closeTarget(
+          { backendId: pool.key, backendEpoch: pool.epoch, target: previousActiveTarget },
+          "target-disappeared",
+        );
+      }
       this.revokeSessionTargetCapabilities(context);
       context.beaconWatch = false;
       pool?.setWindowWatch(context.contentsId, false);
@@ -4377,6 +4665,46 @@ function sameTargetRefIdentity(left: TargetRef, right: TargetRef): boolean {
     left.id === right.id &&
     left.backendEpoch === right.backendEpoch &&
     left.fingerprint === right.fingerprint;
+}
+
+function streamOwnerBinding(
+  context: WindowContext,
+  pool: BackendPool,
+  target: TargetRef,
+  rendererProcessId: number,
+  rendererFrameToken: string,
+): StreamOwnerBinding {
+  return {
+    ownerWindowId: context.contentsId,
+    rendererProcessId,
+    rendererFrameToken,
+    rendererDocumentId: createHash("sha256")
+      .update(String(rendererProcessId))
+      .update("\0")
+      .update(rendererFrameToken)
+      .digest("hex"),
+    backendId: pool.key,
+    backendEpoch: pool.epoch,
+    connectionIncarnation: context.connectionAttempt,
+    target,
+  };
+}
+
+function electronStreamPort(port: MessagePortMain): StreamAttachmentPort {
+  return {
+    postMessage: (frame) => port.postMessage(frame),
+    close: () => port.close(),
+    onMessage: (listener) => {
+      const handleMessage = (event: MessageEvent): void => listener(event.data);
+      port.on("message", handleMessage);
+      return () => port.off("message", handleMessage);
+    },
+    onClose: (listener) => {
+      port.on("close", listener);
+      return () => port.off("close", listener);
+    },
+    start: () => port.start(),
+  };
 }
 
 function supportedTargetCapabilities(pool: BackendPool) {

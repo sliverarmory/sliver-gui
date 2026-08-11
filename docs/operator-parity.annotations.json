@@ -1,15 +1,22 @@
 {
   "schemaVersion": 1,
   "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
-  "reviewVersion": 2,
+  "reviewVersion": 3,
   "reviewPolicy": "Every generated reachable node has an explicit product classification. Regeneration never edits this file.",
   "scopeDecisions": [
     {
       "id": "operator-workbench.m2-session-first",
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M2",
       "operatorScope": true,
-      "notes": "The dedicated session workbench now exposes the reviewed M2 session paths. M2 remains in progress because supported beacon execution, complete cross-platform and real-server evidence, a central authoritative capability service, anchor-stable continuation cursors, and loot dispositions are still pending."
+      "notes": "The operator accepted and completed the delivered session-first M2 scope on 2026-08-10. Supported beacon execution, complete cross-platform and real-server evidence, a central authoritative capability service, anchor-stable continuation cursors, loot dispositions, and their individual parity rows remain explicitly deferred rather than claimed complete."
+    },
+    {
+      "id": "operator-streaming.m3-session-shell",
+      "status": "in-progress",
+      "milestone": "M3",
+      "operatorScope": true,
+      "notes": "The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; same-live-client and same-window reattachment, requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits."
     },
     {
       "id": "operator-transport.wireguard",
@@ -2831,7 +2838,7 @@
       "id": "implant.portfwd",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -2865,13 +2872,13 @@
       "testIds": [
         "parity-contract:implant.portfwd"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Port-forward inventory remains planned for M5. M3 delivered only the bounded session-shell stream foundation and does not claim forwarding parity."
     },
     {
       "id": "implant.portfwd.add",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -2907,13 +2914,13 @@
       "testIds": [
         "parity-contract:implant.portfwd.add"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Port-forward creation remains planned for M5, including local exposure review. M3 delivered only the bounded session-shell stream foundation."
     },
     {
       "id": "implant.portfwd.rm",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -2947,7 +2954,7 @@
       "testIds": [
         "parity-contract:implant.portfwd.rm"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Port-forward removal remains planned for M5. M3 delivered only the bounded session-shell stream foundation."
     },
     {
       "id": "implant.procdump",
@@ -3635,7 +3642,7 @@
       "id": "implant.rportfwd",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -3669,13 +3676,13 @@
       "testIds": [
         "parity-contract:implant.rportfwd"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Reverse-port-forward inventory remains planned for M5. M3 delivered only the bounded session-shell stream foundation and does not claim forwarding parity."
     },
     {
       "id": "implant.rportfwd.add",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -3711,13 +3718,13 @@
       "testIds": [
         "parity-contract:implant.rportfwd.add"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Reverse-port-forward creation remains planned for M5, including endpoint policy and operator review. M3 delivered only the bounded session-shell stream foundation."
     },
     {
       "id": "implant.rportfwd.rm",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -3751,7 +3758,7 @@
       "testIds": [
         "parity-contract:implant.rportfwd.rm"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Reverse-port-forward removal remains planned for M5. M3 delivered only the bounded session-shell stream foundation."
     },
     {
       "id": "implant.runas",
@@ -4011,7 +4018,7 @@
     {
       "id": "implant.shell",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M3",
       "restrictionReview": {
         "targetModes": [
@@ -4046,14 +4053,15 @@
       ],
       "guiSurface": "streams",
       "testIds": [
-        "parity-contract:implant.shell"
+        "parity-contract:implant.shell",
+        "session-shell-start-stream"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "The session Terminal workspace starts the target default shell through a bounded managed stream. Linux and macOS request an upstream-unconfirmed PTY; Windows is forced non-PTY. Packaged-real and cross-platform evidence plus operator acceptance remain pending, so the row is in progress."
     },
     {
       "id": "implant.shell.attach",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M3",
       "restrictionReview": {
         "targetModes": [
@@ -4086,14 +4094,15 @@
       ],
       "guiSurface": "streams",
       "testIds": [
-        "parity-contract:implant.shell.attach"
+        "parity-contract:implant.shell.attach",
+        "session-shell-attach-stream"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "The GUI can attach and intentionally reattach to one managed shell only from the same live client and owning application window. Reattachment after restart, window change, backend replacement, or target loss is not claimed; operator acceptance remains pending."
     },
     {
       "id": "implant.shell.kill",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M3",
       "restrictionReview": {
         "targetModes": [
@@ -4127,14 +4136,15 @@
       ],
       "guiSurface": "streams",
       "testIds": [
-        "parity-contract:implant.shell.kill"
+        "parity-contract:implant.shell.kill",
+        "session-shell-close-kill"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "The managed-shell workspace exposes confirmed Close and Kill actions bound to an opaque resource. Local closure is authoritative, while interrupted best-effort remote closure can leave process state unknown; packaged-real evidence and operator acceptance remain pending."
     },
     {
       "id": "implant.shell.ls",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M3",
       "restrictionReview": {
         "targetModes": [
@@ -4165,9 +4175,10 @@
       ],
       "guiSurface": "streams",
       "testIds": [
-        "parity-contract:implant.shell.ls"
+        "parity-contract:implant.shell.ls",
+        "session-shell-inventory"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "The session Terminal workspace lists bounded, main-owned managed-shell metadata for the exact owning window and target without output content or raw upstream tunnel IDs. Packaged-real evidence and operator acceptance remain pending."
     },
     {
       "id": "implant.sideload",
@@ -4223,7 +4234,7 @@
       "id": "implant.socks5",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -4257,13 +4268,13 @@
       "testIds": [
         "parity-contract:implant.socks5"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Session SOCKS inventory remains planned for M5. M3 delivered only the bounded session-shell stream foundation and does not claim SOCKS parity."
     },
     {
       "id": "implant.socks5.start",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -4299,13 +4310,13 @@
       "testIds": [
         "parity-contract:implant.socks5.start"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Session SOCKS creation and local exposure review remain planned for M5. M3 delivered only the bounded session-shell stream foundation."
     },
     {
       "id": "implant.socks5.stop",
       "operatorScope": true,
       "status": "planned",
-      "milestone": "M3",
+      "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
           "session"
@@ -4339,7 +4350,7 @@
       "testIds": [
         "parity-contract:implant.socks5.stop"
       ],
-      "notes": "Registered implant workflow assigned to M3."
+      "notes": "Session SOCKS stop remains planned for M5. M3 delivered only the bounded session-shell stream foundation."
     },
     {
       "id": "implant.spawndll",

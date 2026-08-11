@@ -48,6 +48,7 @@ import {
   openOperationDetail,
 } from "./TargetsPage";
 import { defaultSessionWorkspacePanels } from "./session-workbench-panels";
+import { SessionTerminalPanel } from "./SessionTerminalPanel";
 
 export interface SessionWorkspaceRoute {
   sessionId: string;
@@ -61,6 +62,7 @@ export type SessionWorkspacePanelId =
   | "files"
   | "processes"
   | "environment"
+  | "terminal"
   | "activity"
   | "registry";
 
@@ -321,6 +323,7 @@ export function SessionWorkspacePage({
             <WorkspaceTab id="processes" label="Processes" />
             <WorkspaceTab id="environment" label="Environment" />
             {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
+            <WorkspaceTab id="terminal" label="Terminal" />
             <WorkspaceTab id="activity" label="Activity" />
           </Tabs.List>
         </Tabs.ListContainer>
@@ -382,6 +385,11 @@ export function SessionWorkspacePage({
             })}
           </Tabs.Panel>
         ) : null}
+        <Tabs.Panel className="pt-6" id="terminal">
+          {resolvedPanels.terminal
+            ? resolvedPanels.terminal(context)
+            : <SessionTerminalPanel route={route} session={currentSession} />}
+        </Tabs.Panel>
         <Tabs.Panel className="pt-6" id="activity">
           <SessionActivity
             error={operationsError}

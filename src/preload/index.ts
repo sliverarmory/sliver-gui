@@ -8,7 +8,67 @@ import {
   type SliverSnapshot,
 } from "../shared/contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
+import {
+  STREAM_PROTOCOL_VERSION,
+  parseStreamAttachRequest,
+} from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
+
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+interface RendererWindowBridge {
+  postMessage(message: unknown, targetOrigin: string, transfer: MessagePort[]): void;
+}
+
+function openStream(attachmentToken: string, correlationId: string): void {
+  const request = parseStreamAttachRequest({
+    v: STREAM_PROTOCOL_VERSION,
+    attachmentToken,
+  });
+  if (typeof correlationId !== "string" || !UUID_V4_PATTERN.test(correlationId)) {
+    throw new TypeError("stream correlationId must be a UUID v4");
+  }
+
+  const channel = new MessageChannel();
+  try {
+    ipcRenderer.postMessage(IPC.attach, request, [channel.port1]);
+    rendererWindow().postMessage(
+      Object.freeze({
+        source: "sliver-preload",
+        type: "stream-port",
+        v: STREAM_PROTOCOL_VERSION,
+        correlationId,
+      }),
+      "*",
+      [channel.port2],
+    );
+  } catch (error) {
+    closePort(channel.port1);
+    closePort(channel.port2);
+    throw error;
+  }
+}
+
+function rendererWindow(): RendererWindowBridge {
+  const candidate = (globalThis as { window?: unknown }).window;
+  if (
+    typeof candidate !== "object" ||
+    candidate === null ||
+    !("postMessage" in candidate) ||
+    typeof candidate.postMessage !== "function"
+  ) {
+    throw new Error("renderer window bridge is unavailable");
+  }
+  return candidate as RendererWindowBridge;
+}
+
+function closePort(port: MessagePort): void {
+  try {
+    port.close();
+  } catch {
+    // A transferred port may already be detached from this realm.
+  }
+}
 
 function createInvokeApi(): SliverDesktopInvokeAPI {
   // Generate routes from the shared method-to-channel map so methods cannot be
@@ -24,6 +84,7 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
+  openStream,
   onSnapshotChanged: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: SliverSnapshot) => listener(snapshot);
     ipcRenderer.on(IPC.snapshotChanged, handler);

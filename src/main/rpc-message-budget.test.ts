@@ -1,6 +1,8 @@
 import {
   RPC_MESSAGE_BUDGETS,
   RPC_MESSAGE_DOMAINS,
+  TUNNEL_STREAM_MAX_PAYLOAD_BYTES,
+  TUNNEL_STREAM_RPC_MESSAGE_BYTES,
   WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES,
   WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES,
   rpcMessageChannelOptions,
@@ -17,15 +19,19 @@ describe("Sliver RPC message budgets", () => {
       "control",
       "inventory",
       "task-content",
+      "tunnel-stream",
       "workbench-artifact",
       "artifact",
     ]);
     expect(WORKBENCH_ARTIFACT_MAX_PAYLOAD_BYTES).toBe(64 * MiB);
     expect(WORKBENCH_ARTIFACT_RPC_MESSAGE_BYTES).toBe(66 * MiB);
+    expect(TUNNEL_STREAM_MAX_PAYLOAD_BYTES).toBe(64 * KiB);
+    expect(TUNNEL_STREAM_RPC_MESSAGE_BYTES).toBe(66 * KiB);
     expect(RPC_MESSAGE_BUDGETS).toEqual({
       control: { maxSendBytes: 8 * MiB, maxReceiveBytes: 16 * MiB },
       inventory: { maxSendBytes: 4 * MiB, maxReceiveBytes: 32 * MiB },
       "task-content": { maxSendBytes: 1 * MiB, maxReceiveBytes: 80 * KiB },
+      "tunnel-stream": { maxSendBytes: 66 * KiB, maxReceiveBytes: 66 * KiB },
       "workbench-artifact": { maxSendBytes: 66 * MiB, maxReceiveBytes: 66 * MiB },
       artifact: { maxSendBytes: 256 * MiB, maxReceiveBytes: 256 * MiB },
     });
@@ -37,6 +43,9 @@ describe("Sliver RPC message budgets", () => {
     );
     expect(RPC_MESSAGE_BUDGETS["task-content"].maxReceiveBytes).toBeLessThan(
       RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes,
+    );
+    expect(RPC_MESSAGE_BUDGETS["tunnel-stream"].maxReceiveBytes).toBeLessThan(
+      RPC_MESSAGE_BUDGETS.control.maxReceiveBytes,
     );
     expect(RPC_MESSAGE_BUDGETS["workbench-artifact"].maxReceiveBytes).toBeLessThan(
       RPC_MESSAGE_BUDGETS.artifact.maxReceiveBytes,

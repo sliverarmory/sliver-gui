@@ -163,12 +163,13 @@ describe("SessionWorkspacePage", () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
     const filesPanel = vi.fn(() => <section aria-label="Injected files panel">Remote files</section>);
+    const terminalPanel = vi.fn(() => <section aria-label="Injected terminal panel">Managed terminal</section>);
     installAPI();
     const snapshot = workspaceSnapshot();
 
     render(
       <SessionWorkspacePage
-        panels={{ files: filesPanel }}
+        panels={{ files: filesPanel, terminal: terminalPanel }}
         route={route}
         session={session}
         snapshot={snapshot}
@@ -182,13 +183,22 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Processes" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Environment" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Terminal" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Registry" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("tab").at(-1)).toHaveAccessibleName("Activity");
+    const tabs = screen.getAllByRole("tab");
+    const terminalIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Terminal" || tab.textContent?.includes("Terminal"));
+    const activityIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Activity" || tab.textContent?.includes("Activity"));
+    expect(terminalIndex).toBeGreaterThanOrEqual(0);
+    expect(activityIndex).toBe(terminalIndex + 1);
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     expect(screen.getByRole("region", { name: "Injected files panel" })).toHaveTextContent("Remote files");
     expect(filesPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
+
+    await user.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(screen.getByRole("region", { name: "Injected terminal panel" })).toHaveTextContent("Managed terminal");
+    expect(terminalPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
 
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(onBack).toHaveBeenCalledOnce();
