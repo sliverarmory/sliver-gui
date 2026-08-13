@@ -469,7 +469,7 @@ async function verifyM1TargetsAndOperations(
     // Leave a second-window shell detached, then remove its exact session.
     // Target disappearance must close the main-owned resource and quarantine
     // every renderer surface that could otherwise retain stale terminal data.
-    await secondPage.getByRole("tab", { name: "Terminal", exact: true }).click();
+    await secondPage.getByRole("tab", { name: "Shell", exact: true }).click();
     await secondPage.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
     const secondShellStarts = fakeMethodCount(await readFakeState(electronApplication), "startShellSession");
     await secondPage.getByRole("button", { name: "New shell", exact: true }).first().click();
@@ -717,7 +717,7 @@ async function verifyM3SessionTerminal(
   page.on("request", observeRequest);
   try {
     await installM3HostEffectGuards(page);
-    await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+    await page.getByRole("tab", { name: "Shell", exact: true }).click();
     await page.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
     await page.getByText("No managed shells", { exact: true }).waitFor();
 
@@ -734,6 +734,57 @@ async function verifyM3SessionTerminal(
     await page.getByText("Attached", { exact: true }).waitFor();
     await waitForFakeMethodCount(electronApplication, "shell.resize", initialResizes + 1);
     await waitForNonZeroTerminalMetric(page, "Bytes in");
+
+    const mountedManagedShells = page.locator("#session-shells-heading");
+    const mountedTerminalSurface = page.locator('[aria-label="Interactive shell for m1-session"]');
+    const attachedInventoryBeforeTabSwitch = await invokeSliver(page, "listSessionShells", {});
+    assert.equal(
+      attachedInventoryBeforeTabSwitch.ok,
+      true,
+      attachedInventoryBeforeTabSwitch.error ?? "managed-shell inventory failed before the tab switch",
+    );
+    const [attachedResourceBeforeTabSwitch] = attachedInventoryBeforeTabSwitch.value?.resources ?? [];
+    assert.ok(attachedResourceBeforeTabSwitch, "the attached managed shell must exist before switching tabs");
+    assert.equal(attachedResourceBeforeTabSwitch.state, "attached");
+
+    await page.getByRole("tab", { name: "Overview", exact: true }).click();
+    assert.equal(
+      await mountedManagedShells.count(),
+      1,
+      "the managed-shell panel must remain mounted while another workspace tab is active",
+    );
+    assert.equal(
+      await mountedManagedShells.isHidden(),
+      true,
+      "Managed Shells must not be visible outside the Shell tab",
+    );
+    assert.equal(
+      await mountedTerminalSurface.count(),
+      1,
+      "the terminal surface must remain mounted so its scrollback survives tab changes",
+    );
+    assert.equal(
+      await mountedTerminalSurface.isHidden(),
+      true,
+      "the preserved terminal surface must be hidden outside the Shell tab",
+    );
+    const attachedInventoryAfterTabSwitch = await invokeSliver(page, "listSessionShells", {});
+    assert.equal(
+      attachedInventoryAfterTabSwitch.ok,
+      true,
+      attachedInventoryAfterTabSwitch.error ?? "managed-shell inventory failed while the Shell tab was hidden",
+    );
+    assert.equal(attachedInventoryAfterTabSwitch.value?.resources.length, 1);
+    assert.equal(
+      attachedInventoryAfterTabSwitch.value?.resources[0]?.resourceId,
+      attachedResourceBeforeTabSwitch.resourceId,
+      "switching tabs must preserve the exact managed-shell resource",
+    );
+    assert.equal(attachedInventoryAfterTabSwitch.value?.resources[0]?.state, "attached");
+
+    await page.getByRole("tab", { name: "Shell", exact: true }).click();
+    await mountedManagedShells.waitFor({ state: "visible" });
+    await mountedTerminalSurface.waitFor({ state: "visible" });
 
     const initialWhoamiCommands = fakeMethodCount(await readFakeState(electronApplication), "shell.command.whoami");
     try {

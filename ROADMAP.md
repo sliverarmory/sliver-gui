@@ -708,7 +708,7 @@ remain M5 work even though they can later reuse this bounded stream foundation.
   before returning an independent byte copy for each isolated terminal runtime;
   the renderer never fetches executable content.
 - [x] Add shell start, list, attach, detach, close, kill, and managed-resource
-  switching to the dedicated session Terminal view, with a resizable desktop
+  switching to the dedicated session Shell view, with a resizable desktop
   workspace and a bounded responsive alternative. Selecting a shell now
   attaches it directly without a second Attach action.
 - [x] Let the owning workspace pop its exact managed-shell inventory into one

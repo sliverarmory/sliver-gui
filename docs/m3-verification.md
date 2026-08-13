@@ -14,7 +14,7 @@ parity remain assigned to M5.
 
 ## Delivered operator path
 
-- The dedicated session workbench now places **Terminal** immediately before
+- The dedicated session workbench now places **Shell** immediately before
   **Activity**. Its managed-shell workspace supports start, bounded inventory,
   selection-driven attach, detach, close, kill, and switching among multiple
   managed shells. Selecting a detached shell attaches it directly; there is no
@@ -196,7 +196,7 @@ barrier; the settled rerun began and ended with no direct shell child.
 Use only an authorized disposable session and an operator configuration whose
 cleanup scope is understood.
 
-1. Open one live session, select **Terminal**, and start a new shell.
+1. Open one live session, select **Shell**, and start a new shell.
 2. Confirm normal keyboard input/output and explicit focus, Copy, and Paste.
 3. On Linux or macOS, resize the workspace and confirm the UI continues to say
    the PTY and resize are requested or unconfirmed. On Windows, confirm resize

@@ -51,16 +51,8 @@
       "sha256": "48a977a691c8e8a26a87b2e488aef1630371259e7ee93b5ff324ccc42897df88"
     },
     {
-      "path": "src/config.ts",
-      "sha256": "0faca469d4500b9357f4b9e88a9221cd321dab9e015ea348b56e3afe5e6d002b"
-    },
-    {
       "path": "src/events/index.ts",
       "sha256": "2e643c622faa5724f6f9aa76ea9fe1d3c98c7c2743d40374226a93a36755f11c"
-    },
-    {
-      "path": "src/internal/credentials.ts",
-      "sha256": "599f662bc088be6382c73d903eb78638ec17cb54f70a9fd067e4803e3ecca950"
     },
     {
       "path": "src/internal/wgProxy.ts",
@@ -72,7 +64,7 @@
     "appliedAfterProtobufGeneration": true,
     "patch": {
       "path": "protocol/sliver-script-handwritten-overlay.patch",
-      "sha256": "e84664a3279b67fa1729f95fdd1953b862f5c4b26f9c6c1dc2c3fae4e67e77c8"
+      "sha256": "b1d566e44417d5de7d4bc771854cdea299820caac105b131c6b5286fe95f0015"
     },
     "files": [
       {
@@ -80,6 +72,12 @@
         "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
         "sha256": "f5bb909c322aabd33ba0805ff28c556e8c8e69e83afbb98e3abee9196c497459",
         "review": "Route RPCs through bounded control, inventory, task-content, tunnel-stream, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; add a main-only managed session-shell handle with early-output-safe binding, bounded chunked writes, PTY-gated resize, idempotent cleanup, fixed target-error mapping, and bounded canonical exit/logout signaling before CloseTunnel for explicit close and lost-response startup cleanup; support bounded from-end downloads for Tail without combining incompatible range options; preserve upload response status for main-owned mutation classification; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
+      },
+      {
+        "path": "src/config.ts",
+        "baseSha256": "0faca469d4500b9357f4b9e88a9221cd321dab9e015ea348b56e3afe5e6d002b",
+        "sha256": "1b7fa601ecb71b283e4d3b160fcdf1c6d0462712cb5889d1f0ffddfd60f06c48",
+        "review": "Require the Sliver-managed CA field to contain non-whitespace content so operator mTLS cannot fall back to default or system trust."
       },
       {
         "path": "src/index.ts",
@@ -92,6 +90,12 @@
         "baseSha256": "9804cd42b895dc24895e91e1bbe5b732526a28c371e56d9d1b386d302749da41",
         "sha256": "39ddbf19932d68b621d0069a295f294f846bd9f38906fdec92d9157a1f235790",
         "review": "Replace the unbounded generic queue with an explicitly item- and byte-budgeted single-consumer queue that fails atomically on overflow, zeroizes disposed byte payloads through owner callbacks, and has deterministic close, failure, and consumer-cancel behavior."
+      },
+      {
+        "path": "src/internal/credentials.ts",
+        "baseSha256": "599f662bc088be6382c73d903eb78638ec17cb54f70a9fd067e4803e3ecca950",
+        "sha256": "ee3f3f310ca4516bbc0b9f0492e0c560fe4ac60486ee10177f9072178c897b49",
+        "review": "Build operator RPC TLS credentials only from the Sliver-managed CA and client identity in the configuration, fail closed on a blank CA, and explicitly require certificate-chain verification."
       },
       {
         "path": "src/internal/tunnelManager.ts",

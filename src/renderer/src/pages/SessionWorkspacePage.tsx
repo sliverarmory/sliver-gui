@@ -338,7 +338,7 @@ export function SessionWorkspacePage({
             <WorkspaceTab id="processes" label="Processes" />
             <WorkspaceTab id="environment" label="Environment" />
             {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
-            <WorkspaceTab id="terminal" label="Terminal" />
+            <WorkspaceTab id="terminal" label="Shell" />
             <WorkspaceTab id="activity" label="Activity" />
           </Tabs.List>
         </Tabs.ListContainer>
@@ -400,7 +400,11 @@ export function SessionWorkspacePage({
             })}
           </Tabs.Panel>
         ) : null}
-        <Tabs.Panel shouldForceMount className="pt-6" id="terminal">
+        <Tabs.Panel
+          shouldForceMount
+          className="pt-6 data-[inert=true]:hidden"
+          id="terminal"
+        >
           {terminalVisitedRouteIdentity === routeIdentity
             ? resolvedPanels.terminal
               ? resolvedPanels.terminal(context)

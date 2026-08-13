@@ -189,11 +189,12 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Processes" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Environment" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Terminal" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Shell" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Terminal" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Registry" })).not.toBeInTheDocument();
     const tabs = screen.getAllByRole("tab");
-    const terminalIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Terminal" || tab.textContent?.includes("Terminal"));
+    const terminalIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Shell" || tab.textContent?.includes("Shell"));
     const activityIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Activity" || tab.textContent?.includes("Activity"));
     expect(terminalIndex).toBeGreaterThanOrEqual(0);
     expect(activityIndex).toBe(terminalIndex + 1);
@@ -202,15 +203,20 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("region", { name: "Injected files panel" })).toHaveTextContent("Remote files");
     expect(filesPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
 
-    await user.click(screen.getByRole("tab", { name: "Terminal" }));
+    await user.click(screen.getByRole("tab", { name: "Shell" }));
     const mountedTerminal = screen.getByRole("region", { name: "Injected terminal panel" });
     expect(mountedTerminal).toHaveTextContent("Managed terminal");
     expect(terminalPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
+    const mountedTerminalPanel = mountedTerminal.closest("[role=tabpanel]");
+    expect(mountedTerminalPanel).not.toHaveAttribute("data-inert");
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     expect(terminalUnmounted).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(mountedTerminalPanel).toHaveAttribute("data-inert", "true");
+    expect(mountedTerminalPanel).toHaveClass("data-[inert=true]:hidden");
+    await user.click(screen.getByRole("tab", { name: "Shell" }));
     expect(screen.getByRole("region", { name: "Injected terminal panel" })).toBe(mountedTerminal);
+    expect(mountedTerminalPanel).not.toHaveAttribute("data-inert");
 
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(onBack).toHaveBeenCalledOnce();

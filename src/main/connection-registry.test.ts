@@ -839,6 +839,39 @@ describe("connection registry with an injected Sliver client", () => {
     expect(incompatibleRegistry.snapshot(2).domains.compiler.status).toBe("unsupported");
   });
 
+  it("never suggests system CA trust for managed operator mTLS failures", async () => {
+    const client = new FakeSliverClient();
+    client.connect.mockRejectedValueOnce(new Error(
+      "14 UNAVAILABLE: unable to verify the first certificate; if the root CA is installed locally, " +
+      "try running Node.js with --use-system-ca",
+    ));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    const listed = await registry.listSavedConfigs(1);
+    if (!listed.ok) throw new Error(listed.error);
+
+    const result = await registry.connectSavedConfig(1, listed.value[0]!.id);
+
+    expect(result).toEqual({ ok: false, error: "14 UNAVAILABLE: unable to verify the first certificate" });
+    expect(registry.snapshot(1).connection.error).toBe("14 UNAVAILABLE: unable to verify the first certificate");
+    expect(JSON.stringify(result)).not.toContain("--use-system-ca");
+  });
+
+  it("refuses an operator configuration without a managed CA before constructing a client", async () => {
+    const missingCaPath = join(externalDirectory, "missing-managed-ca.cfg");
+    await writeFile(missingCaPath, validConfig({ ca_certificate: "  " }));
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [missingCaPath] });
+    const factory = vi.fn(() => new FakeSliverClient().adapter);
+    const registry = createRegistry(factory);
+    registry.registerWindow(1);
+
+    await expect(registry.chooseAndConnect(sender(1))).resolves.toEqual({
+      ok: false,
+      error: "Invalid Sliver configuration file",
+    });
+    expect(factory).not.toHaveBeenCalled();
+  });
+
   it("keeps an empty compiler inventory authoritative and never fabricates targets", async () => {
     const client = new FakeSliverClient();
     const registry = createRegistry(() => client.adapter);

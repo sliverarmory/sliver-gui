@@ -5627,6 +5627,13 @@ function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "An unexpected operation error occurred";
   return boundedText(
     message
+      // Node appends a system-trust fallback to certificate-chain failures.
+      // Operator RPC trust is intentionally pinned to the CA embedded in the
+      // Sliver configuration, so that suggestion is inapplicable and unsafe.
+      .replace(
+        /;\s*if the root CA is installed locally,\s*try running Node\.js with --use-system-ca/giu,
+        "",
+      )
       .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*/giu, "[redacted private key]")
       .replace(/\b(bearer\s+)[^\s,;]+/giu, "$1[redacted]")
       .replace(

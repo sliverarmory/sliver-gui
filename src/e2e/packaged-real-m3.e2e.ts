@@ -159,7 +159,7 @@ test(
       page.on("pageerror", (error) => pageErrors.push(error.message));
       await connectSavedConfig(page);
       await openAuthorizedSessionWorkspace(page, authorizedSession);
-      await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+      await page.getByRole("tab", { name: "Shell", exact: true }).click();
       await page.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
 
       const initialInventory = await listManagedShells(page);

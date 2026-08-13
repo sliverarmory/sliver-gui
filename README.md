@@ -42,7 +42,7 @@ configuration files and their private keys stay in the Electron main process.
   typed write, create-key, and delete-key mutations.
 - Activity unifies M1 and session-workbench history for the exact session while
   excluding command content, secrets, binary data, and local paths.
-- A session-only managed-shell workspace in the Terminal tab. Operators can
+- A session-only managed-shell workspace in the Shell tab. Operators can
   start, list, select-to-attach, detach, close, and kill shells; pop the exact
   managed inventory into a main-created dedicated window; use explicit copy
   and reviewed paste controls; and see lifecycle, pressure, and byte-count
@@ -119,6 +119,11 @@ npx heroui-pro login
 npx heroui-pro install --yes
 npm run dev
 ```
+
+`npm run dev` builds and opens the same static renderer used by production.
+This deliberately avoids Vite's inline React refresh bootstrap and HMR
+WebSocket so the renderer can keep the production content security policy;
+restart the command after source changes.
 
 The HeroUI login/install steps are only needed once per workstation and can be
 skipped when `HEROUI_AUTH_TOKEN` is already present in the environment.

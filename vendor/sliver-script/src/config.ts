@@ -73,6 +73,9 @@ function validateConfig(config: Partial<SliverClientConfig>): asserts config is 
       throw new Error(`Invalid sliver config: missing/invalid ${key}`);
     }
   }
+  if (!config.ca_certificate?.trim()) {
+    throw new Error("Invalid sliver config: missing/invalid ca_certificate");
+  }
   if (typeof config.lport !== "number" || !Number.isFinite(config.lport)) {
     throw new Error("Invalid sliver config: missing/invalid lport");
   }

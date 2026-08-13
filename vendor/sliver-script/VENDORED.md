@@ -77,6 +77,9 @@ IP-literal targets, because Node TLS does not accept an IP literal as SNI, and
 preserves the configured DNS authority when traffic traverses the loopback
 proxy. This changes authority/SNI selection only; the configured Sliver CA,
 client certificate, private key, and token remain the authenticated material.
+The wrapper rejects a blank managed CA and passes only that CA into the gRPC
+TLS context with certificate-chain verification required; system trust is not
+an operator RPC fallback.
 
 The M1 overlay adds explicit typed wrappers for target inventory and presence,
 named target lifecycle operations, ping and environment mutation,

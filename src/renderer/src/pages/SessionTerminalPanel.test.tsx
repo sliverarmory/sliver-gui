@@ -14,17 +14,36 @@ vi.mock("../components/GhosttyTerminal", async () => {
   const React = await import("react");
   return {
     GhosttyTerminal: React.forwardRef(function MockGhosttyTerminal(
-      props: { ariaLabel?: string; onError?: (error: Error) => void; onReady?: () => void },
+      props: {
+        ariaLabel?: string;
+        onError?: (error: Error) => void;
+        onReady?: () => void;
+        transport: {
+          subscribe: (subscription: {
+            onOutput: (bytes: Uint8Array) => void;
+            onClose: (reason?: string) => void;
+          }) => () => void;
+        };
+      },
       ref: React.ForwardedRef<unknown>,
     ) {
+      const hostRef = React.useRef<HTMLDivElement>(null);
+      const outputRef = React.useRef("");
       React.useImperativeHandle(ref, () => ({
         focus: shellMocks.focus,
         getSelection: shellMocks.getSelection,
         paste: shellMocks.paste,
       }));
       React.useEffect(() => props.onReady?.(), [props.onReady]);
+      React.useEffect(() => props.transport.subscribe({
+        onOutput: (bytes) => {
+          outputRef.current += new TextDecoder().decode(bytes);
+          hostRef.current?.setAttribute("data-terminal-output", outputRef.current);
+        },
+        onClose: (reason) => hostRef.current?.setAttribute("data-terminal-close", reason ?? "closed"),
+      }), [props.transport]);
       return (
-        <div aria-label={props.ariaLabel} role="textbox">
+        <div ref={hostRef} aria-label={props.ariaLabel} data-terminal-output="" role="textbox">
           Terminal bytes stay outside React state
           <button
             aria-label="Inject terminal initialization failure"
@@ -319,6 +338,87 @@ describe("SessionTerminalPanel", () => {
     expect(transport.detach).toHaveBeenCalledOnce();
   });
 
+  it("keeps distinct shell terminals mounted and processing output across A to B to A selection", async () => {
+    const firstResourceId = "a".repeat(43);
+    const secondResourceId = "b".repeat(43);
+    const firstToken = "c".repeat(43);
+    const secondToken = "d".repeat(43);
+    const first = resource({
+      resourceId: firstResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:00:00.000Z",
+    });
+    const second = resource({
+      resourceId: secondResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:01:00.000Z",
+    });
+    const firstTransport = fakeTransport();
+    const secondTransport = fakeTransport();
+    shellMocks.open
+      .mockResolvedValueOnce(firstTransport.api)
+      .mockResolvedValueOnce(secondTransport.api);
+    const api = installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([first, second]) }),
+      actOnSessionShell: async (requestedResourceId, action) => {
+        const selected = requestedResourceId === firstResourceId ? first : second;
+        return {
+          ok: true,
+          value: {
+            action,
+            resourceId: requestedResourceId,
+            resource: selected,
+            attachment: {
+              attachmentToken: requestedResourceId === firstResourceId ? firstToken : secondToken,
+              expiresAt: new Date(Date.now() + 5_000).toISOString(),
+            },
+          },
+        };
+      },
+    });
+    const user = userEvent.setup();
+    const { container } = render(<SessionTerminalPanel route={route} session={session} />);
+    await screen.findByText("Shell 1");
+
+    await user.click(screen.getByText("Shell 1"));
+    await screen.findByRole("textbox", { name: "Interactive shell for payments" });
+    const firstWrapper = container.querySelector<HTMLElement>(
+      `[data-shell-terminal-resource-id="${firstResourceId}"]`,
+    );
+    const firstTerminal = firstWrapper?.querySelector<HTMLElement>("[role=textbox]");
+    expect(firstWrapper).not.toBeNull();
+    act(() => firstTransport.emitOutput("first-visible\n"));
+    expect(firstTerminal).toHaveAttribute("data-terminal-output", "first-visible\n");
+
+    await user.click(screen.getByText("Shell 2"));
+    await waitFor(() => expect(shellMocks.open).toHaveBeenCalledTimes(2));
+    const secondWrapper = container.querySelector<HTMLElement>(
+      `[data-shell-terminal-resource-id="${secondResourceId}"]`,
+    );
+    expect(secondWrapper).not.toBeNull();
+    expect(firstWrapper).toHaveAttribute("aria-hidden", "true");
+    expect(firstTransport.detach).not.toHaveBeenCalled();
+    expect(api.actOnSessionShell).not.toHaveBeenCalledWith({ resourceId: firstResourceId, action: "detach" });
+
+    act(() => firstTransport.emitOutput("first-hidden\n"));
+    expect(firstTerminal).toHaveAttribute(
+      "data-terminal-output",
+      "first-visible\nfirst-hidden\n",
+    );
+
+    await user.click(screen.getByText("Shell 1"));
+    expect(container.querySelector(`[data-shell-terminal-resource-id="${firstResourceId}"]`)).toBe(firstWrapper);
+    expect(firstWrapper).not.toHaveAttribute("aria-hidden", "true");
+    expect(secondWrapper).toHaveAttribute("aria-hidden", "true");
+    expect(shellMocks.open).toHaveBeenCalledTimes(2);
+    expect(firstTransport.detach).not.toHaveBeenCalled();
+    expect(secondTransport.detach).not.toHaveBeenCalled();
+    expect(firstTerminal).toHaveAttribute(
+      "data-terminal-output",
+      "first-visible\nfirst-hidden\n",
+    );
+  });
+
   it("refreshes and auto-attaches a main-transferred shell without letting an older inventory win", async () => {
     const staleInventory = deferred<unknown>();
     const transferredInventory = deferred<unknown>();
@@ -452,7 +552,7 @@ describe("SessionTerminalPanel", () => {
     ]);
   });
 
-  it("preserves the latest intent when the active shell is reselected during an in-flight switch", async () => {
+  it("preserves the active terminal when it is reselected during another shell attachment", async () => {
     const firstResourceId = "a".repeat(43);
     const secondResourceId = "b".repeat(43);
     const firstToken = "c".repeat(43);
@@ -467,7 +567,7 @@ describe("SessionTerminalPanel", () => {
       state: "detached",
       createdAt: "2026-08-10T01:01:00.000Z",
     });
-    const detachRequest = deferred<unknown>();
+    const secondTicket = deferred<unknown>();
     const firstTransport = fakeTransport();
     const replacementTransport = fakeTransport();
     shellMocks.open
@@ -476,7 +576,10 @@ describe("SessionTerminalPanel", () => {
     const api = installAPI({
       listSessionShells: async () => ({ ok: true, value: inventory([first, second]) }),
       actOnSessionShell: async (requestedResourceId, action) => {
-        if (action === "detach") return detachRequest.promise;
+        if (action === "attach" && requestedResourceId === secondResourceId) return secondTicket.promise;
+        if (action === "detach") {
+          return { ok: true, value: { action, resourceId: requestedResourceId, resource: second } };
+        }
         const selected = requestedResourceId === firstResourceId ? first : second;
         return {
           ok: true,
@@ -502,23 +605,33 @@ describe("SessionTerminalPanel", () => {
 
     await user.click(screen.getByText("Shell 2"));
     await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({
-      resourceId: firstResourceId,
-      action: "detach",
+      resourceId: secondResourceId,
+      action: "attach",
     }));
     await user.click(screen.getByText("Shell 1"));
-    detachRequest.resolve({
+    secondTicket.resolve({
       ok: true,
-      value: { action: "detach", resourceId: firstResourceId, resource: first },
+      value: {
+        action: "attach",
+        resourceId: secondResourceId,
+        resource: second,
+        attachment: {
+          attachmentToken: secondToken,
+          expiresAt: new Date(Date.now() + 5_000).toISOString(),
+        },
+      },
     });
 
     await waitFor(() => expect(shellMocks.open).toHaveBeenCalledTimes(2));
-    expect(firstTransport.detach).toHaveBeenCalledOnce();
+    await waitFor(() => expect(replacementTransport.detach).toHaveBeenCalledOnce());
+    expect(firstTransport.detach).not.toHaveBeenCalled();
     expect(shellMocks.open).toHaveBeenLastCalledWith(expect.objectContaining({
-      attachmentToken: firstToken,
-      expectedResourceId: firstResourceId,
+      attachmentToken: secondToken,
+      expectedResourceId: secondResourceId,
     }));
     const attachCalls = api.actOnSessionShell.mock.calls.filter(([input]) => input.action === "attach");
-    expect(attachCalls).toEqual([[{ resourceId: firstResourceId, action: "attach" }]]);
+    expect(attachCalls).toEqual([[{ resourceId: secondResourceId, action: "attach" }]]);
+    expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId: secondResourceId, action: "detach" });
     expect(screen.getByText("Shell 1").closest("[role=row]")).toHaveAttribute("aria-selected", "true");
   });
 
@@ -870,6 +983,10 @@ function attachedSnapshot(): SessionShellTransportSnapshot {
 function fakeTransport() {
   let snapshot = attachedSnapshot();
   let stateListener: ((next: SessionShellTransportSnapshot) => void) | undefined;
+  let terminalSubscription: {
+    onOutput: (bytes: Uint8Array) => void;
+    onClose: (reason?: string) => void;
+  } | undefined;
   const detach = vi.fn();
   const close = vi.fn();
   const api = {
@@ -883,7 +1000,12 @@ function fakeTransport() {
     }),
     detach,
     close,
-    subscribe: vi.fn(() => vi.fn()),
+    subscribe: vi.fn((subscription: typeof terminalSubscription) => {
+      terminalSubscription = subscription;
+      return vi.fn(() => {
+        if (terminalSubscription === subscription) terminalSubscription = undefined;
+      });
+    }),
     send: vi.fn(),
     resize: vi.fn(),
   } as unknown as SessionShellTransport;
@@ -894,6 +1016,9 @@ function fakeTransport() {
     emit(next: SessionShellTransportSnapshot) {
       snapshot = next;
       stateListener?.(next);
+    },
+    emitOutput(text: string) {
+      terminalSubscription?.onOutput(new TextEncoder().encode(text));
     },
   };
 }
