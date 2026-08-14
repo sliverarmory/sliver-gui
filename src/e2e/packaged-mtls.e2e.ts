@@ -93,6 +93,9 @@ test("packaged production app completes current mTLS read and mutation flows", {
       });
       throw error;
     }
+    // Keep overlay teardown deterministic; this smoke validates packaged RPC
+    // behavior rather than animation timing on headless platform runners.
+    await page.emulateMedia({ reducedMotion: "reduce" });
     page.on("console", (message) => consoleMessages.push(message.text()));
     page.on("pageerror", (error) => pageErrors.push(error.message));
 
