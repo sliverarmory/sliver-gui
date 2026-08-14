@@ -97,6 +97,7 @@ vi.mock("ghostty-web", () => {
 
     open(element: HTMLElement) {
       this.element = element;
+      element.setAttribute("contenteditable", "true");
       element.setAttribute("role", "textbox");
       element.setAttribute("aria-label", "Terminal input");
       element.addEventListener("click", this.linkClick);
@@ -231,6 +232,11 @@ describe("GhosttyTerminal", () => {
     );
 
     const host = screen.getByRole("textbox", { name: "Safe terminal" });
+    expect(host).toHaveAttribute("contenteditable", "true");
+    expect(host).not.toHaveClass("p-2");
+    expect(host.style.backgroundColor).toBe("rgb(30, 30, 30)");
+    expect(host.parentElement?.style.backgroundColor).toBe("rgb(30, 30, 30)");
+    expect(host.style.caretColor).toBe("transparent");
     fireEvent.click(host, { ctrlKey: true });
     act(() => {
       terminal.simulateSelectionMouseUp();

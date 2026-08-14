@@ -235,8 +235,10 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
       {
         id: "actions",
         header: <span className="sr-only">Actions</span>,
-        align: "end",
+        align: "center",
+        width: 72,
         minWidth: 72,
+        maxWidth: 72,
         pinned: "end",
         cell: (job) => (
           <Tooltip delay={250}>
@@ -457,6 +459,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
 
           <DataGrid
               aria-label="Active Sliver jobs"
+              className="[--background:var(--surface)]"
               columns={columns}
               contentClassName="min-w-[780px]"
               data={jobs}

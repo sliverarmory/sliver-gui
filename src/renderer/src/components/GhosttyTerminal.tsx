@@ -292,7 +292,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         terminal.open(host);
         disablePinnedGhosttyAutoCopy(terminal);
         host.setAttribute("aria-label", ariaLabel);
-        // Terminal.open focuses its hidden textarea. Return focus to the
+        // Terminal.open focuses its contenteditable host. Return focus to the
         // workspace tab/trigger until the operator explicitly focuses here.
         terminal.blur();
         fitAddon.fit();
@@ -359,16 +359,23 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
 
     return (
       <div
-        className={["relative h-full min-h-0 w-full overflow-hidden bg-black font-mono", className]
+        className={["relative h-full min-h-0 w-full overflow-hidden font-mono", className]
           .filter(Boolean)
           .join(" ")}
         data-terminal-state={terminalState}
+        style={{ backgroundColor: appearance?.theme?.background ?? "#1e1e1e" }}
       >
+        {/* Ghostty draws its cursor on the canvas; suppress Chromium's native
+            caret on the focused contenteditable host so only one cursor is visible. */}
         <div
           ref={hostRef}
           aria-busy={terminalState === "loading"}
           aria-label={ariaLabel}
-          className="h-full min-h-0 w-full overflow-hidden p-2"
+          className="h-full min-h-0 w-full overflow-hidden"
+          style={{
+            backgroundColor: appearance?.theme?.background ?? "#1e1e1e",
+            caretColor: "transparent",
+          }}
         />
         {terminalState === "failed" ? (
           <p className="absolute inset-0 grid place-items-center text-sm text-danger" role="alert">

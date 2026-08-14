@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -23,6 +23,27 @@ afterEach(() => {
 });
 
 describe("OperationsPage listener modal", () => {
+  it("keeps stop actions pinned and accessible in a compact fixed column", () => {
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = { status: "connected" };
+    snapshot.jobs = [
+      { id: 4, name: "mtls", description: "mTLS listener", protocol: "mtls", port: 8888, domains: [], profileName: "" },
+      { id: 9, name: "https", description: "HTTPS listener", protocol: "https", port: 443, domains: ["c2.example.test"], profileName: "" },
+    ];
+
+    render(<OperationsPage snapshot={snapshot} />);
+
+    const grid = screen.getByRole("grid", { name: "Active Sliver jobs" });
+    const actionHeader = within(grid).getByRole("columnheader", { name: "Actions" });
+    const stopJob4 = within(grid).getByRole("button", { name: "Stop job 4" });
+    const stopJob9 = within(grid).getByRole("button", { name: "Stop job 9" });
+
+    expect(grid.closest('[data-slot="data-grid"]')).toHaveClass("[--background:var(--surface)]");
+    expect(actionHeader).toHaveAttribute("data-pinned", "end");
+    expect(stopJob4.closest('[role="gridcell"]')).toHaveAttribute("data-pinned", "end");
+    expect(stopJob9.closest('[role="gridcell"]')).toHaveAttribute("data-pinned", "end");
+  });
+
   it("lays out form sections vertically so the body gap separates each row", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();

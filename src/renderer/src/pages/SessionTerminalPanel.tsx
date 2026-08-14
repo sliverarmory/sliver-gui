@@ -12,6 +12,7 @@ import {
   AlertDialog,
   Button,
   Chip,
+  Modal,
   ScrollShadow,
   Toolbar,
   Tooltip,
@@ -832,7 +833,6 @@ export function SessionTerminalPanel({
       onDetach={() => {
         if (selectedResource) void runResourceAction(selectedResource.resourceId, "detach");
       }}
-      onFocus={() => selectedTerminalHandle(attachedTerminalsRef.current, selectedResourceIdRef.current)?.focus()}
       onOpenShellList={() => setIsShellListOpen(true)}
       onPaste={() => void requestPaste()}
       onRequestClose={(resourceId) => setPendingResourceAction({ resourceId, action: "close" })}
@@ -1060,7 +1060,6 @@ function TerminalSurface({
   transportSnapshot,
   onCopy,
   onDetach,
-  onFocus,
   onOpenShellList,
   onPaste,
   onRequestClose,
@@ -1079,7 +1078,6 @@ function TerminalSurface({
   transportSnapshot: SessionShellTransportSnapshot;
   onCopy: () => void;
   onDetach: () => void;
-  onFocus: () => void;
   onOpenShellList: () => void;
   onPaste: () => void;
   onRequestClose: (resourceId: string) => void;
@@ -1088,8 +1086,17 @@ function TerminalSurface({
 }): React.JSX.Element {
   const isAttached = Boolean(selectedResource && activeResourceId === selectedResource.resourceId);
   const isBusy = isStarting || isAttaching;
+  const [isStatisticsOpen, setIsStatisticsOpen] = useState(false);
+  const statisticsTriggerRef = useRef<HTMLButtonElement>(null);
+  const updateStatisticsOpen = useCallback((open: boolean) => {
+    setIsStatisticsOpen(open);
+    if (!open) {
+      window.requestAnimationFrame(() => statisticsTriggerRef.current?.focus());
+    }
+  }, []);
+  useEffect(() => setIsStatisticsOpen(false), [selectedResource?.resourceId]);
   return (
-    <div className="flex h-full min-h-[520px] min-w-0 flex-col bg-background">
+    <div className="flex h-full min-h-[520px] min-w-0 flex-col bg-background" data-terminal-surface>
       <div className="flex flex-col gap-3 bg-surface px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex min-w-0 items-center gap-2">
           {!isWide ? (
@@ -1123,9 +1130,11 @@ function TerminalSurface({
           </div>
         </div>
         <Toolbar aria-label="Terminal actions" className="flex-wrap gap-1">
+          {selectedResource ? (
+            <Button ref={statisticsTriggerRef} size="sm" variant="ghost" onPress={() => setIsStatisticsOpen(true)}>Stats</Button>
+          ) : null}
           {isAttached ? (
             <>
-              <Button size="sm" variant="ghost" onPress={onFocus}>Focus</Button>
               <Button size="sm" variant="ghost" onPress={onCopy}>Copy</Button>
               <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
               <Button isDisabled={isBusy} size="sm" variant="secondary" onPress={onDetach}>Detach</Button>
@@ -1190,14 +1199,30 @@ function TerminalSurface({
         ) : null}
       </div>
 
-      {selectedResource ? (
-        <dl className="grid grid-cols-2 gap-x-5 gap-y-2 bg-surface px-4 py-3 text-[11px] sm:grid-cols-4">
-          <Metric label="Input queued" value={formatBytes(isAttached ? transportSnapshot.queuedInputBytes : selectedResource.metrics.queuedInputBytes)} />
-          <Metric label="Output queued" value={formatBytes(isAttached ? transportSnapshot.queuedOutputBytes : selectedResource.metrics.queuedOutputBytes)} />
-          <Metric label="Bytes in" value={formatCount(isAttached ? transportSnapshot.bytesFromRemote : selectedResource.metrics.bytesToRenderer)} />
-          <Metric label="Bytes out" value={formatCount(isAttached ? transportSnapshot.bytesToRemote : selectedResource.metrics.bytesFromRenderer)} />
-        </dl>
-      ) : null}
+      <Modal.Backdrop isOpen={isStatisticsOpen && selectedResource !== undefined} variant="blur" onOpenChange={updateStatisticsOpen}>
+        <Modal.Container placement="center" size="sm">
+          <Modal.Dialog className="sm:max-w-[420px]">
+            <Modal.CloseTrigger />
+            <Modal.Header>
+              <Modal.Heading>Shell statistics</Modal.Heading>
+              <p className="mt-1 text-sm text-muted">Live, metadata-only counters for the selected managed shell.</p>
+            </Modal.Header>
+            <Modal.Body>
+              {selectedResource ? (
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
+                  <Metric label="Input queued" value={formatBytes(isAttached ? transportSnapshot.queuedInputBytes : selectedResource.metrics.queuedInputBytes)} />
+                  <Metric label="Output queued" value={formatBytes(isAttached ? transportSnapshot.queuedOutputBytes : selectedResource.metrics.queuedOutputBytes)} />
+                  <Metric label="Bytes in" value={formatCount(isAttached ? transportSnapshot.bytesFromRemote : selectedResource.metrics.bytesToRenderer)} />
+                  <Metric label="Bytes out" value={formatCount(isAttached ? transportSnapshot.bytesToRemote : selectedResource.metrics.bytesFromRenderer)} />
+                </dl>
+              ) : null}
+            </Modal.Body>
+            <Modal.Footer>
+              <Button slot="close" size="sm" variant="secondary">Close</Button>
+            </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
     </div>
   );
 }

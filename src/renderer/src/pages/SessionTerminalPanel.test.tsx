@@ -320,8 +320,32 @@ describe("SessionTerminalPanel", () => {
     expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId, action: "attach" });
     expect(await screen.findByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
     expect(shellMocks.focus).toHaveBeenCalled();
-    act(() => transport.emit({ ...attachedSnapshot(), pressure: "high" }));
+    expect(screen.queryByRole("button", { name: "Focus" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stats" })).toBeInTheDocument();
+    expect(screen.queryByText("Input queued")).not.toBeInTheDocument();
+    act(() => transport.emit({
+      ...attachedSnapshot(),
+      pressure: "high",
+      queuedInputBytes: 1_024,
+      queuedOutputBytes: 2_048,
+      bytesFromRemote: "1234",
+      bytesToRemote: "5678",
+    }));
     expect(await screen.findByText("Backpressure")).toBeInTheDocument();
+
+    const statsButton = screen.getByRole("button", { name: "Stats" });
+    await user.click(statsButton);
+    const statistics = await screen.findByRole("dialog", { name: "Shell statistics" });
+    expect(statistics).toBeInTheDocument();
+    expect(screen.getByText("Input queued").closest("div")).toHaveTextContent("1.0 KiB");
+    expect(screen.getByText("Output queued").closest("div")).toHaveTextContent("2.0 KiB");
+    expect(screen.getByText("Bytes in").closest("div")).toHaveTextContent("1,234");
+    expect(screen.getByText("Bytes out").closest("div")).toHaveTextContent("5,678");
+    const closeButtons = screen.getAllByRole("button", { name: "Close" });
+    await user.click(closeButtons.at(-1)!);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Shell statistics" })).not.toBeInTheDocument());
+    await waitFor(() => expect(statsButton).toHaveFocus());
+    expect(screen.getByRole("textbox", { name: "Interactive shell for payments" })).toBeInTheDocument();
 
     vi.mocked(api.actOnSessionShell).mockClear();
     shellMocks.focus.mockClear();
@@ -417,6 +441,38 @@ describe("SessionTerminalPanel", () => {
       "data-terminal-output",
       "first-visible\nfirst-hidden\n",
     );
+  });
+
+  it("keeps metadata statistics available for a selected detached shell", async () => {
+    const base = resource();
+    const detached = resource({
+      state: "detached",
+      metrics: {
+        ...base.metrics,
+        queuedInputBytes: 512,
+        queuedOutputBytes: 1_024,
+        bytesToRenderer: "42",
+        bytesFromRenderer: "17",
+      },
+    });
+    installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([detached]) }),
+      actOnSessionShell: async () => ({ ok: false, error: "Attachment unavailable" }),
+    });
+    const user = userEvent.setup();
+    render(<SessionTerminalPanel route={route} session={session} />);
+    await screen.findByText("Shell 1");
+
+    await user.click(screen.getByText("Shell 1"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Attachment unavailable");
+    expect(screen.queryByText("Input queued")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stats" }));
+
+    const statistics = await screen.findByRole("dialog", { name: "Shell statistics" });
+    expect(statistics).toHaveTextContent("512 B");
+    expect(statistics).toHaveTextContent("1.0 KiB");
+    expect(statistics).toHaveTextContent("42");
+    expect(statistics).toHaveTextContent("17");
   });
 
   it("refreshes and auto-attaches a main-transferred shell without letting an older inventory win", async () => {

@@ -77,6 +77,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     assert.equal(await page.getByRole("dialog", { name: "Server build mismatch" }).count(), 0);
     await page.getByText("#41", { exact: true }).waitFor();
     await page.getByText("Seeded mTLS listener", { exact: true }).waitFor();
+    await assertJobActionColumnSurface(page, 41);
 
     const stateAfterConnect = await readFakeState(electronApplication);
     assert.equal(stateAfterConnect.configFactoryCalls, 1);
@@ -733,6 +734,45 @@ async function verifyM3SessionTerminal(
     await terminal.waitFor();
     await page.getByText("Attached", { exact: true }).waitFor();
     await waitForFakeMethodCount(electronApplication, "shell.resize", initialResizes + 1);
+    assert.equal(await page.getByRole("button", { name: "Focus", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Stats", exact: true }).count(), 1);
+    assert.equal(await page.getByText("Bytes in", { exact: true }).count(), 0, "statistics must not consume terminal layout space");
+
+    const focusedTerminalDom = await terminal.evaluate((host) => {
+      const browser = globalThis as unknown as {
+        document: { activeElement: unknown };
+        getComputedStyle: (element: unknown) => { caretColor: string };
+      };
+      const canvas = host.querySelector("canvas");
+      const hostRect = host.getBoundingClientRect();
+      const canvasRect = canvas?.getBoundingClientRect();
+      const terminalRootRect = host.closest("[data-terminal-state]")?.getBoundingClientRect();
+      const terminalSurfaceRect = host.closest("[data-terminal-surface]")?.getBoundingClientRect();
+      return {
+        active: browser.document.activeElement === host,
+        canvasCount: host.querySelectorAll("canvas").length,
+        canvasLeftInset: canvasRect ? canvasRect.left - hostRect.left : Number.NaN,
+        canvasTopInset: canvasRect ? canvasRect.top - hostRect.top : Number.NaN,
+        caretColor: browser.getComputedStyle(host).caretColor,
+        contentEditable: host.getAttribute("contenteditable"),
+        terminalBottomGap: terminalRootRect && terminalSurfaceRect
+          ? terminalSurfaceRect.bottom - terminalRootRect.bottom
+          : Number.NaN,
+        textareaCount: host.querySelectorAll("textarea").length,
+      };
+    });
+    assert.equal(focusedTerminalDom.active, true, "the interactive shell host must retain keyboard focus");
+    assert.equal(focusedTerminalDom.contentEditable, "true");
+    assert.equal(focusedTerminalDom.canvasCount, 1, "Ghostty must retain its canvas-rendered cursor");
+    assert.ok(Math.abs(focusedTerminalDom.canvasLeftInset) <= 0.5, "the terminal canvas must be flush with the left edge");
+    assert.ok(Math.abs(focusedTerminalDom.canvasTopInset) <= 0.5, "the terminal canvas must be flush beneath the toolbar");
+    assert.ok(Math.abs(focusedTerminalDom.terminalBottomGap) <= 1, "the terminal must fill space previously occupied by inline statistics");
+    assert.equal(focusedTerminalDom.textareaCount, 1, "Ghostty must retain its hidden input surface");
+    assert.match(
+      focusedTerminalDom.caretColor,
+      /^(?:rgba\(0, 0, 0, 0\)|transparent)$/u,
+      "Chromium's native contenteditable caret must be transparent",
+    );
     await waitForNonZeroTerminalMetric(page, "Bytes in");
 
     const mountedManagedShells = page.locator("#session-shells-heading");
@@ -1202,15 +1242,23 @@ async function waitForNonZeroTerminalMetric(
   label: "Bytes in" | "Bytes out",
   timeoutMs = 10_000,
 ): Promise<void> {
-  const metric = page.getByText(label, { exact: true }).locator("..").locator("dd");
+  await page.getByRole("button", { name: "Stats", exact: true }).click();
+  const statistics = page.getByRole("dialog", { name: "Shell statistics", exact: true });
+  await statistics.waitFor();
+  const metric = statistics.getByText(label, { exact: true }).locator("..").locator("dd");
   const deadline = Date.now() + timeoutMs;
   let latest = "missing";
-  while (Date.now() < deadline) {
-    latest = (await metric.textContent().catch(() => null))?.trim() ?? "missing";
-    if (latest !== "missing" && latest !== "0") return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  try {
+    while (Date.now() < deadline) {
+      latest = (await metric.textContent().catch(() => null))?.trim() ?? "missing";
+      if (latest !== "missing" && latest !== "0") return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`${label} did not become non-zero; latest value was ${latest}`);
+  } finally {
+    await statistics.getByRole("button", { name: "Close", exact: true }).last().click();
+    await statistics.waitFor({ state: "detached" });
   }
-  throw new Error(`${label} did not become non-zero; latest value was ${latest}`);
 }
 
 async function verifyM2SessionActivityAndBack(page: Page): Promise<void> {
@@ -1435,6 +1483,57 @@ async function startAndStopMtlsListener(page: Page): Promise<void> {
   }
   await confirmation.getByRole("button", { name: "Stop job #42" }).click();
   await page.getByText("#42", { exact: true }).waitFor({ state: "detached" });
+}
+
+async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<void> {
+  const layout = await page.getByRole("button", { name: `Stop job ${jobId}` }).evaluate((button) => {
+    type ProbeElement = {
+      closest(selector: string): ProbeElement | null;
+      getAttribute(name: string): string | null;
+      getBoundingClientRect(): { bottom: number; height: number; left: number; right: number; top: number; width: number };
+      parentElement: ProbeElement | null;
+      previousElementSibling: ProbeElement | null;
+      querySelector(selector: string): ProbeElement | null;
+    };
+    const browser = globalThis as unknown as {
+      getComputedStyle(element: unknown): { backgroundColor: string };
+    };
+    const actionCell = (button as unknown as ProbeElement).closest('[role="gridcell"]');
+    const row = actionCell?.closest('[role="row"]');
+    const gridRoot = actionCell?.closest('[data-slot="data-grid"]');
+    const card = gridRoot?.parentElement;
+    const actionHeader = gridRoot?.querySelector('[role="columnheader"]:last-child');
+    const adjacentHeader = actionHeader?.previousElementSibling;
+    if (!actionCell || !row || !gridRoot || !card || !actionHeader || !adjacentHeader) return null;
+
+    const actionRect = actionCell.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    return {
+      actionBackground: browser.getComputedStyle(actionCell).backgroundColor,
+      actionHeaderBackground: browser.getComputedStyle(actionHeader).backgroundColor,
+      adjacentHeaderBackground: browser.getComputedStyle(adjacentHeader).backgroundColor,
+      cardBackground: browser.getComputedStyle(card).backgroundColor,
+      pinned: actionCell.getAttribute("data-pinned"),
+      actionWidth: actionRect.width,
+      rightEdgeDelta: Math.abs(actionRect.right - rowRect.right),
+      horizontalCenterDelta: Math.abs(
+        (buttonRect.left + buttonRect.width / 2) - (actionRect.left + actionRect.width / 2),
+      ),
+      verticalCenterDelta: Math.abs(
+        (buttonRect.top + buttonRect.height / 2) - (actionRect.top + actionRect.height / 2),
+      ),
+    };
+  });
+
+  assert.ok(layout, "expected an actions cell and adjacent table cells");
+  assert.equal(layout.actionBackground, layout.cardBackground);
+  assert.equal(layout.actionHeaderBackground, layout.adjacentHeaderBackground);
+  assert.equal(layout.pinned, "end");
+  assert.ok(layout.actionWidth >= 70 && layout.actionWidth <= 88, `unexpected action width ${layout.actionWidth}`);
+  assert.ok(layout.rightEdgeDelta <= 8, `action column missed row edge by ${layout.rightEdgeDelta}px`);
+  assert.ok(layout.horizontalCenterDelta <= 1, `stop action was horizontally off-center by ${layout.horizontalCenterDelta}px`);
+  assert.ok(layout.verticalCenterDelta <= 1, `stop action was vertically off-center by ${layout.verticalCenterDelta}px`);
 }
 
 async function readFakeState(electronApplication: ElectronApplication): Promise<FakeStateSnapshot> {

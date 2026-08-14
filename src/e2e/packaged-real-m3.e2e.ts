@@ -745,14 +745,22 @@ async function waitForNonZeroTerminalMetric(
   page: Page,
   label: "Bytes in" | "Bytes out",
 ): Promise<void> {
-  const metric = page.getByText(label, { exact: true }).locator("..").locator("dd");
+  await page.getByRole("button", { name: "Stats", exact: true }).click();
+  const statistics = page.getByRole("dialog", { name: "Shell statistics", exact: true });
+  await statistics.waitFor();
+  const metric = statistics.getByText(label, { exact: true }).locator("..").locator("dd");
   const deadline = Date.now() + SHELL_WAIT_MILLISECONDS;
-  while (Date.now() < deadline) {
-    const latest = (await metric.textContent().catch(() => null))?.trim();
-    if (latest && latest !== "0") return;
-    await delay(50);
+  try {
+    while (Date.now() < deadline) {
+      const latest = (await metric.textContent().catch(() => null))?.trim();
+      if (latest && latest !== "0") return;
+      await delay(50);
+    }
+    throw new Error(`${label} did not become non-zero`);
+  } finally {
+    await statistics.getByRole("button", { name: "Close", exact: true }).last().click();
+    await statistics.waitFor({ state: "detached" });
   }
-  throw new Error(`${label} did not become non-zero`);
 }
 
 async function listManagedShells(page: Page): Promise<SessionShellResourceList> {
