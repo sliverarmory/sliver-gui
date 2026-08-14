@@ -121,7 +121,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("dialog", { name: "Connect to Sliver" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
     expect(screen.getByText("Finding configurations")).toBeInTheDocument();
     expect(listSavedConfigs).toHaveBeenCalledOnce();
 
@@ -132,12 +132,14 @@ describe("App startup", () => {
     await screen.findByText("No saved configurations");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
 
     window.dispatchEvent(new Event("focus"));
     await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));
-    expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Saved configurations" })).toBeInTheDocument();
   });
 
   it("removes stale opaque config IDs when a catalog refresh fails", async () => {
@@ -242,7 +244,7 @@ describe("App startup", () => {
     expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
     expect(screen.queryByText("Backend degraded")).not.toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
     const header = document.querySelector<HTMLElement>(".app-header");
     if (!header) throw new Error("Application header is missing");
@@ -250,7 +252,7 @@ describe("App startup", () => {
     expect(within(header).queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
     await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
-    expect(await screen.findByRole("dialog", { name: "Connect to Sliver" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
   });
 
   it("shows a mismatched-server notice once per connection epoch and keeps it dismissed on refresh", async () => {
@@ -348,14 +350,15 @@ describe("App startup", () => {
 
     expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
 
     await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
     await user.click(await screen.findByRole("menuitem", { name: "Disconnect" }));
 
     await waitFor(() => expect(api.disconnect).toHaveBeenCalledOnce());
-    expect(await screen.findByRole("heading", { name: "Connect an operator configuration" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+    expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
   });
 });
 
@@ -495,13 +498,13 @@ describe("Sidebar navigation", () => {
       </Sidebar.Provider>,
     );
 
-    const workspace = screen.getByRole("treegrid", { name: "Workspace navigation" });
+    const infrastructure = screen.getByRole("treegrid", { name: "Infrastructure navigation" });
     const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
-    expect(within(workspace).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
-    expect(within(workspace).getByRole("row", { name: "Generate" })).toBeInTheDocument();
-    expect(within(workspace).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
-    expect(within(workspace).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
-    expect(within(workspace).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();
+    expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
+    expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
+    expect(within(infrastructure).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(within(infrastructure).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();
     const sessionsItem = within(interact).getByRole("row", { name: "Sessions" });
     const beaconsItem = within(interact).getByRole("row", { name: "Beacons" });
     expect(sessionsItem).toBeInTheDocument();
@@ -596,7 +599,7 @@ describe("Sidebar navigation", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connect to Sliver" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
     const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
     await user.click(within(interact).getByRole("row", { name: "Sessions" }));
     await user.click(await screen.findByRole("row", { name: /payments/i }));
@@ -672,11 +675,11 @@ describe("Sidebar navigation", () => {
 
       await screen.findByText("mobile-ready");
       await user.click(screen.getByRole("button", { name: "Open mobile navigation" }));
-      const workspace = await screen.findByRole("treegrid", { name: "Workspace navigation" });
+      const infrastructure = await screen.findByRole("treegrid", { name: "Infrastructure navigation" });
       const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
-      expect(within(workspace).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
-      expect(within(workspace).getByRole("row", { name: "Generate" })).toBeInTheDocument();
-      expect(within(workspace).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
+      expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
+      expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
+      expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
       expect(within(interact).getByRole("row", { name: "Sessions" })).toBeInTheDocument();
       await user.click(within(interact).getByRole("row", { name: "Beacons" }));
       expect(onViewChange).toHaveBeenCalledWith("beacons");

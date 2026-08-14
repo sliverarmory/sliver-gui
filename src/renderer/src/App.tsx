@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Card, Chip, Dropdown, Label, Modal, Tooltip, toast } from "@heroui/react";
-import { EmptyState } from "@heroui-pro/react/empty-state";
+import { Button, Chip, Dropdown, Label, Modal, Tooltip, toast } from "@heroui/react";
 import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Heading } from "react-aria-components";
@@ -9,7 +8,6 @@ import {
   faBars,
   faBolt,
   faBoxesStacked,
-  faCircleNodes,
   faComputer,
   faEllipsisVertical,
   faLink,
@@ -36,7 +34,7 @@ import { TargetsPage } from "./pages/TargetsPage";
 
 type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts";
 
-const workspaceNavItems = [
+const infrastructureNavItems = [
   { id: "operations" as const, label: "Jobs & listeners", icon: faSatelliteDish },
   { id: "generate" as const, label: "Generate", icon: faBolt },
   { id: "artifacts" as const, label: "Builds & profiles", icon: faBoxesStacked },
@@ -58,6 +56,7 @@ export function App() {
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
   const [savedConfigError, setSavedConfigError] = useState<string>();
   const savedConfigLoadRef = useRef<Promise<void> | null>(null);
+  const wasConnectedRef = useRef(false);
   const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -211,6 +210,12 @@ export function App() {
   }
 
   const connected = isUsableConnection(snapshot.connection.status);
+
+  useEffect(() => {
+    if (wasConnectedRef.current && !connected) setIsConfigSelectorOpen(true);
+    wasConnectedRef.current = connected;
+  }, [connected]);
+
   const compatibilityKey = compatibilityNoticeKey(snapshot);
   const isCompatibilityNoticeOpen = Boolean(
     connected &&
@@ -302,7 +307,7 @@ export function App() {
               <p className="truncate text-xs text-muted">
                 {connected
                   ? `${snapshot.connection.operator ?? "operator"} · ${snapshot.connection.configName ?? "configuration"}`
-                  : "Import an operator configuration to begin"}
+                  : "Select a saved configuration to begin"}
               </p>
             </div>
           </div>
@@ -314,7 +319,7 @@ export function App() {
               <HeaderAction label="Refresh server state" icon={faArrowsRotate} pending={isRefreshing} onPress={() => void refresh()} />
             ) : (
               <Button size="sm" isPending={isConnecting} onPress={() => setIsConfigSelectorOpen(true)}>
-                <FontAwesomeIcon icon={faLink} /> Connect
+                <FontAwesomeIcon icon={faLink} /> Saved configurations
               </Button>
             )}
           </div>
@@ -353,15 +358,7 @@ export function App() {
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
             </>
-          ) : (
-            <ConnectionLanding
-              snapshot={snapshot}
-              isConnecting={isConnecting}
-              isLoadingSavedConfigs={isLoadingSavedConfigs}
-              savedConfigCount={savedConfigs.length}
-              onOpenConfigSelector={() => setIsConfigSelectorOpen(true)}
-            />
-          )}
+          ) : null}
         </div>
         <SavedConfigSelector
           configs={savedConfigs}
@@ -425,9 +422,9 @@ export function NavigationContent({
       </Sidebar.Header>
       <Sidebar.Content>
         <Sidebar.Group>
-          <Sidebar.GroupLabel>Workspace</Sidebar.GroupLabel>
-          <Sidebar.Menu aria-label="Workspace navigation" showGuideLines={false}>
-            {workspaceNavItems.map((item) => (
+          <Sidebar.GroupLabel>Infrastructure</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label="Infrastructure navigation" showGuideLines={false}>
+            {infrastructureNavItems.map((item) => (
               <Sidebar.MenuItem
                 key={item.id}
                 id={item.id}
@@ -546,50 +543,6 @@ export function ConnectionMenu({
         </Dropdown.Menu>
       </Dropdown.Popover>
     </Dropdown>
-  );
-}
-
-function ConnectionLanding({
-  snapshot,
-  isConnecting,
-  isLoadingSavedConfigs,
-  savedConfigCount,
-  onOpenConfigSelector,
-}: {
-  snapshot: SliverSnapshot;
-  isConnecting: boolean;
-  isLoadingSavedConfigs: boolean;
-  savedConfigCount: number;
-  onOpenConfigSelector: () => void;
-}) {
-  return (
-    <div className="flex min-h-[calc(100vh-10rem)] items-center justify-center py-12">
-      <Card variant="secondary" className="w-full max-w-xl overflow-hidden">
-        <div className="landing-glow" aria-hidden="true" />
-        <Card.Content className="relative p-8 sm:p-10">
-          <EmptyState size="lg">
-            <EmptyState.Media className="landing-icon"><FontAwesomeIcon icon={faCircleNodes} /></EmptyState.Media>
-            <EmptyState.Content>
-              <EmptyState.Title>Connect an operator configuration</EmptyState.Title>
-              <EmptyState.Description>
-                Choose a saved configuration from ~/.sliver-client/configs or import one from another location. Certificates, keys, and tokens remain only in the Electron main process.
-              </EmptyState.Description>
-            </EmptyState.Content>
-            <div className="mt-6 flex justify-center">
-              <Button isPending={isConnecting || isLoadingSavedConfigs} onPress={onOpenConfigSelector}>
-                <FontAwesomeIcon icon={faLink} />
-                {savedConfigCount > 0 ? `Saved configurations (${savedConfigCount})` : "Select configuration"}
-              </Button>
-            </div>
-            {snapshot.connection.error ? (
-              <div className="mt-6 max-w-md rounded-2xl bg-danger-soft px-4 py-3 text-left text-sm text-danger-soft-foreground">
-                {snapshot.connection.error}
-              </div>
-            ) : null}
-          </EmptyState>
-        </Card.Content>
-      </Card>
-    </div>
   );
 }
 

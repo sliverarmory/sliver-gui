@@ -101,6 +101,7 @@
 
   .sidebar.app-sidebar > .brand-block {
     -webkit-app-region: drag;
+    padding-block-start: 3rem;
   }
 
   .brand-mark {
@@ -411,21 +412,6 @@
 
   .status-dot--stopped {
     background: var(--color-muted);
-  }
-
-  .landing-glow {
-    position: absolute;
-    inset: -8rem 10% auto;
-    height: 13rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-accent) 14%, transparent);
-    filter: blur(42px);
-    pointer-events: none;
-  }
-
-  .landing-icon {
-    background: var(--color-accent-soft);
-    color: var(--color-accent-soft-foreground);
   }
 
   @keyframes pulse-status {

@@ -1022,7 +1022,7 @@ async function verifyM3ManagedShellPopout(
     await popout.locator('[data-presentation="dedicated"]').waitFor();
     await popout.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
     assert.equal(
-      await popout.locator('[aria-label="Workspace navigation"]').count(),
+      await popout.locator('[aria-label="Infrastructure navigation"]').count(),
       0,
       "the dedicated managed-shell window must not render the full application sidebar",
     );

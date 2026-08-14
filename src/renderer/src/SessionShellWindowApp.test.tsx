@@ -87,7 +87,7 @@ describe("SessionShellWindowApp", () => {
     expect(panel).toHaveAttribute("data-session-id", session.id);
     expect(panel).toHaveAttribute("data-target-fingerprint", target.fingerprint);
     expect(claimSessionShellWindow).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("Connect to Sliver")).not.toBeInTheDocument();
+    expect(screen.queryByText("Saved configurations")).not.toBeInTheDocument();
   });
 
   it("quarantines the dedicated surface when the exact target disappears", async () => {

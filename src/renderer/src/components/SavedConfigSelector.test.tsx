@@ -78,7 +78,7 @@ describe("SavedConfigSelector", () => {
   it("shows operator and connection metadata without exposing a source path", () => {
     renderSelector();
 
-    expect(screen.getByRole("dialog", { name: "Connect to Sliver" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
     expect(screen.getByText("alice")).toBeInTheDocument();
     expect(screen.getByText("red-team.cfg")).toBeInTheDocument();
     expect(screen.getByText("c2.example.test:31337")).toBeInTheDocument();

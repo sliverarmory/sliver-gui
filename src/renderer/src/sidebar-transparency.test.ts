@@ -37,7 +37,7 @@ describe("sidebar glass styles", () => {
 
   it("keeps the desktop brand header draggable and collapsed disabled items tooltip-capable", () => {
     expect(styles).toMatch(
-      /\.sidebar\.app-sidebar\s*>\s*\.brand-block\s*\{[^}]*-webkit-app-region:\s*drag;/s,
+      /\.sidebar\.app-sidebar\s*>\s*\.brand-block\s*\{[^}]*-webkit-app-region:\s*drag;[^}]*padding-block-start:\s*3rem;/s,
     );
     expect(styles).toMatch(
       /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.sidebar__menu-item\[aria-disabled="true"\]\s*\{[^}]*pointer-events:\s*auto;/s,

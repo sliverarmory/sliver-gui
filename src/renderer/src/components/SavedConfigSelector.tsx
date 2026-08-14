@@ -182,7 +182,7 @@ export function SavedConfigSelector({
               <FontAwesomeIcon aria-hidden icon={faSatelliteDish} className="size-4" />
             </Modal.Icon>
             <div className="min-w-0 flex-1">
-              <Modal.Heading>Connect to Sliver</Modal.Heading>
+              <Modal.Heading>Saved configurations</Modal.Heading>
               <p className="mt-0.5 text-xs font-normal leading-relaxed text-muted">
                 Saved mTLS configurations; WireGuard operator transport is deferred
               </p>
