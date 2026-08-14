@@ -1546,6 +1546,8 @@ async function startAndStopMtlsListener(page: Page): Promise<void> {
 async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<void> {
   const layout = await page.getByRole("button", { name: `Stop job ${jobId}` }).evaluate((button) => {
     type ProbeElement = {
+      clientLeft: number;
+      clientWidth: number;
       closest(selector: string): ProbeElement | null;
       getAttribute(name: string): string | null;
       getBoundingClientRect(): { bottom: number; height: number; left: number; right: number; top: number; width: number };
@@ -1559,14 +1561,20 @@ async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<
     const actionCell = (button as unknown as ProbeElement).closest('[role="gridcell"]');
     const row = actionCell?.closest('[role="row"]');
     const gridRoot = actionCell?.closest('[data-slot="data-grid"]');
+    const scrollContainer = gridRoot?.querySelector('[data-slot="table-scroll-container"]');
     const card = gridRoot?.parentElement;
     const actionHeader = gridRoot?.querySelector('[role="columnheader"]:last-child');
     const adjacentHeader = actionHeader?.previousElementSibling;
-    if (!actionCell || !row || !gridRoot || !card || !actionHeader || !adjacentHeader) return null;
+    if (!actionCell || !row || !gridRoot || !scrollContainer || !card || !actionHeader || !adjacentHeader) return null;
 
     const actionRect = actionCell.getBoundingClientRect();
     const rowRect = row.getBoundingClientRect();
+    const scrollRect = scrollContainer.getBoundingClientRect();
     const buttonRect = button.getBoundingClientRect();
+    const visibleRightEdge = Math.min(
+      rowRect.right,
+      scrollRect.left + scrollContainer.clientLeft + scrollContainer.clientWidth,
+    );
     return {
       actionBackground: browser.getComputedStyle(actionCell).backgroundColor,
       actionHeaderBackground: browser.getComputedStyle(actionHeader).backgroundColor,
@@ -1574,7 +1582,7 @@ async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<
       cardBackground: browser.getComputedStyle(card).backgroundColor,
       pinned: actionCell.getAttribute("data-pinned"),
       actionWidth: actionRect.width,
-      rightEdgeDelta: Math.abs(actionRect.right - rowRect.right),
+      visibleRightEdgeDelta: Math.abs(actionRect.right - visibleRightEdge),
       horizontalCenterDelta: Math.abs(
         (buttonRect.left + buttonRect.width / 2) - (actionRect.left + actionRect.width / 2),
       ),
@@ -1589,7 +1597,10 @@ async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<
   assert.equal(layout.actionHeaderBackground, layout.adjacentHeaderBackground);
   assert.equal(layout.pinned, "end");
   assert.ok(layout.actionWidth >= 70 && layout.actionWidth <= 88, `unexpected action width ${layout.actionWidth}`);
-  assert.ok(layout.rightEdgeDelta <= 8, `action column missed row edge by ${layout.rightEdgeDelta}px`);
+  assert.ok(
+    layout.visibleRightEdgeDelta <= 8,
+    `action column missed visible grid edge by ${layout.visibleRightEdgeDelta}px`,
+  );
   assert.ok(layout.horizontalCenterDelta <= 1, `stop action was horizontally off-center by ${layout.horizontalCenterDelta}px`);
   assert.ok(layout.verticalCenterDelta <= 1, `stop action was vertically off-center by ${layout.verticalCenterDelta}px`);
 }
