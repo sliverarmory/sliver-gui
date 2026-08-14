@@ -198,6 +198,8 @@ jobs:
         run: npm run postdist
 
       - name: Exercise packaged mTLS application
+        env:
+          DEBUG: ${{ runner.os == 'Windows' && 'pw:browser' || '' }}
         run: ${{ matrix.packaged_smoke }}
 
       - name: Upload packaged-smoke diagnostics

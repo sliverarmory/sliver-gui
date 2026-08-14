@@ -13,6 +13,7 @@ import {
   startMtlsFixture,
   verifyFixtureAuthenticationBoundary,
 } from "./mtls-fixture.js";
+import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
 
 test("packaged production app completes current mTLS read and mutation flows", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -24,6 +25,15 @@ test("packaged production app completes current mTLS read and mutation flows", {
   const configPath = join(savedConfigDirectory, "m0-packaged-operator.cfg");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   const fixture = await startMtlsFixture(repositoryRoot);
+  const diagnosticRedactions = [
+    PACKAGED_FIXTURE_TOKEN,
+    PACKAGED_FIXTURE_EVENT_SECRET,
+    fixture.caCertificate,
+    fixture.clientCertificate,
+    fixture.clientPrivateKey,
+    configPath,
+    temporaryRoot,
+  ];
   await verifyFixtureAuthenticationBoundary(fixture);
   await Promise.all([
     mkdir(savedConfigDirectory, { recursive: true }),
@@ -43,22 +53,46 @@ test("packaged production app completes current mTLS read and mutation flows", {
     const cleanEnvironment = Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
-    electronApplication = await electron.launch({
-      executablePath,
-      args: ["--enable-sandbox", `--user-data-dir=${userDataDirectory}`],
-      bypassCSP: false,
-      chromiumSandbox: true,
-      cwd: repositoryRoot,
-      env: {
-        ...cleanEnvironment,
-        HOME: isolatedHome,
-        USERPROFILE: isolatedHome,
-        XDG_CONFIG_HOME: join(isolatedHome, ".config"),
-        // A packaged application must ignore this development-only redirect.
-        ELECTRON_RENDERER_URL: "http://127.0.0.1:65535/",
-      },
-    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
-    const page = await electronApplication.firstWindow();
+    try {
+      electronApplication = await electron.launch({
+        executablePath,
+        args: ["--enable-sandbox", `--user-data-dir=${userDataDirectory}`],
+        bypassCSP: false,
+        chromiumSandbox: true,
+        cwd: repositoryRoot,
+        env: {
+          ...cleanEnvironment,
+          HOME: isolatedHome,
+          USERPROFILE: isolatedHome,
+          XDG_CONFIG_HOME: join(isolatedHome, ".config"),
+          // A packaged application must ignore this development-only redirect.
+          ELECTRON_RENDERER_URL: "http://127.0.0.1:65535/",
+        },
+      } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    } catch (error) {
+      await writePackagedDiagnosticArtifact(
+        artifactDirectory,
+        { phase: "launch", launchError: errorMessage(error) },
+        diagnosticRedactions,
+      ).catch((diagnosticError) => {
+        console.error("Failed to write packaged launch diagnostics", errorMessage(diagnosticError));
+      });
+      throw error;
+    }
+    let page: Page;
+    try {
+      page = await electronApplication.firstWindow();
+    } catch (error) {
+      await writePackagedStartupDiagnostics({
+        artifactDirectory,
+        electronApplication,
+        error,
+        redactions: diagnosticRedactions,
+      }).catch((diagnosticError) => {
+        console.error("Failed to write packaged startup diagnostics", errorMessage(diagnosticError));
+      });
+      throw error;
+    }
     page.on("console", (message) => consoleMessages.push(message.text()));
     page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -82,15 +116,33 @@ test("packaged production app completes current mTLS read and mutation flows", {
     await savedOption.waitFor();
     if ((await savedOption.getAttribute("aria-selected")) !== "true") await savedOption.click();
     await savedConfigsDialog.getByRole("button", { name: /^connect$/i }).click();
-    await savedConfigsDialog.waitFor({ state: "hidden" });
+    try {
+      await savedConfigsDialog.waitFor({ state: "hidden" });
+    } catch (error) {
+      const body = (await page.locator("body").innerText()).slice(0, 4_000);
+      throw new Error(
+        redactDiagnosticText(
+          `Packaged saved configuration did not connect. RPCs=${fixture.state.calls.join(",") || "none"}; ` +
+            `pageErrors=${pageErrors.join(" | ") || "none"}; console=${consoleMessages.join(" | ") || "none"}; ` +
+            `body=${body}`,
+          diagnosticRedactions,
+          12_000,
+        ),
+        { cause: error },
+      );
+    }
     try {
       await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 10_000 });
     } catch (error) {
       const body = (await page.locator("body").innerText()).slice(0, 4_000);
       throw new Error(
-        `Packaged app did not connect. RPCs=${fixture.state.calls.join(",") || "none"}; ` +
-        `pageErrors=${pageErrors.join(" | ") || "none"}; console=${consoleMessages.join(" | ") || "none"}; ` +
-        `body=${body}`,
+        redactDiagnosticText(
+          `Packaged app did not connect. RPCs=${fixture.state.calls.join(",") || "none"}; ` +
+            `pageErrors=${pageErrors.join(" | ") || "none"}; console=${consoleMessages.join(" | ") || "none"}; ` +
+            `body=${body}`,
+          diagnosticRedactions,
+          12_000,
+        ),
         { cause: error },
       );
     }
@@ -149,6 +201,90 @@ test("packaged production app completes current mTLS read and mutation flows", {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function writePackagedStartupDiagnostics({
+  artifactDirectory,
+  electronApplication,
+  error,
+  redactions,
+}: {
+  artifactDirectory: string;
+  electronApplication: ElectronApplication;
+  error: unknown;
+  redactions: string[];
+}): Promise<void> {
+  let applicationState: unknown;
+  try {
+    applicationState = await withTimeout(
+      electronApplication.evaluate(({ app, BrowserWindow }) => ({
+        appPath: app.getAppPath(),
+        appReady: app.isReady(),
+        executablePath: process.execPath,
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        windows: BrowserWindow.getAllWindows().map((window) => ({
+          crashed: window.webContents.isCrashed(),
+          destroyed: window.isDestroyed(),
+          rendererUrl: window.webContents.getURL(),
+        })),
+      })),
+      5_000,
+    );
+  } catch (diagnosticError) {
+    applicationState = { diagnosticError: errorMessage(diagnosticError) };
+  }
+
+  await writePackagedDiagnosticArtifact(
+    artifactDirectory,
+    {
+      applicationState,
+      launchError: errorMessage(error),
+      phase: "first-window",
+    },
+    redactions,
+  );
+}
+
+async function writePackagedDiagnosticArtifact(
+  artifactDirectory: string,
+  payload: Record<string, unknown>,
+  redactions: string[],
+): Promise<void> {
+  const diagnostics = stringifyRedactedDiagnostics(
+    {
+      ...payload,
+      platform: process.platform,
+      architecture: process.arch,
+    },
+    redactions,
+  );
+  await writeFile(
+    join(artifactDirectory, `packaged-startup-${process.platform}-${process.arch}.json`),
+    `${diagnostics}\n`,
+    { mode: 0o600 },
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Diagnostic capture timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
 
 async function startAndStopPackagedListener(page: Page): Promise<void> {
   await page.getByRole("button", { name: "New listener" }).click();

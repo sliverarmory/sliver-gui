@@ -81,7 +81,7 @@
     "jsdom": "30.0.1",
     "motion": "13.0.0",
     "nice-grpc": "2.1.17",
-    "playwright-core": "1.54.2",
+    "playwright-core": "1.62.1",
     "react": "19.2.8",
     "react-aria": "^3.51.0",
     "react-aria-components": "^1.20.0",

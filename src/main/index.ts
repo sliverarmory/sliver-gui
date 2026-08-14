@@ -8,7 +8,12 @@ if (!hasSingleInstanceLock) {
 } else {
   let application: ApplicationHandle | undefined;
   app.on("second-instance", () => application?.createWindow());
-  void startApplication().then((startedApplication) => {
-    application = startedApplication;
-  });
+  void startApplication()
+    .then((startedApplication) => {
+      application = startedApplication;
+    })
+    .catch((error: unknown) => {
+      console.error("Sliver GUI failed to start", error);
+      app.exit(1);
+    });
 }

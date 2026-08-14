@@ -26,6 +26,9 @@ describe("native distribution packaging", () => {
       "run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never",
     );
     expect(workflow).toContain("run: npm run postdist");
+    expect(workflow).toContain(
+      "DEBUG: ${{ runner.os == 'Windows' && 'pw:browser' || '' }}",
+    );
     expect(workflow).not.toContain("npm run dist --");
   });
 });
