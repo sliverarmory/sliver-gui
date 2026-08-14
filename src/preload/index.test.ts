@@ -138,6 +138,7 @@ describe("sandboxed preload bridge", () => {
       "onOperationChanged",
       "onBeaconTasksInvalidated",
       "onSessionShellsChanged",
+      "onReleaseDownloadChanged",
       "openStream",
     ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
@@ -159,6 +160,7 @@ describe("sandboxed preload bridge", () => {
       "onOperationChanged",
       "onBeaconTasksInvalidated",
       "onSessionShellsChanged",
+      "onReleaseDownloadChanged",
       "openStream",
     ].sort());
     expect(exposed).not.toHaveProperty("ipcRenderer");
@@ -189,6 +191,41 @@ describe("sandboxed preload bridge", () => {
     unsubscribe();
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
       IPC.sessionShellsChanged,
+      handler,
+    );
+  });
+
+  it("delivers only validated release-download progress events and removes the listener", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed.onReleaseDownloadChanged(listener);
+    const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(channel).toBe(IPC.releaseDownloadChanged);
+    if (typeof handler !== "function") throw new Error("Expected the release-download event handler");
+    const valid = {
+      status: "progress",
+      downloadId: "8e577480-5dc2-4dde-aa58-23c8f1770627",
+      artifact: "server",
+      os: "linux",
+      arch: "amd64",
+      version: "v1.7.3",
+      fileName: "sliver-server_linux-amd64",
+      receivedBytes: 64,
+      totalBytes: 128,
+    };
+    handler({} as Electron.IpcRendererEvent, valid);
+    handler({} as Electron.IpcRendererEvent, { ...valid, destinationPath: "/Users/private/Downloads" });
+    handler({} as Electron.IpcRendererEvent, { ...valid, receivedBytes: 129 });
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
+      IPC.releaseDownloadChanged,
       handler,
     );
   });

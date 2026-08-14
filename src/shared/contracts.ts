@@ -42,6 +42,7 @@ import type {
   SessionShellResourceList,
   TerminalRuntimeAsset,
 } from "./stream-contracts.js";
+import type { SliverReleaseDownloadEvent } from "./release-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -98,6 +99,7 @@ export const IPC_EVENTS = {
   operationChanged: "sliver:operation:changed",
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
   sessionShellsChanged: "sliver:session-shell:changed",
+  releaseDownloadChanged: "sliver:release-download:changed",
 } as const;
 
 export const IPC = {
@@ -677,6 +679,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
+  onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
 };
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {

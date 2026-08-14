@@ -73,6 +73,7 @@ function installSliverAPI(
     listTargetOperations: vi.fn(failedOperation),
     onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
     onSessionShellsChanged: vi.fn(() => vi.fn()),
+    onReleaseDownloadChanged: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {

@@ -1,0 +1,267 @@
+import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
+import type { SliverReleaseTarget } from "../shared/release-contracts.js";
+
+export type ReleaseMenuCatalog =
+  | { readonly status: "loading" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "ready";
+      readonly version: string;
+      readonly targets: readonly SliverReleaseTarget[];
+    };
+
+export interface ApplicationMenuActions {
+  readonly newWindow: () => void;
+  readonly duplicateConnectedWindow: () => void;
+  readonly openDocumentation: () => void;
+  readonly downloadRelease: (target: SliverReleaseTarget) => void;
+}
+
+export interface ContextMenuActions {
+  readonly copyImageAt: (x: number, y: number) => void;
+  readonly copyText: (text: string) => void;
+  readonly inspectElement: (x: number, y: number) => void;
+  readonly openExternal: (url: string) => void;
+  readonly replaceMisspelling: (text: string) => void;
+}
+
+export function buildApplicationMenuTemplate(
+  platform: NodeJS.Platform,
+  applicationName: string,
+  actions: ApplicationMenuActions,
+  releaseCatalog: ReleaseMenuCatalog = { status: "loading" },
+): MenuItemConstructorOptions[] {
+  return [
+    ...(platform === "darwin"
+      ? [
+          {
+            label: applicationName,
+            submenu: [
+              { role: "about" as const },
+              { type: "separator" as const },
+              { role: "services" as const },
+              { type: "separator" as const },
+              { role: "hide" as const },
+              { role: "hideOthers" as const },
+              { role: "unhide" as const },
+              { type: "separator" as const },
+              { role: "quit" as const },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "New Window",
+          accelerator: "CmdOrCtrl+N",
+          click: actions.newWindow,
+        },
+        {
+          label: "Duplicate Connected Window",
+          accelerator: "CmdOrCtrl+Shift+N",
+          click: actions.duplicateConnectedWindow,
+        },
+        { type: "separator" },
+        platform === "darwin" ? { role: "close" } : { role: "quit" },
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "pasteAndMatchStyle" },
+        { role: "delete" },
+        { type: "separator" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+        { role: "toggleDevTools" },
+      ],
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        ...(platform === "darwin" ? [{ role: "zoom" as const }] : []),
+        { type: "separator" },
+        ...(platform === "darwin"
+          ? [{ role: "front" as const }]
+          : [{ role: "close" as const }]),
+      ],
+    },
+    {
+      label: "Help",
+      role: "help",
+      submenu: [
+        {
+          label: "Sliver Documentation",
+          click: actions.openDocumentation,
+        },
+        { type: "separator" },
+        {
+          label: "Download Server",
+          submenu: buildReleaseDownloadSubmenu("server", releaseCatalog, actions.downloadRelease),
+        },
+        {
+          label: "Download Console Client",
+          submenu: buildReleaseDownloadSubmenu("client", releaseCatalog, actions.downloadRelease),
+        },
+      ],
+    },
+  ];
+}
+
+function buildReleaseDownloadSubmenu(
+  artifact: SliverReleaseTarget["artifact"],
+  catalog: ReleaseMenuCatalog,
+  onDownload: (target: SliverReleaseTarget) => void,
+): MenuItemConstructorOptions[] {
+  if (catalog.status === "loading") return [{ label: "Checking latest release…", enabled: false }];
+  if (catalog.status === "unavailable") return [{ label: "Latest release unavailable", enabled: false }];
+  const targets = catalog.targets.filter((target) => target.artifact === artifact);
+  if (targets.length === 0) return [{ label: "No binaries in latest release", enabled: false }];
+  const byOperatingSystem = new Map<string, SliverReleaseTarget[]>();
+  for (const target of targets) {
+    const existing = byOperatingSystem.get(target.os) ?? [];
+    existing.push(target);
+    byOperatingSystem.set(target.os, existing);
+  }
+  return [
+    { label: `Latest release: ${catalog.version}`, enabled: false },
+    { type: "separator" },
+    ...[...byOperatingSystem.entries()]
+      .sort(([left], [right]) => operatingSystemOrder(left) - operatingSystemOrder(right) || left.localeCompare(right))
+      .map(([os, osTargets]) => ({
+        label: operatingSystemLabel(os),
+        submenu: osTargets
+          .sort((left, right) => architectureOrder(left.arch) - architectureOrder(right.arch) || left.arch.localeCompare(right.arch))
+          .map((target) => ({
+            label: architectureLabel(target.arch),
+            click: () => onDownload(target),
+          })),
+      })),
+  ];
+}
+
+function operatingSystemLabel(value: string): string {
+  if (value === "darwin" || value === "macos") return "macOS";
+  if (value === "linux") return "Linux";
+  if (value === "windows") return "Windows";
+  if (value === "freebsd") return "FreeBSD";
+  return value;
+}
+
+function operatingSystemOrder(value: string): number {
+  return ["darwin", "macos", "linux", "windows", "freebsd"].indexOf(value) + 1 || 100;
+}
+
+function architectureLabel(value: string): string {
+  if (value === "amd64") return "x86_64 (amd64)";
+  if (value === "386") return "x86 (386)";
+  return value;
+}
+
+function architectureOrder(value: string): number {
+  return ["amd64", "arm64", "386"].indexOf(value) + 1 || 100;
+}
+
+export function buildContextMenuTemplate(
+  params: ContextMenuParams,
+  actions: ContextMenuActions,
+): MenuItemConstructorOptions[] {
+  const groups: MenuItemConstructorOptions[][] = [];
+
+  if (params.isEditable && params.misspelledWord) {
+    const suggestions = params.dictionarySuggestions.slice(0, 5);
+    groups.push(suggestions.length > 0
+      ? suggestions.map((suggestion) => ({
+          label: suggestion,
+          click: () => actions.replaceMisspelling(suggestion),
+        }))
+      : [{ label: "No Spelling Suggestions", enabled: false }]);
+  }
+
+  if (params.isEditable) {
+    groups.push([
+      { role: "undo", enabled: params.editFlags.canUndo },
+      { role: "redo", enabled: params.editFlags.canRedo },
+      { type: "separator" },
+      { role: "cut", enabled: params.editFlags.canCut },
+      { role: "copy", enabled: params.editFlags.canCopy },
+      { role: "paste", enabled: params.editFlags.canPaste },
+      { role: "pasteAndMatchStyle", enabled: params.editFlags.canPaste },
+      { role: "delete", enabled: params.editFlags.canDelete },
+      { type: "separator" },
+      { role: "selectAll", enabled: params.editFlags.canSelectAll },
+    ]);
+  } else if (params.selectionText.length > 0) {
+    groups.push([
+      { role: "copy", enabled: params.editFlags.canCopy },
+      { role: "selectAll", enabled: params.editFlags.canSelectAll },
+    ]);
+  } else {
+    groups.push([{ role: "selectAll", enabled: params.editFlags.canSelectAll }]);
+  }
+
+  if (params.linkURL) {
+    groups.push([
+      ...(isSafeExternalWebUrl(params.linkURL)
+        ? [{ label: "Open Link in Browser", click: () => actions.openExternal(params.linkURL) }]
+        : []),
+      { label: "Copy Link Address", click: () => actions.copyText(params.linkURL) },
+    ]);
+  }
+
+  if (params.mediaType === "image" && params.hasImageContents) {
+    groups.push([{
+      label: "Copy Image",
+      click: () => actions.copyImageAt(params.x, params.y),
+    }]);
+  }
+
+  groups.push([{
+    label: "Inspect Element",
+    click: () => actions.inspectElement(params.x, params.y),
+  }]);
+
+  return joinMenuGroups(groups);
+}
+
+export function isSafeExternalWebUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") &&
+      url.username === "" &&
+      url.password === "";
+  } catch {
+    return false;
+  }
+}
+
+function joinMenuGroups(groups: readonly MenuItemConstructorOptions[][]): MenuItemConstructorOptions[] {
+  const template: MenuItemConstructorOptions[] = [];
+  for (const group of groups) {
+    if (group.length === 0) continue;
+    if (template.length > 0) template.push({ type: "separator" });
+    template.push(...group);
+  }
+  return template;
+}

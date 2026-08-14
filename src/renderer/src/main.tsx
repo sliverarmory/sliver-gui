@@ -6,6 +6,7 @@ import "@fortawesome/fontawesome-svg-core/styles.css";
 import "./styles.css";
 import { App } from "./App";
 import { SessionShellWindowApp } from "./SessionShellWindowApp";
+import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 
 config.autoAddCss = false;
 
@@ -17,6 +18,7 @@ const isManagedShellWindow = new URLSearchParams(window.location.search).get("su
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     {isManagedShellWindow ? <SessionShellWindowApp /> : <App />}
+    <ReleaseDownloadToasts />
     <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

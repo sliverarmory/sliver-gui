@@ -6,7 +6,8 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
-import { IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import { IPC, IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import type { SliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import type { SessionShellResourceList } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
@@ -61,6 +62,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 
     await assertRendererSecurity(electronApplication, page);
     await page.getByRole("dialog", { name: /connect to sliver/i }).waitFor();
+    await verifyReleaseDownloadToast(electronApplication, page);
 
     // Replace the native chooser from outside the app immediately before the
     // production renderer invokes it. No production switch or debug IPC is
@@ -146,6 +148,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onOperationChanged",
     "onBeaconTasksInvalidated",
     "onSessionShellsChanged",
+    "onReleaseDownloadChanged",
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
@@ -198,6 +201,56 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     webSecurity: true,
     webviewTag: false,
   });
+}
+
+async function verifyReleaseDownloadToast(
+  electronApplication: ElectronApplication,
+  page: Page,
+): Promise<void> {
+  const base = {
+    downloadId: "8e577480-5dc2-4dde-aa58-23c8f1770627",
+    artifact: "server",
+    os: "linux",
+    arch: "amd64",
+  } as const;
+  await sendReleaseDownloadEvent(electronApplication, { ...base, status: "started" });
+  await page.getByText("Downloading Sliver server · Linux / amd64", { exact: true }).waitFor();
+  const progress = page.getByRole("progressbar", { name: /Downloading Sliver server/ });
+  await progress.waitFor();
+  assert.equal(await progress.getAttribute("aria-valuenow"), null);
+
+  await sendReleaseDownloadEvent(electronApplication, {
+    ...base,
+    status: "progress",
+    version: "v1.7.3",
+    fileName: "sliver-server_linux-amd64",
+    receivedBytes: 25 * 1024 * 1024,
+    totalBytes: 100 * 1024 * 1024,
+  });
+  await page.getByText("25% · 25.0 MB / 100.0 MB", { exact: true }).waitFor();
+  assert.equal(await progress.getAttribute("aria-valuenow"), "25");
+
+  await sendReleaseDownloadEvent(electronApplication, {
+    ...base,
+    status: "completed",
+    version: "v1.7.3",
+    fileName: "sliver-server_linux-amd64",
+    receivedBytes: 100 * 1024 * 1024,
+    totalBytes: 100 * 1024 * 1024,
+  });
+  await page.getByText("Download complete", { exact: true }).waitFor();
+  await page.getByText("sliver-server_linux-amd64 was saved to Downloads.", { exact: true }).waitFor();
+}
+
+async function sendReleaseDownloadEvent(
+  electronApplication: ElectronApplication,
+  event: SliverReleaseDownloadEvent,
+): Promise<void> {
+  await electronApplication.evaluate(({ BrowserWindow }, input) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) throw new Error("Expected an application window");
+    window.webContents.send(input.channel, input.event);
+  }, { channel: IPC.releaseDownloadChanged, event });
 }
 
 async function verifyM1TargetsAndOperations(

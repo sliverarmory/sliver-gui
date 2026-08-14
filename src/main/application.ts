@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, dialog, Menu, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, Menu, net, session, shell } from "electron";
 
 import {
   IPC,
@@ -10,6 +10,15 @@ import {
   type WindowLaunchContext,
 } from "../shared/contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
+import type {
+  SliverReleaseDownloadEvent,
+  SliverReleaseTarget,
+} from "../shared/release-contracts.js";
+import {
+  buildApplicationMenuTemplate,
+  buildContextMenuTemplate,
+  type ReleaseMenuCatalog,
+} from "./application-menus.js";
 import { ConnectionRegistry } from "./connection-registry.js";
 import {
   registerIpcHandlers,
@@ -17,6 +26,7 @@ import {
   type TrustedWindowIdentity,
 } from "./ipc.js";
 import { configureSessionSecurity, hardenWindow } from "./security.js";
+import { SliverReleaseDownloader } from "./sliver-release-download.js";
 import { mainWindowOptions, sessionShellWindowOptions } from "./window-options.js";
 
 export interface StartApplicationOptions {
@@ -64,6 +74,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
   const pendingWindowCleanup = new Set<Promise<void>>();
+  let releaseCatalog: ReleaseMenuCatalog = { status: "loading" };
+  let releaseDownloader: SliverReleaseDownloader | undefined;
   let stopping = false;
 
   function loadRenderer(window: BrowserWindow, surface?: "managed-shells"): void {
@@ -89,6 +101,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (inheritFromContentsId !== undefined) registry.inheritConnection(inheritFromContentsId, contentsId);
 
     hardenWindow(window, rendererUrl);
+    installContextMenu(window);
     window.once("ready-to-show", () => window.show());
     let completedInitialLoad = false;
     window.webContents.once("did-finish-load", () => {
@@ -340,56 +353,54 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function installMenu(): void {
-    const template: Electron.MenuItemConstructorOptions[] = [
-      ...(process.platform === "darwin"
-        ? [
-            {
-              label: app.name,
-              submenu: [
-                { role: "about" as const },
-                { type: "separator" as const },
-                { role: "services" as const },
-                { type: "separator" as const },
-                { role: "hide" as const },
-                { role: "hideOthers" as const },
-                { role: "unhide" as const },
-                { type: "separator" as const },
-                { role: "quit" as const },
-              ],
-            },
-          ]
-        : []),
-      {
-        label: "File",
-        submenu: [
-          {
-            label: "New Window",
-            accelerator: "CmdOrCtrl+N",
-            click: () => createWindow(),
-          },
-          {
-            label: "Duplicate Connected Window",
-            accelerator: "CmdOrCtrl+Shift+N",
-            click: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
-          },
-          { type: "separator" },
-          process.platform === "darwin" ? { role: "close" } : { role: "quit" },
-        ],
-      },
-      { role: "editMenu" },
-      { role: "viewMenu" },
-      { role: "windowMenu" },
-      {
-        role: "help",
-        submenu: [
-          {
-            label: "Sliver Documentation",
-            click: () => void shell.openExternal("https://sliver.sh/docs"),
-          },
-        ],
-      },
-    ];
+    const template = buildApplicationMenuTemplate(process.platform, app.name, {
+      newWindow: () => createWindow(),
+      duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
+      openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
+      downloadRelease: (target) => startReleaseDownload(target),
+    }, releaseCatalog);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
+
+  function startReleaseDownload(target: SliverReleaseTarget): void {
+    const window = BrowserWindow.getFocusedWindow();
+    if (!window || window.isDestroyed() || !releaseDownloader) return;
+    void releaseDownloader.download(target, (event) => sendReleaseDownloadEvent(window, event));
+  }
+
+  function sendReleaseDownloadEvent(window: BrowserWindow, event: SliverReleaseDownloadEvent): void {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return;
+    window.webContents.send(IPC.releaseDownloadChanged, event);
+  }
+
+  async function refreshReleaseMenu(): Promise<void> {
+    try {
+      const catalog = await releaseDownloader?.latestRelease();
+      if (!catalog || stopping) return;
+      releaseCatalog = {
+        status: "ready",
+        version: catalog.version,
+        targets: catalog.assets.map(({ artifact, os, arch }) => ({ artifact, os, arch })),
+      };
+    } catch {
+      if (stopping) return;
+      releaseCatalog = { status: "unavailable" };
+    }
+    installMenu();
+  }
+
+  function installContextMenu(window: BrowserWindow): void {
+    window.webContents.on("context-menu", (_event, params) => {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) return;
+      const template = buildContextMenuTemplate(params, {
+        copyImageAt: (x, y) => window.webContents.copyImageAt(x, y),
+        copyText: (text) => clipboard.writeText(text),
+        inspectElement: (x, y) => window.webContents.inspectElement(x, y),
+        openExternal: (url) => void shell.openExternal(url),
+        replaceMisspelling: (text) => window.webContents.replaceMisspelling(text),
+      });
+      Menu.buildFromTemplate(template).popup({ window });
+    });
   }
 
   const onActivate = (): void => {
@@ -400,6 +411,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   };
 
   await app.whenReady();
+  releaseDownloader = new SliverReleaseDownloader({
+    downloadsDirectory: app.getPath("downloads"),
+    fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+  });
   configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
   registerIpcHandlers(
     registry,
@@ -411,6 +426,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     },
   );
   installMenu();
+  void refreshReleaseMenu();
   app.on("activate", onActivate);
   app.on("window-all-closed", onWindowAllClosed);
   createWindow();
@@ -419,6 +435,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     createWindow,
     async stop(): Promise<void> {
       stopping = true;
+      releaseDownloader?.stop();
       app.removeListener("activate", onActivate);
       app.removeListener("window-all-closed", onWindowAllClosed);
       unregisterIpcHandlers();
