@@ -50,8 +50,9 @@
     "verify:packaged-content": "node ./scripts/verifyReleaseContent.mjs --packaged",
     "prepackage": "npm run build:licenses",
     "package": "npm run build && npm run verify:release-content && electron-builder --dir && npm run verify:packaged-content",
-    "predist": "npm run build:licenses",
-    "dist": "npm run build && npm run verify:release-content && electron-builder && npm run verify:packaged-content"
+    "predist": "npm run build:licenses && npm run build && npm run verify:release-content",
+    "dist": "electron-builder",
+    "postdist": "npm run verify:packaged-content"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",
