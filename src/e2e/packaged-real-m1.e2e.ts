@@ -391,12 +391,13 @@ function spawnOwnedImplant(path: string): ChildProcess {
 }
 
 async function connectSavedConfig(page: Page): Promise<void> {
-  const dialog = page.getByRole("dialog", { name: /connect to sliver/i });
+  const dialog = page.getByRole("dialog", { name: /saved configurations/i });
   await dialog.waitFor();
   const option = dialog.getByRole("option", { name: /m1-real-operator/i });
   await option.waitFor();
   if ((await option.getAttribute("aria-selected")) !== "true") await option.click();
   await dialog.getByRole("button", { name: /^connect$/i }).click();
+  await dialog.waitFor({ state: "hidden" });
   await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 30_000 });
   const mismatch = page.getByRole("dialog", { name: "Server build mismatch" });
   if (await mismatch.count()) {

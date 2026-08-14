@@ -110,12 +110,13 @@ test(
       page.on("pageerror", (error) => pageErrors.push(error.message));
 
       await assertPackagedRendererSecurity(electronApplication, page, executablePath);
-      const connectDialog = page.getByRole("dialog", { name: /connect to sliver/i });
-      await connectDialog.waitFor();
-      const savedOption = connectDialog.getByRole("option", { name: /m0-packaged-real-server/i });
+      const savedConfigsDialog = page.getByRole("dialog", { name: /saved configurations/i });
+      await savedConfigsDialog.waitFor();
+      const savedOption = savedConfigsDialog.getByRole("option", { name: /m0-packaged-real-server/i });
       await savedOption.waitFor();
       if ((await savedOption.getAttribute("aria-selected")) !== "true") await savedOption.click();
-      await connectDialog.getByRole("button", { name: /^connect$/i }).click();
+      await savedConfigsDialog.getByRole("button", { name: /^connect$/i }).click();
+      await savedConfigsDialog.waitFor({ state: "hidden" });
 
       try {
         await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 30_000 });

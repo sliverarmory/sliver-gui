@@ -76,12 +76,13 @@ test("packaged production app completes current mTLS read and mutation flows", {
     assert.match(productionState.rendererUrl ?? "", /^file:/u);
     assert.equal(await realpath(productionState.executablePath), await realpath(executablePath));
 
-    const connectDialog = page.getByRole("dialog", { name: /connect to sliver/i });
-    await connectDialog.waitFor();
-    const savedOption = connectDialog.getByRole("option", { name: /m0-packaged-operator/i });
+    const savedConfigsDialog = page.getByRole("dialog", { name: /saved configurations/i });
+    await savedConfigsDialog.waitFor();
+    const savedOption = savedConfigsDialog.getByRole("option", { name: /m0-packaged-operator/i });
     await savedOption.waitFor();
     if ((await savedOption.getAttribute("aria-selected")) !== "true") await savedOption.click();
-    await connectDialog.getByRole("button", { name: /^connect$/i }).click();
+    await savedConfigsDialog.getByRole("button", { name: /^connect$/i }).click();
+    await savedConfigsDialog.waitFor({ state: "hidden" });
     try {
       await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 10_000 });
     } catch (error) {

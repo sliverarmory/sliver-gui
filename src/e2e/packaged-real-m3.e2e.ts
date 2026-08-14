@@ -879,12 +879,13 @@ async function rendererSnapshot(page: Page): Promise<SliverSnapshot> {
 }
 
 async function connectSavedConfig(page: Page): Promise<void> {
-  const dialog = page.getByRole("dialog", { name: /connect to sliver/iu });
+  const dialog = page.getByRole("dialog", { name: /saved configurations/iu });
   await dialog.waitFor();
   const option = dialog.getByRole("option", { name: /m3-real-operator/iu });
   await option.waitFor();
   if ((await option.getAttribute("aria-selected")) !== "true") await option.click();
   await dialog.getByRole("button", { name: /^connect$/iu }).click();
+  await dialog.waitFor({ state: "hidden" });
   await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 30_000 });
   const mismatch = page.getByRole("dialog", { name: "Server build mismatch" });
   let mismatchVisible = false;
