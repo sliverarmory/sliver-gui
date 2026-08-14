@@ -116,6 +116,14 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 22%, transparent);
   }
 
+  .brand-mark__image {
+    width: 1.5rem;
+    height: 1.5rem;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+  }
+
   .connection-summary {
     display: flex;
     min-height: 2.75rem;

@@ -204,6 +204,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     deleteProfile: vi.fn(failed),
     disconnect: vi.fn(failed),
     downloadBuild: vi.fn(failed),
+    exitApp: vi.fn(failed),
     executeStopPlan: vi.fn(failed),
     executeTargetActionPlan: vi.fn(failed),
     executeSessionDestructiveActionPlan: vi.fn(failed),

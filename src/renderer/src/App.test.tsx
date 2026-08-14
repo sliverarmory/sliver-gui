@@ -59,6 +59,7 @@ function installSliverAPI(
     deleteProfile: vi.fn(failedOperation),
     disconnect: vi.fn(failedOperation),
     downloadBuild: vi.fn(failedOperation),
+    exitApp: vi.fn(failedOperation),
     generate: vi.fn(failedOperation),
     generateFromProfile: vi.fn(failedOperation),
     getBeaconTask: vi.fn(failedOperation),
@@ -363,7 +364,7 @@ describe("App startup", () => {
 });
 
 describe("Current server menu", () => {
-  it("opens from the server summary and owns switch-config and disconnect actions", async () => {
+  it("opens from the server summary and owns switch-config, disconnect, and exit actions", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -375,11 +376,13 @@ describe("Current server menu", () => {
     };
     const onSwitchConfig = vi.fn();
     const onDisconnect = vi.fn();
+    const onExitApp = vi.fn();
 
     render(
       <ConnectionMenu
         snapshot={snapshot}
         onDisconnect={onDisconnect}
+        onExitApp={onExitApp}
         onSwitchConfig={onSwitchConfig}
       />,
     );
@@ -388,15 +391,26 @@ describe("Current server menu", () => {
     expect(trigger.querySelectorAll('[data-sidebar="label"]')).toHaveLength(2);
     expect(screen.queryByRole("menuitem", { name: "Switch config" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Disconnect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Exit app" })).not.toBeInTheDocument();
 
     await user.click(trigger);
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Switch config",
+      "Disconnect",
+      "Exit app",
+    ]);
     await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
     expect(onSwitchConfig).toHaveBeenCalledOnce();
     expect(onDisconnect).not.toHaveBeenCalled();
+    expect(onExitApp).not.toHaveBeenCalled();
 
     await user.click(trigger);
     await user.click(await screen.findByRole("menuitem", { name: "Disconnect" }));
     expect(onDisconnect).toHaveBeenCalledOnce();
+
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "Exit app" }));
+    expect(onExitApp).toHaveBeenCalledOnce();
   });
 
   it("leaves the offline summary noninteractive", () => {
@@ -404,6 +418,7 @@ describe("Current server menu", () => {
       <ConnectionMenu
         snapshot={disconnectedSnapshot()}
         onDisconnect={vi.fn()}
+        onExitApp={vi.fn()}
         onSwitchConfig={vi.fn()}
       />,
     );
@@ -423,6 +438,7 @@ describe("Sidebar navigation", () => {
             snapshot={disconnectedSnapshot()}
             view="operations"
             onDisconnect={vi.fn()}
+            onExitApp={vi.fn()}
             onSwitchConfig={vi.fn()}
             onViewChange={onViewChange}
           />
@@ -431,6 +447,16 @@ describe("Sidebar navigation", () => {
     );
     return onViewChange;
   }
+
+  it("uses the approved Sliver creature glyph for the sidebar brand mark", () => {
+    renderNavigation(true);
+
+    const image = document.querySelector<HTMLImageElement>(".brand-mark__image");
+    expect(image).not.toBeNull();
+    expect(image).toHaveAttribute("src", expect.stringContaining("sliver-sidebar.png"));
+    expect(image).toHaveAttribute("alt", "");
+    expect(image).toHaveAttribute("draggable", "false");
+  });
 
   it("shows labels as tooltips only while collapsed and keeps disabled items inactive", async () => {
     const user = userEvent.setup();
@@ -491,6 +517,7 @@ describe("Sidebar navigation", () => {
             snapshot={snapshot}
             view="operations"
             onDisconnect={vi.fn()}
+            onExitApp={vi.fn()}
             onSwitchConfig={vi.fn()}
             onViewChange={onViewChange}
           />
@@ -666,6 +693,7 @@ describe("Sidebar navigation", () => {
               snapshot={snapshot}
               view="operations"
               onDisconnect={vi.fn()}
+              onExitApp={vi.fn()}
               onSwitchConfig={vi.fn()}
               onViewChange={onViewChange}
             />
@@ -708,6 +736,7 @@ describe("Sidebar navigation", () => {
             snapshot={snapshot}
             view="operations"
             onDisconnect={vi.fn()}
+            onExitApp={vi.fn()}
             onSwitchConfig={onSwitchConfig}
             onViewChange={vi.fn()}
           />

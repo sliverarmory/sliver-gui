@@ -94,6 +94,15 @@ describe("trusted Electron IPC boundary", () => {
     expect(snapshot).toHaveBeenCalledWith(42);
   });
 
+  it("allows a trusted renderer to request application exit", () => {
+    const exitApplication = vi.fn();
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL, undefined, exitApplication);
+    const { event } = invokeEvent("http://127.0.0.1:5173/", 42);
+
+    expect(electronMocks.handlers.get(IPC.exitApp)?.(event)).toEqual({ ok: true });
+    expect(exitApplication).toHaveBeenCalledOnce();
+  });
+
   it("rejects origins that merely prefix-match the configured renderer", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent("http://127.0.0.1:5173.evil.test/", 42);
@@ -177,6 +186,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.disconnect,
     IPC.getSnapshot,
     IPC.refresh,
+    IPC.exitApp,
     IPC.chooseCertificatePair,
     IPC.prepareStopAllJobs,
   ] as const)("rejects unexpected arguments for %s", (channel) => {

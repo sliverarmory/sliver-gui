@@ -54,6 +54,7 @@ export const IPC_INVOKE = {
   getSnapshot: "sliver:snapshot:get",
   refresh: "sliver:snapshot:refresh",
   openWindow: "sliver:window:open",
+  exitApp: "sliver:application:exit",
   openSessionShellWindow: "sliver:window:open-session-shells",
   claimSessionShellWindow: "sliver:window:claim-session-shells",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
@@ -518,6 +519,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   };
   [IPC.openWindow]: {
     args: [input: OpenWindowInput];
+    result: OperationResult;
+  };
+  [IPC.exitApp]: {
+    args: [];
     result: OperationResult;
   };
   [IPC.openSessionShellWindow]: {

@@ -14,6 +14,7 @@ export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly duplicateConnectedWindow: () => void;
   readonly openDocumentation: () => void;
+  readonly showAboutPanel: () => void;
   readonly downloadRelease: (target: SliverReleaseTarget) => void;
 }
 
@@ -37,7 +38,7 @@ export function buildApplicationMenuTemplate(
           {
             label: applicationName,
             submenu: [
-              { role: "about" as const },
+              { label: `About ${applicationName}`, role: "about" as const },
               { type: "separator" as const },
               { role: "services" as const },
               { type: "separator" as const },
@@ -124,6 +125,15 @@ export function buildApplicationMenuTemplate(
           label: "Download Console Client",
           submenu: buildReleaseDownloadSubmenu("client", releaseCatalog, actions.downloadRelease),
         },
+        ...(platform === "darwin"
+          ? []
+          : [
+              { type: "separator" as const },
+              {
+                label: `About ${applicationName}`,
+                click: actions.showAboutPanel,
+              },
+            ]),
       ],
     },
   ];

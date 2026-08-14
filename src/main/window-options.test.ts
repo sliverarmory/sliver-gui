@@ -25,9 +25,9 @@ describe("main window transparency", () => {
   );
 
   it("uses native glass materials on macOS and Windows", () => {
-    const mac = mainWindowOptions("/preload.js", "darwin");
-    const windows = mainWindowOptions("/preload.js", "win32");
-    const linux = mainWindowOptions("/preload.js", "linux");
+    const mac = mainWindowOptions("/preload.js", "darwin", "/brand.png");
+    const windows = mainWindowOptions("/preload.js", "win32", "/brand.png");
+    const linux = mainWindowOptions("/preload.js", "linux", "/brand.png");
 
     expect(mac).toMatchObject({
       titleBarStyle: "hiddenInset",
@@ -37,10 +37,12 @@ describe("main window transparency", () => {
     expect(mac).not.toHaveProperty("frame");
     expect(mac).not.toHaveProperty("titleBarOverlay");
     expect(mac).not.toHaveProperty("backgroundMaterial");
+    expect(mac).not.toHaveProperty("icon");
 
     expect(windows).toMatchObject({
       frame: false,
       backgroundMaterial: "acrylic",
+      icon: "/brand.png",
       titleBarStyle: "hidden",
       titleBarOverlay: {
         color: "#00000000",
@@ -52,6 +54,7 @@ describe("main window transparency", () => {
 
     expect(linux).toMatchObject({
       titleBarStyle: "hidden",
+      icon: "/brand.png",
       titleBarOverlay: {
         color: "#00000000",
         height: 72,
@@ -64,7 +67,7 @@ describe("main window transparency", () => {
 
 describe("managed-shell window", () => {
   it("uses focused native chrome while preserving the hardened renderer preferences", () => {
-    const options = sessionShellWindowOptions("/absolute/preload.js");
+    const options = sessionShellWindowOptions("/absolute/preload.js", "linux", "/brand.png");
 
     expect(options).toMatchObject({
       title: "Managed Shells",
@@ -73,6 +76,7 @@ describe("managed-shell window", () => {
       minWidth: 720,
       minHeight: 540,
       show: false,
+      icon: "/brand.png",
       webPreferences: {
         preload: "/absolute/preload.js",
         nodeIntegration: false,

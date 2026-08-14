@@ -16,6 +16,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
     };
     const template = buildApplicationMenuTemplate("darwin", "Sliver GUI", actions);
@@ -28,6 +29,10 @@ describe("application menu templates", () => {
       "Window",
       "Help",
     ]);
+    expect(menuItems(template, "Sliver GUI")[0]).toMatchObject({
+      label: "About Sliver GUI",
+      role: "about",
+    });
     expect(menuRoles(template, "Edit")).toEqual([
       "undo",
       "redo",
@@ -52,16 +57,21 @@ describe("application menu templates", () => {
   });
 
   it("uses the conventional non-macOS close and quit placements", () => {
+    const showAboutPanel = vi.fn();
     const template = buildApplicationMenuTemplate("win32", "Sliver GUI", {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openDocumentation: vi.fn(),
+      showAboutPanel,
       downloadRelease: vi.fn(),
     });
 
     expect(template.map((item) => item.label)).toEqual(["File", "Edit", "View", "Window", "Help"]);
     expect(menuRoles(template, "File")).toContain("quit");
     expect(menuRoles(template, "Window")).toContain("close");
+    const about = menuItems(template, "Help").find((item) => item.label === "About Sliver GUI");
+    clickItem(about);
+    expect(showAboutPanel).toHaveBeenCalledOnce();
   });
 
   it("builds server and console-client submenus from every latest-release target", () => {
@@ -70,6 +80,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
       downloadRelease,
     }, {
       status: "ready",
@@ -107,6 +118,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
     };
     const loading = menuItems(buildApplicationMenuTemplate("linux", "Sliver GUI", actions), "Help");

@@ -128,6 +128,18 @@ for (const requiredPath of requiredBuilderPaths) {
     throw new Error(`Production package allowlist is missing: ${requiredPath}`);
   }
 }
+for (const requiredSetting of [
+  "from: build/about-icon.png",
+  "to: sliver-desktop.png",
+]) {
+  if (!builderConfiguration.includes(requiredSetting)) {
+    throw new Error(`Production package branding is missing: ${requiredSetting}`);
+  }
+}
+const configuredPlatformIcons = builderConfiguration.match(/^\s+icon: build\/icon\.png$/gmu) ?? [];
+if (configuredPlatformIcons.length !== 3) {
+  throw new Error("Production package branding must configure the app icon for macOS, Windows, and Linux");
+}
 for (const forbiddenPath of [".e2e-dist", "src/e2e", "tsconfig.e2e", "artifacts/e2e"]) {
   if (builderConfiguration.includes(forbiddenPath)) {
     throw new Error(`Production package allowlist references test-only content: ${forbiddenPath}`);
@@ -139,8 +151,20 @@ if (verifyPackaged) {
     ? [await exactPackagedArchive(exactArchiveArgument)]
     : [await newestPackagedArchive()];
 
-  for (const archive of archives) verifyArchive(archive);
+  for (const archive of archives) {
+    verifyArchive(archive);
+    await verifyExternalBrandAsset(archive);
+  }
   console.log(`Verified ${archives.length} packaged app.asar archive(s) contain no E2E or secret fixtures`);
+}
+
+async function verifyExternalBrandAsset(archivePath) {
+  const expected = await readFile(join(rootDir, "build/about-icon.png"));
+  const packagedPath = join(dirname(archivePath), "sliver-desktop.png");
+  const packaged = await readFile(packagedPath).catch(() => undefined);
+  if (!packaged || sha256(packaged) !== sha256(expected)) {
+    throw new Error(`Packaged application is missing the approved About/window icon: ${packagedPath}`);
+  }
 }
 
 function argumentValue(name) {

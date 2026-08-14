@@ -13,15 +13,16 @@ import {
   faLink,
   faLinkSlash,
   faPlus,
+  faPowerOff,
   faSatellite,
   faSatelliteDish,
-  faShieldHalved,
   faTriangleExclamation,
   faWindowRestore,
 } from "@fortawesome/free-solid-svg-icons";
 import { disconnectedSnapshot } from "../../shared/contracts";
 import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
 import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
+import sliverSidebarIcon from "./assets/sliver-sidebar.png";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
@@ -280,6 +281,7 @@ export function App() {
           snapshot={snapshot}
           view={view}
           onDisconnect={() => void disconnect()}
+          onExitApp={() => void window.sliver.exitApp()}
           onSwitchConfig={() => setIsConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
@@ -290,6 +292,7 @@ export function App() {
           snapshot={snapshot}
           view={view}
           onDisconnect={() => void disconnect()}
+          onExitApp={() => void window.sliver.exitApp()}
           onSwitchConfig={() => setIsConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
@@ -387,12 +390,14 @@ export function NavigationContent({
   snapshot,
   view,
   onDisconnect,
+  onExitApp,
   onSwitchConfig,
   onViewChange,
 }: {
   snapshot: SliverSnapshot;
   view: ViewId;
   onDisconnect: () => void;
+  onExitApp: () => void;
   onSwitchConfig: () => void;
   onViewChange: (view: ViewId) => void;
 }) {
@@ -406,6 +411,10 @@ export function NavigationContent({
     setMobileOpen(false);
     onDisconnect();
   };
+  const exitApp = () => {
+    setMobileOpen(false);
+    onExitApp();
+  };
   const navigate = (nextView: ViewId) => {
     setMobileOpen(false);
     onViewChange(nextView);
@@ -414,7 +423,9 @@ export function NavigationContent({
     <>
       <Heading className="sr-only" slot="title">Sliver navigation</Heading>
       <Sidebar.Header className="brand-block">
-        <div className="brand-mark" aria-hidden="true"><FontAwesomeIcon icon={faShieldHalved} /></div>
+        <div className="brand-mark" aria-hidden="true">
+          <img alt="" className="brand-mark__image" draggable={false} src={sliverSidebarIcon} />
+        </div>
         <div className="min-w-0" data-sidebar="label">
           <p className="truncate text-sm font-semibold tracking-tight">Sliver Desktop</p>
           <p className="truncate text-[11px] text-muted">Operator console</p>
@@ -472,6 +483,7 @@ export function NavigationContent({
         <ConnectionMenu
           snapshot={snapshot}
           onDisconnect={disconnectCurrentServer}
+          onExitApp={exitApp}
           onSwitchConfig={switchConfig}
         />
       </Sidebar.Footer>
@@ -482,10 +494,12 @@ export function NavigationContent({
 export function ConnectionMenu({
   snapshot,
   onDisconnect,
+  onExitApp,
   onSwitchConfig,
 }: {
   snapshot: SliverSnapshot;
   onDisconnect: () => void;
+  onExitApp: () => void;
   onSwitchConfig: () => void;
 }) {
   const connected = isUsableConnection(snapshot.connection.status);
@@ -526,10 +540,11 @@ export function ConnectionMenu({
       </Button>
       <Dropdown.Popover className="min-w-56" placement="top start">
         <Dropdown.Menu
-          aria-label="Current server actions"
+          aria-label="Application and current server actions"
           onAction={(key) => {
             if (String(key) === "switch-config") onSwitchConfig();
             if (String(key) === "disconnect") onDisconnect();
+            if (String(key) === "exit-app") onExitApp();
           }}
         >
           <Dropdown.Item id="switch-config" textValue="Switch config">
@@ -539,6 +554,10 @@ export function ConnectionMenu({
           <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
             <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
             <Label>Disconnect</Label>
+          </Dropdown.Item>
+          <Dropdown.Item id="exit-app" textValue="Exit app">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faPowerOff} />
+            <Label>Exit app</Label>
           </Dropdown.Item>
         </Dropdown.Menu>
       </Dropdown.Popover>

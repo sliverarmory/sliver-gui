@@ -30,22 +30,28 @@ files:
   - docs/operator-parity.md
   - docs/adr/0001-platform-support.md
   - docs/rpc-message-budgets.md
+extraResources:
+  - from: build/about-icon.png
+    to: sliver-desktop.png
 extraMetadata:
   main: dist/main/index.js
 mac:
   category: public.app-category.developer-tools
   hardenedRuntime: true
   gatekeeperAssess: false
+  icon: build/icon.png
   target:
     - dmg
     - zip
 win:
+  icon: build/icon.png
   target:
     - nsis
     - portable
 linux:
   category: Development
   maintainer: Sliver Armory <sliverarmory@users.noreply.github.com>
+  icon: build/icon.png
   target:
     - AppImage
     - deb

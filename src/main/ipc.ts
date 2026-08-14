@@ -147,6 +147,7 @@ export function registerIpcHandlers(
   createWindow: (inheritFromContentsId?: number) => void,
   rendererUrl: string,
   sessionShellWindows?: SessionShellWindowController,
+  exitApplication?: () => void,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -166,6 +167,11 @@ export function registerIpcHandlers(
   handleTrusted(IPC.refresh, rendererUrl, parseNoArguments, ({ contentsId }) => registry.refresh(contentsId));
   handleTrusted(IPC.openWindow, rendererUrl, parseOpenWindowArguments, ({ contentsId }, input) => {
     createWindow(input.inheritConnection ? contentsId : undefined);
+    return { ok: true };
+  });
+  handleTrusted(IPC.exitApp, rendererUrl, parseNoArguments, () => {
+    if (!exitApplication) return { ok: false, error: "Application exit is unavailable" };
+    exitApplication();
     return { ok: true };
   });
   handleTrusted(

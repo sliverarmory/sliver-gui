@@ -14,6 +14,7 @@ const TRANSPARENT_WINDOW_COLOR = "#00000000";
 export function mainWindowOptions(
   preload: string,
   platform: NodeJS.Platform = process.platform,
+  icon?: string,
 ): BrowserWindowConstructorOptions {
   return {
     width: 1440,
@@ -39,6 +40,7 @@ export function mainWindowOptions(
       : {}),
     ...(platform !== "darwin"
       ? {
+          ...(icon ? { icon } : {}),
           titleBarOverlay: {
             color: TRANSPARENT_WINDOW_COLOR,
             symbolColor: "#f4f4f5",
@@ -56,7 +58,11 @@ export function mainWindowOptions(
  * so the terminal receives an unambiguous draggable region and native close
  * semantics on every supported desktop.
  */
-export function sessionShellWindowOptions(preload: string): BrowserWindowConstructorOptions {
+export function sessionShellWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+): BrowserWindowConstructorOptions {
   return {
     width: 1180,
     height: 780,
@@ -65,6 +71,7 @@ export function sessionShellWindowOptions(preload: string): BrowserWindowConstru
     show: false,
     title: "Managed Shells",
     backgroundColor: "#09090b",
+    ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: secureWebPreferences(preload),
   };
 }

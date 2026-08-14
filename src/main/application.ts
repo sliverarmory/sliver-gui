@@ -29,6 +29,8 @@ import { configureSessionSecurity, hardenWindow } from "./security.js";
 import { SliverReleaseDownloader } from "./sliver-release-download.js";
 import { mainWindowOptions, sessionShellWindowOptions } from "./window-options.js";
 
+const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
+
 export interface StartApplicationOptions {
   registry?: ConnectionRegistry;
   rendererEntryPath?: string;
@@ -60,6 +62,10 @@ interface SessionShellWindowRecord {
 export async function startApplication(options: StartApplicationOptions = {}): Promise<ApplicationHandle> {
   const registry = options.registry ?? new ConnectionRegistry();
   const mainBundleDirectory = import.meta.dirname;
+  const runtimeIconPath = app.isPackaged
+    ? join(process.resourcesPath, "sliver-desktop.png")
+    : join(mainBundleDirectory, "../../build/about-icon.png");
+  const developmentDockIconPath = join(mainBundleDirectory, "../../build/icon.png");
   const rendererEntryPath = options.rendererEntryPath ?? join(mainBundleDirectory, "../renderer/index.html");
   const preloadPath = options.preloadPath ?? join(mainBundleDirectory, "../preload/index.cjs");
   // Packaged applications always trust their immutable file entry. A caller's
@@ -171,7 +177,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function createWindow(inheritFromContentsId?: number): BrowserWindow {
-    const window = new BrowserWindow(mainWindowOptions(preloadPath));
+    const window = new BrowserWindow(mainWindowOptions(preloadPath, process.platform, runtimeIconPath));
     trackWindow(window, inheritFromContentsId);
     loadRenderer(window);
     return window;
@@ -236,7 +242,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         return { ok: true };
       }
 
-      const window = new BrowserWindow(sessionShellWindowOptions(preloadPath));
+      const window = new BrowserWindow(sessionShellWindowOptions(preloadPath, process.platform, runtimeIconPath));
       const record: SessionShellWindowRecord = {
         key,
         window,
@@ -353,10 +359,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function installMenu(): void {
-    const template = buildApplicationMenuTemplate(process.platform, app.name, {
+    const template = buildApplicationMenuTemplate(process.platform, APPLICATION_DISPLAY_NAME, {
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
       openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
+      showAboutPanel: () => app.showAboutPanel(),
       downloadRelease: (target) => startReleaseDownload(target),
     }, releaseCatalog);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -411,6 +418,19 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   };
 
   await app.whenReady();
+  app.setAboutPanelOptions({
+    applicationName: APPLICATION_DISPLAY_NAME,
+    applicationVersion: app.getVersion(),
+    version: app.getVersion(),
+    copyright: "Licensed under GPLv3",
+    credits: "Bred as living shields, these slivers have proven unruly-they know they cannot be caught.",
+    authors: ["Sliver Armory"],
+    website: "https://github.com/sliverarmory/sliver-gui",
+    iconPath: runtimeIconPath,
+  });
+  if (process.platform === "darwin" && !app.isPackaged && app.dock) {
+    app.dock.setIcon(developmentDockIconPath);
+  }
   releaseDownloader = new SliverReleaseDownloader({
     downloadsDirectory: app.getPath("downloads"),
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
@@ -423,6 +443,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     {
       open: openSessionShellWindow,
       claim: claimSessionShellWindow,
+    },
+    () => {
+      stopping = true;
+      releaseDownloader?.stop();
+      app.quit();
     },
   );
   installMenu();

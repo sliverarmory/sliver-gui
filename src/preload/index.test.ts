@@ -24,6 +24,7 @@ const invokeArguments = {
   getSnapshot: [],
   refresh: [],
   openWindow: [{ inheritConnection: true }],
+  exitApp: [],
   openSessionShellWindow: [{ preferredResourceId: "R".repeat(43) }],
   claimSessionShellWindow: [],
   chooseCertificatePair: [],

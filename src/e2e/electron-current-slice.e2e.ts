@@ -61,7 +61,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     page.on("pageerror", (error) => pageErrors.push(error.message));
 
     await assertRendererSecurity(electronApplication, page);
-    await page.getByRole("dialog", { name: /connect to sliver/i }).waitFor();
+    await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     await verifyReleaseDownloadToast(electronApplication, page);
 
     // Replace the native chooser from outside the app immediately before the
@@ -131,6 +131,11 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     assert.deepEqual(pageErrors, []);
 
     await page.getByRole("button", { name: /^Current server:/i }).click();
+    assert.deepEqual(await page.getByRole("menuitem").allTextContents(), [
+      "Switch config",
+      "Disconnect",
+      "Exit app",
+    ]);
     await page.getByRole("menuitem", { name: "Disconnect" }).click();
     await page.getByText("No server connected", { exact: true }).waitFor();
     assert.equal((await readFakeState(electronApplication)).disconnects, 1);
