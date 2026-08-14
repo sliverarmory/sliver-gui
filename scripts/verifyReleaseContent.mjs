@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { extractFile, listPackage, statFile } from "@electron/asar";
 
+import { asarEntryPaths } from "./asarEntryPaths.mjs";
+
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(rootDir, "dist");
 const releaseDir = join(rootDir, "release");
@@ -211,9 +213,9 @@ async function newestFile(paths) {
 }
 
 function verifyArchive(archivePath) {
-  const entries = listPackage(archivePath, { isPack: false }).map((entry) => entry.replaceAll("\\", "/"));
-  const normalizedEntries = entries.map((entry) => entry.replace(/^\//u, ""));
-  const forbiddenEntries = entries.filter((entry) =>
+  const entries = listPackage(archivePath, { isPack: false }).map(asarEntryPaths);
+  const normalizedEntries = entries.map(({ normalizedPath }) => normalizedPath);
+  const forbiddenEntries = normalizedEntries.filter((entry) =>
     /(?:^|\/)(?:\.e2e-dist|e2e|fixtures?|artifacts)(?:\/|$)|(?:\.e2e|\.test|\.spec)\.[cm]?[jt]sx?$|tsconfig\.e2e\.json$/iu.test(entry),
   );
   if (forbiddenEntries.length > 0) {
@@ -228,7 +230,13 @@ function verifyArchive(archivePath) {
       throw new Error(`Packaged archive is missing required application/source evidence: ${requiredPath}`);
     }
   }
-  const terminalRuntime = extractFile(archivePath, "node_modules/ghostty-web/ghostty-vt.wasm", false);
+  const terminalRuntimeEntry = entries.find(
+    ({ normalizedPath }) => normalizedPath === "node_modules/ghostty-web/ghostty-vt.wasm",
+  );
+  if (!terminalRuntimeEntry) {
+    throw new Error("Packaged archive lost the required Ghostty runtime entry during verification");
+  }
+  const terminalRuntime = extractFile(archivePath, terminalRuntimeEntry.lookupPath, false);
   const terminalRuntimeSha256 = sha256(terminalRuntime);
   if (terminalRuntime.byteLength !== 423_045 || terminalRuntimeSha256 !== "d6f0326f1874ad2ce9f289e3a4a0c5f3507d4cb38d8747e4b287def470a0c60a") {
     throw new Error(`Packaged Ghostty runtime failed its integrity check: ${archivePath}`);
@@ -239,10 +247,13 @@ function verifyArchive(archivePath) {
     }
   }
 
-  for (const entry of normalizedEntries) {
-    const metadata = statFile(archivePath, entry, false);
+  for (const entry of entries) {
+    const metadata = statFile(archivePath, entry.lookupPath, false);
     if (!("size" in metadata)) continue;
-    assertNoBannedMarkers(extractFile(archivePath, entry, false), `${archivePath}:${entry}`);
+    assertNoBannedMarkers(
+      extractFile(archivePath, entry.lookupPath, false),
+      `${archivePath}:${entry.normalizedPath}`,
+    );
   }
 }
 
