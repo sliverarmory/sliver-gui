@@ -20,6 +20,7 @@ import {
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
 import { ConnectionRegistry } from "./connection-registry.js";
+import { resolveDownloadsDirectory } from "./download-directory.js";
 import {
   registerIpcHandlers,
   unregisterIpcHandlers,
@@ -432,7 +433,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     app.dock.setIcon(developmentDockIconPath);
   }
   releaseDownloader = new SliverReleaseDownloader({
-    downloadsDirectory: app.getPath("downloads"),
+    downloadsDirectory: resolveDownloadsDirectory((name) => app.getPath(name)),
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
   });
   configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
