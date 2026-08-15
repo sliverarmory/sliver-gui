@@ -54,6 +54,8 @@ export const IPC_INVOKE = {
   getSnapshot: "sliver:snapshot:get",
   refresh: "sliver:snapshot:refresh",
   openWindow: "sliver:window:open",
+  openInteractionWindow: "sliver:window:open-interaction",
+  claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
   openSessionShellWindow: "sliver:window:open-session-shells",
   claimSessionShellWindow: "sliver:window:claim-session-shells",
@@ -472,6 +474,11 @@ export interface OpenSessionShellWindowInput {
 export type WindowLaunchContext =
   | { readonly kind: "workspace" }
   | {
+      readonly kind: "interaction";
+      readonly snapshot: SliverSnapshot;
+      readonly target: TargetRef;
+    }
+  | {
       readonly kind: "session-shell";
       readonly snapshot: SliverSnapshot;
       readonly preferredResourceId?: string;
@@ -520,6 +527,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.openWindow]: {
     args: [input: OpenWindowInput];
     result: OperationResult;
+  };
+  [IPC.openInteractionWindow]: {
+    args: [];
+    result: OperationResult;
+  };
+  [IPC.claimInteractionWindow]: {
+    args: [];
+    result: OperationResult<WindowLaunchContext>;
   };
   [IPC.exitApp]: {
     args: [];

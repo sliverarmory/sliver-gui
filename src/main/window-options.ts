@@ -75,3 +75,27 @@ export function sessionShellWindowOptions(
     webPreferences: secureWebPreferences(preload),
   };
 }
+
+/**
+ * A native, full-size window for one target interaction workspace. Target
+ * identity is never encoded in these options or the renderer URL; Electron
+ * main binds the destination window to the source window's exact active target
+ * before loading the static interaction surface.
+ */
+export function interactionWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1360,
+    height: 900,
+    minWidth: 840,
+    minHeight: 640,
+    show: false,
+    title: "Interact",
+    backgroundColor: "#09090b",
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: secureWebPreferences(preload),
+  };
+}

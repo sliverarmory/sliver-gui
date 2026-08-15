@@ -24,6 +24,8 @@ const invokeArguments = {
   getSnapshot: [],
   refresh: [],
   openWindow: [{ inheritConnection: true }],
+  openInteractionWindow: [],
+  claimInteractionWindow: [],
   exitApp: [],
   openSessionShellWindow: [{ preferredResourceId: "R".repeat(43) }],
   claimSessionShellWindow: [],
@@ -148,6 +150,19 @@ describe("sandboxed preload bridge", () => {
       await Reflect.apply(exposed[method], exposed, args);
       expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC_INVOKE[method], ...args);
     }
+  });
+
+  it("opens and claims a dedicated interaction window without renderer-authored target arguments", async () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    electronMocks.invoke.mockClear();
+
+    await exposed.openInteractionWindow();
+    await exposed.claimInteractionWindow();
+
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, IPC.openInteractionWindow);
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(2, IPC.claimInteractionWindow);
   });
 
   it("keeps the preload allowlist narrow and exposes no raw Electron transport", () => {

@@ -90,6 +90,23 @@
       var(--color-background);
   }
 
+  .interaction-window {
+    min-height: 100vh;
+  }
+
+  .interaction-window__content {
+    height: 100vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 2rem 1.25rem 5rem;
+  }
+
+  .interaction-window__content > * {
+    width: 100%;
+    max-width: 90rem;
+    margin-inline: auto;
+  }
+
   .brand-block {
     min-height: 72px;
     display: flex;
@@ -448,6 +465,10 @@
   .app-content {
     padding-inline: 1rem;
     padding-top: 1.5rem;
+  }
+
+  .interaction-window__content {
+    padding: 1.5rem 1rem 3rem;
   }
 
   .page-heading {

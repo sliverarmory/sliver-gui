@@ -23,7 +23,7 @@ const M2_INITIAL_FILE_TEXT = `${M2_FILE_CONTENT}\nsecond deterministic line\n`;
 const M2_EDITED_CONTENT = "FAKE_M2_EDITED_CONTENT_DO_NOT_JOURNAL";
 const M2_SEARCH_PATTERN = "FAKE_M2_SEARCH_PATTERN_DO_NOT_JOURNAL";
 
-test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 90_000 }, async () => {
+test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-electron-e2e-"));
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
@@ -337,6 +337,7 @@ async function verifyM1TargetsAndOperations(
     { id: "beacon.open-session", available: true },
     "a safe main-owned C2 endpoint must enable beacon session conversion",
   );
+  await verifyInteractionWindowPopout(electronApplication, page, "beacon", "m1-beacon", artifactDirectory);
 
   await electronApplication.evaluate(() => {
     globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
@@ -577,6 +578,239 @@ async function verifyM1TargetsAndOperations(
   }
   await page.locator('[aria-label="Jobs & listeners"]:visible').click();
   await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+}
+
+async function verifyInteractionWindowPopout(
+  electronApplication: ElectronApplication,
+  sourcePage: Page,
+  mode: "session" | "beacon",
+  expectedName: string,
+  artifactDirectory: string,
+): Promise<void> {
+  const sourceSnapshot = await rendererSnapshot(sourcePage);
+  const sourceTarget = sourceSnapshot.targetContext.activeTarget;
+  assert.equal(sourceTarget?.mode, mode);
+  assert.ok(sourceTarget, `expected an active ${mode} before popping out its interaction workspace`);
+
+  const existingWindows = new Set(electronApplication.windows());
+  const externalRequests: string[] = [];
+  const pageErrors: string[] = [];
+  const observeWindow = (candidate: Page): void => {
+    candidate.on("pageerror", (error) => pageErrors.push(error.message));
+    candidate.on("request", (request) => {
+      if (/^https?:/iu.test(request.url())) externalRequests.push(request.url());
+    });
+    candidate.on("websocket", (socket) => externalRequests.push(socket.url()));
+  };
+  electronApplication.on("window", observeWindow);
+
+  let popout: Page | undefined;
+  try {
+    if (mode === "session") {
+      await sourcePage.getByRole("button", { name: "Sessions, switch session", exact: true }).click();
+      await sourcePage.getByRole("menuitemradio", { name: /m1-session/iu }).waitFor();
+      await sourcePage.screenshot({
+        animations: "disabled",
+        path: join(artifactDirectory, "session-breadcrumb-dropdown.png"),
+      });
+      await sourcePage.keyboard.press("Escape");
+    }
+    await sourcePage.getByRole("button", { name: "Pop out interaction", exact: true }).click();
+    popout = await waitForInteractionWindow(electronApplication, existingWindows);
+    await popout.locator('[aria-label="Dedicated interaction window"]').waitFor();
+    await popout.getByRole("heading", { name: expectedName, exact: true }).first().waitFor();
+    if (mode === "session") {
+      await popout.getByRole("navigation", { name: "Session workspace breadcrumbs", exact: true }).waitFor();
+      await popout.getByRole("tablist", { name: "Session interaction sections", exact: true }).waitFor();
+    } else {
+      await popout.getByRole("heading", { name: "Beacon tasks", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "All target operations", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "Operator presence", exact: true }).waitFor();
+    }
+    await popout.screenshot({
+      animations: "disabled",
+      path: join(artifactDirectory, `interaction-${mode}.png`),
+    });
+
+    assert.equal(
+      await popout.locator('[aria-label="Infrastructure navigation"]').count(),
+      0,
+      "a dedicated interaction window must not render the application sidebar",
+    );
+    assert.equal(
+      await popout.getByRole("button", { name: "New window options", exact: true }).count(),
+      0,
+      "a dedicated interaction window must not render generic window chrome",
+    );
+    assert.equal(
+      await popout.getByRole("button", { name: "Pop out interaction", exact: true }).count(),
+      0,
+      "a dedicated interaction window must not recursively expose another popout action",
+    );
+    if (mode === "beacon") {
+      assert.equal(
+        await popout.locator('[aria-label="Sliver beacons"]').count(),
+        0,
+        "the beacon interaction window must not retain the target catalog",
+      );
+      assert.equal(
+        await popout.getByRole("button", { name: "Background target", exact: true }).count(),
+        0,
+        "the dedicated beacon must stay focused on its exact target",
+      );
+    }
+
+    const popoutUrl = popout.url();
+    const parsedPopoutUrl = new URL(popoutUrl);
+    assert.equal(parsedPopoutUrl.searchParams.get("surface"), "interaction");
+    assert.equal(parsedPopoutUrl.search, "?surface=interaction", "the interaction URL must use one static marker only");
+    assert.equal(parsedPopoutUrl.hash, "", "the interaction URL must not carry fragment launch data");
+    assert.equal(parsedPopoutUrl.username, "");
+    assert.equal(parsedPopoutUrl.password, "");
+    const decodedPopoutUrl = decodeURIComponent(popoutUrl);
+    for (const forbidden of [
+      sourceTarget.id,
+      sourceTarget.fingerprint,
+      PRIVATE_KEY_SECRET,
+      TOKEN_SECRET,
+      EVENT_SECRET,
+      TARGET_SECRET,
+      TASK_SECRET,
+      M2_ENV_SECRET,
+      M2_FILE_CONTENT,
+      M2_EDITED_CONTENT,
+      M2_SEARCH_PATTERN,
+    ]) {
+      assert.ok(!decodedPopoutUrl.includes(forbidden), `interaction-window URL exposed ${forbidden}`);
+    }
+    assert.equal(await popout.evaluate(() => (
+      globalThis as unknown as { opener?: unknown }
+    ).opener === null), true);
+
+    const popoutWindowState = await electronApplication.evaluate(({ BrowserWindow }, expectedUrl) => {
+      const interactionWindow = BrowserWindow.getAllWindows().find(
+        (candidate) => candidate.webContents.getURL() === expectedUrl,
+      );
+      if (!interactionWindow) throw new Error("Expected a dedicated interaction BrowserWindow");
+      const preferences = (interactionWindow.webContents as unknown as {
+        getLastWebPreferences(): Record<string, unknown>;
+      }).getLastWebPreferences();
+      return {
+        isVisible: interactionWindow.isVisible(),
+        preferences: {
+          contextIsolation: preferences["contextIsolation"],
+          nodeIntegration: preferences["nodeIntegration"],
+          nodeIntegrationInWorker: preferences["nodeIntegrationInWorker"] ?? false,
+          nodeIntegrationInSubFrames: preferences["nodeIntegrationInSubFrames"],
+          sandbox: preferences["sandbox"],
+          webSecurity: preferences["webSecurity"],
+          webviewTag: preferences["webviewTag"],
+        },
+      };
+    }, popoutUrl);
+    assert.equal(popoutWindowState.isVisible, true, "the ready interaction BrowserWindow must be visible");
+    assert.deepEqual(popoutWindowState.preferences, {
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+    });
+
+    const destinationSnapshot = await rendererSnapshot(popout);
+    assert.deepEqual(
+      stableTargetIdentity(destinationSnapshot.targetContext.activeTarget),
+      stableTargetIdentity(sourceTarget),
+      "the dedicated window must start on the source window's exact target identity",
+    );
+    assert.equal(destinationSnapshot.connection.server, sourceSnapshot.connection.server);
+    assert.equal(destinationSnapshot.connection.epoch, sourceSnapshot.connection.epoch);
+
+    if (mode === "session") {
+      const sourceShells = await invokeSliver(sourcePage, "listSessionShells", {});
+      assert.equal(sourceShells.ok, true, sourceShells.error ?? "source shell inventory failed");
+      assert.ok((sourceShells.value?.resources.length ?? 0) > 0, "the source must own a shell for the isolation proof");
+      const destinationShells = await invokeSliver(popout, "listSessionShells", {});
+      assert.equal(destinationShells.ok, true, destinationShells.error ?? "destination shell inventory failed");
+      assert.deepEqual(destinationShells.value?.resources, [], "whole-workspace popout must not copy shell ownership");
+      const sourceShellsAfterOpen = await invokeSliver(sourcePage, "listSessionShells", {});
+      assert.deepEqual(
+        sourceShellsAfterOpen.value?.resources.map(({ resourceId }) => resourceId),
+        sourceShells.value?.resources.map(({ resourceId }) => resourceId),
+        "whole-workspace popout must leave exact shell ownership in the source window",
+      );
+
+      const historyBeforePing = await invokeSliver(popout, "listTargetOperations", { limit: 100 });
+      assert.equal(historyBeforePing.ok, true, historyBeforePing.error ?? "destination operation history failed");
+      const existingRequestIds = new Set(
+        historyBeforePing.value?.items.map(({ requestId }) => requestId) ?? [],
+      );
+      await popout.getByRole("button", { name: "Run ping", exact: true }).click();
+      const destinationPing = await waitForNewTargetOperation(popout, existingRequestIds, "target.ping");
+      const destinationHistory = await invokeSliver(popout, "listTargetOperations", { limit: 100 });
+      assert.equal(destinationHistory.ok, true, destinationHistory.error ?? "destination operation history failed");
+      assert.ok(
+        destinationHistory.value?.items.some((operation) => operation.requestId === destinationPing.requestId),
+        "the dedicated interaction must retain its own submitted operation",
+      );
+      const sourceHistory = await invokeSliver(sourcePage, "listTargetOperations", { limit: 100 });
+      assert.equal(sourceHistory.ok, true, sourceHistory.error ?? "source operation history failed");
+      assert.ok(
+        !sourceHistory.value?.items.some((operation) => operation.requestId === destinationPing.requestId),
+        "dedicated interaction operations must remain destination-window-owned",
+      );
+    } else {
+      await popout.getByRole("button", { name: "Run ping", exact: true }).waitFor();
+    }
+
+    const replacementMode = mode === "session" ? "beacon" : "session";
+    const replacementTarget = requireTargetRef(destinationSnapshot, replacementMode);
+    const replacement = await invokeSliver(popout, "selectTarget", replacementTarget);
+    assert.equal(replacement.ok, false, "a dedicated interaction window must reject cross-mode retargeting");
+    assert.deepEqual(
+      stableTargetIdentity((await rendererSnapshot(popout)).targetContext.activeTarget),
+      stableTargetIdentity(sourceTarget),
+      "a rejected cross-mode request must leave the exact destination target selected",
+    );
+
+    const background = await invokeSliver(popout, "backgroundTarget");
+    assert.equal(background.ok, true, background.error ?? "destination target-loss setup failed");
+    await popout.getByRole("heading", {
+      name: mode === "session" ? "Session workspace unavailable" : "Beacon interaction unavailable",
+      exact: true,
+    }).waitFor();
+    const sourceTargetAfterLoss = (await rendererSnapshot(sourcePage)).targetContext.activeTarget;
+    assert.deepEqual(
+      stableTargetIdentity(sourceTargetAfterLoss),
+      stableTargetIdentity(sourceTarget),
+      "destination target loss must not change the source window's exact target",
+    );
+
+    await popout.reload();
+    await popout.locator('[aria-label="Dedicated interaction window"]').waitFor();
+    await popout.getByRole("heading", { name: expectedName, exact: true }).first().waitFor();
+    const restoredSnapshot = await waitForSnapshot(
+      popout,
+      (snapshot) => targetsHaveSameStableIdentity(snapshot.targetContext.activeTarget, sourceTarget),
+    );
+    assert.deepEqual(
+      stableTargetIdentity(restoredSnapshot.targetContext.activeTarget),
+      stableTargetIdentity(sourceTarget),
+      "reload must reclaim the main-owned launch identity instead of repinning from renderer state",
+    );
+    assert.equal(
+      await popout.getByRole("button", { name: "Pop out interaction", exact: true }).count(),
+      0,
+      "a reloaded dedicated interaction window must remain non-recursive",
+    );
+    assert.deepEqual(externalRequests, [], "the dedicated interaction window must remain network inert");
+  } finally {
+    electronApplication.off("window", observeWindow);
+    await popout?.close().catch(() => undefined);
+  }
+  assert.deepEqual(pageErrors, []);
 }
 
 async function verifyM2SessionWorkspace(
@@ -964,6 +1198,14 @@ async function verifyM3SessionTerminal(
     await reattachedTerminal.pressSequentially("pwd");
     await reattachedTerminal.press("Enter");
     await waitForFakeMethodCount(electronApplication, "shell.command.pwd", initialPwdCommands + 1);
+
+    await verifyInteractionWindowPopout(
+      electronApplication,
+      page,
+      "session",
+      "m1-session",
+      artifactDirectory,
+    );
 
     await verifyM3ManagedShellPopout(
       electronApplication,
@@ -1395,6 +1637,30 @@ function requireTargetRef(snapshot: SliverSnapshot, mode: "session" | "beacon"):
   return target;
 }
 
+function stableTargetIdentity(target: TargetRef | null | undefined): Pick<
+  TargetRef,
+  "mode" | "id" | "backendEpoch" | "fingerprint"
+> | undefined {
+  if (!target) return undefined;
+  return {
+    mode: target.mode,
+    id: target.id,
+    backendEpoch: target.backendEpoch,
+    fingerprint: target.fingerprint,
+  };
+}
+
+function targetsHaveSameStableIdentity(
+  left: TargetRef | null | undefined,
+  right: TargetRef | null | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  return left.mode === right.mode &&
+    left.id === right.id &&
+    left.backendEpoch === right.backendEpoch &&
+    left.fingerprint === right.fingerprint;
+}
+
 function requireOperation(result: Awaited<ReturnType<SliverDesktopAPI["submitTargetOperation"]>>): TargetOperationRecord;
 function requireOperation(result: Awaited<ReturnType<SliverDesktopAPI["cancelTargetOperation"]>>): TargetOperationRecord;
 function requireOperation(
@@ -1428,6 +1694,30 @@ async function waitForOperation(
   throw new Error(`Operation ${requestId} did not reach ${state}; latest state was ${latest?.state ?? "missing"}`);
 }
 
+async function waitForNewTargetOperation(
+  page: Page,
+  existingRequestIds: ReadonlySet<string>,
+  operationId: TargetOperationRecord["operationId"],
+  timeoutMs = 15_000,
+): Promise<TargetOperationRecord> {
+  const deadline = Date.now() + timeoutMs;
+  let latestError = "missing";
+  while (Date.now() < deadline) {
+    const result = await invokeSliver(page, "listTargetOperations", { limit: 100 });
+    if (result.ok && result.value) {
+      const operation = result.value.items.find((candidate) => (
+        candidate.operationId === operationId && !existingRequestIds.has(candidate.requestId)
+      ));
+      if (operation) return operation;
+      latestError = "no new matching operation";
+    } else {
+      latestError = result.error ?? "unknown operation-history error";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`No new ${operationId} operation appeared; latest result was ${latestError}`);
+}
+
 async function waitForSnapshot(
   page: Page,
   predicate: (snapshot: SliverSnapshot) => boolean,
@@ -1455,6 +1745,26 @@ async function waitForAdditionalWindow(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for inherited application window");
+}
+
+async function waitForInteractionWindow(
+  electronApplication: ElectronApplication,
+  existingWindows: ReadonlySet<Page>,
+): Promise<Page> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const interaction = electronApplication.windows().find((candidate) => {
+      if (existingWindows.has(candidate) || candidate.isClosed()) return false;
+      try {
+        return new URL(candidate.url()).search === "?surface=interaction";
+      } catch {
+        return false;
+      }
+    });
+    if (interaction) return interaction;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for a dedicated interaction window");
 }
 
 async function waitForManagedShellWindow(

@@ -73,11 +73,57 @@ const sessionRef: TargetRef = {
   fingerprint: "a".repeat(64),
 };
 
+const otherSession: SessionSummary = {
+  ...session,
+  id: "session-2",
+  name: "analytics",
+  hostname: "prod-linux",
+  hostId: "host-2",
+  username: "bob",
+  os: "linux",
+  arch: "amd64",
+  pid: 4002,
+};
+
+const otherSessionRef: TargetRef = {
+  mode: "session",
+  id: otherSession.id,
+  backendEpoch: 7,
+  domainRevision: 3,
+  fingerprint: "b".repeat(64),
+};
+
+const thirdSession: SessionSummary = {
+  ...session,
+  id: "session-3",
+  name: "billing",
+  hostname: "prod-windows",
+  hostId: "host-3",
+  username: "carol",
+  os: "windows",
+  arch: "amd64",
+  pid: 4003,
+};
+
+const thirdSessionRef: TargetRef = {
+  mode: "session",
+  id: thirdSession.id,
+  backendEpoch: 7,
+  domainRevision: 3,
+  fingerprint: "c".repeat(64),
+};
+
 const route: SessionWorkspaceRoute = {
   sessionId: session.id,
   backendEpoch: 7,
   connectionIncarnation: 4,
   targetFingerprint: sessionRef.fingerprint,
+};
+
+const otherRoute: SessionWorkspaceRoute = {
+  ...route,
+  sessionId: otherSession.id,
+  targetFingerprint: otherSessionRef.fingerprint,
 };
 
 function workspaceSnapshot(activeSession = session): SliverSnapshot {
@@ -115,6 +161,45 @@ function workspaceSnapshot(activeSession = session): SliverSnapshot {
   return snapshot;
 }
 
+function switchableWorkspaceSnapshot(): SliverSnapshot {
+  const snapshot = workspaceSnapshot();
+  snapshot.sessions = [session, otherSession];
+  snapshot.domains.sessions = {
+    ...snapshot.domains.sessions,
+    items: [session, otherSession],
+    page: { limit: 500, total: 2, truncated: false },
+  };
+  snapshot.targetContext.selectableTargets = [sessionRef, otherSessionRef];
+  return snapshot;
+}
+
+function selectedOtherSessionSnapshot(): SliverSnapshot {
+  const snapshot = switchableWorkspaceSnapshot();
+  snapshot.targetContext = {
+    ...snapshot.targetContext,
+    activeTarget: otherSessionRef,
+    activeTargetSummary: otherSession,
+  };
+  return snapshot;
+}
+
+function selectedThirdSessionSnapshot(): SliverSnapshot {
+  const snapshot = switchableWorkspaceSnapshot();
+  snapshot.sessions.push(thirdSession);
+  snapshot.domains.sessions = {
+    ...snapshot.domains.sessions,
+    items: [...snapshot.domains.sessions.items, thirdSession],
+    page: { limit: 500, total: 3, truncated: false },
+  };
+  snapshot.targetContext = {
+    ...snapshot.targetContext,
+    activeTarget: thirdSessionRef,
+    activeTargetSummary: thirdSession,
+    selectableTargets: [...snapshot.targetContext.selectableTargets, thirdSessionRef],
+  };
+  return snapshot;
+}
+
 function operation(overrides: Partial<TargetOperationRecord> = {}): TargetOperationRecord {
   return {
     requestId: "request-1",
@@ -144,19 +229,32 @@ function operation(overrides: Partial<TargetOperationRecord> = {}): TargetOperat
   };
 }
 
-function installAPI(operations: TargetOperationRecord[] = []): Pick<SliverDesktopAPI, "listTargetOperations"> {
+function installAPI(operations: TargetOperationRecord[] = []): Pick<
+  SliverDesktopAPI,
+  "listTargetOperations" | "listSessionShells" | "openInteractionWindow" | "selectTarget"
+> {
   const listTargetOperations = vi.fn().mockResolvedValue({
     ok: true,
     value: { items: operations, page: { limit: 100, total: operations.length, truncated: false } },
   });
+  const listSessionShells = vi.fn().mockResolvedValue({
+    ok: true,
+    value: { resources: [], metrics: {} },
+  });
+  const openInteractionWindow = vi.fn().mockResolvedValue({ ok: true });
+  const selectTarget = vi.fn().mockResolvedValue({ ok: false, error: "No selection configured" });
+  const api = {
+    listSessionShells,
+    listTargetOperations,
+    openInteractionWindow,
+    selectTarget,
+    onOperationChanged: vi.fn(() => vi.fn()),
+  } as unknown as SliverDesktopAPI;
   Object.defineProperty(window, "sliver", {
     configurable: true,
-    value: {
-      listTargetOperations,
-      onOperationChanged: vi.fn(() => vi.fn()),
-    } as unknown as SliverDesktopAPI,
+    value: api,
   });
-  return { listTargetOperations };
+  return { listSessionShells, listTargetOperations, openInteractionWindow, selectTarget };
 }
 
 describe("SessionWorkspacePage", () => {
@@ -220,6 +318,227 @@ describe("SessionWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(onBack).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Sessions in the breadcrumb and switches with an exact main-issued reference", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const next = selectedOtherSessionSnapshot();
+    vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: next });
+    const onSessionChange = vi.fn();
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={switchableWorkspaceSnapshot()}
+        onBack={vi.fn()}
+        onSessionChange={onSessionChange}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("navigation", { name: "Session workspace breadcrumbs" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "payments" })).toHaveAttribute("aria-current", "page");
+    const trigger = screen.getByRole("button", { name: "Sessions, switch session" });
+    expect(trigger.closest("a")).toBeNull();
+    await user.click(trigger);
+    expect(await screen.findByRole("menuitemradio", { name: /payments/i })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByRole("button", { name: "View all sessions" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("menuitemradio", { name: /analytics/i }));
+
+    await waitFor(() => expect(api.listSessionShells).toHaveBeenCalledExactlyOnceWith({}));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(otherSessionRef));
+    expect(onSessionChange).toHaveBeenCalledExactlyOnceWith(next, {
+      sessionId: otherSession.id,
+      backendEpoch: 7,
+      connectionIncarnation: 4,
+      targetFingerprint: otherSessionRef.fingerprint,
+    });
+  });
+
+  it("commits an exact selection response after its requested-target event arrives first", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const selection = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    vi.mocked(api.selectTarget).mockReturnValue(selection.promise);
+    const onSessionChange = vi.fn();
+    const onSnapshot = vi.fn();
+    const onBack = vi.fn();
+    const { rerender } = render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={switchableWorkspaceSnapshot()}
+        onBack={onBack}
+        onSessionChange={onSessionChange}
+        onSnapshot={onSnapshot}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Sessions, switch session" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /analytics/i }));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(otherSessionRef));
+
+    const requestedSnapshot = selectedOtherSessionSnapshot();
+    rerender(
+      <SessionWorkspacePage
+        route={route}
+        session={otherSession}
+        snapshot={requestedSnapshot}
+        onBack={onBack}
+        onSessionChange={onSessionChange}
+        onSnapshot={onSnapshot}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Session workspace unavailable" })).toBeInTheDocument();
+
+    await act(async () => {
+      selection.resolve({ ok: true, value: requestedSnapshot });
+      await selection.promise;
+    });
+    await waitFor(() => expect(onSessionChange).toHaveBeenCalledExactlyOnceWith(requestedSnapshot, otherRoute));
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "an unrelated target event",
+      finalState: () => ({ route, session: thirdSession, snapshot: selectedThirdSessionSnapshot() }),
+    },
+    {
+      name: "a disconnect",
+      finalState: () => ({ route, session: null, snapshot: disconnectedSnapshot() }),
+    },
+    {
+      name: "a route change",
+      finalState: () => ({ route: otherRoute, session: otherSession, snapshot: selectedOtherSessionSnapshot() }),
+    },
+  ])("quarantines an earlier selection response after $name", async ({ finalState }) => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const selection = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    vi.mocked(api.selectTarget).mockReturnValue(selection.promise);
+    const onSessionChange = vi.fn();
+    const onSnapshot = vi.fn();
+    const onBack = vi.fn();
+    const { rerender } = render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={switchableWorkspaceSnapshot()}
+        onBack={onBack}
+        onSessionChange={onSessionChange}
+        onSnapshot={onSnapshot}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Sessions, switch session" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /analytics/i }));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(otherSessionRef));
+
+    const requestedSnapshot = selectedOtherSessionSnapshot();
+    rerender(
+      <SessionWorkspacePage
+        route={route}
+        session={otherSession}
+        snapshot={requestedSnapshot}
+        onBack={onBack}
+        onSessionChange={onSessionChange}
+        onSnapshot={onSnapshot}
+      />,
+    );
+    const final = finalState();
+    rerender(
+      <SessionWorkspacePage
+        route={final.route}
+        session={final.session}
+        snapshot={final.snapshot}
+        onBack={onBack}
+        onSessionChange={onSessionChange}
+        onSnapshot={onSnapshot}
+      />,
+    );
+
+    await act(async () => {
+      selection.resolve({ ok: true, value: requestedSnapshot });
+      await selection.promise;
+    });
+    expect(onSessionChange).not.toHaveBeenCalled();
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("discloses partial inventory and returns to the full sessions view", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const snapshot = switchableWorkspaceSnapshot();
+    snapshot.domains.sessions.page = { limit: 2, total: 5, truncated: true };
+    const onBack = vi.fn();
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={snapshot}
+        onBack={onBack}
+        onSessionChange={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Sessions, switch session" }));
+    const viewAll = await screen.findByRole("button", { name: /View all sessions/i });
+    expect(viewAll).toHaveTextContent("Showing 2 of 5 available sessions");
+    await user.click(viewAll);
+    expect(onBack).toHaveBeenCalledOnce();
+  });
+
+  it("requires confirmation before a session switch closes managed shells", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    vi.mocked(api.listSessionShells).mockResolvedValue({
+      ok: true,
+      value: { resources: [{ resourceId: "shell-1" }, { resourceId: "shell-2" }], metrics: {} },
+    } as unknown as Awaited<ReturnType<SliverDesktopAPI["listSessionShells"]>>);
+    vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: selectedOtherSessionSnapshot() });
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={switchableWorkspaceSnapshot()}
+        onBack={vi.fn()}
+        onSessionChange={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Sessions, switch session" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /analytics/i }));
+
+    expect(await screen.findByRole("alertdialog", { name: "Switch sessions and close managed shells?" })).toBeInTheDocument();
+    expect(api.selectTarget).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Close shells and switch" }));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(otherSessionRef));
+  });
+
+  it("pops out the whole interaction through the zero-argument bridge", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Pop out interaction" }));
+    await waitFor(() => expect(api.openInteractionWindow).toHaveBeenCalledOnce());
+    expect(api.openInteractionWindow).toHaveBeenCalledWith();
   });
 
   it("shows Registry only for Windows sessions", () => {
