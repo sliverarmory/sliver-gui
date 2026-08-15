@@ -24,15 +24,32 @@ import { parseApplicationUpdateState, type ApplicationUpdateState } from "../sha
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
 import {
   assertPrivatePackagedUpdateConfiguration,
+  attachCleanupFailure,
+  cleanupOwnedApplication,
+  observePromiseSettlement,
+  packagedUpdateLaunchProfile,
+  packagedUpdateProfileEnvironment,
   parsePackagedUpdateVersions,
+  parseWindowsAuthenticodeInspection,
+  type ObservedPromiseSettlement,
   type PackagedUpdateVersions,
+  windowsAuthenticodeInspectionCommand,
 } from "./packaged-application-update-support.js";
 
 const ENABLE_VARIABLE = "SLIVER_GUI_UPDATE_E2E";
 const TEST_TIMEOUT_MS = 20 * 60 * 1_000;
 const UPDATE_TIMEOUT_MS = 10 * 60 * 1_000;
+const PLAYWRIGHT_CLOSE_SETTLE_TIMEOUT_MS = 30_000;
+const APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS = 5_000;
+const APPLICATION_PROCESS_GRACEFUL_EXIT_TIMEOUT_MS = 5_000;
+const APPLICATION_PROCESS_FORCE_EXIT_TIMEOUT_MS = 15_000;
 const PROCESS_POLL_INTERVAL_MS = 250;
 const COMMAND_OUTPUT_LIMIT = 64 * 1_024;
+
+const BROAD_APPLICATION_PROCESS_INVENTORY = {
+  includeDescendants: true,
+  includeHelpers: true,
+} as const;
 
 const enableValue = process.env[ENABLE_VARIABLE];
 if (enableValue !== undefined && enableValue !== "" && enableValue !== "0" && enableValue !== "1") {
@@ -70,6 +87,8 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
   let secondApplication: ElectronApplication | undefined;
   let secondPage: Page | undefined;
   let forcedRelaunch: ProcessRecord | undefined;
+  let testFailed = false;
+  let testFailure: unknown;
   try {
     recordPhase(diagnostics, "installing-n-minus-one");
     const installation = await installBaseApplication(input, installRoot, temporaryRoot);
@@ -89,7 +108,11 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     const initialState = await inspectApplication(firstApplication);
     assert.equal(initialState.isPackaged, true, "N-1 must be a packaged application");
     assert.equal(initialState.version, input.versions.from, "installed application version must match N-1");
-    assertPathInside(initialState.userDataPath, profileRoot, "N-1 user-data path");
+    await assertCanonicalPathEqual(
+      initialState.userDataPath,
+      firstLaunch.userDataDirectory,
+      "N-1 user-data path",
+    );
     if (process.platform === "linux") {
       assert.ok(initialState.appImagePath, "N-1 AppImage runtime must set APPIMAGE");
       assert.ok(
@@ -145,11 +168,10 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     });
 
     recordPhase(diagnostics, "installing-and-forced-relaunch");
-    const oldApplicationClosed = firstApplication.waitForEvent("close", { timeout: UPDATE_TIMEOUT_MS });
+    const oldApplicationClose = observePromiseSettlement(
+      firstApplication.waitForEvent("close", { timeout: 0 }),
+    );
     await restartDialog.getByRole("button", { name: "Restart and update", exact: true }).click();
-    await oldApplicationClosed;
-    firstApplication = undefined;
-    firstPage = undefined;
     await waitForProcessIdToExit(
       initialState.pid,
       installation.executablePath,
@@ -159,6 +181,10 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
 
     const updatedExecutable = await waitForUpdatedExecutable(installation, input.versions, UPDATE_TIMEOUT_MS);
     diagnostics["updatedExecutable"] = updatedExecutable;
+    // Native updater relaunches do not preserve the controlled launch's
+    // --user-data-dir argument. Verify that native process and executable here,
+    // then terminate it; profile identity is asserted only after the second
+    // controlled Playwright launch below.
     forcedRelaunch = await waitForForcedRelaunch({
       executablePath: updatedExecutable,
       installRoot,
@@ -167,8 +193,16 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     });
     diagnostics["forcedRelaunch"] = forcedRelaunch;
     await terminateExactApplicationProcess(forcedRelaunch, updatedExecutable, installRoot);
+    await waitForNoApplicationProcesses(
+      undefined,
+      installRoot,
+      30_000,
+      BROAD_APPLICATION_PROCESS_INVENTORY,
+    );
     forcedRelaunch = undefined;
-    await waitForNoApplicationProcesses(updatedExecutable, installRoot, 30_000);
+    await requireObservedApplicationClose(oldApplicationClose, PLAYWRIGHT_CLOSE_SETTLE_TIMEOUT_MS);
+    firstApplication = undefined;
+    firstPage = undefined;
 
     const updatedTrust = await verifyPlatformTrust(updatedExecutable, input);
     diagnostics["updatedSignature"] = updatedTrust;
@@ -190,7 +224,11 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     const updatedState = await inspectApplication(secondApplication);
     assert.equal(updatedState.isPackaged, true, "N must be a packaged application");
     assert.equal(updatedState.version, input.versions.to, "restarted application version must match N");
-    assertPathInside(updatedState.userDataPath, profileRoot, "N user-data path");
+    await assertCanonicalPathEqual(
+      updatedState.userDataPath,
+      secondLaunch.userDataDirectory,
+      "N user-data path",
+    );
     assert.equal(
       updatedState.userDataPath,
       initialState.userDataPath,
@@ -224,8 +262,14 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     recordPhase(diagnostics, "complete");
     await writeDiagnosticFile(diagnosticsDirectory, "success", diagnostics, redactions);
   } catch (error) {
+    testFailed = true;
+    testFailure = error;
     diagnostics["failure"] = errorMessage(error);
-    diagnostics["processes"] = await applicationProcesses(undefined, installRoot).catch((processError) => [{
+    diagnostics["processes"] = await applicationProcesses(
+      undefined,
+      installRoot,
+      BROAD_APPLICATION_PROCESS_INVENTORY,
+    ).catch((processError) => [{
       pid: -1,
       commandLine: errorMessage(processError),
     }]);
@@ -242,14 +286,44 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     });
     throw error;
   } finally {
-    await secondApplication?.close().catch(() => undefined);
-    await firstApplication?.close().catch(() => undefined);
+    const cleanupFailures: unknown[] = [];
+    // A native relaunch can inherit Playwright's transport descriptor. Stop it
+    // before asking the original connection to close, including failure paths.
     if (forcedRelaunch) {
-      await terminateExactApplicationProcess(forcedRelaunch, undefined, installRoot).catch(() => undefined);
+      await terminateExactApplicationProcess(forcedRelaunch, undefined, installRoot).catch((cleanupError) => {
+        console.error("Failed to terminate the tracked updater relaunch", errorMessage(cleanupError));
+      });
     }
-    await rm(temporaryRoot, { recursive: true, force: true }).catch((cleanupError: NodeJS.ErrnoException) => {
-      console.error("Failed to clean the packaged updater temporary directory", cleanupError.code ?? "unknown");
+    for (const [label, application] of [
+      ["N", secondApplication],
+      ["N-1", firstApplication],
+    ] as const) {
+      if (!application) continue;
+      await cleanupOwnedApplication(application, label, APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS).catch((cleanupError) => {
+        cleanupFailures.push(cleanupError);
+        console.error(`Failed to close the controlled ${label} application`, errorMessage(cleanupError));
+      });
+    }
+    let processAbsenceProved = false;
+    await terminateRemainingApplicationProcesses(installRoot).then(() => {
+      processAbsenceProved = true;
+    }).catch((cleanupError) => {
+      cleanupFailures.push(cleanupError);
+      console.error("Failed to terminate every packaged updater application process", errorMessage(cleanupError));
     });
+    if (!processAbsenceProved) {
+      console.error("Retaining the packaged updater temporary directory because process absence was not proved");
+    } else {
+      await rm(temporaryRoot, { recursive: true, force: true }).catch((cleanupError: NodeJS.ErrnoException) => {
+        cleanupFailures.push(cleanupError);
+        console.error("Failed to clean the packaged updater temporary directory", cleanupError.code ?? "unknown");
+      });
+    }
+    if (cleanupFailures.length > 0) {
+      const cleanupError = new AggregateError(cleanupFailures, "Packaged updater E2E cleanup failed");
+      if (testFailed) attachCleanupFailure(testFailure, cleanupError);
+      else throw cleanupError;
+    }
   }
 });
 
@@ -279,8 +353,20 @@ interface ApplicationState {
 
 interface ProcessRecord {
   readonly pid: number;
+  readonly parentPid?: number;
   readonly executablePath?: string;
   readonly commandLine: string;
+}
+
+interface ApplicationProcessInventoryOptions {
+  readonly includeDescendants?: boolean;
+  readonly includeHelpers?: boolean;
+}
+
+interface ApplicationProcessCandidate extends ProcessRecord {
+  readonly directlyOwned: boolean;
+  readonly helper: boolean;
+  readonly parentPid: number;
 }
 
 async function readInput(repositoryRoot: string): Promise<TestInput> {
@@ -430,22 +516,18 @@ async function verifyPlatformTrust(executablePath: string, input: TestInput): Pr
     };
   }
   if (process.platform === "win32") {
-    const result = await runCommand("powershell.exe", [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "$signature = Get-AuthenticodeSignature -LiteralPath $env:SLIVER_GUI_UPDATE_E2E_SIGNATURE_PATH; " +
-        "[PSCustomObject]@{Status=[string]$signature.Status;" +
-        "Subject=[string]$signature.SignerCertificate.Subject} | ConvertTo-Json -Compress",
-    ], {
-      env: { SLIVER_GUI_UPDATE_E2E_SIGNATURE_PATH: executablePath },
-    });
-    const signature = JSON.parse(result.stdout) as { Status?: unknown; Subject?: unknown };
-    assert.equal(signature.Status, "Valid", "Windows application signature must be valid");
-    assert.equal(signature.Subject, input.windowsPublisher, "Windows application publisher must remain unchanged");
+    const inspection = windowsAuthenticodeInspectionCommand(executablePath);
+    const result = await runCommand(inspection.executable, inspection.arguments);
+    const signature = parseWindowsAuthenticodeInspection(result.stdout);
+    assert.equal(
+      signature.status,
+      "Valid",
+      `Windows application signature must be valid: ${signature.statusMessage}`,
+    );
+    assert.equal(signature.subject, input.windowsPublisher, "Windows application publisher must remain unchanged");
     return {
-      signerIdentity: String(signature.Subject),
-      details: signature,
+      signerIdentity: `${signature.subject} (${signature.thumbprint})`,
+      details: { ...signature },
     };
   }
   const metadata = await stat(executablePath);
@@ -460,11 +542,13 @@ async function launchApplication(
   executablePath: string,
   profileRoot: string,
   githubToken: string,
-): Promise<{ application: ElectronApplication; page: Page }> {
+): Promise<{ application: ElectronApplication; page: Page; userDataDirectory: string }> {
   const environment = isolatedApplicationEnvironment(profileRoot, githubToken);
+  const launchProfile = packagedUpdateLaunchProfile(profileRoot);
+  await mkdir(launchProfile.userDataDirectory, { recursive: true });
   const application = await electron.launch({
     executablePath,
-    args: ["--enable-sandbox"],
+    args: launchProfile.arguments,
     bypassCSP: false,
     chromiumSandbox: true,
     cwd: dirname(executablePath),
@@ -475,9 +559,16 @@ async function launchApplication(
     const page = await application.firstWindow({ timeout: 120_000 });
     await beginUpdateStateCapture(page);
     await page.emulateMedia({ reducedMotion: "reduce" });
-    return { application, page };
+    return { application, page, userDataDirectory: launchProfile.userDataDirectory };
   } catch (error) {
-    await application.close().catch(() => undefined);
+    await cleanupOwnedApplication(
+      application,
+      "partially launched",
+      APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS,
+    ).catch((cleanupError) => {
+      console.error("Failed to clean a partially launched application", errorMessage(cleanupError));
+      attachCleanupFailure(error, cleanupError);
+    });
     throw error;
   }
 }
@@ -502,14 +593,8 @@ function isolatedApplicationEnvironment(profileRoot: string, githubToken: string
   ]) delete environment[name];
   return {
     ...environment,
-    APPDATA: join(profileRoot, "AppData", "Roaming"),
+    ...packagedUpdateProfileEnvironment(profileRoot, process.platform),
     GH_TOKEN: githubToken,
-    HOME: profileRoot,
-    LOCALAPPDATA: join(profileRoot, "AppData", "Local"),
-    USERPROFILE: profileRoot,
-    XDG_CACHE_HOME: join(profileRoot, ".cache"),
-    XDG_CONFIG_HOME: join(profileRoot, ".config"),
-    XDG_DATA_HOME: join(profileRoot, ".local", "share"),
     ...(process.platform === "linux" ? { APPIMAGE_EXTRACT_AND_RUN: "1" } : {}),
   };
 }
@@ -693,80 +778,245 @@ async function waitForForcedRelaunch({
 async function applicationProcesses(
   executablePath: string | undefined,
   installRoot: string,
+  options: ApplicationProcessInventoryOptions = {},
 ): Promise<ProcessRecord[]> {
   if (process.platform === "win32") {
-    const result = await runCommand("powershell.exe", [
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$items = @(Get-CimInstance Win32_Process -ErrorAction Stop | " +
+        "Where-Object {-not [string]::IsNullOrWhiteSpace($_.ExecutablePath)} | " +
+        "Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine)",
+      "ConvertTo-Json -Compress -InputObject $items -ErrorAction Stop",
+    ].join("; ");
+    const result = await runCommand("pwsh.exe", [
+      "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
-      "-Command",
-      "$items = @(Get-CimInstance Win32_Process | Where-Object {$null -ne $_.ExecutablePath} | " +
-        "Select-Object ProcessId,ExecutablePath,CommandLine); ConvertTo-Json -Compress -InputObject $items",
-    ]);
-    const parsed = JSON.parse(result.stdout || "[]") as Array<{
-      ProcessId?: unknown;
-      ExecutablePath?: unknown;
-      CommandLine?: unknown;
-    }>;
-    return parsed.flatMap((item): ProcessRecord[] => {
-      if (typeof item.ProcessId !== "number" || typeof item.ExecutablePath !== "string") return [];
-      if (!isPathInside(item.ExecutablePath, installRoot)) return [];
-      if (executablePath && !samePath(item.ExecutablePath, executablePath)) return [];
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ], { timeoutMs: 30_000 });
+    if (result.stderr) {
+      throw new Error(`Windows process inventory wrote stderr: ${redactDiagnosticText(result.stderr, [], 4_096)}`);
+    }
+    const parsed = parseWindowsProcessInventory(result.stdout);
+    const candidates = parsed.flatMap((item): ApplicationProcessCandidate[] => {
+      const commandLine = item.CommandLine ?? item.ExecutablePath;
+      const directlyOwned = isPathInside(item.ExecutablePath, installRoot) &&
+        (!executablePath || samePath(item.ExecutablePath, executablePath));
       return [{
         pid: item.ProcessId,
+        parentPid: item.ParentProcessId,
         executablePath: item.ExecutablePath,
-        commandLine: typeof item.CommandLine === "string" ? item.CommandLine : item.ExecutablePath,
+        commandLine,
+        directlyOwned,
+        helper: isApplicationHelperCommand(commandLine),
       }];
     });
+    return selectOwnedApplicationProcesses(candidates, options);
   }
 
   if (process.platform === "linux") {
-    return linuxAppImageProcesses(executablePath, installRoot);
+    return linuxAppImageProcesses(executablePath, installRoot, options);
   }
 
-  const result = await runCommand("/bin/ps", ["-axo", "pid=,command="]);
-  return result.stdout.split(/\r?\n/u).flatMap((line): ProcessRecord[] => {
-    const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
-    if (!match?.[1] || !match[2]) return [];
-    const commandLine = match[2];
-    const target = executablePath ?? installRoot;
-    if (!commandLine.includes(target)) return [];
-    if (/(?:Helper|crashpad_handler)/u.test(commandLine)) return [];
-    return [{ pid: Number(match[1]), commandLine }];
+  return macApplicationProcesses(executablePath, installRoot, options);
+}
+
+interface WindowsProcessInventoryRecord {
+  readonly CommandLine: string | null;
+  readonly ExecutablePath: string;
+  readonly ParentProcessId: number;
+  readonly ProcessId: number;
+}
+
+function parseWindowsProcessInventory(content: string): WindowsProcessInventoryRecord[] {
+  const value = JSON.parse(content) as unknown;
+  if (!Array.isArray(value)) throw new Error("Windows process inventory must return a JSON array");
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`Windows process inventory item ${index} must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    const processId = record["ProcessId"];
+    const parentProcessId = record["ParentProcessId"];
+    const executablePath = record["ExecutablePath"];
+    const commandLine = record["CommandLine"];
+    if (
+      typeof processId !== "number" ||
+      !Number.isSafeInteger(processId) ||
+      processId <= 0 ||
+      typeof parentProcessId !== "number" ||
+      !Number.isSafeInteger(parentProcessId) ||
+      parentProcessId < 0 ||
+      typeof executablePath !== "string" ||
+      !isAbsolute(executablePath) ||
+      (commandLine !== null && typeof commandLine !== "string")
+    ) {
+      throw new Error(`Windows process inventory item ${index} has an invalid shape`);
+    }
+    return {
+      ProcessId: processId,
+      ParentProcessId: parentProcessId,
+      ExecutablePath: executablePath,
+      CommandLine: commandLine,
+    };
   });
+}
+
+async function macApplicationProcesses(
+  executablePath: string | undefined,
+  installRoot: string,
+  options: ApplicationProcessInventoryOptions,
+): Promise<ProcessRecord[]> {
+  const result = await runCommand("/bin/ps", ["-axo", "pid=,ppid=,command="]);
+  const candidates = result.stdout.split(/\r?\n/u).flatMap((line): ApplicationProcessCandidate[] => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/u.exec(line);
+    if (!match?.[1] || !match[2] || !match[3]) return [];
+    const pid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parentPid)) return [];
+    const commandLine = match[3];
+    const target = executablePath ?? installRoot;
+    const directlyOwned = commandLine.includes(target);
+    return [{
+      pid,
+      parentPid,
+      commandLine,
+      directlyOwned,
+      helper: isApplicationHelperCommand(commandLine),
+    }];
+  });
+  return selectOwnedApplicationProcesses(candidates, options);
+}
+
+function selectOwnedApplicationProcesses(
+  candidates: readonly ApplicationProcessCandidate[],
+  options: ApplicationProcessInventoryOptions,
+): ProcessRecord[] {
+  const ownedPids = new Set(
+    candidates.filter(({ directlyOwned }) => directlyOwned).map(({ pid }) => pid),
+  );
+  if (options.includeDescendants) {
+    let addedDescendant = true;
+    while (addedDescendant) {
+      addedDescendant = false;
+      for (const candidate of candidates) {
+        if (ownedPids.has(candidate.pid) || !ownedPids.has(candidate.parentPid)) continue;
+        ownedPids.add(candidate.pid);
+        addedDescendant = true;
+      }
+    }
+  }
+  return candidates.flatMap((candidate): ProcessRecord[] => {
+    if (!ownedPids.has(candidate.pid) || (!options.includeHelpers && candidate.helper)) return [];
+    return [{
+      pid: candidate.pid,
+      parentPid: candidate.parentPid,
+      commandLine: candidate.commandLine,
+      ...(candidate.executablePath ? { executablePath: candidate.executablePath } : {}),
+    }];
+  });
+}
+
+function isApplicationHelperCommand(commandLine: string): boolean {
+  return /(?:--type=|Helper|crashpad_handler)/u.test(commandLine);
+}
+
+function absoluteCommandArgumentPath(argument: string): string | undefined {
+  if (isAbsolute(argument)) return argument;
+  const separatorIndex = argument.indexOf("=");
+  if (separatorIndex < 0) return undefined;
+  const value = argument.slice(separatorIndex + 1);
+  return isAbsolute(value) ? value : undefined;
+}
+
+function directlyOwnedLinuxCommand(
+  arguments_: readonly string[],
+  executablePath: string | undefined,
+  installRoot: string,
+): string | undefined {
+  for (const argument of arguments_) {
+    const path = absoluteCommandArgumentPath(argument);
+    if (!path || !isPathInside(path, installRoot)) continue;
+    if (!executablePath || samePath(path, executablePath)) return path;
+  }
+  return undefined;
+}
+
+function linuxParentPid(status: string): number | undefined {
+  const parent = /^PPid:\s+(\d+)\s*$/mu.exec(status)?.[1];
+  if (!parent) return undefined;
+  const parentPid = Number(parent);
+  return Number.isSafeInteger(parentPid) ? parentPid : undefined;
+}
+
+async function readLinuxEnvironment(pid: number): Promise<Buffer> {
+  try {
+    return await readFile(`/proc/${pid}/environ`);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") return Buffer.alloc(0);
+    throw error;
+  }
 }
 
 async function linuxAppImageProcesses(
   executablePath: string | undefined,
   installRoot: string,
+  options: ApplicationProcessInventoryOptions,
 ): Promise<ProcessRecord[]> {
   const entries = await readdir("/proc", { withFileTypes: true });
-  const records = await Promise.all(entries.flatMap((entry): Array<Promise<ProcessRecord | undefined>> => {
-    if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) return [];
-    const pid = Number(entry.name);
-    return [readLinuxAppImageProcess(pid, executablePath, installRoot)];
-  }));
-  return records.filter((record): record is ProcessRecord => record !== undefined);
+  const candidates = await Promise.all(entries.flatMap(
+    (entry): Array<Promise<ApplicationProcessCandidate | undefined>> => {
+      if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) return [];
+      const pid = Number(entry.name);
+      return [readLinuxAppImageProcess(pid, executablePath, installRoot, options)];
+    },
+  ));
+  return selectOwnedApplicationProcesses(
+    candidates.filter((record): record is ApplicationProcessCandidate => record !== undefined),
+    options,
+  );
 }
 
 async function readLinuxAppImageProcess(
   pid: number,
   executablePath: string | undefined,
   installRoot: string,
-): Promise<ProcessRecord | undefined> {
+  options: ApplicationProcessInventoryOptions,
+): Promise<ApplicationProcessCandidate | undefined> {
   try {
-    const [environmentBuffer, commandBuffer] = await Promise.all([
-      readFile(`/proc/${pid}/environ`),
+    const [environmentBuffer, commandBuffer, statusBuffer] = await Promise.all([
+      readLinuxEnvironment(pid),
       readFile(`/proc/${pid}/cmdline`),
+      readFile(`/proc/${pid}/status`),
     ]);
+    const parentPid = linuxParentPid(statusBuffer.toString("utf8"));
+    if (parentPid === undefined) return undefined;
     const environment = environmentBuffer.toString("utf8").split("\0");
     const appImage = environment.find((entry) => entry.startsWith("APPIMAGE="))?.slice("APPIMAGE=".length);
-    if (!appImage || !isAbsolute(appImage) || !isPathInside(appImage, installRoot)) return undefined;
-    if (executablePath && !samePath(appImage, executablePath)) return undefined;
     const arguments_ = commandBuffer.toString("utf8").split("\0").filter(Boolean);
-    if (arguments_.some((argument) => argument.startsWith("--type="))) return undefined;
     const commandLine = arguments_.join(" ");
-    if (/crashpad_handler/u.test(commandLine)) return undefined;
-    return { pid, executablePath: appImage, commandLine };
+    const commandPath = directlyOwnedLinuxCommand(arguments_, executablePath, installRoot);
+    const appImageOwned = Boolean(
+      appImage &&
+      isAbsolute(appImage) &&
+      isPathInside(appImage, installRoot) &&
+      (!executablePath || samePath(appImage, executablePath)),
+    );
+    const directlyOwned = appImageOwned || commandPath !== undefined;
+    const helper = isApplicationHelperCommand(commandLine);
+    if (!directlyOwned && !options.includeDescendants) return undefined;
+    if (helper && !options.includeHelpers && !options.includeDescendants) return undefined;
+    const ownedExecutable = appImageOwned ? appImage : commandPath;
+    return {
+      pid,
+      parentPid,
+      commandLine,
+      directlyOwned,
+      helper,
+      ...(ownedExecutable ? { executablePath: ownedExecutable } : {}),
+    };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "EACCES" || code === "EPERM") return undefined;
@@ -809,14 +1059,102 @@ async function terminateExactApplicationProcess(
 }
 
 async function waitForNoApplicationProcesses(
-  executablePath: string,
+  executablePath: string | undefined,
   installRoot: string,
   timeoutMs: number,
+  options: ApplicationProcessInventoryOptions = {},
 ): Promise<void> {
   await pollUntil(async () => {
-    const processes = await applicationProcesses(executablePath, installRoot);
+    const processes = await applicationProcesses(executablePath, installRoot, options);
     return processes.length === 0 ? true : undefined;
   }, timeoutMs, "the forced-relaunch process tree to exit");
+}
+
+async function terminateRemainingApplicationProcesses(installRoot: string): Promise<void> {
+  const gracefulFailures = await terminateApplicationProcessSnapshot(installRoot, false);
+  try {
+    await waitForNoApplicationProcesses(
+      undefined,
+      installRoot,
+      APPLICATION_PROCESS_GRACEFUL_EXIT_TIMEOUT_MS,
+      BROAD_APPLICATION_PROCESS_INVENTORY,
+    );
+    return;
+  } catch {
+    // The bounded graceful phase is expected to expire for a stuck helper.
+  }
+
+  const forcedFailures = await terminateApplicationProcessSnapshot(installRoot, true);
+  try {
+    await waitForNoApplicationProcesses(
+      undefined,
+      installRoot,
+      APPLICATION_PROCESS_FORCE_EXIT_TIMEOUT_MS,
+      BROAD_APPLICATION_PROCESS_INVENTORY,
+    );
+  } catch (absenceError) {
+    const remaining = await applicationProcesses(
+      undefined,
+      installRoot,
+      BROAD_APPLICATION_PROCESS_INVENTORY,
+    ).catch((inventoryError) => [{
+      pid: -1,
+      commandLine: `inventory failed: ${errorMessage(inventoryError)}`,
+    }]);
+    const failures = [...gracefulFailures, ...forcedFailures];
+    throw new Error(
+      `Test-owned application processes survived bounded cleanup: ${JSON.stringify(remaining)}` +
+        `${failures.length > 0 ? `; termination failures: ${failures.join("; ")}` : ""}` +
+        `; absence proof: ${errorMessage(absenceError)}`,
+    );
+  }
+}
+
+async function terminateApplicationProcessSnapshot(
+  installRoot: string,
+  force: boolean,
+): Promise<string[]> {
+  const processes = await applicationProcesses(
+    undefined,
+    installRoot,
+    BROAD_APPLICATION_PROCESS_INVENTORY,
+  );
+  const failures: string[] = [];
+  for (const processRecord of processes) {
+    if (processRecord.pid === process.pid) {
+      failures.push(`refused to signal the harness process ${processRecord.pid}`);
+      continue;
+    }
+    try {
+      const stillOwned = (await applicationProcesses(
+        undefined,
+        installRoot,
+        BROAD_APPLICATION_PROCESS_INVENTORY,
+      )).some((current) => sameProcessIdentity(current, processRecord));
+      if (!stillOwned) continue;
+      if (process.platform === "win32") {
+        await runCommand(
+          "taskkill.exe",
+          ["/PID", String(processRecord.pid), "/T", ...(force ? ["/F"] : [])],
+          { timeoutMs: 30_000 },
+        );
+      } else {
+        process.kill(processRecord.pid, force ? "SIGKILL" : "SIGTERM");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
+      failures.push(`PID ${processRecord.pid}: ${errorMessage(error)}`);
+    }
+  }
+  return failures;
+}
+
+function sameProcessIdentity(current: ProcessRecord, snapshot: ProcessRecord): boolean {
+  if (current.pid !== snapshot.pid || current.commandLine !== snapshot.commandLine) return false;
+  if (current.executablePath === undefined || snapshot.executablePath === undefined) {
+    return current.executablePath === snapshot.executablePath;
+  }
+  return samePath(current.executablePath, snapshot.executablePath);
 }
 
 async function waitForProcessIdToExit(
@@ -963,8 +1301,32 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-function assertPathInside(path: string, parent: string, label: string): void {
-  if (!isPathInside(path, parent)) throw new Error(`${label} must remain inside the isolated test profile`);
+async function assertCanonicalPathEqual(path: string, expected: string, label: string): Promise<void> {
+  const [canonicalPath, canonicalExpected] = await Promise.all([realpath(path), realpath(expected)]);
+  if (!samePath(canonicalPath, canonicalExpected)) {
+    throw new Error(`${label} must exactly match the controlled user-data directory`);
+  }
+}
+
+async function requireObservedApplicationClose(
+  observation: Promise<ObservedPromiseSettlement<unknown>>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutResult = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error("Timed out waiting for the controlled Playwright application connection to close"));
+    }, timeoutMs);
+    timeout.unref?.();
+  });
+  try {
+    const outcome = await Promise.race([observation, timeoutResult]);
+    if (outcome.status === "rejected") {
+      throw new Error(`Controlled Playwright application close failed: ${errorMessage(outcome.reason)}`);
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function isPathInside(path: string, parent: string): boolean {
