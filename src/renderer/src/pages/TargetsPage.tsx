@@ -40,6 +40,7 @@ import {
   faTerminal,
   faTrash,
   faTriangleExclamation,
+  faUpRightFromSquare,
   faUserGroup,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
@@ -91,6 +92,8 @@ export interface TargetsPageProps {
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
   onOpenSession?: (session: SessionSummary, target: TargetRef) => void;
+  presentation?: "catalog" | "dedicated";
+  expectedTarget?: TargetRef;
 }
 
 type OperationDraft = {
@@ -131,10 +134,18 @@ const OPERATION_CAPABILITIES: Readonly<Record<TargetOperationId, TargetCapabilit
   "beacon.open-session": "beacon.open-session",
 };
 
-export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: TargetsPageProps): React.JSX.Element {
+export function TargetsPage({
+  mode,
+  snapshot,
+  onSnapshot,
+  onOpenSession,
+  presentation = "catalog",
+  expectedTarget,
+}: TargetsPageProps): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [isSelecting, setIsSelecting] = useState(false);
   const [isChangingWatch, setIsChangingWatch] = useState(false);
+  const [isOpeningInteractionWindow, setIsOpeningInteractionWindow] = useState(false);
   const [operations, setOperations] = useState<TargetOperationRecord[]>([]);
   const [operationsPage, setOperationsPage] = useState<PageSummary>();
   const [operationsError, setOperationsError] = useState<string>();
@@ -217,6 +228,14 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
   const backendIncarnationRef = useRef(backendIncarnation);
   backendIncarnationRef.current = backendIncarnation;
   const taskReadCapability = capabilityFor(snapshot.targetContext.capabilities, "beacon.tasks.read");
+  const dedicatedTargetIsCurrent = presentation !== "dedicated" || (
+    mode === "beacon" &&
+    expectedTarget?.mode === "beacon" &&
+    snapshot.connection.epoch === expectedTarget.backendEpoch &&
+    targetRefIdentity(expectedTarget) === activeIdentity &&
+    active?.mode === "beacon" &&
+    active.id === expectedTarget.id
+  );
   const selectedKeys = active ? new Set([targetRowKey(active)]) : new Set<string>();
   const pageLabel = mode === "session" ? "Sessions" : "Beacons";
   const pageLabelLower = mode === "session" ? "sessions" : "beacons";
@@ -395,7 +414,7 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
     const append = cursor !== undefined;
     const expectedIncarnation = backendIncarnationRef.current;
     const requestSequence = ++tasksRequestSequence.current;
-    if (active?.mode !== "beacon") {
+    if (active?.mode !== "beacon" || !dedicatedTargetIsCurrent) {
       setTasks([]);
       setTasksPage(undefined);
       setTasksError(undefined);
@@ -459,7 +478,7 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
         else setIsLoadingTasks(false);
       }
     }
-  }, [active?.id, active?.mode, activeIdentity, taskReadCapability?.available, taskReadCapability?.reason?.message]);
+  }, [active?.id, active?.mode, activeIdentity, dedicatedTargetIsCurrent, taskReadCapability?.available, taskReadCapability?.reason?.message]);
 
   useEffect(() => {
     targetInventoryPageRequestSequence.current.session += 1;
@@ -669,6 +688,21 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
     }
   }, [onSnapshot]);
 
+  const openInteractionWindow = useCallback(async () => {
+    if (mode !== "beacon" || presentation !== "catalog" || activeIdentityRef.current === undefined) return;
+    setIsOpeningInteractionWindow(true);
+    try {
+      const result = await window.sliver.openInteractionWindow();
+      if (!result.ok) {
+        toast.danger("Could not pop out interaction", { description: result.error });
+      }
+    } catch (error) {
+      toast.danger("Could not pop out interaction", { description: errorMessage(error) });
+    } finally {
+      setIsOpeningInteractionWindow(false);
+    }
+  }, [mode, presentation]);
+
   const refreshSnapshot = useCallback(async () => {
     try {
       const result = await window.sliver.refresh();
@@ -801,9 +835,56 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
     }]),
   ], [mode, selectTarget]);
 
+  if (!dedicatedTargetIsCurrent) {
+    return (
+      <section className="page-stack targets-page" data-presentation="dedicated">
+        <div className="grid min-h-[calc(100vh-4rem)] place-items-center rounded-2xl border border-separator bg-surface px-6 py-12">
+          <EmptyState size="sm">
+            <EmptyState.Header>
+              <EmptyState.Media variant="icon">
+                <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} />
+              </EmptyState.Media>
+              <EmptyState.Title>Beacon interaction unavailable</EmptyState.Title>
+              <EmptyState.Description className="max-w-md text-pretty">
+                This window is pinned to an exact beacon identity. The active target changed or became unavailable, so its interaction controls are quarantined.
+              </EmptyState.Description>
+            </EmptyState.Header>
+          </EmptyState>
+        </div>
+      </section>
+    );
+  }
+
+  const targetDetail = mode === "beacon" ? (
+    <TargetDetail
+      active={active}
+      mode={mode}
+      capabilities={snapshot.targetContext.capabilities}
+      isBusy={isSelecting || isPreparingAction}
+      isChangingWatch={isChangingWatch}
+      isDedicated={presentation === "dedicated"}
+      isOpeningInteractionWindow={isOpeningInteractionWindow}
+      watchEnabled={snapshot.targetContext.beaconWatch}
+      unavailableReason={snapshot.targetContext.activeTarget?.mode === mode
+        ? snapshot.targetContext.unavailableReason
+        : undefined}
+      onBackground={presentation === "catalog" ? () => void backgroundTarget() : undefined}
+      onPopOut={presentation === "catalog" ? () => void openInteractionWindow() : undefined}
+      onPrepareAction={(action) => void prepareAction(action)}
+      onWatchChange={(enabled) => void setBeaconWatch(enabled)}
+      onOperationSubmitted={(operation) => {
+        const submittedIncarnation = backendIncarnation;
+        if (submittedIncarnation !== backendIncarnationRef.current) return false;
+        mergeOperation(operation);
+        return true;
+      }}
+      operationTargetIdentity={`${backendIncarnation}:${targetRefIdentity(activeRef) ?? `${active?.mode ?? "none"}:${active?.id ?? "none"}`}`}
+    />
+  ) : null;
+
   return (
-    <section className="page-stack targets-page">
-      <header className="page-heading">
+    <section className="page-stack targets-page" data-presentation={presentation}>
+      {presentation === "catalog" ? <header className="page-heading">
         <div className="min-w-0">
           <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={pageIcon} /> {mode === "session" ? "Session" : "Beacon"} workspace</div>
           <h1>{pageLabel}</h1>
@@ -818,9 +899,9 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
             onAction={(action) => void prepareAction(action)}
           />
         </div>
-      </header>
+      </header> : null}
 
-      <div className={mode === "session" ? "min-h-0" : "grid min-h-0 gap-4 2xl:grid-cols-[minmax(0,1fr)_390px]"}>
+      {presentation === "catalog" ? <div className={mode === "session" ? "min-h-0" : "grid min-h-0 gap-4 2xl:grid-cols-[minmax(0,1fr)_390px]"}>
         <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="target-inventory-heading">
           <div className="flex flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex min-w-0 items-center gap-3">
@@ -926,30 +1007,8 @@ export function TargetsPage({ mode, snapshot, onSnapshot, onOpenSession }: Targe
           />
         </section>
 
-        {mode === "beacon" ? (
-          <TargetDetail
-            active={active}
-            mode={mode}
-            capabilities={snapshot.targetContext.capabilities}
-            isBusy={isSelecting || isPreparingAction}
-            isChangingWatch={isChangingWatch}
-            watchEnabled={snapshot.targetContext.beaconWatch}
-            unavailableReason={snapshot.targetContext.activeTarget?.mode === mode
-              ? snapshot.targetContext.unavailableReason
-              : undefined}
-            onBackground={() => void backgroundTarget()}
-            onPrepareAction={(action) => void prepareAction(action)}
-            onWatchChange={(enabled) => void setBeaconWatch(enabled)}
-            onOperationSubmitted={(operation) => {
-              const submittedIncarnation = backendIncarnation;
-              if (submittedIncarnation !== backendIncarnationRef.current) return false;
-              mergeOperation(operation);
-              return true;
-            }}
-            operationTargetIdentity={`${backendIncarnation}:${targetRefIdentity(activeRef) ?? `${active?.mode ?? "none"}:${active?.id ?? "none"}`}`}
-          />
-        ) : null}
-      </div>
+        {targetDetail}
+      </div> : targetDetail}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <OperationHistory
@@ -1062,9 +1121,12 @@ function TargetDetail({
   capabilities,
   isBusy,
   isChangingWatch,
+  isDedicated,
+  isOpeningInteractionWindow,
   watchEnabled,
   unavailableReason,
   onBackground,
+  onPopOut,
   onPrepareAction,
   onWatchChange,
   onOperationSubmitted,
@@ -1075,9 +1137,12 @@ function TargetDetail({
   capabilities: SliverSnapshot["targetContext"]["capabilities"];
   isBusy: boolean;
   isChangingWatch: boolean;
+  isDedicated: boolean;
+  isOpeningInteractionWindow: boolean;
   watchEnabled: boolean;
   unavailableReason: string | undefined;
-  onBackground: () => void;
+  onBackground: (() => void) | undefined;
+  onPopOut: (() => void) | undefined;
   onPrepareAction: (action: DestructiveTargetActionId) => void;
   onWatchChange: (enabled: boolean) => void;
   onOperationSubmitted: (operation: TargetOperationRecord) => boolean;
@@ -1085,7 +1150,7 @@ function TargetDetail({
 }): React.JSX.Element {
   if (!active) {
     return (
-      <aside className="min-w-0 self-start rounded-2xl border border-separator bg-surface p-6 2xl:sticky 2xl:top-0">
+      <aside className={`min-w-0 rounded-2xl border border-separator bg-surface p-6 ${isDedicated ? "" : "self-start 2xl:sticky 2xl:top-0"}`}>
         <EmptyState size="sm">
           <EmptyState.Media><FontAwesomeIcon aria-hidden icon={mode === "session" ? faComputer : faSatellite} /></EmptyState.Media>
           <EmptyState.Content>
@@ -1105,7 +1170,7 @@ function TargetDetail({
     : ["target.kill", "beacon.remove"];
 
   return (
-    <aside className="min-w-0 self-start overflow-hidden rounded-2xl border border-separator bg-surface 2xl:sticky 2xl:top-0">
+    <aside className={`min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface ${isDedicated ? "" : "self-start 2xl:sticky 2xl:top-0"}`}>
       <div className="flex items-start gap-3 px-4 py-4">
         <span className="section-icon"><FontAwesomeIcon aria-hidden icon={active.mode === "session" ? faComputer : faSatellite} /></span>
         <div className="min-w-0 flex-1">
@@ -1115,12 +1180,32 @@ function TargetDetail({
           </div>
           <p className="mt-1 truncate font-mono text-[11px] text-muted">{active.id}</p>
         </div>
-        <Tooltip delay={250}>
-          <Button aria-label="Background target" isDisabled={isBusy} isIconOnly size="sm" variant="ghost" onPress={onBackground}>
-            <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
-          </Button>
-          <Tooltip.Content>Background target</Tooltip.Content>
-        </Tooltip>
+        <div className="flex shrink-0 items-center gap-1">
+          {onPopOut ? (
+            <Tooltip delay={250}>
+              <Button
+                aria-label="Pop out interaction"
+                isDisabled={isBusy}
+                isIconOnly
+                isPending={isOpeningInteractionWindow}
+                size="sm"
+                variant="ghost"
+                onPress={onPopOut}
+              >
+                <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} />
+              </Button>
+              <Tooltip.Content>Pop out interaction into a new window</Tooltip.Content>
+            </Tooltip>
+          ) : null}
+          {onBackground ? (
+            <Tooltip delay={250}>
+              <Button aria-label="Background target" isDisabled={isBusy} isIconOnly size="sm" variant="ghost" onPress={onBackground}>
+                <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+              </Button>
+              <Tooltip.Content>Background target</Tooltip.Content>
+            </Tooltip>
+          ) : null}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 border-y border-separator bg-default px-4 py-4 text-xs">

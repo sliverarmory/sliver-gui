@@ -81,6 +81,8 @@ function installSliverAPI(
       captureSnapshotListener?.(listener);
       return vi.fn();
     }),
+    openInteractionWindow: vi.fn(failedOperation),
+    claimInteractionWindow: vi.fn(failedOperation),
     openSessionShellWindow: vi.fn(failedOperation),
     claimSessionShellWindow: vi.fn(failedOperation),
     openWindow: vi.fn(failedOperation),

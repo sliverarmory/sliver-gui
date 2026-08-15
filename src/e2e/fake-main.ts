@@ -89,6 +89,7 @@ const registry = new ConnectionRegistry({
 app.setPath("userData", requiredArgument("--user-data-directory="));
 void startApplication({
   registry,
+  applicationAssetsDirectory: `${repositoryRoot}/build`,
   rendererEntryPath: `${repositoryRoot}/dist/renderer/index.html`,
   preloadPath: `${repositoryRoot}/dist/preload/index.cjs`,
 }).catch((error: unknown) => {

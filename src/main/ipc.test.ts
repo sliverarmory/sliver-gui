@@ -186,6 +186,8 @@ describe("trusted Electron IPC boundary", () => {
     IPC.disconnect,
     IPC.getSnapshot,
     IPC.refresh,
+    IPC.openInteractionWindow,
+    IPC.claimInteractionWindow,
     IPC.exitApp,
     IPC.chooseCertificatePair,
     IPC.prepareStopAllJobs,
@@ -351,6 +353,121 @@ describe("trusted Electron IPC boundary", () => {
     expect(() => electronMocks.handlers.get(IPC.claimSessionShellWindow)?.(event, {})).toThrow(
       /invalid arguments/i,
     );
+  });
+
+  it("opens and claims an interaction window only for the exact trusted main-frame identity", async () => {
+    const open = vi.fn(async () => ({ ok: true as const }));
+    const claim = vi.fn(async () => ({ ok: false as const, error: "claim probe" }));
+    const selectTarget = vi.fn(async () => ({ ok: false as const, error: "selection probe" }));
+    registerIpcHandlers(
+      registryMock(),
+      vi.fn(),
+      RENDERER_URL,
+      undefined,
+      undefined,
+      { open, claim, selectTarget },
+    );
+    const trusted = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+
+    await expect(
+      electronMocks.handlers.get(IPC.openInteractionWindow)?.(trusted.event),
+    ).resolves.toEqual({ ok: true });
+    expect(open).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+    await expect(
+      electronMocks.handlers.get(IPC.claimInteractionWindow)?.(trusted.event),
+    ).resolves.toEqual({ ok: false, error: "claim probe" });
+    expect(claim).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+
+    expect(() => electronMocks.handlers.get(IPC.openInteractionWindow)?.(
+      trusted.event,
+      { targetId: "attacker-selected-session" },
+    )).toThrow(/invalid arguments/i);
+    expect(() => electronMocks.handlers.get(IPC.claimInteractionWindow)?.(
+      trusted.event,
+      { targetId: "attacker-selected-session" },
+    )).toThrow(/invalid arguments/i);
+
+    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/", 88);
+    expect(() => electronMocks.handlers.get(IPC.openInteractionWindow)?.(untrusted.event)).toThrow(
+      /untrusted renderer/i,
+    );
+    expect(() => electronMocks.handlers.get(IPC.claimInteractionWindow)?.(untrusted.event)).toThrow(
+      /untrusted renderer/i,
+    );
+
+    const child = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 99);
+    Object.defineProperty(child.event, "senderFrame", {
+      value: { ...child.mainFrame, frameToken: "child-frame" } as WebFrameMain,
+    });
+    expect(() => electronMocks.handlers.get(IPC.openInteractionWindow)?.(child.event)).toThrow(
+      /untrusted renderer/i,
+    );
+    expect(() => electronMocks.handlers.get(IPC.claimInteractionWindow)?.(child.event)).toThrow(
+      /untrusted renderer/i,
+    );
+
+    const wrongProcess = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 100);
+    Object.defineProperty(wrongProcess.event, "senderFrame", {
+      value: { ...wrongProcess.mainFrame, processId: 101 } as WebFrameMain,
+    });
+    expect(() => electronMocks.handlers.get(IPC.claimInteractionWindow)?.(wrongProcess.event)).toThrow(
+      /untrusted renderer/i,
+    );
+    expect(open).toHaveBeenCalledOnce();
+    expect(claim).toHaveBeenCalledOnce();
+  });
+
+  it("rejects interaction claims when no main-owned controller recognizes the window", async () => {
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent("http://127.0.0.1:5173/?surface=interaction", 77);
+
+    expect(electronMocks.handlers.get(IPC.claimInteractionWindow)?.(event)).toEqual({
+      ok: false,
+      error: "This window is not authorized to host an interaction workspace",
+    });
+  });
+
+  it("routes target selection through the interaction controller when one is installed", async () => {
+    const registrySelectTarget = vi.fn(async () => ({ ok: false as const, error: "registry probe" }));
+    const controllerSelectTarget = vi.fn(async () => ({ ok: false as const, error: "controller probe" }));
+    registerIpcHandlers(
+      registryMock({ selectTarget: registrySelectTarget }),
+      vi.fn(),
+      RENDERER_URL,
+      undefined,
+      undefined,
+      {
+        open: vi.fn(async () => ({ ok: true as const })),
+        claim: vi.fn(async () => ({ ok: false as const, error: "claim probe" })),
+        selectTarget: controllerSelectTarget,
+      },
+    );
+    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const target = {
+      mode: "session",
+      id: "session_2",
+      backendEpoch: 3,
+      domainRevision: 8,
+      fingerprint: "b".repeat(64),
+    } as const;
+
+    await expect(electronMocks.handlers.get(IPC.selectTarget)?.(event, target)).resolves.toEqual({
+      ok: false,
+      error: "controller probe",
+    });
+    expect(controllerSelectTarget).toHaveBeenCalledExactlyOnceWith(
+      { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" },
+      target,
+    );
+    expect(registrySelectTarget).not.toHaveBeenCalled();
   });
 
   it("accepts only main-issued target references and compiled operation identifiers", async () => {

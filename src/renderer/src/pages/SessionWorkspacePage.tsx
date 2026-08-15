@@ -6,13 +6,27 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Breadcrumbs, Button, Chip, Tabs, Tooltip, toast } from "@heroui/react";
+import {
+  AlertDialog,
+  Breadcrumbs,
+  Button,
+  Chip,
+  Description,
+  Dropdown,
+  Label,
+  Tabs,
+  Tooltip,
+  toast,
+} from "@heroui/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowLeft,
+  faArrowUpRightFromSquare,
+  faChevronDown,
+  faChevronRight,
   faClockRotateLeft,
   faComputer,
   faCode,
@@ -31,6 +45,7 @@ import type {
   SessionSummary,
   TargetActionExecutionResult,
   TargetActionPlan,
+  TargetRef,
 } from "../../../shared/target-contracts";
 import type { TargetOperationRecord } from "../../../shared/operation-contracts";
 import {
@@ -39,6 +54,7 @@ import {
   operationLabel,
   operationStateColor,
   operationStateLabel,
+  targetRowKey,
   targetStatus,
 } from "./target-page-model";
 import {
@@ -85,7 +101,9 @@ export interface SessionWorkspacePageProps {
   session: SessionSummary | null;
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
-  onBack: () => void;
+  onBack?: () => void;
+  onSessionChange?: (snapshot: SliverSnapshot, route: SessionWorkspaceRoute) => void;
+  allowPopOut?: boolean;
   panels?: SessionWorkspacePanels;
 }
 
@@ -95,11 +113,16 @@ export function SessionWorkspacePage({
   snapshot,
   onSnapshot,
   onBack,
+  onSessionChange,
+  allowPopOut = true,
   panels = {},
 }: SessionWorkspacePageProps): React.JSX.Element {
   const routeIdentity = sessionWorkspaceRouteIdentity(route);
   const routeIdentityRef = useRef(routeIdentity);
   routeIdentityRef.current = routeIdentity;
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
+  const selectionSnapshotIdentity = sessionSelectionSnapshotIdentity(snapshot);
   const isCurrent = isAuthoritativeSessionRoute(snapshot, session, route);
   const isCurrentRef = useRef(isCurrent);
   isCurrentRef.current = isCurrent;
@@ -116,8 +139,16 @@ export function SessionWorkspacePage({
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [terminalVisitedRouteIdentity, setTerminalVisitedRouteIdentity] = useState<string>();
+  const [pendingSessionSwitch, setPendingSessionSwitch] = useState<PendingSessionSwitch>();
+  const [isCheckingSessionShells, setIsCheckingSessionShells] = useState(false);
+  const [isSwitchingSession, setIsSwitchingSession] = useState(false);
+  const [isPoppingOutInteraction, setIsPoppingOutInteraction] = useState(false);
   const operationsRequestSequence = useRef(0);
   const operationDetailRequestSequence = useRef(0);
+  const shellPreflightRequestSequence = useRef(0);
+  const sessionSelectionRequestSequence = useRef(0);
+  const pendingSessionSelectionRef = useRef<PendingSessionSelection | undefined>(undefined);
+  const interactionWindowRequestSequence = useRef(0);
 
   const mergeOperation = useCallback((operation: TargetOperationRecord) => {
     if (!operationBelongsToRoute(operation, route)) return;
@@ -176,6 +207,8 @@ export function SessionWorkspacePage({
   useEffect(() => {
     operationsRequestSequence.current += 1;
     operationDetailRequestSequence.current += 1;
+    shellPreflightRequestSequence.current += 1;
+    interactionWindowRequestSequence.current += 1;
     setOperations([]);
     setNextOperationCursor(undefined);
     setOperationsError(undefined);
@@ -185,8 +218,23 @@ export function SessionWorkspacePage({
     setActionResult(undefined);
     setIsPreparingAction(false);
     setIsExecutingAction(false);
+    setPendingSessionSwitch(undefined);
+    setIsCheckingSessionShells(false);
+    setIsPoppingOutInteraction(false);
     if (isCurrent) void loadOperations();
   }, [isCurrent, loadOperations, routeIdentity]);
+
+  useEffect(() => {
+    const pending = pendingSessionSelectionRef.current;
+    if (
+      pending &&
+      pending.sourceRouteIdentity === routeIdentity &&
+      sessionSelectionSnapshotAllowsCompletion(snapshotRef.current, pending)
+    ) return;
+    sessionSelectionRequestSequence.current += 1;
+    pendingSessionSelectionRef.current = undefined;
+    setIsSwitchingSession(false);
+  }, [routeIdentity, selectionSnapshotIdentity]);
 
   useEffect(() => {
     if (!isCurrent) return;
@@ -263,6 +311,135 @@ export function SessionWorkspacePage({
     if (!result.ok) throw new Error(result.error ?? "Managed shells could not be popped out");
   }, []);
 
+  const sessionMenu = useMemo(
+    () => buildSessionMenu(snapshot),
+    [snapshot],
+  );
+
+  const selectSession = useCallback(async (option: SessionSwitchOption): Promise<void> => {
+    if (!isCurrentRef.current || !onSessionChange || option.ref.id === route.sessionId) return;
+    const sourceRef = snapshotRef.current.targetContext.activeTarget;
+    if (!sourceRef || !targetRefMatchesSessionRoute(sourceRef, route)) return;
+    const expectedRouteIdentity = routeIdentity;
+    const requestSequence = ++sessionSelectionRequestSequence.current;
+    const pendingSelection: PendingSessionSelection = {
+      requestSequence,
+      requestedRef: option.ref,
+      sourceRef,
+      sourceRoute: route,
+      sourceRouteIdentity: expectedRouteIdentity,
+    };
+    pendingSessionSelectionRef.current = pendingSelection;
+    const requestCanCommit = (): boolean => {
+      const pending = pendingSessionSelectionRef.current;
+      return requestSequence === sessionSelectionRequestSequence.current &&
+        expectedRouteIdentity === routeIdentityRef.current &&
+        pending?.requestSequence === requestSequence &&
+        pending.sourceRouteIdentity === expectedRouteIdentity &&
+        sessionSelectionSnapshotAllowsCompletion(snapshotRef.current, pending);
+    };
+    setIsSwitchingSession(true);
+    try {
+      const result = await window.sliver.selectTarget(option.ref);
+      if (!requestCanCommit()) return;
+      if (!result.ok || !result.value) {
+        toast.danger("Could not switch session", { description: result.error });
+        return;
+      }
+      const nextRoute = routeFromExactSessionSelection(result.value, option.ref);
+      if (!nextRoute) {
+        onSnapshot(result.value);
+        toast.warning("Session changed", {
+          description: "The main process did not confirm the exact selected session. Refresh the inventory and try again.",
+        });
+        return;
+      }
+      onSessionChange(result.value, nextRoute);
+    } catch (error) {
+      if (requestCanCommit()) {
+        toast.danger("Could not switch session", { description: errorMessage(error) });
+      }
+    } finally {
+      if (pendingSessionSelectionRef.current?.requestSequence === requestSequence) {
+        pendingSessionSelectionRef.current = undefined;
+      }
+      if (
+        requestSequence === sessionSelectionRequestSequence.current &&
+        expectedRouteIdentity === routeIdentityRef.current
+      ) setIsSwitchingSession(false);
+    }
+  }, [onSessionChange, onSnapshot, route.sessionId, routeIdentity]);
+
+  const requestSessionSwitch = useCallback(async (option: SessionSwitchOption): Promise<void> => {
+    if (!isCurrentRef.current || !onSessionChange || option.ref.id === route.sessionId) return;
+    const expectedRouteIdentity = routeIdentity;
+    const requestSequence = ++shellPreflightRequestSequence.current;
+    setIsCheckingSessionShells(true);
+    try {
+      const result = await window.sliver.listSessionShells({});
+      if (
+        requestSequence !== shellPreflightRequestSequence.current ||
+        expectedRouteIdentity !== routeIdentityRef.current ||
+        !isCurrentRef.current
+      ) return;
+      if (!result.ok || !result.value) {
+        toast.danger("Could not inspect managed shells", {
+          description: result.error ?? "The session was not changed because open shell state could not be confirmed.",
+        });
+        return;
+      }
+      if (result.value.resources.length > 0) {
+        setPendingSessionSwitch({ option, shellCount: result.value.resources.length });
+        return;
+      }
+      await selectSession(option);
+    } catch (error) {
+      if (
+        requestSequence === shellPreflightRequestSequence.current &&
+        expectedRouteIdentity === routeIdentityRef.current &&
+        isCurrentRef.current
+      ) {
+        toast.danger("Could not inspect managed shells", {
+          description: `${errorMessage(error)} The session was not changed.`,
+        });
+      }
+    } finally {
+      if (
+        requestSequence === shellPreflightRequestSequence.current &&
+        expectedRouteIdentity === routeIdentityRef.current
+      ) setIsCheckingSessionShells(false);
+    }
+  }, [onSessionChange, route.sessionId, routeIdentity, selectSession]);
+
+  const popOutInteraction = useCallback(async (): Promise<void> => {
+    if (!isCurrentRef.current || !allowPopOut) return;
+    const expectedRouteIdentity = routeIdentity;
+    const requestSequence = ++interactionWindowRequestSequence.current;
+    setIsPoppingOutInteraction(true);
+    try {
+      const result = await window.sliver.openInteractionWindow();
+      if (
+        requestSequence !== interactionWindowRequestSequence.current ||
+        expectedRouteIdentity !== routeIdentityRef.current ||
+        !isCurrentRef.current
+      ) return;
+      if (!result.ok) {
+        toast.danger("Could not pop out interaction", { description: result.error });
+      }
+    } catch (error) {
+      if (
+        requestSequence === interactionWindowRequestSequence.current &&
+        expectedRouteIdentity === routeIdentityRef.current &&
+        isCurrentRef.current
+      ) toast.danger("Could not pop out interaction", { description: errorMessage(error) });
+    } finally {
+      if (
+        requestSequence === interactionWindowRequestSequence.current &&
+        expectedRouteIdentity === routeIdentityRef.current
+      ) setIsPoppingOutInteraction(false);
+    }
+  }, [allowPopOut, routeIdentity]);
+
   if (!currentSession) {
     return (
       <section className="page-stack" aria-labelledby="session-workspace-unavailable-heading">
@@ -278,9 +455,11 @@ export function SessionWorkspacePage({
                 This route no longer matches the main process&apos;s active session or connection. Return to the live inventory and select it again.
               </EmptyState.Description>
             </EmptyState.Header>
-            <EmptyState.Content>
-              <Button variant="outline" onPress={onBack}>Back to sessions</Button>
-            </EmptyState.Content>
+            {onBack ? (
+              <EmptyState.Content>
+                <Button variant="outline" onPress={onBack}>Back to sessions</Button>
+              </EmptyState.Content>
+            ) : null}
           </EmptyState>
         </div>
       </section>
@@ -299,7 +478,16 @@ export function SessionWorkspacePage({
 
   return (
     <section className="page-stack" aria-labelledby="session-workspace-heading">
-      <WorkspaceTrail sessionName={currentSession.name || currentSession.hostname || currentSession.id} onBack={onBack} />
+      <WorkspaceTrail
+        currentSessionId={route.sessionId}
+        isSessionMenuBusy={isCheckingSessionShells || isSwitchingSession}
+        isPoppingOutInteraction={isPoppingOutInteraction}
+        sessionMenu={sessionMenu}
+        sessionName={currentSession.name || currentSession.hostname || currentSession.id}
+        onBack={onBack}
+        onPopOutInteraction={allowPopOut ? () => void popOutInteraction() : undefined}
+        onSelectSession={onSessionChange ? (option) => void requestSessionSwitch(option) : undefined}
+      />
 
       <header className="flex flex-col gap-5 rounded-2xl bg-surface p-5 sm:p-6 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 items-start gap-4">
@@ -468,24 +656,233 @@ export function SessionWorkspacePage({
           }
         }}
       />
+      <SessionSwitchDialog
+        isSwitching={isSwitchingSession}
+        pending={pendingSessionSwitch}
+        onCancel={() => {
+          if (!isSwitchingSession) setPendingSessionSwitch(undefined);
+        }}
+        onConfirm={() => {
+          const pending = pendingSessionSwitch;
+          if (!pending || isSwitchingSession) return;
+          setPendingSessionSwitch(undefined);
+          void selectSession(pending.option);
+        }}
+      />
     </section>
   );
 }
 
-function WorkspaceTrail({ sessionName, onBack }: { sessionName: string; onBack: () => void }): React.JSX.Element {
+interface SessionSwitchOption {
+  readonly summary: SessionSummary;
+  readonly ref: TargetRef;
+}
+
+interface SessionMenuModel {
+  readonly options: readonly SessionSwitchOption[];
+  readonly isTruncated: boolean;
+  readonly total: number;
+}
+
+interface PendingSessionSwitch {
+  readonly option: SessionSwitchOption;
+  readonly shellCount: number;
+}
+
+interface PendingSessionSelection {
+  readonly requestSequence: number;
+  readonly requestedRef: TargetRef;
+  readonly sourceRef: TargetRef;
+  readonly sourceRoute: SessionWorkspaceRoute;
+  readonly sourceRouteIdentity: string;
+}
+
+function WorkspaceTrail({
+  currentSessionId,
+  isPoppingOutInteraction = false,
+  isSessionMenuBusy = false,
+  sessionMenu,
+  sessionName,
+  onBack,
+  onPopOutInteraction,
+  onSelectSession,
+}: {
+  currentSessionId?: string;
+  isPoppingOutInteraction?: boolean;
+  isSessionMenuBusy?: boolean;
+  sessionMenu?: SessionMenuModel;
+  sessionName: string;
+  onBack?: (() => void) | undefined;
+  onPopOutInteraction?: (() => void) | undefined;
+  onSelectSession?: ((option: SessionSwitchOption) => void) | undefined;
+}): React.JSX.Element {
+  const optionByKey = new Map(
+    sessionMenu?.options.map((option) => [sessionMenuItemKey(option.ref.id), option]) ?? [],
+  );
+  const currentKey = currentSessionId ? sessionMenuItemKey(currentSessionId) : undefined;
+  const hasSessionMenu = Boolean(sessionMenu && onSelectSession);
+  const viewAllDescription = sessionMenu
+    ? `Showing ${sessionMenu.options.length} of ${sessionMenu.total} available sessions`
+    : undefined;
+
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <Tooltip delay={250}>
-        <Button aria-label="Back to live sessions" isIconOnly size="sm" variant="ghost" onPress={onBack}>
-          <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
-        </Button>
-        <Tooltip.Content>Back to live sessions</Tooltip.Content>
-      </Tooltip>
-      <Breadcrumbs className="min-w-0">
-        <Breadcrumbs.Item className="no-underline">Sessions</Breadcrumbs.Item>
-        <Breadcrumbs.Item className="max-w-72 truncate no-underline">{sessionName}</Breadcrumbs.Item>
-      </Breadcrumbs>
+    <div className="flex min-w-0 items-center justify-between gap-3">
+      <div className="flex min-w-0 items-center gap-2">
+        {onBack ? (
+          <Tooltip delay={250}>
+            <Button aria-label="Back to live sessions" isIconOnly size="sm" variant="ghost" onPress={onBack}>
+              <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+            </Button>
+            <Tooltip.Content>Back to live sessions</Tooltip.Content>
+          </Tooltip>
+        ) : null}
+        <nav aria-label="Session workspace breadcrumbs" className="min-w-0">
+          <Breadcrumbs aria-label="Breadcrumb items" className="min-w-0">
+            {hasSessionMenu && sessionMenu ? (
+              <Breadcrumbs.Item>
+                {() => (
+                  <>
+                    <Dropdown>
+                      <Button
+                        aria-label="Sessions, switch session"
+                        className="-mx-2 px-2 text-muted"
+                        isPending={isSessionMenuBusy}
+                        size="sm"
+                        variant="ghost"
+                      >
+                        Sessions
+                        <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
+                      </Button>
+                      <Dropdown.Popover className="max-h-96 min-w-80" placement="bottom start">
+                        <Dropdown.Menu
+                          aria-label="Switch session"
+                          selectionMode="single"
+                          {...(currentKey ? { selectedKeys: new Set([currentKey]) } : {})}
+                          onAction={(key) => {
+                            const option = optionByKey.get(String(key));
+                            if (option) onSelectSession?.(option);
+                          }}
+                        >
+                          {sessionMenu.options.map((option) => {
+                            const name = sessionDisplayName(option.summary);
+                            const status = targetStatus(option.summary);
+                            const isCurrent = option.ref.id === currentSessionId;
+                            return (
+                              <Dropdown.Item
+                                id={sessionMenuItemKey(option.ref.id)}
+                                key={sessionMenuItemKey(option.ref.id)}
+                                textValue={`${name}, ${option.summary.hostname || "unknown host"}, ${status.label}`}
+                              >
+                                <Dropdown.ItemIndicator className="shrink-0 text-accent" />
+                                <div className="min-w-0">
+                                  <Label className="block truncate">{name}{isCurrent ? " — Current" : ""}</Label>
+                                  <Description className="block truncate">
+                                    {option.summary.username || "Unknown user"} · {option.summary.hostname || "unknown host"} · {status.label}
+                                  </Description>
+                                </div>
+                              </Dropdown.Item>
+                            );
+                          })}
+                        </Dropdown.Menu>
+                        {sessionMenu.isTruncated ? (
+                          onBack ? (
+                            <Button
+                              className="w-full justify-start rounded-none border-t border-separator px-3 py-2 text-start"
+                              size="sm"
+                              variant="ghost"
+                              onPress={onBack}
+                            >
+                              <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faList} />
+                              <span className="min-w-0">
+                                <span className="block text-sm font-medium">View all sessions</span>
+                                <span className="block truncate text-xs font-normal text-muted">{viewAllDescription}</span>
+                              </span>
+                            </Button>
+                          ) : (
+                            <p className="border-t border-separator px-3 py-2 text-xs text-muted">
+                              {viewAllDescription}. Additional sessions are available in the main window.
+                            </p>
+                          )
+                        ) : null}
+                      </Dropdown.Popover>
+                    </Dropdown>
+                    <FontAwesomeIcon
+                      aria-hidden
+                      className="mx-1 size-3 shrink-0 text-muted"
+                      data-slot="breadcrumbs-separator"
+                      icon={faChevronRight}
+                    />
+                  </>
+                )}
+              </Breadcrumbs.Item>
+            ) : (
+              <Breadcrumbs.Item className="no-underline">Sessions</Breadcrumbs.Item>
+            )}
+            <Breadcrumbs.Item className="max-w-72 truncate no-underline">{sessionName}</Breadcrumbs.Item>
+          </Breadcrumbs>
+        </nav>
+      </div>
+      {onPopOutInteraction ? (
+        <Tooltip delay={250}>
+          <Button
+            aria-label="Pop out interaction"
+            isIconOnly
+            isPending={isPoppingOutInteraction}
+            size="sm"
+            variant="ghost"
+            onPress={onPopOutInteraction}
+          >
+            <FontAwesomeIcon aria-hidden icon={faArrowUpRightFromSquare} />
+          </Button>
+          <Tooltip.Content>Pop out interaction into a new window</Tooltip.Content>
+        </Tooltip>
+      ) : null}
     </div>
+  );
+}
+
+function SessionSwitchDialog({
+  isSwitching,
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  isSwitching: boolean;
+  pending: PendingSessionSwitch | undefined;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): React.JSX.Element {
+  const shellCount = pending?.shellCount ?? 0;
+  return (
+    <AlertDialog.Backdrop
+      isOpen={pending !== undefined}
+      onOpenChange={(open) => {
+        if (!open && !isSwitching) onCancel();
+      }}
+      variant="blur"
+    >
+      <AlertDialog.Container placement="center" size="sm">
+        <AlertDialog.Dialog className="sm:max-w-[440px]">
+          <AlertDialog.Header>
+            <AlertDialog.Icon status="warning">
+              <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} />
+            </AlertDialog.Icon>
+            <AlertDialog.Heading>Switch sessions and close managed shells?</AlertDialog.Heading>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            <p className="text-sm leading-relaxed text-muted">
+              Switching to <strong className="text-foreground">{pending ? sessionDisplayName(pending.option.summary) : "this session"}</strong> closes {shellCount} managed shell {shellCount === 1 ? "stream" : "streams"} owned by this window as the target changes. Detached scrollback cannot be recovered, and remote process termination is not confirmed. Cancel and use <strong className="text-foreground">Pop out managed shells</strong> from the Shell tab first if you want to keep those shells open in their own window.
+            </p>
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <Button isDisabled={isSwitching} size="sm" variant="tertiary" onPress={onCancel}>Cancel</Button>
+            <Button isPending={isSwitching} size="sm" variant="danger" onPress={onConfirm}>
+              Close {shellCount === 1 ? "shell" : "shells"} and switch
+            </Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Dialog>
+      </AlertDialog.Container>
+    </AlertDialog.Backdrop>
   );
 }
 
@@ -706,6 +1103,129 @@ export function isAuthoritativeSessionRoute(
 
 export function sessionWorkspaceRouteIdentity(route: SessionWorkspaceRoute): string {
   return `${route.backendEpoch}:${route.connectionIncarnation}:session:${route.sessionId}:${route.targetFingerprint}`;
+}
+
+function buildSessionMenu(snapshot: SliverSnapshot): SessionMenuModel {
+  const backendEpoch = snapshot.connection.epoch;
+  const refs = new Map<string, TargetRef>();
+  for (const ref of snapshot.targetContext.selectableTargets) {
+    if (ref.mode === "session" && ref.backendEpoch === backendEpoch) refs.set(targetRowKey(ref), ref);
+  }
+  const activeRef = snapshot.targetContext.activeTarget;
+  if (activeRef?.mode === "session" && activeRef.backendEpoch === backendEpoch) {
+    refs.set(targetRowKey(activeRef), activeRef);
+  }
+
+  const summaries = new Map<string, SessionSummary>();
+  for (const summary of [...snapshot.sessions, ...snapshot.domains.sessions.items]) {
+    summaries.set(targetRowKey(summary), summary);
+  }
+  const activeSummary = snapshot.targetContext.activeTargetSummary;
+  if (activeSummary?.mode === "session") summaries.set(targetRowKey(activeSummary), activeSummary);
+
+  const allOptions: SessionSwitchOption[] = [];
+  let hasUnpairedSummary = false;
+  for (const [key, summary] of summaries) {
+    const ref = refs.get(key);
+    if (ref) allOptions.push({ summary, ref });
+    else hasUnpairedSummary = true;
+  }
+  const hasUnpairedRef = [...refs.keys()].some((key) => !summaries.has(key));
+  const total = Math.max(snapshot.domains.sessions.page.total, summaries.size, refs.size);
+  return {
+    options: allOptions,
+    total,
+    isTruncated: snapshot.domains.sessions.page.truncated ||
+      snapshot.domains.sessions.page.total > summaries.size ||
+      hasUnpairedSummary ||
+      hasUnpairedRef,
+  };
+}
+
+function routeFromExactSessionSelection(
+  snapshot: SliverSnapshot,
+  requested: TargetRef,
+): SessionWorkspaceRoute | undefined {
+  const selectedRef = snapshot.targetContext.activeTarget;
+  const selectedSummary = snapshot.targetContext.activeTargetSummary;
+  if (
+    snapshot.targetContext.status !== "selected" ||
+    requested.mode !== "session" ||
+    snapshot.connection.epoch !== requested.backendEpoch ||
+    selectedRef?.mode !== "session" ||
+    selectedRef.id !== requested.id ||
+    selectedRef.backendEpoch !== requested.backendEpoch ||
+    selectedRef.domainRevision !== requested.domainRevision ||
+    selectedRef.fingerprint !== requested.fingerprint ||
+    selectedSummary?.mode !== "session" ||
+    selectedSummary.id !== requested.id
+  ) return undefined;
+  return {
+    sessionId: selectedRef.id,
+    backendEpoch: selectedRef.backendEpoch,
+    connectionIncarnation: snapshot.connection.incarnation ?? 0,
+    targetFingerprint: selectedRef.fingerprint,
+  };
+}
+
+function sessionSelectionSnapshotIdentity(snapshot: SliverSnapshot): string {
+  const ref = snapshot.targetContext.activeTarget;
+  const summary = snapshot.targetContext.activeTargetSummary;
+  return JSON.stringify([
+    snapshot.connection.status,
+    snapshot.connection.epoch,
+    snapshot.connection.incarnation,
+    snapshot.targetContext.status,
+    ref?.mode,
+    ref?.id,
+    ref?.backendEpoch,
+    ref?.domainRevision,
+    ref?.fingerprint,
+    summary?.mode,
+    summary?.id,
+  ]);
+}
+
+function sessionSelectionSnapshotAllowsCompletion(
+  snapshot: SliverSnapshot,
+  pending: PendingSessionSelection,
+): boolean {
+  if (
+    !["connected", "degraded", "reconnecting"].includes(snapshot.connection.status) ||
+    snapshot.connection.epoch !== pending.sourceRoute.backendEpoch ||
+    (snapshot.connection.incarnation ?? 0) !== pending.sourceRoute.connectionIncarnation
+  ) return false;
+  return snapshotHasExactSessionTarget(snapshot, pending.sourceRef) ||
+    snapshotHasExactSessionTarget(snapshot, pending.requestedRef);
+}
+
+function snapshotHasExactSessionTarget(snapshot: SliverSnapshot, expected: TargetRef): boolean {
+  const activeRef = snapshot.targetContext.activeTarget;
+  const activeSummary = snapshot.targetContext.activeTargetSummary;
+  return snapshot.targetContext.status === "selected" &&
+    expected.mode === "session" &&
+    activeRef?.mode === "session" &&
+    activeRef.id === expected.id &&
+    activeRef.backendEpoch === expected.backendEpoch &&
+    activeRef.domainRevision === expected.domainRevision &&
+    activeRef.fingerprint === expected.fingerprint &&
+    activeSummary?.mode === "session" &&
+    activeSummary.id === expected.id;
+}
+
+function targetRefMatchesSessionRoute(target: TargetRef, route: SessionWorkspaceRoute): boolean {
+  return target.mode === "session" &&
+    target.id === route.sessionId &&
+    target.backendEpoch === route.backendEpoch &&
+    target.fingerprint === route.targetFingerprint;
+}
+
+function sessionDisplayName(session: SessionSummary): string {
+  return session.name || session.hostname || session.id;
+}
+
+function sessionMenuItemKey(sessionId: string): string {
+  return `session:${sessionId}`;
 }
 
 function operationBelongsToRoute(operation: TargetOperationRecord, route: SessionWorkspaceRoute): boolean {

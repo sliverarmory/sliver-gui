@@ -235,6 +235,8 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     openStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn(() => vi.fn()),
+    openInteractionWindow: vi.fn(failed),
+    claimInteractionWindow: vi.fn(failed),
     openSessionShellWindow: vi.fn(failed),
     claimSessionShellWindow: vi.fn(failed),
     openWindow: vi.fn(failed),
@@ -280,6 +282,87 @@ function sessionWorkspace(snapshot: SliverSnapshot, onSnapshot = vi.fn()): React
 }
 
 describe("TargetsPage", () => {
+  it("pops out a catalog beacon interaction and keeps the dedicated surface focused", async () => {
+    const user = userEvent.setup();
+    const openInteractionWindow = vi.fn().mockResolvedValue({ ok: true });
+    installAPI({ openInteractionWindow });
+    const snapshot = targetSnapshot("beacon");
+    const { rerender } = render(
+      <TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Pop out interaction" }));
+    expect(openInteractionWindow).toHaveBeenCalledOnce();
+    expect(openInteractionWindow).toHaveBeenCalledWith();
+
+    rerender(
+      <TargetsPage
+        expectedTarget={beaconRef}
+        mode="beacon"
+        presentation="dedicated"
+        snapshot={snapshot}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "warehouse" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "All target operations" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Operator presence" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Beacon tasks" })).toBeInTheDocument();
+    expect(screen.queryByRole("grid", { name: "Sliver beacons" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("searchbox", { name: "Filter beacons" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Background target" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pop out interaction" })).not.toBeInTheDocument();
+  });
+
+  it("quarantines a dedicated beacon interaction when its exact identity changes", () => {
+    const api = installAPI();
+    const snapshot = targetSnapshot("beacon");
+    const { rerender } = render(
+      <TargetsPage
+        expectedTarget={beaconRef}
+        mode="beacon"
+        presentation="dedicated"
+        snapshot={snapshot}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    const refreshed = targetSnapshot("beacon");
+    const refreshedRef = { ...beaconRef, domainRevision: beaconRef.domainRevision + 1 };
+    refreshed.targetContext.activeTarget = refreshedRef;
+    refreshed.targetContext.selectableTargets = [sessionRef, refreshedRef];
+    rerender(
+      <TargetsPage
+        expectedTarget={beaconRef}
+        mode="beacon"
+        presentation="dedicated"
+        snapshot={refreshed}
+        onSnapshot={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "warehouse" })).toBeInTheDocument();
+
+    const changed = targetSnapshot("beacon");
+    const changedRef = { ...refreshedRef, fingerprint: "f".repeat(64) };
+    changed.targetContext.activeTarget = changedRef;
+    changed.targetContext.selectableTargets = [sessionRef, changedRef];
+    rerender(
+      <TargetsPage
+        expectedTarget={beaconRef}
+        mode="beacon"
+        presentation="dedicated"
+        snapshot={changed}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Beacon interaction unavailable" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run ping" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Beacon tasks" })).not.toBeInTheDocument();
+    expect(api.openInteractionWindow).not.toHaveBeenCalled();
+  });
+
   it("isolates each route from the other target domain and hides an active target of the other mode", () => {
     installAPI();
     const snapshot = targetSnapshot("beacon");

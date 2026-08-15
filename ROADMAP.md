@@ -675,6 +675,24 @@ The session-shell-only M3 implementation was delivered on 2026-08-10. Technical
 checks are recorded in [M3 verification](docs/m3-verification.md), but the
 milestone remains open until the operator accepts it. M4 has not started.
 
+Operator acceptance feedback on 2026-08-14 added cross-cutting M1-M3 operator
+polish without expanding the M3 shell scope:
+
+- [x] Keep **Sessions** in the session-workbench breadcrumb while making it a
+  bounded dropdown for exact, main-issued session targets. Switching is
+  guarded against stale target identity and requires explicit confirmation
+  when the current workspace still owns managed shells.
+- [x] Let the exact current session or beacon pop its whole **Interact** surface
+  into a hardened native window. Its URL contains only a static presentation
+  marker; Electron main owns launch authorization and target identity, and the
+  destination keeps window-local operation and interaction state while
+  observing the exact target's task and presence data, instead of copying
+  source-window state or shell ownership.
+
+This acceptance-feedback follow-up does not constitute operator acceptance of
+M3, does not transfer managed shells implicitly, and does not unlock M4. M3
+remains **Awaiting operator acceptance**, and M4 has not started.
+
 This scope follows the pinned upstream command tree: interactive shell commands
 exist for sessions only, so M3 makes no beacon-shell claim. Port forwarding,
 reverse forwarding, SOCKS, WireGuard networking, and generic tunnel lifecycle

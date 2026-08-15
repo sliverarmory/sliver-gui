@@ -259,6 +259,10 @@ export function App() {
       targetFingerprint: target.fingerprint,
     });
   }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
+  const changeSessionWorkspace = useCallback((next: SliverSnapshot, route: SessionWorkspaceRoute) => {
+    setSnapshot(next);
+    setSessionWorkspaceRoute(route);
+  }, []);
 
   useEffect(() => {
     if (!sessionWorkspaceRoute) return;
@@ -345,6 +349,7 @@ export function App() {
                       : null}
                     snapshot={snapshot}
                     onBack={() => setSessionWorkspaceRoute(undefined)}
+                    onSessionChange={changeSessionWorkspace}
                     onSnapshot={setSnapshot}
                   />
                 ) : (

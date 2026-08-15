@@ -7,6 +7,7 @@ import {
   IPC,
   type OpenSessionShellWindowInput,
   type OperationResult,
+  type SliverSnapshot,
   type WindowLaunchContext,
 } from "../shared/contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
@@ -26,9 +27,13 @@ import {
   unregisterIpcHandlers,
   type TrustedWindowIdentity,
 } from "./ipc.js";
-import { configureSessionSecurity, hardenWindow } from "./security.js";
+import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl } from "./security.js";
 import { SliverReleaseDownloader } from "./sliver-release-download.js";
-import { mainWindowOptions, sessionShellWindowOptions } from "./window-options.js";
+import {
+  interactionWindowOptions,
+  mainWindowOptions,
+  sessionShellWindowOptions,
+} from "./window-options.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 
@@ -37,6 +42,7 @@ export interface StartApplicationOptions {
   rendererEntryPath?: string;
   preloadPath?: string;
   developmentRendererUrl?: string;
+  applicationAssetsDirectory?: string;
 }
 
 export interface ApplicationHandle {
@@ -55,6 +61,16 @@ interface SessionShellWindowRecord {
   finalizing: boolean;
 }
 
+interface InteractionWindowRecord {
+  readonly window: BrowserWindow;
+  readonly source: TrustedWindowIdentity;
+  target: TargetRef;
+  connectionIncarnation: number;
+  claimedBy?: TrustedWindowIdentity;
+  generation: number;
+  transition: Promise<void>;
+}
+
 /**
  * Compose the trusted Electron main process. Tests may inject an in-memory
  * backend by importing this module from a test-only main entry; the production
@@ -63,10 +79,11 @@ interface SessionShellWindowRecord {
 export async function startApplication(options: StartApplicationOptions = {}): Promise<ApplicationHandle> {
   const registry = options.registry ?? new ConnectionRegistry();
   const mainBundleDirectory = import.meta.dirname;
+  const applicationAssetsDirectory = options.applicationAssetsDirectory ?? join(mainBundleDirectory, "../../build");
   const runtimeIconPath = app.isPackaged
     ? join(process.resourcesPath, "sliver-desktop.png")
-    : join(mainBundleDirectory, "../../build/about-icon.png");
-  const developmentDockIconPath = join(mainBundleDirectory, "../../build/icon.png");
+    : join(applicationAssetsDirectory, "about-icon.png");
+  const developmentDockIconPath = join(applicationAssetsDirectory, "icon.png");
   const rendererEntryPath = options.rendererEntryPath ?? join(mainBundleDirectory, "../renderer/index.html");
   const preloadPath = options.preloadPath ?? join(mainBundleDirectory, "../preload/index.cjs");
   // Packaged applications always trust their immutable file entry. A caller's
@@ -80,26 +97,31 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const windowsByContentsId = new Map<number, BrowserWindow>();
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
+  const interactionWindowsByContentsId = new Map<number, InteractionWindowRecord>();
   const pendingWindowCleanup = new Set<Promise<void>>();
   let releaseCatalog: ReleaseMenuCatalog = { status: "loading" };
   let releaseDownloader: SliverReleaseDownloader | undefined;
   let stopping = false;
 
-  function loadRenderer(window: BrowserWindow, surface?: "managed-shells"): void {
+  async function loadRenderer(
+    window: BrowserWindow,
+    surface?: "interaction" | "managed-shells",
+  ): Promise<void> {
     if (developmentRendererUrl) {
       const url = new URL(developmentRendererUrl);
       if (surface) url.searchParams.set("surface", surface);
-      void window.loadURL(url.href);
+      await window.loadURL(url.href);
       return;
     }
-    if (surface) void window.loadFile(rendererEntryPath, { query: { surface } });
-    else void window.loadFile(rendererEntryPath);
+    if (surface) await window.loadFile(rendererEntryPath, { query: { surface } });
+    else await window.loadFile(rendererEntryPath);
   }
 
   function trackWindow(
     window: BrowserWindow,
     inheritFromContentsId?: number,
     sessionShellRecord?: SessionShellWindowRecord,
+    interactionWindowRecord?: InteractionWindowRecord,
   ): void {
     const contentsId = window.webContents.id;
     windows.add(window);
@@ -118,14 +140,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       if (details.isMainFrame && !details.isSameDocument) {
         void registry.closeWindowStreams(contentsId, "navigation").catch(() => undefined);
         if (sessionShellRecord && completedInitialLoad) retireSessionShellWindow(sessionShellRecord);
+        if (interactionWindowRecord && completedInitialLoad) resetInteractionWindowClaim(interactionWindowRecord);
       }
     });
     window.webContents.on("render-process-gone", () => {
       void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
       if (sessionShellRecord) retireSessionShellWindow(sessionShellRecord);
+      if (interactionWindowRecord) resetInteractionWindowClaim(interactionWindowRecord);
     });
     window.webContents.on("did-fail-load", (_event, _errorCode, _errorDescription, _url, isMainFrame) => {
       if (sessionShellRecord && isMainFrame) retireSessionShellWindow(sessionShellRecord);
+      if (interactionWindowRecord && isMainFrame) resetInteractionWindowClaim(interactionWindowRecord);
     });
     window.webContents.on("destroyed", () => {
       void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
@@ -171,6 +196,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           sessionShellWindowsByKey.delete(sessionShellRecord.key);
         }
       }
+      if (interactionWindowRecord && interactionWindowsByContentsId.get(contentsId) === interactionWindowRecord) {
+        interactionWindowsByContentsId.delete(contentsId);
+      }
       const cleanup = registry.unregisterWindow(contentsId).catch(() => undefined);
       pendingWindowCleanup.add(cleanup);
       void cleanup.finally(() => pendingWindowCleanup.delete(cleanup));
@@ -180,8 +208,214 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   function createWindow(inheritFromContentsId?: number): BrowserWindow {
     const window = new BrowserWindow(mainWindowOptions(preloadPath, process.platform, runtimeIconPath));
     trackWindow(window, inheritFromContentsId);
-    loadRenderer(window);
+    void loadRenderer(window);
     return window;
+  }
+
+  async function openInteractionWindow(source: TrustedWindowIdentity): Promise<OperationResult> {
+    let window: BrowserWindow | undefined;
+    let interactionRecord: InteractionWindowRecord | undefined;
+    try {
+      const sourceWindow = windowsByContentsId.get(source.contentsId);
+      if (!sourceWindow || sourceWindow.isDestroyed() || !sameWindowIdentity(source, identityForWindow(sourceWindow))) {
+        throw new Error("The source window changed before the interaction could be popped out");
+      }
+      if (interactionWindowsByContentsId.has(source.contentsId)) {
+        throw new Error("A dedicated interaction window cannot pop out another interaction window");
+      }
+      const sourceSnapshot = registry.snapshot(source.contentsId);
+      const target = sourceSnapshot.targetContext.activeTarget;
+      const summary = sourceSnapshot.targetContext.activeTargetSummary;
+      if (!target || !summary || target.mode !== summary.mode || target.id !== summary.id) {
+        throw new Error("Select a session or beacon before popping out its interaction workspace");
+      }
+
+      window = new BrowserWindow(interactionWindowOptions(preloadPath, process.platform, runtimeIconPath));
+      interactionRecord = {
+        window,
+        source,
+        target,
+        connectionIncarnation: 0,
+        generation: 0,
+        transition: Promise.resolve(),
+      };
+      interactionWindowsByContentsId.set(window.webContents.id, interactionRecord);
+      trackWindow(window, source.contentsId, undefined, interactionRecord);
+      const selected = await registry.selectTarget(window.webContents.id, target);
+      if (
+        interactionWindowsByContentsId.get(window.webContents.id) !== interactionRecord ||
+        window.isDestroyed()
+      ) throw new Error("The dedicated interaction window closed while its target was being selected");
+      if (!selected.ok || !selected.value) {
+        throw new Error(selected.error ?? "The target could not be selected in the dedicated window");
+      }
+      const selectedTarget = selected.value.targetContext.activeTarget;
+      const selectedSummary = selected.value.targetContext.activeTargetSummary;
+      if (
+        !selectedTarget ||
+        !sameTargetIdentity(selectedTarget, target) ||
+        !selectedSummary ||
+        selectedSummary.mode !== target.mode ||
+        selectedSummary.id !== target.id
+      ) {
+        throw new Error("The target changed before the dedicated interaction window was ready");
+      }
+      interactionRecord.target = selectedTarget;
+      interactionRecord.connectionIncarnation = selected.value.connection.incarnation ?? 0;
+      const targetName = selectedSummary.name || selectedSummary.hostname || selectedSummary.id;
+      window.setTitle(`Interact — ${targetName}`);
+      await loadRenderer(window, "interaction");
+      if (
+        interactionWindowsByContentsId.get(window.webContents.id) !== interactionRecord ||
+        window.isDestroyed()
+      ) throw new Error("The dedicated interaction window closed while its renderer was loading");
+      return { ok: true };
+    } catch (error) {
+      if (
+        window &&
+        interactionRecord &&
+        interactionWindowsByContentsId.get(window.webContents.id) === interactionRecord
+      ) interactionWindowsByContentsId.delete(window.webContents.id);
+      if (window && !window.isDestroyed()) window.destroy();
+      return { ok: false, error: applicationErrorMessage(error, "The interaction could not be popped out") };
+    }
+  }
+
+  async function claimInteractionWindow(
+    destination: TrustedWindowIdentity,
+  ): Promise<OperationResult<WindowLaunchContext>> {
+    const record = interactionWindowsByContentsId.get(destination.contentsId);
+    if (!record || record.window.isDestroyed()) {
+      return { ok: false, error: "This window is not authorized to host an interaction workspace" };
+    }
+    const generation = record.generation;
+    return serializeInteractionTransition<OperationResult<WindowLaunchContext>>(record, async () => {
+      if (
+        !isCurrentInteractionDestination(
+          record,
+          destination,
+          interactionWindowsByContentsId.get(destination.contentsId),
+          generation,
+        ) ||
+        !isInteractionSurfaceUrl(record.window.webContents.getURL(), rendererUrl)
+      ) {
+        return { ok: false, error: "The interaction window changed before its authority could be claimed" };
+      }
+      if (record.claimedBy && !sameWindowIdentity(record.claimedBy, destination)) {
+        return { ok: false, error: "The interaction window authority belongs to a different renderer frame" };
+      }
+
+      const currentSnapshot = registry.snapshot(destination.contentsId);
+      if ((currentSnapshot.connection.incarnation ?? 0) !== record.connectionIncarnation) {
+        return { ok: false, error: "The interaction window connection changed before its authority could be claimed" };
+      }
+      const freshTarget = freshTargetIdentity(currentSnapshot, record.target);
+      if (!freshTarget) {
+        return { ok: false, error: "The interaction target is no longer available on this backend" };
+      }
+      const selected = await registry.selectTarget(destination.contentsId, freshTarget);
+      if (!isCurrentInteractionDestination(
+        record,
+        destination,
+        interactionWindowsByContentsId.get(destination.contentsId),
+        generation,
+      )) {
+        return { ok: false, error: "The interaction window changed while its target was being restored" };
+      }
+      if (!selected.ok || !selected.value) return selected;
+      if ((selected.value.connection.incarnation ?? 0) !== record.connectionIncarnation) {
+        return { ok: false, error: "The interaction window connection changed while its target was being restored" };
+      }
+      const selectedTarget = selected.value.targetContext.activeTarget;
+      const selectedSummary = selected.value.targetContext.activeTargetSummary;
+      if (
+        !selectedTarget ||
+        !sameTargetIdentity(selectedTarget, record.target) ||
+        !selectedSummary ||
+        selectedSummary.mode !== record.target.mode ||
+        selectedSummary.id !== record.target.id
+      ) {
+        return { ok: false, error: "The interaction target changed while its authority was being claimed" };
+      }
+
+      record.target = selectedTarget;
+      record.claimedBy = destination;
+      setInteractionWindowTitle(record.window, selected.value);
+      return {
+        ok: true,
+        value: Object.freeze({
+          kind: "interaction" as const,
+          snapshot: selected.value,
+          target: selectedTarget,
+        }),
+      };
+    }).catch((): OperationResult<WindowLaunchContext> => ({
+      ok: false,
+      error: "The dedicated interaction context could not be restored",
+    }));
+  }
+
+  async function selectInteractionWindowTarget(
+    destination: TrustedWindowIdentity,
+    target: TargetRef,
+  ): Promise<OperationResult<SliverSnapshot>> {
+    const record = interactionWindowsByContentsId.get(destination.contentsId);
+    if (!record) return registry.selectTarget(destination.contentsId, target);
+    const generation = record.generation;
+    return serializeInteractionTransition<OperationResult<SliverSnapshot>>(record, async () => {
+      if (
+        !isCurrentInteractionDestination(
+          record,
+          destination,
+          interactionWindowsByContentsId.get(destination.contentsId),
+          generation,
+        ) ||
+        !isInteractionSurfaceUrl(record.window.webContents.getURL(), rendererUrl)
+      ) {
+        return { ok: false, error: "The interaction window changed before the target could be selected" };
+      }
+      if (!record.claimedBy || !sameWindowIdentity(record.claimedBy, destination)) {
+        return { ok: false, error: "Claim this interaction window before changing its session" };
+      }
+      if ((registry.snapshot(destination.contentsId).connection.incarnation ?? 0) !== record.connectionIncarnation) {
+        return { ok: false, error: "The interaction window connection changed before its session could be selected" };
+      }
+      if (record.target.mode !== "session" || target.mode !== "session") {
+        return { ok: false, error: "A dedicated interaction window cannot change target modes or retarget a beacon" };
+      }
+
+      const selected = await registry.selectTarget(destination.contentsId, target);
+      if (!isCurrentInteractionDestination(
+        record,
+        destination,
+        interactionWindowsByContentsId.get(destination.contentsId),
+        generation,
+      )) {
+        return { ok: false, error: "The interaction window changed while its session was being selected" };
+      }
+      if (!selected.ok || !selected.value) return selected;
+      if ((selected.value.connection.incarnation ?? 0) !== record.connectionIncarnation) {
+        return { ok: false, error: "The interaction window connection changed while its session was being selected" };
+      }
+      const selectedTarget = selected.value.targetContext.activeTarget;
+      const selectedSummary = selected.value.targetContext.activeTargetSummary;
+      if (
+        selectedTarget?.mode !== "session" ||
+        !sameTargetIdentity(selectedTarget, target) ||
+        selectedSummary?.mode !== "session" ||
+        selectedSummary.id !== target.id
+      ) {
+        return { ok: false, error: "The backend did not confirm the selected session" };
+      }
+
+      record.target = selectedTarget;
+      record.claimedBy = destination;
+      setInteractionWindowTitle(record.window, selected.value);
+      return selected;
+    }).catch((): OperationResult<SliverSnapshot> => ({
+      ok: false,
+      error: "The interaction session could not be selected",
+    }));
   }
 
   async function openSessionShellWindow(
@@ -257,7 +491,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       sessionShellWindowsByKey.set(key, record);
       sessionShellWindowsByContentsId.set(window.webContents.id, record);
       trackWindow(window, source.contentsId, record);
-      loadRenderer(window, "managed-shells");
+      void loadRenderer(window, "managed-shells");
       return { ok: true };
     } catch (error) {
       return { ok: false, error: applicationErrorMessage(error, "Managed shells could not be popped out") };
@@ -450,6 +684,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       releaseDownloader?.stop();
       app.quit();
     },
+    {
+      open: openInteractionWindow,
+      claim: claimInteractionWindow,
+      selectTarget: selectInteractionWindowTarget,
+    },
   );
   installMenu();
   void refreshReleaseMenu();
@@ -525,6 +764,57 @@ function sameTargetIdentity(left: TargetRef, right: TargetRef): boolean {
     left.id === right.id &&
     left.backendEpoch === right.backendEpoch &&
     left.fingerprint === right.fingerprint;
+}
+
+function freshTargetIdentity(snapshot: SliverSnapshot, expected: TargetRef): TargetRef | undefined {
+  const active = snapshot.targetContext.activeTarget;
+  if (active && sameTargetIdentity(active, expected)) return active;
+  return snapshot.targetContext.selectableTargets.find((target) => sameTargetIdentity(target, expected));
+}
+
+function isCurrentInteractionDestination(
+  record: InteractionWindowRecord,
+  destination: TrustedWindowIdentity,
+  registeredRecord: InteractionWindowRecord | undefined,
+  generation: number,
+): boolean {
+  return registeredRecord === record &&
+    record.generation === generation &&
+    !record.window.isDestroyed() &&
+    record.window.webContents.id === destination.contentsId &&
+    sameWindowIdentity(destination, identityForWindow(record.window));
+}
+
+function resetInteractionWindowClaim(record: InteractionWindowRecord): void {
+  record.generation += 1;
+  delete record.claimedBy;
+}
+
+function isInteractionSurfaceUrl(candidateUrl: string, rendererUrl: string): boolean {
+  try {
+    const candidate = new URL(candidateUrl);
+    return isTrustedRendererUrl(candidate.href, rendererUrl) &&
+      candidate.search === "?surface=interaction" &&
+      candidate.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function serializeInteractionTransition<T>(
+  record: InteractionWindowRecord,
+  transition: () => Promise<T>,
+): Promise<T> {
+  const result = record.transition.then(transition, transition);
+  record.transition = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function setInteractionWindowTitle(window: BrowserWindow, snapshot: SliverSnapshot): void {
+  if (window.isDestroyed()) return;
+  const summary = snapshot.targetContext.activeTargetSummary;
+  if (!summary) return;
+  window.setTitle(`Interact — ${summary.name || summary.hostname || summary.id}`);
 }
 
 function applicationErrorMessage(error: unknown, fallback: string): string {

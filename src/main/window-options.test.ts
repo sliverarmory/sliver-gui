@@ -2,7 +2,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { mainWindowOptions, sessionShellWindowOptions } from "./window-options.js";
+import {
+  interactionWindowOptions,
+  mainWindowOptions,
+  sessionShellWindowOptions,
+} from "./window-options.js";
 
 describe("main window transparency", () => {
   it.each(["darwin", "linux", "win32"] as const)(
@@ -88,5 +92,35 @@ describe("managed-shell window", () => {
       },
     });
     expect(options).not.toHaveProperty("parent");
+  });
+});
+
+describe("interaction window", () => {
+  it("uses dedicated native chrome while preserving hardened renderer preferences", () => {
+    const options = interactionWindowOptions("/absolute/preload.js", "linux", "/brand.png");
+
+    expect(options).toMatchObject({
+      title: "Interact",
+      width: 1360,
+      height: 900,
+      minWidth: 840,
+      minHeight: 640,
+      show: false,
+      backgroundColor: "#09090b",
+      icon: "/brand.png",
+      webPreferences: {
+        preload: "/absolute/preload.js",
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        nodeIntegrationInSubFrames: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        webviewTag: false,
+      },
+    });
+    expect(options).not.toHaveProperty("parent");
+    expect(options).not.toHaveProperty("transparent");
+    expect(options).not.toHaveProperty("titleBarOverlay");
   });
 });

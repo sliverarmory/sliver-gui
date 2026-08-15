@@ -2,6 +2,7 @@
 
 Date: 2026-08-10
 Status: **Delivered; awaiting operator acceptance**
+Acceptance-feedback follow-up: 2026-08-14
 
 This record covers the session-shell-only M3 tranche. Automated implementation
 and deterministic Electron evidence are complete, but M3 remains open until the
@@ -11,6 +12,43 @@ The pinned upstream Sliver command tree exposes interactive shells for sessions,
 not beacons, so this milestone makes no beacon-shell claim. Port forwarding,
 reverse forwarding, SOCKS, WireGuard networking, and generic tunnel-resource
 parity remain assigned to M5.
+
+## Acceptance-feedback follow-up (2026-08-14)
+
+Operator feedback added two cross-cutting M1-M3 navigation and windowing
+improvements without widening the delivered shell tranche:
+
+- **Sessions** remains the first session-workbench breadcrumb and is now a
+  bounded dropdown over exact, main-issued session target references. A switch
+  is admitted only while the source and requested identities are still exact;
+  stale, disconnected, or third-target races fail closed. If the source
+  workspace owns managed shells, the UI warns the operator and requires
+  confirmation before switching, with **Pop out managed shells** available to
+  preserve intentional ownership first.
+- The exact active session or beacon can open its whole **Interact** surface in
+  a hardened native window. The launch URL carries only a static presentation
+  marker. Electron main owns the destination authorization and stable target
+  identity, rejects unregistered or recursive claims, and restores the same
+  authorized identity across renderer reloads. The destination maintains its
+  own operation history and interaction controller while observing the exact
+  target's task and presence data; it does not copy source-window state or
+  implicitly transfer managed shells.
+
+This follow-up is acceptance evidence for the operator to exercise, not an M3
+acceptance decision. M3 remains **Awaiting operator acceptance**, and M4 has not
+started. The historical automated results below remain the 2026-08-10 delivery
+record and are not rewritten by this follow-up.
+
+### Follow-up automated evidence
+
+The 2026-08-14 integrated verification passed `npm run typecheck` and the full
+unit/component suite: **66 test files passed and one was skipped; 749 tests
+passed and two were skipped**. The production-renderer Electron lane also
+passed its single current-slice journey. It opened exact session and beacon
+interaction windows, exercised a visible operation control, proved source and
+destination operation/shell isolation, rejected cross-mode retargeting,
+quarantined target loss, restored the main-owned identity after reload, and
+observed no HTTP or WebSocket escape.
 
 ## Delivered operator path
 
@@ -212,7 +250,18 @@ cleanup scope is understood.
    best-effort remote request, not proof of remote process termination.
 8. Confirm no shell content appears in Activity, broad snapshots, diagnostics,
    or metrics.
-9. Explicitly accept or reject M3. Do not begin M4 on the basis of automated
+9. Use the **Sessions** breadcrumb dropdown to switch to another live session.
+   Confirm the selected session and route change together, and confirm a
+   workspace with managed shells requires the warning and explicit approval.
+10. From a session and from a beacon, choose **Pop out interaction**. Confirm
+    each native window opens on the exact target with the complete dedicated
+    interaction surface, no generic application chrome, and no recursive
+    interaction-popout control.
+11. Confirm existing managed shells remain owned by the source window, the
+    interaction window maintains independent operation/task state, and
+    reloading it restores the same exact authorized target without exposing a
+    target identifier in the URL.
+12. Explicitly accept or reject M3. Do not begin M4 on the basis of automated
    evidence alone.
 
 ## Deferred evidence and parity

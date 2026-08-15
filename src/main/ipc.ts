@@ -22,6 +22,7 @@ import {
   type OperationResult,
   type RemoveSavedConfigInput,
   type SaveProfileInput,
+  type SliverSnapshot,
   type WindowLaunchContext,
 } from "../shared/contracts.js";
 import {
@@ -75,6 +76,15 @@ export interface SessionShellWindowController {
     input: OpenSessionShellWindowInput,
   ): MaybePromise<OperationResult>;
   claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<WindowLaunchContext>>;
+}
+
+export interface InteractionWindowController {
+  open(source: TrustedWindowIdentity): MaybePromise<OperationResult>;
+  claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<WindowLaunchContext>>;
+  selectTarget(
+    destination: TrustedWindowIdentity,
+    target: TargetRef,
+  ): MaybePromise<OperationResult<SliverSnapshot>>;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -148,6 +158,7 @@ export function registerIpcHandlers(
   rendererUrl: string,
   sessionShellWindows?: SessionShellWindowController,
   exitApplication?: () => void,
+  interactionWindows?: InteractionWindowController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -169,6 +180,26 @@ export function registerIpcHandlers(
     createWindow(input.inheritConnection ? contentsId : undefined);
     return { ok: true };
   });
+  handleTrusted(
+    IPC.openInteractionWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => interactionWindows?.open({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "Dedicated interaction windows are unavailable" },
+  );
+  handleTrusted(
+    IPC.claimInteractionWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => interactionWindows?.claim({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "This window is not authorized to host an interaction workspace" },
+  );
   handleTrusted(IPC.exitApp, rendererUrl, parseNoArguments, () => {
     if (!exitApplication) return { ok: false, error: "Application exit is unavailable" };
     exitApplication();
@@ -241,8 +272,14 @@ export function registerIpcHandlers(
   handleTrusted(IPC.listTargets, rendererUrl, parseTargetCatalogPageArguments, ({ contentsId }, request) =>
     registry.listTargets(contentsId, request),
   );
-  handleTrusted(IPC.selectTarget, rendererUrl, parseTargetRefArguments, ({ contentsId }, target) =>
-    registry.selectTarget(contentsId, target),
+  handleTrusted(
+    IPC.selectTarget,
+    rendererUrl,
+    parseTargetRefArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, target) => interactionWindows?.selectTarget(
+      { contentsId, rendererProcessId, rendererFrameToken },
+      target,
+    ) ?? registry.selectTarget(contentsId, target),
   );
   handleTrusted(IPC.backgroundTarget, rendererUrl, parseNoArguments, ({ contentsId }) =>
     registry.backgroundTarget(contentsId),
