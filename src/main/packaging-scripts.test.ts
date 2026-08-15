@@ -59,6 +59,37 @@ describe("native distribution packaging", () => {
     expect(privateUpdaterWorkflow.match(/node \.\/scripts\/verifyUpdateArtifacts\.mjs/gu)).toHaveLength(6);
   });
 
+  it("verifies immutable private updater releases from published state", () => {
+    const rootDir = resolve(import.meta.dirname, "../..");
+    const workflow = readFileSync(
+      resolve(rootDir, ".github/workflows/private-updater-e2e.yml"),
+      "utf8",
+    );
+
+    expect(workflow).not.toContain("immutable-releases");
+    expect(workflow).not.toContain("immutable_releases");
+    expect(workflow).not.toMatch(/2>\/dev\/null\s*\|\|\s*echo false/gu);
+
+    const publishedState = workflowStep(workflow, "Verify published state and exact remote inventory");
+    expect(publishedState).toContain(
+      "--json isDraft,isImmutable,isPrerelease,tagName,targetCommitish",
+    );
+    expect(publishedState).toContain(
+      "--jq '[.isDraft, .isPrerelease, .isImmutable, .tagName, .targetCommitish] | @tsv'",
+    );
+    expect(publishedState).toContain(
+      "expected_state=\"$(printf 'false\\ttrue\\ttrue\\t%s\\t%s'",
+    );
+
+    const nativeContext = workflowStep(workflow, "Build credential-free native test context");
+    expect(nativeContext).toContain(
+      "--json databaseId,isDraft,isImmutable,isPrerelease,publishedAt,tagName,targetCommitish,url",
+    );
+    const nativeVerifier = workflowStep(workflow, "Verify credential-free release context");
+    expect(nativeVerifier).toContain("c.isImmutable!==true");
+    expect(nativeVerifier).not.toContain("GH_TOKEN");
+  });
+
   it("keeps private updater trust setup noninteractive and cleanup fail-closed", () => {
     const rootDir = resolve(import.meta.dirname, "../..");
     const workflow = readFileSync(

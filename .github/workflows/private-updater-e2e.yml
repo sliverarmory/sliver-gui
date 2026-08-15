@@ -550,7 +550,6 @@ jobs:
     permissions:
       contents: write
     outputs:
-      immutable_releases: ${{ steps.repository.outputs.immutable_releases }}
       release_url: ${{ steps.remote.outputs.release_url }}
 
     steps:
@@ -595,7 +594,6 @@ jobs:
             --private-e2e
 
       - name: Verify repository state for the isolated release
-        id: repository
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
@@ -612,15 +610,6 @@ jobs:
             echo "::error::Release or tag already exists: $TEST_TAG"
             exit 1
           fi
-          immutable="$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/immutable-releases" \
-            --jq .enabled 2>/dev/null || echo false)"
-          if [ "$immutable" != "true" ] && [ "$immutable" != "false" ]; then
-            echo "::error::Unexpected immutable releases response: $immutable"
-            exit 1
-          fi
-          echo "immutable_releases=$immutable" >> "$GITHUB_OUTPUT"
 
       - name: Stage one unique draft and upload the complete inventory
         env:
@@ -666,9 +655,9 @@ jobs:
           UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
         run: |
           set -euo pipefail
-          state="$(gh release view "$TEST_TAG" --json isDraft,isPrerelease,tagName,targetCommitish \
-            --jq '[.isDraft, .isPrerelease, .tagName, .targetCommitish] | @tsv')"
-          expected_state="$(printf 'false\ttrue\t%s\t%s' "$TEST_TAG" "$GITHUB_SHA")"
+          state="$(gh release view "$TEST_TAG" --json isDraft,isImmutable,isPrerelease,tagName,targetCommitish \
+            --jq '[.isDraft, .isPrerelease, .isImmutable, .tagName, .targetCommitish] | @tsv')"
+          expected_state="$(printf 'false\ttrue\ttrue\t%s\t%s' "$TEST_TAG" "$GITHUB_SHA")"
           if [ "$state" != "$expected_state" ]; then
             echo "::error::Unexpected published prerelease state: $state"
             exit 1
@@ -803,7 +792,7 @@ jobs:
           const expected={tagName:process.env.EXPECTED_TAG,baseVersion:process.env.EXPECTED_BASE_VERSION,
           updateVersion:process.env.EXPECTED_UPDATE_VERSION,commit:process.env.GITHUB_SHA};
           for(const [key,value] of Object.entries(expected)){if(c[key]!==value)throw new Error('release context '+key+' mismatch')}
-          if(c.isDraft!==false||c.isPrerelease!==true)throw new Error('release context is not a published prerelease')" "${{ runner.temp }}/sliver-gui-updater-e2e/release/release.json"
+          if(c.isDraft!==false||c.isPrerelease!==true||c.isImmutable!==true)throw new Error('release context is not an immutable published prerelease')" "${{ runner.temp }}/sliver-gui-updater-e2e/release/release.json"
 
       - name: Resolve the absolute N-1 installer path
         if: runner.os != 'Windows'
