@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1146,17 +1146,24 @@ describe("session workbench panels", () => {
     await act(async () => {
       prepareGate.resolve(preparedAction({ actionId: "session.process.terminate", pid: 2, force: false }));
     });
-    expect(await screen.findByRole("alertdialog", { name: "Terminate process 2?" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    const terminateDialog = await screen.findByRole("alertdialog", { name: "Terminate process 2?" });
+    expect(terminateDialog).toBeInTheDocument();
+    await user.click(within(terminateDialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(terminateDialog).not.toBeInTheDocument());
 
-    await user.type(screen.getByRole("searchbox", { name: "Filter processes" }), "bash");
-    expect(await screen.findByRole("row", { name: /server-filtered/i }, { timeout: 3_000 })).toBeInTheDocument();
-    expect(api.runSessionWorkbench).toHaveBeenCalledWith({
-      operationId: "session.process.list",
-      fullInfo: true,
-      limit: 100,
-      query: "bash",
-    });
+    const processFilter = screen.getByRole("searchbox", { name: "Filter processes" });
+    fireEvent.change(processFilter, { target: { value: "bash" } });
+    expect(processFilter).toHaveValue("bash");
+    await waitFor(
+      () => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+        operationId: "session.process.list",
+        fullInfo: true,
+        limit: 100,
+        query: "bash",
+      }),
+      { timeout: 3_000 },
+    );
+    expect(await screen.findByRole("row", { name: /server-filtered/i })).toBeInTheDocument();
     expect(screen.getByText("Loaded 1 of 1 processes matching “bash”")).toBeInTheDocument();
   });
 
