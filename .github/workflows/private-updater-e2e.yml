@@ -353,13 +353,13 @@ jobs:
           UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
         run: |
           set -euo pipefail
-          npm run verify:update-artifacts -- \
+          node ./scripts/verifyUpdateArtifacts.mjs \
             --directory release-base \
             --platform "${{ matrix.id }}" \
             --version "$BASE_VERSION" \
             --app-update "release-base/${{ matrix.app_update_relative }}" \
             --private-e2e
-          npm run verify:update-artifacts -- \
+          node ./scripts/verifyUpdateArtifacts.mjs \
             --directory release-update \
             --platform "${{ matrix.id }}" \
             --version "$UPDATE_VERSION" \
@@ -373,14 +373,14 @@ jobs:
           BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
           UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
         run: |
-          npm run verify:update-artifacts -- `
+          node ./scripts/verifyUpdateArtifacts.mjs `
             --directory release-base `
             --platform windows `
             --version $env:BASE_VERSION `
             --app-update "release-base/${{ matrix.app_update_relative }}" `
             --publisher-name $env:WINDOWS_PUBLISHER `
             --private-e2e
-          npm run verify:update-artifacts -- `
+          node ./scripts/verifyUpdateArtifacts.mjs `
             --directory release-update `
             --platform windows `
             --version $env:UPDATE_VERSION `
@@ -528,7 +528,7 @@ jobs:
             cd release-assets
             sha256sum latest*.yml sliver-gui-* > SHA256SUMS
           )
-          npm run verify:update-artifacts -- \
+          node ./scripts/verifyUpdateArtifacts.mjs \
             --directory release-assets \
             --platform all \
             --version "$UPDATE_VERSION" \
@@ -633,7 +633,7 @@ jobs:
           gh release download "$TEST_TAG" --dir remote-assets
           find remote-assets -maxdepth 1 -type f -exec basename {} \; | sort > downloaded-assets.txt
           diff -u expected-assets.txt downloaded-assets.txt
-          npm run verify:update-artifacts -- \
+          node ./scripts/verifyUpdateArtifacts.mjs \
             --directory remote-assets \
             --platform all \
             --version "$UPDATE_VERSION" \
