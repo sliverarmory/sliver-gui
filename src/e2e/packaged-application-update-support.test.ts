@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -185,12 +185,15 @@ describe("packaged application update E2E support", () => {
   });
 
   it("pins controlled application launches to one explicit user-data directory", () => {
-    expect(packagedUpdateLaunchProfile("/private/tmp/e2e-profile")).toEqual({
+    const profileRoot = resolve("private", "tmp", "e2e-profile");
+    const userDataDirectory = join(profileRoot, "user-data");
+
+    expect(packagedUpdateLaunchProfile(profileRoot)).toEqual({
       arguments: [
         "--enable-sandbox",
-        "--user-data-dir=/private/tmp/e2e-profile/user-data",
+        `--user-data-dir=${userDataDirectory}`,
       ],
-      userDataDirectory: "/private/tmp/e2e-profile/user-data",
+      userDataDirectory,
     });
   });
 
