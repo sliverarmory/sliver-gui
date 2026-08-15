@@ -1016,32 +1016,96 @@ jobs:
             return 1
           }
 
+          wait_for_absence() {
+            local endpoint="$1"
+            local label="$2"
+            local max_attempts="$3"
+            local delay_seconds="$4"
+            local attempt
+            local state
+            for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+              if ! state="$(resource_state "$endpoint" "$label-$attempt")"; then
+                echo "::error::$label returned an API error; refusing to retry or fail open." >&2
+                return 2
+              fi
+              if [ "$state" = "absent" ]; then
+                return 0
+              fi
+              if [ "$attempt" -lt "$max_attempts" ]; then
+                echo "::notice::$label is still present (attempt $attempt/$max_attempts); waiting ${delay_seconds}s." >&2
+                sleep "$delay_seconds"
+              fi
+            done
+            echo "::error::Timed out waiting for explicit 404 absence from $label." >&2
+            return 1
+          }
+
           release_endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$TEST_TAG"
           tag_endpoint="repos/$GITHUB_REPOSITORY/git/ref/tags/$TEST_TAG"
+          absence_poll_attempts=13
+          absence_poll_delay_seconds=5
           cleanup_failed=false
           found_evidence=false
-          release_presence="$(resource_state "$release_endpoint" release-before-cleanup)"
-          tag_presence="$(resource_state "$tag_endpoint" tag-before-cleanup)"
-          if [ "$release_presence" = "present" ]; then
-            found_evidence=true
-            if ! gh release delete "$TEST_TAG" --yes; then
-              echo "::error::Failed to delete updater E2E release; manual cleanup is required."
-              cleanup_failed=true
+          release_absent=false
+          tag_absent=false
+          cleanup_complete=false
+
+          if release_presence="$(resource_state "$release_endpoint" release-before-cleanup)"; then
+            if [ "$release_presence" = "present" ]; then
+              found_evidence=true
+              if ! gh release delete "$TEST_TAG" --yes; then
+                echo "::error::Failed to delete updater E2E release; manual cleanup is required."
+                cleanup_failed=true
+              fi
+              if wait_for_absence \
+                "$release_endpoint" \
+                release-after-delete \
+                "$absence_poll_attempts" \
+                "$absence_poll_delay_seconds"; then
+                release_absent=true
+              else
+                cleanup_failed=true
+              fi
+            else
+              release_absent=true
             fi
+          else
+            echo "::error::Release state check failed; refusing release or tag deletion."
+            cleanup_failed=true
           fi
 
-          tag_presence="$(resource_state "$tag_endpoint" tag-after-release-cleanup)"
-          if [ "$tag_presence" = "present" ]; then
-            found_evidence=true
-            if ! gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TEST_TAG"; then
-              echo "::error::Failed to delete updater E2E tag; manual cleanup is required."
+          if [ "$release_absent" = "true" ]; then
+            if tag_presence="$(resource_state "$tag_endpoint" tag-before-cleanup)"; then
+              if [ "$tag_presence" = "present" ]; then
+                found_evidence=true
+                if ! gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TEST_TAG"; then
+                  echo "::error::Failed to delete updater E2E tag; manual cleanup is required."
+                  cleanup_failed=true
+                fi
+                if wait_for_absence \
+                  "$tag_endpoint" \
+                  tag-after-delete \
+                  "$absence_poll_attempts" \
+                  "$absence_poll_delay_seconds"; then
+                  tag_absent=true
+                else
+                  cleanup_failed=true
+                fi
+              else
+                tag_absent=true
+              fi
+            else
+              echo "::error::Tag state check failed; refusing fail-open cleanup."
               cleanup_failed=true
             fi
+          else
+            echo "::error::Skipping tag deletion because release absence was not confirmed."
+            cleanup_failed=true
           fi
 
-          final_release_presence="$(resource_state "$release_endpoint" release-after-cleanup)"
-          final_tag_presence="$(resource_state "$tag_endpoint" tag-after-cleanup)"
-          if [ "$final_release_presence" != "absent" ] || [ "$final_tag_presence" != "absent" ]; then
+          if [ "$release_absent" = "true" ] && [ "$tag_absent" = "true" ]; then
+            cleanup_complete=true
+          else
             echo "::error::Updater E2E release or tag survived cleanup; manual cleanup is required."
             cleanup_failed=true
           fi
@@ -1049,12 +1113,14 @@ jobs:
           {
             echo "### Private updater E2E cleanup"
             echo
-            if [ "$found_evidence" = "true" ] && [ "$cleanup_failed" = "false" ]; then
-              echo "Deleted test release and tag \`$TEST_TAG\`, including immutable evidence when enabled."
-            elif [ "$found_evidence" = "false" ]; then
-              echo "No test release or tag existed for \`$TEST_TAG\`."
+            if [ "$cleanup_complete" = "true" ] && [ "$cleanup_failed" = "false" ]; then
+              if [ "$found_evidence" = "true" ]; then
+                echo "Deleted test release and tag \`$TEST_TAG\`, including immutable evidence when enabled."
+              else
+                echo "No test release or tag existed for \`$TEST_TAG\`."
+              fi
             else
-              echo "Test evidence for \`$TEST_TAG\` survived; remove it before repository visibility changes."
+              echo "Cleanup for \`$TEST_TAG\` did not reach verified release-and-tag absence; inspect the errors above."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
