@@ -85,6 +85,12 @@ describe("native distribution packaging", () => {
     ]) {
       expect(workflowStep(workflow, name)).toContain("timeout-minutes: 10");
     }
+    expect(
+      workflowStep(
+        workflow.replace(/\n/gu, "\r\n"),
+        "Generate one ephemeral self-signed macOS identity",
+      ),
+    ).toContain("timeout-minutes: 10");
 
     const macSigningSetup = workflowStep(workflow, "Generate one ephemeral self-signed macOS identity");
     for (const context of [
@@ -173,9 +179,10 @@ function escapeRegularExpression(value: string): string {
 }
 
 function workflowStep(workflow: string, name: string): string {
+  const normalizedWorkflow = workflow.replace(/\r\n?/gu, "\n");
   const marker = `      - name: ${name}\n`;
-  const start = workflow.indexOf(marker);
+  const start = normalizedWorkflow.indexOf(marker);
   if (start < 0) throw new Error(`Missing workflow step: ${name}`);
-  const next = workflow.indexOf("\n      - name: ", start + marker.length);
-  return workflow.slice(start, next < 0 ? undefined : next);
+  const next = normalizedWorkflow.indexOf("\n      - name: ", start + marker.length);
+  return normalizedWorkflow.slice(start, next < 0 ? undefined : next);
 }
