@@ -202,6 +202,10 @@ jobs:
             -k "$keychain" -P "$p12_password" -T /usr/bin/codesign -T /usr/bin/productbuild
           security set-key-partition-list \
             -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
+            echo "::error::Ephemeral macOS admin trust is allowed only on GitHub-hosted runners"
+            exit 1
+          fi
           sudo -n security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$signing_dir/signing.pem"
           original_keychains=()
           while IFS= read -r keychain_path; do
@@ -423,17 +427,15 @@ jobs:
       - name: Remove ephemeral private signing material
         if: always() && runner.os == 'macOS'
         shell: bash
+        timeout-minutes: 2
         run: |
           set -uo pipefail
           cleanup_failed=false
-          signing_certificate="${UPDATER_E2E_PUBLIC_CERT:-$RUNNER_TEMP/sliver-gui-updater-signing/signing.pem}"
-          if [ -f "$signing_certificate" ]; then
-            if ! sudo -n security remove-trusted-cert -d "$signing_certificate"; then
-              echo "::error::Failed to remove the ephemeral macOS admin trust setting"
-              cleanup_failed=true
-            fi
-          fi
+          # GitHub-hosted macOS can hang while removing admin trust (runner-images #12116).
+          # Delete all private material here; fresh-VM teardown discards the public admin trust record.
+          echo "::notice::MAC_SIGNING_CLEANUP_BEGIN"
           original_keychains_file="${UPDATER_E2E_ORIGINAL_KEYCHAINS:-$RUNNER_TEMP/sliver-gui-updater-signing/original-keychains.txt}"
+          echo "::notice::MAC_SIGNING_CLEANUP_RESTORE_KEYCHAINS"
           if [ -f "$original_keychains_file" ]; then
             original_keychains=()
             while IFS= read -r keychain_path; do
@@ -445,11 +447,13 @@ jobs:
             fi
           fi
           signing_keychain="${CSC_KEYCHAIN:-$RUNNER_TEMP/sliver-gui-updater-signing.keychain-db}"
+          echo "::notice::MAC_SIGNING_CLEANUP_DELETE_KEYCHAIN"
           if [ -e "$signing_keychain" ] && ! security delete-keychain "$signing_keychain"; then
             echo "::error::Failed to delete the ephemeral macOS signing keychain"
             cleanup_failed=true
           fi
           signing_dir="${UPDATER_E2E_SIGNING_DIR:-$RUNNER_TEMP/sliver-gui-updater-signing}"
+          echo "::notice::MAC_SIGNING_CLEANUP_DELETE_PRIVATE_MATERIAL"
           case "$signing_dir" in
             "$RUNNER_TEMP"/*)
               if ! rm -rf -- "$signing_dir"; then
@@ -462,6 +466,7 @@ jobs:
               cleanup_failed=true
               ;;
           esac
+          echo "::notice::MAC_SIGNING_CLEANUP_END"
           if [ "$cleanup_failed" = true ]; then exit 1; fi
 
       - name: Remove ephemeral Windows private signing material
@@ -849,12 +854,15 @@ jobs:
           {
             echo "UPDATER_E2E_TRUST_KEYCHAIN=$trust_keychain"
             echo "UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS=$RUNNER_TEMP/sliver-gui-updater-original-keychains.txt"
-            echo "UPDATER_E2E_TRUST_CERTIFICATE=$certificate"
             echo "SLIVER_GUI_UPDATE_E2E_MAC_SIGNING_AUTHORITY=$MAC_SIGNING_AUTHORITY"
           } >> "$GITHUB_ENV"
           security create-keychain -p "$trust_password" "$trust_keychain"
           security set-keychain-settings -lut 21600 "$trust_keychain"
           security unlock-keychain -p "$trust_password" "$trust_keychain"
+          if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
+            echo "::error::Ephemeral macOS admin trust is allowed only on GitHub-hosted runners"
+            exit 1
+          fi
           sudo -n security add-trusted-cert -d -r trustRoot -p codeSign -k "$trust_keychain" "$certificate"
           original_keychains=()
           while IFS= read -r keychain_path; do
@@ -903,17 +911,14 @@ jobs:
       - name: Remove ephemeral macOS trust
         if: always() && runner.os == 'macOS'
         shell: bash
+        timeout-minutes: 2
         run: |
           set -uo pipefail
           cleanup_failed=false
-          trust_certificate="${UPDATER_E2E_TRUST_CERTIFICATE:-$RUNNER_TEMP/sliver-gui-updater-e2e/base/signing-certificate.pem}"
-          if [ -f "$trust_certificate" ]; then
-            if ! sudo -n security remove-trusted-cert -d "$trust_certificate"; then
-              echo "::error::Failed to remove the ephemeral macOS admin trust setting"
-              cleanup_failed=true
-            fi
-          fi
+          # The github-hosted guard above makes VM teardown the safe owner of the public trust record.
+          echo "::notice::MAC_NATIVE_TRUST_CLEANUP_BEGIN"
           original_keychains_file="${UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS:-$RUNNER_TEMP/sliver-gui-updater-original-keychains.txt}"
+          echo "::notice::MAC_NATIVE_TRUST_CLEANUP_RESTORE_KEYCHAINS"
           if [ -f "$original_keychains_file" ]; then
             original_keychains=()
             while IFS= read -r keychain_path; do
@@ -924,6 +929,7 @@ jobs:
               cleanup_failed=true
             fi
           fi
+          echo "::notice::MAC_NATIVE_TRUST_CLEANUP_DELETE_SAVED_LIST"
           case "$original_keychains_file" in
             "$RUNNER_TEMP"/*)
               if ! rm -f -- "$original_keychains_file"; then
@@ -937,10 +943,12 @@ jobs:
               ;;
           esac
           trust_keychain="${UPDATER_E2E_TRUST_KEYCHAIN:-$RUNNER_TEMP/sliver-gui-updater-trust.keychain-db}"
+          echo "::notice::MAC_NATIVE_TRUST_CLEANUP_DELETE_KEYCHAIN"
           if [ -e "$trust_keychain" ] && ! security delete-keychain "$trust_keychain"; then
             echo "::error::Failed to delete the ephemeral macOS trust keychain"
             cleanup_failed=true
           fi
+          echo "::notice::MAC_NATIVE_TRUST_CLEANUP_END"
           if [ "$cleanup_failed" = true ]; then exit 1; fi
 
       - name: Remove ephemeral Windows trust
