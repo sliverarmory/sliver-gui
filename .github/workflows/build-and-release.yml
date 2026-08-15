@@ -198,9 +198,9 @@ jobs:
       - name: Set and verify exact version from tag
         if: github.ref_type == 'tag'
         run: |
-          npm run verify:release-version -- --tag "${{ github.ref_name }}" --allow-package-mismatch
+          node ./scripts/verifyReleaseVersion.mjs --tag "${{ github.ref_name }}" --allow-package-mismatch
           npm version --no-git-tag-version --allow-same-version "${{ github.ref_name }}"
-          npm run verify:release-version -- --tag "${{ github.ref_name }}"
+          node ./scripts/verifyReleaseVersion.mjs --tag "${{ github.ref_name }}"
 
       - name: Require release tag at the reviewed main commit
         if: github.ref_type == 'tag'
@@ -221,7 +221,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run verify:release-signing-env -- --platform macos
+        run: node ./scripts/verifyReleaseSigningEnvironment.mjs --platform macos
 
       - name: Require Windows signing secrets
         if: github.ref_type == 'tag' && runner.os == 'Windows'
@@ -229,7 +229,7 @@ jobs:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
-        run: npm run verify:release-signing-env -- --platform windows
+        run: node ./scripts/verifyReleaseSigningEnvironment.mjs --platform windows
 
       - name: Run tests
         run: npm test
@@ -305,13 +305,13 @@ jobs:
 
       - name: Verify updater metadata and native asset inventory
         if: github.ref_type != 'tag' || runner.os != 'Windows'
-        run: npm run verify:update-artifacts -- --platform "${{ matrix.update_platform }}" --app-update "${{ matrix.app_update_path }}"
+        run: node ./scripts/verifyUpdateArtifacts.mjs --platform "${{ matrix.update_platform }}" --app-update "${{ matrix.app_update_path }}"
 
       - name: Verify Windows updater publisher continuity
         if: github.ref_type == 'tag' && runner.os == 'Windows'
         env:
           WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
-        run: npm run verify:update-artifacts -- --platform windows --app-update "${{ matrix.app_update_path }}" --publisher-name "$env:WIN_CSC_PUBLISHER_NAME"
+        run: node ./scripts/verifyUpdateArtifacts.mjs --platform windows --app-update "${{ matrix.app_update_path }}" --publisher-name "$env:WIN_CSC_PUBLISHER_NAME"
 
       - name: Exercise packaged mTLS application
         env:
@@ -385,9 +385,9 @@ jobs:
 
       - name: Verify complete release and updater inventory
         run: |
-          npm run verify:release-version -- --tag "$GITHUB_REF_NAME" --allow-package-mismatch
+          node ./scripts/verifyReleaseVersion.mjs --tag "$GITHUB_REF_NAME" --allow-package-mismatch
           version="${GITHUB_REF_NAME#v}"
-          npm run verify:update-artifacts -- --directory release-assets --platform all --version "$version"
+          node ./scripts/verifyUpdateArtifacts.mjs --directory release-assets --platform all --version "$version"
 
       - name: Generate checksums
         working-directory: release-assets
@@ -396,7 +396,7 @@ jobs:
       - name: Verify checksums cover the exact release inventory
         run: |
           version="${GITHUB_REF_NAME#v}"
-          npm run verify:update-artifacts -- --directory release-assets --platform all --version "$version" --checksums SHA256SUMS
+          node ./scripts/verifyUpdateArtifacts.mjs --directory release-assets --platform all --version "$version" --checksums SHA256SUMS
 
       - name: Create or update draft GitHub release
         env:

@@ -206,6 +206,34 @@ by package is:
 | Linux x64 AppImage | Downloads the AppImage described by `latest-linux.yml`. |
 | Linux x64 Debian package | Manual update only; verify the package against the release `SHA256SUMS`, or use the AppImage build for automatic updates. |
 
+### Manual private updater E2E
+
+Before changing repository visibility, manually dispatch **Private GitHub
+updater E2E**. It builds increasing prerelease versions from the same commit
+with the isolated `electron-builder-updater-e2e.yml` private-feed profile. The
+built-in job token is exposed only to individual GitHub CLI publication steps
+and the native test process; it is never available to packaging or written into
+an application, release asset, diagnostic bundle, or log.
+
+The macOS and Windows build jobs each create one ephemeral self-signed test
+identity and use it for both versions. This proves signature continuity and the
+installed DMG-to-ZIP and NSIS paths; the Linux job separately proves the
+AppImage replacement path. These checks do not replace production Developer ID
+signing, Apple notarization, or publicly trusted Windows Authenticode
+certification. The workflow publishes a uniquely tagged, non-latest GitHub
+prerelease, verifies the downloaded remote inventory, and deletes the release
+and tag after testing. GitHub currently permits an immutable release itself to
+be deleted and its tag to be removed afterward, although that tag name can
+never be reused; every dispatch therefore uses a unique tag. If repository
+policy refuses deletion, the workflow fails closed, records the retained
+evidence in its summary, and requires manual removal before repository
+visibility changes.
+
+After the repository becomes public—and before announcing the first stable
+release—a no-token N-1 to N canary against the real public GitHub Releases feed
+is mandatory. The private-repository test cannot certify anonymous public asset
+access.
+
 Pushing an exact stable tag such as `v1.2.3` at the current reviewed `main`
 commit runs clean native builds and sets the package version to `1.2.3`. Tag
 builds fail closed unless macOS is signed and notarized and Windows is

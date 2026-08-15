@@ -3,6 +3,8 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { assertPackagedGitHubUpdateConfiguration } from "./privateUpdaterE2EConfig.mjs";
+
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const directory = resolve(argumentValue("--directory") ?? join(rootDir, "release"));
 const platform = argumentValue("--platform");
@@ -11,9 +13,19 @@ const version = argumentValue("--version") ?? packageJson.version;
 const checksumsFile = argumentValue("--checksums");
 const appUpdateFile = argumentValue("--app-update");
 const publisherName = argumentValue("--publisher-name");
+const privateE2E = argumentFlag("--private-e2e");
 
-if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(version)) {
-  throw new Error(`--version must be an exact stable SemVer version: ${version}`);
+const stableSemVer = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const prereleaseIdentifier = "(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)";
+const prereleaseSemVer = new RegExp(
+  `^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)-(?:${prereleaseIdentifier})(?:\\.${prereleaseIdentifier})*$`,
+  "u",
+);
+
+if (privateE2E ? !prereleaseSemVer.test(version) : !stableSemVer.test(version)) {
+  throw new Error(
+    `--version must be an exact ${privateE2E ? "prerelease" : "stable"} SemVer version: ${version}`,
+  );
 }
 
 const inventories = {
@@ -86,8 +98,12 @@ for (const inventory of selected) {
   await verifyMetadata(inventory);
 }
 
+if (privateE2E && !appUpdateFile) {
+  throw new Error("--private-e2e requires --app-update");
+}
+
 if (appUpdateFile) {
-  await verifyPackagedUpdateConfiguration(resolve(appUpdateFile), publisherName);
+  await verifyPackagedUpdateConfiguration(resolve(appUpdateFile), publisherName, privateE2E);
 } else if (publisherName) {
   throw new Error("--publisher-name requires --app-update");
 }
@@ -99,7 +115,9 @@ if (checksumsFile) {
 console.log(
   `Verified ${expected.length} ${platform} update/release artifact(s) for version ${version}` +
     (checksumsFile ? " and their SHA-256 checksums" : "") +
-    (appUpdateFile ? " with the public packaged update provider" : ""),
+    (appUpdateFile
+      ? ` with the ${privateE2E ? "private E2E" : "public"} packaged update provider`
+      : ""),
 );
 
 function isPlatformArtifact(name) {
@@ -186,27 +204,9 @@ async function verifyChecksums(checksumsPath, expectedNames) {
   }
 }
 
-async function verifyPackagedUpdateConfiguration(configPath, expectedPublisherName) {
+async function verifyPackagedUpdateConfiguration(configPath, expectedPublisherName, allowPrivateE2E) {
   const content = await readFile(configPath, "utf8");
-  const expected = new Map([
-    ["provider", "github"],
-    ["owner", "sliverarmory"],
-    ["repo", "sliver-gui"],
-  ]);
-
-  for (const [key, value] of expected) {
-    const actual = scalarValue(content, key);
-    if (actual !== value) {
-      throw new Error(`Packaged app-update.yml ${key} ${actual} does not match ${value}`);
-    }
-  }
-
-  const forbiddenKeys = [...content.matchAll(/^[ \t]*([A-Za-z][A-Za-z0-9_-]*):/gmu)]
-    .map((match) => match[1])
-    .filter((key) => /token|private|authorization|request-?headers?|password|secret/iu.test(key));
-  if (forbiddenKeys.length > 0) {
-    throw new Error(`Packaged app-update.yml contains private credential field(s): ${forbiddenKeys.join(", ")}`);
-  }
+  assertPackagedGitHubUpdateConfiguration(content, { privateE2E: allowPrivateE2E });
 
   if (expectedPublisherName) {
     const publisherNames = rootScalarOrSequenceValues(content, "publisherName");
@@ -289,4 +289,10 @@ function argumentValue(name) {
   const value = process.argv[indexes[0] + 1];
   if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
   return value;
+}
+
+function argumentFlag(name) {
+  const count = process.argv.filter((argument) => argument === name).length;
+  if (count > 1) throw new Error(`${name} may be specified only once`);
+  return count === 1;
 }

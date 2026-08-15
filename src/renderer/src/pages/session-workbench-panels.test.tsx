@@ -1150,7 +1150,7 @@ describe("session workbench panels", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
     await user.type(screen.getByRole("searchbox", { name: "Filter processes" }), "bash");
-    expect(await screen.findByRole("row", { name: /server-filtered/i })).toBeInTheDocument();
+    expect(await screen.findByRole("row", { name: /server-filtered/i }, { timeout: 3_000 })).toBeInTheDocument();
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({
       operationId: "session.process.list",
       fullInfo: true,

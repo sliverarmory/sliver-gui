@@ -1,0 +1,9 @@
+# Test-only packaging profile for exercising updates before the repository is public.
+# Authentication is supplied to the test process at runtime and must never be embedded here.
+extends: ./electron-builder.yml
+publish:
+  provider: github
+  owner: sliverarmory
+  repo: sliver-gui
+  private: true
+  channel: latest

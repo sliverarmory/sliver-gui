@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -31,4 +31,35 @@ describe("native distribution packaging", () => {
     );
     expect(workflow).not.toContain("npm run dist --");
   });
+
+  it("routes workflow verifier flags directly to their Node scripts", () => {
+    const rootDir = resolve(import.meta.dirname, "../..");
+    const packageJson = JSON.parse(
+      readFileSync(resolve(rootDir, "package.json"), "utf8"),
+    ) as { scripts?: Record<string, string> };
+    const verifierScripts = Object.entries(packageJson.scripts ?? {})
+      .filter(([name, command]) => name.startsWith("verify:") && command.startsWith("node ./scripts/"))
+      .map(([name]) => name);
+    const workflowsDirectory = resolve(rootDir, ".github/workflows");
+
+    for (const workflowName of readdirSync(workflowsDirectory).filter((name) => /\.ya?ml$/u.test(name))) {
+      const workflow = readFileSync(resolve(workflowsDirectory, workflowName), "utf8");
+      for (const scriptName of verifierScripts) {
+        expect(workflow, `${workflowName} must invoke ${scriptName} directly when passing flags`).not.toMatch(
+          new RegExp(`npm\\s+run\\s+${escapeRegularExpression(scriptName)}\\s+--`, "u"),
+        );
+      }
+    }
+
+    const releaseWorkflow = readFileSync(resolve(workflowsDirectory, "build-and-release.yml"), "utf8");
+    const privateUpdaterWorkflow = readFileSync(resolve(workflowsDirectory, "private-updater-e2e.yml"), "utf8");
+    expect(releaseWorkflow.match(/node \.\/scripts\/verifyReleaseVersion\.mjs/gu)).toHaveLength(3);
+    expect(releaseWorkflow.match(/node \.\/scripts\/verifyReleaseSigningEnvironment\.mjs/gu)).toHaveLength(2);
+    expect(releaseWorkflow.match(/node \.\/scripts\/verifyUpdateArtifacts\.mjs/gu)).toHaveLength(4);
+    expect(privateUpdaterWorkflow.match(/node \.\/scripts\/verifyUpdateArtifacts\.mjs/gu)).toHaveLength(6);
+  });
 });
+
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
