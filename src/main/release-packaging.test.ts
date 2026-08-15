@@ -23,10 +23,10 @@ afterEach(async () => {
 
 describe("self-update release packaging", () => {
   it("keeps private GitHub update configuration isolated to the credential-free E2E profile", async () => {
-    const [productionConfig, privateE2EConfig] = await Promise.all([
+    const [productionConfig, privateE2EConfig] = (await Promise.all([
       readFile(productionBuilderConfig, "utf8"),
       readFile(privateE2EBuilderConfig, "utf8"),
-    ]);
+    ])).map(normalizeLineEndings);
 
     expect(productionConfig).toContain(
       "publish:\n  provider: github\n  owner: sliverarmory\n  repo: sliver-gui\n",
@@ -392,6 +392,10 @@ async function createWindowsFixture(version: string): Promise<{
 
 function runVerifier(arguments_: string[]): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [verifier, ...arguments_], { encoding: "utf8" });
+}
+
+function normalizeLineEndings(value: string): string {
+  return value.replace(/\r\n?/gu, "\n");
 }
 
 function runStager(arguments_: string[]): ReturnType<typeof spawnSync> {
