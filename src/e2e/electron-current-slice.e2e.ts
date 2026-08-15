@@ -154,6 +154,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onBeaconTasksInvalidated",
     "onSessionShellsChanged",
     "onReleaseDownloadChanged",
+    "onApplicationUpdateChanged",
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {

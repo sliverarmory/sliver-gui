@@ -90,7 +90,10 @@ export class ApplicationUpdater {
     }
 
     this.#state = initialApplicationUpdateIdle(options.currentVersion);
-    this.#backend = options.backend ?? new ElectronApplicationUpdateBackend(electronUpdater.autoUpdater);
+    this.#backend = options.backend ?? new ElectronApplicationUpdateBackend(
+      electronUpdater.autoUpdater,
+      options.currentVersion,
+    );
     this.#backend.configure();
     this.#unsubscribeBackend = this.#backend.subscribe({
       checking: () => {
@@ -304,20 +307,48 @@ export function applicationUpdateDisabledReason(
   return undefined;
 }
 
+export function installDownloadedApplicationUpdate(
+  updater: Pick<AppUpdater, "quitAndInstall">,
+): void {
+  // The renderer has already collected explicit confirmation, so avoid a
+  // second installer prompt and always relaunch into the newly installed app.
+  updater.quitAndInstall(true, true);
+}
+
+export function configureApplicationUpdateBackend(
+  updater: Pick<
+    AppUpdater,
+    | "autoDownload"
+    | "autoInstallOnAppQuit"
+    | "autoRunAppAfterInstall"
+    | "allowPrerelease"
+    | "allowDowngrade"
+    | "disableWebInstaller"
+  >,
+  currentVersion: string,
+): void {
+  updater.autoDownload = true;
+  updater.autoInstallOnAppQuit = true;
+  updater.autoRunAppAfterInstall = true;
+  // A signed prerelease build follows prereleases from its configured feed;
+  // stable production builds never opt into them. This lets the private E2E
+  // channel remain a GitHub prerelease without introducing a runtime override.
+  updater.allowPrerelease = currentVersion.includes("-");
+  updater.allowDowngrade = false;
+  updater.disableWebInstaller = true;
+}
+
 class ElectronApplicationUpdateBackend implements ApplicationUpdateBackend {
   readonly #updater: AppUpdater;
+  readonly #currentVersion: string;
 
-  constructor(updater: AppUpdater) {
+  constructor(updater: AppUpdater, currentVersion: string) {
     this.#updater = updater;
+    this.#currentVersion = currentVersion;
   }
 
   configure(): void {
-    this.#updater.autoDownload = true;
-    this.#updater.autoInstallOnAppQuit = true;
-    this.#updater.autoRunAppAfterInstall = true;
-    this.#updater.allowPrerelease = false;
-    this.#updater.allowDowngrade = false;
-    this.#updater.disableWebInstaller = true;
+    configureApplicationUpdateBackend(this.#updater, this.#currentVersion);
   }
 
   subscribe(events: ApplicationUpdateBackendEvents): () => void {
@@ -356,6 +387,6 @@ class ElectronApplicationUpdateBackend implements ApplicationUpdateBackend {
   }
 
   quitAndInstall(): void {
-    this.#updater.quitAndInstall(false, true);
+    installDownloadedApplicationUpdate(this.#updater);
   }
 }

@@ -16,6 +16,8 @@ vi.mock("electron-updater", () => ({
 import {
   ApplicationUpdater,
   applicationUpdateDisabledReason,
+  configureApplicationUpdateBackend,
+  installDownloadedApplicationUpdate,
 } from "./application-updater.js";
 
 afterEach(() => {
@@ -162,6 +164,39 @@ describe("application updater", () => {
     expect(updater.restartToApply()).toEqual({ ok: true });
     expect(updater.restartToApply()).toEqual({ ok: true });
     expect(installCalls).toBe(1);
+  });
+
+  it("silently installs and forces a relaunch after the renderer confirms restart", () => {
+    const quitAndInstall = vi.fn();
+
+    installDownloadedApplicationUpdate({ quitAndInstall });
+
+    expect(quitAndInstall).toHaveBeenCalledOnce();
+    expect(quitAndInstall).toHaveBeenCalledWith(true, true);
+  });
+
+  it("follows prereleases only from an immutable prerelease build", () => {
+    const backend = {
+      autoDownload: false,
+      autoInstallOnAppQuit: false,
+      autoRunAppAfterInstall: false,
+      allowPrerelease: false,
+      allowDowngrade: true,
+      disableWebInstaller: false,
+    };
+
+    configureApplicationUpdateBackend(backend, "0.1.0-e2e.42.0");
+    expect(backend).toEqual({
+      autoDownload: true,
+      autoInstallOnAppQuit: true,
+      autoRunAppAfterInstall: true,
+      allowPrerelease: true,
+      allowDowngrade: false,
+      disableWebInstaller: true,
+    });
+
+    configureApplicationUpdateBackend(backend, "0.1.0");
+    expect(backend.allowPrerelease).toBe(false);
   });
 
   it("checks after a jittered startup delay, repeats periodically, and cancels timers on dispose", async () => {

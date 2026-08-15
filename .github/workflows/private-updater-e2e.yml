@@ -1,0 +1,968 @@
+name: Private GitHub updater E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-updater-e2e-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare isolated updater versions
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      base_version: ${{ steps.versions.outputs.base_version }}
+      update_version: ${{ steps.versions.outputs.update_version }}
+      test_tag: ${{ steps.versions.outputs.test_tag }}
+
+    steps:
+      - name: Check out the exact test commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+
+      - name: Require the private repository and an unused tag
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: updater-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          visibility="$(gh repo view --json visibility --jq .visibility)"
+          if [ "$visibility" != "PRIVATE" ]; then
+            echo "::error::This pre-public updater test is restricted to a private repository; found $visibility."
+            exit 1
+          fi
+          if gh release view "$TEST_TAG" >/dev/null 2>&1 || \
+             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TEST_TAG" >/dev/null 2>&1; then
+            echo "::error::The unique updater E2E tag already exists: $TEST_TAG"
+            exit 1
+          fi
+
+      - name: Compute increasing prerelease versions
+        id: versions
+        env:
+          TEST_TAG: updater-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          version_core="${package_version%%-*}"
+          if ! [[ "$version_core" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::package.json must provide a stable SemVer core; found $package_version."
+            exit 1
+          fi
+          base_version="$version_core-updater-e2e.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.1"
+          update_version="$version_core-updater-e2e.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.2"
+          {
+            echo "base_version=$base_version"
+            echo "update_version=$update_version"
+            echo "test_tag=$TEST_TAG"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Private updater E2E"
+            echo
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Base: \`$base_version\`"
+            echo "- Update: \`$update_version\`"
+            echo "- Unique tag: \`$TEST_TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build N-1 and N (${{ matrix.label }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos
+            label: macOS universal
+            runner: macos-15
+            build_args: --mac --universal
+            app_update_relative: mac-universal/Sliver GUI.app/Contents/Resources/app-update.yml
+            release_paths: |
+              release-update/*.dmg
+              release-update/*.dmg.blockmap
+              release-update/*.zip
+              release-update/*.zip.blockmap
+              release-update/latest-mac.yml
+          - id: windows
+            label: Windows x64
+            runner: windows-2022
+            build_args: --win --x64
+            app_update_relative: win-unpacked/resources/app-update.yml
+            release_paths: |
+              release-update/*.exe
+              release-update/*.exe.blockmap
+              release-update/latest.yml
+          - id: linux
+            label: Linux x64
+            runner: ubuntu-22.04
+            build_args: --linux --x64
+            app_update_relative: linux-unpacked/resources/app-update.yml
+            release_paths: |
+              release-update/*.AppImage
+              release-update/*.deb
+              release-update/latest-linux.yml
+
+    steps:
+      - name: Check out the exact test commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+          cache: npm
+
+      - name: Set up exact npm
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Require HeroUI Pro CI token
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: node -e "if (!process.env.HEROUI_AUTH_TOKEN) { console.error('::error::Add a HEROUI_AUTH_TOKEN Actions secret before running builds.'); process.exit(1); }"
+
+      - name: Install dependencies
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: npm ci --strict-allow-scripts
+
+      - name: Run updater and packaging regressions
+        run: npm test
+
+      - name: Generate one ephemeral self-signed macOS identity
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MAC_SIGNING_AUTHORITY: "Developer ID Application: Sliver GUI Updater E2E (SLVRE2E001)"
+        run: |
+          set -euo pipefail
+          signing_dir="$RUNNER_TEMP/sliver-gui-updater-signing"
+          keychain="$RUNNER_TEMP/sliver-gui-updater-signing.keychain-db"
+          mkdir -p "$signing_dir"
+          p12_password="$(openssl rand -hex 32)"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$p12_password"
+          echo "::add-mask::$keychain_password"
+          printf '%s\n' \
+            '[req]' \
+            'distinguished_name = subject' \
+            'x509_extensions = extensions' \
+            'prompt = no' \
+            '[subject]' \
+            "CN = $MAC_SIGNING_AUTHORITY" \
+            'OU = SLVRE2E001' \
+            '[extensions]' \
+            'basicConstraints = critical, CA:FALSE' \
+            'keyUsage = critical, digitalSignature' \
+            'extendedKeyUsage = codeSigning' \
+            'subjectKeyIdentifier = hash' \
+            'authorityKeyIdentifier = keyid:always' > "$signing_dir/openssl.cnf"
+          openssl req -new -newkey rsa:2048 -nodes -x509 -sha256 -days 2 \
+            -config "$signing_dir/openssl.cnf" \
+            -keyout "$signing_dir/signing.key" \
+            -out "$signing_dir/signing.pem"
+          openssl pkcs12 -export \
+            -inkey "$signing_dir/signing.key" \
+            -in "$signing_dir/signing.pem" \
+            -name "$MAC_SIGNING_AUTHORITY" \
+            -passout "pass:$p12_password" \
+            -out "$signing_dir/signing.p12"
+
+          security list-keychains -d user \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"$//' \
+            > "$signing_dir/original-keychains.txt"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$signing_dir/signing.p12" \
+            -k "$keychain" -P "$p12_password" -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list \
+            -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$signing_dir/signing.pem"
+          original_keychains=()
+          while IFS= read -r keychain_path; do
+            original_keychains+=("$keychain_path")
+          done < "$signing_dir/original-keychains.txt"
+          security list-keychains -d user -s "$keychain" "${original_keychains[@]}"
+          security find-identity -v -p codesigning "$keychain" | grep -F "$MAC_SIGNING_AUTHORITY"
+
+          {
+            echo "CSC_KEYCHAIN=$keychain"
+            echo "CSC_NAME=Sliver GUI Updater E2E"
+            echo "MAC_SIGNING_AUTHORITY=$MAC_SIGNING_AUTHORITY"
+            echo "UPDATER_E2E_PUBLIC_CERT=$signing_dir/signing.pem"
+            echo "UPDATER_E2E_SIGNING_DIR=$signing_dir"
+            echo "UPDATER_E2E_ORIGINAL_KEYCHAINS=$signing_dir/original-keychains.txt"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate one ephemeral self-signed Windows identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $signingDirectory = Join-Path $env:RUNNER_TEMP "sliver-gui-updater-signing"
+          New-Item -ItemType Directory -Path $signingDirectory | Out-Null
+          $subject = "CN=Sliver GUI Updater E2E, O=Sliver Armory E2E"
+          $certificate = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject $subject `
+            -FriendlyName "Sliver GUI Updater E2E" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -KeyExportPolicy Exportable `
+            -NotAfter (Get-Date).AddDays(2)
+          $publisher = $certificate.Subject
+          $passwordText = [Convert]::ToHexString(
+            [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+          )
+          Write-Output "::add-mask::$passwordText"
+          $password = ConvertTo-SecureString -String $passwordText -AsPlainText -Force
+          $pfxPath = Join-Path $signingDirectory "signing.pfx"
+          $cerPath = Join-Path $signingDirectory "signing.cer"
+          Export-PfxCertificate -Cert $certificate -FilePath $pfxPath -Password $password | Out-Null
+          Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
+          Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+          Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\TrustedPublisher" | Out-Null
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CSC_LINK=$pfxPath"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CSC_KEY_PASSWORD=$passwordText"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "WINDOWS_PUBLISHER=$publisher"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "UPDATER_E2E_PUBLIC_CERT=$cerPath"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "UPDATER_E2E_SIGNING_DIR=$signingDirectory"
+
+      - name: Build every production target at N-1 and N
+        shell: bash
+        env:
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          set -euo pipefail
+          extra_arguments=()
+          case "$RUNNER_OS" in
+            macOS)
+              extra_arguments+=(--config.forceCodeSigning=true --config.mac.notarize=false)
+              ;;
+            Windows)
+              extra_arguments+=(--config.forceCodeSigning=true)
+              extra_arguments+=("--config.win.signtoolOptions.publisherName=$WINDOWS_PUBLISHER")
+              ;;
+            Linux)
+              export CSC_IDENTITY_AUTO_DISCOVERY=false
+              ;;
+            *)
+              echo "::error::Unsupported runner OS: $RUNNER_OS"
+              exit 1
+              ;;
+          esac
+
+          build_version() {
+            local version="$1"
+            local output="$2"
+            npm version --no-git-tag-version --allow-same-version "$version"
+            npm run predist
+            node ./node_modules/electron-builder/cli.js \
+              --config electron-builder-updater-e2e.yml \
+              ${{ matrix.build_args }} \
+              --publish never \
+              "--config.directories.output=$output" \
+              "${extra_arguments[@]}"
+          }
+
+          build_version "$BASE_VERSION" release-base
+          build_version "$UPDATE_VERSION" release-update
+
+      - name: Verify both macOS applications use the exact ephemeral identity
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_fingerprint="$(openssl x509 -in "$UPDATER_E2E_PUBLIC_CERT" -noout -sha256 -fingerprint)"
+          for output in release-base release-update; do
+            app="$output/mac-universal/Sliver GUI.app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            authority="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -n 1)"
+            if [ "$authority" != "$MAC_SIGNING_AUTHORITY" ]; then
+              echo "::error::Unexpected macOS signing authority for $app: $authority"
+              exit 1
+            fi
+            extraction_directory="$(mktemp -d "$RUNNER_TEMP/sliver-e2e-codesign.XXXXXX")"
+            (
+              cd "$extraction_directory"
+              codesign -d --extract-certificates "$GITHUB_WORKSPACE/$app"
+            )
+            actual_fingerprint="$(openssl x509 -inform DER -in "$extraction_directory/codesign0" -noout -sha256 -fingerprint)"
+            rm -rf -- "$extraction_directory"
+            if [ "$actual_fingerprint" != "$expected_fingerprint" ]; then
+              echo "::error::The base and update builds must use the generated macOS certificate."
+              exit 1
+            fi
+          done
+
+      - name: Verify both Windows inventories use the exact ephemeral identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($entry in @(
+            @{ Directory = "release-base"; Version = $env:BASE_VERSION },
+            @{ Directory = "release-update"; Version = $env:UPDATE_VERSION }
+          )) {
+            foreach ($suffix in @("setup.exe", "portable.exe")) {
+              $path = Join-Path $entry.Directory "sliver-gui-$($entry.Version)-windows-x64-$suffix"
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "Missing signed Windows E2E asset: $path"
+              }
+              $signature = Get-AuthenticodeSignature -LiteralPath $path
+              if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
+                throw "Invalid Authenticode signature for $path`: $($signature.Status)"
+              }
+              if ($signature.SignerCertificate.Subject -cne $env:WINDOWS_PUBLISHER) {
+                throw "Unexpected Authenticode publisher for $path"
+              }
+              if ($signature.SignerCertificate.Thumbprint -cne $env:WINDOWS_CERT_THUMBPRINT) {
+                throw "The base and update builds did not use the generated Windows certificate"
+              }
+            }
+          }
+
+      - name: Verify private updater inventories at both versions
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          set -euo pipefail
+          npm run verify:update-artifacts -- \
+            --directory release-base \
+            --platform "${{ matrix.id }}" \
+            --version "$BASE_VERSION" \
+            --app-update "release-base/${{ matrix.app_update_relative }}" \
+            --private-e2e
+          npm run verify:update-artifacts -- \
+            --directory release-update \
+            --platform "${{ matrix.id }}" \
+            --version "$UPDATE_VERSION" \
+            --app-update "release-update/${{ matrix.app_update_relative }}" \
+            --private-e2e
+
+      - name: Verify private updater inventories and publisher at both Windows versions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          npm run verify:update-artifacts -- `
+            --directory release-base `
+            --platform windows `
+            --version $env:BASE_VERSION `
+            --app-update "release-base/${{ matrix.app_update_relative }}" `
+            --publisher-name $env:WINDOWS_PUBLISHER `
+            --private-e2e
+          npm run verify:update-artifacts -- `
+            --directory release-update `
+            --platform windows `
+            --version $env:UPDATE_VERSION `
+            --app-update "release-update/${{ matrix.app_update_relative }}" `
+            --publisher-name $env:WINDOWS_PUBLISHER `
+            --private-e2e
+
+      - name: Stage the signed N-1 installer and public verification context
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+        run: |
+          node scripts/stagePrivateUpdaterE2E.mjs \
+            --platform "${{ matrix.id }}" \
+            --version "$BASE_VERSION" \
+            --source release-base \
+            --destination e2e-stage \
+            --certificate "$UPDATER_E2E_PUBLIC_CERT"
+
+      - name: Stage the Linux N-1 installer and public verification context
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+        run: |
+          node scripts/stagePrivateUpdaterE2E.mjs \
+            --platform linux \
+            --version "$BASE_VERSION" \
+            --source release-base \
+            --destination e2e-stage
+
+      - name: Remove ephemeral private signing material
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${UPDATER_E2E_ORIGINAL_KEYCHAINS:-}" ] && [ -f "$UPDATER_E2E_ORIGINAL_KEYCHAINS" ]; then
+            original_keychains=()
+            while IFS= read -r keychain_path; do
+              original_keychains+=("$keychain_path")
+            done < "$UPDATER_E2E_ORIGINAL_KEYCHAINS"
+            security list-keychains -d user -s "${original_keychains[@]}"
+          fi
+          if [ -n "${CSC_KEYCHAIN:-}" ]; then
+            security delete-keychain "$CSC_KEYCHAIN" || true
+          fi
+          case "${UPDATER_E2E_SIGNING_DIR:-}" in
+            "$RUNNER_TEMP"/*) rm -rf -- "$UPDATER_E2E_SIGNING_DIR" ;;
+            "") ;;
+            *) echo "::error::Refusing to remove signing material outside RUNNER_TEMP"; exit 1 ;;
+          esac
+
+      - name: Remove ephemeral Windows private signing material
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            foreach ($store in @("My", "Root", "TrustedPublisher")) {
+              $path = "Cert:\CurrentUser\$store\$($env:WINDOWS_CERT_THUMBPRINT)"
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+            }
+          }
+          if ($env:UPDATER_E2E_SIGNING_DIR) {
+            $resolved = [IO.Path]::GetFullPath($env:UPDATER_E2E_SIGNING_DIR)
+            $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+            if (-not $resolved.StartsWith($runnerTemp, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Refusing to remove signing material outside RUNNER_TEMP"
+            }
+            if (Test-Path -LiteralPath $resolved) {
+              Remove-Item -LiteralPath $resolved -Recurse -Force
+            }
+          }
+
+      - name: Upload N-1 installer and public certificate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-e2e-base-${{ matrix.id }}
+          path: e2e-stage/base/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload credential-free packaged provider context
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-e2e-build-context-${{ matrix.id }}
+          path: e2e-stage/context/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload full N release inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-e2e-release-${{ matrix.id }}
+          path: ${{ matrix.release_paths }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish and verify private prerelease
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      immutable_releases: ${{ steps.repository.outputs.immutable_releases }}
+      release_url: ${{ steps.remote.outputs.release_url }}
+
+    steps:
+      - name: Check out the exact test commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+
+      - name: Download the complete N inventory
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: updater-e2e-release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Download a verified private provider configuration
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: updater-e2e-build-context-linux
+          path: verification-context
+
+      - name: Generate and verify exact checksums
+        env:
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          set -euo pipefail
+          (
+            cd release-assets
+            sha256sum latest*.yml sliver-gui-* > SHA256SUMS
+          )
+          npm run verify:update-artifacts -- \
+            --directory release-assets \
+            --platform all \
+            --version "$UPDATE_VERSION" \
+            --checksums SHA256SUMS \
+            --app-update verification-context/app-update.yml \
+            --private-e2e
+
+      - name: Verify repository state for the isolated release
+        id: repository
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ needs.prepare.outputs.test_tag }}
+        run: |
+          set -euo pipefail
+          visibility="$(gh repo view --json visibility --jq .visibility)"
+          if [ "$visibility" != "PRIVATE" ]; then
+            echo "::error::Refusing to publish a private-feed test into a $visibility repository."
+            exit 1
+          fi
+          if gh release view "$TEST_TAG" >/dev/null 2>&1 || \
+             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TEST_TAG" >/dev/null 2>&1; then
+            echo "::error::Release or tag already exists: $TEST_TAG"
+            exit 1
+          fi
+          immutable="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq .enabled 2>/dev/null || echo false)"
+          if [ "$immutable" != "true" ] && [ "$immutable" != "false" ]; then
+            echo "::error::Unexpected immutable releases response: $immutable"
+            exit 1
+          fi
+          echo "immutable_releases=$immutable" >> "$GITHUB_OUTPUT"
+
+      - name: Stage one unique draft and upload the complete inventory
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ needs.prepare.outputs.test_tag }}
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TEST_TAG" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "Sliver GUI private updater E2E $GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" \
+            --notes "Automated private updater test: $BASE_VERSION -> $UPDATE_VERSION from commit $GITHUB_SHA."
+          gh release upload "$TEST_TAG" release-assets/*
+          draft_state="$(gh release view "$TEST_TAG" --json isDraft,isPrerelease,tagName,targetCommitish \
+            --jq '[.isDraft, .isPrerelease, .tagName, .targetCommitish] | @tsv')"
+          expected_draft_state="$(printf 'true\tfalse\t%s\t%s' "$TEST_TAG" "$GITHUB_SHA")"
+          if [ "$draft_state" != "$expected_draft_state" ]; then
+            echo "::error::Unexpected staged release state: $draft_state"
+            exit 1
+          fi
+          find release-assets -maxdepth 1 -type f -exec basename {} \; | sort > expected-draft-assets.txt
+          gh release view "$TEST_TAG" --json assets --jq '.assets[].name' | sort > uploaded-draft-assets.txt
+          diff -u expected-draft-assets.txt uploaded-draft-assets.txt
+
+      - name: Publish the verified draft as a non-latest prerelease
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ needs.prepare.outputs.test_tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TEST_TAG" --draft=false --prerelease --latest=false
+
+      - name: Verify published state and exact remote inventory
+        id: remote
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ needs.prepare.outputs.test_tag }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          set -euo pipefail
+          state="$(gh release view "$TEST_TAG" --json isDraft,isPrerelease,tagName,targetCommitish \
+            --jq '[.isDraft, .isPrerelease, .tagName, .targetCommitish] | @tsv')"
+          expected_state="$(printf 'false\ttrue\t%s\t%s' "$TEST_TAG" "$GITHUB_SHA")"
+          if [ "$state" != "$expected_state" ]; then
+            echo "::error::Unexpected published prerelease state: $state"
+            exit 1
+          fi
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ "$latest_tag" = "$TEST_TAG" ]; then
+            echo "::error::The private updater E2E prerelease must never become Latest."
+            exit 1
+          fi
+          selected_prerelease="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '[.[] | select(.draft == false and .prerelease == true)][0].tag_name')"
+          if [ "$selected_prerelease" != "$TEST_TAG" ]; then
+            echo "::error::The private updater provider would select $selected_prerelease instead of $TEST_TAG."
+            exit 1
+          fi
+
+          find release-assets -maxdepth 1 -type f -exec basename {} \; | sort > expected-assets.txt
+          gh release view "$TEST_TAG" --json assets --jq '.assets[].name' | sort > published-assets.txt
+          diff -u expected-assets.txt published-assets.txt
+          gh release download "$TEST_TAG" --dir remote-assets
+          find remote-assets -maxdepth 1 -type f -exec basename {} \; | sort > downloaded-assets.txt
+          diff -u expected-assets.txt downloaded-assets.txt
+          npm run verify:update-artifacts -- \
+            --directory remote-assets \
+            --platform all \
+            --version "$UPDATE_VERSION" \
+            --checksums SHA256SUMS \
+            --app-update verification-context/app-update.yml \
+            --private-e2e
+          release_url="$(gh release view "$TEST_TAG" --json url --jq .url)"
+          echo "release_url=$release_url" >> "$GITHUB_OUTPUT"
+
+      - name: Build credential-free native test context
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ needs.prepare.outputs.test_tag }}
+          BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-context
+          gh release view "$TEST_TAG" \
+            --json databaseId,isDraft,isImmutable,isPrerelease,publishedAt,tagName,targetCommitish,url \
+            | jq \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg baseVersion "$BASE_VERSION" \
+              --arg updateVersion "$UPDATE_VERSION" \
+              --arg commit "$GITHUB_SHA" \
+              '. + {schemaVersion: 1, repository: $repository, baseVersion: $baseVersion, updateVersion: $updateVersion, commit: $commit}' \
+              > release-context/release.json
+          cp remote-assets/SHA256SUMS release-context/SHA256SUMS
+
+      - name: Upload native release context
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-e2e-release-context
+          path: release-context/
+          if-no-files-found: error
+          retention-days: 7
+
+  native_update:
+    name: Native N-1 to N (${{ matrix.label }})
+    needs:
+      - prepare
+      - publish
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos
+            label: macOS universal DMG to ZIP
+            runner: macos-15
+            base_pattern: "*.dmg"
+          - id: windows
+            label: Windows x64 NSIS
+            runner: windows-2022
+            base_pattern: "*-setup.exe"
+          - id: linux
+            label: Linux x64 AppImage
+            runner: ubuntu-22.04
+            base_pattern: "*.AppImage"
+
+    steps:
+      - name: Check out the exact test commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.0.0
+          cache: npm
+
+      - name: Set up exact npm
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Require HeroUI Pro CI token
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: node -e "if (!process.env.HEROUI_AUTH_TOKEN) { console.error('::error::Add a HEROUI_AUTH_TOKEN Actions secret before running builds.'); process.exit(1); }"
+
+      - name: Install dependencies
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+        run: npm ci --strict-allow-scripts
+
+      - name: Download N-1 installer and public certificate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: updater-e2e-base-${{ matrix.id }}
+          path: ${{ runner.temp }}/sliver-gui-updater-e2e/base
+
+      - name: Download verified private release context
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: updater-e2e-release-context
+          path: ${{ runner.temp }}/sliver-gui-updater-e2e/release
+
+      - name: Verify credential-free release context
+        env:
+          EXPECTED_TAG: ${{ needs.prepare.outputs.test_tag }}
+          EXPECTED_BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
+          EXPECTED_UPDATE_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: >-
+          node -e "const fs=require('node:fs');const c=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+          const expected={tagName:process.env.EXPECTED_TAG,baseVersion:process.env.EXPECTED_BASE_VERSION,
+          updateVersion:process.env.EXPECTED_UPDATE_VERSION,commit:process.env.GITHUB_SHA};
+          for(const [key,value] of Object.entries(expected)){if(c[key]!==value)throw new Error('release context '+key+' mismatch')}
+          if(c.isDraft!==false||c.isPrerelease!==true)throw new Error('release context is not a published prerelease')" "${{ runner.temp }}/sliver-gui-updater-e2e/release/release.json"
+
+      - name: Resolve the absolute N-1 installer path
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_directory="$RUNNER_TEMP/sliver-gui-updater-e2e/base"
+          installers=()
+          while IFS= read -r installer_path; do
+            installers+=("$installer_path")
+          done < <(find "$input_directory" -maxdepth 1 -type f -name '${{ matrix.base_pattern }}' -print)
+          if [ "${#installers[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one ${{ matrix.base_pattern }} base installer; found ${#installers[@]}."
+            exit 1
+          fi
+          installer="$(cd "$(dirname "${installers[0]}")" && pwd)/$(basename "${installers[0]}")"
+          if [ "$RUNNER_OS" = "Linux" ]; then chmod 0755 "$installer"; fi
+          echo "SLIVER_GUI_UPDATE_E2E_BASE_ARTIFACT=$installer" >> "$GITHUB_ENV"
+
+      - name: Resolve the absolute Windows N-1 installer path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $inputDirectory = Join-Path $env:RUNNER_TEMP "sliver-gui-updater-e2e/base"
+          $installers = @(Get-ChildItem -LiteralPath $inputDirectory -Filter "${{ matrix.base_pattern }}" -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one ${{ matrix.base_pattern }} base installer; found $($installers.Count)"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "SLIVER_GUI_UPDATE_E2E_BASE_ARTIFACT=$($installers[0].FullName)"
+
+      - name: Trust the ephemeral macOS public certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MAC_SIGNING_AUTHORITY: "Developer ID Application: Sliver GUI Updater E2E (SLVRE2E001)"
+        run: |
+          set -euo pipefail
+          input_directory="$RUNNER_TEMP/sliver-gui-updater-e2e/base"
+          certificate="$(find "$input_directory" -maxdepth 1 -type f -name signing-certificate.pem -print)"
+          test -n "$certificate"
+          trust_keychain="$RUNNER_TEMP/sliver-gui-updater-trust.keychain-db"
+          trust_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$trust_password"
+          security list-keychains -d user \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"$//' \
+            > "$RUNNER_TEMP/sliver-gui-updater-original-keychains.txt"
+          security create-keychain -p "$trust_password" "$trust_keychain"
+          security set-keychain-settings -lut 21600 "$trust_keychain"
+          security unlock-keychain -p "$trust_password" "$trust_keychain"
+          security add-trusted-cert -r trustRoot -p codeSign -k "$trust_keychain" "$certificate"
+          original_keychains=()
+          while IFS= read -r keychain_path; do
+            original_keychains+=("$keychain_path")
+          done < "$RUNNER_TEMP/sliver-gui-updater-original-keychains.txt"
+          security list-keychains -d user -s "$trust_keychain" "${original_keychains[@]}"
+          {
+            echo "UPDATER_E2E_TRUST_KEYCHAIN=$trust_keychain"
+            echo "UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS=$RUNNER_TEMP/sliver-gui-updater-original-keychains.txt"
+            echo "SLIVER_GUI_UPDATE_E2E_MAC_SIGNING_AUTHORITY=$MAC_SIGNING_AUTHORITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Trust the ephemeral Windows public certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $inputDirectory = Join-Path $env:RUNNER_TEMP "sliver-gui-updater-e2e/base"
+          $certificatePath = (Get-ChildItem -LiteralPath $inputDirectory -Filter "signing-certificate.cer" -File -ErrorAction Stop).FullName
+          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+          Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+          Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\TrustedPublisher" | Out-Null
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "UPDATER_E2E_TRUST_THUMBPRINT=$($certificate.Thumbprint)"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "SLIVER_GUI_UPDATE_E2E_WINDOWS_PUBLISHER=$($certificate.Subject)"
+
+      - name: Exercise the native private GitHub update
+        if: runner.os != 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLIVER_GUI_UPDATE_E2E: "1"
+          SLIVER_GUI_UPDATE_E2E_FROM_VERSION: ${{ needs.prepare.outputs.base_version }}
+          SLIVER_GUI_UPDATE_E2E_TO_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: npm run test:e2e:packaged-update
+
+      - name: Exercise the native private GitHub update under Xvfb
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLIVER_GUI_UPDATE_E2E: "1"
+          SLIVER_GUI_UPDATE_E2E_FROM_VERSION: ${{ needs.prepare.outputs.base_version }}
+          SLIVER_GUI_UPDATE_E2E_TO_VERSION: ${{ needs.prepare.outputs.update_version }}
+        run: xvfb-run --auto-servernum npm run test:e2e:packaged-update
+
+      - name: Remove ephemeral macOS trust
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS:-}" ] && [ -f "$UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS" ]; then
+            original_keychains=()
+            while IFS= read -r keychain_path; do
+              original_keychains+=("$keychain_path")
+            done < "$UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS"
+            security list-keychains -d user -s "${original_keychains[@]}"
+          fi
+          if [ -n "${UPDATER_E2E_TRUST_KEYCHAIN:-}" ]; then
+            security delete-keychain "$UPDATER_E2E_TRUST_KEYCHAIN" || true
+          fi
+
+      - name: Remove ephemeral Windows trust
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($env:UPDATER_E2E_TRUST_THUMBPRINT) {
+            foreach ($store in @("Root", "TrustedPublisher")) {
+              $path = "Cert:\CurrentUser\$store\$($env:UPDATER_E2E_TRUST_THUMBPRINT)"
+              if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+            }
+          }
+
+      - name: Upload native updater diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-e2e-diagnostics-${{ matrix.id }}
+          path: artifacts/e2e/packaged-update/
+          if-no-files-found: warn
+          retention-days: 7
+
+  cleanup:
+    name: Cleanup test release/tag and propagate result
+    if: always() && needs.prepare.result == 'success'
+    needs:
+      - prepare
+      - build
+      - publish
+      - native_update
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Delete test evidence when GitHub permits it
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TEST_TAG: ${{ needs.prepare.outputs.test_tag }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          NATIVE_RESULT: ${{ needs.native_update.result }}
+        run: |
+          set -euo pipefail
+
+          resource_state() {
+            local endpoint="$1"
+            local label="$2"
+            local response="$RUNNER_TEMP/updater-e2e-$label-response.txt"
+            local error="$RUNNER_TEMP/updater-e2e-$label-error.txt"
+            if gh api --include "$endpoint" >"$response" 2>"$error"; then
+              printf 'present'
+              return 0
+            fi
+            if head -n 1 "$response" | grep -Eq '^HTTP/[0-9.]+ 404 '; then
+              printf 'absent'
+              return 0
+            fi
+            cat "$error" >&2
+            echo "::error::Could not determine whether $label exists; refusing fail-open cleanup." >&2
+            return 1
+          }
+
+          release_endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$TEST_TAG"
+          tag_endpoint="repos/$GITHUB_REPOSITORY/git/ref/tags/$TEST_TAG"
+          cleanup_failed=false
+          found_evidence=false
+          release_presence="$(resource_state "$release_endpoint" release-before-cleanup)"
+          tag_presence="$(resource_state "$tag_endpoint" tag-before-cleanup)"
+          if [ "$release_presence" = "present" ]; then
+            found_evidence=true
+            if ! gh release delete "$TEST_TAG" --yes; then
+              echo "::error::Failed to delete updater E2E release; manual cleanup is required."
+              cleanup_failed=true
+            fi
+          fi
+
+          tag_presence="$(resource_state "$tag_endpoint" tag-after-release-cleanup)"
+          if [ "$tag_presence" = "present" ]; then
+            found_evidence=true
+            if ! gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TEST_TAG"; then
+              echo "::error::Failed to delete updater E2E tag; manual cleanup is required."
+              cleanup_failed=true
+            fi
+          fi
+
+          final_release_presence="$(resource_state "$release_endpoint" release-after-cleanup)"
+          final_tag_presence="$(resource_state "$tag_endpoint" tag-after-cleanup)"
+          if [ "$final_release_presence" != "absent" ] || [ "$final_tag_presence" != "absent" ]; then
+            echo "::error::Updater E2E release or tag survived cleanup; manual cleanup is required."
+            cleanup_failed=true
+          fi
+
+          {
+            echo "### Private updater E2E cleanup"
+            echo
+            if [ "$found_evidence" = "true" ] && [ "$cleanup_failed" = "false" ]; then
+              echo "Deleted test release and tag \`$TEST_TAG\`, including immutable evidence when enabled."
+            elif [ "$found_evidence" = "false" ]; then
+              echo "No test release or tag existed for \`$TEST_TAG\`."
+            else
+              echo "Test evidence for \`$TEST_TAG\` survived; remove it before repository visibility changes."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$BUILD_RESULT" != "success" ] || \
+             [ "$PUBLISH_RESULT" != "success" ] || \
+             [ "$NATIVE_RESULT" != "success" ]; then
+            echo "::error::Updater E2E failed: build=$BUILD_RESULT publish=$PUBLISH_RESULT native=$NATIVE_RESULT"
+            cleanup_failed=true
+          fi
+          if [ "$cleanup_failed" = "true" ]; then exit 1; fi
