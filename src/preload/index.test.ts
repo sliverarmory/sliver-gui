@@ -27,6 +27,9 @@ const invokeArguments = {
   openInteractionWindow: [],
   claimInteractionWindow: [],
   exitApp: [],
+  getApplicationUpdateState: [],
+  checkForApplicationUpdates: [],
+  restartToApplyApplicationUpdate: [],
   openSessionShellWindow: [{ preferredResourceId: "R".repeat(43) }],
   claimSessionShellWindow: [],
   chooseCertificatePair: [],
@@ -142,6 +145,7 @@ describe("sandboxed preload bridge", () => {
       "onBeaconTasksInvalidated",
       "onSessionShellsChanged",
       "onReleaseDownloadChanged",
+      "onApplicationUpdateChanged",
       "openStream",
     ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
@@ -177,6 +181,7 @@ describe("sandboxed preload bridge", () => {
       "onBeaconTasksInvalidated",
       "onSessionShellsChanged",
       "onReleaseDownloadChanged",
+      "onApplicationUpdateChanged",
       "openStream",
     ].sort());
     expect(exposed).not.toHaveProperty("ipcRenderer");
@@ -242,6 +247,38 @@ describe("sandboxed preload bridge", () => {
     unsubscribe();
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
       IPC.releaseDownloadChanged,
+      handler,
+    );
+  });
+
+  it("delivers only exact bounded application-update states and removes the listener", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed.onApplicationUpdateChanged(listener);
+    const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(channel).toBe(IPC.applicationUpdateChanged);
+    if (typeof handler !== "function") throw new Error("Expected the application-update event handler");
+    const valid = {
+      status: "downloading",
+      revision: 4,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      progressPercent: 42.5,
+    };
+    handler({} as Electron.IpcRendererEvent, valid);
+    handler({} as Electron.IpcRendererEvent, { ...valid, downloadUrl: "https://example.test/update" });
+    handler({} as Electron.IpcRendererEvent, { ...valid, progressPercent: 101 });
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
+      IPC.applicationUpdateChanged,
       handler,
     );
   });

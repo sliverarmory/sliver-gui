@@ -18,6 +18,8 @@ describe("application menu templates", () => {
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
     };
     const template = buildApplicationMenuTemplate("darwin", "Sliver GUI", actions);
 
@@ -64,6 +66,8 @@ describe("application menu templates", () => {
       openDocumentation: vi.fn(),
       showAboutPanel,
       downloadRelease: vi.fn(),
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
     });
 
     expect(template.map((item) => item.label)).toEqual(["File", "Edit", "View", "Window", "Help"]);
@@ -82,6 +86,8 @@ describe("application menu templates", () => {
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease,
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
     }, {
       status: "ready",
       version: "v1.7.3",
@@ -120,6 +126,8 @@ describe("application menu templates", () => {
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
     };
     const loading = menuItems(buildApplicationMenuTemplate("linux", "Sliver GUI", actions), "Help");
     expect(nestedMenuItems(loading, "Download Server")).toEqual([
@@ -134,6 +142,57 @@ describe("application menu templates", () => {
     expect(nestedMenuItems(unavailable, "Download Console Client")).toEqual([
       expect.objectContaining({ label: "Latest release unavailable", enabled: false }),
     ]);
+  });
+
+  it("places update checks conventionally and exposes restart only when an update is ready", () => {
+    const checkForApplicationUpdates = vi.fn();
+    const restartToApplyApplicationUpdate = vi.fn();
+    const actions = {
+      newWindow: vi.fn(),
+      duplicateConnectedWindow: vi.fn(),
+      openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
+      downloadRelease: vi.fn(),
+      checkForApplicationUpdates,
+      restartToApplyApplicationUpdate,
+    };
+    const macTemplate = buildApplicationMenuTemplate(
+      "darwin",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      { status: "idle", revision: 0, currentVersion: "1.2.3" },
+    );
+    clickItem(menuItems(macTemplate, "Sliver GUI").find((item) => item.label === "Check for Updates…"));
+    expect(checkForApplicationUpdates).toHaveBeenCalledOnce();
+
+    const linuxTemplate = buildApplicationMenuTemplate(
+      "linux",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      { status: "ready", revision: 3, currentVersion: "1.2.3", availableVersion: "1.3.0" },
+    );
+    clickItem(menuItems(linuxTemplate, "Help").find((item) => item.label === "Restart to Update to 1.3.0…"));
+    expect(restartToApplyApplicationUpdate).toHaveBeenCalledOnce();
+
+    const downloadingTemplate = buildApplicationMenuTemplate(
+      "win32",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      {
+        status: "downloading",
+        revision: 2,
+        currentVersion: "1.2.3",
+        availableVersion: "1.3.0",
+        progressPercent: 42.4,
+      },
+    );
+    expect(menuItems(downloadingTemplate, "Help")[0]).toMatchObject({
+      label: "Downloading Update 1.3.0… 42%",
+      enabled: false,
+    });
   });
 });
 

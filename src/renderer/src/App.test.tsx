@@ -60,6 +60,14 @@ function installSliverAPI(
     disconnect: vi.fn(failedOperation),
     downloadBuild: vi.fn(failedOperation),
     exitApp: vi.fn(failedOperation),
+    getApplicationUpdateState: vi.fn().mockResolvedValue({
+      status: "disabled",
+      revision: 0,
+      currentVersion: "0.1.0",
+      disabledReason: "Updates are not under test.",
+    }),
+    checkForApplicationUpdates: vi.fn(failedOperation),
+    restartToApplyApplicationUpdate: vi.fn(failedOperation),
     generate: vi.fn(failedOperation),
     generateFromProfile: vi.fn(failedOperation),
     getBeaconTask: vi.fn(failedOperation),
@@ -75,6 +83,7 @@ function installSliverAPI(
     onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
     onSessionShellsChanged: vi.fn(() => vi.fn()),
     onReleaseDownloadChanged: vi.fn(() => vi.fn()),
+    onApplicationUpdateChanged: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {

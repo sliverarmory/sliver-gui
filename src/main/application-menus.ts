@@ -1,4 +1,5 @@
 import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
+import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
 
 export type ReleaseMenuCatalog =
@@ -16,6 +17,8 @@ export interface ApplicationMenuActions {
   readonly openDocumentation: () => void;
   readonly showAboutPanel: () => void;
   readonly downloadRelease: (target: SliverReleaseTarget) => void;
+  readonly checkForApplicationUpdates: () => void;
+  readonly restartToApplyApplicationUpdate: () => void;
 }
 
 export interface ContextMenuActions {
@@ -31,7 +34,11 @@ export function buildApplicationMenuTemplate(
   applicationName: string,
   actions: ApplicationMenuActions,
   releaseCatalog: ReleaseMenuCatalog = { status: "loading" },
+  applicationUpdateState?: ApplicationUpdateState,
 ): MenuItemConstructorOptions[] {
+  const updateItems = applicationUpdateState
+    ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
+    : [];
   return [
     ...(platform === "darwin"
       ? [
@@ -39,6 +46,7 @@ export function buildApplicationMenuTemplate(
             label: applicationName,
             submenu: [
               { label: `About ${applicationName}`, role: "about" as const },
+              ...updateItems,
               { type: "separator" as const },
               { role: "services" as const },
               { type: "separator" as const },
@@ -112,6 +120,10 @@ export function buildApplicationMenuTemplate(
       label: "Help",
       role: "help",
       submenu: [
+        ...(platform === "darwin" ? [] : updateItems),
+        ...(platform !== "darwin" && updateItems.length > 0
+          ? [{ type: "separator" as const }]
+          : []),
         {
           label: "Sliver Documentation",
           click: actions.openDocumentation,
@@ -137,6 +149,37 @@ export function buildApplicationMenuTemplate(
       ],
     },
   ];
+}
+
+function buildApplicationUpdateMenuItems(
+  state: ApplicationUpdateState,
+  actions: ApplicationMenuActions,
+): MenuItemConstructorOptions[] {
+  switch (state.status) {
+    case "disabled":
+      return [{ label: "Automatic Updates Unavailable", enabled: false }];
+    case "checking":
+      return [{ label: "Checking for Updates…", enabled: false }];
+    case "available":
+      return [{ label: `Downloading Update ${state.availableVersion}…`, enabled: false }];
+    case "downloading":
+      return [{
+        label: `Downloading Update ${state.availableVersion}… ${Math.round(state.progressPercent)}%`,
+        enabled: false,
+      }];
+    case "ready":
+      return [{
+        label: `Restart to Update to ${state.availableVersion}…`,
+        click: actions.restartToApplyApplicationUpdate,
+      }];
+    case "idle":
+    case "up-to-date":
+    case "error":
+      return [{
+        label: "Check for Updates…",
+        click: actions.checkForApplicationUpdates,
+      }];
+  }
 }
 
 function buildReleaseDownloadSubmenu(

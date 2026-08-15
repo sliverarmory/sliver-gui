@@ -26,6 +26,8 @@ const requiredBuilderPaths = [
   "dist/**",
   "package.json",
   "LICENSE",
+  "LICENSING.md",
+  "LICENSES/**",
   "THIRD_PARTY_NOTICES.md",
   "node_modules/ghostty-web/LICENSE",
   "node_modules/ghostty-web/package.json",
@@ -51,12 +53,17 @@ const requiredBuilderPaths = [
 ];
 const requiredPackagedFiles = [
   "LICENSE",
-  "THIRD_PARTY_NOTICES.md",
+  "LICENSES/Apache-2.0.txt",
+  "LICENSES/GPL-3.0-or-later.txt",
+  "LICENSES/MIT.txt",
+  "LICENSES/README.md",
   "package.json",
   "node_modules/ghostty-web/LICENSE",
   "node_modules/ghostty-web/package.json",
   "node_modules/ghostty-web/ghostty-vt.wasm",
-  "dist/THIRD_PARTY_LICENSES.txt",
+  "node_modules/electron-updater/LICENSE",
+  "node_modules/electron-updater/package.json",
+  "node_modules/electron-updater/out/main.js",
   "dist/main/index.js",
   "dist/preload/index.cjs",
   "dist/renderer/index.html",
@@ -115,12 +122,57 @@ const licenseInventory = await readFile(join(distDir, "THIRD_PARTY_LICENSES.txt"
 for (const requiredText of [
   "@heroui-pro/react@1.0.0-beta.8",
   "HeroUI Pro License Agreement",
+  "@heroui/react@3.2.4",
+  "@heroui/styles@3.2.4",
+  "Copyright 2025 NextUI Inc.",
   "react@19.2.8",
   "ghostty-web@0.4.0",
+  "electron-updater@6.8.9",
   "Inventory entries:",
 ]) {
   if (!licenseInventory.includes(requiredText)) {
     throw new Error(`Third-party license inventory is missing: ${requiredText}`);
+  }
+}
+
+const [projectLicense, gplLicense, mitLicense, apacheLicense, licensingGuide, thirdPartyNotices] =
+  await Promise.all([
+    readFile(join(rootDir, "LICENSE"), "utf8"),
+    readFile(join(rootDir, "LICENSES/GPL-3.0-or-later.txt"), "utf8"),
+    readFile(join(rootDir, "LICENSES/MIT.txt"), "utf8"),
+    readFile(join(rootDir, "LICENSES/Apache-2.0.txt"), "utf8"),
+    readFile(join(rootDir, "LICENSING.md"), "utf8"),
+    readFile(join(rootDir, "THIRD_PARTY_NOTICES.md"), "utf8"),
+  ]);
+if (projectLicense !== gplLicense) {
+  throw new Error("Root LICENSE must be the canonical GPLv3 text copied to LICENSES/GPL-3.0-or-later.txt");
+}
+for (const requiredText of [
+  "GNU GENERAL PUBLIC LICENSE",
+  "Version 3, 29 June 2007",
+  "END OF TERMS AND CONDITIONS",
+]) {
+  if (!projectLicense.includes(requiredText)) {
+    throw new Error(`Project GPL license is missing: ${requiredText}`);
+  }
+}
+if (projectLicense.includes("Permission is hereby granted") || projectLicense.includes("Angular Electron")) {
+  throw new Error("Root LICENSE must not mix third-party MIT notices into the project GPL text");
+}
+for (const [name, content, markers] of [
+  ["MIT", mitLicense, ["MIT License", "Permission is hereby granted"]],
+  ["Apache-2.0", apacheLicense, ["Apache License", "Version 2.0, January 2004", "Copyright 2025 NextUI Inc."]],
+]) {
+  for (const marker of markers) {
+    if (!content.includes(marker)) throw new Error(`${name} license text is missing: ${marker}`);
+  }
+}
+for (const [name, content] of [
+  ["LICENSING.md", licensingGuide],
+  ["THIRD_PARTY_NOTICES.md", thirdPartyNotices],
+]) {
+  if (!/not dual-licens(?:e|ed)/u.test(content)) {
+    throw new Error(`${name} must state that third-party license texts do not dual-license Sliver GUI`);
   }
 }
 
@@ -133,6 +185,14 @@ for (const requiredPath of requiredBuilderPaths) {
 for (const requiredSetting of [
   "from: build/about-icon.png",
   "to: sliver-desktop.png",
+  "from: LICENSES",
+  "to: licenses",
+  "from: LICENSING.md",
+  "to: licenses/LICENSING.md",
+  "from: THIRD_PARTY_NOTICES.md",
+  "to: licenses/THIRD_PARTY_NOTICES.md",
+  "from: dist/THIRD_PARTY_LICENSES.txt",
+  "to: licenses/THIRD_PARTY_LICENSES.txt",
 ]) {
   if (!builderConfiguration.includes(requiredSetting)) {
     throw new Error(`Production package branding is missing: ${requiredSetting}`);
@@ -156,6 +216,7 @@ if (verifyPackaged) {
   for (const archive of archives) {
     verifyArchive(archive);
     await verifyExternalBrandAsset(archive);
+    await verifyExternalLegalAssets(archive);
   }
   console.log(`Verified ${archives.length} packaged app.asar archive(s) contain no E2E or secret fixtures`);
 }
@@ -166,6 +227,28 @@ async function verifyExternalBrandAsset(archivePath) {
   const packaged = await readFile(packagedPath).catch(() => undefined);
   if (!packaged || sha256(packaged) !== sha256(expected)) {
     throw new Error(`Packaged application is missing the approved About/window icon: ${packagedPath}`);
+  }
+}
+
+async function verifyExternalLegalAssets(archivePath) {
+  const resourcesDirectory = dirname(archivePath);
+  const expectedFiles = [
+    [join(rootDir, "LICENSES/Apache-2.0.txt"), "licenses/Apache-2.0.txt"],
+    [join(rootDir, "LICENSES/GPL-3.0-or-later.txt"), "licenses/GPL-3.0-or-later.txt"],
+    [join(rootDir, "LICENSES/MIT.txt"), "licenses/MIT.txt"],
+    [join(rootDir, "LICENSES/README.md"), "licenses/README.md"],
+    [join(rootDir, "LICENSING.md"), "licenses/LICENSING.md"],
+    [join(rootDir, "THIRD_PARTY_NOTICES.md"), "licenses/THIRD_PARTY_NOTICES.md"],
+    [join(distDir, "THIRD_PARTY_LICENSES.txt"), "licenses/THIRD_PARTY_LICENSES.txt"],
+  ];
+  for (const [sourcePath, packagedRelativePath] of expectedFiles) {
+    const [source, packaged] = await Promise.all([
+      readFile(sourcePath),
+      readFile(join(resourcesDirectory, packagedRelativePath)).catch(() => undefined),
+    ]);
+    if (!packaged || sha256(packaged) !== sha256(source)) {
+      throw new Error(`Packaged application is missing exact legal asset: ${packagedRelativePath}`);
+    }
   }
 }
 

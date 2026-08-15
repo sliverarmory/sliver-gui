@@ -1,7 +1,18 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, clipboard, dialog, Menu, net, session, shell } from "electron";
+import {
+  app,
+  autoUpdater as nativeAutoUpdater,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  Menu,
+  net,
+  session,
+  shell,
+} from "electron";
 
 import {
   IPC,
@@ -10,6 +21,7 @@ import {
   type SliverSnapshot,
   type WindowLaunchContext,
 } from "../shared/contracts.js";
+import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
 import type {
   SliverReleaseDownloadEvent,
@@ -20,6 +32,11 @@ import {
   buildContextMenuTemplate,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
+import {
+  createApplicationUpdater,
+  type ApplicationUpdater,
+} from "./application-updater.js";
+import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ConnectionRegistry } from "./connection-registry.js";
 import { resolveDownloadsDirectory } from "./download-directory.js";
 import {
@@ -101,7 +118,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const pendingWindowCleanup = new Set<Promise<void>>();
   let releaseCatalog: ReleaseMenuCatalog = { status: "loading" };
   let releaseDownloader: SliverReleaseDownloader | undefined;
-  let stopping = false;
+  let applicationUpdater: ApplicationUpdater | undefined;
+  let applicationUpdateState: ApplicationUpdateState | undefined;
+  const shutdown = new ApplicationShutdownCoordinator({
+    stopReleaseDownloads: () => releaseDownloader?.stop(),
+    disposeApplicationUpdater: () => applicationUpdater?.dispose(),
+  });
 
   async function loadRenderer(
     window: BrowserWindow,
@@ -158,7 +180,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (sessionShellRecord) {
       window.on("close", (event) => {
         if (
-          stopping ||
+          shutdown.isStopping ||
           sessionShellRecord.finalizing ||
           !sessionShellRecord.claimedBy
         ) return;
@@ -600,8 +622,52 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
       showAboutPanel: () => app.showAboutPanel(),
       downloadRelease: (target) => startReleaseDownload(target),
-    }, releaseCatalog);
+      checkForApplicationUpdates: () => void applicationUpdater?.checkForUpdates(),
+      restartToApplyApplicationUpdate: () => {
+        void confirmApplicationUpdateRestart();
+      },
+    }, releaseCatalog, applicationUpdateState);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
+
+  function beginShutdown(): void {
+    shutdown.beginQuit();
+  }
+
+  function publishApplicationUpdateState(state: ApplicationUpdateState): void {
+    if (shutdown.isStopping) return;
+    const previousMenuState = applicationUpdateState
+      ? applicationUpdateMenuSignature(applicationUpdateState)
+      : undefined;
+    applicationUpdateState = state;
+    if (previousMenuState !== applicationUpdateMenuSignature(state)) installMenu();
+    for (const window of windows) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try {
+        window.webContents.send(IPC.applicationUpdateChanged, state);
+      } catch {
+        // Navigation and renderer teardown can race a main-process event. The
+        // next trusted renderer can always read the current updater snapshot.
+      }
+    }
+  }
+
+  async function confirmApplicationUpdateRestart(): Promise<void> {
+    const window = BrowserWindow.getFocusedWindow();
+    const options = {
+      type: "warning" as const,
+      title: "Restart to apply the update?",
+      message: "Restart Sliver Desktop and apply the downloaded update?",
+      detail: "Restarting closes every Sliver Desktop window and all managed shells. Save any terminal output and finish in-flight work before continuing.",
+      buttons: ["Later", "Restart and Update"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const result = window && !window.isDestroyed()
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+    if (result.response === 1) applicationUpdater?.restartToApply();
   }
 
   function startReleaseDownload(target: SliverReleaseTarget): void {
@@ -618,14 +684,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   async function refreshReleaseMenu(): Promise<void> {
     try {
       const catalog = await releaseDownloader?.latestRelease();
-      if (!catalog || stopping) return;
+      if (!catalog || shutdown.isStopping) return;
       releaseCatalog = {
         status: "ready",
         version: catalog.version,
         targets: catalog.assets.map(({ artifact, os, arch }) => ({ artifact, os, arch })),
       };
     } catch {
-      if (stopping) return;
+      if (shutdown.isStopping) return;
       releaseCatalog = { status: "unavailable" };
     }
     installMenu();
@@ -651,6 +717,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const onWindowAllClosed = (): void => {
     if (process.platform !== "darwin") app.quit();
   };
+  const onBeforeQuit = (): void => beginShutdown();
+  const onBeforeQuitForUpdate = (): void => beginShutdown();
 
   await app.whenReady();
   app.setAboutPanelOptions({
@@ -670,6 +738,16 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     downloadsDirectory: resolveDownloadsDirectory((name) => app.getPath(name)),
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
   });
+  applicationUpdater = createApplicationUpdater({
+    currentVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    portableExecutableFile: process.env["PORTABLE_EXECUTABLE_FILE"],
+    appImageFile: process.env["APPIMAGE"],
+    linuxPackageType: readLinuxPackageType(),
+  });
+  applicationUpdateState = applicationUpdater.getState();
+  applicationUpdater.subscribe(publishApplicationUpdateState);
   configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
   registerIpcHandlers(
     registry,
@@ -680,8 +758,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       claim: claimSessionShellWindow,
     },
     () => {
-      stopping = true;
-      releaseDownloader?.stop();
+      beginShutdown();
       app.quit();
     },
     {
@@ -689,20 +766,31 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       claim: claimInteractionWindow,
       selectTarget: selectInteractionWindowTarget,
     },
+    applicationUpdater,
   );
   installMenu();
   void refreshReleaseMenu();
   app.on("activate", onActivate);
   app.on("window-all-closed", onWindowAllClosed);
+  app.on("before-quit", onBeforeQuit);
+  nativeAutoUpdater.on("before-quit-for-update", onBeforeQuitForUpdate);
   createWindow();
+  applicationUpdater.start();
 
   return {
     createWindow,
     async stop(): Promise<void> {
-      stopping = true;
-      releaseDownloader?.stop();
+      beginShutdown();
+      // A real application quit keeps the updater subscription alive through
+      // Electron's later `quit` event: electron-updater performs an
+      // autoInstallOnAppQuit installation there and may still emit `error`.
+      // The explicit test/embedding teardown does not quit Electron, so it
+      // owns the final updater disposal instead.
+      shutdown.disposeForEmbedding();
       app.removeListener("activate", onActivate);
       app.removeListener("window-all-closed", onWindowAllClosed);
+      app.removeListener("before-quit", onBeforeQuit);
+      nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
@@ -711,6 +799,33 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       await Promise.allSettled([...pendingWindowCleanup]);
     },
   };
+}
+
+function applicationUpdateMenuSignature(state: ApplicationUpdateState): string {
+  switch (state.status) {
+    case "available":
+    case "ready":
+      return `${state.status}:${state.availableVersion}`;
+    case "downloading":
+      return `${state.status}:${state.availableVersion}:${Math.round(state.progressPercent)}`;
+    case "disabled":
+      return `${state.status}:${state.disabledReason}`;
+    case "idle":
+    case "up-to-date":
+    case "error":
+      return "check-available";
+    case "checking":
+      return state.status;
+  }
+}
+
+function readLinuxPackageType(): string | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    return readFileSync(join(process.resourcesPath, "package-type"), "utf8").trim();
+  } catch {
+    return undefined;
+  }
 }
 
 export function readDevelopmentRendererUrl(): string | undefined {

@@ -26,6 +26,10 @@ import {
   type WindowLaunchContext,
 } from "../shared/contracts.js";
 import {
+  initialApplicationUpdateDisabled,
+  type ApplicationUpdateState,
+} from "../shared/application-update-contracts.js";
+import {
   parseCancelBeaconTaskInput,
   parseCancelTargetOperationInput,
   parseGetBeaconTaskInput,
@@ -85,6 +89,12 @@ export interface InteractionWindowController {
     destination: TrustedWindowIdentity,
     target: TargetRef,
   ): MaybePromise<OperationResult<SliverSnapshot>>;
+}
+
+export interface ApplicationUpdateController {
+  getState(): ApplicationUpdateState;
+  checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>>;
+  restartToApply(): OperationResult;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -147,6 +157,11 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 const MAX_SHORT_STRING_LENGTH = 256;
 const MAX_LONG_STRING_LENGTH = 32 * 1024;
 const MAX_STRING_ARRAY_ITEMS = 500;
+const APPLICATION_UPDATES_UNAVAILABLE_REASON = "Application updates are unavailable.";
+const APPLICATION_UPDATES_UNAVAILABLE = initialApplicationUpdateDisabled(
+  "0.0.0",
+  APPLICATION_UPDATES_UNAVAILABLE_REASON,
+);
 
 let registeredStreamAttachListener:
   | ((event: IpcMainEvent, ...args: unknown[]) => void)
@@ -159,6 +174,7 @@ export function registerIpcHandlers(
   sessionShellWindows?: SessionShellWindowController,
   exitApplication?: () => void,
   interactionWindows?: InteractionWindowController,
+  applicationUpdates?: ApplicationUpdateController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -205,6 +221,21 @@ export function registerIpcHandlers(
     exitApplication();
     return { ok: true };
   });
+  handleTrusted(IPC.getApplicationUpdateState, rendererUrl, parseNoArguments, () =>
+    applicationUpdates?.getState() ?? APPLICATION_UPDATES_UNAVAILABLE,
+  );
+  handleTrusted(IPC.checkForApplicationUpdates, rendererUrl, parseNoArguments, () =>
+    applicationUpdates?.checkForUpdates() ?? {
+      ok: false,
+      error: APPLICATION_UPDATES_UNAVAILABLE_REASON,
+    },
+  );
+  handleTrusted(IPC.restartToApplyApplicationUpdate, rendererUrl, parseNoArguments, () =>
+    applicationUpdates?.restartToApply() ?? {
+      ok: false,
+      error: APPLICATION_UPDATES_UNAVAILABLE_REASON,
+    },
+  );
   handleTrusted(
     IPC.openSessionShellWindow,
     rendererUrl,

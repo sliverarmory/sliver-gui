@@ -43,6 +43,7 @@ import type {
   TerminalRuntimeAsset,
 } from "./stream-contracts.js";
 import type { SliverReleaseDownloadEvent } from "./release-contracts.js";
+import type { ApplicationUpdateState } from "./application-update-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -57,6 +58,9 @@ export const IPC_INVOKE = {
   openInteractionWindow: "sliver:window:open-interaction",
   claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
+  getApplicationUpdateState: "sliver:application-update:get",
+  checkForApplicationUpdates: "sliver:application-update:check",
+  restartToApplyApplicationUpdate: "sliver:application-update:restart",
   openSessionShellWindow: "sliver:window:open-session-shells",
   claimSessionShellWindow: "sliver:window:claim-session-shells",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
@@ -103,6 +107,7 @@ export const IPC_EVENTS = {
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
   sessionShellsChanged: "sliver:session-shell:changed",
   releaseDownloadChanged: "sliver:release-download:changed",
+  applicationUpdateChanged: "sliver:application-update:changed",
 } as const;
 
 export const IPC = {
@@ -540,6 +545,18 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [];
     result: OperationResult;
   };
+  [IPC.getApplicationUpdateState]: {
+    args: [];
+    result: ApplicationUpdateState;
+  };
+  [IPC.checkForApplicationUpdates]: {
+    args: [];
+    result: OperationResult<ApplicationUpdateState>;
+  };
+  [IPC.restartToApplyApplicationUpdate]: {
+    args: [];
+    result: OperationResult;
+  };
   [IPC.openSessionShellWindow]: {
     args: [input: OpenSessionShellWindowInput];
     result: OperationResult;
@@ -700,6 +717,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
   onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
+  onApplicationUpdateChanged: (listener: (state: ApplicationUpdateState) => void) => () => void;
 };
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {

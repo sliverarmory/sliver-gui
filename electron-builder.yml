@@ -3,11 +3,18 @@ productName: Sliver GUI
 asar: true
 directories:
   output: release
+publish:
+  provider: github
+  owner: sliverarmory
+  repo: sliver-gui
 files:
   - dist/**
   - "!dist/**/*.map"
+  - "!node_modules/**/*.map"
   - package.json
   - LICENSE
+  - LICENSING.md
+  - LICENSES/**
   - THIRD_PARTY_NOTICES.md
   - node_modules/ghostty-web/LICENSE
   - node_modules/ghostty-web/package.json
@@ -33,18 +40,29 @@ files:
 extraResources:
   - from: build/about-icon.png
     to: sliver-desktop.png
+  - from: LICENSES
+    to: licenses
+  - from: LICENSING.md
+    to: licenses/LICENSING.md
+  - from: THIRD_PARTY_NOTICES.md
+    to: licenses/THIRD_PARTY_NOTICES.md
+  - from: dist/THIRD_PARTY_LICENSES.txt
+    to: licenses/THIRD_PARTY_LICENSES.txt
 extraMetadata:
   main: dist/main/index.js
 mac:
   category: public.app-category.developer-tools
   hardenedRuntime: true
   gatekeeperAssess: false
+  notarize: true
   icon: build/icon.png
+  artifactName: sliver-gui-${version}-macos-${arch}.${ext}
   target:
     - dmg
     - zip
 win:
   icon: build/icon.png
+  artifactName: sliver-gui-${version}-windows-${arch}.${ext}
   target:
     - nsis
     - portable
@@ -52,9 +70,13 @@ linux:
   category: Development
   maintainer: Sliver Armory <sliverarmory@users.noreply.github.com>
   icon: build/icon.png
+  artifactName: sliver-gui-${version}-linux-${arch}.${ext}
   target:
     - AppImage
     - deb
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  artifactName: sliver-gui-${version}-windows-${arch}-setup.${ext}
+portable:
+  artifactName: sliver-gui-${version}-windows-${arch}-portable.${ext}

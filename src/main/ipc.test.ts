@@ -103,6 +103,33 @@ describe("trusted Electron IPC boundary", () => {
     expect(exitApplication).toHaveBeenCalledOnce();
   });
 
+  it("exposes only the bounded application-update controller methods", async () => {
+    const state = { status: "idle", revision: 0, currentVersion: "1.2.3" } as const;
+    const getState = vi.fn(() => state);
+    const checkForUpdates = vi.fn(async () => ({ ok: true as const, value: state }));
+    const restartToApply = vi.fn(() => ({ ok: true as const }));
+    registerIpcHandlers(
+      registryMock(),
+      vi.fn(),
+      RENDERER_URL,
+      undefined,
+      undefined,
+      undefined,
+      { getState, checkForUpdates, restartToApply },
+    );
+    const { event } = invokeEvent("http://127.0.0.1:5173/", 42);
+
+    expect(electronMocks.handlers.get(IPC.getApplicationUpdateState)?.(event)).toEqual(state);
+    await expect(electronMocks.handlers.get(IPC.checkForApplicationUpdates)?.(event)).resolves.toEqual({
+      ok: true,
+      value: state,
+    });
+    expect(electronMocks.handlers.get(IPC.restartToApplyApplicationUpdate)?.(event)).toEqual({ ok: true });
+    expect(getState).toHaveBeenCalledOnce();
+    expect(checkForUpdates).toHaveBeenCalledOnce();
+    expect(restartToApply).toHaveBeenCalledOnce();
+  });
+
   it("rejects origins that merely prefix-match the configured renderer", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent("http://127.0.0.1:5173.evil.test/", 42);
@@ -189,6 +216,9 @@ describe("trusted Electron IPC boundary", () => {
     IPC.openInteractionWindow,
     IPC.claimInteractionWindow,
     IPC.exitApp,
+    IPC.getApplicationUpdateState,
+    IPC.checkForApplicationUpdates,
+    IPC.restartToApplyApplicationUpdate,
     IPC.chooseCertificatePair,
     IPC.prepareStopAllJobs,
   ] as const)("rejects unexpected arguments for %s", (channel) => {

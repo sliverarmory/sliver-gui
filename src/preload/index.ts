@@ -8,6 +8,7 @@ import {
   type SliverSnapshot,
 } from "../shared/contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
+import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
 import { parseSliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -122,6 +123,17 @@ const api: SliverDesktopAPI = {
     };
     ipcRenderer.on(IPC.releaseDownloadChanged, handler);
     return () => ipcRenderer.removeListener(IPC.releaseDownloadChanged, handler);
+  },
+  onApplicationUpdateChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      try {
+        listener(parseApplicationUpdateState(value));
+      } catch {
+        // Drop malformed main-to-renderer events instead of widening the bridge.
+      }
+    };
+    ipcRenderer.on(IPC.applicationUpdateChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.applicationUpdateChanged, handler);
   },
 };
 

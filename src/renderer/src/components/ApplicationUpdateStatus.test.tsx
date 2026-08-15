@@ -1,0 +1,200 @@
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { ApplicationUpdateState } from "../../../shared/application-update-contracts";
+import type { SliverDesktopAPI } from "../../../shared/contracts";
+import { ApplicationUpdateStatus } from "./ApplicationUpdateStatus";
+
+let updateListener: ((state: ApplicationUpdateState) => void) | undefined;
+const unsubscribe = vi.fn();
+
+beforeAll(() => {
+  vi.stubGlobal("ResizeObserver", class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  });
+  Object.defineProperty(Element.prototype, "getAnimations", {
+    configurable: true,
+    value: () => [],
+  });
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
+  Reflect.deleteProperty(Element.prototype, "getAnimations");
+});
+
+beforeEach(() => {
+  updateListener = undefined;
+  unsubscribe.mockReset();
+});
+
+afterEach(cleanup);
+
+describe("application update status", () => {
+  it("subscribes before reading state and ignores an older get result", async () => {
+    const initial = deferred<ApplicationUpdateState>();
+    const calls: string[] = [];
+    installUpdateAPI({
+      getApplicationUpdateState: vi.fn(() => {
+        calls.push("get");
+        return initial.promise;
+      }),
+      onApplicationUpdateChanged: vi.fn((listener) => {
+        calls.push("subscribe");
+        updateListener = listener;
+        return unsubscribe;
+      }),
+    });
+
+    render(<ApplicationUpdateStatus showIdleControl />);
+    expect(calls).toEqual(["subscribe", "get"]);
+
+    emit({
+      status: "ready",
+      revision: 4,
+      currentVersion: "0.1.0",
+      availableVersion: "0.3.0",
+    });
+    expect(await screen.findByText("Update 0.3.0 ready")).toBeInTheDocument();
+
+    initial.resolve({
+      status: "downloading",
+      revision: 3,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      progressPercent: 90,
+    });
+    await act(async () => initial.promise);
+    expect(screen.getByText("Update 0.3.0 ready")).toBeInTheDocument();
+    expect(screen.queryByText("Downloading 0.2.0")).not.toBeInTheDocument();
+  });
+
+  it("shows bounded progress and applies a newer event", async () => {
+    installUpdateAPI({
+      getApplicationUpdateState: vi.fn().mockResolvedValue({
+        status: "downloading",
+        revision: 2,
+        currentVersion: "0.1.0",
+        availableVersion: "0.2.0",
+        progressPercent: 24.6,
+      }),
+    });
+
+    render(<ApplicationUpdateStatus />);
+    expect(await screen.findByText("Downloading 0.2.0")).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Downloading application update 0.2.0" }))
+      .toHaveAttribute("aria-valuenow", "24.6");
+
+    emit({
+      status: "ready",
+      revision: 3,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+    });
+    expect(await screen.findByText("Update 0.2.0 ready")).toBeInTheDocument();
+  });
+
+  it("checks with zero arguments and accepts the returned revision", async () => {
+    const checkForApplicationUpdates = vi.fn().mockResolvedValue({
+      ok: true,
+      value: { status: "up-to-date", revision: 2, currentVersion: "0.1.0" },
+    });
+    installUpdateAPI({
+      getApplicationUpdateState: vi.fn().mockResolvedValue({
+        status: "idle",
+        revision: 1,
+        currentVersion: "0.1.0",
+      }),
+      checkForApplicationUpdates,
+    });
+    const user = userEvent.setup();
+
+    render(<ApplicationUpdateStatus showIdleControl />);
+    await user.click(await screen.findByRole("button", { name: "Check for updates" }));
+
+    expect(checkForApplicationUpdates).toHaveBeenCalledExactlyOnceWith();
+    expect(await screen.findByRole("button", { name: "Up to date · 0.1.0" })).toBeInTheDocument();
+  });
+
+  it("requires confirmation, offers Later and Escape, and restarts with zero arguments", async () => {
+    const restartToApplyApplicationUpdate = vi.fn().mockResolvedValue({ ok: true });
+    installUpdateAPI({
+      getApplicationUpdateState: vi.fn().mockResolvedValue({
+        status: "ready",
+        revision: 3,
+        currentVersion: "0.1.0",
+        availableVersion: "0.2.0",
+      }),
+      restartToApplyApplicationUpdate,
+    });
+    const user = userEvent.setup();
+
+    render(<ApplicationUpdateStatus />);
+    await user.click(await screen.findByRole("button", { name: "Restart" }));
+    expect(screen.getByRole("alertdialog", { name: "Restart to apply the update?" })).toBeInTheDocument();
+    expect(screen.getByText(/closes every Sliver Desktop window and all managed shells/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Later" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "Restart to apply the update?" })).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Restart" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "Restart to apply the update?" })).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Restart" }));
+    await user.click(screen.getByRole("button", { name: "Restart and update" }));
+    expect(restartToApplyApplicationUpdate).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("keeps passive update controls out of dedicated surfaces and unsubscribes", async () => {
+    installUpdateAPI();
+    const view = render(<ApplicationUpdateStatus />);
+    await waitFor(() => expect(updateListener).toBeDefined());
+    expect(screen.queryByTestId("application-update-status")).not.toBeInTheDocument();
+
+    emit({ status: "checking", revision: 2, currentVersion: "0.1.0" });
+    expect(await screen.findByText("Checking for updates…")).toBeInTheDocument();
+
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+});
+
+function installUpdateAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI {
+  const api = {
+    getApplicationUpdateState: vi.fn().mockResolvedValue({
+      status: "idle",
+      revision: 1,
+      currentVersion: "0.1.0",
+    }),
+    checkForApplicationUpdates: vi.fn().mockResolvedValue({ ok: false, error: "Unavailable" }),
+    restartToApplyApplicationUpdate: vi.fn().mockResolvedValue({ ok: false, error: "Not ready" }),
+    onApplicationUpdateChanged: vi.fn((listener: (state: ApplicationUpdateState) => void) => {
+      updateListener = listener;
+      return unsubscribe;
+    }),
+    ...overrides,
+  } as Partial<SliverDesktopAPI> as SliverDesktopAPI;
+  Object.defineProperty(window, "sliver", { configurable: true, value: api });
+  return api;
+}
+
+function emit(state: ApplicationUpdateState): void {
+  if (!updateListener) throw new Error("Application update listener was not installed");
+  act(() => updateListener?.(state));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}

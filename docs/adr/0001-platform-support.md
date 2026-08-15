@@ -74,6 +74,44 @@ physical-host job must perform the certification smoke. Updating Electron,
 raising a minimum, changing an artifact format, or adding a native helper
 requires an ADR/matrix review and fresh certification.
 
+## Automatic update distribution
+
+Stable application updates use the public `sliverarmory/sliver-gui` GitHub
+Releases feed. Clients do not receive a GitHub token. macOS consumes the signed
+ZIP paired with the DMG, Windows installed builds consume the signed NSIS
+installer, and Linux AppImage installations consume the AppImage metadata.
+The Windows portable executable remains a manual download because it has no
+supported in-place updater installation contract. Debian-package updates are
+also manual: the bundled updater version can invoke unauthenticated local APT
+installation under elevation, so DEB users must verify a release package
+against `SHA256SUMS` or switch to AppImage for automatic updates.
+
+An exact `vX.Y.Z` tag at the current reviewed `origin/main` commit is the only
+release trigger. Tag creation is restricted by a repository ruleset and signed
+builds use a protected `release` environment with required approval and
+environment-scoped credentials. macOS and Windows tag builds fail when signing
+credentials are absent; macOS must also pass notarization, stapling, `codesign`,
+and Gatekeeper verification, while Windows release executables must pass
+Authenticode verification. Linux artifacts are bound to their update metadata
+by SHA-512 and all release assets are covered by the published `SHA256SUMS`
+inventory.
+
+The protected environment's non-secret `WIN_CSC_PUBLISHER_NAME` variable pins
+the complete Windows certificate Subject. Both signed executables and the
+packaged updater configuration must match it exactly. Certificate reissuance
+should preserve that Subject; a Subject-changing rotation requires a reviewed
+bridge release, signed by the old certificate, that temporarily trusts both
+old and new names before the signing certificate changes.
+
+The release job stages all packages, blockmaps, and `latest*.yml` files in a
+draft, verifies the uploaded inventory, and then publishes it as the latest
+stable release. Draft and prerelease records are not update signals. Repository
+immutable releases must be enabled before production release; the workflow
+checks the repository setting before it creates the draft. After promotion,
+the workflow refuses asset replacement and performs no further release writes.
+Installed builds older than the first updater-capable version require one
+manual bootstrap installation.
+
 ## Consequences
 
 - macOS universal output is one artifact, but arm64 and x64 are two independent

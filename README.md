@@ -96,9 +96,13 @@ snapshot in `vendor/sliver-script`. This keeps clean checkouts reproducible
 without pulling the full upstream Sliver tree. Its provenance and update notes
 are recorded in `vendor/sliver-script/VENDORED.md`.
 
-Sliver GUI is licensed under GPL-3.0-or-later. Native packages include the
-license, third-party notice, retained client source, and its verifiable Git
-provenance bundle; matching release tags provide the complete GUI source.
+Sliver GUI is licensed under GPL-3.0-or-later and is not dual-licensed under
+MIT or Apache-2.0. Separately identified third-party components retain their
+own licenses; see [`LICENSING.md`](LICENSING.md),
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`LICENSES/`](LICENSES/).
+Native packages include these notices, the retained client source, and its
+verifiable Git provenance bundle; matching release tags provide the complete
+GUI source.
 
 An adjacent `./sliver/` checkout is optional for backend development and is
 ignored by this repository. The GUI does not import or modify that checkout.
@@ -177,14 +181,78 @@ certification evidence can be marked complete.
 The repository or organization must provide an Actions secret named
 `HEROUI_AUTH_TOKEN`. Create a CI/CD token in the HeroUI Pro dashboard and add it
 before enabling the workflow; the build fails early with a direct error when
-the secret is unavailable.
+the secret is unavailable. Pull requests from public forks cannot receive this
+licensed-package secret, so they run the non-secret protocol/parity job while
+Electron E2E and native packaging remain skipped. A maintainer branch, `main`
+push, or release tag must run the complete token-backed suite before release.
 
-Pushing a stable version tag such as `v1.2.3` runs the same clean native builds,
-sets the packaged application version to `1.2.3`, and creates a draft GitHub
-release containing all six packages plus `SHA256SUMS`. Release binaries are
-currently unsigned, so automation never publishes that draft. Signing,
-notarization, and their verification evidence are required before a maintainer
-publishes a stable release.
+Packaged installations use `electron-updater@6.8.9` and the public GitHub
+Releases feed for `sliverarmory/sliver-gui`; the application contains no GitHub
+token. It checks after startup and periodically, downloads an available stable
+update in the background, and installs the downloaded version when the
+operator chooses **Restart to update** or exits the application normally. An
+installed application never treats a draft or prerelease as a stable update.
+
+The first updater-capable build is a one-time manual bootstrap: applications
+installed before updater support exists cannot update themselves. Install that
+release normally, and later releases can use the automatic path. Update support
+by package is:
+
+| Platform package | Automatic update path |
+| --- | --- |
+| macOS universal DMG/ZIP | Install from the DMG; the updater downloads the signed ZIP described by `latest-mac.yml`. |
+| Windows x64 NSIS installer | Downloads the signed NSIS installer described by `latest.yml`. |
+| Windows x64 portable executable | Manual update only; download a signed package from the [latest GitHub release](https://github.com/sliverarmory/sliver-gui/releases/latest) and verify `SHA256SUMS`, or install the Setup build for automatic updates. |
+| Linux x64 AppImage | Downloads the AppImage described by `latest-linux.yml`. |
+| Linux x64 Debian package | Manual update only; verify the package against the release `SHA256SUMS`, or use the AppImage build for automatic updates. |
+
+Pushing an exact stable tag such as `v1.2.3` at the current reviewed `main`
+commit runs clean native builds and sets the package version to `1.2.3`. Tag
+builds fail closed unless macOS is signed and notarized and Windows is
+Authenticode-signed. Electron Builder still runs
+with `--publish never`: each native build produces its local `latest*.yml` and
+blockmap files, and the release job owns publication. It verifies the exact
+cross-platform asset names, metadata references, SHA-512 values, signatures,
+notarization ticket, and generated `SHA256SUMS`; stages the assets on a draft;
+compares the remote draft inventory to the verified local inventory; and only
+then publishes it as the latest stable GitHub release. Publication is the
+promotion gate that makes the version discoverable to installed applications.
+
+Create a protected GitHub Actions environment named `release`, restrict it to
+the stable release-tag pattern, and require maintainer approval. Store these
+Actions secrets in that environment before a stable tag is pushed:
+
+- `MAC_CSC_LINK`: base64-encoded Developer ID Application `.p12`.
+- `MAC_CSC_KEY_PASSWORD`: password for that certificate.
+- `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`: Apple
+  notarization credentials.
+- `WIN_CSC_LINK`: base64-encoded Windows code-signing `.pfx`.
+- `WIN_CSC_KEY_PASSWORD`: password for that certificate.
+
+Also set the non-secret environment variable `WIN_CSC_PUBLISHER_NAME` to the
+certificate's complete Subject distinguished name. The release fails unless
+both Windows executables have that exact Authenticode subject and the packaged
+`app-update.yml` pins the same name for update-signature verification.
+Reissuing a certificate with the same Subject preserves continuity. If the
+Subject must change, first ship a reviewed bridge release signed by the old
+certificate that trusts both old and new Subject names; only a later release
+may switch signing to the new certificate. Do not rotate the certificate and
+trusted Subject in one release.
+
+The built-in, job-scoped `GITHUB_TOKEN` publishes the release; no repository
+credential is embedded in the application. The repository must be public
+before the stable release job can publish. Enable GitHub's **immutable
+releases** setting before the first public release so publishing locks the tag
+and assets; the workflow queries that setting and fails before creating a draft
+when it is disabled. Add a repository tag ruleset that restricts creation and
+deletion of `v*` tags to release maintainers. The workflow independently
+requires the tag to point at the fetched current `origin/main` commit, uploads
+every asset while the release is a draft, refuses to replace an already
+published release, and performs no writes after promotion.
+
+Pull-request, `main`, and manual non-tag builds remain unsigned CI artifacts.
+They include updater metadata for reproducibility checks but are never
+published to the update feed.
 
 ## Real-server integration test
 

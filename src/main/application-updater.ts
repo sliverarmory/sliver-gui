@@ -1,0 +1,361 @@
+import electronUpdater, {
+  type AppUpdater,
+  type ProgressInfo,
+  type UpdateCheckResult,
+  type UpdateDownloadedEvent,
+  type UpdateInfo,
+} from "electron-updater";
+
+import {
+  initialApplicationUpdateDisabled,
+  initialApplicationUpdateIdle,
+  parseApplicationUpdateState,
+  type ApplicationUpdateState,
+} from "../shared/application-update-contracts.js";
+import type { OperationResult } from "../shared/contracts.js";
+
+const FIRST_CHECK_MINIMUM_DELAY_MS = 30_000;
+const FIRST_CHECK_JITTER_MS = 30_000;
+const PERIODIC_CHECK_MINIMUM_DELAY_MS = 6 * 60 * 60 * 1_000;
+const PERIODIC_CHECK_JITTER_MS = 30 * 60 * 1_000;
+const UPDATE_CHECK_ERROR = "Sliver Desktop could not check for updates. Try again later.";
+const UPDATE_INSTALL_ERROR = "Sliver Desktop could not restart to install the update. Try again later.";
+
+export interface ApplicationUpdateBackendEvents {
+  readonly checking: () => void;
+  readonly available: (version: string) => void;
+  readonly notAvailable: () => void;
+  readonly progress: (percent: number) => void;
+  readonly downloaded: (version: string) => void;
+  readonly cancelled: () => void;
+  readonly error: () => void;
+}
+
+export interface ApplicationUpdateCheckResult {
+  readonly isUpdateAvailable: boolean;
+  readonly version: string;
+}
+
+export interface ApplicationUpdateBackend {
+  configure(): void;
+  subscribe(events: ApplicationUpdateBackendEvents): () => void;
+  checkForUpdates(): Promise<ApplicationUpdateCheckResult | null>;
+  quitAndInstall(): void;
+}
+
+export interface CreateApplicationUpdaterOptions {
+  readonly currentVersion: string;
+  readonly isPackaged: boolean;
+  readonly platform: NodeJS.Platform;
+  readonly portableExecutableFile: string | undefined;
+  readonly appImageFile: string | undefined;
+  readonly linuxPackageType: string | undefined;
+  readonly backend?: ApplicationUpdateBackend;
+  readonly random?: () => number;
+  readonly firstCheckMinimumDelayMs?: number;
+  readonly firstCheckJitterMs?: number;
+  readonly periodicCheckMinimumDelayMs?: number;
+  readonly periodicCheckJitterMs?: number;
+}
+
+export class ApplicationUpdater {
+  readonly #backend: ApplicationUpdateBackend | undefined;
+  readonly #random: () => number;
+  readonly #firstCheckMinimumDelayMs: number;
+  readonly #firstCheckJitterMs: number;
+  readonly #periodicCheckMinimumDelayMs: number;
+  readonly #periodicCheckJitterMs: number;
+  readonly #listeners = new Set<(state: ApplicationUpdateState) => void>();
+  #state: ApplicationUpdateState;
+  #availableVersion: string | undefined;
+  #unsubscribeBackend: (() => void) | undefined;
+  #scheduledCheck: ReturnType<typeof setTimeout> | undefined;
+  #checkPromise: Promise<OperationResult<ApplicationUpdateState>> | undefined;
+  #installRequested = false;
+  #started = false;
+  #disposed = false;
+
+  constructor(options: CreateApplicationUpdaterOptions) {
+    this.#random = options.random ?? Math.random;
+    this.#firstCheckMinimumDelayMs = options.firstCheckMinimumDelayMs ?? FIRST_CHECK_MINIMUM_DELAY_MS;
+    this.#firstCheckJitterMs = options.firstCheckJitterMs ?? FIRST_CHECK_JITTER_MS;
+    this.#periodicCheckMinimumDelayMs = options.periodicCheckMinimumDelayMs ?? PERIODIC_CHECK_MINIMUM_DELAY_MS;
+    this.#periodicCheckJitterMs = options.periodicCheckJitterMs ?? PERIODIC_CHECK_JITTER_MS;
+
+    const disabledReason = applicationUpdateDisabledReason(options);
+    if (disabledReason) {
+      this.#state = initialApplicationUpdateDisabled(options.currentVersion, disabledReason);
+      this.#backend = undefined;
+      return;
+    }
+
+    this.#state = initialApplicationUpdateIdle(options.currentVersion);
+    this.#backend = options.backend ?? new ElectronApplicationUpdateBackend(electronUpdater.autoUpdater);
+    this.#backend.configure();
+    this.#unsubscribeBackend = this.#backend.subscribe({
+      checking: () => {
+        if (this.#state.status !== "checking") this.#transition({ status: "checking" });
+      },
+      available: (version) => this.#setAvailable(version),
+      notAvailable: () => {
+        this.#availableVersion = undefined;
+        this.#transition({ status: "up-to-date" });
+      },
+      progress: (percent) => this.#setProgress(percent),
+      downloaded: (version) => this.#setReady(version),
+      cancelled: () => this.#setError(UPDATE_CHECK_ERROR),
+      error: () => this.#setError(this.#installRequested ? UPDATE_INSTALL_ERROR : UPDATE_CHECK_ERROR),
+    });
+  }
+
+  getState(): ApplicationUpdateState {
+    return this.#state;
+  }
+
+  subscribe(listener: (state: ApplicationUpdateState) => void): () => void {
+    if (this.#disposed) return () => undefined;
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  start(): void {
+    if (this.#started || this.#disposed || !this.#backend) return;
+    this.#started = true;
+    this.#scheduleNextCheck(this.#firstCheckMinimumDelayMs, this.#firstCheckJitterMs);
+  }
+
+  checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>> {
+    if (this.#state.status === "disabled") {
+      return Promise.resolve({ ok: false, error: this.#state.disabledReason });
+    }
+    if (this.#disposed || !this.#backend) {
+      return Promise.resolve({ ok: false, error: "Application updates are unavailable." });
+    }
+    if (
+      this.#state.status === "available" ||
+      this.#state.status === "downloading" ||
+      this.#state.status === "ready"
+    ) {
+      return Promise.resolve({ ok: true, value: this.#state });
+    }
+    if (this.#checkPromise) return this.#checkPromise;
+
+    this.#transition({ status: "checking" });
+    const backend = this.#backend;
+    this.#checkPromise = backend.checkForUpdates()
+      .then((result): OperationResult<ApplicationUpdateState> => {
+        if (this.#disposed) return { ok: false, error: "Application updates are unavailable." };
+        if (result === null) {
+          this.#setError(UPDATE_CHECK_ERROR);
+          return { ok: false, error: UPDATE_CHECK_ERROR };
+        }
+        if (this.#state.status === "checking") {
+          if (result.isUpdateAvailable) this.#setAvailable(result.version);
+          else {
+            this.#availableVersion = undefined;
+            this.#transition({ status: "up-to-date" });
+          }
+        }
+        if (this.#state.status === "error") return { ok: false, error: this.#state.error };
+        return { ok: true, value: this.#state };
+      })
+      .catch((): OperationResult<ApplicationUpdateState> => {
+        if (!this.#disposed && this.#state.status !== "error") this.#setError(UPDATE_CHECK_ERROR);
+        return { ok: false, error: UPDATE_CHECK_ERROR };
+      })
+      .finally(() => {
+        this.#checkPromise = undefined;
+      });
+    return this.#checkPromise;
+  }
+
+  restartToApply(): OperationResult {
+    if (this.#installRequested) return { ok: true };
+    if (this.#state.status !== "ready" || !this.#backend || this.#disposed) {
+      return { ok: false, error: "An application update is not ready to install." };
+    }
+    try {
+      this.#installRequested = true;
+      this.#backend.quitAndInstall();
+      const stateAfterInstallRequest = this.getState();
+      if (stateAfterInstallRequest.status === "error") {
+        return { ok: false, error: stateAfterInstallRequest.error };
+      }
+      return { ok: true };
+    } catch {
+      this.#installRequested = false;
+      if (!this.#disposed) this.#setError(UPDATE_INSTALL_ERROR);
+      return { ok: false, error: UPDATE_INSTALL_ERROR };
+    }
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    if (this.#scheduledCheck) clearTimeout(this.#scheduledCheck);
+    this.#scheduledCheck = undefined;
+    this.#unsubscribeBackend?.();
+    this.#unsubscribeBackend = undefined;
+    this.#listeners.clear();
+  }
+
+  #scheduleNextCheck(minimumDelayMs: number, jitterMs: number): void {
+    if (this.#disposed || !this.#backend) return;
+    const randomValue = Math.min(1, Math.max(0, this.#random()));
+    const delay = minimumDelayMs + Math.floor(randomValue * jitterMs);
+    this.#scheduledCheck = setTimeout(() => {
+      this.#scheduledCheck = undefined;
+      void this.checkForUpdates().finally(() => {
+        this.#scheduleNextCheck(this.#periodicCheckMinimumDelayMs, this.#periodicCheckJitterMs);
+      });
+    }, delay);
+    this.#scheduledCheck.unref?.();
+  }
+
+  #setAvailable(version: string): void {
+    if (!this.#isValidAvailableVersion(version)) return;
+    this.#availableVersion = version;
+    this.#transition({ status: "available", availableVersion: version });
+  }
+
+  #setProgress(percent: number): void {
+    if (!this.#availableVersion || !Number.isFinite(percent)) return;
+    const progressPercent = Math.round(Math.min(100, Math.max(0, percent)) * 10) / 10;
+    if (
+      this.#state.status === "downloading" &&
+      this.#state.availableVersion === this.#availableVersion &&
+      this.#state.progressPercent === progressPercent
+    ) return;
+    this.#transition({
+      status: "downloading",
+      availableVersion: this.#availableVersion,
+      progressPercent,
+    });
+  }
+
+  #setReady(version: string): void {
+    if (!this.#isValidAvailableVersion(version)) return;
+    this.#availableVersion = version;
+    this.#transition({ status: "ready", availableVersion: version });
+  }
+
+  #isValidAvailableVersion(version: string): boolean {
+    try {
+      parseApplicationUpdateState({
+        status: "available",
+        revision: this.#state.revision + 1,
+        currentVersion: this.#state.currentVersion,
+        availableVersion: version,
+      });
+      return true;
+    } catch {
+      this.#setError(UPDATE_CHECK_ERROR);
+      return false;
+    }
+  }
+
+  #setError(error: string): void {
+    this.#installRequested = false;
+    this.#availableVersion = undefined;
+    this.#transition({ status: "error", error });
+  }
+
+  #transition(fields: Readonly<Record<string, unknown>>): void {
+    if (this.#disposed) return;
+    this.#state = parseApplicationUpdateState({
+      ...fields,
+      revision: this.#state.revision + 1,
+      currentVersion: this.#state.currentVersion,
+    });
+    for (const listener of this.#listeners) {
+      try {
+        listener(this.#state);
+      } catch {
+        // A presentation listener must not corrupt updater state or turn a
+        // successful backend check into a failed update operation.
+      }
+    }
+  }
+}
+
+export function createApplicationUpdater(options: CreateApplicationUpdaterOptions): ApplicationUpdater {
+  return new ApplicationUpdater(options);
+}
+
+export function applicationUpdateDisabledReason(
+  options: Pick<
+    CreateApplicationUpdaterOptions,
+    "isPackaged" | "platform" | "portableExecutableFile" | "appImageFile" | "linuxPackageType"
+  >,
+): string | undefined {
+  if (!options.isPackaged) return "Automatic updates are available in packaged builds.";
+  if (options.platform !== "darwin" && options.platform !== "win32" && options.platform !== "linux") {
+    return "Automatic updates are not available on this platform.";
+  }
+  if (options.platform === "win32" && options.portableExecutableFile) {
+    return "Portable builds do not update automatically. Install the Windows Setup build to enable updates.";
+  }
+  if (options.platform === "linux" && options.linuxPackageType === "deb") {
+    return "Debian packages require a manually verified update. Use the AppImage build for automatic updates.";
+  }
+  if (options.platform === "linux" && !options.appImageFile) {
+    return "Automatic Linux updates are available from the AppImage build.";
+  }
+  return undefined;
+}
+
+class ElectronApplicationUpdateBackend implements ApplicationUpdateBackend {
+  readonly #updater: AppUpdater;
+
+  constructor(updater: AppUpdater) {
+    this.#updater = updater;
+  }
+
+  configure(): void {
+    this.#updater.autoDownload = true;
+    this.#updater.autoInstallOnAppQuit = true;
+    this.#updater.autoRunAppAfterInstall = true;
+    this.#updater.allowPrerelease = false;
+    this.#updater.allowDowngrade = false;
+    this.#updater.disableWebInstaller = true;
+  }
+
+  subscribe(events: ApplicationUpdateBackendEvents): () => void {
+    const checking = (): void => events.checking();
+    const available = (info: UpdateInfo): void => events.available(info.version);
+    const notAvailable = (_info: UpdateInfo): void => events.notAvailable();
+    const progress = (info: ProgressInfo): void => events.progress(info.percent);
+    const downloaded = (info: UpdateDownloadedEvent): void => events.downloaded(info.version);
+    const cancelled = (_info: UpdateInfo): void => events.cancelled();
+    const error = (_error: Error): void => events.error();
+    this.#updater.on("checking-for-update", checking);
+    this.#updater.on("update-available", available);
+    this.#updater.on("update-not-available", notAvailable);
+    this.#updater.on("download-progress", progress);
+    this.#updater.on("update-downloaded", downloaded);
+    this.#updater.on("update-cancelled", cancelled);
+    this.#updater.on("error", error);
+    return () => {
+      this.#updater.removeListener("checking-for-update", checking);
+      this.#updater.removeListener("update-available", available);
+      this.#updater.removeListener("update-not-available", notAvailable);
+      this.#updater.removeListener("download-progress", progress);
+      this.#updater.removeListener("update-downloaded", downloaded);
+      this.#updater.removeListener("update-cancelled", cancelled);
+      this.#updater.removeListener("error", error);
+    };
+  }
+
+  async checkForUpdates(): Promise<ApplicationUpdateCheckResult | null> {
+    const result: UpdateCheckResult | null = await this.#updater.checkForUpdates();
+    if (!result) return null;
+    return {
+      isUpdateAvailable: result.isUpdateAvailable,
+      version: result.updateInfo.version,
+    };
+  }
+
+  quitAndInstall(): void {
+    this.#updater.quitAndInstall(false, true);
+  }
+}

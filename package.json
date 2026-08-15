@@ -46,6 +46,9 @@
     "protocol:ghostty": "node ./scripts/verifyGhosttyRuntime.mjs",
     "parity:generate": "node ./scripts/parity-generate.mjs",
     "parity:check": "node ./scripts/parity-check.mjs",
+    "verify:release-version": "node ./scripts/verifyReleaseVersion.mjs",
+    "verify:release-signing-env": "node ./scripts/verifyReleaseSigningEnvironment.mjs",
+    "verify:update-artifacts": "node ./scripts/verifyUpdateArtifacts.mjs",
     "verify:release-content": "node ./scripts/verifyReleaseContent.mjs",
     "verify:packaged-content": "node ./scripts/verifyReleaseContent.mjs --packaged",
     "prepackage": "npm run build:licenses",
@@ -107,6 +110,7 @@
     "protobufjs": false
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "ghostty-web": "0.4.0"
   }
 }
