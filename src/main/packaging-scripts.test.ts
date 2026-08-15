@@ -21,6 +21,7 @@ describe("native distribution packaging", () => {
     );
     expect(packageJson.scripts?.["dist"]).toBe("electron-builder");
     expect(packageJson.scripts?.["postdist"]).toBe("npm run verify:packaged-content");
+    expect(packageJson.scripts?.["pretest:e2e:packaged-update"]).toBe("npm run build:client");
     expect(workflow).toContain("run: npm run predist");
     expect(workflow).toContain(
       "run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never",
@@ -88,6 +89,48 @@ describe("native distribution packaging", () => {
     const nativeVerifier = workflowStep(workflow, "Verify credential-free release context");
     expect(nativeVerifier).toContain("c.isImmutable!==true");
     expect(nativeVerifier).not.toContain("GH_TOKEN");
+  });
+
+  it("polls for explicit release and tag absence before cleanup succeeds", () => {
+    const rootDir = resolve(import.meta.dirname, "../..");
+    const workflow = readFileSync(
+      resolve(rootDir, ".github/workflows/private-updater-e2e.yml"),
+      "utf8",
+    );
+    const cleanup = workflowStep(workflow, "Delete test evidence when GitHub permits it");
+
+    expect(cleanup).toContain("absence_poll_attempts=13");
+    expect(cleanup).toContain("absence_poll_delay_seconds=5");
+    expect(cleanup).toContain("for ((attempt = 1; attempt <= max_attempts; attempt++)); do");
+    expect(cleanup).toContain('sleep "$delay_seconds"');
+    expect(cleanup).toContain("Timed out waiting for explicit 404 absence");
+    expect(cleanup).toContain("if head -n 1 \"$response\" | grep -Eq '^HTTP/[0-9.]+ 404 '; then");
+    expect(cleanup).toContain('if ! state="$(resource_state "$endpoint" "$label-$attempt")"; then');
+    expect(cleanup).toContain("returned an API error; refusing to retry or fail open");
+    expect(cleanup).toContain("return 2");
+    expect(cleanup).not.toContain("2>/dev/null");
+    expect(cleanup).not.toContain("|| true");
+    expect(cleanup).not.toMatch(/\|\|\s*echo/gu);
+
+    const releasePoll = cleanup.indexOf("release-after-delete");
+    const releaseAbsenceGate = cleanup.indexOf('if [ "$release_absent" = "true" ]; then');
+    const tagDelete = cleanup.indexOf('gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TEST_TAG"');
+    expect(releasePoll).toBeGreaterThan(-1);
+    expect(releasePoll).toBeLessThan(releaseAbsenceGate);
+    expect(releaseAbsenceGate).toBeLessThan(tagDelete);
+
+    const tagPoll = cleanup.indexOf("tag-after-delete");
+    const verifiedAbsence = cleanup.indexOf(
+      'if [ "$release_absent" = "true" ] && [ "$tag_absent" = "true" ]; then',
+    );
+    const successSummary = cleanup.indexOf("Deleted test release and tag");
+    expect(tagPoll).toBeGreaterThan(tagDelete);
+    expect(tagPoll).toBeLessThan(verifiedAbsence);
+    expect(verifiedAbsence).toBeLessThan(successSummary);
+
+    expect(cleanup).toContain('[ "$BUILD_RESULT" != "success" ]');
+    expect(cleanup).toContain('[ "$PUBLISH_RESULT" != "success" ]');
+    expect(cleanup).toContain('[ "$NATIVE_RESULT" != "success" ]');
   });
 
   it("keeps private updater trust setup noninteractive and cleanup fail-closed", () => {
