@@ -73,8 +73,7 @@ describe("native distribution packaging", () => {
     expect(workflow).toContain(
       'sudo -n security add-trusted-cert -d -r trustRoot -p codeSign -k "$trust_keychain" "$certificate"',
     );
-    expect(workflow.match(/security remove-trusted-cert/gu)).toHaveLength(2);
-    expect(workflow.match(/sudo -n security remove-trusted-cert -d/gu)).toHaveLength(2);
+    expect(workflow).not.toContain("security remove-trusted-cert");
     expect(workflow).not.toMatch(/security (?:add|remove)-trusted-cert[^\n]*\|\| true/gu);
 
     for (const name of [
@@ -108,7 +107,6 @@ describe("native distribution packaging", () => {
     for (const context of [
       'echo "UPDATER_E2E_TRUST_KEYCHAIN=',
       'echo "UPDATER_E2E_TRUST_ORIGINAL_KEYCHAINS=',
-      'echo "UPDATER_E2E_TRUST_CERTIFICATE=',
     ]) {
       expect(macNativeSetup.indexOf(context), context).toBeGreaterThan(-1);
       expect(macNativeSetup.indexOf(context), context).toBeLessThan(
@@ -116,14 +114,52 @@ describe("native distribution packaging", () => {
       );
     }
 
+    for (const setup of [macSigningSetup, macNativeSetup]) {
+      const guard = 'if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then';
+      const guardIndex = setup.indexOf(guard);
+      const trustIndex = setup.indexOf("sudo -n security add-trusted-cert");
+      expect(guardIndex).toBeGreaterThan(-1);
+      expect(guardIndex).toBeLessThan(trustIndex);
+      expect(setup.slice(guardIndex, trustIndex)).toContain("exit 1");
+    }
+
     for (const name of ["Remove ephemeral private signing material", "Remove ephemeral macOS trust"]) {
       const cleanup = workflowStep(workflow, name);
+      expect(cleanup).toContain("timeout-minutes: 2");
       expect(cleanup).toContain("cleanup_failed=false");
       expect(cleanup).toContain("cleanup_failed=true");
       expect(cleanup).toContain('if [ "$cleanup_failed" = true ]; then exit 1; fi');
       expect(cleanup).not.toContain("set -euo pipefail");
       expect(cleanup).not.toContain("|| true");
+      expect(cleanup).not.toContain("sudo");
     }
+    const macSigningCleanup = workflowStep(workflow, "Remove ephemeral private signing material");
+    for (const marker of [
+      "MAC_SIGNING_CLEANUP_BEGIN",
+      "MAC_SIGNING_CLEANUP_RESTORE_KEYCHAINS",
+      "MAC_SIGNING_CLEANUP_DELETE_KEYCHAIN",
+      "MAC_SIGNING_CLEANUP_DELETE_PRIVATE_MATERIAL",
+      "MAC_SIGNING_CLEANUP_END",
+    ]) {
+      expect(macSigningCleanup).toContain(`echo "::notice::${marker}"`);
+    }
+    expect(macSigningCleanup).toContain('security list-keychains -d user -s "${original_keychains[@]}"');
+    expect(macSigningCleanup).toContain('security delete-keychain "$signing_keychain"');
+    expect(macSigningCleanup).toContain('rm -rf -- "$signing_dir"');
+
+    const macNativeCleanup = workflowStep(workflow, "Remove ephemeral macOS trust");
+    for (const marker of [
+      "MAC_NATIVE_TRUST_CLEANUP_BEGIN",
+      "MAC_NATIVE_TRUST_CLEANUP_RESTORE_KEYCHAINS",
+      "MAC_NATIVE_TRUST_CLEANUP_DELETE_SAVED_LIST",
+      "MAC_NATIVE_TRUST_CLEANUP_DELETE_KEYCHAIN",
+      "MAC_NATIVE_TRUST_CLEANUP_END",
+    ]) {
+      expect(macNativeCleanup).toContain(`echo "::notice::${marker}"`);
+    }
+    expect(macNativeCleanup).toContain('security list-keychains -d user -s "${original_keychains[@]}"');
+    expect(macNativeCleanup).toContain('rm -f -- "$original_keychains_file"');
+    expect(macNativeCleanup).toContain('security delete-keychain "$trust_keychain"');
 
     expect(workflow).not.toContain("Import-Certificate");
     expect(workflow).not.toContain("Cert:\\CurrentUser\\Root");
