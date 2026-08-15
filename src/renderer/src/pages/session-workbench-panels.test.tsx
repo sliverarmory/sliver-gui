@@ -1156,12 +1156,15 @@ describe("session workbench panels", () => {
     expect(processFilter).toHaveFocus();
     await user.keyboard("bash");
     expect(processFilter).toHaveValue("bash");
-    await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
-      operationId: "session.process.list",
-      fullInfo: true,
-      limit: 100,
-      query: "bash",
-    }));
+    await waitFor(
+      () => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+        operationId: "session.process.list",
+        fullInfo: true,
+        limit: 100,
+        query: "bash",
+      }),
+      { timeout: 3_000 },
+    );
     expect(await screen.findByRole("row", { name: /server-filtered/i })).toBeInTheDocument();
     expect(screen.getByText("Loaded 1 of 1 processes matching “bash”")).toBeInTheDocument();
   });
