@@ -372,6 +372,166 @@ describe("App startup", () => {
     expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
     expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
   });
+
+  it("keeps the saved configuration selector closed across a delayed connecting snapshot", async () => {
+    const connected = disconnectedSnapshot();
+    connected.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      connected,
+      (listener) => { emitSnapshot = listener; },
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    if (!emitSnapshot) throw new Error("Snapshot listener was not installed");
+
+    act(() => {
+      emitSnapshot?.({
+        ...connected,
+        connection: { ...connected.connection, status: "connecting" },
+      });
+    });
+    expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+
+    act(() => { emitSnapshot?.(connected); });
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+  });
+
+  it("reopens the saved configuration selector when connecting ends disconnected", async () => {
+    const connected = disconnectedSnapshot();
+    connected.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      connected,
+      (listener) => { emitSnapshot = listener; },
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    if (!emitSnapshot) throw new Error("Snapshot listener was not installed");
+
+    act(() => {
+      emitSnapshot?.({
+        ...connected,
+        connection: { ...connected.connection, status: "connecting" },
+      });
+    });
+    expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+
+    act(() => { emitSnapshot?.(disconnectedSnapshot()); });
+    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+  });
+
+  it("keeps a manually opened saved configuration selector across usable health changes", async () => {
+    const user = userEvent.setup();
+    const connected = disconnectedSnapshot();
+    connected.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      connected,
+      (listener) => { emitSnapshot = listener; },
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    if (!emitSnapshot) throw new Error("Snapshot listener was not installed");
+    await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
+    await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
+    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+
+    act(() => {
+      emitSnapshot?.({
+        ...connected,
+        connection: { ...connected.connection, status: "degraded", error: "Compiler refresh failed" },
+      });
+    });
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+
+    act(() => {
+      emitSnapshot?.({
+        ...connected,
+        connection: { ...connected.connection, status: "reconnecting", error: "Event stream retrying" },
+      });
+    });
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+  });
+
+  it("closes a manually opened saved configuration selector when connecting succeeds", async () => {
+    const user = userEvent.setup();
+    const connected = disconnectedSnapshot();
+    connected.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      connected,
+      (listener) => { emitSnapshot = listener; },
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    if (!emitSnapshot) throw new Error("Snapshot listener was not installed");
+    await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
+    await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
+    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+
+    act(() => {
+      emitSnapshot?.({
+        ...connected,
+        connection: { ...connected.connection, status: "connecting" },
+      });
+    });
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+
+    act(() => { emitSnapshot?.(connected); });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+  });
 });
 
 describe("Current server menu", () => {

@@ -211,11 +211,18 @@ export function App() {
   }
 
   const connected = isUsableConnection(snapshot.connection.status);
+  const connectionInProgress = snapshot.connection.status === "connecting";
 
   useEffect(() => {
-    if (wasConnectedRef.current && !connected) setIsConfigSelectorOpen(true);
-    wasConnectedRef.current = connected;
-  }, [connected]);
+    if (connected) {
+      setIsConfigSelectorOpen(false);
+      wasConnectedRef.current = true;
+      return;
+    }
+    if (connectionInProgress) return;
+    if (wasConnectedRef.current) setIsConfigSelectorOpen(true);
+    wasConnectedRef.current = false;
+  }, [connected, connectionInProgress]);
 
   const compatibilityKey = compatibilityNoticeKey(snapshot);
   const isCompatibilityNoticeOpen = Boolean(
