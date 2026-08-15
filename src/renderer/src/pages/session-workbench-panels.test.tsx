@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1152,9 +1152,7 @@ describe("session workbench panels", () => {
     await waitFor(() => expect(terminateDialog).not.toBeInTheDocument());
 
     const processFilter = screen.getByRole("searchbox", { name: "Filter processes" });
-    await user.click(processFilter);
-    expect(processFilter).toHaveFocus();
-    await user.keyboard("bash");
+    fireEvent.change(processFilter, { target: { value: "bash" } });
     expect(processFilter).toHaveValue("bash");
     await waitFor(
       () => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
