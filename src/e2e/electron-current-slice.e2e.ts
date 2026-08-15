@@ -40,6 +40,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   await writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 });
 
   let electronApplication: ElectronApplication | undefined;
+  let page: Page | undefined;
   const consoleMessages: string[] = [];
   const pageErrors: string[] = [];
   try {
@@ -56,7 +57,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       chromiumSandbox: true,
       cwd: repositoryRoot,
     } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
-    const page = await electronApplication.firstWindow();
+    page = await electronApplication.firstWindow();
     page.on("console", (message) => consoleMessages.push(message.text()));
     page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -139,6 +140,14 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await page.getByRole("menuitem", { name: "Disconnect" }).click();
     await page.getByText("No server connected", { exact: true }).waitFor();
     assert.equal((await readFakeState(electronApplication)).disconnects, 1);
+  } catch (error) {
+    if (page && !page.isClosed()) {
+      await page.screenshot({
+        animations: "disabled",
+        path: join(artifactDirectory, "current-slice-failure.png"),
+      }).catch(() => undefined);
+    }
+    throw error;
   } finally {
     await electronApplication?.close().catch(() => undefined);
     await rm(temporaryRoot, { recursive: true, force: true });
@@ -843,9 +852,8 @@ async function verifyM2SessionWorkspace(
   await filesGrid.getByText("projects", { exact: true }).waitFor();
 
   const notesRow = filesGrid.getByRole("row").filter({ hasText: "notes.txt" });
-  await notesRow.click();
   const inspector = page.getByRole("dialog", { name: "notes.txt", exact: true });
-  await inspector.waitFor();
+  await activateDataGridRow(notesRow, "notes.txt", inspector);
   const fileViews = inspector.getByRole("radiogroup", { name: "File view" });
   await inspector.getByText(M2_INITIAL_FILE_TEXT, { exact: true }).waitFor();
   let downloadCount = fakeMethodCount(await readFakeState(electronApplication), "downloadFileSession");
@@ -880,8 +888,7 @@ async function verifyM2SessionWorkspace(
   await page.keyboard.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
-  await notesRow.click();
-  await inspector.waitFor();
+  await activateDataGridRow(notesRow, "notes.txt", inspector);
   await inspector.getByText(M2_EDITED_CONTENT, { exact: true }).waitFor();
   await page.keyboard.press("Escape");
   await inspector.waitFor({ state: "hidden" });
@@ -997,6 +1004,22 @@ async function verifyM2SessionWorkspace(
   assert.ok(!state.methods.includes("memfilesListSession"), "Darwin must quarantine Linux memory-file RPCs");
 
   await verifyM3SessionTerminal(electronApplication, page, artifactDirectory);
+}
+
+async function activateDataGridRow(
+  row: ReturnType<Page["getByRole"]>,
+  visibleName: string,
+  expectedSurface: ReturnType<Page["getByRole"]>,
+): Promise<void> {
+  await row.getByText(visibleName, { exact: true }).click();
+  try {
+    await expectedSurface.waitFor({ timeout: 5_000 });
+  } catch {
+    // React Aria exposes Enter as the deterministic row action. This fallback
+    // avoids viewport-dependent clicks landing in a trailing action cell.
+    await row.press("Enter");
+    await expectedSurface.waitFor();
+  }
 }
 
 async function verifyM3SessionTerminal(
