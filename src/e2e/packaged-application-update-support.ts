@@ -1,3 +1,6 @@
+import { Buffer } from "node:buffer";
+import { join } from "node:path";
+
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)$/u;
 
@@ -7,6 +10,216 @@ const FORBIDDEN_UPDATE_CONFIG_KEY_PATTERN =
 export interface PackagedUpdateVersions {
   readonly from: string;
   readonly to: string;
+}
+
+export interface PackagedUpdateLaunchProfile {
+  readonly arguments: string[];
+  readonly userDataDirectory: string;
+}
+
+export type ObservedPromiseSettlement<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly reason: unknown; readonly status: "rejected" };
+
+export function observePromiseSettlement<T>(promise: Promise<T>): Promise<ObservedPromiseSettlement<T>> {
+  return promise.then(
+    (value) => ({ status: "fulfilled", value }),
+    (reason: unknown) => ({ reason, status: "rejected" }),
+  );
+}
+
+export function attachCleanupFailure(primaryError: unknown, cleanupError: unknown): void {
+  if (
+    (typeof primaryError !== "object" || primaryError === null) &&
+    typeof primaryError !== "function"
+  ) return;
+  try {
+    Object.defineProperty(primaryError, "cleanupError", {
+      configurable: true,
+      enumerable: false,
+      value: cleanupError,
+    });
+  } catch {
+    // The original failure may be frozen or expose a non-configurable field.
+    // Cleanup callers still log the secondary failure before rethrowing it.
+  }
+}
+
+interface OwnedProcessStream {
+  destroy(): unknown;
+}
+
+interface OwnedApplicationProcess {
+  readonly exitCode: number | null;
+  readonly signalCode: string | null;
+  readonly stdio: readonly (OwnedProcessStream | null | undefined)[];
+  kill(signal: NodeJS.Signals): boolean;
+}
+
+export interface OwnedApplicationForCleanup {
+  close(): Promise<void>;
+  process(): OwnedApplicationProcess;
+}
+
+export async function cleanupOwnedApplication(
+  application: OwnedApplicationForCleanup,
+  label: string,
+  settleTimeoutMs: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(settleTimeoutMs) || settleTimeoutMs <= 0) {
+    throw new Error("Application cleanup timeout must be a positive integer");
+  }
+  let ownedProcess: OwnedApplicationProcess | undefined;
+  const fallbackFailures: string[] = [];
+  try {
+    ownedProcess = application.process();
+  } catch (error) {
+    fallbackFailures.push(`could not inspect the owned process: ${cleanupErrorMessage(error)}`);
+  }
+  const close = observePromiseSettlement(Promise.resolve().then(() => application.close()));
+  const initial = await settlementWithin(close, settleTimeoutMs);
+  if (initial?.status === "fulfilled") return;
+
+  if (ownedProcess) {
+    if (ownedProcess.exitCode === null && ownedProcess.signalCode === null) {
+      try {
+        if (!ownedProcess.kill("SIGKILL")) fallbackFailures.push("owned process kill returned false");
+      } catch (error) {
+        fallbackFailures.push(`could not kill the owned process: ${cleanupErrorMessage(error)}`);
+      }
+    }
+    const destroyedStreams = new Set<OwnedProcessStream>();
+    for (const [index, stream] of ownedProcess.stdio.entries()) {
+      if (!stream || destroyedStreams.has(stream)) continue;
+      destroyedStreams.add(stream);
+      try {
+        stream.destroy();
+      } catch (error) {
+        fallbackFailures.push(`could not destroy owned stdio[${index}]: ${cleanupErrorMessage(error)}`);
+      }
+    }
+  }
+
+  const final = await settlementWithin(close, settleTimeoutMs);
+  if (final?.status === "fulfilled") return;
+  const closeFailure = final?.status === "rejected"
+    ? cleanupErrorMessage(final.reason)
+    : initial?.status === "rejected"
+      ? cleanupErrorMessage(initial.reason)
+      : "timed out after the transport fallback";
+  const fallback = fallbackFailures.length > 0 ? `; ${fallbackFailures.join("; ")}` : "";
+  throw new Error(`${label} application cleanup failed: ${closeFailure}${fallback}`);
+}
+
+async function settlementWithin<T>(
+  observation: Promise<ObservedPromiseSettlement<T>>,
+  timeoutMs: number,
+): Promise<ObservedPromiseSettlement<T> | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<undefined>((resolveDeadline) => {
+    timeout = setTimeout(() => resolveDeadline(undefined), timeoutMs);
+  });
+  try {
+    return await Promise.race([observation, deadline]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function cleanupErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function packagedUpdateLaunchProfile(profileRoot: string): PackagedUpdateLaunchProfile {
+  const userDataDirectory = join(profileRoot, "user-data");
+  return {
+    arguments: ["--enable-sandbox", `--user-data-dir=${userDataDirectory}`],
+    userDataDirectory,
+  };
+}
+
+export function packagedUpdateProfileEnvironment(
+  profileRoot: string,
+  platform: NodeJS.Platform,
+): Readonly<Record<string, string>> {
+  return {
+    APPDATA: join(profileRoot, "AppData", "Roaming"),
+    HOME: profileRoot,
+    LOCALAPPDATA: join(profileRoot, "AppData", "Local"),
+    USERPROFILE: profileRoot,
+    XDG_CACHE_HOME: join(profileRoot, ".cache"),
+    XDG_CONFIG_HOME: join(profileRoot, ".config"),
+    XDG_DATA_HOME: join(profileRoot, ".local", "share"),
+    // Electron resolves macOS home directories through Core Foundation, which
+    // intentionally ignores HOME. Keep those application paths aligned with
+    // the explicit user-data directory used by controlled Playwright launches.
+    ...(platform === "darwin" ? { CFFIXED_USER_HOME: profileRoot } : {}),
+  };
+}
+
+export interface WindowsAuthenticodeInspection {
+  readonly status: string;
+  readonly statusMessage: string;
+  readonly subject: string;
+  readonly thumbprint: string;
+}
+
+export interface WindowsAuthenticodeInspectionCommand {
+  readonly arguments: readonly string[];
+  readonly executable: "pwsh.exe";
+}
+
+export function windowsAuthenticodeInspectionCommand(
+  executablePath: string,
+): WindowsAuthenticodeInspectionCommand {
+  const encodedPath = Buffer.from(executablePath, "utf16le").toString("base64");
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$path = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedPath}'))`,
+    "if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Authenticode target is missing' }",
+    "$signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop",
+    "if ($null -eq $signature) { throw 'Get-AuthenticodeSignature returned no result' }",
+    "if ($null -eq $signature.SignerCertificate) { throw 'Authenticode signer certificate is missing' }",
+    "[PSCustomObject]@{ Status = $signature.Status.ToString(); " +
+      "StatusMessage = $signature.StatusMessage.ToString(); " +
+      "Subject = $signature.SignerCertificate.Subject.ToString(); " +
+      "Thumbprint = $signature.SignerCertificate.Thumbprint.ToString() } | ConvertTo-Json -Compress",
+  ].join("; ");
+  return {
+    arguments: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    executable: "pwsh.exe",
+  };
+}
+
+export function parseWindowsAuthenticodeInspection(content: string): WindowsAuthenticodeInspection {
+  const value = JSON.parse(content) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Authenticode inspection must return one JSON object");
+  }
+  const record = value as Record<string, unknown>;
+  const expectedKeys = ["Status", "StatusMessage", "Subject", "Thumbprint"];
+  if (
+    Object.keys(record).length !== expectedKeys.length ||
+    expectedKeys.some((key) => typeof record[key] !== "string")
+  ) {
+    throw new Error("Authenticode inspection returned an unexpected JSON shape");
+  }
+  const thumbprint = record["Thumbprint"] as string;
+  if (!/^[A-F0-9]{40}$/iu.test(thumbprint)) {
+    throw new Error("Authenticode inspection returned an invalid certificate thumbprint");
+  }
+  return {
+    status: record["Status"] as string,
+    statusMessage: record["StatusMessage"] as string,
+    subject: record["Subject"] as string,
+    thumbprint: thumbprint.toUpperCase(),
+  };
 }
 
 interface ParsedPrereleaseVersion {
