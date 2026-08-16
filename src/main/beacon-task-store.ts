@@ -25,7 +25,26 @@ const MAX_CONCURRENT_TASK_CANCELLATIONS = 8;
 const MAX_CONCURRENT_TASK_REFRESHES = 16;
 const MAX_TASK_CATALOGS = 512;
 const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
-const CANCELLABLE_TASK_DESCRIPTIONS = new Set(["Ping", "SetEnvReq", "UnsetEnvReq", "OpenSession"]);
+const CANCELLABLE_TASK_DESCRIPTIONS = new Set([
+  "Ping",
+  "SetEnvReq",
+  "UnsetEnvReq",
+  "OpenSession",
+  "ExecuteReq",
+  "ExecuteWindowsReq",
+  "ExecuteChildrenReq",
+  "InvokeExecuteAssemblyReq",
+  "InvokeInProcExecuteAssemblyReq",
+  "TaskReq",
+  "SideloadReq",
+  "SpawnDllReq",
+  "InvokeMigrateReq",
+  "RunAsReq",
+  "MakeTokenReq",
+  "ImpersonateReq",
+  "RevToSelfReq",
+  "GetPrivsReq",
+]);
 
 interface InternalTask {
   taskId: string;

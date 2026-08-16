@@ -106,6 +106,21 @@ the wrapper. There is still no arbitrary method-name or request-object
 dispatcher. Beacon-mode M2 support has not landed and remains required before
 M2 can be complete.
 
+The M4 overlay adds named session and beacon wrappers for process execution and
+children, assembly, raw shellcode, sideload, reflective DLL execution,
+migration, Metasploit generation/injection, token identity, and privilege
+workflows. It also adds session-only wrappers for SSH, executable backdoor, DLL
+hijack, get-system, and the remote-service primitives used by the main-owned
+psexec composite. Every method builds a canonical protobuf request from typed
+parameters and an exact main-owned target ID; there is still no method-name or
+request-object dispatcher. Binary inputs and byte-form credential artifacts use
+bounded artifact channels, and wrapper-owned mutable buffer clones are cleared
+after settlement. Target `Response.Err` values remain available only for
+main-process classification and are never returned as renderer diagnostics.
+Submitted beacon operations return the exact upstream task ID so the main
+operation journal can reconcile task summary state without decoding arbitrary
+M4 result content through the M1 typed-result path.
+
 Packaged WireGuard operator transport and native-helper certification are
 deferred beyond M0; mTLS is the M0 packaged transport baseline. This does not
 change the independently classified implant-side WireGuard commands.

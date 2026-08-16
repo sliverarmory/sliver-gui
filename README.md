@@ -48,6 +48,12 @@ configuration files and their private keys stay in the Electron main process.
   and reviewed paste controls; and see lifecycle, pressure, and byte-count
   metadata without terminal content entering React state, snapshots, Activity,
   or logs.
+- A target execution workbench for bounded process, assembly, raw-shellcode,
+  shared-library, reflective-DLL, migration, Metasploit, psexec, SSH, backdoor,
+  DLL-hijack, token, identity, get-system, child-process, and privilege
+  workflows. Electron main owns the closed capability catalog, native artifacts,
+  one-use review plans, credentials, target revalidation, output retention, and
+  asynchronous beacon-task correlation.
 - Session workbench mutations are a closed typed allowlist. Destructive or
   replacement actions use expiring one-use review plans, target and platform
   restrictions are revalidated in Electron main, and local paths and binary
@@ -71,13 +77,15 @@ configuration files and their private keys stay in the Electron main process.
   Awesome SVG icons.
 
 The operator accepted and completed the session-first M2 scope on 2026-08-10,
-unlocking M3. The session-shell-only M3 implementation is delivered and
-**awaiting operator acceptance**; M4 has not started. Deferred M2 work remains
-visible in the roadmap: supported beacon execution, complete cross-platform
-real-server evidence, the central authoritative capability service,
-mutation-stable anchor cursors, and remote loot dispositions. Current workbench
-continuation tokens are bounded offsets, so a changing remote inventory can
-still duplicate or skip entries between pages.
+then accepted the delivered session-shell M3 scope and explicitly authorized M4
+on 2026-08-15. The bounded M4 execution and privilege workbench is delivered and
+**awaiting operator acceptance**; M5 has not started. Deferred M2 work remains
+visible in the roadmap: supported beacon execution for the M2 reconnaissance
+families, complete cross-platform real-server evidence, the central
+authoritative capability service, mutation-stable anchor cursors, and remote
+loot dispositions. Current workbench continuation tokens are bounded offsets,
+so a changing remote inventory can still duplicate or skip entries between
+pages.
 
 M3 does not claim beacon-shell parity because the pinned upstream command tree
 has no beacon shell workflow. It also does not claim forwarding, reverse
@@ -88,6 +96,19 @@ allocation is requested but not confirmed by the upstream protocol, and resize
 and remote closure are best-effort operations. See
 [M3 verification](docs/m3-verification.md) for the exact boundary and deferred
 evidence.
+
+M4 does not claim complete command-option parity. Psexec, SSH, executable
+backdoor, DLL hijack, and get-system are session-only. Supported beacon results
+are accepted only after exact task, description, operation, and protobuf
+verification, with bounded decoded output available for native save. The pinned
+implant's empty `TaskReq` result cannot distinguish shellcode, Metasploit, or
+Metasploit-inject success from failure, so those beacon outcomes remain unknown.
+Synchronous session RPCs have no safe post-dispatch cancellation; interactive
+and advanced-transform shellcode modes remain deferred; and real
+Windows/Linux target-package evidence is still required. Review plans and
+inputs are never replayed after transport uncertainty. See
+[M4 verification](docs/m4-verification.md) for the delivered boundary and
+operator checklist.
 
 ## Development
 
@@ -152,9 +173,9 @@ npm run test:m0
 24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` retains the
 M0 current-platform regression gate. `npm run test:e2e:electron` exercises the
 M1 target/task path, the dedicated session-first M2 workbench, and the
-deterministic M3 managed-shell path through the production renderer, frozen
-preload, trusted IPC, and an injected Sliver client; `npm run test:e2e:m1`
-remains an alias for that current-slice lane.
+deterministic M3 managed-shell and M4 execution paths through the production
+renderer, frozen preload, trusted IPC, and an injected Sliver client;
+`npm run test:e2e:m1` remains an alias for that current-slice lane.
 Opt-in actual-server package tests remain separate because they require an
 authorized disposable server and operator configuration.
 

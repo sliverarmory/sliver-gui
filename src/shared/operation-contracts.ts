@@ -1,4 +1,5 @@
 import type { PageResult } from "./contracts.js";
+import type { ExecutionOperationId } from "./execution-contracts.js";
 import type { SessionWorkbenchOperationId } from "./session-contracts.js";
 import type { TargetMode, TargetRef } from "./target-contracts.js";
 
@@ -21,7 +22,7 @@ export type TargetOperationId = (typeof TARGET_OPERATION_IDS)[number];
  * dispatcher surface; session workbench identifiers are journal-only here and
  * keep their own closed input parser.
  */
-export type OperationRecordId = TargetOperationId | SessionWorkbenchOperationId;
+export type OperationRecordId = TargetOperationId | SessionWorkbenchOperationId | ExecutionOperationId;
 
 export interface PingOperationInput {
   operationId: "target.ping";

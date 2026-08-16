@@ -14,7 +14,9 @@ import type {
   TargetOperationState,
 } from "../../../shared/operation-contracts";
 import { isTargetOperationId } from "../../../shared/operation-contracts";
+import { isExecutionOperationId } from "../../../shared/execution-contracts";
 import type { SessionWorkbenchOperationId } from "../../../shared/session-contracts";
+import { executionActionPresentation } from "./target-execution-model";
 
 export type TargetModeFilter = "all" | TargetMode;
 
@@ -124,6 +126,7 @@ export function beaconTaskCountLabel(beacon: BeaconSummary): string {
 
 export function operationLabel(operationId: OperationRecordId): string {
   if (isTargetOperationId(operationId)) return OPERATION_LABELS[operationId];
+  if (isExecutionOperationId(operationId)) return executionActionPresentation(operationId).label;
   return SESSION_OPERATION_LABELS[operationId];
 }
 

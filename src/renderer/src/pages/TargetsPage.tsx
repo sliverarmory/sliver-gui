@@ -14,6 +14,7 @@ import {
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
+import { Sheet } from "@heroui-pro/react";
 import { ScrollShadow } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -86,6 +87,7 @@ import {
   taskStateColor,
 } from "./target-page-model";
 import type { TargetModeFilter } from "./target-page-model";
+import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 export interface TargetsPageProps {
   mode: TargetMode;
@@ -113,6 +115,11 @@ interface TargetInventoryState {
   refs: Record<string, TargetRef>;
   sessionPage: PageSummary;
   beaconPage: PageSummary;
+}
+
+interface ExecutionSheetTarget {
+  ref: TargetRef;
+  backendIncarnation: string;
 }
 
 const DEFAULT_OPERATION_DRAFT: OperationDraft = {
@@ -163,6 +170,7 @@ export function TargetsPage({
   const [actionResult, setActionResult] = useState<TargetActionExecutionResult>();
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
+  const [executionSheetTarget, setExecutionSheetTarget] = useState<ExecutionSheetTarget>();
   const targetInventoryIdentity = targetCatalogIdentity(snapshot, mode);
   const normalizedTargetQuery = normalizeTargetCatalogQuery(query);
   const targetSearchIdentity = `${targetInventoryIdentity}\0${mode}\0${normalizedTargetQuery}`;
@@ -227,6 +235,14 @@ export function TargetsPage({
     : `${snapshot.connection.epoch}:${snapshot.connection.incarnation ?? 0}:${snapshot.connection.server ?? ""}:${snapshot.connection.configName ?? ""}`;
   const backendIncarnationRef = useRef(backendIncarnation);
   backendIncarnationRef.current = backendIncarnation;
+  const activeExecutionIdentity = exactTargetRefIdentity(activeRef);
+  const executionSheetIsCurrent = presentation === "catalog" &&
+    mode === "beacon" &&
+    active?.mode === "beacon" &&
+    activeRef?.mode === "beacon" &&
+    active.id === activeRef.id &&
+    executionSheetTarget?.backendIncarnation === backendIncarnation &&
+    exactTargetRefIdentity(executionSheetTarget.ref) === activeExecutionIdentity;
   const taskReadCapability = capabilityFor(snapshot.targetContext.capabilities, "beacon.tasks.read");
   const dedicatedTargetIsCurrent = presentation !== "dedicated" || (
     mode === "beacon" &&
@@ -599,6 +615,10 @@ export function TargetsPage({
     setSelectedTaskIdentity(undefined);
   }, [loadTasks]);
 
+  useEffect(() => {
+    if (executionSheetTarget && !executionSheetIsCurrent) setExecutionSheetTarget(undefined);
+  }, [executionSheetIsCurrent, executionSheetTarget]);
+
   const selectTarget = useCallback(async (target: TargetSummary) => {
     const ref = presentedTargetInventory.refs[targetRowKey(target)];
     if (!ref) {
@@ -869,6 +889,9 @@ export function TargetsPage({
         ? snapshot.targetContext.unavailableReason
         : undefined}
       onBackground={presentation === "catalog" ? () => void backgroundTarget() : undefined}
+      onOpenExecution={presentation === "catalog" && activeRef?.mode === "beacon" && active?.id === activeRef.id
+        ? () => setExecutionSheetTarget({ ref: activeRef, backendIncarnation })
+        : undefined}
       onPopOut={presentation === "catalog" ? () => void openInteractionWindow() : undefined}
       onPrepareAction={(action) => void prepareAction(action)}
       onWatchChange={(enabled) => void setBeaconWatch(enabled)}
@@ -1008,7 +1031,17 @@ export function TargetsPage({
         </section>
 
         {targetDetail}
-      </div> : targetDetail}
+      </div> : (
+        <>
+          {targetDetail}
+          {activeRef?.mode === "beacon" ? (
+            <TargetExecutionWorkbench
+              expectedTarget={activeRef}
+              targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
+            />
+          ) : null}
+        </>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <OperationHistory
@@ -1064,6 +1097,15 @@ export function TargetsPage({
           onRefresh={() => void loadTasks()}
         />
       ) : null}
+
+      <BeaconExecutionSheet
+        expectedTarget={executionSheetIsCurrent ? executionSheetTarget?.ref : undefined}
+        isOpen={executionSheetIsCurrent}
+        targetIdentity={`beacon-catalog:${backendIncarnation}:${activeExecutionIdentity ?? "no-target"}`}
+        onOpenChange={(open) => {
+          if (!open) setExecutionSheetTarget(undefined);
+        }}
+      />
 
       <OperationDetailModal
         isCurrent={() => Boolean(
@@ -1126,6 +1168,7 @@ function TargetDetail({
   watchEnabled,
   unavailableReason,
   onBackground,
+  onOpenExecution,
   onPopOut,
   onPrepareAction,
   onWatchChange,
@@ -1142,6 +1185,7 @@ function TargetDetail({
   watchEnabled: boolean;
   unavailableReason: string | undefined;
   onBackground: (() => void) | undefined;
+  onOpenExecution: (() => void) | undefined;
   onPopOut: (() => void) | undefined;
   onPrepareAction: (action: DestructiveTargetActionId) => void;
   onWatchChange: (enabled: boolean) => void;
@@ -1272,6 +1316,19 @@ function TargetDetail({
         ) : null}
       </div>
 
+      {onOpenExecution ? (
+        <div className="flex items-center justify-between gap-3 border-t border-separator px-4 py-4">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-foreground">Execution</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted">Configure typed process, payload, remote, and identity actions.</p>
+          </div>
+          <Button className="shrink-0" size="sm" variant="secondary" onPress={onOpenExecution}>
+            <FontAwesomeIcon aria-hidden icon={faBolt} />
+            Execution
+          </Button>
+        </div>
+      ) : null}
+
       <div className="border-t border-separator px-4 py-4">
         <OperationComposer
           active={active}
@@ -1302,6 +1359,39 @@ function TargetDetail({
         })}
       </div>
     </aside>
+  );
+}
+
+function BeaconExecutionSheet({
+  expectedTarget,
+  isOpen,
+  targetIdentity,
+  onOpenChange,
+}: {
+  expectedTarget: TargetRef | undefined;
+  isOpen: boolean;
+  targetIdentity: string;
+  onOpenChange: (open: boolean) => void;
+}): React.JSX.Element {
+  return (
+    <Sheet isOpen={isOpen && expectedTarget !== undefined} placement="right" onOpenChange={onOpenChange}>
+      <Sheet.Backdrop variant="blur">
+        <Sheet.Content className="h-full w-full max-w-5xl">
+          <Sheet.Dialog className="h-full">
+            <Sheet.CloseTrigger />
+            <Sheet.Header>
+              <Sheet.Heading>Beacon execution</Sheet.Heading>
+              <p className="mt-1 text-sm text-muted">Actions remain pinned to the exact selected beacon and backend incarnation.</p>
+            </Sheet.Header>
+            <Sheet.Body className="min-h-0 overflow-auto bg-default p-4 sm:p-6">
+              {isOpen && expectedTarget ? (
+                <TargetExecutionWorkbench expectedTarget={expectedTarget} targetIdentity={targetIdentity} />
+              ) : null}
+            </Sheet.Body>
+          </Sheet.Dialog>
+        </Sheet.Content>
+      </Sheet.Backdrop>
+    </Sheet>
   );
 }
 
@@ -2432,6 +2522,12 @@ function targetActionLabel(action: DestructiveTargetActionId): string {
 function targetRefIdentity(target: TargetRef | null | undefined): string | undefined {
   return target
     ? `${target.backendEpoch}:${target.mode}:${target.id}:${target.fingerprint}`
+    : undefined;
+}
+
+function exactTargetRefIdentity(target: TargetRef | null | undefined): string | undefined {
+  return target
+    ? `${target.backendEpoch}:${target.mode}:${target.id}:${target.domainRevision}:${target.fingerprint}`
     : undefined;
 }
 

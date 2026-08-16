@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
-  "reviewVersion": 3,
+  "reviewVersion": 4,
   "reviewPolicy": "Every generated reachable node has an explicit product classification. Regeneration never edits this file.",
   "scopeDecisions": [
     {
@@ -13,10 +13,17 @@
     },
     {
       "id": "operator-streaming.m3-session-shell",
-      "status": "in-progress",
+      "status": "complete",
       "milestone": "M3",
       "operatorScope": true,
-      "notes": "The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits."
+      "notes": "The operator accepted the bounded session-shell M3 scope on 2026-08-15. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits. Individual shell command rows stay in progress until their remaining parity and certification evidence is complete."
+    },
+    {
+      "id": "operator-execution.m4-bounded-workbench",
+      "status": "in-progress",
+      "milestone": "M4",
+      "operatorScope": true,
+      "notes": "The bounded execution and privilege workbench is delivered and awaits operator acceptance. The closed session/beacon action surface, main-owned review and artifact boundary, canonical wrappers, exact task-bound beacon protobuf decoding and output save, credential zeroization, and deterministic Electron journey are implemented. Session-only composites, unverifiable beacon TaskReq results for shellcode and Metasploit, synchronous session cancellation, long-tail command options, real-target certification, and all individual parity rows remain in progress."
     },
     {
       "id": "operator-transport.wireguard",
@@ -186,7 +193,7 @@
     {
       "id": "implant.backdoor",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -220,9 +227,13 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.backdoor"
+        "parity-contract:implant.backdoor",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "A reviewed Windows-session backdoor workflow, closed wrapper, profile preflight, and fixed outcome classification are implemented. Beacon mode and real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.background",
@@ -901,7 +912,7 @@
     {
       "id": "implant.dllhijack",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -938,9 +949,14 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.dllhijack"
+        "parity-contract:implant.dllhijack",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-native-artifact-zeroization",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "A reviewed Windows-session DLL-hijack workflow supports profile or bounded native-file input with main-owned artifact capabilities. Beacon mode and real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.docs",
@@ -1193,7 +1209,7 @@
     {
       "id": "implant.execute",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1240,14 +1256,20 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.execute"
+        "parity-contract:implant.execute",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed process execution is implemented for sessions and beacons with bounded arguments, environment, timeout, platform-gated modifiers, exact beacon protobuf verification, bounded output retention, and native save. Upstream loot, name, and ignore-stderr dispositions plus real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.execute-assembly",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1294,14 +1316,20 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.execute-assembly"
+        "parity-contract:implant.execute-assembly",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-native-artifact-zeroization",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Windows session and beacon assembly execution is implemented through bounded main-owned native input, architecture-aware validation, exact beacon protobuf verification, bounded output save, and a reviewed action surface. Loot/name dispositions and real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.execute-shellcode",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1350,14 +1378,20 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.execute-shellcode"
+        "parity-contract:implant.execute-shellcode",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-native-artifact-zeroization",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed raw-shellcode dispatch is implemented for sessions and beacons with bounded native input, declared architecture, PID, RWX, and timeout validation. The pinned beacon TaskReq result is identical for success and failure, so completion remains outcome-unknown; interactive streaming and upstream encoder, transform, process, and bypass option parity also remain pending."
     },
     {
       "id": "implant.execute.children",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1391,9 +1425,14 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.execute.children"
+        "parity-contract:implant.execute.children",
+        "m4-bounded-read-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-read-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "The execution workbench exposes bounded background-child inventory for sessions and exact task-bound, paged beacon result decoding through closed wrappers. Cross-platform real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.extensions",
@@ -1560,7 +1599,7 @@
     {
       "id": "implant.getprivs",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1593,14 +1632,19 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.getprivs"
+        "parity-contract:implant.getprivs",
+        "m4-bounded-read-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-read-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "The Windows privilege inventory is implemented as a bounded session read and exact task-bound, paged beacon result decode through closed wrappers. Real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.getsystem",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1633,9 +1677,13 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.getsystem"
+        "parity-contract:implant.getsystem",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "A reviewed Windows-session get-system workflow is implemented with main-owned implant configuration and hosting-process validation. Exact resulting-session correlation and real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.getuid",
@@ -1867,7 +1915,7 @@
     {
       "id": "implant.impersonate",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -1900,9 +1948,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.impersonate"
+        "parity-contract:implant.impersonate",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed Windows token impersonation is implemented for sessions and beacons with requested-identity disclosure, main-process capability checks, and exact beacon response verification. Real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.info",
@@ -2081,7 +2135,7 @@
     {
       "id": "implant.make-token",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -2118,9 +2172,16 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.make-token"
+        "parity-contract:implant.make-token",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-secret-artifact-zeroization",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed Windows token creation is implemented for sessions and beacons with uncontrolled renderer credentials, one-operation byte ownership, mutable-byte zeroization, and exact beacon response verification. Real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.memfiles",
@@ -2244,7 +2305,7 @@
     {
       "id": "implant.migrate",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -2280,9 +2341,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.migrate"
+        "parity-contract:implant.migrate",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed Windows migration is implemented for sessions and beacons with exact PID-or-process validation, main-owned implant configuration, exact beacon Success/PID verification, and outcome-unknown handling without replay. Real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.mkdir",
@@ -2369,7 +2436,7 @@
     {
       "id": "implant.msf",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -2408,14 +2475,20 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.msf"
+        "parity-contract:implant.msf",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed Metasploit payload generation and dispatch is implemented for sessions and beacons with bounded listener, encoder, iteration, and timeout fields. The pinned beacon TaskReq result is identical for success and failure, so completion remains outcome-unknown; real-target evidence also remains pending."
     },
     {
       "id": "implant.msf-inject",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -2455,9 +2528,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.msf-inject"
+        "parity-contract:implant.msf-inject",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed Metasploit payload generation and PID-injection dispatch is implemented for sessions and beacons with bounded listener, encoder, iteration, and timeout fields. The pinned beacon TaskReq result is identical for success and failure, so completion remains outcome-unknown; real-target evidence also remains pending."
     },
     {
       "id": "implant.mv",
@@ -3054,7 +3133,7 @@
     {
       "id": "implant.psexec",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -3092,9 +3171,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.psexec"
+        "parity-contract:implant.psexec",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-native-artifact-zeroization",
+        "m4-psexec-composite-cleanup",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "A reviewed Windows-session psexec composite supports profile generation or bounded native executable input, UNC upload, service start, and best-effort cleanup with an explicit partial disposition. Beacon mode, post-dispatch cancellation, and real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.pwd",
@@ -3558,7 +3643,7 @@
     {
       "id": "implant.rev2self",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -3591,9 +3676,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.rev2self"
+        "parity-contract:implant.rev2self",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed revert-to-self is implemented for Windows sessions and beacons with current/requested identity review, exact beacon response verification, and fixed result classification. Real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.rm",
@@ -3763,7 +3854,7 @@
     {
       "id": "implant.runas",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -3803,9 +3894,16 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.runas"
+        "parity-contract:implant.runas",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-secret-artifact-zeroization",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed Windows run-as is implemented for sessions and beacons with requested-identity disclosure, uncontrolled credentials, one-operation byte ownership, mutable-byte zeroization, exact beacon response verification, and bounded output save. Real-target evidence remains pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.screenshot",
@@ -4183,7 +4281,7 @@
     {
       "id": "implant.sideload",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -4226,9 +4324,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.sideload"
+        "parity-contract:implant.sideload",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-native-artifact-zeroization",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed shared-library sideload is implemented for sessions and beacons with bounded native input, host-process, entry-point, argument, keep-alive, exact beacon protobuf verification, bounded output save, and platform validation. Upstream loot, name, and command-specific save dispositions remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.socks5",
@@ -4355,7 +4459,7 @@
     {
       "id": "implant.spawndll",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -4396,14 +4500,20 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.spawndll"
+        "parity-contract:implant.spawndll",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-native-artifact-zeroization",
+        "m4-external-beacon-task-reconciliation",
+        "m4-exact-beacon-result-decoding",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "Reviewed reflective-DLL execution is implemented for Windows sessions and beacons with bounded native input, host process, export, arguments, keep-alive, timeout validation, exact beacon protobuf verification, and bounded output save. Upstream loot, name, parent-process, process-argument, and command-specific save dispositions remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.ssh",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M4",
       "restrictionReview": {
         "targetModes": [
@@ -4445,9 +4555,15 @@
       ],
       "guiSurface": "execution",
       "testIds": [
-        "parity-contract:implant.ssh"
+        "parity-contract:implant.ssh",
+        "m4-contract-registry-dispatch",
+        "m4-canonical-wrapper-requests",
+        "m4-exact-target-reviewed-execution",
+        "m4-native-artifact-zeroization",
+        "m4-secret-artifact-zeroization",
+        "m4-renderer-action-surfaces"
       ],
-      "notes": "Registered implant workflow assigned to M4."
+      "notes": "A reviewed session SSH workflow supports password, bounded main-owned private key, and Kerberos keytab authentication without retaining credentials or native paths. Beacon mode, upstream loot disposition, post-dispatch cancellation, and real-target evidence remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "implant.tail",

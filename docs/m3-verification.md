@@ -1,12 +1,14 @@
 # M3 managed-session-shell verification
 
 Date: 2026-08-10
-Status: **Delivered; awaiting operator acceptance**
+Status: **Accepted session-shell scope (2026-08-15)**
 Acceptance-feedback follow-up: 2026-08-14
 
 This record covers the session-shell-only M3 tranche. Automated implementation
-and deterministic Electron evidence are complete, but M3 remains open until the
-operator tests and accepts it. M4 has not started.
+and deterministic Electron evidence were completed before the operator tested
+the GUI, supplied follow-up polish feedback, accepted this bounded scope, and
+explicitly requested M4 on 2026-08-15. The acceptance does not expand M3 to any
+of the deferrals below.
 
 The pinned upstream Sliver command tree exposes interactive shells for sessions,
 not beacons, so this milestone makes no beacon-shell claim. Port forwarding,
@@ -34,10 +36,11 @@ improvements without widening the delivered shell tranche:
   target's task and presence data; it does not copy source-window state or
   implicitly transfer managed shells.
 
-This follow-up is acceptance evidence for the operator to exercise, not an M3
-acceptance decision. M3 remains **Awaiting operator acceptance**, and M4 has not
-started. The historical automated results below remain the 2026-08-10 delivery
-record and are not rewritten by this follow-up.
+This 2026-08-14 follow-up was acceptance evidence rather than the acceptance
+decision itself. The later 2026-08-15 decision accepted the delivered scope and
+unlocked M4 without transferring managed shells implicitly or expanding M3.
+The historical automated results below remain the 2026-08-10 delivery record
+and are not rewritten by this follow-up.
 
 ### Follow-up automated evidence
 
@@ -261,8 +264,8 @@ cleanup scope is understood.
     interaction window maintains independent operation/task state, and
     reloading it restores the same exact authorized target without exposing a
     target identifier in the URL.
-12. Explicitly accept or reject M3. Do not begin M4 on the basis of automated
-   evidence alone.
+12. Record the explicit acceptance decision. The operator accepted this
+    delivered session-shell scope and authorized M4 on 2026-08-15.
 
 ## Deferred evidence and parity
 

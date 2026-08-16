@@ -74,7 +74,9 @@ function installSliverAPI(
     getTerminalRuntime: vi.fn(failedOperation),
     getSnapshot: vi.fn().mockResolvedValue(initialSnapshot),
     getTargetOperation: vi.fn(failedOperation),
+    getExecutionResult: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
+    listExecutionCatalog: vi.fn(failedOperation),
     listSavedConfigs,
     listSessionShells: vi.fn(failedOperation),
     listBeaconTasks: vi.fn(failedOperation),
@@ -97,6 +99,7 @@ function installSliverAPI(
     openWindow: vi.fn(failedOperation),
     prepareStopAllJobs: vi.fn(failedOperation),
     prepareStopJob: vi.fn(failedOperation),
+    prepareExecutionAction: vi.fn(failedOperation),
     prepareTargetAction: vi.fn(failedOperation),
     refresh: vi.fn(failedOperation),
     removeSavedConfig: vi.fn(failedOperation),
@@ -111,8 +114,12 @@ function installSliverAPI(
     prepareSessionDestructiveAction: vi.fn(failedOperation),
     prepareSessionShell: vi.fn(failedOperation),
     runSessionWorkbench: vi.fn(failedOperation),
+    runExecutionRead: vi.fn(failedOperation),
     actOnSessionShell: vi.fn(failedOperation),
     submitTargetOperation: vi.fn(failedOperation),
+    executeExecutionPlan: vi.fn(failedOperation),
+    discardExecutionPlan: vi.fn(failedOperation),
+    saveExecutionResult: vi.fn(failedOperation),
   };
 
   Object.defineProperty(window, "sliver", {

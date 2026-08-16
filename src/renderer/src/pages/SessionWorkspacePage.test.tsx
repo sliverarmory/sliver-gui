@@ -231,8 +231,23 @@ function operation(overrides: Partial<TargetOperationRecord> = {}): TargetOperat
 
 function installAPI(operations: TargetOperationRecord[] = []): Pick<
   SliverDesktopAPI,
-  "listTargetOperations" | "listSessionShells" | "openInteractionWindow" | "selectTarget"
+  "listExecutionCatalog" | "listTargetOperations" | "listSessionShells" | "openInteractionWindow" | "selectTarget"
 > {
+  const listExecutionCatalog = vi.fn().mockResolvedValue({
+    ok: true,
+    value: {
+      target: session,
+      targetRef: sessionRef,
+      backend: {
+        configId: "config-1",
+        configName: "M2 test",
+        server: "127.0.0.1:53137",
+        operator: "m2-verification",
+        epoch: 7,
+      },
+      capabilities: [],
+    },
+  });
   const listTargetOperations = vi.fn().mockResolvedValue({
     ok: true,
     value: { items: operations, page: { limit: 100, total: operations.length, truncated: false } },
@@ -244,6 +259,7 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
   const openInteractionWindow = vi.fn().mockResolvedValue({ ok: true });
   const selectTarget = vi.fn().mockResolvedValue({ ok: false, error: "No selection configured" });
   const api = {
+    listExecutionCatalog,
     listSessionShells,
     listTargetOperations,
     openInteractionWindow,
@@ -254,7 +270,7 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
     configurable: true,
     value: api,
   });
-  return { listSessionShells, listTargetOperations, openInteractionWindow, selectTarget };
+  return { listExecutionCatalog, listSessionShells, listTargetOperations, openInteractionWindow, selectTarget };
 }
 
 describe("SessionWorkspacePage", () => {
@@ -262,6 +278,7 @@ describe("SessionWorkspacePage", () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
     const filesPanel = vi.fn(() => <section aria-label="Injected files panel">Remote files</section>);
+    const executionPanel = vi.fn(() => <section aria-label="Injected execution panel">Execution workbench</section>);
     const terminalUnmounted = vi.fn();
     const TerminalProbe = (): React.JSX.Element => {
       useEffect(() => () => terminalUnmounted(), []);
@@ -273,7 +290,7 @@ describe("SessionWorkspacePage", () => {
 
     render(
       <SessionWorkspacePage
-        panels={{ files: filesPanel, terminal: terminalPanel }}
+        panels={{ execution: executionPanel, files: filesPanel, terminal: terminalPanel }}
         route={route}
         session={session}
         snapshot={snapshot}
@@ -286,20 +303,30 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Processes" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Execution" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Environment" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Shell" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Terminal" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Registry" })).not.toBeInTheDocument();
     const tabs = screen.getAllByRole("tab");
+    const processesIndex = tabs.findIndex((tab) => tab.textContent?.includes("Processes"));
+    const executionIndex = tabs.findIndex((tab) => tab.textContent?.includes("Execution"));
+    const environmentIndex = tabs.findIndex((tab) => tab.textContent?.includes("Environment"));
     const terminalIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Shell" || tab.textContent?.includes("Shell"));
     const activityIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Activity" || tab.textContent?.includes("Activity"));
     expect(terminalIndex).toBeGreaterThanOrEqual(0);
     expect(activityIndex).toBe(terminalIndex + 1);
+    expect(executionIndex).toBe(processesIndex + 1);
+    expect(environmentIndex).toBe(executionIndex + 1);
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     expect(screen.getByRole("region", { name: "Injected files panel" })).toHaveTextContent("Remote files");
     expect(filesPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
+
+    await user.click(screen.getByRole("tab", { name: "Execution" }));
+    expect(screen.getByRole("region", { name: "Injected execution panel" })).toHaveTextContent("Execution workbench");
+    expect(executionPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
 
     await user.click(screen.getByRole("tab", { name: "Shell" }));
     const mountedTerminal = screen.getByRole("region", { name: "Injected terminal panel" });
@@ -355,6 +382,26 @@ describe("SessionWorkspacePage", () => {
       connectionIncarnation: 4,
       targetFingerprint: otherSessionRef.fingerprint,
     });
+  });
+
+  it("mounts the execution workbench with the exact active session reference", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    expect(api.listExecutionCatalog).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("tab", { name: "Execution" }));
+    expect(await screen.findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
+    expect(api.listExecutionCatalog).toHaveBeenCalledOnce();
   });
 
   it("commits an exact selection response after its requested-target event arrives first", async () => {

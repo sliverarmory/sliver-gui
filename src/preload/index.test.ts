@@ -75,6 +75,13 @@ const invokeArguments = {
   listSessionShells: [{}],
   actOnSessionShell: [{ resourceId: "R".repeat(43), action: "attach" }],
   getTerminalRuntime: [],
+  listExecutionCatalog: [],
+  runExecutionRead: [{ operationId: "execution.children" }],
+  prepareExecutionAction: [{ draft: { operationId: "privilege.revert", timeoutSeconds: 30 } }],
+  executeExecutionPlan: [{ token: "execution_plan_1" }],
+  discardExecutionPlan: [{ token: "execution_plan_1" }],
+  getExecutionResult: [{ requestId: "execution_request_1" }],
+  saveExecutionResult: [{ requestId: "execution_request_1", stream: "combined" }],
 } satisfies InvokeArgumentsByMethod;
 
 const electronMocks = vi.hoisted(() => ({

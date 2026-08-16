@@ -71,6 +71,7 @@ import type {
   BeaconTaskSummary,
   BeaconTasksInvalidationReason,
   OperationPageRequest,
+  OperationRecordId,
   TargetOperationInput,
   TargetOperationId,
   TargetOperationPage,
@@ -103,6 +104,21 @@ import {
   type StreamCloseReason,
   type TerminalRuntimeAsset,
 } from "../shared/stream-contracts.js";
+import type {
+  ExecuteExecutionPlanInput,
+  ExecutionActionDraft,
+  ExecutionActionPlan,
+  ExecutionActionResult,
+  ExecutionArtifactRole,
+  ExecutionCatalog,
+  ExecutionOperationId,
+  ExecutionReadResult,
+  ExecutionResultRequest,
+  PrepareExecutionActionInput,
+  RunExecutionReadInput,
+  SaveExecutionResultInput,
+  SaveExecutionResultResult,
+} from "../shared/execution-contracts.js";
 import {
   artifactFormatFromProto,
   buildImplantConfig,
@@ -173,6 +189,34 @@ import {
   type StreamOwnerBinding,
 } from "./stream-manager.js";
 import { loadTerminalRuntime } from "./terminal-runtime.js";
+import {
+  ExecutionArtifactStore,
+  type ExecutionArtifactScope,
+} from "./execution-artifact-store.js";
+import {
+  assertExecutionOperationSupported,
+  executionCapabilitiesForTarget,
+  executionOperationDescriptor,
+} from "./execution-operation-registry.js";
+import {
+  clearExecutionDraftSecrets,
+  executionArtifactSelections,
+  executionReviewFields,
+  executionWarning,
+  requestedExecutionIdentity,
+} from "./execution-review.js";
+import {
+  dispatchExecutionAction,
+  ExecutionRemoteRejectedError,
+  ExecutionTargetRejectedError,
+  ExecutionWorkbenchInputError,
+  runExecutionRead as runExecutionWorkbenchRead,
+} from "./execution-workbench.js";
+import {
+  decodeExecutionBeaconTask,
+  ExecutionBeaconTaskDecodeError,
+  type DecodedExecutionBeaconTask,
+} from "./execution-beacon-task.js";
 
 interface CertificatePair {
   cert: Buffer;
@@ -213,6 +257,11 @@ interface WindowContext {
   sessionPlanTimers: Map<string, NodeJS.Timeout>;
   sessionWorkbenchAdmissions: Map<string, "standard" | "artifact">;
   sessionShellPrepareAdmissions: Set<string>;
+  executionPlans: Map<string, InternalExecutionPlan>;
+  executionPlanTimers: Map<string, NodeJS.Timeout>;
+  executionAdmissions: Set<string>;
+  executionResults: Map<string, InternalExecutionResult>;
+  executionResultTimers: Map<string, NodeJS.Timeout>;
   taskListAdmissions: Set<string>;
   taskDetailAdmissions: Set<string>;
   taskCancelAdmissions: Set<string>;
@@ -237,6 +286,12 @@ interface ManualRefreshState {
 const GENERATE_TIMEOUT_SECONDS = 15 * 60;
 const MAX_WINDOW_SESSION_SHELL_PREPARES = 2;
 const MAX_GLOBAL_SESSION_SHELL_PREPARES = 16;
+const EXECUTION_PLAN_TTL_MS = 60_000;
+const EXECUTION_RESULT_TTL_MS = 5 * 60_000;
+const MAX_WINDOW_EXECUTION_PLANS = 4;
+const MAX_WINDOW_EXECUTION_RESULTS = 128;
+const MAX_WINDOW_EXECUTION_REQUESTS = 4;
+const MAX_GLOBAL_EXECUTION_REQUESTS = 16;
 const MAX_RECENT_EVENTS = 50;
 const RECONCILE_INTERVAL_MS = 30_000;
 const CERTIFICATE_CAPABILITY_TTL_MS = 5 * 60_000;
@@ -287,10 +342,11 @@ type PoolTaskSignalReason = BeaconTasksInvalidationReason | "connection-interrup
 interface PoolTaskClaim {
   ownerWindowId: number;
   requestId: string;
-  operationId: TargetOperationId;
+  operationId: OperationRecordId;
   beaconId: string;
   claimedAt: number;
   expectedPingNonce?: number;
+  requiresResultVerification: boolean;
   recoverable: boolean;
 }
 
@@ -342,6 +398,43 @@ interface InternalSessionActionPlan {
   resourceFingerprint?: string;
 }
 
+interface InternalExecutionArtifact {
+  role: ExecutionArtifactRole | "stdout" | "stderr" | "combined";
+  scope: ExecutionArtifactScope;
+  handle: string;
+}
+
+interface InternalExecutionPlan {
+  token: string;
+  expiresAt: number;
+  contentsId: number;
+  poolKey: string;
+  epoch: number;
+  connectionAttempt: number;
+  target: TargetRef;
+  journalTarget: ResolvedOperationTarget;
+  draft: ExecutionActionDraft;
+  artifacts: Array<InternalExecutionArtifact & { role: ExecutionArtifactRole }>;
+  review: ExecutionActionPlan;
+}
+
+interface InternalExecutionResult {
+  value: ExecutionActionResult;
+  expiresAt: number;
+  output: Partial<Record<"stdout" | "stderr" | "combined", InternalExecutionArtifact>>;
+  poolKey: string;
+  epoch: number;
+  connectionAttempt: number;
+  target: TargetRef;
+}
+
+type RefreshedExecutionBeaconTask =
+  | { state: "pending" }
+  | { state: "canceled" }
+  | { state: "failed" }
+  | { state: "outcome-unknown" }
+  | { state: "decoded"; decoded: DecodedExecutionBeaconTask };
+
 interface SessionSaveIntent {
   readonly destinationKey: string;
   readonly destinationPath: string;
@@ -379,10 +472,12 @@ export class ConnectionRegistry {
   private readonly pools = new Map<string, BackendPool>();
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
   private readonly sessionArtifacts: SessionArtifactStore;
+  private readonly executionArtifacts: ExecutionArtifactStore;
   private readonly streams: StreamManager;
   private readonly sessionWorkbenchGlobalAdmissions = new Map<string, "standard" | "artifact">();
   private readonly terminalRuntimeAdmissions = new Set<number>();
   private readonly sessionShellPrepareGlobalAdmissions = new Set<string>();
+  private readonly executionGlobalAdmissions = new Set<string>();
   private readonly sessionSaveIntents = new Map<string, SessionSaveIntent>();
   private readonly sessionSaveLocks = new Map<string, Promise<void>>();
   private sessionSaveReservationTail: Promise<void> = Promise.resolve();
@@ -401,6 +496,7 @@ export class ConnectionRegistry {
     this.clientFactory = normalized.clientFactory ?? ((config) => new SliverClient(config));
     this.now = normalized.now ?? Date.now;
     this.sessionArtifacts = new SessionArtifactStore({ now: this.now });
+    this.executionArtifacts = new ExecutionArtifactStore({ now: this.now });
     this.streams = new StreamManager({ now: this.now });
   }
 
@@ -421,6 +517,11 @@ export class ConnectionRegistry {
       sessionPlanTimers: new Map(),
       sessionWorkbenchAdmissions: new Map(),
       sessionShellPrepareAdmissions: new Set(),
+      executionPlans: new Map(),
+      executionPlanTimers: new Map(),
+      executionAdmissions: new Set(),
+      executionResults: new Map(),
+      executionResultTimers: new Map(),
       taskListAdmissions: new Set(),
       taskDetailAdmissions: new Set(),
       taskCancelAdmissions: new Set(),
@@ -441,12 +542,14 @@ export class ConnectionRegistry {
       context.beaconWatch = false;
       context.targetPlans.clear();
       this.revokeSessionTargetCapabilities(context);
+      this.revokeExecutionState(context);
       context.sessionPlanAdmissions.clear();
       context.sessionWorkbenchAdmissions.clear();
       context.sessionShellPrepareAdmissions.clear();
       context.targetPageCursors.clear();
     } else {
       this.sessionArtifacts.removeOwner(contentsId);
+      this.executionArtifacts.removeOwner(contentsId);
     }
     context?.savedConfigs.clear();
     await this.streams.closeWindow(contentsId, "window-closed").catch(() => undefined);
@@ -471,6 +574,7 @@ export class ConnectionRegistry {
     target.connectionAttempt += 1;
     delete target.activeTarget;
     this.revokeSessionTargetCapabilities(target);
+    this.revokeExecutionState(target);
     target.sessionPlanAdmissions.clear();
     target.poolKey = source.poolKey;
     if (source.configName) target.configName = source.configName;
@@ -734,6 +838,7 @@ export class ConnectionRegistry {
     context.beaconWatch = false;
     context.targetPlans.clear();
     this.revokeSessionTargetCapabilities(context);
+    this.revokeExecutionState(context);
     context.sessionPlanAdmissions.clear();
     context.targetPageCursors.clear();
     context.snapshot = disconnectedSnapshot();
@@ -865,6 +970,7 @@ export class ConnectionRegistry {
         // session while its streams are closing.
         context.activeTarget = current.ref;
         this.revokeSessionTargetCapabilities(context);
+        this.revokeExecutionState(context);
         if (closePreviousShells) await this.streams.closeWindow(contentsId, "target-rebound");
       } else {
         context.activeTarget = current.ref;
@@ -887,6 +993,7 @@ export class ConnectionRegistry {
       if (previousActiveTarget) {
         delete context.activeTarget;
         this.revokeSessionTargetCapabilities(context);
+        this.revokeExecutionState(context);
         if (previousActiveTarget.mode === "session") {
           await this.streams.closeWindow(contentsId, "target-rebound");
         }
@@ -1395,6 +1502,768 @@ export class ConnectionRegistry {
     } finally {
       admittedContext?.sessionWorkbenchAdmissions.delete(admissionId);
       this.sessionWorkbenchGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async listExecutionCatalog(contentsId: number): Promise<OperationResult<ExecutionCatalog>> {
+    try {
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        assertBinding();
+        const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+        this.bindExecutionArtifactOwner(context, pool);
+        return {
+          target: { ...target.target },
+          targetRef: { ...target.ref },
+          backend: operationBackendSummary(context, pool),
+          capabilities: executionCapabilitiesForTarget(target.target),
+        };
+      });
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    }
+  }
+
+  async prepareExecutionAction(
+    sender: WebContents,
+    input: PrepareExecutionActionInput,
+  ): Promise<OperationResult<ExecutionActionPlan>> {
+    const admissionId = randomUUID();
+    let admittedContext: WindowContext | undefined;
+    const stagedArtifacts: Array<InternalExecutionArtifact & { role: ExecutionArtifactRole }> = [];
+    let planCommitted = false;
+    try {
+      const context = this.requireWindow(sender.id);
+      this.admitExecutionRequest(context, admissionId);
+      admittedContext = context;
+      return await this.withExecutionPool(sender.id, async (pool, assertBinding) => {
+        const { target } = this.requireSelectedExecutionTarget(sender.id, pool);
+        const selectedRef = { ...target.ref };
+        const assertCurrent = (): RevalidatedTarget => {
+          assertBinding();
+          const currentContext = this.requireWindow(sender.id);
+          if (
+            currentContext !== context ||
+            !currentContext.activeTarget ||
+            !sameTargetRefIdentity(currentContext.activeTarget, selectedRef)
+          ) throw new Error("The selected target changed while the execution review was being prepared");
+          const current = pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch);
+          if (!current) throw new Error("The selected target is no longer available");
+          if (current.target.mode === "session" && current.target.liveness !== "active") {
+            throw new Error("The selected session is no longer active");
+          }
+          return current;
+        };
+        const descriptor = assertExecutionOperationSupported(input.draft.operationId, target.target);
+        if (executionDraftUsesProfile(input.draft)) {
+          await pool.refreshDomains(["profiles"]);
+          assertCurrent();
+        }
+        if (input.draft.operationId === "execution.psexec" && input.draft.source.kind === "profile") {
+          const profile = pool.profile(input.draft.source.profileName);
+          if (!profile.Config) throw new Error("The selected service profile has no implant configuration");
+        } else if (input.draft.operationId === "execution.backdoor") {
+          const profile = pool.profile(input.draft.profileName);
+          if (!profile.Config) throw new Error("The selected backdoor profile has no implant configuration");
+        } else if (input.draft.operationId === "execution.dll-hijack" && input.draft.source.kind === "profile") {
+          const profile = pool.profile(input.draft.source.profileName);
+          if (!profile.Config) throw new Error("The selected DLL profile has no implant configuration");
+        }
+        this.pruneExecutionPlans(context);
+        if (context.executionPlans.size >= MAX_WINDOW_EXECUTION_PLANS) {
+          throw new Error("Too many execution reviews are already awaiting confirmation");
+        }
+        const owner = requireOwnerWindow(sender);
+        for (const requested of executionArtifactSelections(input.draft)) {
+          if (owner.isDestroyed()) throw new Error("The application window is no longer available");
+          let selection;
+          try {
+            selection = await dialog.showOpenDialog(owner, {
+              title: requested.title,
+              properties: ["openFile"],
+              ...(requested.extensions.length > 0
+                ? { filters: [{ name: requested.title, extensions: requested.extensions }] }
+                : {}),
+            });
+          } catch {
+            throw new Error("Could not open the native execution file picker");
+          }
+          assertCurrent();
+          const filePath = selection.filePaths[0];
+          if (selection.canceled || !filePath) throw new Error("Execution file selection was canceled");
+          let selectedFile;
+          try {
+            selectedFile = await readBoundedRegularFile(filePath, {
+              label: requested.title,
+              maxBytes: requested.maximumBytes,
+            });
+          } catch {
+            throw new Error("Could not read the selected execution file");
+          }
+          try {
+            assertCurrent();
+            const scope = this.executionArtifactScope(
+              context,
+              pool,
+              target,
+              input.draft.operationId,
+              requested.role,
+            );
+            const metadata = this.executionArtifacts.storeInput({
+              scope,
+              data: selectedFile.data,
+              mediaType: "application/octet-stream",
+              suggestedBasename: safeArtifactFileName(basename(filePath)),
+            });
+            stagedArtifacts.push({ role: requested.role, scope, handle: metadata.handle });
+          } finally {
+            selectedFile.data.fill(0);
+          }
+        }
+        const current = assertCurrent();
+        const requestedIdentity = requestedExecutionIdentity(input.draft);
+        let currentIdentity: string | undefined;
+        if (requestedIdentity && current.target.mode === "session") {
+          let identityResponse;
+          try {
+            identityResponse = await pool.client.currentTokenOwnerSession(
+              current.target.id,
+              descriptor.timeoutSeconds,
+            );
+          } catch {
+            throw new Error("The current token identity could not be verified for this review");
+          }
+          const rebound = assertCurrent();
+          if (identityResponse.Response?.Err?.trim()) {
+            throw new Error("The current token identity could not be verified for this review");
+          }
+          const reportedIdentity = identityResponse.Output?.trim();
+          if (!reportedIdentity) {
+            throw new Error("The current token identity could not be verified for this review");
+          }
+          currentIdentity = boundedText(reportedIdentity, MAX_SUMMARY_TEXT);
+          if (!sameTargetRefIdentity(rebound.ref, selectedRef)) {
+            throw new Error("The selected target changed while the execution review was being prepared");
+          }
+        }
+        const token = randomUUID();
+        const expiresAt = this.now() + EXECUTION_PLAN_TTL_MS;
+        const artifacts = stagedArtifacts.map((artifact) => {
+          const metadata = this.executionArtifacts.metadata(artifact.scope, artifact.handle);
+          return {
+            role: artifact.role,
+            fileName: metadata.suggestedBasename,
+            mediaType: metadata.mediaType,
+            size: metadata.size,
+            sha256: metadata.sha256,
+          };
+        });
+        const review: ExecutionActionPlan = {
+          token,
+          operationId: input.draft.operationId,
+          expiresAt: new Date(expiresAt).toISOString(),
+          risk: descriptor.risk,
+          target: {
+            backend: operationBackendSummary(context, pool),
+            target: { ...current.target },
+            fingerprint: current.ref.fingerprint,
+          },
+          warning: executionWarning(input.draft),
+          fields: executionReviewFields(input.draft),
+          artifacts,
+          ...(currentIdentity ? { currentIdentity } : {}),
+          ...(requestedIdentity ? { requestedIdentity } : {}),
+        };
+        const plan: InternalExecutionPlan = {
+          token,
+          expiresAt,
+          contentsId: sender.id,
+          poolKey: pool.key,
+          epoch: pool.epoch,
+          connectionAttempt: context.connectionAttempt,
+          target: selectedRef,
+          journalTarget: resolvedExecutionOperationTarget(context, pool, current),
+          draft: input.draft,
+          artifacts: [...stagedArtifacts],
+          review,
+        };
+        context.executionPlans.set(token, plan);
+        const timer = setTimeout(() => {
+          const currentContext = this.windows.get(sender.id);
+          if (currentContext?.executionPlans.get(token) === plan) this.revokeExecutionPlan(currentContext, token);
+        }, EXECUTION_PLAN_TTL_MS);
+        timer.unref?.();
+        context.executionPlanTimers.set(token, timer);
+        planCommitted = true;
+        return review;
+      });
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      if (!planCommitted) {
+        clearExecutionDraftSecrets(input.draft);
+        for (const artifact of stagedArtifacts) {
+          try { this.executionArtifacts.remove(artifact.scope, artifact.handle); } catch { /* already revoked */ }
+        }
+      }
+      admittedContext?.executionAdmissions.delete(admissionId);
+      this.executionGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async discardExecutionPlan(
+    contentsId: number,
+    input: ExecuteExecutionPlanInput,
+  ): Promise<OperationResult> {
+    try {
+      const context = this.requireWindow(contentsId);
+      const plan = context.executionPlans.get(input.token);
+      if (!plan || plan.contentsId !== contentsId) throw new Error("The execution review is unavailable or expired");
+      this.revokeExecutionPlan(context, input.token);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    }
+  }
+
+  async runExecutionRead(
+    contentsId: number,
+    input: RunExecutionReadInput,
+  ): Promise<OperationResult<ExecutionReadResult>> {
+    const admissionId = randomUUID();
+    let admittedContext: WindowContext | undefined;
+    try {
+      const context = this.requireWindow(contentsId);
+      this.admitExecutionRequest(context, admissionId);
+      admittedContext = context;
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+        const selectedRef = { ...target.ref };
+        const descriptor = assertExecutionOperationSupported(input.operationId, target.target);
+        const engine = this.requireOperationEngine(contentsId, context, pool);
+        if (target.target.mode === "beacon") {
+          assertExecutionBeaconReadRequest(input);
+        }
+        const assertCurrent = (): void => {
+          assertBinding();
+          if (
+            this.windows.get(contentsId) !== context ||
+            !context.activeTarget ||
+            !sameTargetRefIdentity(context.activeTarget, selectedRef) ||
+            !pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch)
+          ) throw new Error("The selected target changed while the execution read was running");
+        };
+        if (input.taskId) {
+          if (target.target.mode !== "beacon") {
+            throw new Error("The selected target cannot refresh a beacon execution task");
+          }
+          const refreshed = await this.refreshExecutionBeaconTask({
+            context,
+            pool,
+            target,
+            engine,
+            taskId: input.taskId,
+            operationId: input.operationId,
+            readInput: input,
+            assertCurrent,
+          });
+          try {
+            assertCurrent();
+          } catch (error) {
+            clearRefreshedExecutionBuffers(refreshed);
+            throw error;
+          }
+          switch (refreshed.state) {
+            case "decoded":
+              if (refreshed.decoded.kind !== "read") {
+                clearRefreshedExecutionBuffers(refreshed);
+                throw new Error("The selected target returned the wrong execution result type");
+              }
+              return refreshed.decoded.value;
+            case "pending":
+              return submittedExecutionReadResult(input.operationId, input.taskId);
+            case "canceled":
+              throw new Error("The selected target execution read was canceled before a result was available");
+            case "failed":
+              throw new Error("The selected target rejected the execution read");
+            case "outcome-unknown":
+              throw new Error("The selected target execution read result could not be confirmed safely");
+          }
+        }
+        const journal = engine.beginExternal(
+          input.operationId,
+          resolvedExecutionOperationTarget(context, pool, target),
+          externalExecutionDescriptor(descriptor, false, target.target.mode),
+        );
+        let dispatched = false;
+        try {
+          const response = await runExecutionWorkbenchRead({
+            client: pool.client,
+            target: { id: target.target.id, mode: target.target.mode, summary: target.target },
+            input,
+            onDispatch: () => {
+              dispatched = true;
+              engine.markExternalSubmitted(journal.requestId);
+            },
+          });
+          assertBinding();
+          if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, selectedRef)) {
+            engine.finishExternal(journal.requestId, "target-disappeared");
+            throw new Error("The selected target changed while the execution read was running");
+          }
+          if (response.taskId) engine.markExternalSubmitted(journal.requestId, response.taskId);
+          if (response.state === "completed") {
+            engine.finishExternal(journal.requestId, "completed");
+            return response;
+          }
+          if (!response.taskId) throw new Error("The execution read returned no bounded result");
+          return response;
+        } catch (error) {
+          if (error instanceof ExecutionRemoteRejectedError || error instanceof ExecutionTargetRejectedError) {
+            engine.finishExternal(journal.requestId, "failed");
+          } else if (!dispatched) {
+            engine.finishExternal(journal.requestId, "failed");
+          } else if (engine.get(journal.requestId)?.state !== "target-disappeared") {
+            engine.finishExternal(journal.requestId, "failed");
+          }
+          throw error;
+        }
+      });
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      admittedContext?.executionAdmissions.delete(admissionId);
+      this.executionGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async executeExecutionPlan(
+    contentsId: number,
+    input: ExecuteExecutionPlanInput,
+  ): Promise<OperationResult<ExecutionActionResult>> {
+    const admissionId = randomUUID();
+    let admittedContext: WindowContext | undefined;
+    let plan: InternalExecutionPlan | undefined;
+    const artifacts = new Map<ExecutionArtifactRole, Buffer>();
+    const generatedBuffers: Buffer[] = [];
+    const actionOutputBuffers: Buffer[] = [];
+    let journal: TargetOperationRecord | undefined;
+    let engine: OperationEngine | undefined;
+    let dispatched = false;
+    let bindingCurrent: (() => boolean) | undefined;
+    try {
+      const context = this.requireWindow(contentsId);
+      this.admitExecutionRequest(context, admissionId);
+      admittedContext = context;
+      plan = this.takeExecutionPlan(context, input.token);
+      const capturedPlan = plan;
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        if (
+          capturedPlan.poolKey !== pool.key ||
+          capturedPlan.epoch !== pool.epoch ||
+          capturedPlan.connectionAttempt !== context.connectionAttempt
+        ) throw new Error("The backend connection changed after the execution review");
+
+        bindingCurrent = () => {
+          try {
+            assertBinding();
+            return this.windows.get(contentsId) === context &&
+              context.activeTarget !== undefined &&
+              sameTargetRefIdentity(context.activeTarget, capturedPlan.target) &&
+              this.pools.get(pool.key) === pool &&
+              pool.epoch === capturedPlan.epoch;
+          } catch {
+            return false;
+          }
+        };
+        await pool.refreshDomains([capturedPlan.target.mode === "session" ? "sessions" : "beacons"]);
+        if (!bindingCurrent()) throw new Error("The selected target changed before execution dispatch");
+        if (capturedPlan.expiresAt <= this.now()) throw new Error("The execution review expired before dispatch");
+        const current = pool.targetStore.revalidateTargetRef(capturedPlan.target, pool.epoch);
+        if (!current) throw new Error("The selected target is no longer available");
+        if (current.target.mode === "session" && current.target.liveness !== "active") {
+          throw new Error("The selected session is no longer active");
+        }
+        assertExecutionOperationSupported(capturedPlan.draft.operationId, current.target);
+
+        for (const artifact of capturedPlan.artifacts) {
+          const consumed = this.executionArtifacts.consumeInput(artifact.scope, artifact.handle);
+          const expected = capturedPlan.review.artifacts.find((candidate) => candidate.role === artifact.role);
+          if (
+            !expected ||
+            consumed.metadata.sha256 !== expected.sha256 ||
+            consumed.metadata.size !== expected.size
+          ) {
+            consumed.data.fill(0);
+            throw new Error("A reviewed execution artifact no longer matches its bound metadata");
+          }
+          artifacts.set(artifact.role, consumed.data);
+        }
+
+        let implantConfig: clientpb.ImplantConfig | undefined;
+        if (
+          capturedPlan.draft.operationId === "execution.migrate" ||
+          capturedPlan.draft.operationId === "privilege.get-system"
+        ) {
+          implantConfig = pool.implantConfigForTarget(current.target);
+        } else if (
+          capturedPlan.draft.operationId === "execution.psexec" &&
+          capturedPlan.draft.source.kind === "profile"
+        ) {
+          const profile = pool.profile(capturedPlan.draft.source.profileName);
+          if (!profile.Config) throw new Error("The selected service profile has no implant configuration");
+          implantConfig = clientpb.ImplantConfig.create(profile.Config);
+        }
+
+        const descriptor = executionOperationDescriptor(capturedPlan.draft.operationId);
+        engine = this.requireOperationEngine(contentsId, context, pool);
+        journal = engine.beginExternal(
+          capturedPlan.draft.operationId,
+          capturedPlan.journalTarget,
+          externalExecutionDescriptor(descriptor, true, current.target.mode),
+        );
+        const capturedEngine = engine;
+        const capturedJournal = journal;
+        const markDispatched = (): void => {
+          if (!bindingCurrent?.()) throw new Error("The selected target changed before execution dispatch");
+          const submitted = capturedEngine.markExternalSubmitted(capturedJournal.requestId);
+          if (submitted.state !== "running") {
+            throw new Error("The reviewed execution no longer belongs to the active target");
+          }
+          dispatched = true;
+        };
+
+        let action;
+        try {
+          action = await dispatchExecutionAction({
+            client: pool.client,
+            target: { id: current.target.id, mode: current.target.mode, summary: current.target },
+            draft: capturedPlan.draft,
+            artifacts,
+            ...(implantConfig ? { implantConfig } : {}),
+            onDispatch: markDispatched,
+            psexec: async ({ draft, serviceExecutable, implantConfig: serviceConfig, onDispatch }) => {
+              let executable = serviceExecutable ? Buffer.from(serviceExecutable) : undefined;
+              if (executable) generatedBuffers.push(executable);
+              if (!executable) {
+                if (!serviceConfig) throw new ExecutionWorkbenchInputError("The reviewed service profile is unavailable");
+                const generated = await pool.client.generateImplant(
+                  serviceConfig,
+                  "",
+                  GENERATE_TIMEOUT_SECONDS,
+                );
+                if (!generated.File?.Data?.length) throw new ExecutionWorkbenchInputError("The service profile generated no executable");
+                executable = Buffer.from(generated.File.Data);
+                generated.File.Data.fill(0);
+                generatedBuffers.push(executable);
+              }
+              const remoteBinaryPath = psexecRemoteBinaryPath(draft.remotePath);
+              const uploadPath = psexecUploadPath(draft.hostname, remoteBinaryPath);
+              onDispatch();
+              const uploaded = await pool.client.uploadSession(
+                current.target.id,
+                uploadPath,
+                executable,
+                { overwrite: true },
+                draft.timeoutSeconds,
+              );
+              if (uploaded.Response?.Err?.trim()) throw new ExecutionRemoteRejectedError();
+              await delayMilliseconds(5_000);
+              const started = await pool.client.startRemoteServiceSession(
+                current.target.id,
+                {
+                  hostname: draft.hostname,
+                  serviceName: draft.serviceName,
+                  serviceDescription: draft.serviceDescription,
+                  binaryPath: remoteBinaryPath,
+                },
+                draft.timeoutSeconds,
+              );
+              if (started.Response?.Err?.trim()) return { __executionPartial: true };
+              let cleanupConfirmed = true;
+              try {
+                const removed = await pool.client.removeRemoteServiceSession(
+                  current.target.id,
+                  { hostname: draft.hostname, serviceName: draft.serviceName },
+                  draft.timeoutSeconds,
+                );
+                if (removed.Response?.Err?.trim()) cleanupConfirmed = false;
+              } catch {
+                cleanupConfirmed = false;
+              }
+              return cleanupConfirmed ? {} : { __executionPartial: true };
+            },
+          });
+          if (action.stdout) actionOutputBuffers.push(action.stdout);
+          if (action.stderr) actionOutputBuffers.push(action.stderr);
+        } catch (error) {
+          if (error instanceof ExecutionRemoteRejectedError || error instanceof ExecutionTargetRejectedError) {
+            let failed = capturedEngine.finishExternal(capturedJournal.requestId, "failed");
+            if (failed.state === "outcome-unknown" && bindingCurrent()) {
+              failed = capturedEngine.resolveExternalOutcome(capturedJournal.requestId, "failed");
+            }
+            const result = this.retainExecutionResult(context, pool, current, {
+              requestId: capturedJournal.requestId,
+              operationId: capturedPlan.draft.operationId,
+              state: "failed",
+              message: descriptor.failedMessage,
+            });
+            return result;
+          }
+          if (dispatched) {
+            capturedEngine.finishExternal(capturedJournal.requestId, "outcome-unknown");
+            return this.retainExecutionResult(context, pool, current, {
+              requestId: capturedJournal.requestId,
+              operationId: capturedPlan.draft.operationId,
+              state: "outcome-unknown",
+              message: "The execution operation was dispatched, but its final outcome could not be confirmed. Refresh authoritative target and task state before continuing.",
+            });
+          }
+          capturedEngine.finishExternal(capturedJournal.requestId, "failed");
+          throw error;
+        }
+
+        if (!bindingCurrent()) {
+          if (dispatched) capturedEngine.finishExternal(capturedJournal.requestId, "outcome-unknown");
+          throw new Error("The selected target changed while the reviewed execution was running");
+        }
+        if (action.taskId) {
+          capturedEngine.markExternalSubmitted(capturedJournal.requestId, action.taskId);
+          this.ensureOperationReconciliation(contentsId);
+          return this.retainExecutionResult(context, pool, current, {
+            requestId: capturedJournal.requestId,
+            operationId: capturedPlan.draft.operationId,
+            state: "submitted",
+            message: descriptor.submittedMessage,
+            taskId: action.taskId,
+            ...(action.pid === undefined ? {} : { pid: action.pid }),
+          });
+        }
+
+        const terminalState = action.partial ? "partial" : "completed";
+        let terminal = capturedEngine.finishExternal(capturedJournal.requestId, terminalState);
+        if (terminal.state === "outcome-unknown" && terminalState === "completed" && bindingCurrent()) {
+          terminal = capturedEngine.resolveExternalOutcome(capturedJournal.requestId, "completed");
+        }
+        if (terminal.state !== terminalState) {
+          throw new Error("The execution result could not be bound to the active operation journal");
+        }
+        return this.retainExecutionResult(
+          context,
+          pool,
+          current,
+          {
+            requestId: capturedJournal.requestId,
+            operationId: capturedPlan.draft.operationId,
+            state: terminalState,
+            message: action.partial
+              ? capturedPlan.draft.operationId === "execution.psexec"
+                ? "The remote service workflow completed only partially. The uploaded executable remains and later service state or cleanup could not be confirmed."
+                : "The primary execution effect completed, but cleanup could not be confirmed."
+              : capturedPlan.draft.operationId === "execution.psexec"
+                ? "The remote service started and was removed. The uploaded executable remains at the reviewed remote directory."
+                : action.summary,
+            ...(action.pid === undefined ? {} : { pid: action.pid }),
+          },
+          {
+            ...(action.stdout ? { stdout: { data: action.stdout, truncated: action.stdoutTruncated === true } } : {}),
+            ...(action.stderr ? { stderr: { data: action.stderr, truncated: action.stderrTruncated === true } } : {}),
+          },
+        );
+      });
+    } catch (error) {
+      if (journal && engine && !dispatched && !TERMINAL_OPERATION_STATES.has(engine.get(journal.requestId)?.state ?? "failed")) {
+        engine.finishExternal(journal.requestId, "failed");
+      }
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      for (const data of artifacts.values()) data.fill(0);
+      for (const data of generatedBuffers) data.fill(0);
+      for (const data of actionOutputBuffers) data.fill(0);
+      if (plan) {
+        clearExecutionDraftSecrets(plan.draft);
+        for (const artifact of plan.artifacts) {
+          try { this.executionArtifacts.remove(artifact.scope, artifact.handle); } catch { /* consumed or revoked */ }
+        }
+      }
+      admittedContext?.executionAdmissions.delete(admissionId);
+      this.executionGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async getExecutionResult(
+    contentsId: number,
+    input: ExecutionResultRequest,
+  ): Promise<OperationResult<ExecutionActionResult>> {
+    const admissionId = randomUUID();
+    let admittedContext: WindowContext | undefined;
+    try {
+      const context = this.requireWindow(contentsId);
+      this.admitExecutionRequest(context, admissionId);
+      admittedContext = context;
+      const result = this.requireExecutionResult(context, input.requestId);
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        if (
+          result.poolKey !== pool.key ||
+          result.epoch !== pool.epoch ||
+          result.connectionAttempt !== context.connectionAttempt ||
+          !context.activeTarget ||
+          !sameTargetRefIdentity(context.activeTarget, result.target)
+        ) throw new Error("The execution result is unavailable for the current target");
+        if (
+          !result.value.taskId ||
+          result.target.mode !== "beacon" ||
+          (result.value.state !== "submitted" && result.value.state !== "outcome-unknown")
+        ) return cloneExecutionActionResult(result.value);
+
+        const target = pool.targetStore.revalidateTargetRef(result.target, pool.epoch);
+        if (!target) throw new Error("The selected target is no longer available");
+        const engine = this.requireOperationEngine(contentsId, context, pool);
+        const assertCurrent = (): void => {
+          assertBinding();
+          if (
+            this.windows.get(contentsId) !== context ||
+            context.executionResults.get(input.requestId) !== result ||
+            !context.activeTarget ||
+            !sameTargetRefIdentity(context.activeTarget, result.target) ||
+            !pool.targetStore.revalidateTargetRef(result.target, pool.epoch)
+          ) throw new Error("The execution result is unavailable for the current target");
+        };
+        const refreshed = await this.refreshExecutionBeaconTask({
+          context,
+          pool,
+          target,
+          engine,
+          taskId: result.value.taskId,
+          operationId: result.value.operationId,
+          expectedRequestId: input.requestId,
+          assertCurrent,
+        });
+        try {
+          assertCurrent();
+        } catch (error) {
+          clearRefreshedExecutionBuffers(refreshed);
+          throw error;
+        }
+        const descriptor = executionOperationDescriptor(result.value.operationId);
+        switch (refreshed.state) {
+          case "pending":
+            return cloneExecutionActionResult(result.value);
+          case "canceled":
+            return this.retainExecutionResult(context, pool, target, {
+              requestId: input.requestId,
+              operationId: result.value.operationId,
+              state: "canceled",
+              message: "The beacon execution task was canceled before completion.",
+              taskId: result.value.taskId,
+            });
+          case "failed":
+            return this.retainExecutionResult(context, pool, target, {
+              requestId: input.requestId,
+              operationId: result.value.operationId,
+              state: "failed",
+              message: descriptor.failedMessage,
+              taskId: result.value.taskId,
+            });
+          case "outcome-unknown":
+            return this.retainExecutionResult(context, pool, target, {
+              requestId: input.requestId,
+              operationId: result.value.operationId,
+              state: "outcome-unknown",
+              message: "The beacon task completed, but its exact execution result could not be confirmed safely.",
+              taskId: result.value.taskId,
+            });
+          case "decoded": {
+            if (refreshed.decoded.kind !== "action") {
+              clearRefreshedExecutionBuffers(refreshed);
+              throw new Error("The selected target returned the wrong execution result type");
+            }
+            const action = refreshed.decoded.value;
+            return this.retainExecutionResult(
+              context,
+              pool,
+              target,
+              {
+                requestId: input.requestId,
+                operationId: result.value.operationId,
+                state: "completed",
+                message: action.summary,
+                taskId: result.value.taskId,
+                ...(action.pid === undefined ? {} : { pid: action.pid }),
+              },
+              {
+                ...(action.stdout
+                  ? { stdout: { data: action.stdout, truncated: action.stdoutTruncated === true } }
+                  : {}),
+                ...(action.stderr
+                  ? { stderr: { data: action.stderr, truncated: action.stderrTruncated === true } }
+                  : {}),
+              },
+            );
+          }
+        }
+      });
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      admittedContext?.executionAdmissions.delete(admissionId);
+      this.executionGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async saveExecutionResult(
+    sender: WebContents,
+    input: SaveExecutionResultInput,
+  ): Promise<OperationResult<SaveExecutionResultResult>> {
+    let data: Buffer | undefined;
+    try {
+      const context = this.requireWindow(sender.id);
+      const result = this.requireExecutionResult(context, input.requestId);
+      const artifact = result.output[input.stream];
+      if (!artifact) throw new Error("The requested execution output is unavailable");
+      const owner = requireOwnerWindow(sender);
+      if (owner.isDestroyed()) throw new Error("The application window is no longer available");
+      const metadata = this.executionArtifacts.metadata(artifact.scope, artifact.handle);
+      let selection;
+      try {
+        selection = await dialog.showSaveDialog(owner, {
+          title: "Save execution output",
+          defaultPath: safeArtifactFileName(metadata.suggestedBasename),
+        });
+      } catch {
+        throw new Error("Could not open the native execution output save dialog");
+      }
+      if (selection.canceled || !selection.filePath) return { ok: true, value: { saved: false } };
+      const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+      const assertCurrent = (): void => {
+        if (
+          this.windows.get(sender.id) !== context ||
+          !pool ||
+          this.pools.get(result.poolKey) !== pool ||
+          pool.epoch !== result.epoch ||
+          context.connectionAttempt !== result.connectionAttempt ||
+          !context.activeTarget ||
+          !sameTargetRefIdentity(context.activeTarget, result.target) ||
+          context.executionResults.get(input.requestId) !== result
+        ) throw new Error("The execution result no longer belongs to the active target");
+      };
+      assertCurrent();
+      const intent = await this.reserveSessionSaveIntent(selection.filePath);
+      assertCurrent();
+      const retrieved = this.executionArtifacts.getResult(artifact.scope, artifact.handle);
+      data = retrieved.data;
+      try {
+        await this.commitSessionSaveIntent(intent, data, assertCurrent);
+      } catch {
+        throw new Error("Could not save the execution output");
+      }
+      return {
+        ok: true,
+        value: { saved: true, fileName: safeArtifactFileName(basename(intent.destinationPath)) },
+      };
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      data?.fill(0);
     }
   }
 
@@ -2090,6 +2959,50 @@ export class ConnectionRegistry {
     return { context, target, platform: sessionPlatform(target.target.os) };
   }
 
+  private requireSelectedExecutionTarget(
+    contentsId: number,
+    pool: BackendPool,
+  ): { context: WindowContext; target: RevalidatedTarget } {
+    const context = this.requireWindow(contentsId);
+    const selectedRef = context.activeTarget;
+    if (!selectedRef) throw new Error("Select a target before using the execution workbench");
+    assertTargetDomainAuthoritative(pool, selectedRef.mode);
+    const target = pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch);
+    if (!target) throw new Error("The selected target is no longer available");
+    if (target.target.mode === "session" && target.target.liveness !== "active") {
+      throw new Error("The selected session is no longer active");
+    }
+    return { context, target };
+  }
+
+  private bindExecutionArtifactOwner(context: WindowContext, pool: BackendPool): void {
+    this.executionArtifacts.bindOwner({
+      ownerWindowId: context.contentsId,
+      backendId: pool.key,
+      backendEpoch: pool.epoch,
+      connectionIncarnation: context.connectionAttempt,
+    });
+  }
+
+  private executionArtifactScope(
+    context: WindowContext,
+    pool: BackendPool,
+    target: RevalidatedTarget,
+    operationId: string,
+    role: string,
+  ): ExecutionArtifactScope {
+    this.bindExecutionArtifactOwner(context, pool);
+    return {
+      ownerWindowId: context.contentsId,
+      backendId: pool.key,
+      backendEpoch: pool.epoch,
+      connectionIncarnation: context.connectionAttempt,
+      target: { ...target.ref },
+      operationId,
+      role,
+    };
+  }
+
   private bindSessionArtifactScope(
     context: WindowContext,
     pool: BackendPool,
@@ -2113,6 +3026,314 @@ export class ConnectionRegistry {
     for (const timer of context.sessionPlanTimers.values()) clearTimeout(timer);
     context.sessionPlanTimers.clear();
     this.sessionArtifacts.removeOwner(context.contentsId);
+  }
+
+  /** Revoke every M4 plan, secret, and result bound to this exact window authority. */
+  private revokeExecutionState(context: WindowContext): void {
+    for (const token of [...context.executionPlans.keys()]) this.revokeExecutionPlan(context, token);
+    context.executionResults.clear();
+    for (const timer of context.executionResultTimers.values()) clearTimeout(timer);
+    context.executionResultTimers.clear();
+    this.executionArtifacts.removeOwner(context.contentsId);
+  }
+
+  private admitExecutionRequest(context: WindowContext, admissionId: string): void {
+    if (context.executionAdmissions.size >= MAX_WINDOW_EXECUTION_REQUESTS) {
+      throw new Error("Too many execution requests are already running in this window");
+    }
+    if (this.executionGlobalAdmissions.size >= MAX_GLOBAL_EXECUTION_REQUESTS) {
+      throw new Error("The global execution request capacity is currently full");
+    }
+    context.executionAdmissions.add(admissionId);
+    this.executionGlobalAdmissions.add(admissionId);
+  }
+
+  private pruneExecutionPlans(context: WindowContext): void {
+    const now = this.now();
+    for (const [token, plan] of context.executionPlans) {
+      if (plan.expiresAt <= now) this.revokeExecutionPlan(context, token);
+    }
+  }
+
+  private takeExecutionPlan(context: WindowContext, token: string): InternalExecutionPlan {
+    this.pruneExecutionPlans(context);
+    const plan = context.executionPlans.get(token);
+    if (!plan || plan.contentsId !== context.contentsId || plan.expiresAt <= this.now()) {
+      if (plan) this.revokeExecutionPlan(context, token);
+      throw new Error("The execution review is unavailable or expired");
+    }
+    context.executionPlans.delete(token);
+    const timer = context.executionPlanTimers.get(token);
+    if (timer) clearTimeout(timer);
+    context.executionPlanTimers.delete(token);
+    return plan;
+  }
+
+  private revokeExecutionPlan(context: WindowContext, token: string): void {
+    const plan = context.executionPlans.get(token);
+    context.executionPlans.delete(token);
+    const timer = context.executionPlanTimers.get(token);
+    if (timer) clearTimeout(timer);
+    context.executionPlanTimers.delete(token);
+    if (!plan) return;
+    clearExecutionDraftSecrets(plan.draft);
+    for (const artifact of plan.artifacts) {
+      try { this.executionArtifacts.remove(artifact.scope, artifact.handle); } catch { /* already consumed */ }
+    }
+  }
+
+  private retainExecutionResult(
+    context: WindowContext,
+    pool: BackendPool,
+    target: RevalidatedTarget,
+    value: ExecutionActionResult,
+    streams: Partial<Record<"stdout" | "stderr", { data: Buffer; truncated: boolean }>> = {},
+  ): ExecutionActionResult {
+    this.pruneExecutionResults(context);
+    if (context.executionResults.has(value.requestId)) {
+      this.revokeExecutionResult(context, value.requestId);
+    }
+    while (context.executionResults.size >= MAX_WINDOW_EXECUTION_RESULTS) {
+      const oldest = [...context.executionResults.entries()]
+        .sort((left, right) => left[1].expiresAt - right[1].expiresAt)[0];
+      if (!oldest) break;
+      this.revokeExecutionResult(context, oldest[0]);
+    }
+    const output: InternalExecutionResult["output"] = {};
+    const publicOutput: NonNullable<ExecutionActionResult["output"]> = [];
+    const created: InternalExecutionArtifact[] = [];
+    let outputRetained = true;
+    try {
+      const store = (
+        stream: "stdout" | "stderr" | "combined",
+        data: Buffer,
+        truncated: boolean,
+      ): void => {
+        const scope = this.executionArtifactScope(
+          context,
+          pool,
+          target,
+          value.operationId,
+          stream,
+        );
+        const stored = this.executionArtifacts.storeResult({
+          scope,
+          data,
+          mediaType: "application/octet-stream",
+          suggestedBasename: safeArtifactFileName(
+            `${value.operationId.replaceAll(".", "-")}-${stream}.bin`,
+          ),
+        });
+        const artifact: InternalExecutionArtifact = { role: stream, scope, handle: stored.handle };
+        created.push(artifact);
+        output[stream] = artifact;
+        publicOutput.push({
+          handle: stored.handle,
+          suggestedFileName: stored.suggestedBasename,
+          mediaType: stored.mediaType,
+          size: stored.size,
+          expiresAt: stored.expiresAt,
+          stream,
+          truncated,
+        });
+      };
+      if (streams.stdout) store("stdout", streams.stdout.data, streams.stdout.truncated);
+      if (streams.stderr) store("stderr", streams.stderr.data, streams.stderr.truncated);
+      if (streams.stdout && streams.stderr) {
+        const combined = Buffer.concat([streams.stdout.data, streams.stderr.data]);
+        try {
+          store(
+            "combined",
+            combined,
+            streams.stdout.truncated || streams.stderr.truncated,
+          );
+        } finally {
+          combined.fill(0);
+        }
+      }
+    } catch {
+      outputRetained = false;
+      for (const artifact of created) {
+        try { this.executionArtifacts.remove(artifact.scope, artifact.handle); } catch { /* already revoked */ }
+      }
+      for (const stream of ["stdout", "stderr", "combined"] as const) delete output[stream];
+      publicOutput.length = 0;
+    } finally {
+      streams.stdout?.data.fill(0);
+      streams.stderr?.data.fill(0);
+    }
+
+    const expiresAt = this.now() + EXECUTION_RESULT_TTL_MS;
+    const retainedValue: ExecutionActionResult = Object.freeze({
+      ...value,
+      ...(!outputRetained && (streams.stdout || streams.stderr)
+        ? { message: `${value.message} Captured output could not be retained.` }
+        : {}),
+      ...(publicOutput.length > 0 ? { output: publicOutput.map((item) => Object.freeze({ ...item })) } : {}),
+    });
+    const retained: InternalExecutionResult = {
+      value: retainedValue,
+      expiresAt,
+      output,
+      poolKey: pool.key,
+      epoch: pool.epoch,
+      connectionAttempt: context.connectionAttempt,
+      target: { ...target.ref },
+    };
+    context.executionResults.set(value.requestId, retained);
+    const timer = setTimeout(() => {
+      const current = this.windows.get(context.contentsId);
+      if (current?.executionResults.get(value.requestId) === retained) {
+        this.revokeExecutionResult(current, value.requestId);
+      }
+    }, EXECUTION_RESULT_TTL_MS);
+    timer.unref?.();
+    context.executionResultTimers.set(value.requestId, timer);
+    return cloneExecutionActionResult(retainedValue);
+  }
+
+  private async refreshExecutionBeaconTask(input: {
+    context: WindowContext;
+    pool: BackendPool;
+    target: RevalidatedTarget;
+    engine: OperationEngine;
+    taskId: string;
+    operationId: ExecutionOperationId;
+    expectedRequestId?: string;
+    readInput?: RunExecutionReadInput;
+    assertCurrent: () => void;
+  }): Promise<RefreshedExecutionBeaconTask> {
+    const {
+      context,
+      pool,
+      target,
+      engine,
+      taskId,
+      operationId,
+      expectedRequestId,
+      readInput,
+      assertCurrent,
+    } = input;
+    if (target.target.mode !== "beacon") {
+      throw new Error("The selected target cannot refresh a beacon execution task");
+    }
+    const operation = engine.findByTask(taskId, target.target.id);
+    if (
+      !operation ||
+      operation.operationId !== operationId ||
+      (expectedRequestId !== undefined && operation.requestId !== expectedRequestId)
+    ) throw new Error("The execution result is unavailable for the current target");
+
+    const resolveOwnership = this.taskOwnershipResolver(context);
+    try {
+      await pool.beaconTasks.refresh(
+        target.target.id,
+        [taskId, ...localTaskIdsForBeacon(context, target.target.id)],
+        [taskId, ...pool.recoverableTaskIdsForBeacon(target.target.id)],
+      );
+    } catch {
+      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      return { state: "outcome-unknown" };
+    }
+    assertCurrent();
+    let summary: BeaconTaskSummary;
+    try {
+      summary = pool.beaconTasks.task(target.target.id, taskId, resolveOwnership);
+    } catch {
+      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      return { state: "outcome-unknown" };
+    }
+    if (summary.localRequestId !== operation.requestId) {
+      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      return { state: "outcome-unknown" };
+    }
+    switch (summary.state) {
+      case "pending":
+      case "sent":
+        if (operation.state !== "cancel-requested") {
+          await engine.reconcileTask({ taskId, beaconId: target.target.id, state: summary.state });
+        }
+        return { state: "pending" };
+      case "canceled":
+        await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "canceled" });
+        return { state: "canceled" };
+      case "failed":
+        await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "failed" });
+        return { state: "failed" };
+      case "unknown":
+        engine.markTaskOutcomeUnknown(taskId, target.target.id);
+        return { state: "outcome-unknown" };
+      case "completed":
+        break;
+    }
+
+    let content: clientpb.BeaconTask | undefined;
+    let decoded: DecodedExecutionBeaconTask | undefined;
+    let decodedTransferred = false;
+    try {
+      content = await pool.client.fetchBeaconTask(taskId);
+      assertCurrent();
+      if (
+        content.ID !== taskId ||
+        content.BeaconID !== target.target.id ||
+        content.State.trim().toLowerCase() !== "completed" ||
+        content.Description !== summary.description
+      ) throw new ExecutionBeaconTaskDecodeError("description-mismatch");
+      decoded = decodeExecutionBeaconTask({
+        operationId,
+        description: content.Description,
+        response: content.Response,
+        ...(readInput ? { readInput } : {}),
+      });
+      assertCurrent();
+      await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "completed" });
+      decodedTransferred = true;
+      return { state: "decoded", decoded };
+    } catch (error) {
+      if (!decodedTransferred && decoded?.kind === "action") {
+        decoded.value.stdout?.fill(0);
+        decoded.value.stderr?.fill(0);
+      }
+      if (error instanceof ExecutionBeaconTaskDecodeError && error.reason === "invalid-read-input") {
+        throw error;
+      }
+      if (error instanceof ExecutionRemoteRejectedError) {
+        await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "failed" });
+        return { state: "failed" };
+      }
+      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      return { state: "outcome-unknown" };
+    } finally {
+      content?.Request.fill(0);
+      content?.Response.fill(0);
+    }
+  }
+
+  private pruneExecutionResults(context: WindowContext): void {
+    const now = this.now();
+    for (const [requestId, result] of context.executionResults) {
+      if (result.expiresAt <= now) this.revokeExecutionResult(context, requestId);
+    }
+  }
+
+  private requireExecutionResult(context: WindowContext, requestId: string): InternalExecutionResult {
+    this.pruneExecutionResults(context);
+    const result = context.executionResults.get(requestId);
+    if (!result) throw new Error("The execution result is unavailable or expired");
+    return result;
+  }
+
+  private revokeExecutionResult(context: WindowContext, requestId: string): void {
+    const result = context.executionResults.get(requestId);
+    context.executionResults.delete(requestId);
+    const timer = context.executionResultTimers.get(requestId);
+    if (timer) clearTimeout(timer);
+    context.executionResultTimers.delete(requestId);
+    if (!result) return;
+    for (const artifact of Object.values(result.output)) {
+      if (!artifact) continue;
+      try { this.executionArtifacts.remove(artifact.scope, artifact.handle); } catch { /* expired or revoked */ }
+    }
   }
 
   private sessionArtifactGateway(
@@ -2543,7 +3764,25 @@ export class ConnectionRegistry {
       releaseTaskClaimReservation: (requestId) =>
         pool.releaseTaskClaimReservation(contentsId, requestId),
       claimTask: (taskId, requestId, operationId, beaconId, expectedPingNonce) =>
-        pool.claimTask(contentsId, taskId, requestId, operationId, beaconId, expectedPingNonce),
+        pool.claimTask(
+          contentsId,
+          taskId,
+          requestId,
+          operationId,
+          beaconId,
+          expectedPingNonce,
+          true,
+        ),
+      claimExternalTask: (taskId, requestId, operationId, beaconId) =>
+        pool.claimTask(
+          contentsId,
+          taskId,
+          requestId,
+          operationId,
+          beaconId,
+          undefined,
+          false,
+        ),
       settleTaskClaim: (taskId, requestId) => pool.settleTaskClaim(contentsId, taskId, requestId),
       capability: (target, capabilityId) => {
         assertOperationBinding();
@@ -2681,14 +3920,18 @@ export class ConnectionRegistry {
     return (taskId, beaconId) => {
       const operation = engine?.findByTask(taskId, beaconId);
       if (operation) {
+        const requiresResultVerification =
+          engine?.requiresTaskResultVerification(taskId, beaconId) === true;
         const expectedPingNonce = engine?.expectedPingNonceForTask(taskId, beaconId);
         return {
           ownership: operation.ownership,
           localRequestId: operation.requestId,
-          // findByTask indexes only dispatcher-owned beacon operations; external
-          // session journal entries can never acquire a task ID.
-          operationId: operation.operationId as TargetOperationId,
-          ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
+          ...(requiresResultVerification
+            ? {
+                operationId: operation.operationId as TargetOperationId,
+                ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
+              }
+            : {}),
         };
       }
       const claim = pool?.taskClaimForWindow(taskId, beaconId, ownerWindowId);
@@ -2700,10 +3943,14 @@ export class ConnectionRegistry {
             actor: { attribution: "unknown" },
           },
           localRequestId: claim.requestId,
-          operationId: claim.operationId,
-          ...(claim.expectedPingNonce === undefined
-            ? {}
-            : { expectedPingNonce: claim.expectedPingNonce }),
+          ...(claim.requiresResultVerification
+            ? {
+                operationId: claim.operationId as TargetOperationId,
+                ...(claim.expectedPingNonce === undefined
+                  ? {}
+                  : { expectedPingNonce: claim.expectedPingNonce }),
+              }
+            : {}),
         };
       }
       return { ownership: { origin: "unknown", actor: { attribution: "unknown" } } };
@@ -2715,6 +3962,15 @@ export class ConnectionRegistry {
     task: BeaconTaskSummary | BeaconTaskDetail,
   ): Promise<void> {
     if (!engine.findByTask(task.taskId, task.beaconId)) return;
+    if (
+      task.state === "completed" &&
+      !engine.requiresTaskResultVerification(task.taskId, task.beaconId)
+    ) {
+      // Completed M4 external tasks require their operation-specific response
+      // decoder. The generic task detail path can neither prove success nor
+      // safely translate a task-level result for the reviewed operation.
+      return;
+    }
     const taskError = "error" in task ? task.error : undefined;
     const errorKind = "errorKind" in task ? task.errorKind : undefined;
     if (errorKind === "decode-uncertain") {
@@ -2823,7 +4079,11 @@ export class ConnectionRegistry {
           } catch {
             continue;
           }
-          if (summary.state === "completed") {
+          const requiresTypedM1Result = engine.requiresTaskResultVerification(
+            operation.taskId,
+            beaconId,
+          );
+          if (summary.state === "completed" && requiresTypedM1Result) {
             try {
               const detail = await pool.beaconTasks.detail(
                 beaconId,
@@ -2840,10 +4100,14 @@ export class ConnectionRegistry {
                 "The beacon task completed, but its response could not be fetched and verified",
               );
             }
-          } else {
+          } else if (summary.state !== "completed") {
             if (!bindingCurrent()) return;
             await this.reconcileOperationFromTask(engine, summary);
           }
+          // A completed external M4 task remains non-terminal until its exact
+          // operation-specific protobuf response is fetched and decoded by the
+          // execution result/read refresh path. Server state alone cannot prove
+          // that the implant accepted the request.
         }
         if (!bindingCurrent()) return;
         const ref = pool.targetStore.createTargetRef("beacon", beaconId, pool.epoch);
@@ -3635,6 +4899,16 @@ export class ConnectionRegistry {
     }
   }
 
+  private async withExecutionPool<T>(
+    contentsId: number,
+    operation: (pool: BackendPool, assertBinding: () => void) => Promise<T>,
+  ): Promise<OperationResultWithValue<T>> {
+    const result = await this.withPool(contentsId, operation);
+    return result.ok
+      ? result
+      : { ok: false, error: executionBoundaryError(new Error(result.error)) };
+  }
+
   private async withPool<T>(
     contentsId: number,
     operation: (pool: BackendPool, assertBinding: () => void) => Promise<T>,
@@ -3707,6 +4981,7 @@ export class ConnectionRegistry {
       context.beaconWatch = false;
       context.targetPlans.clear();
       this.revokeSessionTargetCapabilities(context);
+      this.revokeExecutionState(context);
       context.sessionPlanAdmissions.clear();
 
       if (context.poolKey && context.poolKey !== poolKey) {
@@ -4053,6 +5328,7 @@ export class ConnectionRegistry {
           );
         }
         this.revokeSessionTargetCapabilities(context);
+        this.revokeExecutionState(context);
       }
       context.activeTarget = revalidated.ref;
     } else if (previousActiveTarget && activeAbsenceAuthoritative) {
@@ -4064,6 +5340,7 @@ export class ConnectionRegistry {
         );
       }
       this.revokeSessionTargetCapabilities(context);
+      this.revokeExecutionState(context);
       context.beaconWatch = false;
       pool?.setWindowWatch(context.contentsId, false);
       delete context.activeTarget;
@@ -4258,9 +5535,10 @@ class BackendPool {
     ownerWindowId: number,
     taskId: string,
     requestId: string,
-    operationId: TargetOperationId,
+    operationId: OperationRecordId,
     beaconId: string,
     expectedPingNonce?: number,
+    requiresResultVerification = true,
   ): boolean {
     const now = this.now();
     this.pruneTaskClaims(now);
@@ -4272,7 +5550,8 @@ class BackendPool {
         existing.requestId === requestId &&
         existing.operationId === operationId &&
         existing.beaconId === beaconId &&
-        existing.expectedPingNonce === expectedPingNonce;
+        existing.expectedPingNonce === expectedPingNonce &&
+        existing.requiresResultVerification === requiresResultVerification;
     }
     this.pruneSettledInvisibleTaskClaims();
     if (!this.windowIds.has(ownerWindowId) || this.taskClaims.size >= MAX_POOL_TASK_CLAIMS) return false;
@@ -4283,6 +5562,7 @@ class BackendPool {
       beaconId,
       claimedAt: now,
       ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
+      requiresResultVerification,
       recoverable: true,
     });
     return true;
@@ -4637,6 +5917,27 @@ class BackendPool {
 
   hasBuild(name: string): boolean {
     return this.buildsByName.has(name);
+  }
+
+  implantConfigForTarget(target: TargetSummary): clientpb.ImplantConfig {
+    const retained = this.buildsByName.get(target.name) ?? this.buildsByName.get(target.id);
+    if (retained) return clientpb.ImplantConfig.create(retained);
+    const activeC2 = this.targetStore.authoritativeActiveC2(target.mode, target.id);
+    if (!activeC2) throw new Error("The selected target has no authoritative active C2 configuration");
+    const scheme = /^([a-z][a-z0-9+.-]*):/iu.exec(activeC2)?.[1]?.toLowerCase() ?? "";
+    return clientpb.ImplantConfig.create({
+      IsBeacon: target.mode === "beacon",
+      GOOS: target.os.toLowerCase(),
+      GOARCH: target.arch.toLowerCase(),
+      IncludeMTLS: scheme === "mtls",
+      IncludeHTTP: scheme === "http" || scheme === "https",
+      IncludeWG: scheme === "wg",
+      IncludeDNS: scheme === "dns",
+      IncludeNamePipe: scheme === "namedpipe",
+      IncludeTCP: scheme === "tcppivot",
+      C2: [clientpb.ImplantC2.create({ URL: activeC2 })],
+      HTTPC2ConfigName: "default",
+    });
   }
 
   assertCompilerTarget(input: GenerateInput): void {
@@ -5470,6 +6771,132 @@ function resolvedSessionOperationTarget(
     summary: { ...target.target },
     backend: operationBackendSummary(context, pool),
   };
+}
+
+function resolvedExecutionOperationTarget(
+  context: WindowContext,
+  pool: BackendPool,
+  target: RevalidatedTarget,
+): ResolvedOperationTarget {
+  const authoritativeActiveC2 = pool.targetStore.authoritativeActiveC2(target.ref.mode, target.ref.id);
+  return {
+    ref: { ...target.ref },
+    summary: { ...target.target },
+    backend: operationBackendSummary(context, pool),
+    ...(authoritativeActiveC2 ? { authoritativeActiveC2 } : {}),
+  };
+}
+
+function executionBoundaryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    /^(Select a target|The selected target|The selected session|The execution read|The execution review|The execution result|The requested execution output|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
+  ) return boundedText(message, 512);
+  return "The execution request failed at the protected main-process boundary";
+}
+
+function cloneExecutionActionResult(value: ExecutionActionResult): ExecutionActionResult {
+  return {
+    ...value,
+    ...(value.output ? { output: value.output.map((item) => ({ ...item })) } : {}),
+  };
+}
+
+function submittedExecutionReadResult(
+  operationId: RunExecutionReadInput["operationId"],
+  taskId: string,
+): ExecutionReadResult {
+  return operationId === "execution.children"
+    ? {
+        operationId,
+        state: "submitted",
+        taskId,
+        items: [],
+        total: 0,
+        truncated: false,
+      }
+    : {
+        operationId,
+        state: "submitted",
+        taskId,
+        processName: "",
+        processIntegrity: "",
+        privileges: [],
+        total: 0,
+        truncated: false,
+      };
+}
+
+function assertExecutionBeaconReadRequest(input: RunExecutionReadInput): void {
+  if (!input.taskId) {
+    if (input.cursor) throw new Error("The execution read cursor requires its exact beacon task");
+    return;
+  }
+  if (
+    input.cursor !== undefined &&
+    !input.cursor.startsWith(`execution-read:v2:${input.operationId}:${input.taskId}:`)
+  ) throw new Error("The execution read cursor does not belong to the selected beacon task");
+}
+
+function clearRefreshedExecutionBuffers(value: RefreshedExecutionBeaconTask): void {
+  if (value.state !== "decoded" || value.decoded.kind !== "action") return;
+  value.decoded.value.stdout?.fill(0);
+  value.decoded.value.stderr?.fill(0);
+}
+
+function executionDraftUsesProfile(draft: ExecutionActionDraft): boolean {
+  return draft.operationId === "execution.backdoor" ||
+    (draft.operationId === "execution.psexec" && draft.source.kind === "profile") ||
+    (draft.operationId === "execution.dll-hijack" && draft.source.kind === "profile");
+}
+
+function psexecRemoteBinaryPath(remoteDirectory: string): string {
+  const normalizedDirectory = win32Path.normalize(remoteDirectory.trim());
+  if (!/^[A-Za-z]:\\/u.test(normalizedDirectory) || normalizedDirectory.includes("\u0000")) {
+    throw new ExecutionWorkbenchInputError("The reviewed service directory must be an absolute Windows drive path");
+  }
+  const basename = `sliver-${randomUUID().replaceAll("-", "").slice(0, 12)}.exe`;
+  return win32Path.join(normalizedDirectory, basename);
+}
+
+function psexecUploadPath(hostname: string, remotePath: string): string {
+  const host = hostname.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/u.test(host)) {
+    throw new ExecutionWorkbenchInputError("The reviewed remote service hostname is invalid");
+  }
+  const normalized = win32Path.normalize(remotePath.trim());
+  if (!/^[A-Za-z]:\\/u.test(normalized) || normalized.includes("\u0000")) {
+    throw new ExecutionWorkbenchInputError("The reviewed service path must be an absolute Windows drive path");
+  }
+  const drive = normalized[0]!.toUpperCase();
+  const suffix = normalized.slice(3);
+  return `\\\\${host}\\${drive}$${suffix ? `\\${suffix}` : ""}`;
+}
+
+async function delayMilliseconds(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolveDelay) => {
+    const timer = setTimeout(resolveDelay, milliseconds);
+    timer.unref?.();
+  });
+}
+
+function externalExecutionDescriptor(
+  descriptor: ReturnType<typeof executionOperationDescriptor>,
+  mutating: boolean,
+  mode: TargetMode,
+) {
+  return Object.freeze({
+    cancellation: mode === "beacon" ? "best-effort-beacon-task" as const : "not-supported" as const,
+    outcomeUnknownAfterSubmission: mutating,
+    startMessage: descriptor.submittedMessage,
+    completionMessage: descriptor.completedMessage,
+    failureMessage: descriptor.failedMessage,
+    canceledMessage: "The execution operation was canceled before submission",
+    partialMessage: "The execution operation completed only partially",
+    outcomeUnknownMessage: "The execution operation was dispatched, but its outcome could not be confirmed",
+    targetDisappearedMessage: "The selected target became unavailable before the execution operation completed",
+    taskTimeoutSeconds: descriptor.timeoutSeconds,
+  });
 }
 
 function sessionWorkbenchResultWasCanceled(result: { value: unknown }): boolean {

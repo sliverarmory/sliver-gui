@@ -54,6 +54,7 @@ import {
   type SliverClientAdapter,
 } from "./connection-registry.js";
 import { BeaconTaskStore } from "./beacon-task-store.js";
+import type { OperationEngine } from "./operation-engine.js";
 
 let root: string;
 let externalDirectory: string;
@@ -5035,6 +5036,801 @@ describe("M3 session shell registry boundary", () => {
     });
     expect(terminalRuntimeMocks.loadTerminalRuntime).toHaveBeenCalledTimes(2);
   });
+
+  it("binds reviewed execution to the exact session, retains bounded output, and consumes the plan once", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m4", "m4-execution")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!target) throw new Error("Expected an M4 session target");
+    await registry.selectTarget(1, target);
+
+    const catalog = await registry.listExecutionCatalog(1);
+    expect(catalog).toMatchObject({
+      ok: true,
+      value: {
+        target: { id: "session_m4" },
+        capabilities: expect.arrayContaining([
+          expect.objectContaining({ operationId: "execution.process", available: true }),
+          expect.objectContaining({ operationId: "execution.assembly", available: false }),
+        ]),
+      },
+    });
+
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: {
+        operationId: "execution.process",
+        path: "/usr/bin/id",
+        args: ["-u"],
+        captureOutput: true,
+        background: false,
+        inheritEnvironment: true,
+        environment: [],
+        useToken: false,
+        hideWindow: false,
+        timeoutSeconds: 60,
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    expect(prepared.value.fields).toContainEqual({
+      label: "Executable",
+      value: "/usr/bin/id",
+      sensitive: false,
+    });
+
+    const executed = await registry.executeExecutionPlan(1, { token: prepared.value.token });
+    if (!executed.ok) throw new Error(executed.error);
+    expect(executed.value).toMatchObject({
+      operationId: "execution.process",
+      state: "completed",
+      pid: 6_001,
+      output: expect.arrayContaining([
+        expect.objectContaining({ stream: "stdout", size: 9 }),
+        expect.objectContaining({ stream: "stderr", size: 9 }),
+        expect.objectContaining({ stream: "combined", size: 18 }),
+      ]),
+    });
+    expect(client.executeSession).toHaveBeenCalledOnce();
+    await expect(registry.executeExecutionPlan(1, { token: prepared.value.token })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/unavailable or expired/u),
+    });
+    expect(client.executeSession).toHaveBeenCalledOnce();
+
+    await expect(registry.getExecutionResult(1, { requestId: executed.value.requestId })).resolves.toEqual({
+      ok: true,
+      value: executed.value,
+    });
+    const destination = join(externalDirectory, "m4-stdout.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    await expect(registry.saveExecutionResult(sender(1), {
+      requestId: executed.value.requestId,
+      stream: "stdout",
+    })).resolves.toEqual({ ok: true, value: { saved: true, fileName: "m4-stdout.bin" } });
+    await expect(readFile(destination, "utf8")).resolves.toBe("m4-stdout");
+  });
+
+  it("classifies exact target rejection separately from transport uncertainty without replay or backend text", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m4_errors", "m4-errors")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!target) throw new Error("Expected an M4 session target");
+    await registry.selectTarget(1, target);
+    const prepare = async () => {
+      const result = await registry.prepareExecutionAction(sender(1), {
+        draft: {
+          operationId: "execution.process",
+          path: "/usr/bin/false",
+          args: [],
+          captureOutput: true,
+          background: false,
+          inheritEnvironment: true,
+          environment: [],
+          useToken: false,
+          hideWindow: false,
+          timeoutSeconds: 60,
+        },
+      });
+      if (!result.ok) throw new Error(result.error);
+      return result.value;
+    };
+
+    client.executeSession.mockResolvedValueOnce({
+      Stdout: Buffer.alloc(0),
+      Stderr: Buffer.alloc(0),
+      Pid: 0,
+      Response: { Err: "secret target detail /remote/path" },
+    });
+    const rejected = await registry.executeExecutionPlan(1, { token: (await prepare()).token });
+    expect(rejected).toMatchObject({
+      ok: true,
+      value: { state: "failed", message: "The selected target rejected the reviewed operation." },
+    });
+    expect(JSON.stringify(rejected)).not.toMatch(/secret|remote\/path/u);
+
+    client.executeSession.mockRejectedValueOnce(new Error("credential=secret /rpc/private/path"));
+    const uncertain = await registry.executeExecutionPlan(1, { token: (await prepare()).token });
+    expect(uncertain).toMatchObject({
+      ok: true,
+      value: { state: "outcome-unknown" },
+    });
+    expect(JSON.stringify(uncertain)).not.toMatch(/credential|secret|rpc\/private/u);
+    expect(client.executeSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears credential bytes after reviewed execution and journals beacon submission without waiting", async () => {
+    const windowsClient = new FakeSliverClient();
+    const windowsSession = session("session_windows_m4", "windows-m4");
+    windowsSession.OS = "windows";
+    windowsSession.Arch = "amd64";
+    windowsClient.sessionState.Sessions = [windowsSession];
+    const sessionRegistry = createRegistry(() => windowsClient.adapter);
+    sessionRegistry.registerWindow(1);
+    await connectSaved(sessionRegistry, 1);
+    const sessionTarget = sessionRegistry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!sessionTarget) throw new Error("Expected a Windows session target");
+    await sessionRegistry.selectTarget(1, sessionTarget);
+    const credential = Uint8Array.from(Buffer.from("one-operation-password", "utf8"));
+    const review = await sessionRegistry.prepareExecutionAction(sender(1), {
+      draft: {
+        operationId: "privilege.run-as",
+        username: "operator",
+        domain: "LAB",
+        password: credential,
+        process: "cmd.exe",
+        args: "/c whoami",
+        showWindow: false,
+        netOnly: false,
+        timeoutSeconds: 30,
+      },
+    });
+    if (!review.ok) throw new Error(review.error);
+    expect(review.value).toMatchObject({
+      currentIdentity: "DOMAIN\\operator-user",
+      requestedIdentity: "LAB\\operator",
+    });
+    expect(windowsClient.currentTokenOwnerSession).toHaveBeenCalledOnce();
+    expect(JSON.stringify(review.value)).not.toMatch(/one-operation-password/u);
+    await expect(sessionRegistry.executeExecutionPlan(1, { token: review.value.token })).resolves.toMatchObject({
+      ok: true,
+      value: { state: "completed" },
+    });
+    expect([...credential]).toEqual(new Array(credential.length).fill(0));
+
+    const beaconClient = new FakeSliverClient();
+    beaconClient.beaconState.Beacons = [beacon("beacon_m4", "m4-beacon")];
+    const beaconRegistry = createRegistry(() => beaconClient.adapter);
+    beaconRegistry.registerWindow(2);
+    await connectSaved(beaconRegistry, 2);
+    const beaconTarget = beaconRegistry.snapshot(2).targetContext.selectableTargets.find(({ mode }) => mode === "beacon");
+    if (!beaconTarget) throw new Error("Expected an M4 beacon target");
+    await beaconRegistry.selectTarget(2, beaconTarget);
+    const queued = await beaconRegistry.prepareExecutionAction(sender(2), {
+      draft: {
+        operationId: "execution.process",
+        path: "/usr/bin/id",
+        args: [],
+        captureOutput: false,
+        background: false,
+        inheritEnvironment: true,
+        environment: [],
+        useToken: false,
+        hideWindow: false,
+        timeoutSeconds: 60,
+      },
+    });
+    if (!queued.ok) throw new Error(queued.error);
+    const submitted = await beaconRegistry.executeExecutionPlan(2, { token: queued.value.token });
+    if (!submitted.ok) throw new Error(submitted.error);
+    expect(submitted).toMatchObject({
+      ok: true,
+      value: {
+        operationId: "execution.process",
+        state: "submitted",
+        taskId: expect.stringMatching(/^task_/u),
+      },
+    });
+    expect(beaconClient.executeBeacon).toHaveBeenCalledOnce();
+  });
+
+  it("decodes a completed beacon action, retains its output, and destroys fetched task bytes", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_decode", "m4-decode")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    completeFakeTaskSummary(client, "beacon_m4_decode", taskId, "ExecuteReq");
+    const fetched = clientpb.BeaconTask.create({
+      ID: taskId,
+      BeaconID: "beacon_m4_decode",
+      State: "completed",
+      Description: "ExecuteReq",
+      Request: Buffer.from("M4_FETCHED_REQUEST_SECRET"),
+      Response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Stdout: Buffer.from("decoded-beacon-stdout"),
+        Stderr: Buffer.from("decoded-beacon-stderr"),
+        Pid: 7_331,
+        Response: {},
+      })).finish()),
+    });
+    client.fetchBeaconTask.mockResolvedValueOnce(fetched);
+
+    const completed = await registry.getExecutionResult(1, { requestId: submitted.requestId });
+    expect(completed).toMatchObject({
+      ok: true,
+      value: {
+        requestId: submitted.requestId,
+        operationId: "execution.process",
+        state: "completed",
+        taskId,
+        pid: 7_331,
+        message: "Process execution completed.",
+        output: expect.arrayContaining([
+          expect.objectContaining({ stream: "stdout", size: 21 }),
+          expect.objectContaining({ stream: "stderr", size: 21 }),
+          expect.objectContaining({ stream: "combined", size: 42 }),
+        ]),
+      },
+    });
+    expect(fetched.Request.every((byte) => byte === 0)).toBe(true);
+    expect(fetched.Response.every((byte) => byte === 0)).toBe(true);
+
+    await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toEqual(completed);
+    expect(client.fetchBeaconTask).toHaveBeenCalledOnce();
+    const destination = join(externalDirectory, "decoded-beacon-stdout.txt");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    await expect(registry.saveExecutionResult(sender(1), {
+      requestId: submitted.requestId,
+      stream: "stdout",
+    })).resolves.toEqual({
+      ok: true,
+      value: { saved: true, fileName: "decoded-beacon-stdout.txt" },
+    });
+    await expect(readFile(destination, "utf8")).resolves.toBe("decoded-beacon-stdout");
+  });
+
+  it("maps a completed beacon Response.Err to a fixed failed result without remote text", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_reject", "m4-reject")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    completeFakeTaskSummary(client, "beacon_m4_reject", taskId, "ExecuteReq");
+    const fetched = clientpb.BeaconTask.create({
+      ID: taskId,
+      BeaconID: "beacon_m4_reject",
+      State: "completed",
+      Description: "ExecuteReq",
+      Request: Buffer.from("M4_REJECT_REQUEST_SECRET"),
+      Response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Response: { Err: "password=REMOTE_SECRET path=/remote/private" },
+      })).finish()),
+    });
+    client.fetchBeaconTask.mockResolvedValueOnce(fetched);
+
+    const failed = await registry.getExecutionResult(1, { requestId: submitted.requestId });
+    expect(failed).toMatchObject({
+      ok: true,
+      value: {
+        state: "failed",
+        taskId,
+        message: "The selected target rejected the reviewed operation.",
+      },
+    });
+    expect(JSON.stringify(failed)).not.toMatch(/REMOTE_SECRET|remote\/private|password=/u);
+    expect(fetched.Request.every((byte) => byte === 0)).toBe(true);
+    expect(fetched.Response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "a target-reported error",
+      response: () => Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Response: { Err: "password=GENERIC_DETAIL_MUST_NOT_SETTLE" },
+      })).finish()),
+      exactState: "failed",
+    },
+    {
+      label: "a malformed response",
+      response: () => Buffer.from([0xff, 0xff, 0xff, 0x7f]),
+      exactState: "outcome-unknown",
+    },
+  ] as const)("does not settle an M4 journal from generic task detail with $label", async ({
+    response,
+    exactState,
+  }) => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_detail_guard", "m4-detail-guard")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    completeFakeTaskSummary(client, "beacon_m4_detail_guard", taskId, "ExecuteReq", response());
+
+    await expect(registry.getBeaconTask(1, taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { taskId, state: "completed", localRequestId: submitted.requestId },
+    });
+    await expect(registry.getTargetOperation(1, submitted.requestId)).resolves.toMatchObject({
+      ok: true,
+      value: { state: "running", taskId },
+    });
+
+    await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toMatchObject({
+      ok: true,
+      value: { state: exactState, taskId },
+    });
+  });
+
+  it("keeps an already-completed malformed M4 task nonterminal during cancellation preflight", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_cancel_preflight", "m4-cancel-preflight")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    completeFakeTaskSummary(
+      client,
+      "beacon_m4_cancel_preflight",
+      taskId,
+      "ExecuteReq",
+      Buffer.from([0xff, 0xff, 0xff, 0x7f]),
+    );
+
+    const canceled = await registry.cancelTargetOperation(1, submitted.requestId);
+    expect(canceled).toMatchObject({ ok: true, value: { taskId } });
+    if (!canceled.ok) throw new Error(canceled.error);
+    expect(["running", "cancel-requested"]).toContain(canceled.value.state);
+    expect(client.cancelBeaconTask).not.toHaveBeenCalled();
+    const operation = await registry.getTargetOperation(1, submitted.requestId);
+    expect(operation).toMatchObject({ ok: true, value: { taskId } });
+    if (!operation.ok) throw new Error(operation.error);
+    expect(["running", "cancel-requested"]).toContain(operation.value.state);
+
+    await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toMatchObject({
+      ok: true,
+      value: { state: "outcome-unknown", taskId },
+    });
+  });
+
+  it("keeps a completed M4 Response.Err nonterminal during cancellation follow-up", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_cancel_followup", "m4-cancel-followup")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    client.cancelBeaconTask.mockImplementationOnce(async () => {
+      completeFakeTaskSummary(
+        client,
+        "beacon_m4_cancel_followup",
+        taskId,
+        "ExecuteReq",
+        Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+          Response: { Err: "password=CANCEL_FOLLOWUP_MUST_NOT_SETTLE" },
+        })).finish()),
+      );
+      throw new Error("the cancellation response was lost after task completion");
+    });
+
+    const canceled = await registry.cancelTargetOperation(1, submitted.requestId);
+    expect(canceled).toMatchObject({ ok: true, value: { taskId } });
+    if (!canceled.ok) throw new Error(canceled.error);
+    expect(["running", "cancel-requested"]).toContain(canceled.value.state);
+    expect(client.cancelBeaconTask).toHaveBeenCalledOnce();
+    const operation = await registry.getTargetOperation(1, submitted.requestId);
+    expect(operation).toMatchObject({ ok: true, value: { taskId } });
+    if (!operation.ok) throw new Error(operation.error);
+    expect(["running", "cancel-requested"]).toContain(operation.value.state);
+
+    await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toMatchObject({
+      ok: true,
+      value: { state: "failed", taskId },
+    });
+  });
+
+  it("zeroizes decoded action output when completed journal reconciliation rejects", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_reconcile_reject", "m4-reconcile-reject")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    completeFakeTaskSummary(client, "beacon_m4_reconcile_reject", taskId, "ExecuteReq");
+    const fetched = clientpb.BeaconTask.create({
+      ID: taskId,
+      BeaconID: "beacon_m4_reconcile_reject",
+      State: "completed",
+      Description: "ExecuteReq",
+      Response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Pid: 7_332,
+        Stdout: Buffer.from("RECONCILE_REJECT_STDOUT"),
+        Stderr: Buffer.from("RECONCILE_REJECT_STDERR"),
+        Response: {},
+      })).finish()),
+    });
+    client.fetchBeaconTask.mockResolvedValueOnce(fetched);
+
+    const internals = registry as unknown as {
+      windows: Map<number, {
+        operationEngine?: OperationEngine;
+        operationReconcileInFlight?: Promise<void>;
+      }>;
+    };
+    const context = internals.windows.get(1);
+    await context?.operationReconcileInFlight;
+    if (!context?.operationEngine) throw new Error("Expected an operation engine");
+    vi.spyOn(context.operationEngine, "reconcileTask")
+      .mockRejectedValueOnce(new Error("journal reconciliation rejected"));
+
+    const originalBufferFrom = Buffer.from.bind(Buffer);
+    const decodedCopies: Buffer[] = [];
+    const bufferFrom = vi.spyOn(Buffer, "from").mockImplementation(((...args: Parameters<typeof Buffer.from>) => {
+      const created = originalBufferFrom(...args);
+      const text = created.toString("utf8");
+      if (text === "RECONCILE_REJECT_STDOUT" || text === "RECONCILE_REJECT_STDERR") {
+        decodedCopies.push(created);
+      }
+      return created;
+    }) as typeof Buffer.from);
+    try {
+      await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toMatchObject({
+        ok: true,
+        value: { state: "outcome-unknown", taskId },
+      });
+    } finally {
+      bufferFrom.mockRestore();
+    }
+    expect(decodedCopies.filter((copy) => copy.every((byte) => byte === 0))).toHaveLength(2);
+    expect(fetched.Response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it.each([
+    { label: "description mismatch", description: "RunAsReq", fetchedId: "same", response: "valid" },
+    { label: "task ID mismatch", description: "ExecuteReq", fetchedId: "other", response: "valid" },
+    { label: "malformed response", description: "ExecuteReq", fetchedId: "same", response: "malformed" },
+  ] as const)("quarantines a completed beacon action with $label as outcome-unknown", async ({
+    description,
+    fetchedId,
+    response,
+  }) => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_m4_uncertain", "m4-uncertain")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const submitted = await submitBeaconProcess(registry, 1);
+    const taskId = submitted.taskId;
+    if (!taskId) throw new Error("Expected a submitted beacon task");
+    completeFakeTaskSummary(client, "beacon_m4_uncertain", taskId, description);
+    const fetched = clientpb.BeaconTask.create({
+      ID: fetchedId === "same" ? taskId : "task_other_M4_SECRET",
+      BeaconID: "beacon_m4_uncertain",
+      State: "completed",
+      Description: description,
+      Request: Buffer.from("M4_UNCERTAIN_REQUEST_SECRET"),
+      Response: response === "valid"
+        ? Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+            Stdout: Buffer.from("must-not-be-retained"),
+            Response: {},
+          })).finish())
+        : Buffer.from([0xff, 0xff, 0xff, 0x7f]),
+    });
+    client.fetchBeaconTask.mockResolvedValueOnce(fetched);
+
+    const uncertain = await registry.getExecutionResult(1, { requestId: submitted.requestId });
+    expect(uncertain).toMatchObject({
+      ok: true,
+      value: {
+        state: "outcome-unknown",
+        taskId,
+        message: "The beacon task completed, but its exact execution result could not be confirmed safely.",
+      },
+    });
+    expect(JSON.stringify(uncertain)).not.toMatch(/M4_SECRET|must-not-be-retained|UNCERTAIN_REQUEST/u);
+    expect(fetched.Request.every((byte) => byte === 0)).toBe(true);
+    expect(fetched.Response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("decodes submitted children and privilege reads into bounded pages without redispatch", async () => {
+    const childrenClient = new FakeSliverClient();
+    childrenClient.beaconState.Beacons = [beacon("beacon_m4_children", "m4-children")];
+    const childrenRegistry = createRegistry(() => childrenClient.adapter);
+    childrenRegistry.registerWindow(1);
+    await connectSaved(childrenRegistry, 1);
+    await selectOnlyBeacon(childrenRegistry, 1);
+
+    const submittedChildren = await childrenRegistry.runExecutionRead(1, {
+      operationId: "execution.children",
+      limit: 1,
+    });
+    if (!submittedChildren.ok || submittedChildren.value.state !== "submitted") {
+      throw new Error("Expected submitted children task");
+    }
+    const childrenTaskId = submittedChildren.value.taskId;
+    if (!childrenTaskId) throw new Error("Expected children task ID");
+    completeFakeTaskSummary(childrenClient, "beacon_m4_children", childrenTaskId, "ExecuteChildrenReq", Buffer.from(
+      sliverpb.ExecuteChildren.encode(sliverpb.ExecuteChildren.create({
+        Children: [
+          { Pid: 101, Path: "/usr/bin/one", Args: ["a"], StartTime: "2000000000", Exited: true, ExitCode: 0 },
+          { Pid: 102, Path: "/usr/bin/two", Args: ["b"], StartTime: "2000000001", Exited: false },
+          { Pid: 103, Path: "/usr/bin/three", Args: ["c"], StartTime: "2000000002", Exited: false },
+        ],
+        Response: {},
+      })).finish(),
+    ));
+
+    const firstChildrenPage = await childrenRegistry.runExecutionRead(1, {
+      operationId: "execution.children",
+      taskId: childrenTaskId,
+      limit: 1,
+    });
+    expect(firstChildrenPage).toMatchObject({
+      ok: true,
+      value: {
+        state: "completed",
+        taskId: childrenTaskId,
+        items: [{ pid: 101, path: "/usr/bin/one" }],
+        total: 3,
+        nextCursor: `execution-read:v2:execution.children:${childrenTaskId}:1`,
+        truncated: true,
+      },
+    });
+    if (!firstChildrenPage.ok || firstChildrenPage.value.operationId !== "execution.children") {
+      throw new Error("Expected decoded children page");
+    }
+    const nextChildrenCursor = firstChildrenPage.value.nextCursor;
+    if (!nextChildrenCursor) throw new Error("Expected another children page");
+    const secondChildrenPage = await childrenRegistry.runExecutionRead(1, {
+      operationId: "execution.children",
+      taskId: childrenTaskId,
+      cursor: nextChildrenCursor,
+      limit: 1,
+    });
+    expect(secondChildrenPage).toMatchObject({
+      ok: true,
+      value: { taskId: childrenTaskId, items: [{ pid: 102, path: "/usr/bin/two" }], total: 3 },
+    });
+    expect(childrenClient.executeChildrenBeacon).toHaveBeenCalledOnce();
+
+    const privilegesClient = new FakeSliverClient();
+    const windowsBeacon = beacon("beacon_m4_privs", "m4-privs");
+    windowsBeacon.OS = "windows";
+    windowsBeacon.Arch = "amd64";
+    privilegesClient.beaconState.Beacons = [windowsBeacon];
+    const privilegesRegistry = createRegistry(() => privilegesClient.adapter);
+    privilegesRegistry.registerWindow(2);
+    await connectSaved(privilegesRegistry, 2);
+    await selectOnlyBeacon(privilegesRegistry, 2);
+
+    const submittedPrivileges = await privilegesRegistry.runExecutionRead(2, {
+      operationId: "privilege.get",
+      limit: 1,
+    });
+    if (!submittedPrivileges.ok || submittedPrivileges.value.state !== "submitted") {
+      throw new Error("Expected submitted privileges task");
+    }
+    const privilegeTaskId = submittedPrivileges.value.taskId;
+    if (!privilegeTaskId) throw new Error("Expected privilege task ID");
+    completeFakeTaskSummary(privilegesClient, "beacon_m4_privs", privilegeTaskId, "GetPrivsReq", Buffer.from(
+      sliverpb.GetPrivs.encode(sliverpb.GetPrivs.create({
+        ProcessName: "implant.exe",
+        ProcessIntegrity: "High",
+        PrivInfo: [
+          { Name: "SeDebugPrivilege", Description: "Debug programs", Enabled: true },
+          { Name: "SeImpersonatePrivilege", Description: "Impersonate clients", Enabled: true },
+        ],
+        Response: {},
+      })).finish(),
+    ));
+
+    const firstPrivilegePage = await privilegesRegistry.runExecutionRead(2, {
+      operationId: "privilege.get",
+      taskId: privilegeTaskId,
+      limit: 1,
+    });
+    expect(firstPrivilegePage).toMatchObject({
+      ok: true,
+      value: {
+        state: "completed",
+        taskId: privilegeTaskId,
+        processName: "implant.exe",
+        processIntegrity: "High",
+        privileges: [{ name: "SeDebugPrivilege", enabled: true }],
+        total: 2,
+        nextCursor: `execution-read:v2:privilege.get:${privilegeTaskId}:1`,
+        truncated: true,
+      },
+    });
+    if (!firstPrivilegePage.ok || firstPrivilegePage.value.operationId !== "privilege.get") {
+      throw new Error("Expected decoded privilege page");
+    }
+    const nextPrivilegeCursor = firstPrivilegePage.value.nextCursor;
+    if (!nextPrivilegeCursor) throw new Error("Expected another privilege page");
+    const secondPrivilegePage = await privilegesRegistry.runExecutionRead(2, {
+      operationId: "privilege.get",
+      taskId: privilegeTaskId,
+      cursor: nextPrivilegeCursor,
+      limit: 1,
+    });
+    expect(secondPrivilegePage).toMatchObject({
+      ok: true,
+      value: {
+        taskId: privilegeTaskId,
+        privileges: [{ name: "SeImpersonatePrivilege", enabled: true }],
+        total: 2,
+      },
+    });
+    expect(privilegesClient.getPrivsBeacon).toHaveBeenCalledOnce();
+  });
+
+  it("denies cross-operation beacon task refresh without dispatching another read", async () => {
+    const client = new FakeSliverClient();
+    const windowsBeacon = beacon("beacon_m4_cross", "m4-cross");
+    windowsBeacon.OS = "windows";
+    windowsBeacon.Arch = "amd64";
+    client.beaconState.Beacons = [windowsBeacon];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const children = await registry.runExecutionRead(1, { operationId: "execution.children", limit: 1 });
+    const privileges = await registry.runExecutionRead(1, { operationId: "privilege.get", limit: 1 });
+    if (!children.ok || children.value.state !== "submitted" ||
+      !privileges.ok || privileges.value.state !== "submitted") {
+      throw new Error("Expected two submitted read tasks");
+    }
+    const childrenTaskId = children.value.taskId;
+    const privilegeTaskId = privileges.value.taskId;
+    if (!childrenTaskId || !privilegeTaskId) throw new Error("Expected exact read task IDs");
+
+    await expect(registry.runExecutionRead(1, {
+      operationId: "execution.children",
+      taskId: privilegeTaskId,
+      limit: 1,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/execution result is unavailable for the current target/i),
+    });
+    await expect(registry.runExecutionRead(1, {
+      operationId: "privilege.get",
+      taskId: childrenTaskId,
+      limit: 1,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/execution result is unavailable for the current target/i),
+    });
+    expect(client.executeChildrenBeacon).toHaveBeenCalledOnce();
+    expect(client.getPrivsBeacon).toHaveBeenCalledOnce();
+    expect(client.fetchBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects an identity review when the exact selected session changes during token-owner verification", async () => {
+    const client = new FakeSliverClient();
+    const first = session("session_identity_a", "identity-a");
+    const second = session("session_identity_b", "identity-b");
+    first.OS = second.OS = "windows";
+    first.Arch = second.Arch = "amd64";
+    client.sessionState.Sessions = [first, second];
+    const identityGate = deferred<sliverpb.CurrentTokenOwner>();
+    client.currentTokenOwnerSession.mockImplementationOnce(async () => identityGate.promise);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const selectable = registry.snapshot(1).targetContext.selectableTargets.filter(({ mode }) => mode === "session");
+    const firstRef = selectable.find(({ id }) => id === first.ID);
+    const secondRef = selectable.find(({ id }) => id === second.ID);
+    if (!firstRef || !secondRef) throw new Error("Expected two Windows sessions");
+    await registry.selectTarget(1, firstRef);
+    const password = Uint8Array.from(Buffer.from("review-secret", "utf8"));
+    const pending = registry.prepareExecutionAction(sender(1), {
+      draft: {
+        operationId: "privilege.make-token",
+        username: "operator",
+        domain: "LAB",
+        password,
+        logonType: "interactive",
+        timeoutSeconds: 60,
+      },
+    });
+    await vi.waitFor(() => expect(client.currentTokenOwnerSession).toHaveBeenCalledOnce());
+    await registry.selectTarget(1, secondRef);
+    identityGate.resolve(sliverpb.CurrentTokenOwner.create({ Output: "LAB\\old-token" }));
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/selected target changed/u),
+    });
+    expect([...password]).toEqual(new Array(password.length).fill(0));
+  });
+
+  it("binds Psexec upload and service execution to one generated remote executable", async () => {
+    const client = new FakeSliverClient();
+    const windowsSession = session("session_psexec_m4", "psexec-m4");
+    windowsSession.OS = "windows";
+    windowsSession.Arch = "amd64";
+    client.sessionState.Sessions = [windowsSession];
+    const executablePath = join(externalDirectory, "review-service.exe");
+    await writeFile(executablePath, "reviewed-service-binary");
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [executablePath] });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!target) throw new Error("Expected a Windows session");
+    await registry.selectTarget(1, target);
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: {
+        operationId: "execution.psexec",
+        hostname: "workstation.example",
+        serviceName: "TelemetryReview",
+        serviceDescription: "Telemetry review service",
+        remotePath: "C:\\Windows\\Temp",
+        source: { kind: "native-file" },
+        timeoutSeconds: 180,
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+
+    vi.useFakeTimers();
+    try {
+      const execution = registry.executeExecutionPlan(1, { token: prepared.value.token });
+      await vi.waitFor(() => expect(client.uploadSession).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(execution).resolves.toMatchObject({
+        ok: true,
+        value: {
+          state: "completed",
+          message: expect.stringMatching(/uploaded executable remains/u),
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(client.startRemoteServiceSession).toHaveBeenCalledOnce();
+    expect(client.removeRemoteServiceSession).toHaveBeenCalledOnce();
+    const uploadedPath = client.uploadSession.mock.calls.at(-1)?.[1];
+    const serviceOptions = client.startRemoteServiceSession.mock.calls.at(-1)?.[1];
+    expect(serviceOptions?.binaryPath).toMatch(/^C:\\Windows\\Temp\\sliver-[a-f0-9]{12}\.exe$/u);
+    expect(uploadedPath).toBe(
+      `\\\\workstation.example\\C$${serviceOptions?.binaryPath.slice(2)}`,
+    );
+    expect(client.uploadSession.mock.calls.at(-1)?.[2].every((byte) => byte === 0)).toBe(true);
+  });
 });
 
 describe("server compatibility and event redaction", () => {
@@ -5154,6 +5950,55 @@ class FakeSliverClient {
       .map(([Key, Value]) => ({ Key, Value })),
   }));
   readonly currentTokenOwnerSession = vi.fn(async () => sliverpb.CurrentTokenOwner.create({ Output: "DOMAIN\\operator-user" }));
+  readonly currentTokenOwnerBeacon = vi.fn(async () => ({ Output: "DOMAIN\\operator-user" }));
+  readonly executeSession = vi.fn(async () => ({
+    Stdout: Buffer.from("m4-stdout"),
+    Stderr: Buffer.from("m4-stderr"),
+    Pid: 6_001,
+    Response: { Err: "" },
+  }));
+  readonly executeBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "ExecuteReq",
+    Buffer.alloc(0),
+  ));
+  readonly executeChildrenSession = vi.fn(async () => ({ Children: [], Response: { Err: "" } }));
+  readonly executeChildrenBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "ExecuteChildrenReq",
+    Buffer.alloc(0),
+  ));
+  readonly getPrivsSession = vi.fn(async () => ({
+    ProcessName: "implant",
+    ProcessIntegrity: "high",
+    PrivInfo: [],
+    Response: { Err: "" },
+  }));
+  readonly getPrivsBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "GetPrivsReq",
+    Buffer.alloc(0),
+  ));
+  readonly runAsSession = vi.fn(async () => ({ Output: "run-as-ok", Response: { Err: "" } }));
+  readonly runAsBeacon = vi.fn(async (beaconId: string) => this.queueBeaconTask(
+    beaconId,
+    "RunAsReq",
+    Buffer.alloc(0),
+  ));
+  readonly startRemoteServiceSession = vi.fn(async (
+    _sessionId: string,
+    _options: {
+      hostname: string;
+      serviceName: string;
+      serviceDescription: string;
+      binaryPath: string;
+      args?: string;
+    },
+  ) => ({ Response: { Err: "" } }));
+  readonly removeRemoteServiceSession = vi.fn(async (
+    _sessionId: string,
+    _options: { hostname: string; serviceName: string },
+  ) => ({ Response: { Err: "" } }));
   readonly listEnvSession = vi.fn(async (sessionId: string) => this.getEnvSession(sessionId, ""));
   readonly revealEnvSession = vi.fn(async (sessionId: string, name: string) => this.getEnvSession(sessionId, name));
   readonly pwdSession = vi.fn(async () => sliverpb.Pwd.create({ Path: "/tmp" }));
@@ -5344,6 +6189,17 @@ class FakeSliverClient {
     pingBeacon: this.pingBeacon,
     getEnvSession: this.getEnvSession,
     currentTokenOwnerSession: this.currentTokenOwnerSession,
+    currentTokenOwnerBeacon: this.currentTokenOwnerBeacon,
+    executeSession: this.executeSession,
+    executeBeacon: this.executeBeacon,
+    executeChildrenSession: this.executeChildrenSession,
+    executeChildrenBeacon: this.executeChildrenBeacon,
+    getPrivsSession: this.getPrivsSession,
+    getPrivsBeacon: this.getPrivsBeacon,
+    runAsSession: this.runAsSession,
+    runAsBeacon: this.runAsBeacon,
+    startRemoteServiceSession: this.startRemoteServiceSession,
+    removeRemoteServiceSession: this.removeRemoteServiceSession,
     listEnvSession: this.listEnvSession,
     revealEnvSession: this.revealEnvSession,
     pwdSession: this.pwdSession,
@@ -5547,6 +6403,53 @@ function createRegistry(factory: () => SliverClientAdapter): ConnectionRegistry 
   });
   registries.push(registry);
   return registry;
+}
+
+async function selectOnlyBeacon(registry: ConnectionRegistry, contentsId: number): Promise<void> {
+  const target = registry.snapshot(contentsId).targetContext.selectableTargets.find(({ mode }) => mode === "beacon");
+  if (!target) throw new Error("Expected a selectable beacon");
+  const selected = await registry.selectTarget(contentsId, target);
+  if (!selected.ok) throw new Error(selected.error);
+}
+
+async function submitBeaconProcess(registry: ConnectionRegistry, contentsId: number) {
+  const prepared = await registry.prepareExecutionAction(sender(contentsId), {
+    draft: {
+      operationId: "execution.process",
+      path: "/usr/bin/id",
+      args: ["-u"],
+      captureOutput: true,
+      background: false,
+      inheritEnvironment: true,
+      environment: [],
+      useToken: false,
+      hideWindow: false,
+      timeoutSeconds: 60,
+    },
+  });
+  if (!prepared.ok) throw new Error(prepared.error);
+  const submitted = await registry.executeExecutionPlan(contentsId, { token: prepared.value.token });
+  if (!submitted.ok || submitted.value.state !== "submitted") {
+    throw new Error("Expected a submitted beacon process");
+  }
+  return submitted.value;
+}
+
+function completeFakeTaskSummary(
+  client: FakeSliverClient,
+  beaconId: string,
+  taskId: string,
+  description: string,
+  response?: Buffer,
+): clientpb.BeaconTask {
+  const task = client.taskState.get(beaconId)?.find((candidate) => candidate.ID === taskId);
+  if (!task) throw new Error("Expected fake beacon task");
+  task.State = "completed";
+  task.Description = description;
+  if (response) task.Response = Buffer.from(response);
+  task.SentAt = task.SentAt || String(Math.floor(Date.now() / 1_000));
+  task.CompletedAt = String(Math.floor(Date.now() / 1_000));
+  return task;
 }
 
 async function connectSaved(registry: ConnectionRegistry, contentsId: number): Promise<void> {

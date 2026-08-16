@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,15 @@ const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
 const M2_INITIAL_FILE_TEXT = `${M2_FILE_CONTENT}\nsecond deterministic line\n`;
 const M2_EDITED_CONTENT = "FAKE_M2_EDITED_CONTENT_DO_NOT_JOURNAL";
 const M2_SEARCH_PATTERN = "FAKE_M2_SEARCH_PATTERN_DO_NOT_JOURNAL";
+const M4_PRIVATE_KEY_SECRET = "FAKE_M4_PRIVATE_KEY_SECRET_DO_NOT_RENDER";
+const M4_SSH_STDOUT_TEXT = "deterministic M4 SSH stdout";
+const M4_SSH_STDOUT = `${M4_SSH_STDOUT_TEXT}\n`;
+const M4_PRIVATE_KEY_CONTENT = [
+  "-----BEGIN OPENSSH PRIVATE KEY-----",
+  M4_PRIVATE_KEY_SECRET,
+  "-----END OPENSSH PRIVATE KEY-----",
+  "",
+].join("\n");
 
 test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -30,6 +39,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   const managedConfigDirectory = join(temporaryRoot, "managed-configs");
   const userDataDirectory = join(temporaryRoot, "user-data");
   const selectedConfigPath = join(temporaryRoot, "chosen-m0-operator.cfg");
+  const m4PrivateKeyPath = join(temporaryRoot, "m4-e2e-private.key");
+  const m4SavedOutputPath = join(temporaryRoot, "m4-ssh-stdout.txt");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   await Promise.all([
     mkdir(savedConfigDirectory, { recursive: true }),
@@ -38,6 +49,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     mkdir(artifactDirectory, { recursive: true }),
   ]);
   await writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 });
+  await writeFile(m4PrivateKeyPath, M4_PRIVATE_KEY_CONTENT, { mode: 0o600 });
 
   let electronApplication: ElectronApplication | undefined;
   let page: Page | undefined;
@@ -94,7 +106,13 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       assert.ok(stateAfterConnect.methods.includes(method), `expected ConnectionRegistry to call ${method}`);
     }
 
-    await verifyM1TargetsAndOperations(electronApplication, page, artifactDirectory);
+    await verifyM1TargetsAndOperations(
+      electronApplication,
+      page,
+      artifactDirectory,
+      m4PrivateKeyPath,
+      m4SavedOutputPath,
+    );
 
     await startAndStopMtlsListener(page);
     const stateAfterStop = await readFakeState(electronApplication);
@@ -123,8 +141,12 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       M2_FILE_CONTENT,
       M2_EDITED_CONTENT,
       M2_SEARCH_PATTERN,
+      M4_PRIVATE_KEY_SECRET,
+      M4_SSH_STDOUT_TEXT,
       "/Users/e2e/workspace/notes.txt",
       selectedConfigPath,
+      m4PrivateKeyPath,
+      m4SavedOutputPath,
     ]) {
       assert.ok(!observableText.includes(forbidden), `renderer-visible text exposed ${forbidden}`);
       assert.equal(screenshot.includes(Buffer.from(forbidden)), false, `screenshot bytes exposed ${forbidden}`);
@@ -272,6 +294,8 @@ async function verifyM1TargetsAndOperations(
   electronApplication: ElectronApplication,
   page: Page,
   artifactDirectory: string,
+  m4PrivateKeyPath: string,
+  m4SavedOutputPath: string,
 ): Promise<void> {
   const initial = await rendererSnapshot(page);
   assert.deepEqual(initial.sessions.map(({ id, name }) => ({ id, name })), [
@@ -293,9 +317,18 @@ async function verifyM1TargetsAndOperations(
   await sessionsGrid.getByText("m1-session", { exact: true }).waitFor();
   assert.equal(await sessionsGrid.getByText("m1-beacon", { exact: true }).count(), 0);
   const sessionRef = requireTargetRef(initial, "session");
+  const beaconRef = requireTargetRef(initial, "beacon");
   await page.getByRole("row", { name: /m1-session/i }).click();
   await waitForSnapshot(page, (snapshot) => snapshot.targetContext.activeTarget?.id === sessionRef.id);
-  await verifyM2SessionWorkspace(electronApplication, page, artifactDirectory);
+  await verifyM2SessionWorkspace(
+    electronApplication,
+    page,
+    artifactDirectory,
+    m4PrivateKeyPath,
+    m4SavedOutputPath,
+    sessionRef,
+    beaconRef,
+  );
 
   const sessionPing = requireOperation(await invokeSliver(page, "submitTargetOperation", {
     operationId: "target.ping",
@@ -331,7 +364,6 @@ async function verifyM1TargetsAndOperations(
   await page.locator('[aria-label="Sessions"]:visible').click();
   await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
   await page.locator('[aria-label="Sliver sessions"]').getByText("m1-session", { exact: true }).waitFor();
-  const beaconRef = requireTargetRef(await rendererSnapshot(page), "beacon");
   await page.locator('[aria-label="Beacons"]:visible').click();
   await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
   const beaconsGrid = page.locator('[aria-label="Sliver beacons"]');
@@ -348,6 +380,7 @@ async function verifyM1TargetsAndOperations(
     "a safe main-owned C2 endpoint must enable beacon session conversion",
   );
   await verifyInteractionWindowPopout(electronApplication, page, "beacon", "m1-beacon", artifactDirectory);
+  await verifyM4BeaconExecution(electronApplication, page);
 
   await electronApplication.evaluate(() => {
     globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
@@ -356,11 +389,11 @@ async function verifyM1TargetsAndOperations(
     operationId: "target.ping",
   }));
   assert.equal(queuedPing.mode, "beacon");
-  assert.equal(queuedPing.state, "running");
+  assert.equal(queuedPing.state, "submitted");
   assert.deepEqual(queuedPing.progress, {
     completedUnits: 2,
     totalUnits: 3,
-    message: "Waiting for authoritative task completion",
+    message: "Waiting for beacon task delivery",
   });
   const fakeAfterBeaconPing = await readFakeState(electronApplication);
   assert.ok(
@@ -371,6 +404,13 @@ async function verifyM1TargetsAndOperations(
         methods: fakeAfterBeaconPing.methods.slice(-8),
       })}`,
   );
+  const awaitingPing = await waitForOperation(page, queuedPing.requestId, "running");
+  assert.equal(awaitingPing.taskId, queuedPing.taskId);
+  assert.deepEqual(awaitingPing.progress, {
+    completedUnits: 2,
+    totalUnits: 3,
+    message: "Waiting for authoritative task completion",
+  });
   await page.locator('[aria-label="Generate"]:visible').click();
   await page.getByRole("heading", { name: "Generate implant" }).waitFor();
   await electronApplication.evaluate((_electron, taskId) => {
@@ -404,11 +444,11 @@ async function verifyM1TargetsAndOperations(
     operationId: "beacon.open-session",
     delaySeconds: 2,
   }));
-  assert.equal(openSession.state, "running");
+  assert.equal(openSession.state, "submitted");
   assert.deepEqual(openSession.progress, {
     completedUnits: 2,
     totalUnits: 3,
-    message: "Waiting for authoritative task completion",
+    message: "Waiting for beacon task delivery",
   });
   assert.ok(openSession.taskId, "session conversion must retain its exact task binding");
   assert.deepEqual((await readFakeState(electronApplication)).openSessionRequests.at(-1), {
@@ -468,7 +508,7 @@ async function verifyM1TargetsAndOperations(
 
   const taskPage = await invokeSliver(page, "listBeaconTasks", { limit: 1 });
   assert.equal(taskPage.ok, true);
-  assert.equal(taskPage.value?.page.total, 3);
+  assert.equal(taskPage.value?.page.total, 4);
   assert.equal(taskPage.value?.page.truncated, true);
   assert.match(taskPage.value?.page.nextCursor ?? "", /^task:v2:/u);
   const nextTaskPage = await invokeSliver(page, "listBeaconTasks", {
@@ -827,6 +867,10 @@ async function verifyM2SessionWorkspace(
   electronApplication: ElectronApplication,
   page: Page,
   artifactDirectory: string,
+  m4PrivateKeyPath: string,
+  m4SavedOutputPath: string,
+  sessionRef: TargetRef,
+  beaconRef: TargetRef,
 ): Promise<void> {
   await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
   await page.getByRole("tablist", { name: "Session interaction sections" }).waitFor();
@@ -1004,6 +1048,179 @@ async function verifyM2SessionWorkspace(
   assert.ok(!state.methods.includes("memfilesListSession"), "Darwin must quarantine Linux memory-file RPCs");
 
   await verifyM3SessionTerminal(electronApplication, page, artifactDirectory);
+  await verifyM4SessionExecution(
+    electronApplication,
+    page,
+    artifactDirectory,
+    m4PrivateKeyPath,
+    m4SavedOutputPath,
+    sessionRef,
+    beaconRef,
+  );
+}
+
+async function verifyM4SessionExecution(
+  electronApplication: ElectronApplication,
+  page: Page,
+  artifactDirectory: string,
+  m4PrivateKeyPath: string,
+  m4SavedOutputPath: string,
+  sessionRef: TargetRef,
+  beaconRef: TargetRef,
+): Promise<void> {
+  await page.getByRole("tab", { name: "Execution", exact: true }).click();
+  await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
+
+  const childrenCalls = fakeMethodCount(await readFakeState(electronApplication), "executeChildrenSession");
+  await page.getByRole("button", { name: "Open: Background children", exact: true }).click();
+  const childrenGrid = page.getByRole("grid", { name: "Background child processes", exact: true });
+  await childrenGrid.waitFor();
+  await childrenGrid.getByText("/usr/bin/printf", { exact: true }).waitFor();
+  await childrenGrid.getByText("/usr/bin/sleep", { exact: true }).waitFor();
+  await waitForFakeMethodCount(electronApplication, "executeChildrenSession", childrenCalls + 1);
+
+  await page.getByRole("radio", { name: "Remote", exact: true }).click();
+  await page.getByRole("button", { name: "Open: SSH command", exact: true }).click();
+  const configuration = page.getByRole("dialog", { name: "SSH command", exact: true });
+  await configuration.waitFor();
+  await configuration.getByLabel("Remote hostname").fill("m4-hop.internal");
+  await configuration.getByLabel("Username").fill("m4-operator");
+  await configuration.getByLabel("Remote command").fill("/usr/bin/id\n-u");
+  await configuration.getByLabel("Authentication").click();
+  await page.getByRole("option", { name: "Private key chosen during Review", exact: true }).click();
+  await configuration.getByRole("region", { name: "Native file selection", exact: true }).waitFor();
+
+  await electronApplication.evaluate(({ dialog }, privateKeyPath) => {
+    dialog.showOpenDialog = async () => {
+      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+      return { canceled: false, filePaths: [privateKeyPath] };
+    };
+  }, m4PrivateKeyPath);
+  await configuration.getByRole("button", { name: "Review", exact: true }).click();
+
+  const review = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
+  await review.waitFor();
+  const reviewText = await review.innerText();
+  assert.ok(reviewText.includes("m1-session"), "M4 review must name the exact selected session");
+  assert.ok(reviewText.includes("session:m1_session"), "M4 review must include the exact target ID");
+  assert.match(reviewText, /m0-e2e-operator@127\.0\.0\.1:31337/u);
+  assert.match(reviewText, /m4-e2e-private\.key/u);
+  assert.match(reviewText, /SHA-256 [a-f0-9]{64}/u);
+  assert.ok(!reviewText.includes(m4PrivateKeyPath), "native paths must remain in the main process");
+  assert.ok(!reviewText.includes(M4_PRIVATE_KEY_SECRET), "native file bytes must not enter review metadata");
+
+  const sshCalls = fakeMethodCount(await readFakeState(electronApplication), "runSshSession");
+  await review.getByRole("button", { name: "Execute", exact: true }).click();
+  const latestExecution = page.getByRole("region", { name: "Latest execution", exact: true });
+  await latestExecution.waitFor();
+  await latestExecution.getByText("Remote SSH command completed.", { exact: true }).waitFor();
+  await latestExecution.getByText("Completed", { exact: true }).waitFor();
+  const saveStdout = latestExecution.getByRole("button", { name: "Save stdout", exact: true });
+  await saveStdout.waitFor();
+  await waitForFakeMethodCount(electronApplication, "runSshSession", sshCalls + 1);
+
+  await electronApplication.evaluate(({ dialog }, outputPath) => {
+    dialog.showSaveDialog = async () => {
+      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+      return { canceled: false, filePath: outputPath };
+    };
+  }, m4SavedOutputPath);
+  await saveStdout.click();
+  await page.getByText("Output saved", { exact: true }).waitFor();
+  await page.getByText("m4-ssh-stdout.txt", { exact: true }).waitFor();
+  assert.deepEqual(await readFile(m4SavedOutputPath), Buffer.from(M4_SSH_STDOUT));
+
+  const afterSsh = await readFakeState(electronApplication);
+  assert.equal(afterSsh.m4Audit.artifactInputs, 1);
+  assert.equal(afterSsh.m4Audit.credentialInputs, 1);
+  assert.ok(afterSsh.m4Audit.artifactInputBytes > 0);
+  assert.equal(afterSsh.m4Audit.artifactInputBytes, afterSsh.m4Audit.credentialInputBytes);
+  assert.ok(afterSsh.m4Audit.zeroizedCopies >= 2);
+  assert.equal(afterSsh.m4Audit.retainedSensitiveInputs, 0);
+
+  const m4BodyText = await page.locator("body").innerText();
+  assert.ok(!m4BodyText.includes(M4_PRIVATE_KEY_SECRET));
+  assert.ok(!m4BodyText.includes(m4PrivateKeyPath));
+  assert.ok(!m4BodyText.includes(M4_SSH_STDOUT_TEXT));
+  assert.ok(!m4BodyText.includes(m4SavedOutputPath));
+  const m4Screenshot = await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "m4-session-execution.png"),
+  });
+  assert.equal(m4Screenshot.includes(Buffer.from(M4_PRIVATE_KEY_SECRET)), false);
+  assert.equal(m4Screenshot.includes(Buffer.from(m4PrivateKeyPath)), false);
+  assert.equal(m4Screenshot.includes(Buffer.from(M4_SSH_STDOUT_TEXT)), false);
+  assert.equal(m4Screenshot.includes(Buffer.from(m4SavedOutputPath)), false);
+
+  // A reviewed plan is quarantined as soon as the main-owned exact target
+  // changes, without dispatching the stale operation.
+  await page.getByRole("radio", { name: "Process", exact: true }).click();
+  await page.getByRole("button", { name: "Open: Execute process", exact: true }).click();
+  const staleConfiguration = page.getByRole("dialog", { name: "Execute process", exact: true });
+  await staleConfiguration.getByLabel("Executable path").fill("/usr/bin/printf");
+  await staleConfiguration.getByLabel("Arguments").fill("stale-m4-plan");
+  await staleConfiguration.getByRole("button", { name: "Review", exact: true }).click();
+  const staleReview = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
+  await staleReview.waitFor();
+  const executeCalls = fakeMethodCount(await readFakeState(electronApplication), "executeSession");
+
+  const currentBeacon = requireTargetRef(await rendererSnapshot(page), "beacon");
+  assert.equal(currentBeacon.id, beaconRef.id);
+  const selectedBeacon = await invokeSliver(page, "selectTarget", currentBeacon);
+  assert.equal(selectedBeacon.ok, true, selectedBeacon.error ?? "selecting the M4 beacon failed");
+  await staleReview.waitFor({ state: "hidden" });
+  await page.getByRole("heading", { name: "Session workspace unavailable", exact: true }).waitFor();
+  assert.equal(fakeMethodCount(await readFakeState(electronApplication), "executeSession"), executeCalls);
+
+  const currentSession = requireTargetRef(await rendererSnapshot(page), "session");
+  assert.equal(currentSession.id, sessionRef.id);
+  const selectedSession = await invokeSliver(page, "selectTarget", currentSession);
+  assert.equal(selectedSession.ok, true, selectedSession.error ?? "restoring the M4 session failed");
+  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  await page.getByRole("tablist", { name: "Session interaction sections", exact: true }).waitFor();
+}
+
+async function verifyM4BeaconExecution(
+  electronApplication: ElectronApplication,
+  page: Page,
+): Promise<void> {
+  await page.getByRole("button", { name: "Execution", exact: true }).click();
+  const beaconSheet = page.getByRole("dialog", { name: "Beacon execution", exact: true });
+  await beaconSheet.waitFor();
+  await beaconSheet.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
+  await beaconSheet.getByRole("button", { name: "Open: Execute process", exact: true }).click();
+
+  const configuration = page.getByRole("dialog", { name: "Execute process", exact: true });
+  await configuration.getByLabel("Executable path").fill("/usr/bin/printf");
+  await configuration.getByLabel("Arguments").fill("beacon-m4-submitted");
+  await configuration.getByRole("button", { name: "Review", exact: true }).click();
+  const review = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
+  await review.waitFor();
+  const reviewText = await review.innerText();
+  assert.ok(reviewText.includes("m1-beacon"));
+  assert.ok(reviewText.includes("beacon:m1_beacon"));
+  assert.match(reviewText, /m0-e2e-operator@127\.0\.0\.1:31337/u);
+  assert.ok(!reviewText.includes(TARGET_SECRET));
+
+  await electronApplication.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  const beaconExecuteCalls = fakeMethodCount(await readFakeState(electronApplication), "executeBeacon");
+  await review.getByRole("button", { name: "Execute", exact: true }).click();
+  const latestExecution = beaconSheet.getByRole("region", { name: "Latest execution", exact: true });
+  await latestExecution.waitFor();
+  await latestExecution.getByText("Submitted", { exact: true }).waitFor();
+  await latestExecution.getByText("The reviewed operation was submitted to the selected target.", { exact: true }).waitFor();
+  await waitForFakeMethodCount(electronApplication, "executeBeacon", beaconExecuteCalls + 1);
+  const afterBeacon = await readFakeState(electronApplication);
+  const submittedTask = afterBeacon.tasks.at(-1);
+  assert.equal(submittedTask?.beaconId, "m1_beacon");
+  assert.equal(submittedTask?.description, "ExecuteReq");
+  assert.equal(submittedTask?.state, "pending");
+  assert.equal(afterBeacon.m4Audit.retainedSensitiveInputs, 0);
+
+  await page.keyboard.press("Escape");
+  await beaconSheet.waitFor({ state: "hidden" });
 }
 
 async function activateDataGridRow(
@@ -1980,6 +2197,17 @@ interface FakeStateSnapshot {
   environment: Record<string, string>;
   openSessionRequests: Array<{ beaconId: string; c2s: string[]; delayNanoseconds: string }>;
   tasks: Array<{ id: string; beaconId: string; state: string; description: string }>;
+  m4Audit: {
+    callCounts: Record<string, number>;
+    artifactInputs: number;
+    artifactInputBytes: number;
+    credentialInputs: number;
+    credentialInputBytes: number;
+    zeroizedCopies: number;
+    remoteServiceStarts: number;
+    remoteServiceRemovals: number;
+    retainedSensitiveInputs: number;
+  };
   connectedConfig?: { operator: string; host: string; port: number };
 }
 

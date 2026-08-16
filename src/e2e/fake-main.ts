@@ -34,6 +34,17 @@ interface FakeMainState {
     state: string;
     description: string;
   }>;
+  m4Audit: {
+    callCounts: Record<string, number>;
+    artifactInputs: number;
+    artifactInputBytes: number;
+    credentialInputs: number;
+    credentialInputBytes: number;
+    zeroizedCopies: number;
+    remoteServiceStarts: number;
+    remoteServiceRemovals: number;
+    retainedSensitiveInputs: number;
+  };
 }
 
 interface FakeMainControl {
@@ -69,6 +80,17 @@ const state: FakeMainState = {
   ]),
   openSessionRequests: [],
   tasks: [],
+  m4Audit: {
+    callCounts: {},
+    artifactInputs: 0,
+    artifactInputBytes: 0,
+    credentialInputs: 0,
+    credentialInputBytes: 0,
+    zeroizedCopies: 0,
+    remoteServiceStarts: 0,
+    remoteServiceRemovals: 0,
+    retainedSensitiveInputs: 0,
+  },
 };
 globalThis.__SLIVER_GUI_E2E_STATE__ = state;
 
@@ -168,6 +190,60 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
 
   const record = (method: string): void => {
     testState.methods.push(method);
+  };
+  const recordM4 = (method: string): void => {
+    record(method);
+    testState.m4Audit.callCounts[method] = (testState.m4Audit.callCounts[method] ?? 0) + 1;
+  };
+  const inspectArtifact = (
+    value: Buffer | undefined,
+    label: string,
+    maximumBytes = 64 * 1_024 * 1_024,
+    required = true,
+  ): void => {
+    if (value === undefined || value.length === 0) {
+      if (required) throw new Error(`${label} is required by the deterministic fake`);
+      return;
+    }
+    if (value.length > maximumBytes) throw new Error(`${label} exceeds the deterministic fake input limit`);
+    const ownedCopy = Buffer.from(value);
+    try {
+      testState.m4Audit.artifactInputs += 1;
+      testState.m4Audit.artifactInputBytes += ownedCopy.length;
+    } finally {
+      ownedCopy.fill(0);
+      testState.m4Audit.zeroizedCopies += 1;
+    }
+  };
+  const inspectCredentialBuffer = (
+    value: Buffer | undefined,
+    label: string,
+    maximumBytes = 64 * 1_024,
+  ): void => {
+    if (value === undefined || value.length === 0) return;
+    if (value.length > maximumBytes) throw new Error(`${label} exceeds the deterministic fake credential limit`);
+    const ownedCopy = Buffer.from(value);
+    try {
+      testState.m4Audit.credentialInputs += 1;
+      testState.m4Audit.credentialInputBytes += ownedCopy.length;
+    } finally {
+      ownedCopy.fill(0);
+      testState.m4Audit.zeroizedCopies += 1;
+    }
+  };
+  const inspectCredentialText = (value: string | undefined, label: string, required = false): void => {
+    const byteLength = Buffer.byteLength(value ?? "", "utf8");
+    if (required && byteLength === 0) throw new Error(`${label} is required by the deterministic fake`);
+    if (byteLength === 0) return;
+    if (byteLength > 64 * 1_024) throw new Error(`${label} exceeds the deterministic fake credential limit`);
+    const ownedCopy = Buffer.from(value!, "utf8");
+    try {
+      testState.m4Audit.credentialInputs += 1;
+      testState.m4Audit.credentialInputBytes += ownedCopy.length;
+    } finally {
+      ownedCopy.fill(0);
+      testState.m4Audit.zeroizedCopies += 1;
+    }
   };
   const unsupported = (method: string): never => {
     record(method);
@@ -429,11 +505,26 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       });
     },
     async currentTokenOwnerSession(sessionId: string) {
-      record("currentTokenOwnerSession");
+      recordM4("currentTokenOwnerSession");
       requireSession(sessionId);
       return sliverpb.CurrentTokenOwner.create({
         Output: "e2e-user",
         Response: response(false),
+      });
+    },
+    async currentTokenOwnerBeacon(beaconId: string) {
+      recordM4("currentTokenOwnerBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.CurrentTokenOwner.create({
+        Output: "e2e-user",
+        Response: response(false),
+      });
+      return sliverpb.CurrentTokenOwner.create({
+        Response: queueTask(
+          beaconId,
+          "CurrentTokenOwnerReq",
+          Buffer.from(sliverpb.CurrentTokenOwner.encode(completed).finish()),
+        ),
       });
     },
     async listEnvSession(sessionId: string) {
@@ -728,6 +819,374 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async registryWriteSession() { return unsupported("registryWriteSession"); },
     async registryCreateKeySession() { return unsupported("registryCreateKeySession"); },
     async registryDeleteKeySession() { return unsupported("registryDeleteKeySession"); },
+    async executeSession(sessionId, options) {
+      recordM4("executeSession");
+      requireSession(sessionId);
+      return sliverpb.Execute.create({
+        Status: 0,
+        Stdout: options.background || options.output === false
+          ? Buffer.alloc(0)
+          : Buffer.from("deterministic M4 process stdout\n", "utf8"),
+        Stderr: Buffer.alloc(0),
+        Pid: 43_001,
+        Response: response(false),
+      });
+    },
+    async executeBeacon(beaconId, options) {
+      recordM4("executeBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.Execute.create({
+        Status: 0,
+        Stdout: options.background || options.output === false
+          ? Buffer.alloc(0)
+          : Buffer.from("deterministic M4 process stdout\n", "utf8"),
+        Stderr: Buffer.alloc(0),
+        Pid: 43_002,
+        Response: response(false),
+      });
+      return sliverpb.Execute.create({
+        Response: queueTask(
+          beaconId,
+          "ExecuteReq",
+          Buffer.from(sliverpb.Execute.encode(completed).finish()),
+        ),
+      });
+    },
+    async executeChildrenSession(sessionId) {
+      recordM4("executeChildrenSession");
+      requireSession(sessionId);
+      return sliverpb.ExecuteChildren.create({
+        Children: fakeExecutionChildren(),
+        Response: response(false),
+      });
+    },
+    async executeChildrenBeacon(beaconId) {
+      recordM4("executeChildrenBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.ExecuteChildren.create({
+        Children: fakeExecutionChildren(),
+        Response: response(false),
+      });
+      return sliverpb.ExecuteChildren.create({
+        Response: queueTask(
+          beaconId,
+          "ExecuteChildrenReq",
+          Buffer.from(sliverpb.ExecuteChildren.encode(completed).finish()),
+        ),
+      });
+    },
+    async executeAssemblySession(sessionId, assembly) {
+      recordM4("executeAssemblySession");
+      requireSession(sessionId);
+      inspectArtifact(assembly, "Assembly");
+      return sliverpb.ExecuteAssembly.create({
+        Output: Buffer.from("deterministic M4 assembly output\n", "utf8"),
+        Response: response(false),
+      });
+    },
+    async executeAssemblyBeacon(beaconId, assembly, options) {
+      recordM4("executeAssemblyBeacon");
+      requireBeacon(beaconId);
+      inspectArtifact(assembly, "Assembly");
+      const completed = sliverpb.ExecuteAssembly.create({
+        Output: Buffer.from("deterministic M4 assembly output\n", "utf8"),
+        Response: response(false),
+      });
+      return sliverpb.ExecuteAssembly.create({
+        Response: queueTask(
+          beaconId,
+          options?.inProcess ? "InvokeInProcExecuteAssemblyReq" : "InvokeExecuteAssemblyReq",
+          Buffer.from(sliverpb.ExecuteAssembly.encode(completed).finish()),
+        ),
+      });
+    },
+    async executeShellcodeSession(sessionId, shellcode) {
+      recordM4("executeShellcodeSession");
+      requireSession(sessionId);
+      inspectArtifact(shellcode, "Shellcode");
+      return sliverpb.Task.create({ Response: response(false) });
+    },
+    async executeShellcodeBeacon(beaconId, shellcode) {
+      recordM4("executeShellcodeBeacon");
+      requireBeacon(beaconId);
+      inspectArtifact(shellcode, "Shellcode");
+      const completed = sliverpb.Task.create({ Response: response(false) });
+      return sliverpb.Task.create({
+        Response: queueTask(
+          beaconId,
+          "TaskReq",
+          Buffer.from(sliverpb.Task.encode(completed).finish()),
+        ),
+      });
+    },
+    async sideloadSession(sessionId, data) {
+      recordM4("sideloadSession");
+      requireSession(sessionId);
+      inspectArtifact(data, "Sideload library");
+      return sliverpb.Sideload.create({
+        Result: "deterministic M4 sideload output\n",
+        Response: response(false),
+      });
+    },
+    async sideloadBeacon(beaconId, data) {
+      recordM4("sideloadBeacon");
+      requireBeacon(beaconId);
+      inspectArtifact(data, "Sideload library");
+      const completed = sliverpb.Sideload.create({
+        Result: "deterministic M4 sideload output\n",
+        Response: response(false),
+      });
+      return sliverpb.Sideload.create({
+        Response: queueTask(
+          beaconId,
+          "SideloadReq",
+          Buffer.from(sliverpb.Sideload.encode(completed).finish()),
+        ),
+      });
+    },
+    async spawnDllSession(sessionId, data) {
+      recordM4("spawnDllSession");
+      requireSession(sessionId);
+      inspectArtifact(data, "Reflective DLL");
+      return sliverpb.SpawnDll.create({
+        Result: "deterministic M4 reflective DLL output\n",
+        Response: response(false),
+      });
+    },
+    async spawnDllBeacon(beaconId, data) {
+      recordM4("spawnDllBeacon");
+      requireBeacon(beaconId);
+      inspectArtifact(data, "Reflective DLL");
+      const completed = sliverpb.SpawnDll.create({
+        Result: "deterministic M4 reflective DLL output\n",
+        Response: response(false),
+      });
+      return sliverpb.SpawnDll.create({
+        Response: queueTask(
+          beaconId,
+          "SpawnDllReq",
+          Buffer.from(sliverpb.SpawnDll.encode(completed).finish()),
+        ),
+      });
+    },
+    async getShellcodeEncoderMap() {
+      recordM4("getShellcodeEncoderMap");
+      return clientpb.ShellcodeEncoderMap.create({
+        Encoders: {
+          amd64: {
+            Encoders: { xor: clientpb.ShellcodeEncoder.XOR },
+            Descriptions: { xor: "Deterministic XOR encoder" },
+          },
+        },
+      });
+    },
+    async migrateSession(sessionId, options) {
+      recordM4("migrateSession");
+      requireSession(sessionId);
+      return sliverpb.Migrate.create({
+        Success: true,
+        Pid: options.pid || 43_010,
+        Response: response(false),
+      });
+    },
+    async migrateBeacon(beaconId, options) {
+      recordM4("migrateBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.Migrate.create({
+        Success: true,
+        Pid: options.pid || 43_011,
+        Response: response(false),
+      });
+      return sliverpb.Migrate.create({
+        Response: queueTask(
+          beaconId,
+          "InvokeMigrateReq",
+          Buffer.from(sliverpb.Migrate.encode(completed).finish()),
+        ),
+      });
+    },
+    async msfSession(sessionId) {
+      recordM4("msfSession");
+      requireSession(sessionId);
+      return sliverpb.Task.create({ Response: response(false) });
+    },
+    async msfBeacon(beaconId) {
+      recordM4("msfBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.Task.create({ Response: response(false) });
+      return sliverpb.Task.create({
+        Response: queueTask(
+          beaconId,
+          "TaskReq",
+          Buffer.from(sliverpb.Task.encode(completed).finish()),
+        ),
+      });
+    },
+    async msfRemoteSession(sessionId) {
+      recordM4("msfRemoteSession");
+      requireSession(sessionId);
+      return sliverpb.Task.create({ Response: response(false) });
+    },
+    async msfRemoteBeacon(beaconId) {
+      recordM4("msfRemoteBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.Task.create({ Response: response(false) });
+      return sliverpb.Task.create({
+        Response: queueTask(
+          beaconId,
+          "TaskReq",
+          Buffer.from(sliverpb.Task.encode(completed).finish()),
+        ),
+      });
+    },
+    async runSshSession(sessionId, options) {
+      recordM4("runSshSession");
+      requireSession(sessionId);
+      inspectCredentialText(options.password, "SSH password");
+      inspectArtifact(options.privateKey, "SSH private key", 1 * 1_024 * 1_024, false);
+      inspectArtifact(options.kerberosKeytab, "Kerberos keytab", 4 * 1_024 * 1_024, false);
+      inspectCredentialBuffer(options.privateKey, "SSH private key", 1 * 1_024 * 1_024);
+      inspectCredentialBuffer(options.kerberosKeytab, "Kerberos keytab", 4 * 1_024 * 1_024);
+      return sliverpb.SSHCommand.create({
+        StdOut: "deterministic M4 SSH stdout\n",
+        StdErr: "",
+        Response: response(false),
+      });
+    },
+    async runAsSession(sessionId, options) {
+      recordM4("runAsSession");
+      requireSession(sessionId);
+      inspectCredentialText(options.password, "Run-as password");
+      return sliverpb.RunAs.create({
+        Output: "deterministic M4 run-as output\n",
+        Response: response(false),
+      });
+    },
+    async runAsBeacon(beaconId, options) {
+      recordM4("runAsBeacon");
+      requireBeacon(beaconId);
+      inspectCredentialText(options.password, "Run-as password");
+      const completed = sliverpb.RunAs.create({
+        Output: "deterministic M4 run-as output\n",
+        Response: response(false),
+      });
+      return sliverpb.RunAs.create({
+        Response: queueTask(
+          beaconId,
+          "RunAsReq",
+          Buffer.from(sliverpb.RunAs.encode(completed).finish()),
+        ),
+      });
+    },
+    async makeTokenSession(sessionId, options) {
+      recordM4("makeTokenSession");
+      requireSession(sessionId);
+      inspectCredentialText(options.password, "Token password", true);
+      return sliverpb.MakeToken.create({ Response: response(false) });
+    },
+    async makeTokenBeacon(beaconId, options) {
+      recordM4("makeTokenBeacon");
+      requireBeacon(beaconId);
+      inspectCredentialText(options.password, "Token password", true);
+      const completed = sliverpb.MakeToken.create({ Response: response(false) });
+      return sliverpb.MakeToken.create({
+        Response: queueTask(
+          beaconId,
+          "MakeTokenReq",
+          Buffer.from(sliverpb.MakeToken.encode(completed).finish()),
+        ),
+      });
+    },
+    async impersonateSession(sessionId) {
+      recordM4("impersonateSession");
+      requireSession(sessionId);
+      return sliverpb.Impersonate.create({ Response: response(false) });
+    },
+    async impersonateBeacon(beaconId) {
+      recordM4("impersonateBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.Impersonate.create({ Response: response(false) });
+      return sliverpb.Impersonate.create({
+        Response: queueTask(
+          beaconId,
+          "ImpersonateReq",
+          Buffer.from(sliverpb.Impersonate.encode(completed).finish()),
+        ),
+      });
+    },
+    async revToSelfSession(sessionId) {
+      recordM4("revToSelfSession");
+      requireSession(sessionId);
+      return sliverpb.RevToSelf.create({ Response: response(false) });
+    },
+    async revToSelfBeacon(beaconId) {
+      recordM4("revToSelfBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.RevToSelf.create({ Response: response(false) });
+      return sliverpb.RevToSelf.create({
+        Response: queueTask(
+          beaconId,
+          "RevToSelfReq",
+          Buffer.from(sliverpb.RevToSelf.encode(completed).finish()),
+        ),
+      });
+    },
+    async getSystemSession(sessionId) {
+      recordM4("getSystemSession");
+      requireSession(sessionId);
+      return sliverpb.GetSystem.create({ Response: response(false) });
+    },
+    async getPrivsSession(sessionId) {
+      recordM4("getPrivsSession");
+      requireSession(sessionId);
+      return sliverpb.GetPrivs.create({
+        PrivInfo: fakePrivileges(),
+        ProcessIntegrity: "High",
+        ProcessName: "sliver-m4-session.exe",
+        Response: response(false),
+      });
+    },
+    async getPrivsBeacon(beaconId) {
+      recordM4("getPrivsBeacon");
+      requireBeacon(beaconId);
+      const completed = sliverpb.GetPrivs.create({
+        PrivInfo: fakePrivileges(),
+        ProcessIntegrity: "High",
+        ProcessName: "sliver-m4-beacon.exe",
+        Response: response(false),
+      });
+      return sliverpb.GetPrivs.create({
+        Response: queueTask(
+          beaconId,
+          "GetPrivsReq",
+          Buffer.from(sliverpb.GetPrivs.encode(completed).finish()),
+        ),
+      });
+    },
+    async backdoorSession(sessionId) {
+      recordM4("backdoorSession");
+      requireSession(sessionId);
+      return clientpb.Backdoor.create({ Response: response(false) });
+    },
+    async hijackDllSession(sessionId, options) {
+      recordM4("hijackDllSession");
+      requireSession(sessionId);
+      inspectArtifact(options.referenceDll, "DLL hijack reference DLL", 64 * 1_024 * 1_024, false);
+      inspectArtifact(options.targetDll, "DLL hijack target DLL", 64 * 1_024 * 1_024, false);
+      return clientpb.DllHijack.create({ Response: response(false) });
+    },
+    async startRemoteServiceSession(sessionId) {
+      recordM4("startRemoteServiceSession");
+      requireSession(sessionId);
+      testState.m4Audit.remoteServiceStarts += 1;
+      return sliverpb.ServiceInfo.create({ Response: response(false) });
+    },
+    async removeRemoteServiceSession(sessionId) {
+      recordM4("removeRemoteServiceSession");
+      requireSession(sessionId);
+      testState.m4Audit.remoteServiceRemovals += 1;
+      return sliverpb.ServiceInfo.create({ Response: response(false) });
+    },
     async killSession(sessionId: string) {
       record("killSession");
       const session = requireSession(sessionId);
@@ -998,6 +1457,56 @@ function fakeProcess(pid: number, executable: string, parentPid = 1) {
     SessionID: 1,
     CmdLine: [`/usr/local/bin/${executable}`, "--m2-e2e"],
   };
+}
+
+function fakeExecutionChildren(): sliverpb.ExecuteChild[] {
+  return [
+    sliverpb.ExecuteChild.create({
+      Pid: 43_101,
+      Path: "/usr/bin/printf",
+      Args: ["deterministic-child-one"],
+      StartTime: "2026-08-15T19:00:00.000Z",
+      Exited: true,
+      ExitCode: 0,
+      ExitTime: "2026-08-15T19:00:01.000Z",
+      Stdout: "deterministic child output\n",
+      Stderr: "",
+      Error: "",
+    }),
+    sliverpb.ExecuteChild.create({
+      Pid: 43_102,
+      Path: "/usr/bin/sleep",
+      Args: ["30"],
+      StartTime: "2026-08-15T19:01:00.000Z",
+      Exited: false,
+      ExitCode: 0,
+      ExitTime: "",
+      Stdout: "",
+      Stderr: "",
+      Error: "",
+    }),
+  ];
+}
+
+function fakePrivileges(): sliverpb.WindowsPrivilegeEntry[] {
+  return [
+    sliverpb.WindowsPrivilegeEntry.create({
+      Name: "SeDebugPrivilege",
+      Description: "Debug programs",
+      Enabled: true,
+      EnabledByDefault: false,
+      Removed: false,
+      UsedForAccess: true,
+    }),
+    sliverpb.WindowsPrivilegeEntry.create({
+      Name: "SeImpersonatePrivilege",
+      Description: "Impersonate a client after authentication",
+      Enabled: true,
+      EnabledByDefault: true,
+      Removed: false,
+      UsedForAccess: false,
+    }),
+  ];
 }
 
 function cloneSession(session: clientpb.Session): clientpb.Session {

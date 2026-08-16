@@ -298,8 +298,8 @@ Operator-only scope is enforced at the application boundary:
 | M0 | Reproducible protocol baseline and stable current features | **Complete** | 4-6 weeks |
 | M1 | Sessions, beacons, target state, and generic task execution | **Complete** | 3-5 weeks |
 | M2 | Core endpoint reconnaissance, files, and processes | **Complete (accepted session-first scope)** | 4-6 weeks |
-| M3 | Bounded session streaming and managed shells | **Awaiting operator acceptance** | 3-5 weeks |
-| M4 | Execution, post-exploitation, and privilege workflows | Not started | 4-6 weeks |
+| M3 | Bounded session streaming and managed shells | **Complete (accepted session-shell scope)** | 3-5 weeks |
+| M4 | Execution, post-exploitation, and privilege workflows | **Awaiting operator acceptance** | 4-6 weeks |
 | M5 | Forwarding, SOCKS, WireGuard networking, and pivots | Not started | 4-5 weeks |
 | M6 | Operator data, collaboration, monitoring, and cracking | Not started | 4-6 weeks |
 | M7 | Complete payload, profile, build, and encoder lifecycle | Not started | 3-5 weeks |
@@ -313,8 +313,8 @@ Milestone governance is tracked separately from checklist state:
 | M0 | Codex / operator accepted | 2026-08-09 | [ADR 0001](docs/adr/0001-platform-support.md) | [M0 verification](docs/m0-verification.md) |
 | M1 | Codex / operator accepted | 2026-08-09 | [M1 boundaries](docs/m1-verification.md#c2-and-certification-boundaries) | [M1 verification](docs/m1-verification.md) |
 | M2 | Codex / operator accepted (session-first scope) | 2026-08-10 | Session-first scope below | [Session-first verification](docs/m2-session-verification.md) |
-| M3 | Codex / operator acceptance pending | 2026-08-10 | Streaming and terminal boundaries below | [M3 verification](docs/m3-verification.md) |
-| M4 | Unassigned | 2026-08-09 | TBD | TBD |
+| M3 | Codex / operator accepted (session-shell scope) | 2026-08-15 | Streaming and terminal boundaries below | [M3 verification](docs/m3-verification.md) |
+| M4 | Codex / operator acceptance pending | 2026-08-15 | Execution and credential boundaries below | [M4 verification](docs/m4-verification.md) |
 | M5 | Unassigned | 2026-08-09 | TBD | TBD |
 | M6 | Unassigned | 2026-08-09 | TBD | TBD |
 | M7 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -668,12 +668,15 @@ paths, and full cross-platform evidence remain M2 work.
 
 ## M3 - Bounded session streaming and managed shells
 
-- Status: **Awaiting operator acceptance**
+- Status: **Complete (accepted session-shell scope)**
 - Dependencies: M1 and the delivered M2 session workbench
 
 The session-shell-only M3 implementation was delivered on 2026-08-10. Technical
-checks are recorded in [M3 verification](docs/m3-verification.md), but the
-milestone remains open until the operator accepts it. M4 has not started.
+checks are recorded in [M3 verification](docs/m3-verification.md). After the
+operator exercised the delivered GUI and supplied follow-up polish feedback,
+the operator accepted the scoped milestone and explicitly requested M4 on
+2026-08-15. This acceptance does not expand M3 to beacon shells, forwarding,
+SOCKS, WireGuard networking, or generic tunnel lifecycle.
 
 Operator acceptance feedback on 2026-08-14 added cross-cutting M1-M3 operator
 polish without expanding the M3 shell scope:
@@ -689,9 +692,9 @@ polish without expanding the M3 shell scope:
   observing the exact target's task and presence data, instead of copying
   source-window state or shell ownership.
 
-This acceptance-feedback follow-up does not constitute operator acceptance of
-M3, does not transfer managed shells implicitly, and does not unlock M4. M3
-remains **Awaiting operator acceptance**, and M4 has not started.
+The acceptance-feedback follow-up did not transfer managed shells implicitly.
+The later 2026-08-15 decision accepted this bounded session-shell scope and
+unlocked M4; all explicit M3 deferrals remain recorded.
 
 This scope follows the pinned upstream command tree: interactive shell commands
 exist for sessions only, so M3 makes no beacon-shell claim. Port forwarding,
@@ -794,55 +797,76 @@ remain M5 work even though they can later reuse this bounded stream foundation.
   disappearance, empty resource accounting, and unchanged session identity.
 - [ ] Finish Windows and Linux package/target evidence. WireGuard helper
   evidence remains deferred.
-- [ ] The operator tests and explicitly accepts the delivered M3 scope before
-  M4 begins.
+- [x] The operator tested and explicitly accepted the delivered session-shell
+  M3 scope before authorizing M4 on 2026-08-15.
 
 ## M4 - Execution, post-exploitation, and privileges
 
-- Status: Not started
+- Status: **Awaiting operator acceptance**
 - Dependencies: M2 and the M1 operation engine; stream-dependent actions also
   depend on M3
 
+The bounded M4 workbench slice was delivered on 2026-08-15. Automated evidence
+and the exact security boundary are recorded in
+[M4 verification](docs/m4-verification.md). The parity rows remain in progress,
+and M5 does not begin until the operator accepts this delivered M4 scope.
+
 ### Execution workflows
 
-- [ ] Execute a process, configure output capture, and list background children.
-- [ ] Execute assembly and shellcode with architecture-aware validation.
-- [ ] Sideload shared libraries and reflectively execute DLL entry points.
-- [ ] Migrate into a selected process.
-- [ ] Metasploit payload generation and injection workflows.
-- [ ] Psexec and SSH workflows with credential handling that never enters logs or
+- [x] Execute a process, configure bounded output capture and native save, and
+  list background children.
+- [x] Execute assembly and raw shellcode with architecture-aware validation.
+  Interactive shellcode streaming and the upstream advanced transform/encoder
+  option family remain open parity work. The pinned beacon `TaskReq` result
+  cannot prove shellcode success or failure, so beacon completion remains
+  outcome-unknown.
+- [x] Sideload shared libraries and reflectively execute DLL entry points.
+- [x] Migrate into a selected process.
+- [x] Metasploit payload generation and injection workflows. Beacon dispatch is
+  correlated exactly, but the pinned implant's empty `TaskReq` result cannot
+  prove success or failure.
+- [x] Psexec and SSH workflows with credential handling that never enters logs or
   global state.
-- [ ] Windows executable backdoor and DLL-hijack workflows.
-- [ ] Consistent native-file selection, argument/environment editing, timeout,
-  cancellation, and output-save behavior.
+- [x] Windows executable backdoor and DLL-hijack workflows.
+- [x] Consistent bounded native-file selection, argument/environment editing,
+  operation-owned timeouts, pre-dispatch review discard, and bounded decoded
+  session/beacon output-save behavior.
+- [x] Provide reviewed, single-flight, best-effort cancellation for the exact
+  pending M4 beacon task without replaying the original action; authoritative
+  task state wins completion/cancellation races.
+- [ ] Submitted synchronous session RPCs remain non-cancelable after dispatch;
+  they are never replayed after transport uncertainty.
 
 ### Privileges and tokens
 
-- [ ] Run-as, make-token, impersonate, revert-to-self, get-system, and privilege
+- [x] Run-as, make-token, impersonate, revert-to-self, get-system, and privilege
   inspection.
-- [ ] Show current and requested identity changes before execution.
-- [ ] Treat credentials and tokens as sensitive one-operation inputs with no
+- [x] Show the current token identity, when authoritatively reported by the
+  target, and the requested identity change before execution.
+- [x] Treat credentials and tokens as sensitive one-operation inputs with no
   automatic persistence.
 
 ### Safety model
 
-- [ ] Classify actions as read-only, mutating, destructive, credential-bearing,
+- [x] Classify actions as read-only, mutating, destructive, credential-bearing,
   or high-OPSEC-impact.
-- [ ] Use accessible confirmation dialogs for destructive and high-impact
+- [x] Use accessible confirmation dialogs for destructive and high-impact
   actions, including exact target identity and relevant parameters.
-- [ ] Keep a local sanitized operation history without command secrets or binary
+- [x] Keep a local sanitized operation history without command secrets or binary
   content.
 
 ### M4 exit criteria
 
-- [ ] Golden request/response fixtures match the Go client's behavior for every
+- [x] Golden request/response fixtures match the Go client's behavior for every
   implemented action family.
-- [ ] Unsupported target/platform actions are rejected in main and not offered
+- [x] Unsupported target/platform actions are rejected in main and not offered
   by normal renderer navigation.
-- [ ] Credential values cannot appear in event summaries, snapshots, logs, or
+- [x] Credential values cannot appear in event summaries, snapshots, logs, or
   crash reports.
-- [ ] Destructive and high-impact actions always identify the target and require
+- [x] Destructive and high-impact actions always identify the target and require
   the configured confirmation policy.
+- [ ] The operator tests and explicitly accepts the delivered M4 scope before M5
+  begins.
 
 ## M5 - Forwarding, SOCKS, WireGuard networking, and pivots
 

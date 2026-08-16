@@ -44,6 +44,18 @@ import type {
 } from "./stream-contracts.js";
 import type { SliverReleaseDownloadEvent } from "./release-contracts.js";
 import type { ApplicationUpdateState } from "./application-update-contracts.js";
+import type {
+  ExecuteExecutionPlanInput,
+  ExecutionActionPlan,
+  ExecutionActionResult,
+  ExecutionCatalog,
+  ExecutionReadResult,
+  ExecutionResultRequest,
+  PrepareExecutionActionInput,
+  RunExecutionReadInput,
+  SaveExecutionResultInput,
+  SaveExecutionResultResult,
+} from "./execution-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -95,6 +107,13 @@ export const IPC_INVOKE = {
   listSessionShells: "sliver:session-shell:list",
   actOnSessionShell: "sliver:session-shell:act",
   getTerminalRuntime: "sliver:terminal-runtime:get",
+  listExecutionCatalog: "sliver:execution:catalog",
+  runExecutionRead: "sliver:execution:read",
+  prepareExecutionAction: "sliver:execution:prepare",
+  executeExecutionPlan: "sliver:execution:execute-plan",
+  discardExecutionPlan: "sliver:execution:discard-plan",
+  getExecutionResult: "sliver:execution:result",
+  saveExecutionResult: "sliver:execution:save-result",
 } as const;
 
 export const IPC_STREAM = {
@@ -692,6 +711,34 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.getTerminalRuntime]: {
     args: [];
     result: OperationResult<TerminalRuntimeAsset>;
+  };
+  [IPC.listExecutionCatalog]: {
+    args: [];
+    result: OperationResult<ExecutionCatalog>;
+  };
+  [IPC.runExecutionRead]: {
+    args: [input: RunExecutionReadInput];
+    result: OperationResult<ExecutionReadResult>;
+  };
+  [IPC.prepareExecutionAction]: {
+    args: [input: PrepareExecutionActionInput];
+    result: OperationResult<ExecutionActionPlan>;
+  };
+  [IPC.executeExecutionPlan]: {
+    args: [input: ExecuteExecutionPlanInput];
+    result: OperationResult<ExecutionActionResult>;
+  };
+  [IPC.discardExecutionPlan]: {
+    args: [input: ExecuteExecutionPlanInput];
+    result: OperationResult;
+  };
+  [IPC.getExecutionResult]: {
+    args: [input: ExecutionResultRequest];
+    result: OperationResult<ExecutionActionResult>;
+  };
+  [IPC.saveExecutionResult]: {
+    args: [input: SaveExecutionResultInput];
+    result: OperationResult<SaveExecutionResultResult>;
   };
 }>;
 

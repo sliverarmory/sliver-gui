@@ -42,6 +42,13 @@ import {
   parseSessionWorkbenchInput,
 } from "../shared/session-contracts.js";
 import {
+  parseExecuteExecutionPlanInput,
+  parseExecutionResultRequest,
+  parsePrepareExecutionActionInput,
+  parseRunExecutionReadInput,
+  parseSaveExecutionResultInput,
+} from "../shared/execution-contracts.js";
+import {
   parseListSessionShellsInput,
   parsePrepareSessionShellInput,
   parseSessionShellResourceActionInput,
@@ -143,6 +150,13 @@ export type IpcConnectionRegistry = Pick<
   | "listSessionShells"
   | "actOnSessionShell"
   | "getTerminalRuntime"
+  | "listExecutionCatalog"
+  | "runExecutionRead"
+  | "prepareExecutionAction"
+  | "executeExecutionPlan"
+  | "discardExecutionPlan"
+  | "getExecutionResult"
+  | "saveExecutionResult"
   | "attachStream"
 >;
 
@@ -384,6 +398,40 @@ export function registerIpcHandlers(
   handleTrusted(IPC.getTerminalRuntime, rendererUrl, parseNoArguments, ({ contentsId }) =>
     registry.getTerminalRuntime(contentsId),
   );
+  handleTrusted(IPC.listExecutionCatalog, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.listExecutionCatalog(contentsId),
+  );
+  handleTrusted(IPC.runExecutionRead, rendererUrl, parseRunExecutionReadArguments, ({ contentsId }, input) =>
+    registry.runExecutionRead(contentsId, input),
+  );
+  handleTrusted(
+    IPC.prepareExecutionAction,
+    rendererUrl,
+    parsePrepareExecutionActionArguments,
+    async ({ sender }, input) => {
+      let retainedByRegistry = false;
+      try {
+        const result = await registry.prepareExecutionAction(sender, input);
+        retainedByRegistry = result.ok && result.value !== undefined;
+        return result;
+      } finally {
+        if (!retainedByRegistry) clearExecutionCredentialInput(input);
+      }
+    },
+    clearRawExecutionCredentialArguments,
+  );
+  handleTrusted(IPC.executeExecutionPlan, rendererUrl, parseExecuteExecutionPlanArguments, ({ contentsId }, input) =>
+    registry.executeExecutionPlan(contentsId, input),
+  );
+  handleTrusted(IPC.discardExecutionPlan, rendererUrl, parseExecuteExecutionPlanArguments, ({ contentsId }, input) =>
+    registry.discardExecutionPlan(contentsId, input),
+  );
+  handleTrusted(IPC.getExecutionResult, rendererUrl, parseExecutionResultRequestArguments, ({ contentsId }, input) =>
+    registry.getExecutionResult(contentsId, input),
+  );
+  handleTrusted(IPC.saveExecutionResult, rendererUrl, parseSaveExecutionResultArguments, ({ sender }, input) =>
+    registry.saveExecutionResult(sender, input),
+  );
 
   if (registeredStreamAttachListener) {
     ipcMain.removeListener(IPC.attach, registeredStreamAttachListener);
@@ -482,11 +530,16 @@ function handleTrusted<Channel extends IpcInvokeChannel>(
     sender: TrustedSender,
     ...args: IpcInvokeArgs<Channel>
   ) => MaybePromise<IpcInvokeResult<Channel>>,
+  cleanupRawArguments?: (args: readonly unknown[]) => void,
 ): void {
   ipcMain.handle(channel, (event, ...rawArguments: unknown[]) => {
-    const sender = requireTrustedSender(event, rendererUrl);
-    const args = parseArguments(rawArguments);
-    return handler(sender, ...args);
+    try {
+      const sender = requireTrustedSender(event, rendererUrl);
+      const args = parseArguments(rawArguments);
+      return handler(sender, ...args);
+    } finally {
+      cleanupRawArguments?.(rawArguments);
+    }
   });
 }
 
@@ -683,6 +736,74 @@ function parseSessionShellResourceActionArguments(
 ): [input: ReturnType<typeof parseSessionShellResourceActionInput>] {
   requireArgumentCount(args, 1, "session shell resource action");
   return [parseSessionShellResourceActionInput(args[0])];
+}
+
+function parseRunExecutionReadArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseRunExecutionReadInput>] {
+  requireArgumentCount(args, 1, "execution read input");
+  return [parseRunExecutionReadInput(args[0])];
+}
+
+function parsePrepareExecutionActionArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parsePrepareExecutionActionInput>] {
+  requireArgumentCount(args, 1, "prepare execution action input");
+  return [parsePrepareExecutionActionInput(args[0])];
+}
+
+function clearRawExecutionCredentialArguments(args: readonly unknown[]): void {
+  // Electron has already made these structured-clone copies. The shared parser
+  // returns a distinct main-owned credential buffer, so erase every raw view
+  // immediately on success, parse rejection, and untrusted-sender rejection.
+  for (const argument of args) clearExecutionCredentialInput(argument);
+}
+
+function clearExecutionCredentialInput(value: unknown): void {
+  try {
+    if (!isPlainRecord(value)) return;
+    const draft = value["draft"];
+    if (!isPlainRecord(draft)) return;
+    // Scrub credential-shaped fields even when operationId or another field is
+    // malformed. Parse rejection must not leave the raw structured-clone view
+    // alive merely because the discriminator could not be trusted.
+    zeroByteView(draft["password"]);
+    const authentication = draft["authentication"];
+    if (isPlainRecord(authentication)) zeroByteView(authentication["password"]);
+  } catch {
+    // Cleanup is best effort and must not replace the boundary's parse error.
+  }
+}
+
+function zeroByteView(value: unknown): void {
+  if (value instanceof Uint8Array) value.fill(0);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function parseExecuteExecutionPlanArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseExecuteExecutionPlanInput>] {
+  requireArgumentCount(args, 1, "execute execution plan input");
+  return [parseExecuteExecutionPlanInput(args[0])];
+}
+
+function parseExecutionResultRequestArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseExecutionResultRequest>] {
+  requireArgumentCount(args, 1, "execution result request");
+  return [parseExecutionResultRequest(args[0])];
+}
+
+function parseSaveExecutionResultArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseSaveExecutionResultInput>] {
+  requireArgumentCount(args, 1, "save execution result input");
+  return [parseSaveExecutionResultInput(args[0])];
 }
 
 function parseListenerArguments(args: readonly unknown[]): [input: ListenerInput] {

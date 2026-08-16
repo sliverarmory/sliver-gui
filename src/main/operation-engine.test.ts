@@ -19,6 +19,7 @@ import {
   isAuthoritativeActiveC2Usable,
   OperationEngine,
   TaskCancellationDispatchError,
+  type ExternalOperationDescriptor,
   type OperationEngineHost,
   type ResolvedOperationTarget,
 } from "./operation-engine.js";
@@ -174,6 +175,226 @@ describe("OperationEngine", () => {
     expect(harness.engine.resolveExternalOutcome(mutation.requestId, "completed")).toMatchObject({
       state: "outcome-unknown",
     });
+  });
+
+  it("indexes and reconciles an exact external beacon task without decoding M1 results", async () => {
+    const harness = createHarness("beacon", { ids: ["external_beacon_request"] });
+    const descriptor = externalBeaconDescriptor({ taskTimeoutSeconds: 45 });
+    const started = harness.engine.beginExternal("execution.process", harness.active, descriptor);
+
+    expect(harness.reserveTaskClaim).toHaveBeenCalledWith(started.requestId);
+    const submitted = harness.engine.markExternalSubmitted(started.requestId, "external_beacon_task");
+    expect(submitted).toMatchObject({
+      operationId: "execution.process",
+      state: "running",
+      taskId: "external_beacon_task",
+      deadlineAt: expect.any(String),
+      attempts: 1,
+    });
+    expect(harness.claimExternalTask).toHaveBeenCalledWith(
+      "external_beacon_task",
+      started.requestId,
+      "execution.process",
+      harness.active.ref.id,
+    );
+    expect(harness.engine.findByTask("external_beacon_task", harness.active.ref.id)?.requestId)
+      .toBe(started.requestId);
+    expect(harness.engine.requiresTaskResultVerification("external_beacon_task", harness.active.ref.id))
+      .toBe(false);
+
+    await expect(harness.engine.reconcileTask({
+      taskId: "external_beacon_task",
+      beaconId: harness.active.ref.id,
+      state: "pending",
+      error: "REMOTE_SECRET_PENDING",
+      disposition: {
+        kind: "inline-text",
+        text: "REMOTE_SECRET_DISPOSITION",
+        truncated: false,
+      },
+    })).resolves.toMatchObject({
+      state: "running",
+      message: "The beacon task is awaiting completion",
+    });
+
+    expect(harness.engine.markTaskOutcomeUnknown(
+      "external_beacon_task",
+      harness.active.ref.id,
+      "LOCAL_SECRET_TRANSPORT_ERROR",
+    )).toMatchObject({
+      state: "outcome-unknown",
+      message: "The reviewed task outcome could not be confirmed.",
+    });
+    const recovered = await harness.engine.reconcileTask({
+      taskId: "external_beacon_task",
+      beaconId: harness.active.ref.id,
+      state: "completed",
+      error: "REMOTE_SECRET_COMPLETION_ERROR",
+      disposition: {
+        kind: "inline-text",
+        text: "REMOTE_SECRET_COMPLETION_BODY",
+        truncated: false,
+      },
+    });
+    expect(recovered).toMatchObject({
+      state: "completed",
+      message: "Reviewed execution completed.",
+      finishedAt: expect.any(String),
+    });
+    expect(recovered?.disposition).toBeUndefined();
+    expect(JSON.stringify(recovered)).not.toMatch(/REMOTE_SECRET|LOCAL_SECRET/u);
+    expect(harness.settleTaskClaim).toHaveBeenCalledWith("external_beacon_task", started.requestId);
+
+    await expect(harness.engine.reconcileTask({
+      taskId: "external_beacon_task",
+      beaconId: harness.active.ref.id,
+      state: "failed",
+      error: "late remote failure",
+    })).resolves.toMatchObject({ state: "completed", message: "Reviewed execution completed." });
+  });
+
+  it("rejects duplicate external task IDs, cross-window claims, and cross-beacon reconciliation", async () => {
+    const harness = createHarness("beacon", { ids: ["external_first", "external_second"] });
+    const first = harness.engine.beginExternal("execution.process", harness.active, externalBeaconDescriptor());
+    const second = harness.engine.beginExternal("execution.shellcode", harness.active, externalBeaconDescriptor());
+    harness.engine.markExternalSubmitted(first.requestId, "duplicate_external_task");
+
+    expect(() => harness.engine.markExternalSubmitted(second.requestId, "duplicate_external_task"))
+      .toThrow(/duplicate task ID/u);
+    expect(() => harness.engine.markExternalSubmitted(first.requestId, "different_external_task"))
+      .toThrow(/already bound/u);
+    expect(harness.engine.findByTask("duplicate_external_task", "different_beacon")).toBeUndefined();
+    await expect(harness.engine.reconcileTask({
+      taskId: "duplicate_external_task",
+      beaconId: "different_beacon",
+      state: "completed",
+    })).resolves.toBeUndefined();
+    expect(harness.engine.get(first.requestId)).toMatchObject({ state: "running" });
+
+    const globalClaims = new Map<string, string>();
+    const claimExternalTask: OperationEngineHost["claimExternalTask"] = (taskId, requestId) => {
+      const existing = globalClaims.get(taskId);
+      if (existing && existing !== requestId) return false;
+      globalClaims.set(taskId, requestId);
+      return true;
+    };
+    const windowOne = createHarness("beacon", {
+      ids: ["window_one_external"],
+      ownerWindowId: 11,
+      claimExternalTask,
+    });
+    const windowTwo = createHarness("beacon", {
+      ids: ["window_two_external"],
+      ownerWindowId: 22,
+      claimExternalTask,
+    });
+    const windowOneRecord = windowOne.engine.beginExternal(
+      "execution.process",
+      windowOne.active,
+      externalBeaconDescriptor(),
+    );
+    const windowTwoRecord = windowTwo.engine.beginExternal(
+      "execution.process",
+      windowTwo.active,
+      externalBeaconDescriptor(),
+    );
+    windowOne.engine.markExternalSubmitted(windowOneRecord.requestId, "global_external_task");
+    expect(() => windowTwo.engine.markExternalSubmitted(windowTwoRecord.requestId, "global_external_task"))
+      .toThrow(/already claimed/u);
+    expect(windowOne.engine.findByTask("global_external_task", windowOne.active.ref.id)?.requestId)
+      .toBe(windowOneRecord.requestId);
+    expect(windowTwo.engine.findByTask("global_external_task", windowTwo.active.ref.id)).toBeUndefined();
+  });
+
+  it("cancels a pending external beacon task once without replaying the reviewed operation", async () => {
+    const harness = createHarness("beacon", { ids: ["external_cancel_request"] });
+    const record = harness.engine.beginExternal(
+      "execution.process",
+      harness.active,
+      externalBeaconDescriptor(),
+    );
+    harness.engine.markExternalSubmitted(record.requestId);
+    const cancellation = harness.engine.cancel(record.requestId);
+    await expect(cancellation).resolves.toMatchObject({
+      state: "cancel-requested",
+    });
+    harness.engine.markExternalSubmitted(record.requestId, "external_cancel_task");
+    await vi.waitFor(() => expect(harness.cancelTask).toHaveBeenCalledOnce());
+    expect(harness.cancelTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: harness.active.ref.id, mode: "beacon" }),
+      "external_cancel_task",
+    );
+    await expect(harness.engine.reconcileTask({
+      taskId: "external_cancel_task",
+      beaconId: harness.active.ref.id,
+      state: "canceled",
+    })).resolves.toMatchObject({
+      state: "canceled",
+      message: "Reviewed execution canceled.",
+    });
+    await harness.engine.cancel(record.requestId);
+    expect(harness.cancelTask).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["failed" as const, "Reviewed execution failed."],
+    ["canceled" as const, "Reviewed execution canceled."],
+  ])("uses fixed external journal text for a %s beacon task", async (state, expectedMessage) => {
+    const harness = createHarness("beacon", { ids: [`external_${state}_request`] });
+    const record = harness.engine.beginExternal(
+      "execution.shellcode",
+      harness.active,
+      externalBeaconDescriptor(),
+    );
+    harness.engine.markExternalSubmitted(record.requestId, `external_${state}_task`);
+    await expect(harness.engine.reconcileTask({
+      taskId: `external_${state}_task`,
+      beaconId: harness.active.ref.id,
+      state: "sent",
+      error: "REMOTE_SENT_SECRET",
+    })).resolves.toMatchObject({ state: "running", message: "The beacon task is awaiting completion" });
+    const terminal = await harness.engine.reconcileTask({
+      taskId: `external_${state}_task`,
+      beaconId: harness.active.ref.id,
+      state,
+      error: "REMOTE_TERMINAL_SECRET",
+    });
+    expect(terminal).toMatchObject({ state, message: expectedMessage });
+    expect(JSON.stringify(terminal)).not.toContain("REMOTE_");
+  });
+
+  it("expires, prunes, and closes external task indexes conservatively", () => {
+    const expiring = createHarness("beacon", {
+      ids: ["expiring_external"],
+      recoverableTaskTtlMilliseconds: 1_000,
+    });
+    const record = expiring.engine.beginExternal(
+      "execution.children",
+      expiring.active,
+      externalBeaconDescriptor({ outcomeUnknownAfterSubmission: false, taskTimeoutSeconds: 2 }),
+    );
+    expiring.engine.markExternalSubmitted(record.requestId, "expiring_external_task");
+    expiring.advance(2_001);
+    expect(expiring.engine.expireOverdueTasks()).toBe(1);
+    expect(expiring.engine.findByTask("expiring_external_task", expiring.active.ref.id)).toMatchObject({
+      state: "outcome-unknown",
+    });
+    expiring.advance(1_001);
+    expect(expiring.engine.list().items).toHaveLength(0);
+    expect(expiring.engine.findByTask("expiring_external_task", expiring.active.ref.id)).toBeUndefined();
+    expect(expiring.settleTaskClaim).toHaveBeenCalledWith("expiring_external_task", record.requestId);
+
+    const closing = createHarness("beacon", { ids: ["closing_external"] });
+    const closingRecord = closing.engine.beginExternal(
+      "execution.process",
+      closing.active,
+      externalBeaconDescriptor(),
+    );
+    closing.engine.markExternalSubmitted(closingRecord.requestId, "closing_external_task");
+    closing.engine.close();
+    expect(closing.engine.get(closingRecord.requestId)).toMatchObject({ state: "outcome-unknown" });
+    expect(closing.engine.findByTask("closing_external_task", closing.active.ref.id)).toBeUndefined();
+    expect(closing.settleTaskClaim).toHaveBeenCalledWith("closing_external_task", closingRecord.requestId);
   });
 
   it("orders mixed activity deterministically and keeps cursor pages stable across insertion", async () => {
@@ -354,6 +575,7 @@ describe("OperationEngine", () => {
 
     expect(record).toMatchObject({ state: "submitted", taskId, attempts: 1 });
     expect(harness.engine.findByTask(taskId, harness.active.ref.id)?.requestId).toBe(record.requestId);
+    expect(harness.engine.requiresTaskResultVerification(taskId, harness.active.ref.id)).toBe(true);
     expect(harness.client[method].mock.calls[0]?.at(-1)).toBe(timeout);
     expect(harness.refreshTargets).toHaveBeenCalled();
   });
@@ -1180,6 +1402,7 @@ interface HarnessOptions {
   recoverableTaskTtlMilliseconds?: number;
   activeOperationLimit?: number;
   onChanged?: (record: Readonly<TargetOperationRecord>) => void;
+  claimExternalTask?: OperationEngineHost["claimExternalTask"];
 }
 
 function createHarness(mode: TargetMode, options: HarnessOptions = {}) {
@@ -1193,16 +1416,22 @@ function createHarness(mode: TargetMode, options: HarnessOptions = {}) {
   const capability = vi.fn(async (_target: ResolvedOperationTarget, _capabilityId: TargetCapabilityId) => true);
   const refreshTargets = vi.fn(async () => undefined);
   const cancelTask = vi.fn(async () => undefined);
+  const reserveTaskClaim = vi.fn((_requestId: string) => true);
+  const releaseTaskClaimReservation = vi.fn((_requestId: string) => undefined);
+  const claimTask = vi.fn((_taskId: string) => true);
+  const claimExternalTask = vi.fn(options.claimExternalTask ?? ((_taskId: string) => true));
+  const settleTaskClaim = vi.fn((_taskId: string, _requestId: string) => undefined);
   const host: OperationEngineHost = {
     client,
     ownerWindowId: options.ownerWindowId ?? 7,
     resolveActiveTarget,
     assertTarget,
     resolveJournaledTarget: assertTarget,
-    reserveTaskClaim: () => true,
-    releaseTaskClaimReservation: () => undefined,
-    claimTask: () => true,
-    settleTaskClaim: () => undefined,
+    reserveTaskClaim,
+    releaseTaskClaimReservation,
+    claimTask,
+    claimExternalTask,
+    settleTaskClaim,
     capability,
     refreshTargets,
     cancelTask,
@@ -1230,6 +1459,10 @@ function createHarness(mode: TargetMode, options: HarnessOptions = {}) {
     capability,
     refreshTargets,
     cancelTask,
+    reserveTaskClaim,
+    releaseTaskClaimReservation,
+    claimExternalTask,
+    settleTaskClaim,
     advance: (milliseconds: number) => {
       clock += milliseconds;
     },
@@ -1264,6 +1497,22 @@ function fakeClient(mode: TargetMode) {
     reconfigureBeacon: vi.fn(async () => defaultTask),
     openSessionFromBeacon: vi.fn(async () => defaultTask),
   } as unknown as OperationEngineHost["client"] & Record<OperationClientMethod, ReturnType<typeof vi.fn>>;
+}
+
+function externalBeaconDescriptor(
+  overrides: Partial<ExternalOperationDescriptor> = {},
+): Readonly<ExternalOperationDescriptor> {
+  return Object.freeze({
+    cancellation: "best-effort-beacon-task",
+    outcomeUnknownAfterSubmission: true,
+    taskTimeoutSeconds: 60,
+    startMessage: "Reviewed execution submitted.",
+    completionMessage: "Reviewed execution completed.",
+    failureMessage: "Reviewed execution failed.",
+    canceledMessage: "Reviewed execution canceled.",
+    outcomeUnknownMessage: "The reviewed task outcome could not be confirmed.",
+    ...overrides,
+  });
 }
 
 type OperationClientMethod =

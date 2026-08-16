@@ -65,6 +65,7 @@ import {
 } from "./TargetsPage";
 import { defaultSessionWorkspacePanels } from "./session-workbench-panels";
 import { SessionTerminalPanel } from "./SessionTerminalPanel";
+import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 export interface SessionWorkspaceRoute {
   sessionId: string;
@@ -77,6 +78,7 @@ export type SessionWorkspacePanelId =
   | "overview"
   | "files"
   | "processes"
+  | "execution"
   | "environment"
   | "terminal"
   | "activity"
@@ -475,6 +477,9 @@ export function SessionWorkspacePage({
   };
   const resolvedPanels = { ...defaultSessionWorkspacePanels, ...panels };
   const isWindows = currentSession.os.toLocaleLowerCase().includes("windows");
+  const activeSessionRef = snapshot.targetContext.activeTarget?.mode === "session"
+    ? snapshot.targetContext.activeTarget
+    : undefined;
 
   return (
     <section className="page-stack" aria-labelledby="session-workspace-heading">
@@ -524,6 +529,7 @@ export function SessionWorkspacePage({
             <WorkspaceTab id="overview" label="Overview" />
             <WorkspaceTab id="files" label="Files" />
             <WorkspaceTab id="processes" label="Processes" />
+            <WorkspaceTab id="execution" label="Execution" />
             <WorkspaceTab id="environment" label="Environment" />
             {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
             <WorkspaceTab id="terminal" label="Shell" />
@@ -571,6 +577,17 @@ export function SessionWorkspacePage({
             title: "No process inventory loaded",
             description: "Process details and filters will appear here after the session returns an inventory.",
           })}
+        </Tabs.Panel>
+        <Tabs.Panel className="pt-6" id="execution">
+          {resolvedPanels.execution
+            ? resolvedPanels.execution(context)
+            : activeSessionRef
+              ? <TargetExecutionWorkbench expectedTarget={activeSessionRef} targetIdentity={routeIdentity} />
+              : renderPanel(undefined, context, {
+                  icon: faTriangleExclamation,
+                  title: "Execution workbench unavailable",
+                  description: "The exact main-issued target reference is no longer available.",
+                })}
         </Tabs.Panel>
         <Tabs.Panel className="pt-6" id="environment">
           {renderPanel(resolvedPanels.environment, context, {

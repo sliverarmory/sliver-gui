@@ -645,6 +645,25 @@ describe("BeaconTaskStore", () => {
     expect(client.cancelBeaconTask).toHaveBeenCalledOnce();
   });
 
+  it("advertises cancellation for the pinned transformed assembly and migrate task names", async () => {
+    const descriptions = [
+      "InvokeExecuteAssemblyReq",
+      "InvokeInProcExecuteAssemblyReq",
+      "InvokeMigrateReq",
+      "TaskReq",
+    ];
+    const client = fakeClient(clientpb.BeaconTasks.create({
+      Tasks: descriptions.map((description, index) =>
+        task(`m4_cancel_${index}`, "pending", 20 - index, description)),
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+
+    for (const [index] of descriptions.entries()) {
+      expect(store.task(beaconId, `m4_cancel_${index}`).cancellation).toEqual({ available: true });
+    }
+  });
+
   it("zeroizes cancellation response payloads", async () => {
     const client = fakeClient(clientpb.BeaconTasks.create({ Tasks: [task("pending_task", "pending", 10, "Ping")] }));
     const requestBytes = Buffer.from("cancel-request-secret");

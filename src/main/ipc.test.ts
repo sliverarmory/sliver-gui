@@ -16,6 +16,7 @@ import {
   type IpcInvokeChannel,
   type ListenerInput,
 } from "../shared/contracts.js";
+import type { PrepareExecutionActionInput } from "../shared/execution-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 
 const electronMocks = vi.hoisted(() => ({
@@ -221,6 +222,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.restartToApplyApplicationUpdate,
     IPC.chooseCertificatePair,
     IPC.prepareStopAllJobs,
+    IPC.listExecutionCatalog,
   ] as const)("rejects unexpected arguments for %s", (channel) => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
@@ -686,6 +688,246 @@ describe("trusted Electron IPC boundary", () => {
     })).toThrow(/unsupported/i);
   });
 
+  it("routes only strictly parsed execution operations through the trusted window boundary", async () => {
+    const listExecutionCatalog = vi.fn(async () => ({ ok: false as const, error: "catalog probe" }));
+    const runExecutionRead = vi.fn(async () => ({ ok: false as const, error: "read probe" }));
+    const prepareExecutionAction = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
+    const executeExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "execute probe" }));
+    const discardExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "discard probe" }));
+    const getExecutionResult = vi.fn(async () => ({ ok: false as const, error: "result probe" }));
+    const saveExecutionResult = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
+    registerIpcHandlers(
+      registryMock({
+        listExecutionCatalog,
+        runExecutionRead,
+        prepareExecutionAction,
+        executeExecutionPlan,
+        discardExecutionPlan,
+        getExecutionResult,
+        saveExecutionResult,
+      }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event, sender } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const action = { draft: { operationId: "privilege.revert" as const, timeoutSeconds: 30 } };
+    const plan = { token: "execution_plan_1" };
+    const request = { requestId: "execution_request_1" };
+    const save = { ...request, stream: "combined" as const };
+
+    await electronMocks.handlers.get(IPC.listExecutionCatalog)?.(event);
+    await electronMocks.handlers.get(IPC.runExecutionRead)?.(event, {
+      operationId: "execution.children",
+      cursor: "children_page_2",
+      limit: 25,
+    });
+    await electronMocks.handlers.get(IPC.prepareExecutionAction)?.(event, action);
+    await electronMocks.handlers.get(IPC.executeExecutionPlan)?.(event, plan);
+    await electronMocks.handlers.get(IPC.discardExecutionPlan)?.(event, plan);
+    await electronMocks.handlers.get(IPC.getExecutionResult)?.(event, request);
+    await electronMocks.handlers.get(IPC.saveExecutionResult)?.(event, save);
+
+    expect(listExecutionCatalog).toHaveBeenCalledExactlyOnceWith(77);
+    expect(runExecutionRead).toHaveBeenCalledExactlyOnceWith(77, {
+      operationId: "execution.children",
+      cursor: "children_page_2",
+      limit: 25,
+    });
+    expect(prepareExecutionAction).toHaveBeenCalledExactlyOnceWith(sender, action);
+    expect(executeExecutionPlan).toHaveBeenCalledExactlyOnceWith(77, plan);
+    expect(discardExecutionPlan).toHaveBeenCalledExactlyOnceWith(77, plan);
+    expect(getExecutionResult).toHaveBeenCalledExactlyOnceWith(77, request);
+    expect(saveExecutionResult).toHaveBeenCalledExactlyOnceWith(sender, save);
+  });
+
+  it("scrubs every raw credential view after successful prepare while retaining the parsed copy", async () => {
+    const parsedCredentials: Uint8Array[] = [];
+    const prepareExecutionAction = vi.fn(async (_sender: WebContents, input: PrepareExecutionActionInput) => {
+      parsedCredentials.push(executionCredential(input));
+      return { ok: true as const, value: {} as never };
+    });
+    registerIpcHandlers(registryMock({ prepareExecutionAction }), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const secretText = "main-clone-secret";
+    const drafts = [
+      (password: Uint8Array) => ({
+        operationId: "privilege.run-as",
+        username: "operator",
+        domain: "LAB",
+        password,
+        process: "cmd.exe",
+        args: "/c whoami",
+        showWindow: false,
+        netOnly: false,
+        timeoutSeconds: 30,
+      }),
+      (password: Uint8Array) => ({
+        operationId: "privilege.make-token",
+        username: "operator",
+        domain: "LAB",
+        password,
+        logonType: "new-credentials",
+        timeoutSeconds: 30,
+      }),
+      (password: Uint8Array) => ({
+        operationId: "execution.ssh",
+        hostname: "server",
+        port: 22,
+        username: "operator",
+        command: ["id"],
+        authentication: { kind: "password", password },
+        timeoutSeconds: 30,
+      }),
+    ];
+
+    for (const draft of drafts) {
+      const rawPassword = Uint8Array.from(Buffer.from(secretText, "utf8"));
+      const pending = electronMocks.handlers.get(IPC.prepareExecutionAction)?.(event, {
+        draft: draft(rawPassword),
+      }) as Promise<unknown>;
+
+      expect(isZeroBytes(rawPassword)).toBe(true);
+      await pending;
+      const parsedPassword = parsedCredentials.at(-1);
+      expect(parsedPassword).toBeDefined();
+      expect(parsedPassword).not.toBe(rawPassword);
+      expect(Buffer.from(parsedPassword!).toString("utf8")).toBe(secretText);
+      parsedPassword?.fill(0);
+    }
+  });
+
+  it("scrubs parsed credential copies when prepare fails or throws", async () => {
+    const secretText = "failed-prepare-secret";
+    for (const outcome of ["failure", "throw"] as const) {
+      let parsedPassword: Uint8Array | undefined;
+      const prepareExecutionAction = vi.fn(async (_sender: WebContents, input: PrepareExecutionActionInput) => {
+        parsedPassword = executionCredential(input);
+        if (outcome === "throw") throw new Error("prepare failed without credential detail");
+        return { ok: false as const, error: "prepare failed" };
+      });
+      registerIpcHandlers(registryMock({ prepareExecutionAction }), vi.fn(), RENDERER_URL);
+      const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+      const rawPassword = Uint8Array.from(Buffer.from(secretText, "utf8"));
+      const pending = electronMocks.handlers.get(IPC.prepareExecutionAction)?.(event, {
+        draft: {
+          operationId: "privilege.make-token",
+          username: "operator",
+          domain: "LAB",
+          password: rawPassword,
+          logonType: "new-credentials",
+          timeoutSeconds: 30,
+        },
+      }) as Promise<unknown>;
+
+      expect(isZeroBytes(rawPassword)).toBe(true);
+      if (outcome === "throw") {
+        await expect(pending).rejects.toThrow("prepare failed without credential detail");
+        await expect(pending).rejects.not.toThrow(secretText);
+      } else {
+        await expect(pending).resolves.toEqual({ ok: false, error: "prepare failed" });
+      }
+      expect(parsedPassword).toBeDefined();
+      expect(isZeroBytes(parsedPassword!)).toBe(true);
+    }
+  });
+
+  it("scrubs credential-shaped raw views on parse and trust rejection without exposing their contents", () => {
+    const prepareExecutionAction = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
+    registerIpcHandlers(registryMock({ prepareExecutionAction }), vi.fn(), RENDERER_URL);
+    const trusted = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/sessions/session_1", 88);
+    const secretText = "rejected-boundary-secret";
+    const malformedPassword = Uint8Array.from(Buffer.from(secretText, "utf8"));
+
+    let parseFailure: unknown;
+    try {
+      electronMocks.handlers.get(IPC.prepareExecutionAction)?.(trusted.event, {
+        draft: { operationId: "invalid-operation", password: malformedPassword },
+      });
+    } catch (error) {
+      parseFailure = error;
+    }
+    expect(parseFailure).toBeInstanceOf(TypeError);
+    expect(String(parseFailure)).not.toContain(secretText);
+    expect(isZeroBytes(malformedPassword)).toBe(true);
+
+    const untrustedPassword = Uint8Array.from(Buffer.from(secretText, "utf8"));
+    let trustFailure: unknown;
+    try {
+      electronMocks.handlers.get(IPC.prepareExecutionAction)?.(untrusted.event, {
+        draft: {
+          operationId: "execution.ssh",
+          hostname: "server",
+          port: 22,
+          username: "operator",
+          command: ["id"],
+          authentication: { kind: "password", password: untrustedPassword },
+          timeoutSeconds: 30,
+        },
+      });
+    } catch (error) {
+      trustFailure = error;
+    }
+    expect(String(trustFailure)).toMatch(/untrusted renderer/i);
+    expect(String(trustFailure)).not.toContain(secretText);
+    expect(isZeroBytes(untrustedPassword)).toBe(true);
+    expect(prepareExecutionAction).not.toHaveBeenCalled();
+  });
+
+  it("rejects untrusted and over-posted execution requests before registry dispatch", () => {
+    const runExecutionRead = vi.fn(async () => ({ ok: false as const, error: "read probe" }));
+    const prepareExecutionAction = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
+    const executeExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "execute probe" }));
+    const discardExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "discard probe" }));
+    const getExecutionResult = vi.fn(async () => ({ ok: false as const, error: "result probe" }));
+    const saveExecutionResult = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
+    registerIpcHandlers(
+      registryMock({
+        runExecutionRead,
+        prepareExecutionAction,
+        executeExecutionPlan,
+        discardExecutionPlan,
+        getExecutionResult,
+        saveExecutionResult,
+      }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const trusted = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/sessions/session_1", 88);
+
+    expect(() => electronMocks.handlers.get(IPC.runExecutionRead)?.(untrusted.event, {
+      operationId: "execution.children",
+    })).toThrow(/untrusted renderer/i);
+    expect(() => electronMocks.handlers.get(IPC.prepareExecutionAction)?.(trusted.event, {
+      draft: { operationId: "privilege.revert", timeoutSeconds: 30, targetId: "session_2" },
+    })).toThrow(/unexpected field: targetId/i);
+    expect(() => electronMocks.handlers.get(IPC.executeExecutionPlan)?.(trusted.event, {
+      token: "execution_plan_1",
+      operationId: "privilege.revert",
+    })).toThrow(/unexpected field: operationId/i);
+    expect(() => electronMocks.handlers.get(IPC.discardExecutionPlan)?.(trusted.event, {
+      token: "execution_plan_1",
+      targetId: "session_2",
+    })).toThrow(/unexpected field: targetId/i);
+    expect(() => electronMocks.handlers.get(IPC.getExecutionResult)?.(trusted.event, {
+      requestId: "execution_request_1",
+      outputPath: "/tmp/secret",
+    })).toThrow(/unexpected field: outputPath/i);
+    expect(() => electronMocks.handlers.get(IPC.saveExecutionResult)?.(trusted.event, {
+      requestId: "execution_request_1",
+      stream: "combined",
+      destinationPath: "/tmp/secret",
+    })).toThrow(/unexpected field: destinationPath/i);
+
+    expect(runExecutionRead).not.toHaveBeenCalled();
+    expect(prepareExecutionAction).not.toHaveBeenCalled();
+    expect(executeExecutionPlan).not.toHaveBeenCalled();
+    expect(discardExecutionPlan).not.toHaveBeenCalled();
+    expect(getExecutionResult).not.toHaveBeenCalled();
+    expect(saveExecutionResult).not.toHaveBeenCalled();
+  });
+
   it("transfers one validated stream port with the exact main-frame identity", () => {
     const attachStream = vi.fn();
     registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
@@ -776,6 +1018,23 @@ describe("trusted Electron IPC boundary", () => {
   });
 });
 
+function executionCredential(input: PrepareExecutionActionInput): Uint8Array {
+  switch (input.draft.operationId) {
+    case "execution.ssh":
+      if (input.draft.authentication.kind !== "password") throw new Error("Expected SSH password credentials");
+      return input.draft.authentication.password;
+    case "privilege.run-as":
+    case "privilege.make-token":
+      return input.draft.password;
+    default:
+      throw new Error("Expected credential-bearing execution draft");
+  }
+}
+
+function isZeroBytes(value: Uint8Array): boolean {
+  return value.every((byte) => byte === 0);
+}
+
 function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnectionRegistry {
   const unavailable = async (): Promise<{ ok: false; error: string }> => ({
     ok: false,
@@ -822,6 +1081,13 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     listSessionShells: vi.fn(unavailable),
     actOnSessionShell: vi.fn(unavailable),
     getTerminalRuntime: vi.fn(unavailable),
+    listExecutionCatalog: vi.fn(unavailable),
+    runExecutionRead: vi.fn(unavailable),
+    prepareExecutionAction: vi.fn(unavailable),
+    executeExecutionPlan: vi.fn(unavailable),
+    discardExecutionPlan: vi.fn(unavailable),
+    getExecutionResult: vi.fn(unavailable),
+    saveExecutionResult: vi.fn(unavailable),
     attachStream: vi.fn(),
     ...overrides,
   };

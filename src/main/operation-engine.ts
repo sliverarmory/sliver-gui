@@ -6,6 +6,7 @@ import type {
   OperationBackendSummary,
   OperationDisposition,
   OperationPageRequest,
+  OperationRecordId,
   TargetOperationId,
   TargetOperationInput,
   TargetOperationPage,
@@ -27,7 +28,6 @@ import {
 } from "./operation-registry.js";
 import {
   getSessionOperationDescriptor,
-  type SessionOperationDescriptor,
 } from "./session-operation-registry.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 
@@ -38,6 +38,7 @@ const DEFAULT_ACTIVE_OPERATION_LIMIT = 100;
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 const MAX_MESSAGE_CHARACTERS = 512;
+const DEFAULT_EXTERNAL_TASK_TIMEOUT_SECONDS = 60;
 const TASK_IDENTIFIER = /^[A-Za-z0-9_-]{1,128}$/u;
 
 const TERMINAL_STATES: ReadonlySet<TargetOperationState> = new Set([
@@ -101,6 +102,12 @@ export interface OperationEngineHost {
     beaconId: string,
     expectedPingNonce?: number,
   ): boolean;
+  claimExternalTask(
+    taskId: string,
+    requestId: string,
+    operationId: OperationRecordId,
+    beaconId: string,
+  ): boolean;
   settleTaskClaim(taskId: string, requestId: string): void;
   capability(
     target: ResolvedOperationTarget,
@@ -139,7 +146,25 @@ interface ExternalOperation {
   sequence: number;
   record: TargetOperationRecord;
   submitted: boolean;
-  descriptor: Readonly<SessionOperationDescriptor>;
+  taskReservation: boolean;
+  cancelWhenTaskKnown: boolean;
+  cancellationIssued: boolean;
+  cancellationPromise?: Promise<void>;
+  descriptor: Readonly<ExternalOperationDescriptor>;
+}
+
+export interface ExternalOperationDescriptor {
+  readonly cancellation: "not-supported" | "best-effort-beacon-task";
+  readonly outcomeUnknownAfterSubmission: boolean;
+  /** Bounded reconciliation deadline for a server-queued beacon task. */
+  readonly taskTimeoutSeconds?: number;
+  readonly startMessage: string;
+  readonly completionMessage: string;
+  readonly failureMessage?: string;
+  readonly canceledMessage?: string;
+  readonly partialMessage?: string;
+  readonly outcomeUnknownMessage?: string;
+  readonly targetDisappearedMessage?: string;
 }
 
 type EnvironmentReconciliation = NonNullable<InternalOperation["environmentReconciliation"]>;
@@ -274,28 +299,56 @@ export class OperationEngine {
 
   /**
    * Starts a main-owned journal record for a closed operation surface that is
-   * executed outside the M1 protobuf dispatcher (currently the session
-   * workbench). The caller may only transition this record; renderer input
+   * executed outside the M1 protobuf dispatcher (the session and execution
+   * workbenches). The caller may only transition this record; renderer input
    * never supplies request IDs, targets, actors, or backend identity.
    */
   beginExternal(
     operationId: SessionWorkbenchOperationId,
     target: ResolvedOperationTarget,
+  ): TargetOperationRecord;
+  beginExternal(
+    operationId: OperationRecordId,
+    target: ResolvedOperationTarget,
+    descriptor: Readonly<ExternalOperationDescriptor>,
+  ): TargetOperationRecord;
+  beginExternal(
+    operationId: OperationRecordId,
+    target: ResolvedOperationTarget,
+    suppliedDescriptor?: Readonly<ExternalOperationDescriptor>,
   ): TargetOperationRecord {
     this.assertOpen();
     this.pruneTerminalRecords();
     validateResolvedTarget(target);
-    if (target.ref.mode !== "session") {
+    if (suppliedDescriptor === undefined && target.ref.mode !== "session") {
       throw new Error("Session workbench activity must be bound to a session target");
     }
     const releaseAdmission = this.reserveActiveOperation();
     try {
-      const descriptor = getSessionOperationDescriptor(operationId);
+      const descriptor = suppliedDescriptor ?? sessionExternalDescriptor(
+        getSessionOperationDescriptor(operationId as SessionWorkbenchOperationId),
+      );
       const requestId = this.createRequestId();
+      let taskReservation = false;
+      if (target.ref.mode === "beacon") {
+        const taskTimeoutSeconds = descriptor.taskTimeoutSeconds ?? DEFAULT_EXTERNAL_TASK_TIMEOUT_SECONDS;
+        if (!Number.isSafeInteger(taskTimeoutSeconds) || taskTimeoutSeconds < 1 || taskTimeoutSeconds > 3_600) {
+          throw new Error("The external task reconciliation timeout is invalid");
+        }
+        if (!this.host.reserveTaskClaim(requestId)) {
+          throw new Error(
+            "The backend has reached its bounded active beacon-task limit; wait for task reconciliation before submitting another operation",
+          );
+        }
+        taskReservation = true;
+      }
       const timestamp = this.timestamp();
       const external: ExternalOperation = {
         sequence: this.allocateSequence(),
         submitted: false,
+        taskReservation,
+        cancelWhenTaskKnown: false,
+        cancellationIssued: false,
         descriptor,
         record: {
           requestId,
@@ -318,24 +371,47 @@ export class OperationEngine {
           message: descriptor.startMessage,
         },
       };
-      this.externalOperations.set(requestId, external);
-      this.emitRecord(external.record);
-      return this.publicRecord(external.record);
+      try {
+        this.externalOperations.set(requestId, external);
+        this.emitRecord(external.record);
+        return this.publicRecord(external.record);
+      } catch (error) {
+        if (taskReservation) this.host.releaseTaskClaimReservation(requestId);
+        this.externalOperations.delete(requestId);
+        throw error;
+      }
     } finally {
       releaseAdmission();
     }
   }
 
-  markExternalSubmitted(requestId: string): TargetOperationRecord {
+  markExternalSubmitted(requestId: string, taskId?: string): TargetOperationRecord {
     const external = this.requireExternalOperation(requestId);
-    if (isTerminal(external.record.state)) return this.publicRecord(external.record);
+    if (isTerminal(external.record.state) && external.record.state !== "outcome-unknown") {
+      return this.publicRecord(external.record);
+    }
     this.assertOpen();
     if (!external.submitted) {
       external.submitted = true;
       external.record.attempts += 1;
       external.record.submittedAt = this.timestamp();
     }
-    this.transitionExternal(external, "running", external.descriptor.startMessage);
+    if (taskId !== undefined) {
+      this.bindExternalTask(external, taskId);
+    }
+    if (external.cancelWhenTaskKnown && external.record.taskId) {
+      this.transitionExternal(
+        external,
+        "cancel-requested",
+        "Cancellation requested; the beacon task may already have been dispatched",
+      );
+      void this.requestExternalTaskCancellationOnce(external).catch(() => {
+        // Cancellation is a separate best-effort request. Failure never
+        // resubmits the original reviewed operation.
+      });
+    } else if (external.record.state !== "outcome-unknown") {
+      this.transitionExternal(external, "running", external.descriptor.startMessage);
+    }
     return this.publicRecord(external.record);
   }
 
@@ -358,6 +434,10 @@ export class OperationEngine {
     }
     external.record.finishedAt = this.timestamp();
     this.transitionExternal(external, state, externalTerminalMessage(external.descriptor, state));
+    this.releaseExternalTaskReservation(external);
+    if (external.record.taskId && state !== "outcome-unknown") {
+      this.host.settleTaskClaim(external.record.taskId, external.record.requestId);
+    }
     this.pruneTerminalRecords();
     return this.publicRecord(external.record);
   }
@@ -389,6 +469,10 @@ export class OperationEngine {
       externalTerminalMessage(external.descriptor, state),
       MAX_MESSAGE_CHARACTERS,
     );
+    if (external.record.taskId) {
+      this.host.settleTaskClaim(external.record.taskId, external.record.requestId);
+    }
+    this.releaseExternalTaskReservation(external);
     this.emitRecord(external.record);
     this.pruneTerminalRecords();
     return this.publicRecord(external.record);
@@ -436,9 +520,22 @@ export class OperationEngine {
     this.pruneTerminalRecords();
     const requestId = this.taskRequests.get(taskId);
     const internal = requestId ? this.operations.get(requestId) : undefined;
-    return internal?.record.mode === "beacon" && internal.record.target.id === beaconId
-      ? this.publicRecord(internal.record)
+    const external = requestId ? this.externalOperations.get(requestId) : undefined;
+    const operation = internal ?? external;
+    return operation?.record.mode === "beacon" && operation.record.target.id === beaconId
+      ? this.publicRecord(operation.record)
       : undefined;
+  }
+
+  /** M1 dispatcher tasks require the M1 protobuf decoder. External M4 tasks
+   * return false because their exact operation-specific decoder lives at the
+   * execution boundary; they must never be routed through the M1 decoder or
+   * terminalized from server task state alone. */
+  requiresTaskResultVerification(taskId: string, beaconId: string): boolean {
+    this.pruneTerminalRecords();
+    const requestId = this.taskRequests.get(taskId);
+    const internal = requestId ? this.operations.get(requestId) : undefined;
+    return internal?.record.mode === "beacon" && internal.record.target.id === beaconId;
   }
 
   expectedPingNonceForTask(taskId: string, beaconId: string): number | undefined {
@@ -455,7 +552,23 @@ export class OperationEngine {
     const external = this.externalOperations.get(requestId);
     if (external) {
       if (isTerminal(external.record.state)) return this.publicRecord(external.record);
-      throw new Error("This operation cannot be canceled");
+      if (
+        external.record.mode !== "beacon" ||
+        external.descriptor.cancellation !== "best-effort-beacon-task"
+      ) {
+        throw new Error("This operation cannot be canceled");
+      }
+      if (!external.submitted) {
+        return this.finishExternal(requestId, "canceled");
+      }
+      external.cancelWhenTaskKnown = true;
+      this.transitionExternal(
+        external,
+        "cancel-requested",
+        "Cancellation requested; the beacon task may already have been dispatched",
+      );
+      if (external.record.taskId) await this.requestExternalTaskCancellationOnce(external);
+      return this.publicRecord(external.record);
     }
     const internal = this.requireOperation(requestId);
     if (isTerminal(internal.record.state)) {
@@ -486,6 +599,39 @@ export class OperationEngine {
   async reconcileTask(reconciliation: OperationTaskReconciliation): Promise<TargetOperationRecord | undefined> {
     const requestId = this.taskRequests.get(reconciliation.taskId);
     if (!requestId) return undefined;
+    const external = this.externalOperations.get(requestId);
+    if (external) {
+      if (external.record.mode !== "beacon" || external.record.target.id !== reconciliation.beaconId) {
+        return undefined;
+      }
+      if (isTerminal(external.record.state) && external.record.state !== "outcome-unknown") {
+        return this.publicRecord(external.record);
+      }
+      if (this.closed) return this.publicRecord(external.record);
+
+      switch (reconciliation.state) {
+        case "pending":
+        case "sent":
+          if (external.record.state !== "outcome-unknown") {
+            this.transitionExternal(external, "running", "The beacon task is awaiting completion");
+          }
+          break;
+        case "completed":
+          this.finishExternalTask(external, "completed");
+          break;
+        case "canceled":
+          this.finishExternalTask(external, "canceled");
+          break;
+        case "failed":
+          // External task error strings and protobuf dispositions are not part
+          // of the closed M4 result contract. Keep the journal message fixed.
+          this.finishExternalTask(external, "failed");
+          break;
+        case "unknown":
+          break;
+      }
+      return this.publicRecord(external.record);
+    }
     const internal = this.operations.get(requestId);
     if (!internal || (isTerminal(internal.record.state) && internal.record.state !== "outcome-unknown")) {
       return internal ? this.publicRecord(internal.record) : undefined;
@@ -548,6 +694,20 @@ export class OperationEngine {
   ): TargetOperationRecord | undefined {
     const requestId = this.taskRequests.get(taskId);
     if (!requestId) return undefined;
+    const external = this.externalOperations.get(requestId);
+    if (external) {
+      if (external.record.mode !== "beacon" || external.record.target.id !== beaconId) return undefined;
+      if (isTerminal(external.record.state)) return this.publicRecord(external.record);
+      external.record.finishedAt = this.timestamp();
+      this.transitionExternal(
+        external,
+        "outcome-unknown",
+        external.descriptor.outcomeUnknownMessage ??
+          "The beacon task outcome could not be confirmed",
+      );
+      this.pruneTerminalRecords();
+      return this.publicRecord(external.record);
+    }
     const internal = this.operations.get(requestId);
     if (internal?.record.mode !== "beacon" || internal.record.target.id !== beaconId) return undefined;
     if (!internal || isTerminal(internal.record.state)) return internal ? this.publicRecord(internal.record) : undefined;
@@ -577,6 +737,18 @@ export class OperationEngine {
         changed += 1;
       }
     }
+    for (const external of this.externalOperations.values()) {
+      const deadline = external.record.deadlineAt ? Date.parse(external.record.deadlineAt) : Number.NaN;
+      if (
+        external.record.taskId &&
+        !isTerminal(external.record.state) &&
+        Number.isFinite(deadline) &&
+        deadline <= now
+      ) {
+        this.markTaskOutcomeUnknown(external.record.taskId, external.record.target.id);
+        changed += 1;
+      }
+    }
     return changed;
   }
 
@@ -599,6 +771,7 @@ export class OperationEngine {
           state,
           externalTerminalMessage(external.descriptor, state),
         );
+        this.releaseExternalTaskReservation(external);
         changed += 1;
       }
     }
@@ -620,13 +793,21 @@ export class OperationEngine {
     for (const external of this.externalOperations.values()) {
       if (isTerminal(external.record.state)) continue;
       external.record.finishedAt = this.timestamp();
+      const taskOutcomeIsUncertain = external.submitted && (
+        external.record.taskId !== undefined || external.descriptor.outcomeUnknownAfterSubmission
+      );
       this.transitionExternal(
         external,
-        external.submitted && external.descriptor.outcomeUnknownAfterSubmission ? "outcome-unknown" : "canceled",
-        external.submitted && external.descriptor.outcomeUnknownAfterSubmission
+        taskOutcomeIsUncertain ? "outcome-unknown" : "canceled",
+        taskOutcomeIsUncertain
           ? "The owning window closed before the outcome was confirmed"
           : "The owning window closed before the operation completed",
       );
+      this.releaseExternalTaskReservation(external);
+    }
+    for (const [taskId, requestId] of this.taskRequests) {
+      this.host.settleTaskClaim(taskId, requestId);
+      this.taskRequests.delete(taskId);
     }
     this.pruneTerminalRecords();
   }
@@ -936,6 +1117,49 @@ export class OperationEngine {
     return pending;
   }
 
+  private async requestExternalTaskCancellation(external: ExternalOperation): Promise<void> {
+    const taskId = external.record.taskId;
+    if (!taskId || isTerminal(external.record.state)) return;
+    try {
+      await this.host.cancelTask(cloneTargetRef(external.record.target), taskId);
+      if (external.record.state === "cancel-requested") {
+        this.transitionExternal(
+          external,
+          "cancel-requested",
+          "Cancellation requested; refresh will confirm whether the beacon task was already dispatched",
+        );
+      }
+    } catch (error) {
+      if (isTerminal(external.record.state)) return;
+      if (external.record.state === "cancel-requested") {
+        this.transitionExternal(
+          external,
+          "cancel-requested",
+          "Cancellation is not yet confirmed; refresh the beacon task state",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async requestExternalTaskCancellationOnce(external: ExternalOperation): Promise<void> {
+    if (external.cancellationPromise) return external.cancellationPromise;
+    if (external.cancellationIssued) return;
+    external.cancellationIssued = true;
+    const pending = this.requestExternalTaskCancellation(external)
+      .catch((error: unknown) => {
+        if (error instanceof TaskCancellationDispatchError && !error.dispatchStarted) {
+          external.cancellationIssued = false;
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (external.cancellationPromise === pending) delete external.cancellationPromise;
+      });
+    external.cancellationPromise = pending;
+    return pending;
+  }
+
   private async refreshAfterSubmission(internal: InternalOperation): Promise<void> {
     if (internal.record.mode !== "beacon") return;
     await ignoreRefreshError(this.host.refreshTargets);
@@ -1093,31 +1317,50 @@ export class OperationEngine {
 
   private pruneTerminalRecords(): void {
     const now = this.nowMilliseconds();
-    const recoverableTaskRequestIds = [...this.operations]
-      .filter(([, operation]) => operation.record.state === "outcome-unknown" && operation.record.taskId)
-      .map(([requestId]) => requestId);
-    const expiredRecoverableRequestIds = recoverableTaskRequestIds.filter((requestId) => {
-      const operation = this.operations.get(requestId);
-      const retainedFrom = operation?.record.finishedAt ?? operation?.record.updatedAt;
+    const recoverableTaskRecords = [
+      ...[...this.operations].map(([requestId, operation]) => ({
+        kind: "managed" as const,
+        requestId,
+        operation,
+      })),
+      ...[...this.externalOperations].map(([requestId, operation]) => ({
+        kind: "external" as const,
+        requestId,
+        operation,
+      })),
+    ].filter(({ requestId, operation }) =>
+      operation.record.state === "outcome-unknown" &&
+      operation.record.taskId !== undefined &&
+      this.taskRequests.get(operation.record.taskId) === requestId
+    ).sort((left, right) => left.operation.sequence - right.operation.sequence);
+    const expiredRecoverableRecords = recoverableTaskRecords.filter(({ operation }) => {
+      const retainedFrom = operation.record.finishedAt ?? operation.record.updatedAt;
       const retainedFromMilliseconds = retainedFrom ? Date.parse(retainedFrom) : Number.NaN;
       return Number.isFinite(retainedFromMilliseconds) &&
         retainedFromMilliseconds + this.recoverableTaskTtlMilliseconds <= now;
     });
-    for (const requestId of expiredRecoverableRequestIds) this.deleteOperation(requestId);
+    for (const entry of expiredRecoverableRecords) this.deleteJournalOperation(entry.kind, entry.requestId);
 
-    const retainedRecoverableRequestIds = recoverableTaskRequestIds.filter((requestId) =>
-      !expiredRecoverableRequestIds.includes(requestId)
+    const expiredRecoverableKeys = new Set(
+      expiredRecoverableRecords.map(({ kind, requestId }) => `${kind}:${requestId}`),
     );
-    const recoverableRemoveCount = retainedRecoverableRequestIds.length - this.recoverableTaskRecordLimit;
-    for (const requestId of retainedRecoverableRequestIds.slice(0, Math.max(0, recoverableRemoveCount))) {
-      this.deleteOperation(requestId);
+    const retainedRecoverableRecords = recoverableTaskRecords.filter(({ kind, requestId }) =>
+      !expiredRecoverableKeys.has(`${kind}:${requestId}`)
+    );
+    const recoverableRemoveCount = retainedRecoverableRecords.length - this.recoverableTaskRecordLimit;
+    for (const entry of retainedRecoverableRecords.slice(0, Math.max(0, recoverableRemoveCount))) {
+      this.deleteJournalOperation(entry.kind, entry.requestId);
     }
 
     const terminalRecords = [
       ...[...this.operations]
-        .filter(([, operation]) =>
+        .filter(([requestId, operation]) =>
           isTerminal(operation.record.state) &&
-          !(operation.record.state === "outcome-unknown" && operation.record.taskId)
+          !(
+            operation.record.state === "outcome-unknown" &&
+            operation.record.taskId !== undefined &&
+            this.taskRequests.get(operation.record.taskId) === requestId
+          )
         )
         .map(([requestId, operation]) => ({
           kind: "managed" as const,
@@ -1126,7 +1369,14 @@ export class OperationEngine {
           sequence: operation.sequence,
         })),
       ...[...this.externalOperations]
-        .filter(([, operation]) => isTerminal(operation.record.state))
+        .filter(([requestId, operation]) =>
+          isTerminal(operation.record.state) &&
+          !(
+            operation.record.state === "outcome-unknown" &&
+            operation.record.taskId !== undefined &&
+            this.taskRequests.get(operation.record.taskId) === requestId
+          )
+        )
         .map(([requestId, operation]) => ({
           kind: "external" as const,
           requestId,
@@ -1136,9 +1386,13 @@ export class OperationEngine {
     ].sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.sequence - right.sequence);
     const removeCount = terminalRecords.length - this.terminalRecordLimit;
     for (const entry of terminalRecords.slice(0, Math.max(0, removeCount))) {
-      if (entry.kind === "external") this.externalOperations.delete(entry.requestId);
-      else this.deleteOperation(entry.requestId);
+      this.deleteJournalOperation(entry.kind, entry.requestId);
     }
+  }
+
+  private deleteJournalOperation(kind: "managed" | "external", requestId: string): void {
+    if (kind === "external") this.deleteExternalOperation(requestId);
+    else this.deleteOperation(requestId);
   }
 
   private deleteOperation(requestId: string): void {
@@ -1148,6 +1402,18 @@ export class OperationEngine {
       this.taskRequests.delete(operation.record.taskId);
     }
     this.operations.delete(requestId);
+  }
+
+  private deleteExternalOperation(requestId: string): void {
+    const operation = this.externalOperations.get(requestId);
+    if (operation) {
+      this.releaseExternalTaskReservation(operation);
+      if (operation.record.taskId) {
+        this.host.settleTaskClaim(operation.record.taskId, operation.record.requestId);
+        this.taskRequests.delete(operation.record.taskId);
+      }
+    }
+    this.externalOperations.delete(requestId);
   }
 
   private requireOperation(requestId: string): InternalOperation {
@@ -1162,12 +1428,98 @@ export class OperationEngine {
     return external;
   }
 
+  private bindExternalTask(external: ExternalOperation, taskId: string): void {
+    if (!TASK_IDENTIFIER.test(taskId)) throw new Error("The external task identifier is invalid");
+    if (external.record.mode !== "beacon") {
+      throw new Error("Only a beacon operation can be bound to a server task");
+    }
+    if (external.record.taskId !== undefined) {
+      if (external.record.taskId !== taskId) {
+        throw new Error("The external operation is already bound to another task");
+      }
+      if (this.taskRequests.get(taskId) !== external.record.requestId) {
+        throw new Error("The external task correlation is no longer authoritative");
+      }
+      return;
+    }
+    const existingRequestId = this.taskRequests.get(taskId);
+    if (existingRequestId && existingRequestId !== external.record.requestId) {
+      throw new Error("The server returned a duplicate task ID already correlated to another request");
+    }
+    if (!external.taskReservation) {
+      if (!this.host.reserveTaskClaim(external.record.requestId)) {
+        throw new Error("The backend cannot retain another beacon task correlation");
+      }
+      external.taskReservation = true;
+    }
+    let claimed = false;
+    try {
+      claimed = this.host.claimExternalTask(
+        taskId,
+        external.record.requestId,
+        external.record.operationId,
+        external.record.target.id,
+      );
+    } catch (error) {
+      this.releaseExternalTaskReservation(external);
+      throw error;
+    }
+    // A claim attempt consumes the reservation whether it succeeds or loses a
+    // duplicate/capacity race. Explicit release keeps alternate hosts honest.
+    this.host.releaseTaskClaimReservation(external.record.requestId);
+    external.taskReservation = false;
+    if (!claimed) {
+      throw new Error("The server task is already claimed by another window or request");
+    }
+    external.record.taskId = taskId;
+    external.record.deadlineAt = this.futureTimestamp(
+      external.descriptor.taskTimeoutSeconds ?? DEFAULT_EXTERNAL_TASK_TIMEOUT_SECONDS,
+    );
+    this.taskRequests.set(taskId, external.record.requestId);
+    if (external.record.state === "outcome-unknown") this.emitRecord(external.record);
+  }
+
+  private releaseExternalTaskReservation(external: ExternalOperation): void {
+    if (!external.taskReservation) return;
+    external.taskReservation = false;
+    this.host.releaseTaskClaimReservation(external.record.requestId);
+  }
+
+  private finishExternalTask(
+    external: ExternalOperation,
+    state: Extract<TargetOperationState, "completed" | "failed" | "canceled">,
+  ): void {
+    if (isTerminal(external.record.state) && external.record.state !== "outcome-unknown") return;
+    external.record.finishedAt = this.timestamp();
+    external.record.state = state;
+    external.record.progress = progressForState(state);
+    external.record.updatedAt = this.timestamp();
+    external.record.message = boundedText(
+      externalTerminalMessage(external.descriptor, state),
+      MAX_MESSAGE_CHARACTERS,
+    );
+    delete external.record.disposition;
+    this.releaseExternalTaskReservation(external);
+    if (external.record.taskId) {
+      this.host.settleTaskClaim(external.record.taskId, external.record.requestId);
+    }
+    this.emitRecord(external.record);
+    this.pruneTerminalRecords();
+  }
+
   private transitionExternal(
     external: ExternalOperation,
     state: TargetOperationState,
     message?: string,
   ): void {
-    if (isTerminal(external.record.state)) return;
+    if (isTerminal(external.record.state) && external.record.state !== "outcome-unknown") return;
+    if (
+      external.record.state === "outcome-unknown" &&
+      state !== "completed" &&
+      state !== "failed" &&
+      state !== "canceled" &&
+      state !== "partial"
+    ) return;
     external.record.state = state;
     external.record.progress = progressForState(state);
     external.record.updatedAt = this.timestamp();
@@ -1384,7 +1736,7 @@ function successMessage(operationId: TargetOperationInput["operationId"]): strin
 }
 
 function externalTerminalMessage(
-  descriptor: Readonly<SessionOperationDescriptor>,
+  descriptor: Readonly<ExternalOperationDescriptor>,
   state: Extract<
     TargetOperationState,
     "completed" | "failed" | "canceled" | "partial" | "outcome-unknown" | "target-disappeared"
@@ -1394,16 +1746,29 @@ function externalTerminalMessage(
     case "completed":
       return descriptor.completionMessage;
     case "failed":
-      return "The session operation failed";
+      return descriptor.failureMessage ?? "The operation failed";
     case "canceled":
-      return "The session operation was canceled";
+      return descriptor.canceledMessage ?? "The operation was canceled";
     case "partial":
-      return "The session operation completed with incomplete confirmation";
+      return descriptor.partialMessage ?? "The operation completed with incomplete confirmation";
     case "outcome-unknown":
-      return "The session operation was dispatched, but its outcome could not be confirmed";
+      return descriptor.outcomeUnknownMessage ?? "The operation was dispatched, but its outcome could not be confirmed";
     case "target-disappeared":
-      return "The session target became unavailable before the operation completed";
+      return descriptor.targetDisappearedMessage ?? "The target became unavailable before the operation completed";
   }
+}
+
+function sessionExternalDescriptor(
+  descriptor: ReturnType<typeof getSessionOperationDescriptor>,
+): Readonly<ExternalOperationDescriptor> {
+  return Object.freeze({
+    ...descriptor,
+    failureMessage: "The session operation failed",
+    canceledMessage: "The session operation was canceled",
+    partialMessage: "The session operation completed with incomplete confirmation",
+    outcomeUnknownMessage: "The session operation was dispatched, but its outcome could not be confirmed",
+    targetDisappearedMessage: "The session target became unavailable before the operation completed",
+  });
 }
 
 function progressForState(state: TargetOperationState): NonNullable<TargetOperationRecord["progress"]> {

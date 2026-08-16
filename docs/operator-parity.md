@@ -7,7 +7,8 @@ This report merges deterministic command discovery with reviewed product annotat
 ## Scope decisions
 
 - **operator-workbench.m2-session-first** — complete (M2): The operator accepted and completed the delivered session-first M2 scope on 2026-08-10. Supported beacon execution, complete cross-platform and real-server evidence, a central authoritative capability service, anchor-stable continuation cursors, loot dispositions, and their individual parity rows remain explicitly deferred rather than claimed complete.
-- **operator-streaming.m3-session-shell** — in-progress (M3): The bounded managed-shell implementation is delivered for sessions and awaits operator acceptance. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits.
+- **operator-streaming.m3-session-shell** — complete (M3): The operator accepted the bounded session-shell M3 scope on 2026-08-15. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits. Individual shell command rows stay in progress until their remaining parity and certification evidence is complete.
+- **operator-execution.m4-bounded-workbench** — in-progress (M4): The bounded execution and privilege workbench is delivered and awaits operator acceptance. The closed session/beacon action surface, main-owned review and artifact boundary, canonical wrappers, exact task-bound beacon protobuf decoding and output save, credential zeroization, and deterministic Electron journey are implemented. Session-only composites, unverifiable beacon TaskReq results for shellcode and Metasploit, synchronous session cancellation, long-tail command options, real-target certification, and all individual parity rows remain in progress.
 - **operator-transport.wireguard** — deferred (post-M0): WireGuard-enabled operator configurations and packaged helper certification are explicitly deferred; mTLS remains the M0 operator transport baseline. Implant-side WireGuard workflows retain their independently assigned roadmap status.
 
 ## Dynamic audit
@@ -22,7 +23,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.aka` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.aka |
 | `implant.aka.create` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.aka.create |
 | `implant.aka.delete` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.aka.delete |
-| `implant.backdoor` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.backdoor |
+| `implant.backdoor` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.backdoor, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-renderer-action-surfaces |
 | `implant.background` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.background |
 | `implant.cat` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cat |
 | `implant.cd` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.cd |
@@ -39,42 +40,42 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.cursed.electron` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.electron |
 | `implant.cursed.rm` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.rm |
 | `implant.cursed.screenshot` | deferred | M9 | session | windows, linux, darwin | long-tail | parity-contract:implant.cursed.screenshot |
-| `implant.dllhijack` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.dllhijack |
+| `implant.dllhijack` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.dllhijack, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-native-artifact-zeroization, m4-renderer-action-surfaces |
 | `implant.docs` | planned | M8 | session, beacon | windows, linux, darwin | extensions | parity-contract:implant.docs |
 | `implant.download` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.download |
 | `implant.edit` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.edit |
 | `implant.env` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.env |
 | `implant.env.set` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.env.set |
 | `implant.env.unset` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.env.unset |
-| `implant.execute` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute |
-| `implant.execute-assembly` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.execute-assembly |
-| `implant.execute-shellcode` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute-shellcode |
-| `implant.execute.children` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute.children |
+| `implant.execute` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
+| `implant.execute-assembly` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.execute-assembly, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-native-artifact-zeroization, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
+| `implant.execute-shellcode` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute-shellcode, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-native-artifact-zeroization, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
+| `implant.execute.children` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.execute.children, m4-bounded-read-dispatch, m4-canonical-wrapper-requests, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-read-surfaces |
 | `implant.extensions` | planned | M8 | session | windows, linux, darwin | extensions | parity-contract:implant.extensions |
 | `implant.extensions.list` | planned | M8 | session | windows, linux, darwin | extensions | parity-contract:implant.extensions.list |
 | `implant.getgid` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getgid, session-workbench-identity-summary |
 | `implant.getpid` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getpid, session-workbench-identity-summary |
-| `implant.getprivs` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.getprivs |
-| `implant.getsystem` | planned | M4 | session | windows | execution | parity-contract:implant.getsystem |
+| `implant.getprivs` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.getprivs, m4-bounded-read-dispatch, m4-canonical-wrapper-requests, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-read-surfaces |
+| `implant.getsystem` | in-progress | M4 | session | windows | execution | parity-contract:implant.getsystem, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-renderer-action-surfaces |
 | `implant.getuid` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.getuid, session-workbench-identity-summary |
 | `implant.grep` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.grep |
 | `implant.head` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.head |
 | `implant.hex-edit` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.hex-edit |
 | `implant.ifconfig` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ifconfig |
-| `implant.impersonate` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.impersonate |
+| `implant.impersonate` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.impersonate, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
 | `implant.info` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.info |
 | `implant.interactive` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.interactive |
 | `implant.kill` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.kill |
 | `implant.ls` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ls |
-| `implant.make-token` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.make-token |
+| `implant.make-token` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.make-token, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-secret-artifact-zeroization, m4-renderer-action-surfaces |
 | `implant.memfiles` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles |
 | `implant.memfiles.add` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles.add |
 | `implant.memfiles.rm` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.memfiles.rm |
-| `implant.migrate` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.migrate |
+| `implant.migrate` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.migrate, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
 | `implant.mkdir` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mkdir |
 | `implant.mount` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mount |
-| `implant.msf` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf |
-| `implant.msf-inject` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf-inject |
+| `implant.msf` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
+| `implant.msf-inject` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.msf-inject, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
 | `implant.mv` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.mv |
 | `implant.netstat` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.netstat |
 | `implant.ping` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.ping |
@@ -89,7 +90,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.portfwd.rm` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.portfwd.rm |
 | `implant.procdump` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.procdump |
 | `implant.ps` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.ps |
-| `implant.psexec` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.psexec |
+| `implant.psexec` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.psexec, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-native-artifact-zeroization, m4-psexec-composite-cleanup, m4-renderer-action-surfaces |
 | `implant.pwd` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.pwd |
 | `implant.reconfig` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.reconfig |
 | `implant.registry` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry |
@@ -101,12 +102,12 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.registry.read.hive` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.read.hive |
 | `implant.registry.write` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.registry.write |
 | `implant.rename` | complete | M1 | session, beacon | windows, linux, darwin | targets | parity-contract:implant.rename |
-| `implant.rev2self` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.rev2self |
+| `implant.rev2self` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.rev2self, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
 | `implant.rm` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.rm |
 | `implant.rportfwd` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd |
 | `implant.rportfwd.add` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd.add |
 | `implant.rportfwd.rm` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.rportfwd.rm |
-| `implant.runas` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.runas |
+| `implant.runas` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.runas, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-secret-artifact-zeroization, m4-renderer-action-surfaces |
 | `implant.screenshot` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.screenshot |
 | `implant.services` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services |
 | `implant.services.info` | in-progress | M2 | session, beacon | windows | target-workbench | parity-contract:implant.services.info |
@@ -116,12 +117,12 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `implant.shell.attach` | in-progress | M3 | session | windows, linux, darwin | streams | parity-contract:implant.shell.attach, session-shell-attach-stream |
 | `implant.shell.kill` | in-progress | M3 | session | windows, linux, darwin | streams | parity-contract:implant.shell.kill, session-shell-close-kill |
 | `implant.shell.ls` | in-progress | M3 | session | windows, linux, darwin | streams | parity-contract:implant.shell.ls, session-shell-inventory |
-| `implant.sideload` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.sideload |
+| `implant.sideload` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.sideload, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-native-artifact-zeroization, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
 | `implant.socks5` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.socks5 |
 | `implant.socks5.start` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.socks5.start |
 | `implant.socks5.stop` | planned | M5 | session | windows, linux, darwin | streams | parity-contract:implant.socks5.stop |
-| `implant.spawndll` | planned | M4 | session, beacon | windows | execution | parity-contract:implant.spawndll |
-| `implant.ssh` | planned | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.ssh |
+| `implant.spawndll` | in-progress | M4 | session, beacon | windows | execution | parity-contract:implant.spawndll, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-native-artifact-zeroization, m4-external-beacon-task-reconciliation, m4-exact-beacon-result-decoding, m4-renderer-action-surfaces |
+| `implant.ssh` | in-progress | M4 | session, beacon | windows, linux, darwin | execution | parity-contract:implant.ssh, m4-contract-registry-dispatch, m4-canonical-wrapper-requests, m4-exact-target-reviewed-execution, m4-native-artifact-zeroization, m4-secret-artifact-zeroization, m4-renderer-action-surfaces |
 | `implant.tail` | in-progress | M2 | session, beacon | windows, linux, darwin | target-workbench | parity-contract:implant.tail |
 | `implant.tasks` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks |
 | `implant.tasks.cancel` | complete | M1 | beacon | windows, linux, darwin | targets | parity-contract:implant.tasks.cancel |
