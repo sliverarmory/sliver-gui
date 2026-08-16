@@ -1,4 +1,5 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { Toast, toast } from "@heroui/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -29,9 +30,13 @@ afterAll(() => {
 beforeEach(() => {
   updateListener = undefined;
   unsubscribe.mockReset();
+  toast.clear();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  toast.clear();
+});
 
 describe("application update status", () => {
   it("subscribes before reading state and ignores an older get result", async () => {
@@ -118,6 +123,37 @@ describe("application update status", () => {
 
     expect(checkForApplicationUpdates).toHaveBeenCalledExactlyOnceWith();
     expect(await screen.findByRole("button", { name: "Up to date · 0.1.0" })).toBeInTheDocument();
+  });
+
+  it("keeps unavailable updates silent until an explicit check and lets the user dismiss the toast", async () => {
+    const disabledState: ApplicationUpdateState = {
+      status: "disabled",
+      revision: 0,
+      currentVersion: "0.1.0",
+      disabledReason: "Automatic updates are available in packaged builds.",
+    };
+    const api = installUpdateAPI({
+      getApplicationUpdateState: vi.fn().mockResolvedValue(disabledState),
+    });
+    const user = userEvent.setup();
+
+    render(
+      <>
+        <ApplicationUpdateStatus />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    await waitFor(() => expect(api.getApplicationUpdateState).toHaveBeenCalledOnce());
+    expect(screen.queryByText("Updates unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("application-update-status")).not.toBeInTheDocument();
+
+    emit(disabledState);
+    expect(await screen.findByText("Updates unavailable")).toBeInTheDocument();
+    expect(screen.getByText(disabledState.disabledReason)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Updates unavailable")).not.toBeInTheDocument();
+    });
   });
 
   it("requires confirmation, offers Later and Escape, and restarts with zero arguments", async () => {

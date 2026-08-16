@@ -641,7 +641,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       : undefined;
     applicationUpdateState = state;
     if (previousMenuState !== applicationUpdateMenuSignature(state)) installMenu();
-    for (const window of windows) {
+    // Disabled states are published only by an explicit menu check. Keep that
+    // result attached to the window where the operator requested it instead
+    // of surprising every open workspace with the same toast.
+    const updateWindows = state.status === "disabled"
+      ? [BrowserWindow.getFocusedWindow()].filter(
+          (window): window is BrowserWindow => window !== null && windows.has(window),
+        )
+      : windows;
+    for (const window of updateWindows) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
       try {
         window.webContents.send(IPC.applicationUpdateChanged, state);

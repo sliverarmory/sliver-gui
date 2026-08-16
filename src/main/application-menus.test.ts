@@ -156,6 +156,25 @@ describe("application menu templates", () => {
       checkForApplicationUpdates,
       restartToApplyApplicationUpdate,
     };
+    const disabledTemplate = buildApplicationMenuTemplate(
+      "darwin",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      {
+        status: "disabled",
+        revision: 0,
+        currentVersion: "1.2.3",
+        disabledReason: "Automatic updates are available in packaged builds.",
+      },
+    );
+    const disabledCheck = menuItems(disabledTemplate, "Sliver GUI")
+      .find((item) => item.label === "Check for Updates…");
+    expect(disabledCheck?.enabled).not.toBe(false);
+    clickItem(disabledCheck);
+    expect(checkForApplicationUpdates).toHaveBeenCalledOnce();
+    checkForApplicationUpdates.mockClear();
+
     const macTemplate = buildApplicationMenuTemplate(
       "darwin",
       "Sliver GUI",

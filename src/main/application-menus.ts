@@ -157,7 +157,10 @@ function buildApplicationUpdateMenuItems(
 ): MenuItemConstructorOptions[] {
   switch (state.status) {
     case "disabled":
-      return [{ label: "Automatic Updates Unavailable", enabled: false }];
+      return [{
+        label: "Check for Updates…",
+        click: actions.checkForApplicationUpdates,
+      }];
     case "checking":
       return [{ label: "Checking for Updates…", enabled: false }];
     case "available":

@@ -129,6 +129,10 @@ export class ApplicationUpdater {
 
   checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>> {
     if (this.#state.status === "disabled") {
+      // Disabled updaters have no automatic checks, so publishing the current
+      // state here represents an explicit user-requested check. Renderers keep
+      // the initial snapshot silent and surface only this manual result.
+      this.#publish();
       return Promise.resolve({ ok: false, error: this.#state.disabledReason });
     }
     if (this.#disposed || !this.#backend) {
@@ -270,6 +274,10 @@ export class ApplicationUpdater {
       revision: this.#state.revision + 1,
       currentVersion: this.#state.currentVersion,
     });
+    this.#publish();
+  }
+
+  #publish(): void {
     for (const listener of this.#listeners) {
       try {
         listener(this.#state);

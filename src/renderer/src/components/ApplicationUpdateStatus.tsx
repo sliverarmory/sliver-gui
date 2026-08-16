@@ -15,7 +15,7 @@ import {
 } from "../../../shared/application-update-contracts";
 
 export interface ApplicationUpdateStatusProps {
-  /** Keep passive/manual controls in the primary workspace, but out of dedicated operator windows. */
+  /** Keep passive controls in the primary workspace, but out of dedicated operator windows. */
   readonly showIdleControl?: boolean;
 }
 
@@ -27,26 +27,42 @@ export function ApplicationUpdateStatus({
   const [isRestartDialogOpen, setIsRestartDialogOpen] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const highestRevision = useRef(-1);
+  const unavailableToastId = useRef<string | undefined>(undefined);
 
-  const acceptState = useCallback((value: unknown): boolean => {
+  const showUnavailableToast = useCallback((disabledReason: string): void => {
+    if (unavailableToastId.current) toast.close(unavailableToastId.current);
+    const toastId = toast.info("Updates unavailable", {
+      description: disabledReason,
+      timeout: 0,
+      onClose: () => {
+        if (unavailableToastId.current === toastId) unavailableToastId.current = undefined;
+      },
+    });
+    unavailableToastId.current = toastId;
+  }, []);
+
+  const acceptState = useCallback((value: unknown, isExplicitCheck = false): boolean => {
     let next: ApplicationUpdateState;
     try {
       next = parseApplicationUpdateState(value);
     } catch {
       return false;
     }
+    if (isExplicitCheck && next.status === "disabled") {
+      showUnavailableToast(next.disabledReason);
+    }
     if (next.revision <= highestRevision.current) return false;
     highestRevision.current = next.revision;
     setState(next);
     return true;
-  }, []);
+  }, [showUnavailableToast]);
 
   useEffect(() => {
     let mounted = true;
     // Subscribe before reading the snapshot so an event that races the invoke
     // cannot be overwritten by an older get result.
     const unsubscribe = window.sliver.onApplicationUpdateChanged((next) => {
-      if (mounted) acceptState(next);
+      if (mounted) acceptState(next, true);
     });
     void window.sliver.getApplicationUpdateState().then((next) => {
       if (mounted) acceptState(next);
@@ -57,6 +73,8 @@ export function ApplicationUpdateStatus({
     return () => {
       mounted = false;
       unsubscribe();
+      if (unavailableToastId.current) toast.close(unavailableToastId.current);
+      unavailableToastId.current = undefined;
     };
   }, [acceptState]);
 
@@ -105,6 +123,7 @@ export function ApplicationUpdateStatus({
   }, []);
 
   if (!state) return null;
+  if (state.status === "disabled") return null;
   if (!showIdleControl && isPassiveState(state)) return null;
 
   return (

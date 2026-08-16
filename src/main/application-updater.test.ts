@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import type {
   ApplicationUpdateBackend,
   ApplicationUpdateBackendEvents,
@@ -64,8 +65,13 @@ describe("application updater", () => {
 
     const backend = new FakeUpdateBackend();
     const updater = createUpdater(backend, { isPackaged: false });
+    const observed: ApplicationUpdateState[] = [];
+    updater.subscribe((state) => observed.push(state));
     expect(updater.getState()).toMatchObject({ status: "disabled", currentVersion: "1.2.3" });
+    updater.start();
+    expect(observed).toEqual([]);
     expect(await updater.checkForUpdates()).toMatchObject({ ok: false, error: expect.any(String) });
+    expect(observed).toEqual([updater.getState()]);
     expect(backend.configureCalls).toBe(0);
     expect(backend.checkCalls).toBe(0);
   });
