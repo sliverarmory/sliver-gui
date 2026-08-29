@@ -170,7 +170,7 @@ npm run test:m0
 ```
 
 `npm run protocol:check` is authoritative under the locked CI toolchain: Node
-24.0.0, npm 11.19.0, Go 1.25.8, and protoc 35.1. `npm run test:m0` retains the
+24.0.0, npm 11.19.0, Go 1.26.6, and protoc 35.1. `npm run test:m0` retains the
 M0 current-platform regression gate. `npm run test:e2e:electron` exercises the
 M1 target/task path, the dedicated session-first M2 workbench, and the
 deterministic M3 managed-shell and M4 execution paths through the production

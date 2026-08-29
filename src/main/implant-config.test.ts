@@ -123,9 +123,11 @@ describe("implant input validation", () => {
     expect(() => buildImplantConfig(generateInput({ implantType: "beacon", beaconIntervalSeconds: 4 }))).toThrow(
       /at least 5 seconds/,
     );
-    expect(() => buildImplantConfig(generateInput({ beaconIntervalSeconds: 10, beaconJitterSeconds: 11 }))).toThrow(
-      /cannot exceed/,
-    );
+    expect(() => buildImplantConfig(generateInput({
+      implantType: "beacon",
+      beaconIntervalSeconds: 10,
+      beaconJitterSeconds: 11,
+    }))).toThrow(/cannot exceed/);
     expect(() => buildImplantConfig(generateInput({ format: "shared", exports: "" }))).toThrow(
       /require at least one export/,
     );
@@ -135,6 +137,21 @@ describe("implant input validation", () => {
     expect(() => buildImplantConfig(generateInput({ wgKeyExchangePort: 0 }))).toThrow(
       /WireGuard key exchange port/,
     );
+    expect(() => buildImplantConfig(generateInput({
+      format: "shellcode",
+      shellcode: { originalEntryPoint: -1 },
+    }))).toThrow(/Original entry point/);
+  });
+
+  it("does not let hidden beacon timing fields invalidate or populate session configs", () => {
+    const config = buildImplantConfig(generateInput({
+      implantType: "session",
+      beaconIntervalSeconds: -1,
+      beaconJitterSeconds: 9_999,
+    }));
+
+    expect(config.BeaconInterval).toBe("0");
+    expect(config.BeaconJitter).toBe("0");
   });
 });
 

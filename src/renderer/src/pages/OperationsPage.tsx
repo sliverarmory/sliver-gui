@@ -367,9 +367,8 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     }
   }, [confirmation]);
 
-  const stream = snapshot.eventStream;
   const selectedProtocol = LISTENER_PROTOCOL_BY_KIND[draft.kind];
-
+  const stream = snapshot.eventStream;
   return (
     <section className="page-stack">
       <header className="page-heading">
@@ -550,13 +549,15 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
         <Modal.Container placement="center" scroll="inside" size="lg">
           <Modal.Dialog className="sm:max-w-[760px]">
             <Modal.CloseTrigger isDisabled={isStarting} />
-            <Modal.Header>
+            <Modal.Header className="flex-row items-start pr-10">
               <Modal.Icon className="bg-accent-soft text-accent-soft-foreground">
                 <FontAwesomeIcon aria-hidden icon={PROTOCOL_ICONS[draft.kind]} className="size-4" />
               </Modal.Icon>
-              <div>
+              <div className="min-w-0 flex-1">
                 <Modal.Heading>Start a listener</Modal.Heading>
-                <p className="mt-0.5 text-xs font-normal text-muted">{selectedProtocol.description}</p>
+                <p className="mt-0.5 text-xs font-normal leading-relaxed text-muted">
+                  {selectedProtocol.description}
+                </p>
               </div>
             </Modal.Header>
 
@@ -568,41 +569,33 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                 </div>
               )}
 
-              <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                <Select
-                  fullWidth
-                  value={draft.kind}
-                  variant="secondary"
-                  onChange={(value) => {
-                    if (isListenerKind(value)) changeProtocol(value);
-                  }}
-                >
-                  <Label>Protocol</Label>
-                  <Select.Trigger>
-                    <Select.Value />
-                    <Select.Indicator />
-                  </Select.Trigger>
-                  <Select.Popover>
-                    <ListBox>
-                      {LISTENER_PROTOCOLS.map((protocol) => (
-                        <ListBox.Item id={protocol.id} key={protocol.id} textValue={protocol.label}>
-                          <span className="flex items-center gap-2">
-                            <FontAwesomeIcon aria-hidden icon={PROTOCOL_ICONS[protocol.id]} className="size-3.5 text-muted" />
-                            <span>{protocol.label}</span>
-                          </span>
-                          <ListBox.ItemIndicator />
-                        </ListBox.Item>
-                      ))}
-                    </ListBox>
-                  </Select.Popover>
-                </Select>
-                <div className="hidden items-end sm:flex">
-                  <div className="flex w-full items-center gap-2.5 rounded-xl bg-default px-3 py-2.5 text-xs text-muted">
-                    <FontAwesomeIcon aria-hidden icon={PROTOCOL_ICONS[draft.kind]} className="size-3.5 shrink-0" />
-                    <span>{selectedProtocol.description}</span>
-                  </div>
-                </div>
-              </div>
+              <Select
+                fullWidth
+                value={draft.kind}
+                variant="secondary"
+                onChange={(value) => {
+                  if (isListenerKind(value)) changeProtocol(value);
+                }}
+              >
+                <Label>Protocol</Label>
+                <Select.Trigger>
+                  <Select.Value />
+                  <Select.Indicator />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    {LISTENER_PROTOCOLS.map((protocol) => (
+                      <ListBox.Item id={protocol.id} key={protocol.id} textValue={protocol.label}>
+                        <span className="flex items-center gap-2">
+                          <FontAwesomeIcon aria-hidden icon={PROTOCOL_ICONS[protocol.id]} className="size-3.5 text-muted" />
+                          <span>{protocol.label}</span>
+                        </span>
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                    ))}
+                  </ListBox>
+                </Select.Popover>
+              </Select>
 
               <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_180px]">
                 <TextControl
@@ -774,13 +767,7 @@ function ProtocolFields({
 }: ProtocolFieldsProps): ReactNode {
   switch (draft.kind) {
     case "mtls":
-      return (
-        <InfoStrip
-          icon={faShieldHalved}
-          title="Mutual authentication"
-          description="Sliver provisions the listener certificate material and requires authenticated implant clients."
-        />
-      );
+      return null;
 
     case "wireguard":
       return (
@@ -1160,28 +1147,6 @@ function SectionLabel({ icon, title }: { icon: typeof faServer; title: string })
     <div className="flex items-center gap-2">
       <FontAwesomeIcon aria-hidden icon={icon} className="size-3.5 text-muted" />
       <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">{title}</p>
-    </div>
-  );
-}
-
-function InfoStrip({
-  description,
-  icon,
-  title,
-}: {
-  description: string;
-  icon: typeof faServer;
-  title: string;
-}): React.JSX.Element {
-  return (
-    <div className="flex items-start gap-3 rounded-xl border border-separator bg-default p-3">
-      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-surface text-muted">
-        <FontAwesomeIcon aria-hidden icon={icon} className="size-3.5" />
-      </span>
-      <div>
-        <p className="text-xs font-medium text-foreground">{title}</p>
-        <p className="mt-0.5 text-xs leading-relaxed text-muted">{description}</p>
-      </div>
     </div>
   );
 }

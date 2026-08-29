@@ -66,6 +66,10 @@ import {
   type TargetRef,
 } from "../shared/target-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
+import {
+  connectionServerIsLocal,
+  localNetworkInterfaceInventory,
+} from "./network-interfaces.js";
 import { isTrustedRendererUrl } from "./security.js";
 
 interface TrustedSender {
@@ -206,6 +210,21 @@ export function registerIpcHandlers(
   handleTrusted(IPC.disconnect, rendererUrl, parseNoArguments, ({ contentsId }) => registry.disconnect(contentsId));
   handleTrusted(IPC.getSnapshot, rendererUrl, parseNoArguments, ({ contentsId }) => registry.snapshot(contentsId));
   handleTrusted(IPC.refresh, rendererUrl, parseNoArguments, ({ contentsId }) => registry.refresh(contentsId));
+  handleTrusted(IPC.listLocalNetworkInterfaces, rendererUrl, parseNoArguments, ({ contentsId }) => {
+    try {
+      const inventory = localNetworkInterfaceInventory();
+      const connectionServer = registry.snapshot(contentsId).connection.server;
+      if (!connectionServerIsLocal(connectionServer, inventory)) {
+        return {
+          ok: false,
+          error: "Local interface selection is available only when the Sliver server is running on this machine",
+        };
+      }
+      return { ok: true, value: inventory };
+    } catch {
+      return { ok: false, error: "Unable to read this machine's network interfaces" };
+    }
+  });
   handleTrusted(IPC.openWindow, rendererUrl, parseOpenWindowArguments, ({ contentsId }, input) => {
     createWindow(input.inheritConnection ? contentsId : undefined);
     return { ok: true };

@@ -1730,6 +1730,7 @@ export interface Session {
   Locale: string;
   FirstContact: string;
   Integrity: string;
+  Capabilities: string;
 }
 
 export interface Beacon {
@@ -1763,6 +1764,7 @@ export interface Beacon {
   Locale: string;
   FirstContact: string;
   Integrity: string;
+  Capabilities: string;
 }
 
 export interface Beacons {
@@ -3359,6 +3361,7 @@ function createBaseSession(): Session {
     Locale: "",
     FirstContact: "0",
     Integrity: "",
+    Capabilities: "0",
   };
 }
 
@@ -3441,6 +3444,9 @@ export const Session: MessageFns<Session> = {
     }
     if (message.Integrity !== "") {
       writer.uint32(226).string(message.Integrity);
+    }
+    if (message.Capabilities !== "0") {
+      writer.uint32(232).uint64(message.Capabilities);
     }
     return writer;
   },
@@ -3660,6 +3666,14 @@ export const Session: MessageFns<Session> = {
           message.Integrity = reader.string();
           continue;
         }
+        case 29: {
+          if (tag !== 232) {
+            break;
+          }
+
+          message.Capabilities = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3699,6 +3713,7 @@ export const Session: MessageFns<Session> = {
       Locale: isSet(object.Locale) ? globalThis.String(object.Locale) : "",
       FirstContact: isSet(object.FirstContact) ? globalThis.String(object.FirstContact) : "0",
       Integrity: isSet(object.Integrity) ? globalThis.String(object.Integrity) : "",
+      Capabilities: isSet(object.Capabilities) ? globalThis.String(object.Capabilities) : "0",
     };
   },
 
@@ -3782,6 +3797,9 @@ export const Session: MessageFns<Session> = {
     if (message.Integrity !== "") {
       obj.Integrity = message.Integrity;
     }
+    if (message.Capabilities !== "0") {
+      obj.Capabilities = message.Capabilities;
+    }
     return obj;
   },
 
@@ -3816,6 +3834,7 @@ export const Session: MessageFns<Session> = {
     message.Locale = object.Locale ?? "";
     message.FirstContact = object.FirstContact ?? "0";
     message.Integrity = object.Integrity ?? "";
+    message.Capabilities = object.Capabilities ?? "0";
     return message;
   },
 };
@@ -3851,6 +3870,7 @@ function createBaseBeacon(): Beacon {
     Locale: "",
     FirstContact: "0",
     Integrity: "",
+    Capabilities: "0",
   };
 }
 
@@ -3942,6 +3962,9 @@ export const Beacon: MessageFns<Beacon> = {
     }
     if (message.Integrity !== "") {
       writer.uint32(242).string(message.Integrity);
+    }
+    if (message.Capabilities !== "0") {
+      writer.uint32(248).uint64(message.Capabilities);
     }
     return writer;
   },
@@ -4185,6 +4208,14 @@ export const Beacon: MessageFns<Beacon> = {
           message.Integrity = reader.string();
           continue;
         }
+        case 31: {
+          if (tag !== 248) {
+            break;
+          }
+
+          message.Capabilities = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4225,6 +4256,7 @@ export const Beacon: MessageFns<Beacon> = {
       Locale: isSet(object.Locale) ? globalThis.String(object.Locale) : "",
       FirstContact: isSet(object.FirstContact) ? globalThis.String(object.FirstContact) : "0",
       Integrity: isSet(object.Integrity) ? globalThis.String(object.Integrity) : "",
+      Capabilities: isSet(object.Capabilities) ? globalThis.String(object.Capabilities) : "0",
     };
   },
 
@@ -4317,6 +4349,9 @@ export const Beacon: MessageFns<Beacon> = {
     if (message.Integrity !== "") {
       obj.Integrity = message.Integrity;
     }
+    if (message.Capabilities !== "0") {
+      obj.Capabilities = message.Capabilities;
+    }
     return obj;
   },
 
@@ -4354,6 +4389,7 @@ export const Beacon: MessageFns<Beacon> = {
     message.Locale = object.Locale ?? "";
     message.FirstContact = object.FirstContact ?? "0";
     message.Integrity = object.Integrity ?? "";
+    message.Capabilities = object.Capabilities ?? "0";
     return message;
   },
 };

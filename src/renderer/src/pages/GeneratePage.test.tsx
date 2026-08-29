@@ -93,6 +93,255 @@ describe("GeneratePage action footer", () => {
     expect(screen.getByText(/without a scheme default to mTLS/i)).toBeInTheDocument();
   });
 
+  it("adds a selected running listener endpoint without replacing existing C2 entries", async () => {
+    const user = userEvent.setup();
+    const snapshot = readyGenerationSnapshot();
+    snapshot.domains.jobs = {
+      status: "ready",
+      revision: 1,
+      updatedAt: "2026-08-29T12:00:00.000Z",
+      items: [
+        {
+          id: 7,
+          name: "HTTPS",
+          description: "Primary HTTPS listener",
+          protocol: "tcp",
+          port: 8443,
+          domains: ["first.example.test"],
+          profileName: "",
+        },
+        {
+          id: 8,
+          name: "HTTPS",
+          description: "Secondary HTTPS listener",
+          protocol: "tcp",
+          port: 9443,
+          domains: ["second.example.test"],
+          profileName: "",
+        },
+      ],
+      page: { limit: 500, total: 2, truncated: false },
+    };
+
+    render(<GeneratePage snapshot={snapshot} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    expect(c2Field).toHaveValue("mtls://127.0.0.1:8888");
+
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+
+    expect(screen.getByRole("dialog", { name: "Add listener endpoint" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "Running C2 listeners" })).toBeInTheDocument();
+    expect(screen.getByText("https://first.example.test:8443")).toBeVisible();
+    const secondListener = screen.getByRole("option", {
+      name: /Job #8.*https:\/\/second\.example\.test:9443/i,
+    });
+    await user.click(secondListener);
+    expect(secondListener).toHaveAttribute("aria-selected", "true");
+
+    const addEndpoint = screen.getByRole("button", { name: "Add endpoint" });
+    await waitFor(() => expect(addEndpoint).toBeEnabled());
+    await user.click(addEndpoint);
+
+    expect(screen.queryByRole("dialog", { name: "Add listener endpoint" })).not.toBeInTheDocument();
+    expect(c2Field).toHaveValue(
+      "mtls://127.0.0.1:8888\nhttps://second.example.test:9443",
+    );
+  });
+
+  it("offers local interface addresses for a wildcard listener in routability order", async () => {
+    const user = userEvent.setup();
+    const snapshot = readyGenerationSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "localhost:53137",
+      incarnation: 3,
+    };
+    snapshot.domains.jobs = {
+      status: "ready",
+      revision: 1,
+      updatedAt: "2026-08-29T12:00:00.000Z",
+      items: [
+        {
+          id: 1,
+          name: "mTLS",
+          description: "mutual tls listener 0.0.0.0:8888",
+          protocol: "tcp",
+          port: 8888,
+          domains: [],
+          profileName: "",
+        },
+      ],
+      page: { limit: 500, total: 1, truncated: false },
+    };
+    const listLocalNetworkInterfaces = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        hostname: "sliver-host",
+        addresses: [
+          { name: "lo0", address: "127.0.0.1", family: "IPv4", scope: "loopback" },
+          { name: "en0", address: "192.168.50.10", family: "IPv4", scope: "private" },
+          { name: "utun0", address: "8.8.8.8", family: "IPv4", scope: "global" },
+        ],
+      },
+    });
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: {
+        listLocalNetworkInterfaces,
+      } as Pick<SliverDesktopAPI, "listLocalNetworkInterfaces"> as SliverDesktopAPI,
+    });
+
+    render(<GeneratePage snapshot={snapshot} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+    await waitFor(() => expect(listLocalNetworkInterfaces).toHaveBeenCalledOnce());
+
+    expect(screen.getByText("Wildcard")).toBeVisible();
+    expect(screen.queryByText("Unavailable")).not.toBeInTheDocument();
+    const addressList = await screen.findByRole("listbox", { name: "Callback address" });
+    expect(within(addressList).getByText("Globally routable")).toBeVisible();
+    expect(within(addressList).getByText("Private")).toBeVisible();
+    expect(within(addressList).getByText("Localhost")).toBeVisible();
+    expect(within(addressList).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      expect.stringMatching(/mtls:\/\/8\.8\.8\.8:8888.*utun0.*Public IPv4/i),
+      expect.stringMatching(/mtls:\/\/192\.168\.50\.10:8888.*en0.*Private IPv4/i),
+      expect.stringMatching(/mtls:\/\/127\.0\.0\.1:8888.*lo0.*Loopback IPv4.*Added/i),
+    ]);
+
+    await user.click(within(addressList).getByRole("option", {
+      name: /mtls:\/\/192\.168\.50\.10:8888.*en0.*Private IPv4/i,
+    }));
+    const addEndpoint = screen.getByRole("button", { name: "Add endpoint" });
+    await waitFor(() => expect(addEndpoint).toBeEnabled());
+    await user.click(addEndpoint);
+
+    expect(c2Field).toHaveValue(
+      "mtls://127.0.0.1:8888\nmtls://192.168.50.10:8888",
+    );
+  });
+
+  it("marks an existing listener endpoint as added and prevents duplicates", async () => {
+    const user = userEvent.setup();
+    const snapshot = readyGenerationSnapshot();
+    snapshot.domains.jobs = {
+      status: "ready",
+      revision: 1,
+      updatedAt: "2026-08-29T12:00:00.000Z",
+      items: [
+        {
+          id: 8,
+          name: "mTLS",
+          description: "mutual tls listener 127.0.0.1:8888",
+          protocol: "tcp",
+          port: 8888,
+          domains: [],
+          profileName: "",
+        },
+      ],
+      page: { limit: 500, total: 1, truncated: false },
+    };
+
+    render(<GeneratePage snapshot={snapshot} />);
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+
+    expect(screen.getByText("Added")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add endpoint" })).toBeDisabled();
+    expect(c2Field).toHaveValue("mtls://127.0.0.1:8888");
+  });
+
+  it("explains why an underspecified running listener cannot be added", async () => {
+    const user = userEvent.setup();
+    const snapshot = readyGenerationSnapshot();
+    snapshot.domains.jobs = {
+      status: "ready",
+      revision: 1,
+      updatedAt: "2026-08-29T12:00:00.000Z",
+      items: [
+        {
+          id: 9,
+          name: "WG",
+          description: "WireGuard listener",
+          protocol: "udp",
+          port: 53,
+          domains: [],
+          profileName: "",
+        },
+      ],
+      page: { limit: 500, total: 1, truncated: false },
+    };
+
+    render(<GeneratePage snapshot={snapshot} />);
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+
+    expect(screen.getByText("Unavailable")).toBeVisible();
+    expect(screen.getByText(/does not expose the callback host or WireGuard auxiliary ports/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add endpoint" })).toBeDisabled();
+  });
+
+  it("indicates an invalid C2 endpoint and blocks config submission until it is repaired", async () => {
+    const user = userEvent.setup();
+    const generate = vi.fn();
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: { generate } as Pick<SliverDesktopAPI, "generate"> as SliverDesktopAPI,
+    });
+
+    render(<GeneratePage snapshot={readyGenerationSnapshot()} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    const saveProfileButton = screen.getByRole("button", { name: "Save profile" });
+    const generateButton = screen.getByRole("button", { name: "Generate and save" });
+    await waitFor(() => expect(generateButton).toBeEnabled());
+
+    await user.clear(c2Field);
+    await user.type(c2Field, "ftp://c2.example.test");
+
+    expect(c2Field).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/Unsupported C2 protocol.*ftp/i)).toBeVisible();
+    expect(saveProfileButton).toBeDisabled();
+    expect(generateButton).toBeDisabled();
+
+    await user.click(generateButton);
+    expect(generate).not.toHaveBeenCalled();
+
+    await user.clear(c2Field);
+    await user.type(c2Field, "https://c2.example.test");
+
+    await waitFor(() => {
+      expect(c2Field).not.toHaveAttribute("aria-invalid", "true");
+      expect(saveProfileButton).toBeEnabled();
+      expect(generateButton).toBeEnabled();
+    });
+    expect(screen.queryByText(/Unsupported C2 protocol.*ftp/i)).not.toBeInTheDocument();
+  });
+
+  it("resets an invalid form to a valid configuration for the advertised target", async () => {
+    const user = userEvent.setup();
+
+    render(<GeneratePage snapshot={readyGenerationSnapshot()} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    const saveProfileButton = screen.getByRole("button", { name: "Save profile" });
+    const generateButton = screen.getByRole("button", { name: "Generate and save" });
+    await waitFor(() => expect(generateButton).toBeEnabled());
+
+    await user.clear(c2Field);
+    await user.type(c2Field, "ftp://c2.example.test");
+    expect(generateButton).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+
+    expect(c2Field).toHaveValue("mtls://127.0.0.1:8888");
+    await waitFor(() => {
+      expect(c2Field).not.toHaveAttribute("aria-invalid", "true");
+      expect(saveProfileButton).toBeEnabled();
+      expect(generateButton).toBeEnabled();
+    });
+  });
+
   it("shows build progress and disables the complete generation form while compiling", async () => {
     const user = userEvent.setup();
     const build = deferred<OperationResult<SavedArtifact>>();
@@ -121,6 +370,7 @@ describe("GeneratePage action footer", () => {
     expect(screen.getByRole("textbox", { name: "Reusable profile name" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Reset" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add listener" })).toBeDisabled();
 
     build.resolve({
       ok: true,

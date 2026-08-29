@@ -23,6 +23,7 @@ const invokeArguments = {
   disconnect: [],
   getSnapshot: [],
   refresh: [],
+  listLocalNetworkInterfaces: [],
   openWindow: [{ inheritConnection: true }],
   openInteractionWindow: [],
   claimInteractionWindow: [],

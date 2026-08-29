@@ -54,9 +54,24 @@ describe("OperationsPage listener modal", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "Start a listener" });
     const body = dialog.querySelector("[data-slot='modal-body']");
+    const header = dialog.querySelector("[data-slot='modal-header']");
 
     expect(body).not.toBeNull();
     expect(body).toHaveClass("flex", "flex-col", "gap-5");
+    expect(header).toHaveClass("flex-row", "items-start");
+    expect(header?.children[0]).toHaveAttribute("data-slot", "modal-icon");
+    expect(header?.children[1]?.querySelector("[data-slot='modal-heading']")).toHaveTextContent(
+      "Start a listener",
+    );
+    const subtitle = within(dialog).getByText("Authenticated Sliver transport over mutual TLS.");
+    expect(header).toContainElement(subtitle);
+    expect(within(dialog).getAllByText("Authenticated Sliver transport over mutual TLS.")).toHaveLength(1);
+    expect(within(dialog).queryByText("Mutual authentication")).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Sliver provisions the listener certificate material and requires authenticated implant clients.",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("accepts complete listener port values through 65535", async () => {

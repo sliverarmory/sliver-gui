@@ -183,18 +183,18 @@ function rootModes() {
     gateFingerprint: digest({ ...anyRestriction, transports }),
   });
   return [
-    mode("root.default-console", ["default-console"], "sliver-client", "client/cli/cli.go", 84,
-      "Start the interactive console when no subcommand is supplied", ["rc", "enable-wg"], ["mtls", "wireguard"]),
+    mode("root.default-console", ["default-console"], "sliver-client", "client/cli/cli.go", 86,
+      "Start the interactive console when no subcommand is supplied", ["rc", "enable-wg", "disable-wg"], ["mtls", "wireguard"]),
     mode("root.import", ["import"], "import", "client/cli/import.go", 30,
       "Import an operator configuration", ["path"]),
     mode("root.version", ["version"], "version", "client/cli/version.go", 28,
       "Print the local client version"),
     mode("root.console", ["console"], "console", "client/cli/console.go", 35,
-      "Start the interactive console explicitly", ["rc", "enable-wg"], ["mtls", "wireguard"]),
+      "Start the interactive console explicitly", ["rc", "enable-wg", "disable-wg"], ["mtls", "wireguard"]),
     mode("root.mcp", ["mcp"], "mcp", "client/cli/mcp.go", 33,
-      "Start the client MCP stdio server", ["config", "enable-wg"], ["mtls", "wireguard"]),
+      "Start the client MCP stdio server", ["config", "enable-wg", "disable-wg"], ["mtls", "wireguard"]),
     mode("root.implant", ["implant"], "implant", "client/cli/implant.go", 33,
-      "Invoke an implant command from the operator shell", ["use", "enable-wg"], ["mtls", "wireguard"]),
+      "Invoke an implant command from the operator shell", ["use", "enable-wg", "disable-wg"], ["mtls", "wireguard"]),
   ];
 }
 

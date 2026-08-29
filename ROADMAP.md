@@ -2,8 +2,8 @@
 
 - Status: living document
 - Scope: remote Sliver operator workflows
-- Parity baseline: Sliver commit `9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9`
-- Last command-tree audit: 2026-08-09
+- Parity baseline: Sliver commit `ca685f5eed64c3327c0e57504928cfd2d2e96bea`
+- Last command-tree audit: 2026-08-29
 - Target desktop platforms: macOS arm64 and x64 (universal package), Windows
   x64, Linux x64
 
@@ -26,11 +26,11 @@ server process; administer certificate authorities; or expose other local
 The authoritative interactive parity sources are the registered remote-client
 command trees, not the presence of Go packages or helper functions:
 
-- [`client/command/server.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9/client/command/server.go)
-- [`client/command/sliver.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9/client/command/sliver.go)
+- [`client/command/server.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/ca685f5eed64c3327c0e57504928cfd2d2e96bea/client/command/server.go)
+- [`client/command/sliver.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/ca685f5eed64c3327c0e57504928cfd2d2e96bea/client/command/sliver.go)
 
 Root client modes such as config import and stdio MCP are audited separately
-from [`client/cli/cli.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9/client/cli/cli.go).
+from [`client/cli/cli.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/ca685f5eed64c3327c0e57504928cfd2d2e96bea/client/cli/cli.go).
 
 The baseline must be updated deliberately. A newer Sliver checkout does not
 silently expand this roadmap until its reachable command trees and protobuf
@@ -361,8 +361,8 @@ milestone.
   modes.
 - [x] Fetch and verify the exact pinned upstream commit for manifest generation;
   tooling must not assume the ignored adjacent `./sliver` checkout exists.
-- [x] Reconcile and correct the two current provenance baselines: operator parity
-  targets Sliver `9ff9b553...`, while `vendor/sliver-script/VENDORED.md`
+- [x] Reconcile and correct the two original provenance baselines: operator parity
+  targeted Sliver `9ff9b553...`, while `vendor/sliver-script/VENDORED.md`
   attributes the generated protobuf source to Sliver `4ef8644...`. The checked
   generated API contains fields newer than that declared protobuf source, so
   provenance must be proven by byte/semantic regeneration rather than merely
@@ -1229,7 +1229,7 @@ fields per reachable command node:
 {
   "schemaVersion": 1,
   "id": "implant.filesystem.download",
-  "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+  "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
   "source": "sliver/client/command/filesystem/commands.go",
   "surface": "implant",
   "operatorScope": true,

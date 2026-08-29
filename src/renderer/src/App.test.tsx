@@ -77,6 +77,7 @@ function installSliverAPI(
     getExecutionResult: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
+    listLocalNetworkInterfaces: vi.fn(failedOperation),
     listSavedConfigs,
     listSessionShells: vi.fn(failedOperation),
     listBeaconTasks: vi.fn(failedOperation),

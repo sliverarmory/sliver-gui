@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+  "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
   "reviewVersion": 4,
   "reviewPolicy": "Every generated reachable node has an explicit product classification. Regeneration never edits this file.",
   "scopeDecisions": [
@@ -5218,7 +5218,8 @@
       ],
       "meaningfulOptions": [
         "rc",
-        "enable-wg"
+        "enable-wg",
+        "disable-wg"
       ],
       "dependencies": [
         "operator-config"
@@ -5256,7 +5257,8 @@
       ],
       "meaningfulOptions": [
         "rc",
-        "enable-wg"
+        "enable-wg",
+        "disable-wg"
       ],
       "dependencies": [
         "operator-config"
@@ -5294,7 +5296,8 @@
       ],
       "meaningfulOptions": [
         "use",
-        "enable-wg"
+        "enable-wg",
+        "disable-wg"
       ],
       "dependencies": [
         "operator-config"
@@ -5370,7 +5373,8 @@
       ],
       "meaningfulOptions": [
         "config",
-        "enable-wg"
+        "enable-wg",
+        "disable-wg"
       ],
       "dependencies": [
         "operator-config"
@@ -8581,7 +8585,8 @@
         "listen",
         "name",
         "transport",
-        "version"
+        "version",
+        "yes"
       ],
       "dependencies": [
         "compatible-server"
@@ -8862,6 +8867,7 @@
         "not-applicable"
       ],
       "meaningfulOptions": [
+        "external-builder",
         "name",
         "save",
         "shellcode-encoder"

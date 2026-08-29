@@ -10,6 +10,40 @@ import { EnvVar, Process, Request, Response } from "../commonpb/common";
 
 export const protobufPackage = "sliverpb";
 
+/** ImplantCapability values are advertised by implants at registration time. */
+export enum ImplantCapability {
+  IMPLANT_CAPABILITY_NONE = 0,
+  IMPLANT_CAPABILITY_BOF_V1 = 1,
+  UNRECOGNIZED = -1,
+}
+
+export function implantCapabilityFromJSON(object: any): ImplantCapability {
+  switch (object) {
+    case 0:
+    case "IMPLANT_CAPABILITY_NONE":
+      return ImplantCapability.IMPLANT_CAPABILITY_NONE;
+    case 1:
+    case "IMPLANT_CAPABILITY_BOF_V1":
+      return ImplantCapability.IMPLANT_CAPABILITY_BOF_V1;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ImplantCapability.UNRECOGNIZED;
+  }
+}
+
+export function implantCapabilityToJSON(object: ImplantCapability): string {
+  switch (object) {
+    case ImplantCapability.IMPLANT_CAPABILITY_NONE:
+      return "IMPLANT_CAPABILITY_NONE";
+    case ImplantCapability.IMPLANT_CAPABILITY_BOF_V1:
+      return "IMPLANT_CAPABILITY_BOF_V1";
+    case ImplantCapability.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 /** Registry - Registry related messages */
 export enum RegistryType {
   Unknown = 0,
@@ -175,6 +209,7 @@ export interface Register {
   ConfigID: string;
   PeerID: string;
   Locale: string;
+  Capabilities: string;
 }
 
 export interface BeaconRegister {
@@ -1177,6 +1212,8 @@ export interface CallExtensionReq {
   ServerStore: boolean;
   Args: Buffer;
   Export: string;
+  BOFData: Buffer;
+  IsBOF: boolean;
   Request?: Request | undefined;
 }
 
@@ -1607,6 +1644,7 @@ function createBaseRegister(): Register {
     ConfigID: "",
     PeerID: "0",
     Locale: "",
+    Capabilities: "0",
   };
 }
 
@@ -1662,6 +1700,9 @@ export const Register: MessageFns<Register> = {
     }
     if (message.Locale !== "") {
       writer.uint32(146).string(message.Locale);
+    }
+    if (message.Capabilities !== "0") {
+      writer.uint32(152).uint64(message.Capabilities);
     }
     return writer;
   },
@@ -1809,6 +1850,14 @@ export const Register: MessageFns<Register> = {
           message.Locale = reader.string();
           continue;
         }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.Capabilities = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1837,6 +1886,7 @@ export const Register: MessageFns<Register> = {
       ConfigID: isSet(object.ConfigID) ? globalThis.String(object.ConfigID) : "",
       PeerID: isSet(object.PeerID) ? globalThis.String(object.PeerID) : "0",
       Locale: isSet(object.Locale) ? globalThis.String(object.Locale) : "",
+      Capabilities: isSet(object.Capabilities) ? globalThis.String(object.Capabilities) : "0",
     };
   },
 
@@ -1893,6 +1943,9 @@ export const Register: MessageFns<Register> = {
     if (message.Locale !== "") {
       obj.Locale = message.Locale;
     }
+    if (message.Capabilities !== "0") {
+      obj.Capabilities = message.Capabilities;
+    }
     return obj;
   },
 
@@ -1918,6 +1971,7 @@ export const Register: MessageFns<Register> = {
     message.ConfigID = object.ConfigID ?? "";
     message.PeerID = object.PeerID ?? "0";
     message.Locale = object.Locale ?? "";
+    message.Capabilities = object.Capabilities ?? "0";
     return message;
   },
 };
@@ -17305,7 +17359,15 @@ export const RegisterExtension: MessageFns<RegisterExtension> = {
 };
 
 function createBaseCallExtensionReq(): CallExtensionReq {
-  return { Name: "", ServerStore: false, Args: Buffer.alloc(0), Export: "", Request: undefined };
+  return {
+    Name: "",
+    ServerStore: false,
+    Args: Buffer.alloc(0),
+    Export: "",
+    BOFData: Buffer.alloc(0),
+    IsBOF: false,
+    Request: undefined,
+  };
 }
 
 export const CallExtensionReq: MessageFns<CallExtensionReq> = {
@@ -17321,6 +17383,12 @@ export const CallExtensionReq: MessageFns<CallExtensionReq> = {
     }
     if (message.Export !== "") {
       writer.uint32(34).string(message.Export);
+    }
+    if (message.BOFData.length !== 0) {
+      writer.uint32(42).bytes(message.BOFData);
+    }
+    if (message.IsBOF !== false) {
+      writer.uint32(48).bool(message.IsBOF);
     }
     if (message.Request !== undefined) {
       Request.encode(message.Request, writer.uint32(74).fork()).join();
@@ -17367,6 +17435,22 @@ export const CallExtensionReq: MessageFns<CallExtensionReq> = {
           message.Export = reader.string();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.BOFData = Buffer.from(reader.bytes());
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.IsBOF = reader.bool();
+          continue;
+        }
         case 9: {
           if (tag !== 74) {
             break;
@@ -17390,6 +17474,8 @@ export const CallExtensionReq: MessageFns<CallExtensionReq> = {
       ServerStore: isSet(object.ServerStore) ? globalThis.Boolean(object.ServerStore) : false,
       Args: isSet(object.Args) ? Buffer.from(bytesFromBase64(object.Args)) : Buffer.alloc(0),
       Export: isSet(object.Export) ? globalThis.String(object.Export) : "",
+      BOFData: isSet(object.BOFData) ? Buffer.from(bytesFromBase64(object.BOFData)) : Buffer.alloc(0),
+      IsBOF: isSet(object.IsBOF) ? globalThis.Boolean(object.IsBOF) : false,
       Request: isSet(object.Request) ? Request.fromJSON(object.Request) : undefined,
     };
   },
@@ -17408,6 +17494,12 @@ export const CallExtensionReq: MessageFns<CallExtensionReq> = {
     if (message.Export !== "") {
       obj.Export = message.Export;
     }
+    if (message.BOFData.length !== 0) {
+      obj.BOFData = base64FromBytes(message.BOFData);
+    }
+    if (message.IsBOF !== false) {
+      obj.IsBOF = message.IsBOF;
+    }
     if (message.Request !== undefined) {
       obj.Request = Request.toJSON(message.Request);
     }
@@ -17423,6 +17515,8 @@ export const CallExtensionReq: MessageFns<CallExtensionReq> = {
     message.ServerStore = object.ServerStore ?? false;
     message.Args = object.Args ?? Buffer.alloc(0);
     message.Export = object.Export ?? "";
+    message.BOFData = object.BOFData ?? Buffer.alloc(0);
+    message.IsBOF = object.IsBOF ?? false;
     message.Request = (object.Request !== undefined && object.Request !== null)
       ? Request.fromPartial(object.Request)
       : undefined;

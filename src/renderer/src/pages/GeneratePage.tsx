@@ -29,6 +29,7 @@ import {
   faGlobe,
   faListOl,
   faMicrochip,
+  faPlus,
   faPuzzlePiece,
   faSatelliteDish,
   faShieldHalved,
@@ -48,7 +49,13 @@ import {
   type SelectFieldOption,
 } from "../components/FormControls";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ListenerEndpointSelector } from "../components/ListenerEndpointSelector";
 import { cloneGenerateInput, defaultGenerateInput } from "../../../shared/generate-defaults";
+import {
+  firstGenerateInputError,
+  validateGenerateInput,
+} from "../../../shared/generate-validation";
+import { appendListenerEndpoint } from "./generate-listener-endpoint";
 
 interface GeneratePageProps {
   snapshot: SliverSnapshot;
@@ -183,6 +190,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const [isListenerSelectorOpen, setIsListenerSelectorOpen] = useState(false);
 
   const compilerDomain = snapshot.domains.compiler;
   const targets = useMemo(
@@ -220,6 +228,25 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
       .filter((target) => target.os === form.os && target.arch === form.arch)
       .map((target) => target.format),
   );
+  const formErrors = useMemo(() => {
+    const errors = validateGenerateInput(form);
+    const targetSupported = targets.some(
+      (target) =>
+        target.os === form.os && target.arch === form.arch && target.format === form.format,
+    );
+    if (compilerReady && !targetSupported) {
+      errors.target = "Select a target and output format advertised by the connected server.";
+    }
+    return errors;
+  }, [compilerReady, form, targets]);
+  const formValidationError = firstGenerateInputError(formErrors);
+  const formIsValid = formValidationError === undefined;
+  const hardeningErrorCount = [
+    formErrors.maxConnectionErrors,
+    formErrors.exports,
+    formErrors.wgKeyExchangePort,
+    formErrors.wgTcpCommsPort,
+  ].filter(Boolean).length;
 
   function update<K extends keyof GenerateInput>(key: K, value: GenerateInput[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -241,6 +268,24 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
     }));
   }
 
+  function addListenerEndpoint(endpoint: string) {
+    setForm((current) => {
+      const result = appendListenerEndpoint(current.c2, endpoint, current.os);
+      return result.added ? { ...current, c2: result.value } : current;
+    });
+  }
+
+  function resetForm() {
+    const next = cloneGenerateInput(defaultGenerateInput);
+    const firstTarget = targets[0];
+    if (firstTarget) {
+      next.os = firstTarget.os;
+      next.arch = firstTarget.arch;
+      next.format = firstTarget.format;
+    }
+    setForm(next);
+  }
+
   function changeOperatingSystem(os: string) {
     const nextArch = targets.find((target) => target.os === os)?.arch ?? form.arch;
     const nextFormat =
@@ -258,6 +303,12 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
     if (!compilerReady) {
       toast.danger("Generation unavailable", {
         description: "Wait for the connected server to advertise a supported compiler target.",
+      });
+      return;
+    }
+    if (!formIsValid) {
+      toast.danger("Invalid generation settings", {
+        description: formValidationError ?? "Fix the indicated fields before generating.",
       });
       return;
     }
@@ -284,6 +335,12 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
     if (!compilerReady) {
       toast.danger("Profile unavailable", {
         description: "A supported compiler target must be loaded before saving this profile.",
+      });
+      return;
+    }
+    if (!formIsValid) {
+      toast.danger("Invalid profile settings", {
+        description: formValidationError ?? "Fix the indicated fields before saving this profile.",
       });
       return;
     }
@@ -379,6 +436,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={(value) => update("name", value.toLowerCase())}
             placeholder="Random if left blank"
             description="Letters, numbers, dots, dashes, and underscores."
+            error={formErrors.name}
           />
           <SelectField
             label="Implant type"
@@ -392,6 +450,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={changeOperatingSystem}
             options={operatingSystems.map(operatingSystemOption)}
             disabled={!compilerReady}
+            error={formErrors.os}
           />
           <SelectField
             label="Architecture"
@@ -399,6 +458,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={changeArchitecture}
             options={architectures.map(architectureOption)}
             disabled={!compilerReady}
+            error={formErrors.arch}
           />
           <SelectField
             label="Output format"
@@ -406,6 +466,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={(value) => update("format", value)}
             options={formats.map(formatOption)}
             disabled={!compilerReady}
+            error={formErrors.format ?? formErrors.target}
           />
           <Field
             label="Template"
@@ -431,8 +492,20 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={(value) => update("c2", value)}
             placeholder={"mtls://team.example:8888\nhttps://fallback.example"}
             description="One URL per line or comma-separated. Endpoints without a scheme default to mTLS."
+            error={formErrors.c2}
             mono
             required
+            action={
+              <Button
+                aria-haspopup="dialog"
+                size="sm"
+                variant="secondary"
+                onPress={() => setIsListenerSelectorOpen(true)}
+              >
+                <FontAwesomeIcon aria-hidden icon={faPlus} className="size-3" />
+                Add listener
+              </Button>
+            }
           />
           <div className="form-grid form-grid--three">
             <SelectField
@@ -445,16 +518,18 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             <Field
               label="Reconnect delay (seconds)"
               type="number"
-              min={1}
+              min={0}
               value={String(form.reconnectSeconds)}
               onChange={(value) => updateNumber("reconnectSeconds", value)}
+              error={formErrors.reconnectSeconds}
             />
             <Field
               label="Poll timeout (seconds)"
               type="number"
-              min={1}
+              min={0}
               value={String(form.pollTimeoutSeconds)}
               onChange={(value) => updateNumber("pollTimeoutSeconds", value)}
+              error={formErrors.pollTimeoutSeconds}
             />
           </div>
           {form.implantType === "beacon" ? (
@@ -465,6 +540,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
                 min={5}
                 value={String(form.beaconIntervalSeconds)}
                 onChange={(value) => updateNumber("beaconIntervalSeconds", value)}
+                error={formErrors.beaconIntervalSeconds}
               />
               <Field
                 label="Beacon jitter (seconds)"
@@ -472,6 +548,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
                 min={0}
                 value={String(form.beaconJitterSeconds)}
                 onChange={(value) => updateNumber("beaconJitterSeconds", value)}
+                error={formErrors.beaconJitterSeconds}
               />
             </div>
           ) : null}
@@ -480,7 +557,14 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
 
       <details className="advanced-section">
         <summary>
-          <span><FontAwesomeIcon icon={faShieldHalved} /> Build hardening</span>
+          <span>
+            <FontAwesomeIcon icon={faShieldHalved} /> Build hardening
+            {hardeningErrorCount > 0 ? (
+              <span className="ml-2 text-xs font-medium text-danger">
+                {hardeningErrorCount} {hardeningErrorCount === 1 ? "invalid field" : "invalid fields"}
+              </span>
+            ) : null}
+          </span>
           <FontAwesomeIcon icon={faChevronRight} className="advanced-chevron" />
         </summary>
         <div className="advanced-content grid gap-x-8 gap-y-4 md:grid-cols-2">
@@ -489,14 +573,14 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
           <SwitchRow label="Evasion" description="Enable target-specific defensive evasion at compile time." selected={form.evasion} onChange={(value) => update("evasion", value)} />
           <SwitchRow label="Debug build" description="Retain diagnostic information and verbose runtime logging." selected={form.debug} onChange={(value) => update("debug", value)} />
           <SwitchRow label="Run at load" description="Invoke shared-library entry behavior when the module loads." selected={form.runAtLoad} onChange={(value) => update("runAtLoad", value)} disabled={form.format !== "shared"} />
-          <Field label="Maximum connection errors" type="number" min={1} value={String(form.maxConnectionErrors)} onChange={(value) => updateNumber("maxConnectionErrors", value)} />
-          <Field label="Exported symbols" value={form.exports} onChange={(value) => update("exports", value)} placeholder="SymbolOne, SymbolTwo" description="Comma-separated; shared libraries only." />
+          <Field label="Maximum connection errors" type="number" min={0} value={String(form.maxConnectionErrors)} onChange={(value) => updateNumber("maxConnectionErrors", value)} error={formErrors.maxConnectionErrors} />
+          <Field label="Exported symbols" value={form.exports} onChange={(value) => update("exports", value)} placeholder="SymbolOne, SymbolTwo" description="Comma-separated; shared libraries only." error={formErrors.exports} />
           <Field label="HTTP C2 profile" value={form.httpC2Profile} onChange={(value) => update("httpC2Profile", value)} placeholder="default" />
           <AreaField label="Canary domains" value={form.canaryDomains} onChange={(value) => update("canaryDomains", value)} placeholder="example.net" description="One domain per line; trailing dots are normalized." rows={3} />
           <div className="form-grid self-start">
             <Field label="WireGuard peer IP" value={form.wgPeerTunIp} onChange={(value) => update("wgPeerTunIp", value)} placeholder="Assigned automatically" />
-            <Field label="WG key exchange port" type="number" min={1} max={65535} value={String(form.wgKeyExchangePort)} onChange={(value) => updateNumber("wgKeyExchangePort", value)} />
-            <Field label="WG TCP comms port" type="number" min={1} max={65535} value={String(form.wgTcpCommsPort)} onChange={(value) => updateNumber("wgTcpCommsPort", value)} />
+            <Field label="WG key exchange port" type="number" min={1} max={65535} value={String(form.wgKeyExchangePort)} onChange={(value) => updateNumber("wgKeyExchangePort", value)} error={formErrors.wgKeyExchangePort} />
+            <Field label="WG TCP comms port" type="number" min={1} max={65535} value={String(form.wgTcpCommsPort)} onChange={(value) => updateNumber("wgTcpCommsPort", value)} error={formErrors.wgTcpCommsPort} />
           </div>
         </div>
       </details>
@@ -564,6 +648,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
                       const parsed = parseNumberInput(value);
                       if (parsed !== undefined) updateShellcode("originalEntryPoint", parsed);
                     }}
+                    error={formErrors.shellcode}
                   />
                 </div>
               </div>
@@ -588,18 +673,18 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             />
           </div>
           <div className="generate-page__footer-actions">
-            <Button variant="tertiary" onPress={() => setForm(cloneGenerateInput(defaultGenerateInput))}>
+            <Button variant="tertiary" onPress={resetForm}>
               <FontAwesomeIcon icon={faArrowRotateLeft} /> Reset
             </Button>
             <Button
-              isDisabled={!compilerReady || !profileInventoryAuthoritative}
+              isDisabled={!compilerReady || !profileInventoryAuthoritative || !formIsValid}
               variant="secondary"
               isPending={isSaving}
               onPress={requestProfileSave}
             >
               <FontAwesomeIcon icon={faFloppyDisk} /> Save profile
             </Button>
-            <Button isDisabled={!compilerReady} isPending={isGenerating} onPress={() => void generate()}>
+            <Button isDisabled={!compilerReady || !formIsValid} isPending={isGenerating} onPress={() => void generate()}>
               {({ isPending }) => (
                 <>
                   {isPending ? <Spinner color="current" size="sm" /> : <FontAwesomeIcon icon={faDownload} />}
@@ -620,6 +705,16 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
         confirmLabel="Replace profile"
         isPending={isSaving}
         onConfirm={() => saveProfile(true)}
+      />
+      <ListenerEndpointSelector
+        connectionIncarnation={snapshot.connection.incarnation}
+        connectionServer={snapshot.connection.server}
+        currentC2={form.c2}
+        isOpen={isListenerSelectorOpen}
+        jobs={snapshot.domains.jobs}
+        targetOs={form.os}
+        onAddEndpoint={addListenerEndpoint}
+        onOpenChange={setIsListenerSelectorOpen}
       />
     </div>
   );

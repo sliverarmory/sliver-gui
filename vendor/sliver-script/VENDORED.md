@@ -6,20 +6,20 @@ used by Sliver GUI.
 
 - Snapshot commit: `01f1029cc17898da681e52b64af4a708ff82c3d3`
 - Published upstream base: `837fb21c5291eef6285c2e168eef0620b99a5394`
-- Sliver command/protobuf source: `9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9`
+- Sliver command/protobuf source: `ca685f5eed64c3327c0e57504928cfd2d2e96bea`
 
 The authoritative machine-readable locks are
 `protocol/sliver-baseline.json` and `protocol/sliver-script-provenance.json`.
 They separate three inputs that must not be reviewed as one opaque diff:
 
 1. the unpublished handwritten wrapper snapshot reconstructed from the bundle;
-2. five generated protobuf clients reproduced from Sliver `9ff9b553...`; and
+2. five generated protobuf clients reproduced from Sliver `ca685f5e...`; and
 3. the GUI handwritten overlay in
    `protocol/sliver-script-handwritten-overlay.patch`.
 
 The old `4ef8644...` attribution was incorrect. The historical generator script
 preferred an adjacent `../sliver` checkout, so its declared submodule revision
-did not identify the protobuf bytes. Regeneration from `9ff9b553...`, with the
+did not identify the protobuf bytes. Regeneration from `ca685f5e...`, with the
 locked generator, options, input order, and output order, matches all five
 checked-in files byte-for-byte and matches the locked descriptor set hash.
 

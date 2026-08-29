@@ -814,7 +814,7 @@ describe("connection registry with an injected Sliver client", () => {
     expect(secondPlan).toMatchObject({ ok: true, value: { impact: { backend: { configName: "Beta" } } } });
   });
 
-  it("surfaces reconnecting and incompatible connection states", async () => {
+  it("surfaces reconnecting and warns on version incompatibility without blocking the connection", async () => {
     vi.useFakeTimers();
     const reconnectingClient = new FakeSliverClient();
     const registry = createRegistry(() => reconnectingClient.adapter);
@@ -835,9 +835,30 @@ describe("connection registry with an injected Sliver client", () => {
     const listed = await incompatibleRegistry.listSavedConfigs(2);
     if (!listed.ok) throw new Error(listed.error);
     const result = await incompatibleRegistry.connectSavedConfig(2, listed.value[0]!.id);
-    expect(result).toMatchObject({ ok: false });
-    expect(incompatibleRegistry.snapshot(2).connection.status).toBe("incompatible");
-    expect(incompatibleRegistry.snapshot(2).domains.compiler.status).toBe("unsupported");
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        connection: {
+          status: "degraded",
+          capabilities: {
+            compatibility: "degraded",
+            reason: expect.stringMatching(/may be incompatible/u),
+            currentSlice: {
+              jobs: true,
+              listeners: true,
+              generation: true,
+              builds: true,
+              profiles: true,
+              events: true,
+              targets: true,
+              tasks: true,
+            },
+          },
+        },
+      },
+    });
+    expect(incompatibleRegistry.snapshot(2).domains.compiler.status).not.toBe("unsupported");
+    expect(incompatibleClient.getCompiler).toHaveBeenCalled();
   });
 
   it("never suggests system CA trust for managed operator mTLS failures", async () => {
@@ -856,6 +877,24 @@ describe("connection registry with an injected Sliver client", () => {
     expect(result).toEqual({ ok: false, error: "14 UNAVAILABLE: unable to verify the first certificate" });
     expect(registry.snapshot(1).connection.error).toBe("14 UNAVAILABLE: unable to verify the first certificate");
     expect(JSON.stringify(result)).not.toContain("--use-system-ca");
+  });
+
+  it("still blocks when GetVersion fails before returning a version", async () => {
+    const client = new FakeSliverClient();
+    client.getVersion.mockRejectedValueOnce(new Error("/rpcpb.SliverRPC/GetVersion UNAVAILABLE: no authenticated response"));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    const listed = await registry.listSavedConfigs(1);
+    if (!listed.ok) throw new Error(listed.error);
+
+    const result = await registry.connectSavedConfig(1, listed.value[0]!.id);
+
+    expect(result).toEqual({
+      ok: false,
+      error: "/rpcpb.SliverRPC/GetVersion UNAVAILABLE: no authenticated response",
+    });
+    expect(registry.snapshot(1).connection.status).toBe("disconnected");
+    expect(client.getCompiler).not.toHaveBeenCalled();
   });
 
   it("refuses an operator configuration without a managed CA before constructing a client", async () => {
@@ -5834,12 +5873,20 @@ describe("M3 session shell registry boundary", () => {
 });
 
 describe("server compatibility and event redaction", () => {
-  it("distinguishes the pinned baseline, unverified compatible builds, and unsupported majors", () => {
+  it("supports the pinned baseline, warns for valid mismatches, and rejects invalid versions", () => {
     expect(negotiateServerVersion(version({ Commit: SLIVER_PROTOCOL_BASELINE_COMMIT }))).toEqual({
       compatibility: "supported",
     });
     expect(negotiateServerVersion(version({ Commit: "different" }))).toMatchObject({ compatibility: "degraded" });
     expect(negotiateServerVersion(version({ Major: 2, Commit: "different" }))).toMatchObject({
+      compatibility: "degraded",
+      reason: expect.stringMatching(/may be incompatible/u),
+    });
+    expect(negotiateServerVersion(version({ Minor: 5, Commit: "different" }))).toMatchObject({
+      compatibility: "degraded",
+      reason: expect.stringMatching(/may be incompatible/u),
+    });
+    expect(negotiateServerVersion(version({ Major: -1, Commit: "different" }))).toMatchObject({
       compatibility: "unsupported",
     });
   });

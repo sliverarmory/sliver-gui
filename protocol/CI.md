@@ -42,7 +42,7 @@ protocol-parity:
         cache: npm
     - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
       with:
-        go-version: 1.25.8
+        go-version: 1.26.6
         cache: false
     - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
       with:

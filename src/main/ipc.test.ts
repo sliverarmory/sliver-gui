@@ -169,6 +169,38 @@ describe("trusted Electron IPC boundary", () => {
     expect(connectSavedConfig).toHaveBeenCalledWith(77, id);
   });
 
+  it("exposes the bounded interface inventory only to a window connected to a local server", () => {
+    const snapshot = vi.fn((contentsId: number) => {
+      const value = disconnectedSnapshot();
+      value.connection = contentsId === 77
+        ? { status: "connected", server: "127.0.0.1:53137" }
+        : { status: "connected", server: "remote.example:53137" };
+      return value;
+    });
+    registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
+    const local = invokeEvent("http://127.0.0.1:5173/", 77);
+    const remote = invokeEvent("http://127.0.0.1:5173/", 88);
+    const handler = electronMocks.handlers.get(IPC.listLocalNetworkInterfaces);
+
+    const localResult = handler?.(local.event) as {
+      ok: boolean;
+      value?: { hostname: string; addresses: Array<Record<string, unknown>> };
+    };
+    expect(localResult).toMatchObject({
+      ok: true,
+      value: { hostname: expect.any(String), addresses: expect.any(Array) },
+    });
+    expect(localResult.value?.addresses.every((address) =>
+      Object.keys(address).every((key) => ["name", "address", "family", "scope"].includes(key)),
+    )).toBe(true);
+    expect(handler?.(remote.event)).toEqual({
+      ok: false,
+      error: "Local interface selection is available only when the Sliver server is running on this machine",
+    });
+    expect(snapshot).toHaveBeenNthCalledWith(1, 77);
+    expect(snapshot).toHaveBeenNthCalledWith(2, 88);
+  });
+
   it("decodes managed config and stop-plan capability calls at the trusted boundary", async () => {
     const importConfig = vi.fn(async () => ({ ok: false, error: "import probe" } as const));
     const removeSavedConfig = vi.fn(async () => ({ ok: true } as const));
@@ -214,6 +246,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.disconnect,
     IPC.getSnapshot,
     IPC.refresh,
+    IPC.listLocalNetworkInterfaces,
     IPC.openInteractionWindow,
     IPC.claimInteractionWindow,
     IPC.exitApp,

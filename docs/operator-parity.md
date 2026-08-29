@@ -1,6 +1,6 @@
 # Operator parity report
 
-Baseline: `9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9` (tree `62d00f3225977ecbcc723f847f2df2bcd14549cb`)
+Baseline: `ca685f5eed64c3327c0e57504928cfd2d2e96bea` (tree `25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1`)
 
 This report merges deterministic command discovery with reviewed product annotations. Third-party alias and extension names are audited dynamically and are not static requirements. `parity-contract:*`, `scope-denial:*`, and `upstream-regression:*` values are stable test contract IDs; their presence assigns coverage and does not claim the test has passed.
 

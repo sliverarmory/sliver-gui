@@ -5,8 +5,9 @@ import { faDice, faListOl } from "@fortawesome/free-solid-svg-icons";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { useState } from "react";
+import { Button } from "@heroui/react";
 
-import { SelectField, SwitchRow, selectFieldValueFromKey } from "./FormControls";
+import { AreaField, Field, SelectField, SwitchRow, selectFieldValueFromKey } from "./FormControls";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -22,6 +23,52 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe("form field validation", () => {
+  it("exposes text and textarea errors through HeroUI's invalid field state", () => {
+    render(
+      <>
+        <Field
+          error="Build name may use letters, numbers, dots, dashes, and underscores only."
+          label="Build name"
+          value="bad/name"
+          onChange={() => undefined}
+        />
+        <AreaField
+          error="Unsupported C2 protocol 'ftp'."
+          label="C2 endpoints"
+          value="ftp://c2.example.test"
+          onChange={() => undefined}
+        />
+      </>,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Build name" })).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByRole("textbox", { name: "C2 endpoints" })).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(screen.getByText(/Build name may use letters/i)).toBeInTheDocument();
+    expect(screen.getByText(/Unsupported C2 protocol/i)).toBeInTheDocument();
+  });
+
+  it("keeps an action beside a textarea label without changing its accessible name", () => {
+    render(
+      <AreaField
+        action={<Button>Add listener</Button>}
+        label="C2 endpoints"
+        value="mtls://c2.example:8888"
+        onChange={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "C2 endpoints" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add listener" })).toBeInTheDocument();
+  });
 });
 
 describe("SelectField iconography", () => {

@@ -66,6 +66,7 @@ export const IPC_INVOKE = {
   disconnect: "sliver:connection:disconnect",
   getSnapshot: "sliver:snapshot:get",
   refresh: "sliver:snapshot:refresh",
+  listLocalNetworkInterfaces: "sliver:network-interfaces:list-local",
   openWindow: "sliver:window:open",
   openInteractionWindow: "sliver:window:open-interaction",
   claimInteractionWindow: "sliver:window:claim-interaction",
@@ -138,7 +139,7 @@ export const IPC = {
 export type IpcInvokeChannel = (typeof IPC_INVOKE)[keyof typeof IPC_INVOKE];
 
 export const DEFAULT_C2_SCHEME = "mtls" as const;
-export const SLIVER_PROTOCOL_BASELINE_COMMIT = "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9" as const;
+export const SLIVER_PROTOCOL_BASELINE_COMMIT = "ca685f5eed64c3327c0e57504928cfd2d2e96bea" as const;
 
 export type ConnectionStatus =
   | "disconnected"
@@ -222,6 +223,20 @@ export interface JobSummary {
   port: number;
   domains: string[];
   profileName: string;
+}
+
+export type NetworkInterfaceAddressScope = "global" | "private" | "loopback";
+
+export interface LocalNetworkInterfaceAddress {
+  name: string;
+  address: string;
+  family: "IPv4" | "IPv6";
+  scope: NetworkInterfaceAddressScope;
+}
+
+export interface LocalNetworkInterfaceInventory {
+  hostname: string;
+  addresses: LocalNetworkInterfaceAddress[];
 }
 
 export interface BuildSummary {
@@ -547,6 +562,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.refresh]: {
     args: [];
     result: OperationResult<SliverSnapshot>;
+  };
+  [IPC.listLocalNetworkInterfaces]: {
+    args: [];
+    result: OperationResult<LocalNetworkInterfaceInventory>;
   };
   [IPC.openWindow]: {
     args: [input: OpenWindowInput];

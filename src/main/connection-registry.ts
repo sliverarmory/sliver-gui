@@ -6405,21 +6405,21 @@ export function negotiateServerVersion(version: clientpb.Version): {
   }
   if (version.Major !== 1) {
     return {
-      compatibility: "unsupported",
-      reason: `Sliver ${versionText} is outside the supported protocol major version`,
+      compatibility: "degraded",
+      reason: `Sliver ${versionText} uses a different protocol major version and may be incompatible with this client`,
     };
   }
   if (version.Minor < 6) {
     return {
-      compatibility: "unsupported",
-      reason: `Sliver ${versionText} predates the minimum compatible protocol surface`,
+      compatibility: "degraded",
+      reason: `Sliver ${versionText} predates the verified protocol surface and may be incompatible with this client`,
     };
   }
   return {
     compatibility: "degraded",
     reason: version.Dirty
-      ? `Sliver ${versionText} is a modified build and has not been verified against the pinned baseline`
-      : `Sliver ${versionText} does not match the pinned baseline; current features remain available in degraded mode`,
+      ? `Sliver ${versionText} is a modified build and may be incompatible with the pinned baseline`
+      : `Sliver ${versionText} does not match the pinned baseline and may be incompatible; current features remain available in degraded mode`,
   };
 }
 

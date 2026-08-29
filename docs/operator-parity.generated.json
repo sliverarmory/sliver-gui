@@ -3,8 +3,8 @@
   "generatorVersion": 1,
   "baseline": {
     "repository": "https://github.com/BishopFox/sliver.git",
-    "commit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
-    "tree": "62d00f3225977ecbcc723f847f2df2bcd14549cb",
+    "commit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
+    "tree": "25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1",
     "sources": [
       "client/command/server.go",
       "client/command/sliver.go",
@@ -37,7 +37,7 @@
     "addedNodes": [
       {
         "id": "implant.parity-alias",
-        "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+        "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
         "surface": "implant",
         "path": [
           "parity-alias"
@@ -49,9 +49,9 @@
         "deprecated": "",
         "source": {
           "file": "client/command/alias/load.go",
-          "line": 227,
+          "line": 225,
           "symbol": "client/command/alias.LoadAlias.func1",
-          "key": "client/command/alias/load.go:227#implant.parity-alias"
+          "key": "client/command/alias/load.go:225#implant.parity-alias"
         },
         "restrictions": {
           "targetModes": [
@@ -125,7 +125,7 @@
       },
       {
         "id": "implant.parity-extension",
-        "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+        "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
         "surface": "implant",
         "path": [
           "parity-extension"
@@ -137,9 +137,9 @@
         "deprecated": "",
         "source": {
           "file": "client/command/extensions/load.go",
-          "line": 370,
+          "line": 397,
           "symbol": "client/command/extensions.ExtensionRegisterCommand.func1",
-          "key": "client/command/extensions/load.go:370#implant.parity-extension"
+          "key": "client/command/extensions/load.go:397#implant.parity-extension"
         },
         "restrictions": {
           "targetModes": [
@@ -147,7 +147,9 @@
             "beacon"
           ],
           "targetOperatingSystems": [
-            "windows"
+            "windows",
+            "linux",
+            "darwin"
           ],
           "transports": [
             "any"
@@ -174,22 +176,22 @@
           }
         ],
         "upstreamAnnotations": {
-          "console-hidden": "windows,amd64"
+          "console-hidden": "native-extension:unsupported,native-extension:darwin/amd64,native-extension:darwin/arm64,native-extension:linux/386,native-extension:linux/amd64,native-extension:linux/arm64,native-extension:windows/386,native-extension:windows/arm64"
         },
         "restrictionEvidence": {
           "targetModes": "sliver-commands-visible-unless-console-hidden",
-          "targetOperatingSystems": "upstream-console-hidden-annotation",
+          "targetOperatingSystems": "sliver-commands-visible-unless-console-hidden",
           "transports": "sliver-commands-visible-unless-console-hidden"
         },
-        "fingerprint": "c6048b08eb476d54eba7d874e83300c007b907e5112076471ddf0c53e7aa8b4b",
-        "gateFingerprint": "92d323dca76510a41d126e1c4f95fa66932fceadf44da16360881109b5205177"
+        "fingerprint": "f93ff12546def963877395ff0c11106e21bddd33fcdde9d7b77998b2c40873bf",
+        "gateFingerprint": "a1118f6748a293389d4890cea4a2245f4827a145794b03504922464b1ec1ba9e"
       }
     ]
   },
   "commands": [
     {
       "id": "implant.ai",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "ai"
@@ -231,7 +233,7 @@
     },
     {
       "id": "implant.aka",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "aka"
@@ -273,7 +275,7 @@
     },
     {
       "id": "implant.aka.create",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "aka",
@@ -316,7 +318,7 @@
     },
     {
       "id": "implant.aka.delete",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "aka",
@@ -359,7 +361,7 @@
     },
     {
       "id": "implant.backdoor",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "backdoor"
@@ -420,7 +422,7 @@
     },
     {
       "id": "implant.background",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "background"
@@ -472,7 +474,7 @@
     },
     {
       "id": "implant.cat",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cat"
@@ -578,7 +580,7 @@
     },
     {
       "id": "implant.cd",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cd"
@@ -630,7 +632,7 @@
     },
     {
       "id": "implant.chmod",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "chmod"
@@ -691,7 +693,7 @@
     },
     {
       "id": "implant.chown",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "chown"
@@ -752,7 +754,7 @@
     },
     {
       "id": "implant.chtimes",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "chtimes"
@@ -836,7 +838,7 @@
     },
     {
       "id": "implant.close",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "close"
@@ -888,7 +890,7 @@
     },
     {
       "id": "implant.cp",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cp"
@@ -940,7 +942,7 @@
     },
     {
       "id": "implant.cursed",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed"
@@ -993,7 +995,7 @@
     },
     {
       "id": "implant.cursed.chrome",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1099,7 +1101,7 @@
     },
     {
       "id": "implant.cursed.console",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1151,7 +1153,7 @@
     },
     {
       "id": "implant.cursed.cookies",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1203,7 +1205,7 @@
     },
     {
       "id": "implant.cursed.edge",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1309,7 +1311,7 @@
     },
     {
       "id": "implant.cursed.electron",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1370,7 +1372,7 @@
     },
     {
       "id": "implant.cursed.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1422,7 +1424,7 @@
     },
     {
       "id": "implant.cursed.screenshot",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1483,7 +1485,7 @@
     },
     {
       "id": "implant.dllhijack",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "dllhijack"
@@ -1571,7 +1573,7 @@
     },
     {
       "id": "implant.docs",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "docs"
@@ -1613,7 +1615,7 @@
     },
     {
       "id": "implant.download",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "download"
@@ -1710,7 +1712,7 @@
     },
     {
       "id": "implant.edit",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "edit"
@@ -1786,7 +1788,7 @@
     },
     {
       "id": "implant.env",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "env"
@@ -1838,7 +1840,7 @@
     },
     {
       "id": "implant.env.set",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "env",
@@ -1881,7 +1883,7 @@
     },
     {
       "id": "implant.env.unset",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "env",
@@ -1924,7 +1926,7 @@
     },
     {
       "id": "implant.execute",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "execute"
@@ -2090,7 +2092,7 @@
     },
     {
       "id": "implant.execute-assembly",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "execute-assembly"
@@ -2268,7 +2270,7 @@
     },
     {
       "id": "implant.execute-shellcode",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "execute-shellcode"
@@ -2447,7 +2449,7 @@
     },
     {
       "id": "implant.execute.children",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "execute",
@@ -2500,7 +2502,7 @@
     },
     {
       "id": "implant.extensions",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "extensions"
@@ -2543,7 +2545,7 @@
     },
     {
       "id": "implant.extensions.list",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "extensions",
@@ -2595,7 +2597,7 @@
     },
     {
       "id": "implant.getgid",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "getgid"
@@ -2647,7 +2649,7 @@
     },
     {
       "id": "implant.getpid",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "getpid"
@@ -2699,7 +2701,7 @@
     },
     {
       "id": "implant.getprivs",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "getprivs"
@@ -2751,7 +2753,7 @@
     },
     {
       "id": "implant.getsystem",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "getsystem"
@@ -2811,7 +2813,7 @@
     },
     {
       "id": "implant.getuid",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "getuid"
@@ -2863,7 +2865,7 @@
     },
     {
       "id": "implant.grep",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "grep"
@@ -3005,7 +3007,7 @@
     },
     {
       "id": "implant.head",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "head"
@@ -3129,7 +3131,7 @@
     },
     {
       "id": "implant.hex-edit",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "hex-edit"
@@ -3197,7 +3199,7 @@
     },
     {
       "id": "implant.ifconfig",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "ifconfig"
@@ -3258,7 +3260,7 @@
     },
     {
       "id": "implant.impersonate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "impersonate"
@@ -3310,7 +3312,7 @@
     },
     {
       "id": "implant.info",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "info"
@@ -3362,7 +3364,7 @@
     },
     {
       "id": "implant.interactive",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "interactive"
@@ -3478,7 +3480,7 @@
     },
     {
       "id": "implant.kill",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "kill"
@@ -3539,7 +3541,7 @@
     },
     {
       "id": "implant.ls",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "ls"
@@ -3618,7 +3620,7 @@
     },
     {
       "id": "implant.make-token",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "make-token"
@@ -3706,7 +3708,7 @@
     },
     {
       "id": "implant.memfiles",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "memfiles"
@@ -3758,7 +3760,7 @@
     },
     {
       "id": "implant.memfiles.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "memfiles",
@@ -3801,7 +3803,7 @@
     },
     {
       "id": "implant.memfiles.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "memfiles",
@@ -3844,7 +3846,7 @@
     },
     {
       "id": "implant.migrate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "migrate"
@@ -3922,7 +3924,7 @@
     },
     {
       "id": "implant.mkdir",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "mkdir"
@@ -3974,7 +3976,7 @@
     },
     {
       "id": "implant.mount",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "mount"
@@ -4026,7 +4028,7 @@
     },
     {
       "id": "implant.msf",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "msf"
@@ -4123,7 +4125,7 @@
     },
     {
       "id": "implant.msf-inject",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "msf-inject"
@@ -4229,7 +4231,7 @@
     },
     {
       "id": "implant.mv",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "mv"
@@ -4281,7 +4283,7 @@
     },
     {
       "id": "implant.netstat",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "netstat"
@@ -4387,7 +4389,7 @@
     },
     {
       "id": "implant.ping",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "ping"
@@ -4439,7 +4441,7 @@
     },
     {
       "id": "implant.pivots",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pivots"
@@ -4491,7 +4493,7 @@
     },
     {
       "id": "implant.pivots.details",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4544,7 +4546,7 @@
     },
     {
       "id": "implant.pivots.graph",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4587,7 +4589,7 @@
     },
     {
       "id": "implant.pivots.named-pipe",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4649,7 +4651,7 @@
     },
     {
       "id": "implant.pivots.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4702,7 +4704,7 @@
     },
     {
       "id": "implant.pivots.tcp",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4764,7 +4766,7 @@
     },
     {
       "id": "implant.portfwd",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "portfwd"
@@ -4817,7 +4819,7 @@
     },
     {
       "id": "implant.portfwd.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "portfwd",
@@ -4887,7 +4889,7 @@
     },
     {
       "id": "implant.portfwd.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "portfwd",
@@ -4939,7 +4941,7 @@
     },
     {
       "id": "implant.procdump",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "procdump"
@@ -5036,7 +5038,7 @@
     },
     {
       "id": "implant.ps",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "ps"
@@ -5160,7 +5162,7 @@
     },
     {
       "id": "implant.psexec",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "psexec"
@@ -5257,7 +5259,7 @@
     },
     {
       "id": "implant.pwd",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "pwd"
@@ -5309,7 +5311,7 @@
     },
     {
       "id": "implant.reconfig",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "reconfig"
@@ -5398,7 +5400,7 @@
     },
     {
       "id": "implant.registry",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry"
@@ -5450,7 +5452,7 @@
     },
     {
       "id": "implant.registry.create",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5510,7 +5512,7 @@
     },
     {
       "id": "implant.registry.delete",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5570,7 +5572,7 @@
     },
     {
       "id": "implant.registry.list-subkeys",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5630,7 +5632,7 @@
     },
     {
       "id": "implant.registry.list-values",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5690,7 +5692,7 @@
     },
     {
       "id": "implant.registry.read",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5750,7 +5752,7 @@
     },
     {
       "id": "implant.registry.read.hive",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5838,7 +5840,7 @@
     },
     {
       "id": "implant.registry.write",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "registry",
@@ -5916,7 +5918,7 @@
     },
     {
       "id": "implant.rename",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "rename"
@@ -5977,7 +5979,7 @@
     },
     {
       "id": "implant.rev2self",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "rev2self"
@@ -6029,7 +6031,7 @@
     },
     {
       "id": "implant.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "rm"
@@ -6099,7 +6101,7 @@
     },
     {
       "id": "implant.rportfwd",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "rportfwd"
@@ -6152,7 +6154,7 @@
     },
     {
       "id": "implant.rportfwd.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "rportfwd",
@@ -6222,7 +6224,7 @@
     },
     {
       "id": "implant.rportfwd.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "rportfwd",
@@ -6274,7 +6276,7 @@
     },
     {
       "id": "implant.runas",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "runas"
@@ -6389,7 +6391,7 @@
     },
     {
       "id": "implant.screenshot",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "screenshot"
@@ -6468,7 +6470,7 @@
     },
     {
       "id": "implant.services",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "services"
@@ -6529,7 +6531,7 @@
     },
     {
       "id": "implant.services.info",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "services",
@@ -6589,7 +6591,7 @@
     },
     {
       "id": "implant.services.start",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "services",
@@ -6649,7 +6651,7 @@
     },
     {
       "id": "implant.services.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "services",
@@ -6709,7 +6711,7 @@
     },
     {
       "id": "implant.shell",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "shell"
@@ -6780,7 +6782,7 @@
     },
     {
       "id": "implant.shell.attach",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "shell",
@@ -6832,7 +6834,7 @@
     },
     {
       "id": "implant.shell.kill",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "shell",
@@ -6893,7 +6895,7 @@
     },
     {
       "id": "implant.shell.ls",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "shell",
@@ -6935,7 +6937,7 @@
     },
     {
       "id": "implant.sideload",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "sideload"
@@ -7068,7 +7070,7 @@
     },
     {
       "id": "implant.socks5",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "socks5"
@@ -7121,7 +7123,7 @@
     },
     {
       "id": "implant.socks5.start",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "socks5",
@@ -7191,7 +7193,7 @@
     },
     {
       "id": "implant.socks5.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "socks5",
@@ -7243,7 +7245,7 @@
     },
     {
       "id": "implant.spawndll",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "spawndll"
@@ -7367,7 +7369,7 @@
     },
     {
       "id": "implant.ssh",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "ssh"
@@ -7491,7 +7493,7 @@
     },
     {
       "id": "implant.tail",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "tail"
@@ -7615,7 +7617,7 @@
     },
     {
       "id": "implant.tasks",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "tasks"
@@ -7695,7 +7697,7 @@
     },
     {
       "id": "implant.tasks.cancel",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "tasks",
@@ -7737,7 +7739,7 @@
     },
     {
       "id": "implant.tasks.fetch",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "tasks",
@@ -7779,7 +7781,7 @@
     },
     {
       "id": "implant.terminate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "terminate"
@@ -7840,7 +7842,7 @@
     },
     {
       "id": "implant.upload",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "upload"
@@ -7910,7 +7912,7 @@
     },
     {
       "id": "implant.wasm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wasm"
@@ -8007,7 +8009,7 @@
     },
     {
       "id": "implant.wasm.ls",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wasm",
@@ -8050,7 +8052,7 @@
     },
     {
       "id": "implant.wg-portfwd",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wg-portfwd"
@@ -8103,7 +8105,7 @@
     },
     {
       "id": "implant.wg-portfwd.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wg-portfwd",
@@ -8164,7 +8166,7 @@
     },
     {
       "id": "implant.wg-portfwd.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wg-portfwd",
@@ -8206,7 +8208,7 @@
     },
     {
       "id": "implant.wg-socks",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wg-socks"
@@ -8260,7 +8262,7 @@
     },
     {
       "id": "implant.wg-socks.start",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wg-socks",
@@ -8313,7 +8315,7 @@
     },
     {
       "id": "implant.wg-socks.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "wg-socks",
@@ -8356,7 +8358,7 @@
     },
     {
       "id": "implant.whoami",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "implant",
       "path": [
         "whoami"
@@ -8408,7 +8410,7 @@
     },
     {
       "id": "root.console",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "root",
       "path": [
         "console"
@@ -8452,6 +8454,14 @@
           "usage": "See pinned root command source",
           "required": false,
           "persistent": false
+        },
+        {
+          "name": "disable-wg",
+          "type": "string",
+          "default": "",
+          "usage": "See pinned root command source",
+          "required": false,
+          "persistent": false
         }
       ],
       "upstreamAnnotations": {},
@@ -8460,12 +8470,12 @@
         "targetOperatingSystems": "separately-audited-root-mode",
         "transports": "separately-audited-root-mode"
       },
-      "fingerprint": "70996c2e93220f513735e8e35847f9737913575e63d9dd7c87e38ae0965c0246",
+      "fingerprint": "6ecd5faf2cd9eb8cf5d401e586ad2a848acd673a75a88df4e14a9fa0f6fa706c",
       "gateFingerprint": "62cee8958d7c20cb3d05f3dc21a5ed7c7e04342d4f31cf73872a8e8d12230903"
     },
     {
       "id": "root.default-console",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "root",
       "path": [
         "default-console"
@@ -8477,9 +8487,9 @@
       "deprecated": "",
       "source": {
         "file": "client/cli/cli.go",
-        "line": 84,
+        "line": 86,
         "symbol": "client/cli.root.default-console",
-        "key": "client/cli/cli.go:84#root.default-console"
+        "key": "client/cli/cli.go:86#root.default-console"
       },
       "restrictions": {
         "targetModes": [
@@ -8509,6 +8519,14 @@
           "usage": "See pinned root command source",
           "required": false,
           "persistent": false
+        },
+        {
+          "name": "disable-wg",
+          "type": "string",
+          "default": "",
+          "usage": "See pinned root command source",
+          "required": false,
+          "persistent": false
         }
       ],
       "upstreamAnnotations": {},
@@ -8517,12 +8535,12 @@
         "targetOperatingSystems": "separately-audited-root-mode",
         "transports": "separately-audited-root-mode"
       },
-      "fingerprint": "ffa9e4c9ed817a0b308fdb56314f15b55c79ca11c06444fa6f030f529e5a09b0",
+      "fingerprint": "1547cb911af94b13a7244015c6dfa69607e6d5951d59101e8c7496448b2b1995",
       "gateFingerprint": "62cee8958d7c20cb3d05f3dc21a5ed7c7e04342d4f31cf73872a8e8d12230903"
     },
     {
       "id": "root.implant",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "root",
       "path": [
         "implant"
@@ -8566,6 +8584,14 @@
           "usage": "See pinned root command source",
           "required": false,
           "persistent": false
+        },
+        {
+          "name": "disable-wg",
+          "type": "string",
+          "default": "",
+          "usage": "See pinned root command source",
+          "required": false,
+          "persistent": false
         }
       ],
       "upstreamAnnotations": {},
@@ -8574,12 +8600,12 @@
         "targetOperatingSystems": "separately-audited-root-mode",
         "transports": "separately-audited-root-mode"
       },
-      "fingerprint": "b227dbf2fb9ceb533c6e595f7c0e355b3991ad42e57bc07713fa2deda2cfb95d",
+      "fingerprint": "c64b172accf5b6fe4fc3c91b1da9669aed9ee4721ccf62830328c6bcf0cb58df",
       "gateFingerprint": "62cee8958d7c20cb3d05f3dc21a5ed7c7e04342d4f31cf73872a8e8d12230903"
     },
     {
       "id": "root.import",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "root",
       "path": [
         "import"
@@ -8627,7 +8653,7 @@
     },
     {
       "id": "root.mcp",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "root",
       "path": [
         "mcp"
@@ -8671,6 +8697,14 @@
           "usage": "See pinned root command source",
           "required": false,
           "persistent": false
+        },
+        {
+          "name": "disable-wg",
+          "type": "string",
+          "default": "",
+          "usage": "See pinned root command source",
+          "required": false,
+          "persistent": false
         }
       ],
       "upstreamAnnotations": {},
@@ -8679,12 +8713,12 @@
         "targetOperatingSystems": "separately-audited-root-mode",
         "transports": "separately-audited-root-mode"
       },
-      "fingerprint": "a345201732a910deed4f443925490638378690be0b8a55b4175e6be58b1ebfb7",
+      "fingerprint": "60294d0830d4b80cf4805b0ab61b337c8d774cd6f376b2b312e19d58c2325972",
       "gateFingerprint": "62cee8958d7c20cb3d05f3dc21a5ed7c7e04342d4f31cf73872a8e8d12230903"
     },
     {
       "id": "root.version",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "root",
       "path": [
         "version"
@@ -8723,7 +8757,7 @@
     },
     {
       "id": "server.ai",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "ai"
@@ -8762,7 +8796,7 @@
     },
     {
       "id": "server.aka",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aka"
@@ -8801,7 +8835,7 @@
     },
     {
       "id": "server.aka.create",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aka",
@@ -8841,7 +8875,7 @@
     },
     {
       "id": "server.aka.delete",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aka",
@@ -8881,7 +8915,7 @@
     },
     {
       "id": "server.aliases",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aliases"
@@ -8920,7 +8954,7 @@
     },
     {
       "id": "server.aliases.install",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aliases",
@@ -8960,7 +8994,7 @@
     },
     {
       "id": "server.aliases.load",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aliases",
@@ -9000,7 +9034,7 @@
     },
     {
       "id": "server.aliases.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "aliases",
@@ -9040,7 +9074,7 @@
     },
     {
       "id": "server.armory",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory"
@@ -9116,7 +9150,7 @@
     },
     {
       "id": "server.armory.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9208,7 +9242,7 @@
     },
     {
       "id": "server.armory.disable",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9248,7 +9282,7 @@
     },
     {
       "id": "server.armory.enable",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9288,7 +9322,7 @@
     },
     {
       "id": "server.armory.info",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9328,7 +9362,7 @@
     },
     {
       "id": "server.armory.install",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9387,7 +9421,7 @@
     },
     {
       "id": "server.armory.modify",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9482,7 +9516,7 @@
     },
     {
       "id": "server.armory.refresh",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9522,7 +9556,7 @@
     },
     {
       "id": "server.armory.reset",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9562,7 +9596,7 @@
     },
     {
       "id": "server.armory.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9602,7 +9636,7 @@
     },
     {
       "id": "server.armory.save",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9642,7 +9676,7 @@
     },
     {
       "id": "server.armory.search",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9682,7 +9716,7 @@
     },
     {
       "id": "server.armory.update",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "armory",
@@ -9732,7 +9766,7 @@
     },
     {
       "id": "server.beacons",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "beacons"
@@ -9835,7 +9869,7 @@
     },
     {
       "id": "server.beacons.prune",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "beacons",
@@ -9885,7 +9919,7 @@
     },
     {
       "id": "server.beacons.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "beacons",
@@ -9925,7 +9959,7 @@
     },
     {
       "id": "server.beacons.watch",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "beacons",
@@ -9965,7 +9999,7 @@
     },
     {
       "id": "server.builders",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "builders"
@@ -10014,7 +10048,7 @@
     },
     {
       "id": "server.c2profiles",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "c2profiles"
@@ -10063,7 +10097,7 @@
     },
     {
       "id": "server.c2profiles.export",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "c2profiles",
@@ -10122,7 +10156,7 @@
     },
     {
       "id": "server.c2profiles.generate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "c2profiles",
@@ -10199,7 +10233,7 @@
     },
     {
       "id": "server.c2profiles.import",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "c2profiles",
@@ -10267,7 +10301,7 @@
     },
     {
       "id": "server.certificates",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "certificates"
@@ -10352,7 +10386,7 @@
     },
     {
       "id": "server.certificates.authorities",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "certificates",
@@ -10392,7 +10426,7 @@
     },
     {
       "id": "server.clean",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "clean"
@@ -10431,7 +10465,7 @@
     },
     {
       "id": "server.crack",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack"
@@ -11296,7 +11330,7 @@
     },
     {
       "id": "server.crack.hcstat2",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11336,7 +11370,7 @@
     },
     {
       "id": "server.crack.hcstat2.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11387,7 +11421,7 @@
     },
     {
       "id": "server.crack.hcstat2.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11428,7 +11462,7 @@
     },
     {
       "id": "server.crack.rules",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11468,7 +11502,7 @@
     },
     {
       "id": "server.crack.rules.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11519,7 +11553,7 @@
     },
     {
       "id": "server.crack.rules.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11560,7 +11594,7 @@
     },
     {
       "id": "server.crack.stations",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11609,7 +11643,7 @@
     },
     {
       "id": "server.crack.wordlists",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11649,7 +11683,7 @@
     },
     {
       "id": "server.crack.wordlists.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11700,7 +11734,7 @@
     },
     {
       "id": "server.crack.wordlists.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "crack",
@@ -11741,7 +11775,7 @@
     },
     {
       "id": "server.creds",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "creds"
@@ -11790,7 +11824,7 @@
     },
     {
       "id": "server.creds.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "creds",
@@ -11876,7 +11910,7 @@
     },
     {
       "id": "server.creds.add.file",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "creds",
@@ -11945,7 +11979,7 @@
     },
     {
       "id": "server.creds.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "creds",
@@ -11985,7 +12019,7 @@
     },
     {
       "id": "server.dns",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "dns"
@@ -12061,7 +12095,7 @@
     },
     {
       "id": "server.docs",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "docs"
@@ -12100,7 +12134,7 @@
     },
     {
       "id": "server.exit",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "exit"
@@ -12139,7 +12173,7 @@
     },
     {
       "id": "server.extensions",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "extensions"
@@ -12178,7 +12212,7 @@
     },
     {
       "id": "server.extensions.install",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "extensions",
@@ -12218,7 +12252,7 @@
     },
     {
       "id": "server.extensions.load",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "extensions",
@@ -12258,7 +12292,7 @@
     },
     {
       "id": "server.extensions.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "extensions",
@@ -12298,7 +12332,7 @@
     },
     {
       "id": "server.generate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "generate"
@@ -12862,7 +12896,7 @@
     },
     {
       "id": "server.generate.beacon",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "generate",
@@ -13463,7 +13497,7 @@
     },
     {
       "id": "server.generate.info",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "generate",
@@ -13503,7 +13537,7 @@
     },
     {
       "id": "server.generate.traffic-encoders",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "generate",
@@ -13543,7 +13577,7 @@
     },
     {
       "id": "server.generate.traffic-encoders.add",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "generate",
@@ -13594,7 +13628,7 @@
     },
     {
       "id": "server.generate.traffic-encoders.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "generate",
@@ -13635,7 +13669,7 @@
     },
     {
       "id": "server.hosts",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "hosts"
@@ -13684,7 +13718,7 @@
     },
     {
       "id": "server.hosts.ioc",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "hosts",
@@ -13724,7 +13758,7 @@
     },
     {
       "id": "server.hosts.ioc.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "hosts",
@@ -13765,7 +13799,7 @@
     },
     {
       "id": "server.hosts.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "hosts",
@@ -13805,7 +13839,7 @@
     },
     {
       "id": "server.http",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "http"
@@ -13908,7 +13942,7 @@
     },
     {
       "id": "server.https",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "https"
@@ -14047,7 +14081,7 @@
     },
     {
       "id": "server.implants",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "implants"
@@ -14150,7 +14184,7 @@
     },
     {
       "id": "server.implants.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "implants",
@@ -14190,7 +14224,7 @@
     },
     {
       "id": "server.implants.stage",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "implants",
@@ -14230,7 +14264,7 @@
     },
     {
       "id": "server.info",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "info"
@@ -14279,7 +14313,7 @@
     },
     {
       "id": "server.jobs",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "jobs"
@@ -14346,7 +14380,7 @@
     },
     {
       "id": "server.licenses",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "licenses"
@@ -14385,7 +14419,7 @@
     },
     {
       "id": "server.loot",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "loot"
@@ -14443,7 +14477,7 @@
     },
     {
       "id": "server.loot.fetch",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "loot",
@@ -14502,7 +14536,7 @@
     },
     {
       "id": "server.loot.local",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "loot",
@@ -14570,7 +14604,7 @@
     },
     {
       "id": "server.loot.remote",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "loot",
@@ -14638,7 +14672,7 @@
     },
     {
       "id": "server.loot.rename",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "loot",
@@ -14678,7 +14712,7 @@
     },
     {
       "id": "server.loot.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "loot",
@@ -14728,7 +14762,7 @@
     },
     {
       "id": "server.mcp",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "mcp"
@@ -14767,7 +14801,7 @@
     },
     {
       "id": "server.mcp.console",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "mcp",
@@ -14782,9 +14816,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/mcp/commands.go",
-        "line": 62,
+        "line": 63,
         "symbol": "client/command/mcp.Commands.func6",
-        "key": "client/command/mcp/commands.go:62#server.mcp.console"
+        "key": "client/command/mcp/commands.go:63#server.mcp.console"
       },
       "restrictions": {
         "targetModes": [
@@ -14834,7 +14868,7 @@
     },
     {
       "id": "server.mcp.start",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "mcp",
@@ -14894,6 +14928,15 @@
           "usage": "server version for MCP initialize",
           "required": false,
           "persistent": false
+        },
+        {
+          "name": "yes",
+          "shorthand": "y",
+          "type": "bool",
+          "default": "false",
+          "usage": "skip the prompt-injection confirmation (broken or non-interactive terminals)",
+          "required": false,
+          "persistent": false
         }
       ],
       "upstreamAnnotations": {},
@@ -14902,12 +14945,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "74ab5454b7d69bf51597010608cf3eb6107093ee1cb675fc39515f5a3a058f73",
+      "fingerprint": "6e41976a93a01b0bd094202b4253d853798cd50bb72fd300999b05656fb96cd9",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.mcp.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "mcp",
@@ -14920,9 +14963,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/mcp/commands.go",
-        "line": 51,
+        "line": 52,
         "symbol": "client/command/mcp.Commands.func5",
-        "key": "client/command/mcp/commands.go:51#server.mcp.stop"
+        "key": "client/command/mcp/commands.go:52#server.mcp.stop"
       },
       "restrictions": {
         "targetModes": [
@@ -14947,7 +14990,7 @@
     },
     {
       "id": "server.monitor",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "monitor"
@@ -14986,7 +15029,7 @@
     },
     {
       "id": "server.monitor.start",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "monitor",
@@ -15026,7 +15069,7 @@
     },
     {
       "id": "server.monitor.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "monitor",
@@ -15066,7 +15109,7 @@
     },
     {
       "id": "server.mtls",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "mtls"
@@ -15124,7 +15167,7 @@
     },
     {
       "id": "server.operators",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "operators"
@@ -15173,7 +15216,7 @@
     },
     {
       "id": "server.profiles",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles"
@@ -15222,7 +15265,7 @@
     },
     {
       "id": "server.profiles.generate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles",
@@ -15251,6 +15294,15 @@
         ]
       },
       "options": [
+        {
+          "name": "external-builder",
+          "shorthand": "E",
+          "type": "bool",
+          "default": "false",
+          "usage": "use an external builder",
+          "required": false,
+          "persistent": false
+        },
         {
           "name": "name",
           "shorthand": "n",
@@ -15284,12 +15336,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "ea4bda0f43b4702e33038c97893a9cc5a9cdebeefe8c621bb2aa79dd44d56398",
+      "fingerprint": "07f75cd0ab979c1477388b044b91e393888b1e12b3c857ea60ab6bb95cafcda1",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.profiles.info",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles",
@@ -15329,7 +15381,7 @@
     },
     {
       "id": "server.profiles.new",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles",
@@ -15885,7 +15937,7 @@
     },
     {
       "id": "server.profiles.new.beacon",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles",
@@ -16487,7 +16539,7 @@
     },
     {
       "id": "server.profiles.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles",
@@ -16527,7 +16579,7 @@
     },
     {
       "id": "server.profiles.stage",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "profiles",
@@ -16631,7 +16683,7 @@
     },
     {
       "id": "server.reaction",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "reaction"
@@ -16670,7 +16722,7 @@
     },
     {
       "id": "server.reaction.reload",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "reaction",
@@ -16710,7 +16762,7 @@
     },
     {
       "id": "server.reaction.save",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "reaction",
@@ -16750,7 +16802,7 @@
     },
     {
       "id": "server.reaction.set",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "reaction",
@@ -16800,7 +16852,7 @@
     },
     {
       "id": "server.reaction.unset",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "reaction",
@@ -16850,7 +16902,7 @@
     },
     {
       "id": "server.regenerate",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "regenerate"
@@ -16899,7 +16951,7 @@
     },
     {
       "id": "server.sessions",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "sessions"
@@ -17011,7 +17063,7 @@
     },
     {
       "id": "server.sessions.prune",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "sessions",
@@ -17061,7 +17113,7 @@
     },
     {
       "id": "server.settings",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings"
@@ -17109,7 +17161,7 @@
     },
     {
       "id": "server.settings.always-overflow",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17149,7 +17201,7 @@
     },
     {
       "id": "server.settings.autoadult",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17189,7 +17241,7 @@
     },
     {
       "id": "server.settings.beacon-autoresults",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17229,7 +17281,7 @@
     },
     {
       "id": "server.settings.console-logs",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17269,7 +17321,7 @@
     },
     {
       "id": "server.settings.readline",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17309,7 +17361,7 @@
     },
     {
       "id": "server.settings.readline.bind",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17495,7 +17547,7 @@
     },
     {
       "id": "server.settings.readline.set",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17536,7 +17588,7 @@
     },
     {
       "id": "server.settings.save",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17576,7 +17628,7 @@
     },
     {
       "id": "server.settings.small-terminal",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17616,7 +17668,7 @@
     },
     {
       "id": "server.settings.tables",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17656,7 +17708,7 @@
     },
     {
       "id": "server.settings.user-connect",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "settings",
@@ -17696,7 +17748,7 @@
     },
     {
       "id": "server.shellcode-encoders",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "shellcode-encoders"
@@ -17745,7 +17797,7 @@
     },
     {
       "id": "server.shellcode-encoders.encode",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "shellcode-encoders",
@@ -17840,7 +17892,7 @@
     },
     {
       "id": "server.shikata-ga-nai",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "shikata-ga-nai"
@@ -17925,7 +17977,7 @@
     },
     {
       "id": "server.socks5",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "socks5"
@@ -17976,7 +18028,7 @@
     },
     {
       "id": "server.socks5.stop",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "socks5",
@@ -18026,7 +18078,7 @@
     },
     {
       "id": "server.stage-listener",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "stage-listener"
@@ -18153,7 +18205,7 @@
     },
     {
       "id": "server.taskmany",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "taskmany"
@@ -18192,7 +18244,7 @@
     },
     {
       "id": "server.update",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "update"
@@ -18285,7 +18337,7 @@
     },
     {
       "id": "server.use",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "use"
@@ -18334,7 +18386,7 @@
     },
     {
       "id": "server.use.beacons",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "use",
@@ -18374,7 +18426,7 @@
     },
     {
       "id": "server.use.sessions",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "use",
@@ -18414,7 +18466,7 @@
     },
     {
       "id": "server.version",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "version"
@@ -18463,7 +18515,7 @@
     },
     {
       "id": "server.websites",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites"
@@ -18512,7 +18564,7 @@
     },
     {
       "id": "server.websites.add-content",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites",
@@ -18598,7 +18650,7 @@
     },
     {
       "id": "server.websites.content-type",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites",
@@ -18666,7 +18718,7 @@
     },
     {
       "id": "server.websites.list",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites",
@@ -18706,7 +18758,7 @@
     },
     {
       "id": "server.websites.rm",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites",
@@ -18746,7 +18798,7 @@
     },
     {
       "id": "server.websites.rm-content",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites",
@@ -18814,7 +18866,7 @@
     },
     {
       "id": "server.websites.show",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "websites",
@@ -18854,7 +18906,7 @@
     },
     {
       "id": "server.wg",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "wg"
@@ -18930,7 +18982,7 @@
     },
     {
       "id": "server.wg-config",
-      "baselineCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+      "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
       "surface": "server",
       "path": [
         "wg-config"

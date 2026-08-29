@@ -273,6 +273,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     getExecutionResult: vi.fn(failed),
     importConfig: vi.fn(failed),
     listExecutionCatalog: vi.fn(failed),
+    listLocalNetworkInterfaces: vi.fn(failed),
     listBeaconTasks: vi.fn().mockResolvedValue({
       ok: true,
       value: { items: [], page: { limit: 100, total: 0, truncated: false } },

@@ -24,7 +24,7 @@
   },
   "generatedProtobuf": {
     "baseline": "protocol/sliver-baseline.json",
-    "sourceCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
+    "sourceCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
     "paths": [
       "src/pb/clientpb/client.ts",
       "src/pb/commonpb/common.ts",

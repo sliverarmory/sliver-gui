@@ -1,14 +1,25 @@
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
-import { Description, Input, Label, ListBox, Select, TextArea, TextField } from "@heroui/react";
+import {
+  Description,
+  FieldError,
+  Input,
+  Label,
+  ListBox,
+  Select,
+  TextArea,
+  TextField,
+} from "@heroui/react";
 import { CellSwitch } from "@heroui-pro/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faChevronDown } from "@fortawesome/free-solid-svg-icons";
+import type { ReactNode } from "react";
 
 interface FieldProps {
   label: string;
   value: string;
   onChange: (value: string) => void;
   description?: string;
+  error?: string | undefined;
   placeholder?: string;
   type?: "text" | "number" | "password" | "datetime-local";
   min?: number;
@@ -24,6 +35,7 @@ export function Field({
   value,
   onChange,
   description,
+  error,
   placeholder,
   type = "text",
   min,
@@ -38,6 +50,7 @@ export function Field({
       fullWidth
       variant="secondary"
       name={name ?? label.toLowerCase().replaceAll(" ", "-")}
+      isInvalid={Boolean(error)}
       value={value}
       onChange={onChange}
       type={type}
@@ -52,12 +65,14 @@ export function Field({
         {...(max === undefined ? {} : { max })}
       />
       {description ? <Description>{description}</Description> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </TextField>
   );
 }
 
 interface AreaFieldProps extends Omit<FieldProps, "type" | "min" | "max"> {
   rows?: number;
+  action?: ReactNode;
 }
 
 export function AreaField({
@@ -65,28 +80,35 @@ export function AreaField({
   value,
   onChange,
   description,
+  error,
   placeholder,
   rows = 4,
   required,
   mono,
   name,
+  action,
 }: AreaFieldProps) {
   return (
     <TextField
       fullWidth
       variant="secondary"
       name={name ?? label.toLowerCase().replaceAll(" ", "-")}
+      isInvalid={Boolean(error)}
       value={value}
       onChange={onChange}
       {...(required ? { isRequired: true } : {})}
     >
-      <Label>{label}</Label>
+      <div className="flex items-center justify-between gap-3">
+        <Label>{label}</Label>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
       <TextArea
         {...(mono ? { className: "font-mono text-xs" } : {})}
         {...(placeholder ? { placeholder } : {})}
         rows={rows}
       />
       {description ? <Description>{description}</Description> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </TextField>
   );
 }
@@ -104,6 +126,7 @@ interface SelectFieldProps<Value extends string> {
   options: readonly SelectFieldOption<Value>[];
   description?: string;
   disabled?: boolean;
+  error?: string | undefined;
 }
 
 const EMPTY_SELECT_KEY = "__sliver_empty_option__";
@@ -128,6 +151,7 @@ export function SelectField<Value extends string>({
   options,
   description,
   disabled,
+  error,
 }: SelectFieldProps<Value>) {
   const selectedOption = options.find((option) => option.value === value);
 
@@ -136,6 +160,7 @@ export function SelectField<Value extends string>({
       fullWidth
       variant="secondary"
       value={optionKey(value)}
+      isInvalid={Boolean(error)}
       {...(disabled ? { isDisabled: true } : {})}
       onChange={(nextValue) => {
         const selectedValue = selectFieldValueFromKey(options, nextValue);
@@ -182,6 +207,7 @@ export function SelectField<Value extends string>({
         </ListBox>
       </Select.Popover>
       {description ? <Description>{description}</Description> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </Select>
   );
 }

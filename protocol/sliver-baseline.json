@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "repository": "https://github.com/BishopFox/sliver.git",
-  "commit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
-  "tree": "62d00f3225977ecbcc723f847f2df2bcd14549cb",
+  "commit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
+  "tree": "25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1",
   "commandSources": [
     "client/command/server.go",
     "client/command/sliver.go",
     "client/cli/cli.go"
   ],
   "protobuf": {
-    "sourceCommit": "9ff9b55352eb1c8f2ff6a906bb691e9cee5bcaa9",
-    "descriptorSetSha256": "1448165f61ec76019c7dd3adbc284468109959fb23dd14ee8281c4b9c31a013f",
+    "sourceCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
+    "descriptorSetSha256": "3494d2caef3f8dedf17c05d3f1d7eb246b162e282e98dca3f759b3d29abe616d",
     "files": [
       {
         "path": "commonpb/common.proto",
@@ -18,11 +18,11 @@
       },
       {
         "path": "clientpb/client.proto",
-        "sha256": "00a3ba3e5ac798525d95be4af06ba1abdc0b94c1bc92b5427b7b150d1a9c4917"
+        "sha256": "8b0ffbd495e6d80ebfa133d850558d7f4631ade4562e6873eb25a28837d15930"
       },
       {
         "path": "sliverpb/sliver.proto",
-        "sha256": "368fa1381c0013a3f564ddce8ec1f4c6ed4f4c2c4ef04f498a7b224f821875dd"
+        "sha256": "e6f18211ab4ece5dd557fad79aeba218cf0b3097ba0d9237895e6a2b01fc5a76"
       },
       {
         "path": "rpcpb/services.proto",
@@ -40,11 +40,11 @@
       },
       {
         "path": "clientpb/client.ts",
-        "sha256": "d9c9472a2b9302fc3453a85a0a44c695df3b1e68a0c9d516e87d35759df59a0f"
+        "sha256": "eaf9b3fefacc227a729a82a5735a73dd01019cc2d5ea5953d5e4fe1760e04882"
       },
       {
         "path": "sliverpb/sliver.ts",
-        "sha256": "73517636b99ac563074e2a6af2acd7fed0bcd9417b8f80afb984efebf78308c0"
+        "sha256": "844a9c73939361e29ee27ca9af0fa3949c5fcb6ef89f94d372dd35379d8854fe"
       },
       {
         "path": "rpcpb/services.ts",
@@ -66,7 +66,7 @@
     ]
   },
   "toolchain": {
-    "go": "1.25.8",
+    "go": "1.26.6",
     "node": "24.0.0",
     "npm": "11.19.0",
     "protoc": "35.1",
