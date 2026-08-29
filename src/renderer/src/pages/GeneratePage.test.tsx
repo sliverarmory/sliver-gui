@@ -51,6 +51,41 @@ function readyGenerationSnapshot() {
   return snapshot;
 }
 
+function targetMatrixSnapshot() {
+  const snapshot = readyGenerationSnapshot();
+  snapshot.domains.compiler.items = [
+    { os: "windows", arch: "386", format: "archive", supported: true },
+    { os: "windows", arch: "386", format: "executable", supported: true },
+    { os: "windows", arch: "amd64", format: "archive", supported: true },
+    { os: "windows", arch: "amd64", format: "executable", supported: true },
+    { os: "darwin", arch: "amd64", format: "archive", supported: true },
+    { os: "darwin", arch: "amd64", format: "executable", supported: true },
+    { os: "darwin", arch: "arm64", format: "archive", supported: true },
+    { os: "darwin", arch: "arm64", format: "executable", supported: true },
+    { os: "linux", arch: "386", format: "executable", supported: true },
+    { os: "linux", arch: "amd64", format: "executable", supported: true },
+    { os: "aix", arch: "ppc64", format: "executable", supported: false },
+    { os: "android", arch: "arm64", format: "executable", supported: false },
+    { os: "dragonfly", arch: "amd64", format: "executable", supported: false },
+    { os: "freebsd", arch: "386", format: "executable", supported: false },
+    { os: "freebsd", arch: "amd64", format: "executable", supported: false },
+    { os: "illumos", arch: "amd64", format: "executable", supported: false },
+    { os: "ios", arch: "arm64", format: "executable", supported: false },
+    { os: "js", arch: "wasm", format: "executable", supported: false },
+    { os: "netbsd", arch: "amd64", format: "executable", supported: false },
+    { os: "openbsd", arch: "amd64", format: "executable", supported: false },
+    { os: "plan9", arch: "amd64", format: "executable", supported: false },
+    { os: "solaris", arch: "amd64", format: "executable", supported: false },
+    { os: "wasip1", arch: "wasm", format: "executable", supported: false },
+  ];
+  snapshot.domains.compiler.page = {
+    limit: 500,
+    total: snapshot.domains.compiler.items.length,
+    truncated: false,
+  };
+  return snapshot;
+}
+
 describe("GeneratePage action footer", () => {
   it("keeps the reusable profile form and build actions outside the scrolling form body", () => {
     render(<GeneratePage snapshot={disconnectedSnapshot()} />);
@@ -77,8 +112,106 @@ describe("GeneratePage action footer", () => {
 
     expect(screen.getByText("Compiler targets are not loaded")).toBeInTheDocument();
     expect(screen.getByText("0 compiler targets")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "All platforms" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Generate and save" })).toBeDisabled();
+  });
+
+  it("keeps section titles and subtitles in the icon row", () => {
+    render(<GeneratePage snapshot={readyGenerationSnapshot()} />);
+
+    for (const [title, subtitle] of [
+      ["Artifact", "Choose the build identity, target, and output container."],
+      ["Command and control", "Endpoints are attempted in the listed order unless a strategy is selected."],
+    ] as const) {
+      const header = screen.getByText(title).closest<HTMLElement>(".card__header");
+      expect(header).not.toBeNull();
+      if (!header) throw new Error(`${title} is not inside a card header`);
+      expect(header).toHaveClass("flex-row", "items-center", "gap-3");
+      expect(within(header).getByText(subtitle)).toBeInTheDocument();
+      expect(header.querySelector(".section-icon")).toHaveAttribute("aria-hidden", "true");
+    }
+  });
+
+  it("shows exact extended targets on demand and applies deterministic target defaults", async () => {
+    const user = userEvent.setup();
+    render(<GeneratePage snapshot={targetMatrixSnapshot()} />);
+
+    const allPlatforms = screen.getByRole("checkbox", { name: "All platforms" });
+    const osSelect = screen.getByRole("button", { name: /Operating system/i });
+    const archSelect = screen.getByRole("button", { name: /Architecture/i });
+    const formatSelect = screen.getByRole("button", { name: /Output format/i });
+
+    expect(allPlatforms).toBeEnabled();
+    expect(allPlatforms).not.toBeChecked();
+    expect(osSelect).toHaveTextContent("Windows");
+    expect(archSelect).toHaveTextContent("AMD64");
+    expect(formatSelect).toHaveTextContent("Executable");
+    expect(screen.getByText("10 compiler targets")).toBeInTheDocument();
+
+    await user.click(osSelect);
+    expect(screen.getByRole("option", { name: "Windows" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Linux" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "macOS" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "AIX" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "FreeBSD" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("option", { name: "macOS" }));
+    await waitFor(() => {
+      expect(archSelect).toHaveTextContent("ARM64");
+      expect(formatSelect).toHaveTextContent("Executable");
+    });
+
+    await user.click(osSelect);
+    await user.click(screen.getByRole("option", { name: "Windows" }));
+    await waitFor(() => {
+      expect(archSelect).toHaveTextContent("AMD64");
+      expect(formatSelect).toHaveTextContent("Executable");
+    });
+
+    await user.click(allPlatforms);
+    expect(allPlatforms).toBeChecked();
+    expect(screen.getByText("23 compiler targets")).toBeInTheDocument();
+    await user.click(osSelect);
+    for (const [label, icon] of [
+      ["AIX", "server"],
+      ["Android", "android"],
+      ["DragonFly BSD", "dragon"],
+      ["FreeBSD", "freebsd"],
+      ["illumos", "sun"],
+      ["iOS", "app-store-ios"],
+      ["JavaScript", "js"],
+      ["NetBSD", "flag"],
+      ["OpenBSD", "fish-fins"],
+      ["Plan 9", "carrot"],
+      ["Solaris", "sun"],
+      ["WebAssembly (WASI)", "cube"],
+    ] as const) {
+      expect(
+        screen.getByRole("option", { name: label }).querySelector(`svg[data-icon="${icon}"]`),
+      ).toBeInTheDocument();
+    }
+
+    await user.click(screen.getByRole("option", { name: "FreeBSD" }));
+    await waitFor(() => {
+      expect(archSelect).toHaveTextContent("AMD64");
+      expect(formatSelect).toHaveTextContent("Executable");
+    });
+    expect(screen.getByText(/extended platform target/i)).toBeInTheDocument();
+
+    await user.click(archSelect);
+    expect(screen.getByRole("option", { name: "AMD64" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "x86 (386)" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "ARM64" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "x86 (386)" }));
+    await waitFor(() => expect(formatSelect).toHaveTextContent("Executable"));
+
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+    await waitFor(() => {
+      expect(osSelect).toHaveTextContent("Windows");
+      expect(archSelect).toHaveTextContent("AMD64");
+      expect(formatSelect).toHaveTextContent("Executable");
+    });
   });
 
   it("enables generation only for targets advertised by the connected server", () => {

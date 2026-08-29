@@ -5949,7 +5949,7 @@ class BackendPool {
     const match = this.snapshot.compilerTargets.find(
       (target) => target.os === os && target.arch === arch && target.format === input.format,
     );
-    if (!match?.supported) throw new Error(`The server cannot build ${input.format} for ${os}/${arch}`);
+    if (!match) throw new Error(`The server cannot build ${input.format} for ${os}/${arch}`);
   }
 
   private subscribe(): void {

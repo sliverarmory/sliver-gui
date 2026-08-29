@@ -603,6 +603,9 @@ describe("connection registry with an injected Sliver client", () => {
     const client = new FakeSliverClient();
     client.compilerState = clientpb.Compiler.create({
       Targets: [clientpb.CompilerTarget.create({ GOOS: "darwin", GOARCH: "arm64", Format: clientpb.OutputFormat.EXECUTABLE })],
+      UnsupportedTargets: [
+        clientpb.CompilerTarget.create({ GOOS: "freebsd", GOARCH: "amd64", Format: clientpb.OutputFormat.EXECUTABLE }),
+      ],
     });
     client.buildState.Configs["existing"] = clientpb.ImplantConfig.create({
       ID: "build-id",
@@ -617,6 +620,7 @@ describe("connection registry with an injected Sliver client", () => {
 
     expect(registry.snapshot(1).compilerTargets).toEqual([
       { os: "darwin", arch: "arm64", format: "executable", supported: true },
+      { os: "freebsd", arch: "amd64", format: "executable", supported: false },
     ]);
     expect(registry.snapshot(1).builds[0]?.c2).toEqual(["https://c2.test"]);
     expect(JSON.stringify(registry.snapshot(1))).not.toContain("password");
@@ -631,7 +635,14 @@ describe("connection registry with an injected Sliver client", () => {
     expect(generated).toMatchObject({ ok: true, value: { implantName: "generated", saved: false } });
     expect(client.generateImplant).toHaveBeenCalled();
 
+    input.name = "generic-target";
+    input.os = "freebsd";
     input.arch = "amd64";
+    const generic = await registry.generate(sender(1), input);
+    expect(generic).toMatchObject({ ok: true, value: { implantName: "generic-target", saved: false } });
+    expect(client.generateImplant).toHaveBeenCalledTimes(2);
+
+    input.arch = "arm64";
     await expect(registry.generate(sender(1), input)).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/cannot build/),

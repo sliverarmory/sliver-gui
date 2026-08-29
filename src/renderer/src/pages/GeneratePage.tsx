@@ -1,14 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Chip, Spinner, toast } from "@heroui/react";
+import { Button, Card, Checkbox, Chip, Spinner, toast } from "@heroui/react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faApple, faLinux, faWindows } from "@fortawesome/free-brands-svg-icons";
+import {
+  faAndroid,
+  faApple,
+  faAppStoreIos,
+  faFreebsd,
+  faJs,
+  faLinux,
+  faWindows,
+} from "@fortawesome/free-brands-svg-icons";
 import {
   faArrowRight,
   faArrowRotateLeft,
   faBan,
   faBolt,
   faBoxArchive,
+  faCarrot,
   faChevronRight,
   faCircleExclamation,
   faCircleNotch,
@@ -16,11 +25,15 @@ import {
   faCode,
   faCodeBranch,
   faCopy,
+  faCube,
   faDesktop,
   faDice,
   faDownload,
+  faDragon,
   faEraser,
   faFileCode,
+  faFishFins,
+  faFlag,
   faFloppyDisk,
   faGaugeHigh,
   faGaugeSimple,
@@ -32,12 +45,15 @@ import {
   faPlus,
   faPuzzlePiece,
   faSatelliteDish,
+  faServer,
   faShieldHalved,
   faShuffle,
+  faSun,
   faTerminal,
 } from "@fortawesome/free-solid-svg-icons";
 import type {
   ArtifactFormat,
+  CompilerTargetSummary,
   GenerateInput,
   SliverSnapshot,
 } from "../../../shared/contracts";
@@ -70,16 +86,50 @@ const formatLabels: Record<ArtifactFormat, string> = {
 };
 
 const operatingSystemIcons: Record<string, IconDefinition> = {
-  windows: faWindows,
+  aix: faServer,
+  android: faAndroid,
   darwin: faApple,
+  dragonfly: faDragon,
+  freebsd: faFreebsd,
+  illumos: faSun,
+  ios: faAppStoreIos,
+  js: faJs,
   linux: faLinux,
+  netbsd: faFlag,
+  openbsd: faFishFins,
+  plan9: faCarrot,
+  solaris: faSun,
+  wasip1: faCube,
+  windows: faWindows,
 };
 
 const operatingSystemLabels: Record<string, string> = {
+  aix: "AIX",
+  android: "Android",
   windows: "Windows",
   darwin: "macOS",
+  dragonfly: "DragonFly BSD",
+  freebsd: "FreeBSD",
+  illumos: "illumos",
+  ios: "iOS",
+  js: "JavaScript",
   linux: "Linux",
+  netbsd: "NetBSD",
+  openbsd: "OpenBSD",
+  plan9: "Plan 9",
+  solaris: "Solaris",
+  wasip1: "WebAssembly (WASI)",
 };
+
+const operatingSystemPriority = ["windows", "linux", "darwin"] as const;
+
+const formatPriority = [
+  "executable",
+  "service",
+  "shared",
+  "shellcode",
+  "archive",
+] as const satisfies readonly ArtifactFormat[];
 
 const implantTypeOptions = [
   { value: "session", label: "Interactive session", icon: faTerminal },
@@ -150,7 +200,12 @@ function architectureOption(arch: string): SelectFieldOption {
   const normalized = arch.toLowerCase();
   return {
     value: arch,
-    label: normalized === "386" ? "x86 (386)" : arch.toUpperCase(),
+    label:
+      normalized === "386"
+        ? "x86 (386)"
+        : normalized === "wasm"
+          ? "WebAssembly"
+          : arch.toUpperCase(),
     icon: normalized.includes("arm") || normalized.includes("riscv") ? faMicrochip : faDesktop,
   };
 }
@@ -159,8 +214,77 @@ function formatOption(format: ArtifactFormat): SelectFieldOption<ArtifactFormat>
   return { value: format, label: formatLabels[format], icon: formatIcons[format] };
 }
 
-function unique<Value extends string>(values: readonly Value[]): Value[] {
-  return [...new Set(values)].sort();
+function prioritizedUnique<Value extends string>(
+  values: readonly Value[],
+  priority: readonly string[] = [],
+): Value[] {
+  return [...new Set(values)].sort((left, right) => {
+    const leftPriority = priority.indexOf(left);
+    const rightPriority = priority.indexOf(right);
+    if (leftPriority >= 0 || rightPriority >= 0) {
+      if (leftPriority < 0) return 1;
+      if (rightPriority < 0) return -1;
+      return leftPriority - rightPriority;
+    }
+    return left.localeCompare(right);
+  });
+}
+
+function preferredArchitecture(
+  os: string,
+  targets: readonly CompilerTargetSummary[],
+): string | undefined {
+  const priority = os === "darwin" ? ["arm64", "amd64"] : ["amd64", "arm64", "386"];
+  return prioritizedUnique(
+    targets.filter((target) => target.os === os).map((target) => target.arch),
+    priority,
+  )[0];
+}
+
+function preferredFormat(
+  os: string,
+  arch: string,
+  targets: readonly CompilerTargetSummary[],
+): ArtifactFormat | undefined {
+  return prioritizedUnique(
+    targets
+      .filter((target) => target.os === os && target.arch === arch)
+      .map((target) => target.format),
+    formatPriority,
+  )[0];
+}
+
+function normalizeGenerateTarget(
+  input: GenerateInput,
+  targets: readonly CompilerTargetSummary[],
+): GenerateInput {
+  if (
+    targets.some(
+      (target) =>
+        target.os === input.os && target.arch === input.arch && target.format === input.format,
+    )
+  ) {
+    return input;
+  }
+
+  const operatingSystems = prioritizedUnique(
+    targets.map((target) => target.os),
+    operatingSystemPriority,
+  );
+  const os = targets.some((target) => target.os === input.os)
+    ? input.os
+    : targets.some((target) => target.os === defaultGenerateInput.os)
+      ? defaultGenerateInput.os
+      : operatingSystems[0];
+  if (!os) return input;
+
+  const arch = targets.some((target) => target.os === os && target.arch === input.arch)
+    ? input.arch
+    : preferredArchitecture(os, targets);
+  if (!arch) return input;
+
+  const format = preferredFormat(os, arch, targets);
+  return format ? { ...input, os, arch, format } : input;
 }
 
 type KeysWithValue<T, Value> = {
@@ -191,42 +315,43 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [isListenerSelectorOpen, setIsListenerSelectorOpen] = useState(false);
+  const [showAllPlatforms, setShowAllPlatforms] = useState(false);
 
   const compilerDomain = snapshot.domains.compiler;
-  const targets = useMemo(
+  const commonTargets = useMemo(
     () => compilerDomain.items.filter((target) => target.supported),
     [compilerDomain.items],
   );
+  const targets = showAllPlatforms ? compilerDomain.items : commonTargets;
   const compilerReady = compilerDomain.status === "ready" && targets.length > 0;
+  const hasExtendedTargets = compilerDomain.items.some((target) => !target.supported);
   const profileInventory = snapshot.domains.profiles;
   const profileInventoryAuthoritative =
     (profileInventory.status === "ready" || profileInventory.status === "empty") &&
     !profileInventory.page.truncated;
 
   useEffect(() => {
-    const firstTarget = targets[0];
-    if (!firstTarget) return;
-    setForm((current) => {
-      const currentIsSupported = targets.some(
-        (target) =>
-          target.os === current.os &&
-          target.arch === current.arch &&
-          target.format === current.format,
-      );
-      return currentIsSupported
-        ? current
-        : { ...current, os: firstTarget.os, arch: firstTarget.arch, format: firstTarget.format };
-    });
+    if (targets.length === 0) return;
+    setForm((current) => normalizeGenerateTarget(current, targets));
   }, [targets]);
 
-  const operatingSystems = unique(targets.map((target) => target.os));
-  const architectures = unique(
-    targets.filter((target) => target.os === form.os).map((target) => target.arch),
+  const operatingSystems = prioritizedUnique(
+    targets.map((target) => target.os),
+    operatingSystemPriority,
   );
-  const formats = unique(
+  const architectures = prioritizedUnique(
+    targets.filter((target) => target.os === form.os).map((target) => target.arch),
+    form.os === "darwin" ? ["arm64", "amd64"] : ["amd64", "arm64", "386"],
+  );
+  const formats = prioritizedUnique(
     targets
       .filter((target) => target.os === form.os && target.arch === form.arch)
       .map((target) => target.format),
+    formatPriority,
+  );
+  const selectedTarget = targets.find(
+    (target) =>
+      target.os === form.os && target.arch === form.arch && target.format === form.format,
   );
   const formErrors = useMemo(() => {
     const errors = validateGenerateInput(form);
@@ -277,25 +402,20 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
 
   function resetForm() {
     const next = cloneGenerateInput(defaultGenerateInput);
-    const firstTarget = targets[0];
-    if (firstTarget) {
-      next.os = firstTarget.os;
-      next.arch = firstTarget.arch;
-      next.format = firstTarget.format;
-    }
-    setForm(next);
+    setForm(normalizeGenerateTarget(next, targets));
   }
 
   function changeOperatingSystem(os: string) {
-    const nextArch = targets.find((target) => target.os === os)?.arch ?? form.arch;
-    const nextFormat =
-      targets.find((target) => target.os === os && target.arch === nextArch)?.format ?? form.format;
+    const nextArch = preferredArchitecture(os, targets);
+    if (!nextArch) return;
+    const nextFormat = preferredFormat(os, nextArch, targets);
+    if (!nextFormat) return;
     setForm((current) => ({ ...current, os, arch: nextArch, format: nextFormat }));
   }
 
   function changeArchitecture(arch: string) {
-    const nextFormat =
-      targets.find((target) => target.os === form.os && target.arch === arch)?.format ?? form.format;
+    const nextFormat = preferredFormat(form.os, arch, targets);
+    if (!nextFormat) return;
     setForm((current) => ({ ...current, arch, format: nextFormat }));
   }
 
@@ -422,9 +542,9 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
           ) : null}
 
       <Card variant="secondary">
-        <Card.Header>
-          <div className="section-icon"><FontAwesomeIcon icon={faCode} /></div>
-          <div>
+        <Card.Header className="flex-row items-center gap-3">
+          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faCode} /></span>
+          <div className="min-w-0 flex-1">
             <Card.Title>Artifact</Card.Title>
             <Card.Description>Choose the build identity, target, and output container.</Card.Description>
           </div>
@@ -444,6 +564,25 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={(value) => update("implantType", value)}
             options={implantTypeOptions}
           />
+          <div className="col-span-full flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-muted">
+              Common targets are shown by default. Extended targets may have limited command support.
+            </p>
+            <Checkbox
+              aria-label="All platforms"
+              isDisabled={compilerDomain.status !== "ready" || !hasExtendedTargets}
+              isSelected={showAllPlatforms}
+              variant="secondary"
+              onChange={setShowAllPlatforms}
+            >
+              <Checkbox.Content>
+                <Checkbox.Control>
+                  <Checkbox.Indicator />
+                </Checkbox.Control>
+                All platforms
+              </Checkbox.Content>
+            </Checkbox>
+          </div>
           <SelectField
             label="Operating system"
             value={form.os}
@@ -474,13 +613,22 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
             onChange={(value) => update("templateName", value)}
             placeholder="sliver"
           />
+          {selectedTarget && !selectedTarget.supported ? (
+            <div
+              className="col-span-full flex items-start gap-2 rounded-xl border border-warning/25 bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground"
+              role="status"
+            >
+              <FontAwesomeIcon aria-hidden icon={faCircleExclamation} className="mt-0.5 size-3.5 shrink-0" />
+              This is an extended platform target. The server can compile it, but some commands and features may be unavailable.
+            </div>
+          ) : null}
         </Card.Content>
       </Card>
 
       <Card variant="secondary">
-        <Card.Header>
-          <div className="section-icon"><FontAwesomeIcon icon={faGlobe} /></div>
-          <div>
+        <Card.Header className="flex-row items-center gap-3">
+          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faGlobe} /></span>
+          <div className="min-w-0 flex-1">
             <Card.Title>Command and control</Card.Title>
             <Card.Description>Endpoints are attempted in the listed order unless a strategy is selected.</Card.Description>
           </div>
