@@ -174,6 +174,11 @@ test(
       await terminal.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.locator('[data-terminal-state="ready"]').waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.getByText("Attached", { exact: true }).first().waitFor();
+      const commandInput = shellCommandInput(page, terminal, authorizedSession.OS);
+      await commandInput.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
+      if (isWindows(authorizedSession.OS)) {
+        assert.equal(await terminal.getAttribute("aria-readonly"), "true");
+      }
 
       const openedInventory = await waitForManagedShellCount(page, 1);
       const resource = openedInventory.resources[0]!;
@@ -188,9 +193,10 @@ test(
       const firstMarker = syntheticMarker("OPEN");
       await sendSyntheticCommandAndVerifyOutput(
         page,
-        terminal,
+        commandInput,
         ownedShellProcess.executable,
         firstMarker,
+        authorizedSession.OS,
       );
       await waitForNonZeroTerminalMetric(page, "Bytes in");
       await waitForNonZeroTerminalMetric(page, "Bytes out");
@@ -203,9 +209,10 @@ test(
         const resizedMarker = syntheticMarker("RESIZED");
         await sendSyntheticCommandAndVerifyOutput(
           page,
-          terminal,
+          commandInput,
           ownedShellProcess.executable,
           resizedMarker,
+          authorizedSession.OS,
         );
       } else {
         assert.equal(await readResizeFrameCount(page), 0, "a non-PTY shell must not emit resize frames");
@@ -215,6 +222,9 @@ test(
       await page.getByRole("button", { name: "Detach", exact: true }).click();
       await page.getByText("Shell is not attached", { exact: true }).waitFor();
       assert.equal(await terminal.count(), 0, "detach must dispose the payload-bearing terminal surface");
+      if (isWindows(authorizedSession.OS)) {
+        assert.equal(await commandInput.count(), 0, "detach must dispose the Windows command composer");
+      }
       const detached = await waitForManagedResourceState(page, resource.resourceId, "detached");
       assert.equal(detached.resourceId, resource.resourceId);
       await assertRemoteProcessPresent(client, authorizedSession, ownedShellProcess);
@@ -227,6 +237,12 @@ test(
       await reattachedTerminal.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.locator('[data-terminal-state="ready"]').waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.getByText("Attached", { exact: true }).first().waitFor();
+      const reattachedCommandInput = shellCommandInput(
+        page,
+        reattachedTerminal,
+        authorizedSession.OS,
+      );
+      await reattachedCommandInput.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       assert.equal(
         await page.getByRole("button", { name: "Attach", exact: true }).count(),
         0,
@@ -242,9 +258,10 @@ test(
       const reattachedMarker = syntheticMarker("REATTACHED");
       await sendSyntheticCommandAndVerifyOutput(
         page,
-        reattachedTerminal,
+        reattachedCommandInput,
         ownedShellProcess.executable,
         reattachedMarker,
+        authorizedSession.OS,
       );
       await assertRemoteProcessPresent(client, authorizedSession, ownedShellProcess);
 
@@ -596,14 +613,26 @@ function syntheticCommand(executable: string, marker: string): string {
 
 async function sendSyntheticCommandAndVerifyOutput(
   page: Page,
-  terminal: ReturnType<Page["getByRole"]>,
+  commandInput: ReturnType<Page["getByRole"]>,
   executable: string,
   marker: string,
+  os: string,
 ): Promise<void> {
   await clearRenderedGlyphs(page);
-  await terminal.pressSequentially(syntheticCommand(executable, marker));
-  await terminal.press("Enter");
+  await commandInput.pressSequentially(syntheticCommand(executable, marker));
+  await commandInput.press("Enter");
+  if (isWindows(os)) assert.equal(await commandInput.inputValue(), "");
   await waitForRenderedMarker(page, marker);
+}
+
+function shellCommandInput(
+  page: Page,
+  terminal: ReturnType<Page["getByRole"]>,
+  os: string,
+): ReturnType<Page["getByRole"]> {
+  return isWindows(os)
+    ? page.getByRole("textbox", { name: "Windows command", exact: true })
+    : terminal;
 }
 
 interface RendererStreamProbe {

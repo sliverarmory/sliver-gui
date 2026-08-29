@@ -19,6 +19,7 @@ const ghosttyMocks = vi.hoisted(() => ({
     emitResize: (cols: number, rows: number) => void;
     focus: ReturnType<typeof vi.fn>;
     getSelection: ReturnType<typeof vi.fn>;
+    options: Record<string, unknown>;
     paste: ReturnType<typeof vi.fn>;
     rows: number;
     simulateSelectionDoubleClick: () => void;
@@ -73,7 +74,7 @@ vi.mock("ghostty-web", () => {
       document.removeEventListener("mouseup", this.selectionMouseUp);
     });
 
-    constructor(_options: unknown) {
+    constructor(readonly options: Record<string, unknown>) {
       ghosttyMocks.terminals.push(this);
     }
 
@@ -283,6 +284,32 @@ describe("GhosttyTerminal", () => {
 
     act(() => requireTerminal().emitData("typed"));
     expect(sentFrames(transport.send).at(-1)).toEqual({ data: "typed", source: "operator" });
+  });
+
+  it("makes an output-only terminal inert without forwarding operator or terminal-response bytes", async () => {
+    installWebAssemblyMocks();
+    const transport = fakeTransport();
+    ghosttyMocks.responsesPerWrite.push(["\u001b[1;1R"]);
+
+    render(
+      <GhosttyTerminal
+        ariaLabel="Windows shell output"
+        disableInput
+        transport={transport.api}
+        wasmBytes={new Uint8Array([0x00])}
+      />,
+    );
+    const host = await screen.findByRole("textbox", { name: "Windows shell output" });
+    const terminal = requireTerminal();
+
+    expect(terminal.options["disableStdin"]).toBe(true);
+    expect(host).toHaveAttribute("aria-readonly", "true");
+    act(() => terminal.emitData("whoami\r"));
+    act(() => transport.emitOutput(encoder.encode("result\u001b[6n")));
+
+    expect(transport.send).not.toHaveBeenCalled();
+    expect(terminal.write).toHaveBeenCalledOnce();
+    expect(decoder.decode(terminal.write.mock.calls[0]?.[0] as Uint8Array)).toBe("result\u001b[6n");
   });
 
   it("preserves workspace focus and exposes only bounded explicit handle operations", async () => {

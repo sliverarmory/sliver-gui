@@ -64,6 +64,7 @@ export interface GhosttyTerminalProps {
   appearance?: GhosttyTerminalAppearance;
   ariaLabel?: string;
   className?: string;
+  disableInput?: boolean;
   terminalResponseBudgetBytes?: number;
   onClose?: (reason?: string) => void;
   onError?: (error: Error) => void;
@@ -83,6 +84,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       appearance,
       ariaLabel = "Interactive session terminal",
       className,
+      disableInput = false,
       onClose,
       onError,
       onReady,
@@ -277,6 +279,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         terminal = new Terminal({
           cursorBlink: appearance?.cursorBlink ?? true,
           cursorStyle: appearance?.cursorStyle ?? "block",
+          disableStdin: disableInput,
           fontFamily: appearance?.fontFamily ?? "SFMono-Regular, Consolas, Liberation Mono, monospace",
           fontSize: boundedNumber(appearance?.fontSize, 8, 32, 13),
           ghostty,
@@ -285,13 +288,14 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
           ...(appearance?.theme ? { theme: appearance.theme } : {}),
         });
         terminalRef.current = terminal;
-        inputSubscription = terminal.onData(sendTerminalData);
+        if (!disableInput) inputSubscription = terminal.onData(sendTerminalData);
         resizeSubscription = terminal.onResize(({ cols, rows }) => scheduleResize(cols, rows));
         fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(host);
         disablePinnedGhosttyAutoCopy(terminal);
         host.setAttribute("aria-label", ariaLabel);
+        if (disableInput) host.setAttribute("aria-readonly", "true");
         // Terminal.open focuses its contenteditable host. Return focus to the
         // workspace tab/trigger until the operator explicitly focuses here.
         terminal.blur();
@@ -349,6 +353,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       appearance?.scrollback,
       appearance?.theme,
       ariaLabel,
+      disableInput,
       onCloseRef,
       onErrorRef,
       onReadyRef,

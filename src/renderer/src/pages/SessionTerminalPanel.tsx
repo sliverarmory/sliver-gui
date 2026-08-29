@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type RefObject,
 } from "react";
 import type { Selection } from "react-aria-components";
@@ -12,8 +13,11 @@ import {
   AlertDialog,
   Button,
   Chip,
+  Input,
+  Label,
   Modal,
   ScrollShadow,
+  TextField,
   Toolbar,
   Tooltip,
   toast,
@@ -36,6 +40,7 @@ import type {
   SessionShellResourceList,
   TerminalRuntimeAsset,
 } from "../../../shared/stream-contracts";
+import { STREAM_MAX_FRAME_BYTES } from "../../../shared/stream-contracts";
 import {
   GhosttyTerminal,
   type GhosttyTerminalHandle,
@@ -50,6 +55,10 @@ const DEFAULT_COLUMNS = 80;
 const MAX_PASTE_BYTES = 64 * 1_024;
 const METRICS_UPDATE_MILLISECONDS = 250;
 const WIDE_SHELL_WORKSPACE_QUERY = "(min-width: 768px)";
+const WINDOWS_COMMAND_TERMINATOR = "\r";
+const MAX_WINDOWS_COMMAND_BYTES = STREAM_MAX_FRAME_BYTES;
+
+const textEncoder = new TextEncoder();
 
 let cachedTerminalRuntime: TerminalRuntimeAsset | undefined;
 let pendingTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
@@ -130,6 +139,7 @@ export function SessionTerminalPanel({
   const preferredAttachmentKeyRef = useRef<string | undefined>(undefined);
   const pendingTerminalFocusResourceIdRef = useRef<string | undefined>(undefined);
   const pendingPasteRef = useRef<string | undefined>(undefined);
+  const windowsCommandInputRef = useRef<HTMLInputElement>(null);
 
   const [panelStatus, setPanelStatus] = useState<PanelStatus>("loading");
   const [error, setError] = useState<string>();
@@ -151,6 +161,19 @@ export function SessionTerminalPanel({
   const isCurrent = useCallback((expectedIdentity = routeIdentity) => (
     routeIdentityRef.current === expectedIdentity
   ), [routeIdentity]);
+
+  const focusAttachedResource = useCallback((entry: AttachedTerminal): void => {
+    if (isWindows(session.os)) {
+      window.requestAnimationFrame(() => {
+        if (
+          selectedResourceIdRef.current === entry.resourceId &&
+          attachedTerminalsRef.current.get(entry.resourceId) === entry
+        ) windowsCommandInputRef.current?.focus();
+      });
+      return;
+    }
+    entry.terminalRef.current?.focus();
+  }, [session.os]);
 
   const releaseTransport = useCallback((
     resourceId: string,
@@ -455,7 +478,7 @@ export function SessionTerminalPanel({
           pendingTerminalFocusResourceIdRef.current = resourceId;
           setTransportSnapshot(attached.latestSnapshot);
           setIsShellListOpen(false);
-          attached.terminalRef.current?.focus();
+          focusAttachedResource(attached);
           break;
         }
 
@@ -572,7 +595,7 @@ export function SessionTerminalPanel({
       }
     });
     attachmentPumpRef.current = { generation, promise: pump };
-  }, [activateTransport, isCurrent, loadInventory, routeIdentity]);
+  }, [activateTransport, focusAttachedResource, isCurrent, loadInventory, routeIdentity]);
   startAttachmentPumpRef.current = startAttachmentPump;
 
   const selectAndAttach = useCallback((resourceId: string): void => {
@@ -595,7 +618,7 @@ export function SessionTerminalPanel({
       desiredAttachmentResourceIdRef.current = undefined;
       setTransportSnapshot(attached.latestSnapshot);
       setIsShellListOpen(false);
-      attached.terminalRef.current?.focus();
+      focusAttachedResource(attached);
       return;
     }
     if (
@@ -617,7 +640,7 @@ export function SessionTerminalPanel({
     desiredAttachmentResourceIdRef.current = resourceId;
     setError(undefined);
     startAttachmentPump(routeIdentity, lifecycleGenerationRef.current);
-  }, [routeIdentity, startAttachmentPump]);
+  }, [focusAttachedResource, routeIdentity, startAttachmentPump]);
 
   useEffect(() => {
     if (!preferredResourceId || panelStatus !== "ready" || !inventory) return;
@@ -752,6 +775,34 @@ export function SessionTerminalPanel({
     }
   }, [isCurrent]);
 
+  const submitWindowsCommand = useCallback((command: string): void => {
+    if (!isCurrent() || !isWindows(session.os)) {
+      throw new Error("Windows command input is no longer available");
+    }
+    if (command.includes("\0")) throw new Error("A command cannot contain NUL bytes");
+    if (/\r|\n/u.test(command)) throw new Error("Submit one command line at a time");
+
+    const resourceId = selectedResourceIdRef.current;
+    const entry = resourceId ? attachedTerminalsRef.current.get(resourceId) : undefined;
+    const resource = resourceId
+      ? inventoryRef.current?.resources.find((candidate) => candidate.resourceId === resourceId)
+      : undefined;
+    if (!entry || entry.latestSnapshot.state !== "attached" || resource?.pty !== "disabled") {
+      throw new Error("The selected Windows shell is not attached");
+    }
+
+    const bytes = textEncoder.encode(`${command}${WINDOWS_COMMAND_TERMINATOR}`);
+    if (bytes.byteLength > MAX_WINDOWS_COMMAND_BYTES) {
+      bytes.fill(0);
+      throw new Error(`A command cannot exceed ${MAX_WINDOWS_COMMAND_BYTES - 1} bytes`);
+    }
+    try {
+      entry.transport.send(bytes, "operator");
+    } finally {
+      bytes.fill(0);
+    }
+  }, [isCurrent, session.os]);
+
   const resources = useMemo(() => (
     [...(inventory?.resources ?? [])].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
   ), [inventory?.resources]);
@@ -781,6 +832,7 @@ export function SessionTerminalPanel({
           ref={entry.terminalRef}
           ariaLabel={`Interactive shell for ${session.name || session.hostname || session.id}`}
           className="min-h-[360px]"
+          disableInput={isWindows(session.os)}
           transport={entry.transport}
           wasmBytes={runtime.bytes}
           onReady={() => {
@@ -791,7 +843,7 @@ export function SessionTerminalPanel({
               !isCurrent()
             ) return;
             pendingTerminalFocusResourceIdRef.current = undefined;
-            entry.terminalRef.current?.focus();
+            focusAttachedResource(entry);
           }}
           onError={(terminalError) => {
             if (!isCurrent() || attachedTerminalsRef.current.get(entry.resourceId) !== entry) return;
@@ -829,6 +881,7 @@ export function SessionTerminalPanel({
       session={session}
       terminals={terminals}
       transportSnapshot={transportSnapshot}
+      windowsCommandInputRef={windowsCommandInputRef}
       onCopy={() => void copySelection()}
       onDetach={() => {
         if (selectedResource) void runResourceAction(selectedResource.resourceId, "detach");
@@ -838,6 +891,7 @@ export function SessionTerminalPanel({
       onRequestClose={(resourceId) => setPendingResourceAction({ resourceId, action: "close" })}
       onRequestKill={(resourceId) => setPendingResourceAction({ resourceId, action: "kill" })}
       onStart={() => void startShell()}
+      onSubmitWindowsCommand={submitWindowsCommand}
     />
   );
 
@@ -1058,6 +1112,7 @@ function TerminalSurface({
   session,
   terminals,
   transportSnapshot,
+  windowsCommandInputRef,
   onCopy,
   onDetach,
   onOpenShellList,
@@ -1065,6 +1120,7 @@ function TerminalSurface({
   onRequestClose,
   onRequestKill,
   onStart,
+  onSubmitWindowsCommand,
 }: {
   activeResourceId: string | undefined;
   error: string | undefined;
@@ -1076,6 +1132,7 @@ function TerminalSurface({
   session: SessionSummary;
   terminals: React.ReactNode;
   transportSnapshot: SessionShellTransportSnapshot;
+  windowsCommandInputRef: RefObject<HTMLInputElement | null>;
   onCopy: () => void;
   onDetach: () => void;
   onOpenShellList: () => void;
@@ -1083,8 +1140,12 @@ function TerminalSurface({
   onRequestClose: (resourceId: string) => void;
   onRequestKill: (resourceId: string) => void;
   onStart: () => void;
+  onSubmitWindowsCommand: (command: string) => void;
 }): React.JSX.Element {
   const isAttached = Boolean(selectedResource && activeResourceId === selectedResource.resourceId);
+  const usesWindowsCommandComposer = Boolean(
+    isAttached && selectedResource?.pty === "disabled" && isWindows(session.os),
+  );
   const isBusy = isStarting || isAttaching;
   const [isStatisticsOpen, setIsStatisticsOpen] = useState(false);
   const statisticsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1136,7 +1197,9 @@ function TerminalSurface({
           {isAttached ? (
             <>
               <Button size="sm" variant="ghost" onPress={onCopy}>Copy</Button>
-              <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
+              {!usesWindowsCommandComposer ? (
+                <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
+              ) : null}
               <Button isDisabled={isBusy} size="sm" variant="secondary" onPress={onDetach}>Detach</Button>
             </>
           ) : null}
@@ -1163,39 +1226,48 @@ function TerminalSurface({
         </Toolbar>
       </div>
 
-      <div className="relative min-h-0 flex-1">
-        {terminals}
-        {!isAttached ? (
-          <EmptyState className="h-full min-h-[420px] px-6 py-12">
-            <EmptyState.Header>
-              <EmptyState.Media variant="icon">
-                <FontAwesomeIcon aria-hidden icon={error || panelStatus === "error" ? faTriangleExclamation : faTerminal} />
-              </EmptyState.Media>
-              <EmptyState.Title>
-                {panelStatus === "loading"
-                  ? "Loading terminal runtime"
-                  : isAttaching && selectedResource
-                    ? "Attaching shell"
-                  : selectedResource
-                    ? "Shell is not attached"
-                    : "No shell selected"}
-              </EmptyState.Title>
-              <EmptyState.Description className="max-w-md text-pretty">
-                {panelStatus === "loading"
-                  ? "Verifying the pinned Ghostty runtime and this window’s managed streams…"
-                  : isAttaching && selectedResource
-                    ? "Opening the selected managed shell and its bounded terminal stream…"
-                  : selectedResource
-                    ? "Select this shell again from the managed shell inventory to retry attachment."
-                    : "Start a session shell or select an existing detached shell from the inventory."}
-              </EmptyState.Description>
-            </EmptyState.Header>
-            <EmptyState.Content>
-              {!selectedResource && panelStatus !== "loading" ? (
-                <Button isPending={isStarting} onPress={onStart}>New shell</Button>
-              ) : null}
-            </EmptyState.Content>
-          </EmptyState>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="relative min-h-0 flex-1">
+          {terminals}
+          {!isAttached ? (
+            <EmptyState className="h-full min-h-[420px] px-6 py-12">
+              <EmptyState.Header>
+                <EmptyState.Media variant="icon">
+                  <FontAwesomeIcon aria-hidden icon={error || panelStatus === "error" ? faTriangleExclamation : faTerminal} />
+                </EmptyState.Media>
+                <EmptyState.Title>
+                  {panelStatus === "loading"
+                    ? "Loading terminal runtime"
+                    : isAttaching && selectedResource
+                      ? "Attaching shell"
+                      : selectedResource
+                      ? "Shell is not attached"
+                      : "No shell selected"}
+                </EmptyState.Title>
+                <EmptyState.Description className="max-w-md text-pretty">
+                  {panelStatus === "loading"
+                    ? "Verifying the pinned Ghostty runtime and this window’s managed streams…"
+                    : isAttaching && selectedResource
+                      ? "Opening the selected managed shell and its bounded terminal stream…"
+                      : selectedResource
+                      ? "Select this shell again from the managed shell inventory to retry attachment."
+                      : "Start a session shell or select an existing detached shell from the inventory."}
+                </EmptyState.Description>
+              </EmptyState.Header>
+              <EmptyState.Content>
+                {!selectedResource && panelStatus !== "loading" ? (
+                  <Button isPending={isStarting} onPress={onStart}>New shell</Button>
+                ) : null}
+              </EmptyState.Content>
+            </EmptyState>
+          ) : null}
+        </div>
+        {usesWindowsCommandComposer ? (
+          <WindowsCommandComposer
+            key={selectedResource?.resourceId}
+            inputRef={windowsCommandInputRef}
+            onSubmit={onSubmitWindowsCommand}
+          />
         ) : null}
       </div>
 
@@ -1224,6 +1296,58 @@ function TerminalSurface({
         </Modal.Container>
       </Modal.Backdrop>
     </div>
+  );
+}
+
+function WindowsCommandComposer({
+  inputRef,
+  onSubmit,
+}: {
+  inputRef: RefObject<HTMLInputElement | null>;
+  onSubmit: (command: string) => void;
+}): React.JSX.Element {
+  const submit = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    const input = event.currentTarget.elements.namedItem("windows-shell-command");
+    if (!(input instanceof HTMLInputElement)) return;
+    try {
+      onSubmit(input.value);
+      event.currentTarget.reset();
+      input.focus();
+    } catch (caught) {
+      toast.danger("Could not send command", { description: errorMessage(caught) });
+    }
+  };
+
+  return (
+    <form
+      className="flex items-end gap-2 border-t border-divider bg-surface px-3 py-2.5"
+      onSubmit={submit}
+    >
+      <TextField
+        fullWidth
+        className="min-w-0 flex-1 gap-1"
+        name="windows-shell-command"
+        variant="secondary"
+      >
+        <Label className="text-xs font-medium text-muted">Windows command</Label>
+        <Input
+          ref={inputRef}
+          aria-describedby="windows-shell-command-description"
+          autoCapitalize="off"
+          autoComplete="off"
+          autoCorrect="off"
+          className="font-mono text-xs"
+          maxLength={MAX_WINDOWS_COMMAND_BYTES - WINDOWS_COMMAND_TERMINATOR.length}
+          placeholder="Enter a PowerShell or cmd.exe command"
+          spellCheck={false}
+        />
+      </TextField>
+      <Button size="sm" type="submit">Run</Button>
+      <p className="sr-only" id="windows-shell-command-description">
+        Edit locally, then submit the complete command as one line.
+      </p>
+    </form>
   );
 }
 

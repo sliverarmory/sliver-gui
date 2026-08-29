@@ -16,6 +16,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
     GhosttyTerminal: React.forwardRef(function MockGhosttyTerminal(
       props: {
         ariaLabel?: string;
+        disableInput?: boolean;
         onError?: (error: Error) => void;
         onReady?: () => void;
         transport: {
@@ -43,7 +44,13 @@ vi.mock("../components/GhosttyTerminal", async () => {
         onClose: (reason) => hostRef.current?.setAttribute("data-terminal-close", reason ?? "closed"),
       }), [props.transport]);
       return (
-        <div ref={hostRef} aria-label={props.ariaLabel} data-terminal-output="" role="textbox">
+        <div
+          ref={hostRef}
+          aria-label={props.ariaLabel}
+          data-terminal-input-disabled={String(Boolean(props.disableInput))}
+          data-terminal-output=""
+          role="textbox"
+        >
           Terminal bytes stay outside React state
           <button
             aria-label="Inject terminal initialization failure"
@@ -280,7 +287,8 @@ describe("SessionTerminalPanel", () => {
 
   it("forces Windows shells to non-PTY mode without terminal dimensions", async () => {
     const windowsSession = { ...session, os: "windows", arch: "amd64" };
-    shellMocks.open.mockResolvedValue(fakeTransport().api);
+    const transport = fakeTransport();
+    shellMocks.open.mockResolvedValue(transport.api);
     const api = installAPI({
       listSessionShells: vi.fn()
         .mockResolvedValueOnce({ ok: true, value: inventory([]) })
@@ -294,6 +302,24 @@ describe("SessionTerminalPanel", () => {
     await user.click(screen.getAllByRole("button", { name: "New shell" })[0]!);
     await waitFor(() => expect(api.prepareSessionShell).toHaveBeenCalledWith({ requestPty: false }));
     expect(screen.getByText(/Non-PTY · Windows resize unavailable/u)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Interactive shell for payments" }))
+      .toHaveAttribute("data-terminal-input-disabled", "true");
+
+    const commandInput = screen.getByRole("textbox", { name: "Windows command" });
+    commandInput.focus();
+    await user.keyboard("Write-OutpuX{Backspace}t 'SLIVER_GUI_WINDOWS_OK'");
+    expect(commandInput).toHaveValue("Write-Output 'SLIVER_GUI_WINDOWS_OK'");
+    expect(transport.send).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    expect(transport.send).toHaveBeenCalledOnce();
+    expect(transport.sentFrames[0]?.source).toBe("operator");
+    expect(new TextDecoder().decode(transport.sentFrames[0]?.bytes)).toBe(
+      "Write-Output 'SLIVER_GUI_WINDOWS_OK'\r",
+    );
+    expect(commandInput).toHaveValue("");
+    expect(commandInput).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Paste" })).not.toBeInTheDocument();
   });
 
   it("auto-attaches one detached shell activation, focuses it, and routes detach through the managed action API", async () => {
@@ -1045,6 +1071,10 @@ function fakeTransport() {
   } | undefined;
   const detach = vi.fn();
   const close = vi.fn();
+  const sentFrames: Array<{ bytes: Uint8Array; source: string }> = [];
+  const send = vi.fn((bytes: Uint8Array, source: string) => {
+    sentFrames.push({ bytes: bytes.slice(), source });
+  });
   const api = {
     getSnapshot: vi.fn(() => snapshot),
     subscribeState: vi.fn((listener: (next: SessionShellTransportSnapshot) => void) => {
@@ -1062,13 +1092,15 @@ function fakeTransport() {
         if (terminalSubscription === subscription) terminalSubscription = undefined;
       });
     }),
-    send: vi.fn(),
+    send,
     resize: vi.fn(),
   } as unknown as SessionShellTransport;
   return {
     api,
     close,
     detach,
+    send,
+    sentFrames,
     emit(next: SessionShellTransportSnapshot) {
       snapshot = next;
       stateListener?.(next);
