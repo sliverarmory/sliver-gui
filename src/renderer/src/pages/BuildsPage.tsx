@@ -60,15 +60,30 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
   }
 
   async function generateFromProfile(name: string) {
-    const result = await window.sliver.generateFromProfile({ profileName: name, name: "" });
-    if (!result.ok || !result.value) {
-      toast.danger("Profile generation failed", { description: result.error });
-      return;
-    }
-    if (result.value.saved) {
-      toast.success("Artifact generated", { description: result.value.fileName });
-    } else {
-      toast.info("Artifact generated", { description: "Saving was cancelled." });
+    const loadingToastId = toast("Generating implant", {
+      description: `Building from ${name}. This can take several minutes.`,
+      isLoading: true,
+      timeout: 0,
+    });
+    try {
+      const result = await window.sliver.generateFromProfile({ profileName: name, name: "" });
+      toast.close(loadingToastId);
+      if (!result.ok || !result.value) {
+        toast.danger("Profile generation failed", {
+          description: result.error ?? "The server rejected the request.",
+        });
+        return;
+      }
+      if (result.value.saved) {
+        toast.success("Artifact generated", { description: result.value.fileName });
+      } else {
+        toast.info("Artifact generated", { description: "Saving was cancelled." });
+      }
+    } catch (error) {
+      toast.close(loadingToastId);
+      toast.danger("Profile generation failed", {
+        description: error instanceof Error ? error.message : "The generation request could not be completed.",
+      });
     }
   }
 
@@ -230,8 +245,8 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
       </section>
 
       <Card variant="secondary" className="overflow-hidden">
-        <Card.Header className="items-start">
-          <div className="section-icon"><FontAwesomeIcon icon={faBoxArchive} /></div>
+        <Card.Header className="flex-row items-center gap-3">
+          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxArchive} /></span>
           <div className="min-w-0 flex-1">
             <Card.Title>Archived builds</Card.Title>
             <Card.Description>
@@ -285,9 +300,9 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
       </Card>
 
       <Card variant="secondary" className="overflow-hidden">
-        <Card.Header>
-          <div className="section-icon"><FontAwesomeIcon icon={faFileShield} /></div>
-          <div>
+        <Card.Header className="flex-row items-center gap-3">
+          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faFileShield} /></span>
+          <div className="min-w-0 flex-1">
             <Card.Title>Generation profiles</Card.Title>
             <Card.Description>Reusable configurations stored on the connected server.</Card.Description>
           </div>
