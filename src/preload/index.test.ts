@@ -33,6 +33,8 @@ const invokeArguments = {
   restartToApplyApplicationUpdate: [],
   openSessionShellWindow: [{ preferredResourceId: "R".repeat(43) }],
   claimSessionShellWindow: [],
+  openConsoleWindow: [],
+  claimConsoleWindow: [],
   chooseCertificatePair: [],
   startListener: [{ kind: "mtls", host: "127.0.0.1", port: 8888 }],
   prepareStopJob: [7],
@@ -155,6 +157,7 @@ describe("sandboxed preload bridge", () => {
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
       "openStream",
+      "openConsoleStream",
     ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
       electronMocks.invoke.mockClear();
@@ -191,6 +194,7 @@ describe("sandboxed preload bridge", () => {
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
       "openStream",
+      "openConsoleStream",
     ].sort());
     expect(exposed).not.toHaveProperty("ipcRenderer");
     expect(exposed).not.toHaveProperty("send");
@@ -321,6 +325,37 @@ describe("sandboxed preload bridge", () => {
     expect(Object.isFrozen(windowPostMessage.mock.calls[0]?.[0])).toBe(true);
     expect(electronMocks.postMessage.mock.invocationCallOrder[0]).toBeLessThan(
       windowPostMessage.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it("keeps the native console on its distinct one-use port channel", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const attachmentToken = "C".repeat(43);
+    const correlationId = "ed00ab45-4c21-48e8-9e4a-cb10241bb486";
+    createdChannels.length = 0;
+    electronMocks.postMessage.mockClear();
+    windowPostMessage.mockClear();
+
+    exposed.openConsoleStream(attachmentToken, correlationId);
+
+    const channel = createdChannels[0];
+    if (!channel) throw new Error("Expected a MessageChannel");
+    expect(electronMocks.postMessage).toHaveBeenCalledExactlyOnceWith(
+      IPC.attachConsole,
+      { v: 1, attachmentToken },
+      [channel.port1],
+    );
+    expect(windowPostMessage).toHaveBeenCalledExactlyOnceWith(
+      {
+        source: "sliver-preload",
+        type: "console-stream-port",
+        v: 1,
+        correlationId,
+      },
+      "*",
+      [channel.port2],
     );
   });
 

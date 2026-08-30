@@ -56,6 +56,7 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "./execution-contracts.js";
+import type { ConsoleWindowLaunchContext } from "./console-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -76,6 +77,8 @@ export const IPC_INVOKE = {
   restartToApplyApplicationUpdate: "sliver:application-update:restart",
   openSessionShellWindow: "sliver:window:open-session-shells",
   claimSessionShellWindow: "sliver:window:claim-session-shells",
+  openConsoleWindow: "sliver:window:open-console",
+  claimConsoleWindow: "sliver:window:claim-console",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
   startListener: "sliver:listener:start",
   prepareStopJob: "sliver:job:prepare-stop",
@@ -119,6 +122,7 @@ export const IPC_INVOKE = {
 
 export const IPC_STREAM = {
   attach: "sliver:stream:attach",
+  attachConsole: "sliver:console-stream:attach",
 } as const;
 
 export const IPC_EVENTS = {
@@ -521,7 +525,8 @@ export type WindowLaunchContext =
       readonly kind: "session-shell";
       readonly snapshot: SliverSnapshot;
       readonly preferredResourceId?: string;
-    };
+    }
+  | ConsoleWindowLaunchContext;
 
 interface IpcInvokeDefinition {
   args: readonly unknown[];
@@ -602,6 +607,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.claimSessionShellWindow]: {
     args: [];
     result: OperationResult<WindowLaunchContext>;
+  };
+  [IPC.openConsoleWindow]: {
+    args: [];
+    result: OperationResult;
+  };
+  [IPC.claimConsoleWindow]: {
+    args: [];
+    result: OperationResult<ConsoleWindowLaunchContext>;
   };
   [IPC.chooseCertificatePair]: {
     args: [];
@@ -776,8 +789,10 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
    * Transfer one narrow MessagePort capability to the trusted main process.
    * The port is delivered back to this document through a fixed window-message
    * envelope; no ipcRenderer or raw backend object crosses the preload bridge.
-   */
+  */
   openStream: (attachmentToken: string, correlationId: string) => void;
+  /** Transfer the dedicated native-client console port capability. */
+  openConsoleStream: (attachmentToken: string, correlationId: string) => void;
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;

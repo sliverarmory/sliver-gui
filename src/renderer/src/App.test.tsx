@@ -88,6 +88,7 @@ function installSliverAPI(
     onReleaseDownloadChanged: vi.fn(() => vi.fn()),
     onApplicationUpdateChanged: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
+    openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
       captureSnapshotListener?.(listener);
@@ -97,6 +98,8 @@ function installSliverAPI(
     claimInteractionWindow: vi.fn(failedOperation),
     openSessionShellWindow: vi.fn(failedOperation),
     claimSessionShellWindow: vi.fn(failedOperation),
+    openConsoleWindow: vi.fn(failedOperation),
+    claimConsoleWindow: vi.fn(failedOperation),
     openWindow: vi.fn(failedOperation),
     prepareStopAllJobs: vi.fn(failedOperation),
     prepareStopJob: vi.fn(failedOperation),
@@ -379,6 +382,32 @@ describe("App startup", () => {
     await waitFor(() => expect(api.disconnect).toHaveBeenCalledOnce());
     expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
     expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
+  });
+
+  it("opens a dedicated console for the active server without renderer-authored config arguments", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+      incarnation: 9,
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+    vi.mocked(api.openConsoleWindow).mockResolvedValue({ ok: true });
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "New window options" })).toBeInTheDocument();
+    const consoleButton = screen.getByRole("button", { name: "Open Sliver console" });
+    expect(consoleButton).toBeEnabled();
+    await user.click(consoleButton);
+
+    expect(api.openConsoleWindow).toHaveBeenCalledExactlyOnceWith();
   });
 
   it("keeps the saved configuration selector closed across a delayed connecting snapshot", async () => {

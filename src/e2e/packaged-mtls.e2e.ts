@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import {
   PACKAGED_FIXTURE_EVENT_SECRET,
   PACKAGED_FIXTURE_TOKEN,
   startMtlsFixture,
+  type MtlsFixture,
   verifyFixtureAuthenticationBoundary,
 } from "./mtls-fixture.js";
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
@@ -152,6 +153,14 @@ test("packaged production app completes current mTLS read and mutation flows", {
     assert.equal(await page.getByRole("dialog", { name: "Server build mismatch" }).count(), 0);
     await page.getByText("#80", { exact: true }).waitFor();
 
+    await verifyPackagedSliverConsole({
+      artifactDirectory,
+      diagnosticRedactions,
+      electronApplication,
+      fixture,
+      sourcePage: page,
+    });
+
     await startAndStopPackagedListener(page);
     for (const method of [
       "getVersion",
@@ -204,6 +213,122 @@ test("packaged production app completes current mTLS read and mutation flows", {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+interface TerminalCanvasSummary {
+  readonly width: number;
+  readonly height: number;
+  readonly inkPixels: number;
+  readonly hash: number;
+}
+
+async function verifyPackagedSliverConsole({
+  artifactDirectory,
+  diagnosticRedactions,
+  electronApplication,
+  fixture,
+  sourcePage,
+}: {
+  artifactDirectory: string;
+  diagnosticRedactions: string[];
+  electronApplication: ElectronApplication;
+  fixture: MtlsFixture;
+  sourcePage: Page;
+}): Promise<void> {
+  const existingWindows = new Set(electronApplication.windows());
+  const initialWindowCount = existingWindows.size;
+  const rootsBefore = await listConsoleRootNames();
+  const initialGetVersionCalls = fixtureCallCount(fixture, "getVersion");
+  const initialEventCalls = fixtureCallCount(fixture, "events");
+  const initialTunnelCalls = fixtureCallCount(fixture, "tunnelData");
+  let consolePage: Page | undefined;
+  let privateRootName: string | undefined;
+  const consoleMessages: string[] = [];
+  const pageErrors: string[] = [];
+
+  try {
+    await sourcePage.locator('button[aria-label="Open Sliver console"]').click();
+    consolePage = await waitForConsoleWindow(electronApplication, existingWindows);
+    await consolePage.emulateMedia({ reducedMotion: "reduce" });
+    consolePage.on("console", (message) => consoleMessages.push(message.text()));
+    consolePage.on("pageerror", (error) => pageErrors.push(error.message));
+
+    assert.equal(new URL(consolePage.url()).search, "?surface=console");
+    await consolePage.getByRole("main", { name: "Sliver client console window", exact: true }).waitFor();
+    await consolePage.getByText("Active configuration: m0-packaged-operator", { exact: true }).waitFor();
+    await consolePage.getByText("Connected", { exact: true }).waitFor();
+
+    const terminal = consolePage.getByRole("textbox", {
+      name: "Sliver client console using m0-packaged-operator",
+      exact: true,
+    });
+    await terminal.waitFor({ timeout: 30_000 });
+    await consolePage.locator('[data-terminal-state="ready"]').waitFor({ timeout: 30_000 });
+    await waitForFixtureCalls(fixture, {
+      events: initialEventCalls + 1,
+      getVersion: initialGetVersionCalls + 1,
+      tunnelData: initialTunnelCalls + 1,
+    });
+
+    privateRootName = await waitForAdditionalConsoleRoot(rootsBefore);
+    const privateRoot = join(tmpdir(), privateRootName);
+    assert.equal(
+      await pathExists(join(privateRoot, "logs", "console")),
+      false,
+      "the embedded console must not create JSON or asciicast transcript storage",
+    );
+
+    const promptCanvas = await waitForTerminalInk(terminal, 750);
+    assert.ok(promptCanvas.width > 0 && promptCanvas.height > 0);
+
+    const versionCallsBeforeCommand = fixtureCallCount(fixture, "getVersion");
+    await terminal.pressSequentially("version");
+    const canvasBeforeEnter = await terminalCanvasSummary(terminal);
+    await terminal.press("Enter");
+    await waitForFixtureCalls(fixture, { getVersion: versionCallsBeforeCommand + 1 });
+    const versionCanvas = await waitForTerminalInk(
+      terminal,
+      canvasBeforeEnter.inkPixels + 250,
+    );
+    assert.notEqual(
+      versionCanvas.hash,
+      canvasBeforeEnter.hash,
+      "the upstream version response must update Ghostty's canvas",
+    );
+    assert.equal(
+      await pathExists(join(privateRoot, "logs", "console")),
+      false,
+      "running a console command must not create an operator transcript",
+    );
+
+    const screenshot = await consolePage.screenshot({
+      animations: "disabled",
+      path: join(artifactDirectory, `packaged-sliver-console-${process.platform}-${process.arch}.png`),
+    });
+    for (const forbidden of diagnosticRedactions) {
+      if (forbidden) assert.equal(screenshot.includes(Buffer.from(forbidden)), false);
+    }
+    assert.deepEqual(pageErrors, []);
+  } catch (error) {
+    const body = consolePage && !consolePage.isClosed()
+      ? await consolePage.locator("body").innerText().catch(() => "")
+      : "";
+    throw new Error(
+      redactDiagnosticText(
+        `Packaged Sliver console smoke failed. RPCs=${fixture.state.calls.join(",") || "none"}; ` +
+          `pageErrors=${pageErrors.join(" | ") || "none"}; ` +
+          `console=${consoleMessages.join(" | ") || "none"}; body=${body}; failure=${errorMessage(error)}`,
+        diagnosticRedactions,
+        12_000,
+      ),
+    );
+  } finally {
+    await consolePage?.close().catch(() => undefined);
+  }
+
+  assert.ok(privateRootName, "the packaged native console must create one private root");
+  await waitForConsoleRootRemoval(privateRootName);
+  await waitForWindowCount(electronApplication, initialWindowCount);
+}
 
 async function writePackagedStartupDiagnostics({
   artifactDirectory,
@@ -311,6 +436,159 @@ async function startAndStopPackagedListener(page: Page): Promise<void> {
   }
   await confirmation.getByRole("button", { name: "Stop job #81" }).click();
   await page.getByText("#81", { exact: true }).waitFor({ state: "detached" });
+}
+
+function fixtureCallCount(fixture: MtlsFixture, method: string): number {
+  return fixture.state.calls.filter((candidate) => candidate === method).length;
+}
+
+async function waitForFixtureCalls(
+  fixture: MtlsFixture,
+  expected: Readonly<Record<string, number>>,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (Object.entries(expected).every(([method, count]) => fixtureCallCount(fixture, method) >= count)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const observed = Object.keys(expected)
+    .map((method) => `${method}=${fixtureCallCount(fixture, method)}`)
+    .join(", ");
+  throw new Error(`Timed out waiting for native-console RPCs; observed ${observed}`);
+}
+
+async function waitForConsoleWindow(
+  electronApplication: ElectronApplication,
+  existingWindows: ReadonlySet<Page>,
+  timeoutMs = 30_000,
+): Promise<Page> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const consolePage = electronApplication.windows().find((candidate) => {
+      if (existingWindows.has(candidate) || candidate.isClosed()) return false;
+      try {
+        return new URL(candidate.url()).search === "?surface=console";
+      } catch {
+        return false;
+      }
+    });
+    if (consolePage) return consolePage;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for the packaged Sliver console window");
+}
+
+async function terminalCanvasSummary(terminal: Locator): Promise<TerminalCanvasSummary> {
+  const canvas = terminal.locator("canvas");
+  await canvas.waitFor();
+  return canvas.evaluate((element) => {
+    const surface = element as unknown as {
+      width: number;
+      height: number;
+      getContext(
+        contextId: "2d",
+        options: { willReadFrequently: true },
+      ): { getImageData(x: number, y: number, width: number, height: number): { data: Uint8ClampedArray } } | null;
+    };
+    const context = surface.getContext("2d", { willReadFrequently: true });
+    if (!context || surface.width < 1 || surface.height < 1) throw new Error("Ghostty canvas is unavailable");
+    const pixels = context.getImageData(0, 0, surface.width, surface.height).data;
+    const background = [pixels[0]!, pixels[1]!, pixels[2]!, pixels[3]!] as const;
+    let inkPixels = 0;
+    let hash = 2_166_136_261;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const red = pixels[index]!;
+      const green = pixels[index + 1]!;
+      const blue = pixels[index + 2]!;
+      const alpha = pixels[index + 3]!;
+      if (
+        Math.abs(red - background[0]) +
+          Math.abs(green - background[1]) +
+          Math.abs(blue - background[2]) +
+          Math.abs(alpha - background[3]) > 12
+      ) inkPixels += 1;
+      hash = Math.imul(hash ^ red, 16_777_619);
+      hash = Math.imul(hash ^ green, 16_777_619);
+      hash = Math.imul(hash ^ blue, 16_777_619);
+      hash = Math.imul(hash ^ alpha, 16_777_619);
+    }
+    return { width: surface.width, height: surface.height, inkPixels, hash: hash >>> 0 };
+  });
+}
+
+async function waitForTerminalInk(
+  terminal: Locator,
+  minimumInkPixels: number,
+  timeoutMs = 10_000,
+): Promise<TerminalCanvasSummary> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = await terminalCanvasSummary(terminal);
+  while (Date.now() < deadline) {
+    latest = await terminalCanvasSummary(terminal);
+    if (latest.inkPixels >= minimumInkPixels) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Ghostty did not render the expected upstream-client output; observed ${latest.inkPixels} ink pixels`,
+  );
+}
+
+async function listConsoleRootNames(): Promise<Set<string>> {
+  const entries = await readdir(tmpdir(), { withFileTypes: true });
+  return new Set(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("sliver-gui-console-"))
+      .map((entry) => entry.name),
+  );
+}
+
+async function waitForAdditionalConsoleRoot(
+  before: ReadonlySet<string>,
+  timeoutMs = 10_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const additional = [...await listConsoleRootNames()].filter((name) => !before.has(name));
+    if (additional.length === 1) return additional[0]!;
+    if (additional.length > 1) throw new Error("Multiple new private console roots appeared");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("The packaged console did not create a private root");
+}
+
+async function waitForConsoleRootRemoval(rootName: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await listConsoleRootNames()).has(rootName)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("The packaged console private root was not removed after its window closed");
+}
+
+async function waitForWindowCount(
+  electronApplication: ElectronApplication,
+  expectedCount: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = 0;
+  while (Date.now() < deadline) {
+    latest = electronApplication.windows().filter((candidate) => !candidate.isClosed()).length;
+    if (latest === expectedCount) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Packaged application window count did not return to ${expectedCount}; latest was ${latest}`);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function findPackagedExecutable(repositoryRoot: string): Promise<string> {

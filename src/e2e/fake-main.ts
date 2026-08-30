@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
 import { app } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
 import { clientpb, sliverpb, type SliverClientConfig } from "sliver-script";
 
 import { startApplication } from "../main/application.js";
+import type {
+  NativePty,
+  NativePtyDisposable,
+  NativePtyExitEvent,
+  NativePtyFactory,
+  NativePtySpawnOptions,
+} from "../main/console-runtime.js";
 import {
   ConnectionRegistry,
   type SliverClientAdapter,
@@ -44,6 +55,19 @@ interface FakeMainState {
     remoteServiceStarts: number;
     remoteServiceRemovals: number;
     retainedSensitiveInputs: number;
+  };
+  console: {
+    spawns: Array<{
+      executable: string;
+      args: string[];
+      cwd: string;
+      rootDirectory: string;
+      configEntries: string[];
+      configSha256: string;
+    }>;
+    writes: string[];
+    resizes: Array<{ columns: number; rows: number }>;
+    kills: number;
   };
 }
 
@@ -91,6 +115,12 @@ const state: FakeMainState = {
     remoteServiceRemovals: 0,
     retainedSensitiveInputs: 0,
   },
+  console: {
+    spawns: [],
+    writes: [],
+    resizes: [],
+    kills: 0,
+  },
 };
 globalThis.__SLIVER_GUI_E2E_STATE__ = state;
 
@@ -112,12 +142,84 @@ app.setPath("userData", requiredArgument("--user-data-directory="));
 void startApplication({
   registry,
   applicationAssetsDirectory: `${repositoryRoot}/build`,
+  consoleClientExecutable: process.execPath,
+  consolePtyFactory: createFakeConsolePtyFactory(state),
   rendererEntryPath: `${repositoryRoot}/dist/renderer/index.html`,
   preloadPath: `${repositoryRoot}/dist/preload/index.cjs`,
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);
   app.exit(1);
 });
+
+function createFakeConsolePtyFactory(testState: FakeMainState): NativePtyFactory {
+  return Object.freeze({
+    spawn(file: string, args: string[], options: NativePtySpawnOptions): NativePty {
+      const rootDirectory = options.env["SLIVER_CLIENT_ROOT_DIR"];
+      if (!rootDirectory || rootDirectory !== options.cwd) {
+        throw new Error("Fake console received an invalid private root");
+      }
+      const configsDirectory = join(rootDirectory, "configs");
+      const configEntries = readdirSync(configsDirectory).sort();
+      const activeConfig = readFileSync(join(configsDirectory, "active.cfg"));
+      let configSha256: string;
+      try {
+        configSha256 = createHash("sha256").update(activeConfig).digest("hex");
+      } finally {
+        activeConfig.fill(0);
+      }
+      testState.console.spawns.push({
+        executable: file,
+        args: [...args],
+        cwd: options.cwd,
+        rootDirectory,
+        configEntries,
+        configSha256,
+      });
+
+      const dataListeners = new Set<(data: string) => void>();
+      const exitListeners = new Set<(event: NativePtyExitEvent) => void>();
+      let killed = false;
+      return {
+        write(data) {
+          testState.console.writes.push(Buffer.isBuffer(data) ? data.toString("utf8") : data);
+        },
+        resize(columns, rows) {
+          testState.console.resizes.push({ columns, rows });
+        },
+        kill() {
+          if (killed) return;
+          killed = true;
+          testState.console.kills += 1;
+          queueMicrotask(() => {
+            for (const listener of exitListeners) listener({ exitCode: 0 });
+          });
+        },
+        onData(listener) {
+          dataListeners.add(listener);
+          queueMicrotask(() => {
+            if (dataListeners.has(listener) && !killed) listener("Sliver E2E console ready\r\n");
+          });
+          return disposable(() => dataListeners.delete(listener));
+        },
+        onExit(listener) {
+          exitListeners.add(listener);
+          return disposable(() => exitListeners.delete(listener));
+        },
+      };
+    },
+  });
+}
+
+function disposable(dispose: () => void): NativePtyDisposable {
+  let active = true;
+  return {
+    dispose() {
+      if (!active) return;
+      active = false;
+      dispose();
+    },
+  };
+}
 
 function createFakeClient(config: SliverClientConfig, testState: FakeMainState): SliverClientAdapter {
   const eventSubject = new Subject<clientpb.Event>();

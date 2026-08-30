@@ -17,7 +17,7 @@ describe("native distribution packaging", () => {
     );
 
     expect(packageJson.scripts?.["predist"]).toBe(
-      "npm run build:licenses && npm run build && npm run verify:release-content",
+      "npm run build:licenses && npm run prepare:node-pty && npm run build:console && npm run build && npm run verify:release-content",
     );
     expect(packageJson.scripts?.["dist"]).toBe("electron-builder");
     expect(packageJson.scripts?.["postdist"]).toBe("npm run verify:packaged-content");

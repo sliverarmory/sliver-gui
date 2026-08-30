@@ -28,6 +28,13 @@ available in `LICENSES/MIT.txt`, the retained package license, and the generated
 `dist/THIRD_PARTY_LICENSES.txt` shipped with native packages. Source:
 https://github.com/coder/ghostty-web
 
+The application bundles `node-pty` version 1.1.0 to run the native Sliver
+client inside a main-process-owned pseudoterminal. Node-pty is copyright
+Microsoft Corporation and other contributors and is distributed under the MIT
+License. Its retained package license and the complete MIT text are included in
+the native package and generated dependency inventory. Source:
+https://github.com/microsoft/node-pty
+
 The application uses the open-source `@heroui/react` and `@heroui/styles`
 packages. Version 3.2.4 has conflicting upstream metadata: the package
 manifests declare MIT, while the bundled licenses and upstream release history

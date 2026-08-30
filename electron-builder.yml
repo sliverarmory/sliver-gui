@@ -1,6 +1,7 @@
 appId: io.sliver.client.gui
 productName: Sliver GUI
 asar: true
+afterPack: scripts/afterPack.mjs
 directories:
   output: release
 publish:
@@ -19,6 +20,18 @@ files:
   - node_modules/ghostty-web/LICENSE
   - node_modules/ghostty-web/package.json
   - node_modules/ghostty-web/ghostty-vt.wasm
+  - node_modules/node-pty/LICENSE
+  - node_modules/node-pty/package.json
+  - node_modules/node-pty/lib/**/*.js
+  - "!node_modules/node-pty/lib/**/*.test.js"
+  - node_modules/node-pty/build/Release/**
+  - "!node_modules/node-pty/src/**"
+  - "!node_modules/node-pty/scripts/**"
+  - "!node_modules/node-pty/deps/**"
+  - "!node_modules/node-pty/prebuilds/**"
+  - "!node_modules/node-pty/typings/**"
+  - "!node_modules/node-pty/node-addon-api/**"
+  - "!node_modules/node-pty/binding.gyp"
   - vendor/sliver-script/LICENSE
   - vendor/sliver-script/README.md
   - vendor/sliver-script/VENDORED.md
@@ -37,6 +50,8 @@ files:
   - docs/operator-parity.md
   - docs/adr/0001-platform-support.md
   - docs/rpc-message-budgets.md
+asarUnpack:
+  - node_modules/node-pty/build/Release/**
 extraResources:
   - from: build/about-icon.png
     to: sliver-desktop.png
@@ -48,6 +63,15 @@ extraResources:
     to: licenses/THIRD_PARTY_NOTICES.md
   - from: dist/THIRD_PARTY_LICENSES.txt
     to: licenses/THIRD_PARTY_LICENSES.txt
+  - from: native/sliver-console
+    to: sliver-console
+    filter:
+      - sliver-client
+      - sliver-client.exe
+      - provenance.json
+      - LICENSE
+  - from: protocol/sliver-console-provenance.json
+    to: sliver-console/source-provenance.json
 extraMetadata:
   main: dist/main/index.js
 mac:

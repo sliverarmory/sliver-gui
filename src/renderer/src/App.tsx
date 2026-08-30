@@ -16,6 +16,7 @@ import {
   faPowerOff,
   faSatellite,
   faSatelliteDish,
+  faTerminal,
   faTriangleExclamation,
   faWindowRestore,
 } from "@fortawesome/free-solid-svg-icons";
@@ -210,6 +211,19 @@ export function App() {
     if (!result.ok) toast.danger("Could not open window", { description: result.error });
   }
 
+  async function openConsole() {
+    try {
+      const result = await window.sliver.openConsoleWindow();
+      if (!result.ok) {
+        toast.danger("Could not open Sliver console", { description: result.error });
+      }
+    } catch (error) {
+      toast.danger("Could not open Sliver console", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   const connected = isUsableConnection(snapshot.connection.status);
   const connectionInProgress = snapshot.connection.status === "connecting";
 
@@ -329,6 +343,23 @@ export function App() {
             {connected ? <EventStatus status={snapshot.eventStream.status} /> : null}
             {connected && snapshot.connection.status === "reconnecting" ? <ReconnectingStatus /> : null}
             <WindowMenu connected={connected} onOpenWindow={openWindow} />
+            <Tooltip delay={250}>
+              <Tooltip.Trigger>
+                <Button
+                  aria-label="Open Sliver console"
+                  isDisabled={!connected}
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => void openConsole()}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faTerminal} />
+                  <span className="hidden xl:inline">Console</span>
+                </Button>
+              </Tooltip.Trigger>
+              <Tooltip.Content placement="bottom">
+                {connected ? "Open console for the active server" : "Connect to a server first"}
+              </Tooltip.Content>
+            </Tooltip>
             {connected ? (
               <HeaderAction label="Refresh server state" icon={faArrowsRotate} pending={isRefreshing} onPress={() => void refresh()} />
             ) : (

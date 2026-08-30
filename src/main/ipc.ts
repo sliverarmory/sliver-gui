@@ -67,6 +67,11 @@ import {
 } from "../shared/target-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import {
+  parseConsoleAttachRequest,
+  type ConsoleAttachRequest,
+  type ConsoleWindowLaunchContext,
+} from "../shared/console-contracts.js";
+import {
   connectionServerIsLocal,
   localNetworkInterfaceInventory,
 } from "./network-interfaces.js";
@@ -106,6 +111,16 @@ export interface ApplicationUpdateController {
   getState(): ApplicationUpdateState;
   checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>>;
   restartToApply(): OperationResult;
+}
+
+export interface ConsoleWindowController {
+  open(source: TrustedWindowIdentity): MaybePromise<OperationResult>;
+  claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<ConsoleWindowLaunchContext>>;
+  attach(
+    destination: TrustedWindowIdentity,
+    request: ConsoleAttachRequest,
+    port: MessagePortMain,
+  ): MaybePromise<void>;
 }
 
 type MaybePromise<T> = T | Promise<T>;
@@ -184,6 +199,9 @@ const APPLICATION_UPDATES_UNAVAILABLE = initialApplicationUpdateDisabled(
 let registeredStreamAttachListener:
   | ((event: IpcMainEvent, ...args: unknown[]) => void)
   | undefined;
+let registeredConsoleAttachListener:
+  | ((event: IpcMainEvent, ...args: unknown[]) => void)
+  | undefined;
 
 export function registerIpcHandlers(
   registry: IpcConnectionRegistry,
@@ -193,6 +211,7 @@ export function registerIpcHandlers(
   exitApplication?: () => void,
   interactionWindows?: InteractionWindowController,
   applicationUpdates?: ApplicationUpdateController,
+  consoleWindows?: ConsoleWindowController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -287,6 +306,26 @@ export function registerIpcHandlers(
       rendererProcessId,
       rendererFrameToken,
     }) ?? { ok: false, error: "This window is not authorized to host managed shells" },
+  );
+  handleTrusted(
+    IPC.openConsoleWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => consoleWindows?.open({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "Dedicated Sliver consoles are unavailable" },
+  );
+  handleTrusted(
+    IPC.claimConsoleWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => consoleWindows?.claim({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "This window is not authorized to host a Sliver console" },
   );
   handleTrusted(IPC.chooseCertificatePair, rendererUrl, parseNoArguments, ({ sender }) =>
     registry.chooseCertificatePair(sender),
@@ -457,6 +496,11 @@ export function registerIpcHandlers(
   }
   registeredStreamAttachListener = createStreamAttachListener(registry, rendererUrl);
   ipcMain.on(IPC.attach, registeredStreamAttachListener);
+  if (registeredConsoleAttachListener) {
+    ipcMain.removeListener(IPC.attachConsole, registeredConsoleAttachListener);
+  }
+  registeredConsoleAttachListener = createConsoleAttachListener(consoleWindows, rendererUrl);
+  ipcMain.on(IPC.attachConsole, registeredConsoleAttachListener);
 }
 
 export function unregisterIpcHandlers(): void {
@@ -464,6 +508,10 @@ export function unregisterIpcHandlers(): void {
   if (registeredStreamAttachListener) {
     ipcMain.removeListener(IPC.attach, registeredStreamAttachListener);
     registeredStreamAttachListener = undefined;
+  }
+  if (registeredConsoleAttachListener) {
+    ipcMain.removeListener(IPC.attachConsole, registeredConsoleAttachListener);
+    registeredConsoleAttachListener = undefined;
   }
 }
 
@@ -512,6 +560,37 @@ function createStreamAttachListener(
         sender.contentsId,
         sender.rendererProcessId,
         sender.rendererFrameToken,
+        request,
+        ports[0] as MessagePortMain,
+      );
+      if (isPromiseLike(result)) {
+        void Promise.resolve(result).catch(() => closeTransferredPorts(ports));
+      }
+    } catch {
+      closeTransferredPorts(ports);
+    }
+  };
+}
+
+function createConsoleAttachListener(
+  controller: ConsoleWindowController | undefined,
+  rendererUrl: string,
+): (event: IpcMainEvent, ...args: unknown[]) => void {
+  return (event, ...rawArguments): void => {
+    const ports = [...event.ports];
+    try {
+      if (!controller || ports.length !== 1) {
+        throw new Error("Rejected console attachment without an available single-port controller");
+      }
+      const sender = requireTrustedSender(event, rendererUrl);
+      requireArgumentCount(rawArguments, 1, "console attach request");
+      const request = parseConsoleAttachRequest(rawArguments[0]);
+      const result: unknown = controller.attach(
+        {
+          contentsId: sender.contentsId,
+          rendererProcessId: sender.rendererProcessId,
+          rendererFrameToken: sender.rendererFrameToken,
+        },
         request,
         ports[0] as MessagePortMain,
       );

@@ -130,6 +130,7 @@ import {
 } from "./implant-config.js";
 import { buildStagePayload } from "./stage-payload.js";
 import {
+  MAX_SAVED_CONFIG_BYTES,
   readCurrentSavedConfig,
   sanitizeSavedConfigMetadata,
   type SavedConfigRecord,
@@ -242,6 +243,7 @@ interface WindowContext {
   contentsId: number;
   poolKey?: string;
   configName?: string;
+  activeConfig?: ActiveConfigReference;
   snapshot: SliverSnapshot;
   certificatePairs: Map<string, CertificatePair>;
   certificateTimers: Map<string, NodeJS.Timeout>;
@@ -274,6 +276,18 @@ interface WindowContext {
   operationReconcilePending?: boolean;
   operationReconcileIncludeOutcomeUnknown?: boolean;
   operationReconcilePendingReason?: BeaconTasksInvalidationReason;
+}
+
+interface ActiveConfigReference {
+  readonly path: string;
+  readonly digest: string;
+  readonly requirePrivateMode: boolean;
+}
+
+/** Main-process-only copy of the currently connected profile. Callers own and must zeroize configBytes. */
+export interface ActiveConfigMaterial {
+  readonly configName: string;
+  readonly configBytes: Buffer;
 }
 
 interface ManualRefreshState {
@@ -536,6 +550,7 @@ export class ConnectionRegistry {
       context.connectionAttempt += 1;
       delete context.manualRefresh;
       closeWindowOperationEngine(context);
+      delete context.activeConfig;
       clearCertificateCapabilities(context);
       context.stopPlans.clear();
       delete context.activeTarget;
@@ -579,6 +594,8 @@ export class ConnectionRegistry {
     target.poolKey = source.poolKey;
     if (source.configName) target.configName = source.configName;
     else delete target.configName;
+    if (source.activeConfig) target.activeConfig = Object.freeze({ ...source.activeConfig });
+    else delete target.activeConfig;
     target.snapshot = this.snapshotForWindow(target, pool.snapshot);
     pool.addWindow(targetContentsId);
     this.requireOperationEngine(targetContentsId, target, pool);
@@ -740,7 +757,16 @@ export class ConnectionRegistry {
         return { ok: false, error: "Unable to read the selected configuration file" };
       }
       try {
-        return await this.connectConfig(contentsId, data, sanitizeSavedConfigMetadata(basename(filePath)));
+        return await this.connectConfig(
+          contentsId,
+          data,
+          sanitizeSavedConfigMetadata(basename(filePath)),
+          Object.freeze({
+            path: filePath,
+            digest: createHash("sha256").update(data).digest("hex"),
+            requirePrivateMode: false,
+          }),
+        );
       } finally {
         data.fill(0);
       }
@@ -817,7 +843,16 @@ export class ConnectionRegistry {
       return { ok: false, error: "Saved configuration changed or is no longer available; refresh the list" };
     }
     try {
-      return await this.connectConfig(contentsId, data, record.summary.displayName);
+      return await this.connectConfig(
+        contentsId,
+        data,
+        record.summary.displayName,
+        Object.freeze({
+          path: record.path,
+          digest: record.digest,
+          requirePrivateMode: record.summary.origin === "managed",
+        }),
+      );
     } finally {
       data.fill(0);
     }
@@ -832,6 +867,7 @@ export class ConnectionRegistry {
     closeWindowOperationEngine(context);
     delete context.poolKey;
     delete context.configName;
+    delete context.activeConfig;
     clearCertificateCapabilities(context);
     context.stopPlans.clear();
     delete context.activeTarget;
@@ -851,6 +887,49 @@ export class ConnectionRegistry {
       }
     }
     return { ok: true, value: context.snapshot };
+  }
+
+  /**
+   * Re-read the active operator profile through the same bounded, no-symlink
+   * boundary used by the saved-config catalog. The retained path and digest
+   * remain main-only; a changed profile is never silently used by a console.
+   */
+  async copyActiveConfig(contentsId: number): Promise<ActiveConfigMaterial> {
+    const context = this.requireWindow(contentsId);
+    const reference = context.activeConfig;
+    const attempt = context.connectionAttempt;
+    const poolKey = context.poolKey;
+    const pool = poolKey ? this.pools.get(poolKey) : undefined;
+    if (!reference || !context.configName || !pool) {
+      throw new Error("Connect to a Sliver server before opening its console");
+    }
+    if (!["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status)) {
+      throw new Error("The active Sliver connection is not ready for a console");
+    }
+
+    const loaded = await readBoundedRegularFile(reference.path, {
+      label: "Active configuration",
+      maxBytes: MAX_SAVED_CONFIG_BYTES,
+      requirePrivateMode: reference.requirePrivateMode,
+    });
+    const data = loaded.data;
+    try {
+      const digest = createHash("sha256").update(data).digest("hex");
+      if (digest !== reference.digest) throw new Error("The active Sliver configuration changed on disk");
+      if (
+        this.windows.get(contentsId) !== context ||
+        context.connectionAttempt !== attempt ||
+        context.poolKey !== poolKey ||
+        context.activeConfig !== reference ||
+        this.pools.get(poolKey!) !== pool
+      ) {
+        throw new Error("The active Sliver connection changed while its configuration was being verified");
+      }
+      return Object.freeze({ configName: context.configName, configBytes: data });
+    } catch (error) {
+      data.fill(0);
+      throw error;
+    }
   }
 
   async refresh(contentsId: number): Promise<OperationResult<SliverSnapshot>> {
@@ -4953,6 +5032,7 @@ export class ConnectionRegistry {
     contentsId: number,
     data: Buffer,
     configName: string,
+    activeConfig: ActiveConfigReference,
   ): Promise<OperationResult<SliverSnapshot>> {
     let attempt = 0;
     try {
@@ -4974,6 +5054,7 @@ export class ConnectionRegistry {
       attempt = ++context.connectionAttempt;
       delete context.manualRefresh;
       context.configName = configName;
+      delete context.activeConfig;
       context.targetPageCursors.clear();
       if (context.poolKey) this.pools.get(context.poolKey)?.retireWindowTaskClaims(contentsId);
       closeWindowOperationEngine(context);
@@ -5037,6 +5118,7 @@ export class ConnectionRegistry {
         throw new Error("Connection attempt was superseded");
       }
       this.requireOperationEngine(contentsId, context, pool);
+      context.activeConfig = activeConfig;
       context.snapshot = this.snapshotForWindow(context, pool.snapshot);
       return { ok: true, value: context.snapshot };
     } catch (error) {
@@ -5050,6 +5132,7 @@ export class ConnectionRegistry {
         await this.releasePool(failedPoolKey, contentsId).catch(() => undefined);
       }
       delete context.configName;
+      delete context.activeConfig;
       clearCertificateCapabilities(context);
       context.snapshot = incompatible?.connection.status === "incompatible"
         ? { ...incompatible, connection: { ...incompatible.connection, error: message } }

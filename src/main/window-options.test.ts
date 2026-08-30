@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  consoleWindowOptions,
   interactionWindowOptions,
   mainWindowOptions,
   sessionShellWindowOptions,
@@ -92,6 +93,32 @@ describe("managed-shell window", () => {
       },
     });
     expect(options).not.toHaveProperty("parent");
+  });
+});
+
+describe("Sliver console window", () => {
+  it("uses native chrome and never encodes profile material in window options", () => {
+    const options = consoleWindowOptions("/absolute/preload.js", "linux", "/brand.png");
+
+    expect(options).toMatchObject({
+      title: "Sliver Console",
+      width: 1180,
+      height: 780,
+      minWidth: 720,
+      minHeight: 540,
+      show: false,
+      backgroundColor: "#09090b",
+      icon: "/brand.png",
+      webPreferences: {
+        preload: "/absolute/preload.js",
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+      },
+    });
+    expect(JSON.stringify(options)).not.toMatch(/config|operator|certificate|token/iu);
   });
 });
 

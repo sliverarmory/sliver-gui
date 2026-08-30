@@ -75,15 +75,20 @@ describe("trusted Electron IPC boundary", () => {
     expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length);
   });
 
-  it("registers and unregisters exactly one dedicated stream-port listener", () => {
+  it("registers and unregisters the isolated shell and console port listeners", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     const listener = electronMocks.listeners.get(IPC.attach);
+    const consoleListener = electronMocks.listeners.get(IPC.attachConsole);
 
     expect(listener).toBeTypeOf("function");
-    expect(electronMocks.on).toHaveBeenCalledExactlyOnceWith(IPC.attach, listener);
+    expect(consoleListener).toBeTypeOf("function");
+    expect(electronMocks.on).toHaveBeenCalledTimes(2);
+    expect(electronMocks.on).toHaveBeenCalledWith(IPC.attach, listener);
+    expect(electronMocks.on).toHaveBeenCalledWith(IPC.attachConsole, consoleListener);
 
     unregisterIpcHandlers();
     expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.attach, listener);
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.attachConsole, consoleListener);
   });
 
   it("accepts the registered main frame and captures its webContents ID", () => {
@@ -418,6 +423,65 @@ describe("trusted Electron IPC boundary", () => {
     expect(() => electronMocks.handlers.get(IPC.claimSessionShellWindow)?.(event, {})).toThrow(
       /invalid arguments/i,
     );
+  });
+
+  it("opens, claims, and attaches a console without renderer-authored profile material", async () => {
+    const open = vi.fn(async () => ({ ok: true as const }));
+    const context = {
+      kind: "console" as const,
+      attachmentToken: "C".repeat(43),
+      configName: "Production",
+    };
+    const claim = vi.fn(async () => ({ ok: true as const, value: context }));
+    const attach = vi.fn();
+    registerIpcHandlers(
+      registryMock(),
+      vi.fn(),
+      RENDERER_URL,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { open, claim, attach },
+    );
+    const trusted = invokeEvent("http://127.0.0.1:5173/", 77);
+
+    await expect(electronMocks.handlers.get(IPC.openConsoleWindow)?.(trusted.event)).resolves.toEqual({ ok: true });
+    await expect(electronMocks.handlers.get(IPC.claimConsoleWindow)?.(trusted.event)).resolves.toEqual({
+      ok: true,
+      value: context,
+    });
+    expect(open).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+    expect(claim).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+    expect(() => electronMocks.handlers.get(IPC.openConsoleWindow)?.(trusted.event, {
+      configPath: "/tmp/attacker.cfg",
+    })).toThrow(/invalid arguments/iu);
+
+    const port = messagePort();
+    const request = { v: 1 as const, attachmentToken: "D".repeat(43) };
+    requireConsoleStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [port]).event, request);
+    expect(attach).toHaveBeenCalledExactlyOnceWith(
+      { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" },
+      request,
+      port,
+    );
+    expect(Object.isFrozen(attach.mock.calls[0]?.[1])).toBe(true);
+
+    const rejected = messagePort();
+    requireConsoleStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [rejected]).event, {
+      ...request,
+      configPath: "/tmp/attacker.cfg",
+    });
+    expect(rejected.close).toHaveBeenCalledOnce();
+    expect(attach).toHaveBeenCalledOnce();
   });
 
   it("opens and claims an interaction window only for the exact trusted main-frame identity", async () => {
@@ -1129,6 +1193,12 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
 function requireStreamListener(): (event: IpcMainEvent, ...args: unknown[]) => void {
   const listener = electronMocks.listeners.get(IPC.attach);
   if (!listener) throw new Error("Expected the stream attach listener to be registered");
+  return listener;
+}
+
+function requireConsoleStreamListener(): (event: IpcMainEvent, ...args: unknown[]) => void {
+  const listener = electronMocks.listeners.get(IPC.attachConsole);
+  if (!listener) throw new Error("Expected the console stream attach listener to be registered");
   return listener;
 }
 

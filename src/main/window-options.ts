@@ -77,6 +77,29 @@ export function sessionShellWindowOptions(
 }
 
 /**
+ * A main-owned native-client console. It uses native chrome and an opaque
+ * renderer URL; profile paths and credentials are supplied only to the PTY in
+ * Electron main and never become BrowserWindow options.
+ */
+export function consoleWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1180,
+    height: 780,
+    minWidth: 720,
+    minHeight: 540,
+    show: false,
+    title: "Sliver Console",
+    backgroundColor: "#09090b",
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: secureWebPreferences(preload),
+  };
+}
+
+/**
  * A native, full-size window for one target interaction workspace. Target
  * identity is never encoded in these options or the renderer URL; Electron
  * main binds the destination window to the source window's exact active target

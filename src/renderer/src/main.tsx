@@ -7,6 +7,7 @@ import "./styles.css";
 import { App } from "./App";
 import { InteractionWindowApp } from "./InteractionWindowApp";
 import { SessionShellWindowApp } from "./SessionShellWindowApp";
+import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 
@@ -18,6 +19,7 @@ if (!root) throw new Error("Renderer root element was not found");
 const surface = new URLSearchParams(window.location.search).get("surface");
 
 function RendererSurface(): React.JSX.Element {
+  if (surface === "console") return <ConsoleWindowApp />;
   if (surface === "managed-shells") return <SessionShellWindowApp />;
   if (surface === "interaction") return <InteractionWindowApp />;
   return <App />;

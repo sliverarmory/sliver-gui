@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -106,6 +107,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       assert.ok(stateAfterConnect.methods.includes(method), `expected ConnectionRegistry to call ${method}`);
     }
 
+    await verifySliverConsoleWindow(electronApplication, page, fakeOperatorConfig());
+
     await verifyM1TargetsAndOperations(
       electronApplication,
       page,
@@ -179,6 +182,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 async function assertRendererSecurity(electronApplication: ElectronApplication, page: Page): Promise<void> {
   const expectedApiKeys = [
     ...Object.keys(IPC_INVOKE),
+    "openConsoleStream",
     "openStream",
     "onSnapshotChanged",
     "onOperationChanged",
@@ -238,6 +242,83 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     webSecurity: true,
     webviewTag: false,
   });
+}
+
+async function verifySliverConsoleWindow(
+  electronApplication: ElectronApplication,
+  sourcePage: Page,
+  activeConfig: string,
+): Promise<void> {
+  const existingWindows = new Set(electronApplication.windows());
+  const initialWindowCount = existingWindows.size;
+  const initialState = await readFakeState(electronApplication);
+  const initialSpawnCount = initialState.console.spawns.length;
+  const initialKillCount = initialState.console.kills;
+
+  await sourcePage.locator('button[aria-label="Open Sliver console"]').click();
+  const consolePage = await waitForConsoleWindow(electronApplication, existingWindows);
+  const pageErrors: string[] = [];
+  consolePage.on("pageerror", (error) => pageErrors.push(error.message));
+  let rootDirectory: string | undefined;
+
+  try {
+    assert.equal(new URL(consolePage.url()).search, "?surface=console");
+    await consolePage.getByRole("main", { name: "Sliver client console window", exact: true }).waitFor();
+    await consolePage.getByText("Active configuration: chosen-m0-operator.cfg", { exact: true }).waitFor();
+    await consolePage.getByText("Connected", { exact: true }).waitFor();
+
+    const terminal = consolePage.getByRole("textbox", {
+      name: "Sliver client console using chosen-m0-operator.cfg",
+      exact: true,
+    });
+    await terminal.waitFor();
+    await consolePage.locator('[data-terminal-state="ready"]').waitFor();
+
+    const spawnedState = await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.spawns.length === initialSpawnCount + 1,
+      "one native console spawn",
+    );
+    const spawn = spawnedState.console.spawns.at(-1);
+    assert.ok(spawn, "the dedicated console must spawn one PTY");
+    rootDirectory = spawn.rootDirectory;
+    assert.deepEqual(spawn.args, ["--disable-wg"]);
+    assert.equal(spawn.cwd, spawn.rootDirectory);
+    assert.deepEqual(spawn.configEntries, ["active.cfg"]);
+    assert.equal(
+      spawn.configSha256,
+      createHash("sha256").update(activeConfig).digest("hex"),
+      "the PTY must receive the exact active profile selected by the source window",
+    );
+    assert.equal(await pathExists(rootDirectory), true, "the private console root must exist while its window is open");
+
+    const initialWriteCount = spawnedState.console.writes.length;
+    await terminal.pressSequentially("version");
+    await terminal.press("Enter");
+    await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.writes.slice(initialWriteCount).join("").includes("version\r"),
+      "Ghostty input to reach the console PTY",
+    );
+    await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.resizes.length > 0,
+      "Ghostty to size the native console PTY",
+    );
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await consolePage.close().catch(() => undefined);
+  }
+
+  const closedState = await waitForConsoleState(
+    electronApplication,
+    (state) => state.console.kills === initialKillCount + 1,
+    "console PTY cleanup",
+  );
+  assert.equal(closedState.console.spawns.length, initialSpawnCount + 1);
+  assert.ok(rootDirectory, "the fake PTY must record its private root");
+  await waitForPathRemoval(rootDirectory);
+  await waitForWindowCount(electronApplication, initialWindowCount);
 }
 
 async function verifyReleaseDownloadToast(
@@ -2008,6 +2089,26 @@ async function waitForInteractionWindow(
   throw new Error("Timed out waiting for a dedicated interaction window");
 }
 
+async function waitForConsoleWindow(
+  electronApplication: ElectronApplication,
+  existingWindows: ReadonlySet<Page>,
+): Promise<Page> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const consolePage = electronApplication.windows().find((candidate) => {
+      if (existingWindows.has(candidate) || candidate.isClosed()) return false;
+      try {
+        return new URL(candidate.url()).search === "?surface=console";
+      } catch {
+        return false;
+      }
+    });
+    if (consolePage) return consolePage;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for the dedicated Sliver console window");
+}
+
 async function waitForManagedShellWindow(
   electronApplication: ElectronApplication,
   previousCount: number,
@@ -2039,6 +2140,44 @@ async function waitForWindowCount(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Application window count did not settle at ${expectedCount}; latest count was ${latest}`);
+}
+
+async function waitForConsoleState(
+  electronApplication: ElectronApplication,
+  predicate: (state: FakeStateSnapshot) => boolean,
+  description: string,
+  timeoutMs = 10_000,
+): Promise<FakeStateSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = await readFakeState(electronApplication);
+  while (Date.now() < deadline) {
+    latest = await readFakeState(electronApplication);
+    if (predicate(latest)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for ${description}; observed ${latest.console.spawns.length} spawn(s), ` +
+      `${latest.console.writes.length} write(s), ${latest.console.kills} kill(s)`,
+  );
+}
+
+async function waitForPathRemoval(path: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await pathExists(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Private console root was not removed: ${path}`);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function waitForSessionShellInventory(
@@ -2207,6 +2346,19 @@ interface FakeStateSnapshot {
     remoteServiceStarts: number;
     remoteServiceRemovals: number;
     retainedSensitiveInputs: number;
+  };
+  console: {
+    spawns: Array<{
+      executable: string;
+      args: string[];
+      cwd: string;
+      rootDirectory: string;
+      configEntries: string[];
+      configSha256: string;
+    }>;
+    writes: string[];
+    resizes: Array<{ columns: number; rows: number }>;
+    kills: number;
   };
   connectedConfig?: { operator: string; host: string; port: number };
 }

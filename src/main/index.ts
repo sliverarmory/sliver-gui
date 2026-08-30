@@ -1,6 +1,7 @@
 import { app } from "electron";
 
 import { startApplication, type ApplicationHandle } from "./application.js";
+import { scavengeStaleSliverConsoleRoots } from "./console-runtime.js";
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -8,7 +9,8 @@ if (!hasSingleInstanceLock) {
 } else {
   let application: ApplicationHandle | undefined;
   app.on("second-instance", () => application?.createWindow());
-  void startApplication()
+  void scavengeStaleSliverConsoleRoots()
+    .then(() => startApplication())
     .then((startedApplication) => {
       application = startedApplication;
     })

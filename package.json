@@ -22,13 +22,15 @@
   },
   "scripts": {
     "build:client": "node ./vendor/sliver-script/node_modules/typescript/bin/tsc -p ./vendor/sliver-script/tsconfig.json --types node",
-    "build:e2e-app": "npm run build && node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json",
+    "build:console": "node ./scripts/buildSliverConsole.mjs",
+    "build:e2e-app": "npm run prepare:node-pty && npm run build && node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json",
     "build:licenses": "node ./scripts/generateThirdPartyLicenses.mjs",
     "dev": "npm run build && electron-vite preview --skipBuild",
+    "predev": "npm run prepare:node-pty",
     "pretypecheck": "npm run build:client",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "build": "npm run typecheck && electron-vite build",
-    "pretest": "npm run build:client",
+    "pretest": "npm run build:client && npm run prepare:node-pty",
     "test": "vitest run",
     "test:e2e:electron": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/electron-current-slice.e2e.js",
     "test:e2e:m1": "npm run test:e2e:electron",
@@ -48,14 +50,15 @@
     "protocol:ghostty": "node ./scripts/verifyGhosttyRuntime.mjs",
     "parity:generate": "node ./scripts/parity-generate.mjs",
     "parity:check": "node ./scripts/parity-check.mjs",
+    "prepare:node-pty": "node ./scripts/prepareNodePtyRuntime.mjs",
     "verify:release-version": "node ./scripts/verifyReleaseVersion.mjs",
     "verify:release-signing-env": "node ./scripts/verifyReleaseSigningEnvironment.mjs",
     "verify:update-artifacts": "node ./scripts/verifyUpdateArtifacts.mjs",
     "verify:release-content": "node ./scripts/verifyReleaseContent.mjs",
     "verify:packaged-content": "node ./scripts/verifyReleaseContent.mjs --packaged",
-    "prepackage": "npm run build:licenses",
+    "prepackage": "npm run build:licenses && npm run prepare:node-pty && npm run build:console",
     "package": "npm run build && npm run verify:release-content && electron-builder --dir && npm run verify:packaged-content",
-    "predist": "npm run build:licenses && npm run build && npm run verify:release-content",
+    "predist": "npm run build:licenses && npm run prepare:node-pty && npm run build:console && npm run build && npm run verify:release-content",
     "dist": "electron-builder",
     "postdist": "npm run verify:packaged-content"
   },
@@ -109,10 +112,12 @@
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true,
     "fsevents": false,
+    "node-pty@1.1.0": true,
     "protobufjs": false
   },
   "dependencies": {
     "electron-updater": "6.8.9",
-    "ghostty-web": "0.4.0"
+    "ghostty-web": "0.4.0",
+    "node-pty": "1.1.0"
   }
 }

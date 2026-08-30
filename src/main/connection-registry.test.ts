@@ -825,6 +825,39 @@ describe("connection registry with an injected Sliver client", () => {
     expect(secondPlan).toMatchObject({ ok: true, value: { impact: { backend: { configName: "Beta" } } } });
   });
 
+  it("copies only the verified active profile and carries its main-only reference into inherited windows", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+
+    const source = await registry.copyActiveConfig(1);
+    const inherited = await registry.copyActiveConfig(2);
+    try {
+      expect(source.configName).toBe("operator");
+      expect(inherited.configName).toBe("operator");
+      expect(source.configBytes.toString("utf8")).toBe(validConfig());
+      expect(inherited.configBytes.toString("utf8")).toBe(validConfig());
+      expect(source.configBytes).not.toBe(inherited.configBytes);
+    } finally {
+      source.configBytes.fill(0);
+      inherited.configBytes.fill(0);
+    }
+  });
+
+  it("refuses to launch from changed or disconnected active profile material", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    await writeFile(join(externalDirectory, "operator.cfg"), validConfig({ operator: "changed" }));
+    await expect(registry.copyActiveConfig(1)).rejects.toThrow(/changed/u);
+
+    await registry.disconnect(1);
+    await expect(registry.copyActiveConfig(1)).rejects.toThrow(/Connect to a Sliver server/u);
+  });
+
   it("surfaces reconnecting and warns on version incompatibility without blocking the connection", async () => {
     vi.useFakeTimers();
     const reconnectingClient = new FakeSliverClient();

@@ -16,6 +16,10 @@ import {
   parseStreamAttachRequest,
 } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
+import {
+  CONSOLE_PROTOCOL_VERSION,
+  parseConsoleAttachRequest,
+} from "../shared/console-contracts.js";
 
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -40,6 +44,35 @@ function openStream(attachmentToken: string, correlationId: string): void {
         source: "sliver-preload",
         type: "stream-port",
         v: STREAM_PROTOCOL_VERSION,
+        correlationId,
+      }),
+      "*",
+      [channel.port2],
+    );
+  } catch (error) {
+    closePort(channel.port1);
+    closePort(channel.port2);
+    throw error;
+  }
+}
+
+function openConsoleStream(attachmentToken: string, correlationId: string): void {
+  const request = parseConsoleAttachRequest({
+    v: CONSOLE_PROTOCOL_VERSION,
+    attachmentToken,
+  });
+  if (typeof correlationId !== "string" || !UUID_V4_PATTERN.test(correlationId)) {
+    throw new TypeError("console stream correlationId must be a UUID v4");
+  }
+
+  const channel = new MessageChannel();
+  try {
+    ipcRenderer.postMessage(IPC.attachConsole, request, [channel.port1]);
+    rendererWindow().postMessage(
+      Object.freeze({
+        source: "sliver-preload",
+        type: "console-stream-port",
+        v: CONSOLE_PROTOCOL_VERSION,
         correlationId,
       }),
       "*",
@@ -88,6 +121,7 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
   openStream,
+  openConsoleStream,
   onSnapshotChanged: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, snapshot: SliverSnapshot) => listener(snapshot);
     ipcRenderer.on(IPC.snapshotChanged, handler);

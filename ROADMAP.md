@@ -13,8 +13,11 @@ This roadmap defines the work required for Sliver GUI to reach practical
 feature parity with the remote Sliver terminal client under `./sliver/client`.
 Parity means that an operator can accomplish the same supported workflows with
 equivalent inputs, results, target restrictions, and safety controls. It does
-not mean embedding the terminal client, copying its TUI, or exposing a text box
-that passes arbitrary commands to a subprocess.
+not normally mean copying the TUI or treating arbitrary subprocess commands as
+typed GUI parity. The isolated dedicated-console exception embeds the exact
+pinned terminal client for operators who need the upstream command surface;
+its opaque PTY stream is separate from, and cannot be used as evidence for,
+the typed GUI parity tracked by this roadmap.
 
 This is an **operator application**. Server administration is deliberately not
 part of the initial parity target. The GUI may display the connected server's
@@ -162,7 +165,8 @@ The current application already provides the first operator slices:
 - [x] Generic operator action and beacon task engine.
 - [x] Session-only interactive terminal and bounded MessagePort streaming.
 - [ ] Forwarding, reverse forwarding, SOCKS, and other tunnel workflows.
-- [ ] Broad terminal-client operator feature coverage.
+- [x] Dedicated compatibility console exposing the pinned upstream client
+  command tree; broad typed GUI command-option parity remains incremental.
 
 Packaged operator transport is currently mTLS-only. WireGuard operator
 configurations are discovered and shown with an explicit deferred/unavailable
@@ -183,12 +187,23 @@ Important implementation seams:
 
 ## Engineering principles
 
-### 1. Direct typed RPCs, never terminal passthrough
+### 1. Direct typed RPCs by default; one isolated console exception
 
 The Electron main process will call generated Sliver RPCs through typed domain
 services. Client-side logic that currently exists only in Go should be ported
-and verified with golden fixtures. The GUI must not spawn `sliver-client`, parse
-terminal output, or treat CLI strings as a stable API.
+and verified with golden fixtures. Typed GUI features must not parse terminal
+output or treat CLI strings as a stable API.
+
+The dedicated full-console window is the intentionally narrow compatibility
+exception approved on 2026-08-29. It runs the exact pinned native Go
+`sliver-client` behind a main-process-owned PTY and treats terminal bytes as an
+opaque bounded stream rendered by Ghostty Web. The renderer cannot select the
+executable, operator configuration, environment, or arguments. Electron main
+revalidates the active window's config, stages only that config in a private
+temporary Sliver root so no profile picker appears, and tears down the process
+and staged credentials with the owning window. This exception does not turn
+console text into application state or relax the closed typed IPC boundary for
+any other GUI workflow.
 
 ### 2. Preserve the Electron security boundary
 

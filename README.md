@@ -48,6 +48,11 @@ configuration files and their private keys stay in the Electron main process.
   and reviewed paste controls; and see lifecycle, pressure, and byte-count
   metadata without terminal content entering React state, snapshots, Activity,
   or logs.
+- A dedicated full Sliver console window backed by the pinned native Go
+  `sliver-client` and rendered with Ghostty Web. It opens directly against the
+  active window's verified operator configuration; Electron main stages that
+  single config in a private temporary Sliver root and owns the PTY, process,
+  input/output bounds, and cleanup.
 - A target execution workbench for bounded process, assembly, raw-shellcode,
   shared-library, reflective-DLL, migration, Metasploit, psexec, SSH, backdoor,
   DLL-hijack, token, identity, get-system, child-process, and privilege
@@ -121,12 +126,19 @@ Sliver GUI is licensed under GPL-3.0-or-later and is not dual-licensed under
 MIT or Apache-2.0. Separately identified third-party components retain their
 own licenses; see [`LICENSING.md`](LICENSING.md),
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`LICENSES/`](LICENSES/).
-Native packages include these notices, the retained client source, and its
-verifiable Git provenance bundle; matching release tags provide the complete
-GUI source.
+Native packages include these notices, the retained TypeScript client source,
+and its verifiable Git provenance bundle. The native Go console's exact
+upstream corresponding source is identified by
+`protocol/sliver-console-provenance.json` and its packaged copy; matching
+release tags provide the complete GUI source.
 
-An adjacent `./sliver/` checkout is optional for backend development and is
-ignored by this repository. The GUI does not import or modify that checkout.
+An adjacent `./sliver/` checkout is optional for ordinary renderer/backend
+development and ignored by this repository. Native console and distribution
+builds require that directory (or `SLIVER_SOURCE_DIR`) to be a clean checkout
+at commit `ca685f5eed64c3327c0e57504928cfd2d2e96bea`; the build refuses a
+different commit/tree or local source changes and does not fetch or modify the
+checkout. Source and toolchain requirements are pinned in
+`protocol/sliver-console-provenance.json`.
 
 All tracked first-party JavaScript and JSX application, test, and tool-config
 source has been converted to strict TypeScript. HTML, CSS, JSON, and packaging
@@ -135,8 +147,15 @@ metadata remain in their native formats. Dependencies and generated `dist`,
 the GUI's TypeScript source project.
 
 Requirements: Node.js 24 or newer, npm 11.19 or newer, and a HeroUI Pro
-license. Set `HEROUI_AUTH_TOKEN` for automated installs, or authenticate with
-the HeroUI Pro CLI and install its artifacts before building locally.
+license. Native console/distribution builds additionally require Go 1.26.6;
+universal macOS builds use the system `/usr/bin/lipo`. Set `HEROUI_AUTH_TOKEN`
+for automated installs, or authenticate with the HeroUI Pro CLI and install its
+artifacts before building locally.
+
+The console build forces `GOTOOLCHAIN=local`, `GOENV=off`, `GOWORK=off`, and
+an empty `GOFLAGS`; Go's automatic toolchain download/switching is deliberately
+disabled for provenance. Put an actual Go 1.26.6 binary first on `PATH` or set
+`SLIVER_GO_BINARY` to that binary's absolute path.
 
 ```sh
 npm ci --strict-allow-scripts
@@ -161,6 +180,7 @@ npm test
 npm run protocol:check
 npm run protocol:ghostty
 npm run parity:check
+npm run build:console
 npm run test:e2e:electron
 npm run test:e2e:m1
 npm run build
@@ -179,9 +199,14 @@ renderer, frozen preload, trusted IPC, and an injected Sliver client;
 Opt-in actual-server package tests remain separate because they require an
 authorized disposable server and operator configuration.
 
-`npm run package` creates an unpacked application for the current platform in
-`release/`. `npm run dist` creates the configured macOS, Windows, or Linux
-installers.
+`npm run build:console` creates only ignored artifacts under
+`native/sliver-console/`: the platform executable and a digest-bound build
+record. On macOS the executable is universal. `npm run package` creates an
+unpacked application for the current platform in `release/`; `npm run dist`
+creates the configured macOS, Windows, or Linux installers. Packaging verifies
+the exact executable digest before signing, then verifies architecture,
+embedded Go build/VCS metadata, and the nested publisher signature after a
+signed release is assembled.
 
 ## Continuous integration and releases
 
