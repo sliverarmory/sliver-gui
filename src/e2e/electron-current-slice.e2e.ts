@@ -164,9 +164,10 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 
     await page.getByRole("button", { name: /^Current server:/i }).click();
     assert.deepEqual(await page.getByRole("menuitem").allTextContents(), [
-      "Switch config",
-      "Disconnect",
       "Exit app",
+      "Disconnect",
+      "Switch config",
+      "Settings",
     ]);
     await page.getByRole("menuitem", { name: "Disconnect" }).click();
     await page.getByText("No server connected", { exact: true }).waitFor();

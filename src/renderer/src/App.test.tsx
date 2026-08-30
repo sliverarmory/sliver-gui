@@ -578,7 +578,7 @@ describe("App startup", () => {
 });
 
 describe("Current server menu", () => {
-  it("opens from the server summary and owns switch-config, disconnect, and exit actions", async () => {
+  it("opens from the server summary and orders application and server actions nearest the trigger", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -606,13 +606,20 @@ describe("Current server menu", () => {
     expect(screen.queryByRole("menuitem", { name: "Switch config" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Disconnect" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Exit app" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Settings" })).not.toBeInTheDocument();
 
     await user.click(trigger);
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-      "Switch config",
-      "Disconnect",
       "Exit app",
+      "Disconnect",
+      "Switch config",
+      "Settings",
     ]);
+    for (const label of ["Exit app", "Disconnect"]) {
+      const item = screen.getByRole("menuitem", { name: label });
+      expect(item).toHaveClass("menu-item--danger");
+      expect(item.querySelector("svg")).toHaveClass("text-danger");
+    }
     await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
     expect(onSwitchConfig).toHaveBeenCalledOnce();
     expect(onDisconnect).not.toHaveBeenCalled();

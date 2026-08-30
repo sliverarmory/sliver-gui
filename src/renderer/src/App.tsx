@@ -10,6 +10,7 @@ import {
   faBoxesStacked,
   faComputer,
   faEllipsisVertical,
+  faGear,
   faLink,
   faLinkSlash,
   faPlus,
@@ -590,17 +591,21 @@ export function ConnectionMenu({
             if (String(key) === "exit-app") onExitApp();
           }}
         >
-          <Dropdown.Item id="switch-config" textValue="Switch config">
-            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
-            <Label>Switch config</Label>
+          <Dropdown.Item id="exit-app" textValue="Exit app" variant="danger">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faPowerOff} />
+            <Label>Exit app</Label>
           </Dropdown.Item>
           <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
             <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
             <Label>Disconnect</Label>
           </Dropdown.Item>
-          <Dropdown.Item id="exit-app" textValue="Exit app">
-            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faPowerOff} />
-            <Label>Exit app</Label>
+          <Dropdown.Item id="switch-config" textValue="Switch config">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
+            <Label>Switch config</Label>
+          </Dropdown.Item>
+          <Dropdown.Item id="settings" textValue="Settings">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faGear} />
+            <Label>Settings</Label>
           </Dropdown.Item>
         </Dropdown.Menu>
       </Dropdown.Popover>
