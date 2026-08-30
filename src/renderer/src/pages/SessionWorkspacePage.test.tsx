@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -232,7 +232,10 @@ function operation(overrides: Partial<TargetOperationRecord> = {}): TargetOperat
 function installAPI(operations: TargetOperationRecord[] = []): Pick<
   SliverDesktopAPI,
   "listExecutionCatalog" | "listTargetOperations" | "listSessionShells" | "openInteractionWindow" | "selectTarget"
-> {
+> & {
+  emitOperationChanged: (operation: TargetOperationRecord) => void;
+} {
+  let operationChangedListener: ((operation: TargetOperationRecord) => void) | undefined;
   const listExecutionCatalog = vi.fn().mockResolvedValue({
     ok: true,
     value: {
@@ -264,13 +267,26 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
     listTargetOperations,
     openInteractionWindow,
     selectTarget,
-    onOperationChanged: vi.fn(() => vi.fn()),
+    onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
+    onOperationChanged: vi.fn((listener: (operation: TargetOperationRecord) => void) => {
+      operationChangedListener = listener;
+      return vi.fn(() => {
+        if (operationChangedListener === listener) operationChangedListener = undefined;
+      });
+    }),
   } as unknown as SliverDesktopAPI;
   Object.defineProperty(window, "sliver", {
     configurable: true,
     value: api,
   });
-  return { listExecutionCatalog, listSessionShells, listTargetOperations, openInteractionWindow, selectTarget };
+  return {
+    listExecutionCatalog,
+    listSessionShells,
+    listTargetOperations,
+    openInteractionWindow,
+    selectTarget,
+    emitOperationChanged: (operation) => operationChangedListener?.(operation),
+  };
 }
 
 describe("SessionWorkspacePage", () => {
@@ -687,11 +703,11 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByText("1 matching operations loaded")).toBeInTheDocument();
   });
 
-  it("replaces stale Activity rows on a fresh refresh while append remains bounded", async () => {
+  it("updates Activity rows from operation events without a refresh control", async () => {
     const user = userEvent.setup();
-    const stale = operation({ requestId: "request-stale" });
-    const current = operation({ requestId: "request-current", updatedAt: "2026-08-09T20:03:01.000Z" });
-    const { listTargetOperations } = installAPI([stale]);
+    const stale = operation({ requestId: "request-live", state: "submitted" });
+    const current = operation({ requestId: "request-live", updatedAt: "2026-08-09T20:03:01.000Z" });
+    const { emitOperationChanged } = installAPI([stale]);
     const snapshot = workspaceSnapshot();
 
     render(
@@ -705,15 +721,18 @@ describe("SessionWorkspacePage", () => {
     );
 
     await user.click(screen.getByRole("tab", { name: "Activity" }));
-    expect(await screen.findByRole("row", { name: /request-stale/i })).toBeInTheDocument();
-    vi.mocked(listTargetOperations).mockResolvedValueOnce({
-      ok: true,
-      value: { items: [current], page: { limit: 100, total: 1, truncated: false } },
-    });
+    const staleRow = await screen.findByRole("row", { name: /request-live/i });
+    expect(within(staleRow).getByText("Submitted")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh activity" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Refresh activity" }));
-    expect(await screen.findByRole("row", { name: /request-current/i })).toBeInTheDocument();
-    expect(screen.queryByRole("row", { name: /request-stale/i })).not.toBeInTheDocument();
+    act(() => {
+      emitOperationChanged(current);
+    });
+    await waitFor(() => {
+      const currentRow = screen.getByRole("row", { name: /request-live/i });
+      expect(within(currentRow).getByText("Completed")).toBeInTheDocument();
+      expect(within(currentRow).queryByText("Submitted")).not.toBeInTheDocument();
+    });
   });
 
   it("ignores late results from a same-ID route after its fingerprint is replaced", async () => {

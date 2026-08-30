@@ -24,7 +24,6 @@ import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
-  faArrowRotateRight,
   faCheck,
   faChevronRight,
   faDownload,
@@ -87,7 +86,6 @@ export function TargetExecutionWorkbench({
   const [plan, setPlan] = useState<ExecutionActionPlan>();
   const [isExecuting, setIsExecuting] = useState(false);
   const [result, setResult] = useState<ExecutionActionResult>();
-  const [isRefreshingResult, setIsRefreshingResult] = useState(false);
   const [savingStream, setSavingStream] = useState<"stdout" | "stderr" | "combined">();
   const [readState, setReadState] = useState<ReadState>({ status: "idle" });
   const identityRef = useRef(exactIdentity);
@@ -96,6 +94,10 @@ export function TargetExecutionWorkbench({
   expectedTargetRef.current = expectedTarget;
   const planRef = useRef<ExecutionActionPlan | undefined>(undefined);
   planRef.current = plan;
+  const resultRef = useRef<ExecutionActionResult | undefined>(undefined);
+  resultRef.current = result;
+  const readStateRef = useRef<ReadState>({ status: "idle" });
+  readStateRef.current = readState;
   const catalogRequestSequence = useRef(0);
   const prepareRequestSequence = useRef(0);
   const executeRequestSequence = useRef(0);
@@ -169,9 +171,10 @@ export function TargetExecutionWorkbench({
     setIsPreparing(false);
     setPlan(undefined);
     setIsExecuting(false);
+    resultRef.current = undefined;
     setResult(undefined);
-    setIsRefreshingResult(false);
     setSavingStream(undefined);
+    readStateRef.current = { status: "idle" };
     setReadState({ status: "idle" });
     void loadCatalog();
   }, [discardToken, exactIdentity, loadCatalog]);
@@ -190,34 +193,20 @@ export function TargetExecutionWorkbench({
     executionActionPresentation(capability.operationId).category === category), [capabilities, category]);
   const categoryCopy = executionCategoryPresentation(category);
 
-  const beginAction = useCallback((capability: ExecutionCapability): void => {
-    if (!capability.available) return;
-    if (planRef.current) clearPreparedPlan(false);
-    lastAction.current = capability.operationId;
-    setResult(undefined);
-    if (isReadOperation(capability.operationId)) {
-      setSelectedCapability(undefined);
-      void runRead(capability.operationId);
-      return;
-    }
-    readRequestSequence.current += 1;
-    setReadState({ status: "idle" });
-    setSelectedCapability(capability);
-  // runRead is a function declaration and intentionally safe to capture here.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clearPreparedPlan, exactIdentity]);
-
-  async function runRead(
+  const runRead = useCallback(async (
     operationId: ExecutionReadOperationId,
     cursor?: string,
     taskId?: string,
-  ): Promise<void> {
+    background = false,
+  ): Promise<void> => {
     const expectedIdentity = exactIdentity;
     const sequence = ++readRequestSequence.current;
     const append = cursor !== undefined;
-    setReadState((current) => append && current.status === "ready"
-      ? { ...current, isLoadingMore: true }
-      : { status: "loading", operationId });
+    if (!background) {
+      setReadState((current) => append && current.status === "ready"
+        ? { ...current, isLoadingMore: true }
+        : { status: "loading", operationId });
+    }
     try {
       const response = await window.sliver.runExecutionRead({
         operationId,
@@ -227,26 +216,55 @@ export function TargetExecutionWorkbench({
       });
       if (sequence !== readRequestSequence.current || expectedIdentity !== identityRef.current) return;
       if (!response.ok || !response.value) {
-        setReadState({ status: "error", operationId, error: response.error ?? "Execution read failed" });
+        if (!background) {
+          setReadState({ status: "error", operationId, error: response.error ?? "Execution read failed" });
+        }
         return;
       }
       if (response.value.operationId !== operationId) {
-        setReadState({ status: "error", operationId, error: "The returned read did not match the requested operation." });
+        if (!background) {
+          setReadState({ status: "error", operationId, error: "The returned read did not match the requested operation." });
+        }
         return;
       }
-      setReadState((current) => ({
-        status: "ready",
-        value: append && current.status === "ready"
-          ? mergeReadResults(current.value, response.value)
-          : response.value,
-        isLoadingMore: false,
-      }));
+      setReadState((current) => {
+        const next: ReadState = {
+          status: "ready",
+          value: append && current.status === "ready"
+            ? mergeReadResults(current.value, response.value)
+            : response.value,
+          isLoadingMore: false,
+        };
+        readStateRef.current = next;
+        return next;
+      });
     } catch (error) {
-      if (sequence === readRequestSequence.current && expectedIdentity === identityRef.current) {
+      if (
+        !background &&
+        sequence === readRequestSequence.current &&
+        expectedIdentity === identityRef.current
+      ) {
         setReadState({ status: "error", operationId, error: errorMessage(error) });
       }
     }
-  }
+  }, [exactIdentity]);
+
+  const beginAction = useCallback((capability: ExecutionCapability): void => {
+    if (!capability.available) return;
+    if (planRef.current) clearPreparedPlan(false);
+    lastAction.current = capability.operationId;
+    resultRequestSequence.current += 1;
+    resultRef.current = undefined;
+    setResult(undefined);
+    if (isReadOperation(capability.operationId)) {
+      setSelectedCapability(undefined);
+      void runRead(capability.operationId);
+      return;
+    }
+    readRequestSequence.current += 1;
+    setReadState({ status: "idle" });
+    setSelectedCapability(capability);
+  }, [clearPreparedPlan, runRead]);
 
   const prepare = useCallback(async (draft: ExecutionActionDraft): Promise<void> => {
     const expectedIdentity = exactIdentity;
@@ -300,6 +318,7 @@ export function TargetExecutionWorkbench({
       }
       planRef.current = undefined;
       setPlan(undefined);
+      resultRef.current = response.value;
       setResult(response.value);
       toast.success(executionResultTitle(response.value.state), { description: response.value.message });
       restoreActionFocus();
@@ -312,31 +331,73 @@ export function TargetExecutionWorkbench({
     }
   }, [exactIdentity, restoreActionFocus]);
 
-  const refreshResult = useCallback(async (): Promise<void> => {
-    if (!result) return;
+  const syncResult = useCallback(async (
+    pending: ExecutionActionResult,
+    reportFailure = false,
+  ): Promise<void> => {
+    if (resultRef.current?.requestId !== pending.requestId) return;
     const expectedIdentity = exactIdentity;
     const sequence = ++resultRequestSequence.current;
-    setIsRefreshingResult(true);
     try {
-      const response = await window.sliver.getExecutionResult({ requestId: result.requestId });
+      const response = await window.sliver.getExecutionResult({ requestId: pending.requestId });
       if (sequence !== resultRequestSequence.current || expectedIdentity !== identityRef.current) return;
       if (!response.ok || !response.value) {
-        toast.danger("Could not refresh result", { description: response.error });
+        if (reportFailure) {
+          toast.danger("Could not retrieve execution result", {
+            description: response.error ?? "The result is not available yet.",
+          });
+        }
         return;
       }
-      if (response.value.requestId !== result.requestId || response.value.operationId !== result.operationId) {
-        toast.danger("Execution result rejected", { description: "The refreshed result did not match this request." });
+      if (response.value.requestId !== pending.requestId || response.value.operationId !== pending.operationId) {
+        toast.danger("Execution result rejected", { description: "The live result did not match this request." });
         return;
       }
+      if (resultRef.current?.requestId !== pending.requestId) return;
+      resultRef.current = response.value;
       setResult(response.value);
     } catch (error) {
-      if (sequence === resultRequestSequence.current && expectedIdentity === identityRef.current) {
-        toast.danger("Could not refresh result", { description: errorMessage(error) });
+      if (
+        reportFailure &&
+        sequence === resultRequestSequence.current &&
+        expectedIdentity === identityRef.current
+      ) {
+        toast.danger("Could not retrieve execution result", { description: errorMessage(error) });
       }
-    } finally {
-      if (sequence === resultRequestSequence.current && expectedIdentity === identityRef.current) setIsRefreshingResult(false);
+      // Background failures retry on the next task event, reconciliation tick, or F5.
     }
-  }, [exactIdentity, result]);
+  }, [exactIdentity]);
+
+  useEffect(() => {
+    const subscribedIdentity = exactIdentity;
+    return window.sliver.onBeaconTasksInvalidated((target) => {
+      if (
+        subscribedIdentity !== identityRef.current ||
+        expectedTargetRef.current.mode !== "beacon" ||
+        !targetRefsSameIdentity(target, expectedTargetRef.current)
+      ) return;
+
+      const pendingRead = readStateRef.current;
+      if (
+        pendingRead.status === "ready" &&
+        pendingRead.value.state === "submitted" &&
+        pendingRead.value.taskId
+      ) {
+        void runRead(
+          pendingRead.value.operationId,
+          undefined,
+          pendingRead.value.taskId,
+          true,
+        );
+      }
+
+      const pendingResult = resultRef.current;
+      if (
+        pendingResult?.taskId &&
+        (pendingResult.state === "submitted" || pendingResult.state === "outcome-unknown")
+      ) void syncResult(pendingResult);
+    });
+  }, [exactIdentity, runRead, syncResult]);
 
   const saveResult = useCallback(async (stream: "stdout" | "stderr" | "combined"): Promise<void> => {
     if (!result) return;
@@ -421,14 +482,13 @@ export function TargetExecutionWorkbench({
         <ExecutionReadPanel
           state={readState}
           onLoadMore={(operationId, cursor, taskId) => void runRead(operationId, cursor, taskId)}
-          onRetry={(operationId, taskId) => void runRead(operationId, undefined, taskId)}
+          onRetry={(operationId) => void runRead(operationId)}
         />
         {result ? (
           <ExecutionResultPanel
-            isRefreshing={isRefreshingResult}
             result={result}
             savingStream={savingStream}
-            onRefresh={() => void refreshResult()}
+            onRetry={() => void syncResult(result, true)}
             onSave={(stream) => void saveResult(stream)}
           />
         ) : null}
@@ -653,7 +713,7 @@ function ExecutionReadPanel({
 }: {
   state: ReadState;
   onLoadMore: (operationId: ExecutionReadOperationId, cursor: string, taskId?: string) => void;
-  onRetry: (operationId: ExecutionReadOperationId, taskId?: string) => void;
+  onRetry: (operationId: ExecutionReadOperationId) => void;
 }): React.JSX.Element | null {
   if (state.status === "idle") return null;
   if (state.status === "loading") return <InlineLoading label={`Loading ${executionActionPresentation(state.operationId).label.toLocaleLowerCase()}`} />;
@@ -669,20 +729,15 @@ function ExecutionReadPanel({
   if (state.value.state === "submitted") {
     return (
       <section className="mt-6 rounded-2xl border border-separator bg-surface-secondary p-5" aria-live="polite">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="font-semibold text-foreground">{executionActionPresentation(state.value.operationId).label} queued</h3>
-              <Chip color="warning" size="sm" variant="soft">Submitted</Chip>
-            </div>
-            <p className="mt-1 text-sm text-muted">
-              The beacon accepted this read as an asynchronous task. Refresh after its next check-in to load the returned data.
-            </p>
-            {state.value.taskId ? <p className="mt-2 break-all font-mono text-xs text-muted">Task {state.value.taskId}</p> : null}
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-semibold text-foreground">{executionActionPresentation(state.value.operationId).label} queued</h3>
+            <Chip color="warning" size="sm" variant="soft">Submitted</Chip>
           </div>
-          <Button size="sm" variant="outline" onPress={() => onRetry(state.value.operationId, state.value.taskId)}>
-            <FontAwesomeIcon aria-hidden icon={faArrowRotateRight} /> Refresh
-          </Button>
+          <p className="mt-1 text-sm text-muted">
+            The beacon accepted this read as an asynchronous task. Results will appear after its next check-in.
+          </p>
+          {state.value.taskId ? <p className="mt-2 break-all font-mono text-xs text-muted">Task {state.value.taskId}</p> : null}
         </div>
       </section>
     );
@@ -746,16 +801,14 @@ function PrivilegesTable({ isLoadingMore, value, onLoadMore }: {
 }
 
 function ExecutionResultPanel({
-  isRefreshing,
   result,
   savingStream,
-  onRefresh,
+  onRetry,
   onSave,
 }: {
-  isRefreshing: boolean;
   result: ExecutionActionResult;
   savingStream: "stdout" | "stderr" | "combined" | undefined;
-  onRefresh: () => void;
+  onRetry: () => void;
   onSave: (stream: "stdout" | "stderr" | "combined") => void;
 }): React.JSX.Element {
   const streams = [...new Set(result.output?.map((output) => output.stream) ?? [])];
@@ -767,7 +820,7 @@ function ExecutionResultPanel({
           <p className="mt-2 text-sm leading-6 text-muted">{result.message}</p>
           <p className="mt-2 break-all font-mono text-xs text-muted">Request {result.requestId}{result.taskId ? ` · Task ${result.taskId}` : ""}{result.pid === undefined ? "" : ` · PID ${result.pid}`}</p>
         </div>
-        {result.state === "submitted" || result.state === "outcome-unknown" ? <Button isPending={isRefreshing} size="sm" variant="outline" onPress={onRefresh}><FontAwesomeIcon aria-hidden icon={faArrowRotateRight} /> Refresh</Button> : null}
+        {result.state === "outcome-unknown" ? <Button size="sm" variant="outline" onPress={onRetry}>Retry result</Button> : null}
       </div>
       {streams.length > 0 ? <div className="mt-4 flex flex-wrap gap-2">{streams.map((stream) => <Button isPending={savingStream === stream} key={stream} size="sm" variant="tertiary" onPress={() => onSave(stream)}><FontAwesomeIcon aria-hidden icon={faDownload} /> Save {stream}</Button>)}</div> : null}
     </section>
@@ -800,6 +853,10 @@ function isReadOperation(operationId: ExecutionOperationId): operationId is Exec
 
 function targetRefsEqual(left: TargetRef, right: TargetRef): boolean {
   return left.mode === right.mode && left.id === right.id && left.backendEpoch === right.backendEpoch && left.domainRevision === right.domainRevision && left.fingerprint === right.fingerprint;
+}
+
+function targetRefsSameIdentity(left: TargetRef, right: TargetRef): boolean {
+  return left.mode === right.mode && left.id === right.id && left.backendEpoch === right.backendEpoch && left.fingerprint === right.fingerprint;
 }
 
 function targetExecutionIdentity(routeIdentity: string, target: TargetRef): string {

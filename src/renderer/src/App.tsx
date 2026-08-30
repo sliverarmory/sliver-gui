@@ -4,7 +4,6 @@ import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Heading } from "react-aria-components";
 import {
-  faArrowsRotate,
   faBars,
   faBolt,
   faBoxOpen,
@@ -75,7 +74,6 @@ export function App() {
   const [view, setView] = useState<ViewId>("operations");
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(true);
   const [isLoadingSavedConfigs, setIsLoadingSavedConfigs] = useState(true);
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
@@ -213,20 +211,6 @@ export function App() {
       return;
     }
     setSnapshot(result.value);
-  }, []);
-
-  const refresh = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      const result = await window.sliver.refresh();
-      if (!result.ok || !result.value) {
-        toast.danger("Refresh failed", { description: result.error });
-        return;
-      }
-      setSnapshot(result.value);
-    } finally {
-      setIsRefreshing(false);
-    }
   }, []);
 
   async function openWindow(inheritConnection: boolean) {
@@ -408,13 +392,11 @@ export function App() {
                 {connected ? "Open console for the active server" : "Connect to a server first"}
               </Tooltip.Content>
             </Tooltip>
-            {connected ? (
-              <HeaderAction label="Refresh server state" icon={faArrowsRotate} pending={isRefreshing} onPress={() => void refresh()} />
-            ) : (
+            {!connected ? (
               <Button size="sm" isPending={isConnecting} onPress={() => setIsConfigSelectorOpen(true)}>
                 <FontAwesomeIcon icon={faLink} /> Saved configurations
               </Button>
-            )}
+            ) : null}
           </div>
         </header>
         <div
@@ -831,27 +813,4 @@ function compatibilityNoticeKey(snapshot: SliverSnapshot): string | undefined {
 
 function isUsableConnection(status: ConnectionStatus): boolean {
   return status === "connected" || status === "degraded" || status === "reconnecting";
-}
-
-function HeaderAction({
-  label,
-  icon,
-  onPress,
-  pending = false,
-}: {
-  label: string;
-  icon: typeof faArrowsRotate;
-  onPress: () => void;
-  pending?: boolean;
-}) {
-  return (
-    <Tooltip delay={350}>
-      <Tooltip.Trigger>
-        <Button aria-label={label} size="sm" variant="ghost" isIconOnly isPending={pending} onPress={onPress}>
-          <FontAwesomeIcon icon={icon} />
-        </Button>
-      </Tooltip.Trigger>
-      <Tooltip.Content placement="bottom">{label}</Tooltip.Content>
-    </Tooltip>
-  );
 }

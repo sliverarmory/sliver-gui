@@ -98,6 +98,37 @@ describe("LootPage", () => {
     await waitFor(() => expect(listLoot).toHaveBeenCalledTimes(2));
   });
 
+  it("reloads the first page when the event stream recovers without exposing a refresh control", async () => {
+    const recoveredLoot: LootSummary = {
+      ...LOOT,
+      id: "eb06aaea-1865-45ed-abdb-fbb6ed32376f",
+      name: "recovered-event-loot",
+      fileName: "recovered.txt",
+    };
+    const listLoot = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: lootPage() })
+      .mockResolvedValueOnce({ ok: true, value: lootPage([recoveredLoot]) });
+    installAPI({ listLoot });
+    const retryingSnapshot: SliverSnapshot = {
+      ...connectedSnapshot(),
+      eventStream: { status: "retrying", attempt: 1, error: "event stream interrupted" },
+    };
+    const { rerender } = render(<LootPage snapshot={retryingSnapshot} />);
+
+    expect(await screen.findByText("operator-notes")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh loot" })).not.toBeInTheDocument();
+
+    rerender(<LootPage snapshot={{
+      ...retryingSnapshot,
+      eventStream: { status: "connected", attempt: 0 },
+    }} />);
+
+    expect(await screen.findByText("recovered-event-loot")).toBeInTheDocument();
+    expect(listLoot).toHaveBeenCalledTimes(2);
+    expect(listLoot).toHaveBeenNthCalledWith(2, { fileType: "all", limit: 100 });
+    expect(screen.queryByRole("button", { name: "Refresh loot" })).not.toBeInTheDocument();
+  });
+
   it("wipes preview bytes when the detail dialog closes", async () => {
     const user = userEvent.setup();
     const preview = new Uint8Array([115, 101, 99, 114, 101, 116]);

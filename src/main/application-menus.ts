@@ -35,10 +35,28 @@ export interface ConsoleTabShortcutInput {
   readonly key: string;
   readonly code: string;
   readonly isComposing: boolean;
+  readonly isAutoRepeat: boolean;
   readonly shift: boolean;
   readonly control: boolean;
   readonly alt: boolean;
   readonly meta: boolean;
+}
+
+export type ServerRefreshShortcutDisposition = "refresh" | "suppress";
+
+export function serverRefreshShortcutDispositionForInput(
+  input: ConsoleTabShortcutInput,
+): ServerRefreshShortcutDisposition | undefined {
+  if (
+    input.type !== "keyDown" ||
+    input.code !== "F5" ||
+    input.isComposing ||
+    input.shift ||
+    input.control ||
+    input.alt ||
+    input.meta
+  ) return undefined;
+  return input.isAutoRepeat ? "suppress" : "refresh";
 }
 
 export interface ContextMenuActions {

@@ -181,7 +181,14 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
     const delay = normalizedQuery ? 180 : 0;
     const timeout = window.setTimeout(() => void loadFirstPage(), delay);
     return () => window.clearTimeout(timeout);
-  }, [backendIdentity, latestLootEventId, loadFirstPage, refreshSequence, normalizedQuery]);
+  }, [
+    backendIdentity,
+    latestLootEventId,
+    loadFirstPage,
+    normalizedQuery,
+    refreshSequence,
+    snapshot.eventStream.status,
+  ]);
 
   const loadMore = useCallback(async () => {
     const cursor = inventory.page.nextCursor;
@@ -427,19 +434,6 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
           <p>Inspect server-collected files, preview bounded text safely, and save deliberate local copies.</p>
         </div>
         <div className="flex items-center gap-2">
-          <Tooltip delay={300}>
-            <Button
-              aria-label="Refresh loot"
-              isIconOnly
-              isPending={isLoading}
-              size="sm"
-              variant="secondary"
-              onPress={refresh}
-            >
-              <FontAwesomeIcon aria-hidden icon={faRotate} />
-            </Button>
-            <Tooltip.Content placement="top">Refresh loot</Tooltip.Content>
-          </Tooltip>
           <Button size="sm" variant="primary" onPress={() => setIsAddOpen(true)}>
             <FontAwesomeIcon aria-hidden icon={faPlus} /> Add local file
           </Button>
@@ -891,7 +885,7 @@ function LootEmptyState({
           {loading
             ? "Loading paged metadata from the server…"
             : error
-              ? "Refresh the inventory after the connection recovers."
+              ? "The inventory will update after the connection recovers."
               : filtered
                 ? "Clear the search or choose another file type."
                 : "Collected files and local uploads appear here."}

@@ -238,7 +238,7 @@ export function ListenerEndpointSelector({
               <InventoryMessage
                 error
                 title="Listeners could not be loaded"
-                description={jobs.error ?? "Refresh the server state or reconnect before selecting an endpoint."}
+                description={jobs.error ?? "Wait for the listener inventory to synchronize or reconnect before selecting an endpoint."}
               />
             ) : jobs.status === "unsupported" ? (
               <InventoryMessage
@@ -249,7 +249,7 @@ export function ListenerEndpointSelector({
             ) : jobs.status === "idle" ? (
               <InventoryMessage
                 title="Listeners are not loaded"
-                description="Refresh the server state or reconnect before selecting an endpoint."
+                description="Wait for the listener inventory to synchronize or reconnect before selecting an endpoint."
               />
             ) : options.length === 0 ? (
               <EmptyState size="sm" className="min-h-64">

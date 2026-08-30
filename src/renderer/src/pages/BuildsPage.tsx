@@ -110,7 +110,7 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
   async function applyStagedBuilds() {
     if (!stagingAuthoritative) {
       toast.danger("Build inventory incomplete", {
-        description: "Refresh the complete build inventory before replacing the HTTP staging allowlist.",
+        description: "Wait for the complete build inventory to synchronize before replacing the HTTP staging allowlist.",
       });
       return;
     }

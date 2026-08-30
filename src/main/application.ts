@@ -49,6 +49,7 @@ import {
   buildContextMenuTemplate,
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
+  serverRefreshShortcutDispositionForInput,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
 import {
@@ -253,6 +254,18 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
     hardenWindow(window, rendererUrl);
     installContextMenu(window);
+    if (surface === "workspace") {
+      window.webContents.on("before-input-event", (event, input) => {
+        const disposition = serverRefreshShortcutDispositionForInput(input);
+        if (!disposition) return;
+        // F5 reconciles the trusted backend snapshot; it must never reload the
+        // renderer and tear down active UI state.
+        event.preventDefault();
+        if (disposition === "refresh") {
+          void registry.refresh(contentsId).catch(() => undefined);
+        }
+      });
+    }
     if (consoleWindowRecord) {
       window.webContents.on("before-input-event", (event, input) => {
         const index = consoleTabShortcutIndexForInput(process.platform, input);

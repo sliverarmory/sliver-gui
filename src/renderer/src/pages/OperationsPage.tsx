@@ -28,7 +28,6 @@ import {
   faLock,
   faNetworkWired,
   faPlus,
-  faRotate,
   faSatelliteDish,
   faServer,
   faShieldHalved,
@@ -94,7 +93,6 @@ export interface OperationsPageProps {
 
 export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Element {
   const [feedback, setFeedback] = useState<Feedback | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isChoosingCertificate, setIsChoosingCertificate] = useState(false);
@@ -260,23 +258,6 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     [isPreparingStop, isStopping, requestStop],
   );
 
-  const refresh = useCallback(async () => {
-    setIsRefreshing(true);
-    setFeedback(null);
-    try {
-      const result = await window.sliver.refresh();
-      if (!result.ok) {
-        setFeedback({ tone: "danger", message: result.error ?? "Unable to refresh operations." });
-      } else {
-        setFeedback({ tone: "success", message: "Jobs and listeners are up to date." });
-      }
-    } catch (error: unknown) {
-      setFeedback({ tone: "danger", message: errorMessage(error) });
-    } finally {
-      setIsRefreshing(false);
-    }
-  }, []);
-
   const changeProtocol = useCallback(
     (kind: ListenerKind) => {
       setDraft((current) => ({
@@ -383,23 +364,6 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Tooltip delay={250}>
-            <Button
-              aria-label="Refresh jobs and listeners"
-              isDisabled={!isConnected || isRefreshing}
-              isIconOnly
-              size="sm"
-              variant="tertiary"
-              onPress={() => void refresh()}
-            >
-              <FontAwesomeIcon
-                aria-hidden
-                icon={isRefreshing ? faCircleNotch : faRotate}
-                className={`size-3.5 ${isRefreshing ? "animate-spin" : ""}`}
-              />
-            </Button>
-            <Tooltip.Content>Refresh from server</Tooltip.Content>
-          </Tooltip>
           <Button
             isDisabled={!isConnected}
             size="sm"

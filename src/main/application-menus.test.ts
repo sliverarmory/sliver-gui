@@ -9,6 +9,7 @@ import {
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
   isSafeExternalWebUrl,
+  serverRefreshShortcutDispositionForInput,
   type ContextMenuActions,
 } from "./application-menus.js";
 
@@ -17,6 +18,7 @@ const shortcutInput = (overrides: Partial<Parameters<typeof consoleTabShortcutIn
   key: "1",
   code: "Digit1",
   isComposing: false,
+  isAutoRepeat: false,
   shift: false,
   control: false,
   alt: false,
@@ -60,6 +62,29 @@ describe("console tab shortcut input", () => {
     expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", type: "keyUp" }))).toBe(false);
     expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", isComposing: true }))).toBe(false);
     expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyR" }))).toBe(false);
+  });
+});
+
+describe("server refresh shortcut input", () => {
+  it("accepts only an exact unmodified F5 keydown", () => {
+    const f5 = shortcutInput({ key: "F5", code: "F5", meta: false });
+    expect(serverRefreshShortcutDispositionForInput(f5)).toBe("refresh");
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, type: "keyUp" })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, code: "KeyR" })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, isComposing: true })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, shift: true })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, control: true })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, alt: true })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, meta: true })).toBeUndefined();
+  });
+
+  it("suppresses F5 auto-repeat without scheduling another refresh", () => {
+    expect(serverRefreshShortcutDispositionForInput(shortcutInput({
+      key: "F5",
+      code: "F5",
+      meta: false,
+      isAutoRepeat: true,
+    }))).toBe("suppress");
   });
 });
 

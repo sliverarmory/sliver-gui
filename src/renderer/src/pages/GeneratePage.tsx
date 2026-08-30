@@ -485,7 +485,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   function requestProfileSave() {
     if (!profileInventoryAuthoritative) {
       toast.danger("Profile inventory incomplete", {
-        description: "Refresh the complete profile inventory before creating or replacing a profile.",
+        description: "Wait for the complete profile inventory to synchronize before creating or replacing a profile.",
       });
       return;
     }
@@ -885,7 +885,7 @@ function compilerStatusDescription(
     return "The server returned no supported target combinations; no fallback targets were fabricated.";
   }
   if (status === "unsupported") return "Connect to a compatible Sliver server to generate implants.";
-  return "Refresh the server state or reconnect before generating or saving a profile.";
+  return "Wait for the server state to synchronize or reconnect before generating or saving a profile.";
 }
 
 function formatBytes(bytes: number): string {

@@ -26,7 +26,6 @@ import { EmptyState, ListView, Sheet } from "@heroui-pro/react";
 import { Resizable } from "@heroui-pro/react/resizable";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
-  faRotate,
   faTerminal,
   faTriangleExclamation,
   faUpRightFromSquare,
@@ -151,7 +150,6 @@ export function SessionTerminalPanel({
   const [isStarting, setIsStarting] = useState(false);
   const [isAttaching, setIsAttaching] = useState(false);
   const [isPoppingOut, setIsPoppingOut] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [activeAction, setActiveAction] = useState<SessionShellResourceAction>();
   const [pendingResourceAction, setPendingResourceAction] = useState<PendingResourceAction>();
   const [pasteReview, setPasteReview] = useState<PasteReview>();
@@ -207,10 +205,8 @@ export function SessionTerminalPanel({
   const loadInventory = useCallback(async (
     expectedIdentity = routeIdentity,
     generation = lifecycleGenerationRef.current,
-    showProgress = false,
   ): Promise<SessionShellResourceList | undefined> => {
     const requestSequence = ++inventoryRequestSequenceRef.current;
-    if (showProgress) setIsRefreshing(true);
     try {
       const result = await window.sliver.listSessionShells({});
       if (
@@ -233,12 +229,6 @@ export function SessionTerminalPanel({
         isCurrent(expectedIdentity)
       ) setError(errorMessage(caught));
       return undefined;
-    } finally {
-      if (
-        requestSequence === inventoryRequestSequenceRef.current &&
-        generation === lifecycleGenerationRef.current &&
-        isCurrent(expectedIdentity)
-      ) setIsRefreshing(false);
     }
   }, [isCurrent, routeIdentity]);
 
@@ -260,7 +250,6 @@ export function SessionTerminalPanel({
     setIsStarting(false);
     setIsAttaching(false);
     setIsPoppingOut(false);
-    setIsRefreshing(false);
     setActiveAction(undefined);
     setPendingResourceAction(undefined);
     pendingPasteRef.current = undefined;
@@ -939,19 +928,6 @@ export function SessionTerminalPanel({
               <Tooltip.Content>Pop out managed shells</Tooltip.Content>
             </Tooltip>
           ) : null}
-          <Tooltip delay={250}>
-            <Button
-              aria-label="Refresh managed shells"
-              isIconOnly
-              isPending={isRefreshing}
-              size="sm"
-              variant="ghost"
-              onPress={() => void loadInventory(routeIdentity, lifecycleGenerationRef.current, true)}
-            >
-              <FontAwesomeIcon aria-hidden icon={faRotate} />
-            </Button>
-            <Tooltip.Content>Refresh managed shells</Tooltip.Content>
-          </Tooltip>
           <Button
             isDisabled={isAttaching || isPoppingOut}
             isPending={isStarting}

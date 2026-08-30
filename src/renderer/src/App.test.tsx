@@ -309,7 +309,7 @@ describe("App startup", () => {
     expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
   });
 
-  it("shows a mismatched-server notice once per connection epoch and keeps it dismissed on refresh", async () => {
+  it("shows a mismatched-server notice once per connection epoch and keeps it dismissed on same-epoch updates", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     const mismatchReason = "Sliver 1.7.6 is a modified build and has not been verified against the pinned baseline";
@@ -339,15 +339,13 @@ describe("App startup", () => {
       },
     };
     let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
-    const api = installSliverAPI(
+    installSliverAPI(
       vi.fn().mockResolvedValue({ ok: true, value: [] }),
       snapshot,
       (listener) => {
         emitSnapshot = listener;
       },
     );
-    vi.mocked(api.refresh).mockResolvedValue({ ok: true, value: snapshot });
-
     render(<App />);
 
     const dialog = await screen.findByRole("dialog", { name: "Server build mismatch" });
@@ -364,21 +362,22 @@ describe("App startup", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
     });
-
-    await user.click(screen.getByRole("button", { name: "Refresh server state" }));
-    await waitFor(() => expect(api.refresh).toHaveBeenCalledOnce());
-    expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh server state" })).not.toBeInTheDocument();
 
     if (!emitSnapshot) throw new Error("Snapshot listener was not installed");
-    emitSnapshot({
-      ...snapshot,
-      connection: { ...snapshot.connection, status: "reconnecting" },
+    act(() => {
+      emitSnapshot?.({
+        ...snapshot,
+        connection: { ...snapshot.connection, status: "reconnecting" },
+      });
     });
     expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
 
-    emitSnapshot({
-      ...snapshot,
-      connection: { ...snapshot.connection, epoch: 42 },
+    act(() => {
+      emitSnapshot?.({
+        ...snapshot,
+        connection: { ...snapshot.connection, epoch: 42 },
+      });
     });
     expect(await screen.findByRole("dialog", { name: "Server build mismatch" })).toBeInTheDocument();
     await user.keyboard("{Escape}");

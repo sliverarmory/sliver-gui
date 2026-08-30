@@ -63,8 +63,9 @@ mode, option, and real-target gaps.
   disposition. A lost response after possible dispatch is never replayed.
 - Beacon actions enter the existing main-owned operation journal as external
   operations and claim the exact returned task ID. A completed task summary is
-  not accepted as execution success. Refresh fetches the exact same task,
-  verifies beacon, local request, operation, and server description, then uses
+  not accepted as execution success. A matching task invalidation fetches the
+  exact same task, verifies beacon, local request, operation, and server
+  description, then uses
   only that operation's protobuf codec with a bounded envelope. Fetched request
   and response bytes are cleared. This path is separate from the M1 typed task
   decoder.
@@ -128,7 +129,7 @@ be clarified without changing the annotation contract.
 | `m4-bounded-read-dispatch` | Children and privilege paging, platform validation, session dispatch, and beacon task-submission cases |
 | `m4-external-beacon-task-reconciliation` | External task claim, cross-window/cross-beacon denial, reviewed single-flight cancellation, summary reconciliation, expiry, no replay, and no-M1-decoder cases |
 | `m4-exact-beacon-result-decoding` | `src/main/execution-beacon-task.test.ts` and registry integration cases: exact task/description/operation binding, pinned protobuf codecs and invariants, envelopeless success, task-bound paging, bounded output/save, negative migration, fixed target errors, safe refusal of unverifiable `TaskReq`, and request/response zeroization |
-| `m4-renderer-action-surfaces` | Every catalog action opens a typed configuration surface; capability reasons, review, execution, refresh, save, focus, and stale-plan disposal are covered |
+| `m4-renderer-action-surfaces` | Every catalog action opens a typed configuration surface; capability reasons, review, execution, live result updates, save, focus, and stale-plan disposal are covered |
 | `m4-renderer-read-surfaces` | Bounded child/privilege views, continuation, queued beacon state, completion, empty, and error presentation |
 | `m4-electron-current-slice` | Production renderer/preload/IPC journey for session children, native-key SSH review/execute/save, stale-target revocation, and beacon submission |
 
@@ -188,8 +189,8 @@ retained snapshot files** plus the prerequisite-bound Git bundle.
 1. Connect to an authorized disposable backend and select one active session.
    Open **Execution** and confirm unavailable cards explain target mode/platform
    restrictions without offering a bypass.
-2. Run **Background children** and confirm bounded rows, refresh, empty, and
-   error states remain within the Execution surface.
+2. Run **Background children** and confirm bounded rows, queued-to-complete live
+   updates, empty, and error states remain within the Execution surface.
 3. Review a process execution. Confirm the backend, target name, exact mode/ID,
    executable, argument count, environment count, output policy, timeout, and
    risk warning are correct before executing.
@@ -208,8 +209,8 @@ retained snapshot files** plus the prerequisite-bound Git bundle.
    Confirm Review closes and the stale plan cannot dispatch after switching
    back.
 9. Submit an allowed beacon action. Confirm the GUI reports **Submitted** with
-   bounded metadata instead of waiting synchronously. Complete a process action,
-   refresh it, and confirm only exact decoded output becomes available for save.
+   bounded metadata instead of waiting synchronously. Complete a process action
+   and confirm its task event makes only exact decoded output available for save.
    Cancel another exact pending disposable task, confirm the review names the
    task and target, then reconnect and confirm ownership remains isolated
    without a second action dispatch.

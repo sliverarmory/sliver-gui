@@ -33,7 +33,6 @@ import {
   faFolderOpen,
   faList,
   faMicrochip,
-  faRotate,
   faSkullCrossbones,
   faStop,
   faTriangleExclamation,
@@ -352,7 +351,7 @@ export function SessionWorkspacePage({
       if (!nextRoute) {
         onSnapshot(result.value);
         toast.warning("Session changed", {
-          description: "The main process did not confirm the exact selected session. Refresh the inventory and try again.",
+          description: "The main process did not confirm the exact selected session. Return to the live inventory and select it again.",
         });
         return;
       }
@@ -643,7 +642,6 @@ export function SessionWorkspacePage({
                   requestSequence === operationDetailRequestSequence.current,
               );
             }}
-            onRefresh={() => void loadOperations()}
           />
           {resolvedPanels.activity ? <div className="mt-6">{resolvedPanels.activity(context)}</div> : null}
         </Tabs.Panel>
@@ -963,7 +961,6 @@ function SessionActivity({
   nextCursor,
   onLoadMore,
   onOpen,
-  onRefresh,
 }: {
   operations: TargetOperationRecord[];
   error: string | undefined;
@@ -972,7 +969,6 @@ function SessionActivity({
   nextCursor: string | undefined;
   onLoadMore: (cursor: string) => void;
   onOpen: (operation: TargetOperationRecord) => void;
-  onRefresh: () => void;
 }): React.JSX.Element {
   const columns = useMemo<DataGridColumn<TargetOperationRecord>[]>(() => [
     {
@@ -1016,7 +1012,7 @@ function SessionActivity({
 
   return (
     <section className="min-w-0 overflow-hidden rounded-2xl bg-surface" aria-labelledby="m1-operations-heading">
-      <div className="flex items-center justify-between gap-4 px-5 py-4 sm:px-6">
+      <div className="flex items-center gap-4 px-5 py-4 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faClockRotateLeft} /></span>
           <div className="min-w-0">
@@ -1024,12 +1020,6 @@ function SessionActivity({
             <p className="text-xs text-muted">M1 and session workbench activity for this exact session.</p>
           </div>
         </div>
-        <Tooltip delay={250}>
-          <Button aria-label="Refresh activity" isIconOnly isPending={isLoading} size="sm" variant="ghost" onPress={onRefresh}>
-            <FontAwesomeIcon aria-hidden icon={faRotate} />
-          </Button>
-          <Tooltip.Content>Refresh activity</Tooltip.Content>
-        </Tooltip>
       </div>
       {error ? <p className="bg-danger-soft px-5 py-3 text-xs text-danger-soft-foreground sm:px-6" role="alert">{error}</p> : null}
       <DataGrid

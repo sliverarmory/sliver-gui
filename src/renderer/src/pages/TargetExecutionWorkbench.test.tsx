@@ -10,7 +10,12 @@ import type {
   ExecutionOperationId,
 } from "../../../shared/execution-contracts";
 import { EXECUTION_OPERATION_IDS } from "../../../shared/execution-contracts";
-import type { SessionSummary, TargetRef } from "../../../shared/target-contracts";
+import type {
+  BeaconSummary,
+  SessionSummary,
+  TargetRef,
+  TargetSummary,
+} from "../../../shared/target-contracts";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 beforeAll(() => {
@@ -73,6 +78,37 @@ const targetRef: TargetRef = {
   fingerprint: "a".repeat(64),
 };
 
+const beaconTarget: BeaconSummary = {
+  mode: "beacon",
+  id: "beacon-execution-1",
+  name: "build-host-beacon",
+  hostname: "linux-build-01",
+  hostId: "host-1",
+  username: "operator",
+  os: "linux",
+  arch: "amd64",
+  transport: "mtls",
+  remoteAddress: "10.0.0.8:4444",
+  activeC2: "mtls://10.0.0.8:4444",
+  executable: "/tmp/implant",
+  version: "1.7.6",
+  locale: "en-US",
+  integrity: "user",
+  burned: false,
+  pid: 4221,
+  checkinStatus: "on-time",
+  intervalMs: 60_000,
+  jitterMs: 0,
+};
+
+const beaconRef: TargetRef = {
+  mode: "beacon",
+  id: beaconTarget.id,
+  backendEpoch: 7,
+  domainRevision: 5,
+  fingerprint: "b".repeat(64),
+};
+
 const backend = {
   configId: "config-1",
   configName: "Production",
@@ -100,7 +136,7 @@ function capability(
 
 function catalog(
   capabilities: ExecutionCapability[],
-  catalogTarget: SessionSummary = target,
+  catalogTarget: TargetSummary = target,
   ref: TargetRef = targetRef,
 ): ExecutionCatalog {
   return { target: catalogTarget, targetRef: ref, backend, capabilities };
@@ -130,6 +166,7 @@ function deferred<T>() {
 }
 
 function installAPI(executionCatalog: ExecutionCatalog) {
+  let beaconTasksInvalidatedListener: ((target: TargetRef) => void) | undefined;
   const api = {
     listExecutionCatalog: vi.fn().mockResolvedValue({ ok: true, value: executionCatalog }),
     runExecutionRead: vi.fn().mockResolvedValue({ ok: false, error: "No read configured" }),
@@ -138,6 +175,15 @@ function installAPI(executionCatalog: ExecutionCatalog) {
     discardExecutionPlan: vi.fn().mockResolvedValue({ ok: true }),
     getExecutionResult: vi.fn().mockResolvedValue({ ok: false, error: "No result configured" }),
     saveExecutionResult: vi.fn().mockResolvedValue({ ok: false, error: "No save configured" }),
+    onBeaconTasksInvalidated: vi.fn((listener: (target: TargetRef) => void) => {
+      beaconTasksInvalidatedListener = listener;
+      return () => {
+        if (beaconTasksInvalidatedListener === listener) beaconTasksInvalidatedListener = undefined;
+      };
+    }),
+    emitBeaconTasksInvalidated: (invalidatedTarget: TargetRef) => {
+      beaconTasksInvalidatedListener?.(invalidatedTarget);
+    },
   };
   Object.defineProperty(window, "sliver", {
     configurable: true,
@@ -242,10 +288,13 @@ describe("TargetExecutionWorkbench", () => {
     expect(api.prepareExecutionAction.mock.calls[0]?.[0].draft).not.toHaveProperty("parentPid");
   });
 
-  it("prepares an exact process review, executes it, refreshes async state, and saves output natively", async () => {
+  it("advances an exact submitted beacon execution from its task invalidation and saves output natively", async () => {
     const user = userEvent.setup();
-    const api = installAPI(catalog([capability("execution.process")]));
+    const api = installAPI(catalog([
+      capability("execution.process", { modes: ["beacon"] }),
+    ], beaconTarget, beaconRef));
     const reviewedPlan = plan("execution.process", {
+      target: { backend, target: beaconTarget, fingerprint: beaconRef.fingerprint },
       fields: [
         { label: "Executable", value: "/usr/bin/id", sensitive: false },
         { label: "Capture output", value: "yes", sensitive: false },
@@ -292,7 +341,7 @@ describe("TargetExecutionWorkbench", () => {
     });
     api.saveExecutionResult.mockResolvedValue({ ok: true, value: { saved: true, fileName: "id.txt" } });
 
-    render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
+    render(<TargetExecutionWorkbench expectedTarget={beaconRef} targetIdentity="target-beacon-a" />);
     await screen.findByRole("heading", { name: "Execution workbench" });
     await user.click(screen.getByRole("button", { name: "Open: Execute process" }));
     await user.type(screen.getByRole("textbox", { name: "Executable path" }), "/usr/bin/id");
@@ -312,15 +361,25 @@ describe("TargetExecutionWorkbench", () => {
       }),
     });
     const dialog = await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
-    expect(dialog).toHaveTextContent(targetRef.fingerprint);
+    expect(dialog).toHaveTextContent(beaconRef.fingerprint);
     expect(dialog).toHaveTextContent("/usr/bin/id");
 
     await user.click(screen.getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: reviewedPlan.token }));
     expect(await screen.findByText("Process submitted.")).toBeInTheDocument();
     expect(api.discardExecutionPlan).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    act(() => api.emitBeaconTasksInvalidated({
+      ...beaconRef,
+      fingerprint: "c".repeat(64),
+    }));
+    expect(api.getExecutionResult).not.toHaveBeenCalled();
+
+    act(() => api.emitBeaconTasksInvalidated({
+      ...beaconRef,
+      domainRevision: beaconRef.domainRevision + 1,
+    }));
     await waitFor(() => expect(api.getExecutionResult).toHaveBeenCalledExactlyOnceWith({ requestId: "request-process-1" }));
     expect(await screen.findByText("Process completed.")).toBeInTheDocument();
 
@@ -389,9 +448,11 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(review).getByRole("button", { name: "Execute" })).toBeEnabled();
   });
 
-  it("shows beacon reads as queued, then renders the completed bounded inventory", async () => {
+  it("advances an exact queued beacon read from its task invalidation", async () => {
     const user = userEvent.setup();
-    const api = installAPI(catalog([capability("execution.children")]));
+    const api = installAPI(catalog([
+      capability("execution.children", { modes: ["beacon"] }),
+    ], beaconTarget, beaconRef));
     api.runExecutionRead
       .mockResolvedValueOnce({
         ok: true,
@@ -422,14 +483,24 @@ describe("TargetExecutionWorkbench", () => {
         },
       });
 
-    render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
+    render(<TargetExecutionWorkbench expectedTarget={beaconRef} targetIdentity="target-beacon-a" />);
     await screen.findByRole("heading", { name: "Execution workbench" });
     await user.click(screen.getByRole("button", { name: "Open: Background children" }));
     expect(await screen.findByText("Background children queued")).toBeInTheDocument();
     expect(screen.getByText("Task beacon-task-8")).toBeInTheDocument();
     expect(screen.queryByRole("grid", { name: "Background child processes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    act(() => api.emitBeaconTasksInvalidated({
+      ...beaconRef,
+      fingerprint: "c".repeat(64),
+    }));
+    expect(api.runExecutionRead).toHaveBeenCalledOnce();
+
+    act(() => api.emitBeaconTasksInvalidated({
+      ...beaconRef,
+      domainRevision: beaconRef.domainRevision + 1,
+    }));
     expect(await screen.findByText("/usr/bin/sleep")).toBeInTheDocument();
     expect(api.runExecutionRead).toHaveBeenNthCalledWith(2, {
       operationId: "execution.children",

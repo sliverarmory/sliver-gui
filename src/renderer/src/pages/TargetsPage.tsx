@@ -156,7 +156,6 @@ export function TargetsPage({
   const [operations, setOperations] = useState<TargetOperationRecord[]>([]);
   const [operationsPage, setOperationsPage] = useState<PageSummary>();
   const [operationsError, setOperationsError] = useState<string>();
-  const [isLoadingOperations, setIsLoadingOperations] = useState(false);
   const [isLoadingMoreOperations, setIsLoadingMoreOperations] = useState(false);
   const [selectedOperation, setSelectedOperation] = useState<TargetOperationRecord>();
   const [tasks, setTasks] = useState<BeaconTaskSummary[]>([]);
@@ -377,11 +376,9 @@ export function TargetsPage({
     const expectedIncarnation = backendIncarnationRef.current;
     const requestSequence = ++operationsRequestSequence.current;
     if (append) {
-      setIsLoadingOperations(false);
       setIsLoadingMoreOperations(true);
     } else {
       setIsLoadingMoreOperations(false);
-      setIsLoadingOperations(true);
     }
     try {
       const result = await window.sliver.listTargetOperations({
@@ -421,7 +418,6 @@ export function TargetsPage({
         expectedIncarnation === backendIncarnationRef.current
       ) {
         if (append) setIsLoadingMoreOperations(false);
-        else setIsLoadingOperations(false);
       }
     }
   }, []);
@@ -622,7 +618,7 @@ export function TargetsPage({
   const selectTarget = useCallback(async (target: TargetSummary) => {
     const ref = presentedTargetInventory.refs[targetRowKey(target)];
     if (!ref) {
-      toast.warning("Target changed", { description: "Refresh the inventory and select it again." });
+      toast.warning("Target changed", { description: "Return to the live inventory and select it again." });
       return;
     }
     const expectedIncarnation = backendIncarnationRef.current;
@@ -652,7 +648,7 @@ export function TargetsPage({
           selectedSummary.id !== ref.id
         ) {
           toast.warning("Session changed", {
-            description: "The server did not confirm the selected session. Refresh the inventory and try again.",
+            description: "The server did not confirm the selected session. Return to the live inventory and select it again.",
           });
           return;
         }
@@ -1046,7 +1042,6 @@ export function TargetsPage({
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <OperationHistory
           error={operationsError}
-          isLoading={isLoadingOperations}
           isLoadingMore={isLoadingMoreOperations}
           operations={operations}
           page={operationsPage}
@@ -1064,7 +1059,6 @@ export function TargetsPage({
                 requestSequence === operationDetailRequestSequence.current,
             );
           }}
-          onRefresh={() => void loadOperations()}
         />
         <OperatorPresence snapshot={snapshot} />
       </div>
@@ -1288,7 +1282,7 @@ function TargetDetail({
           >
             <Switch.Content className="min-w-0 flex-1">
               <span className="block text-xs font-medium text-foreground">Watch active beacon</span>
-              <span className="mt-0.5 block text-[11px] leading-relaxed text-muted">Refresh tasks between normal check-ins for this window.</span>
+              <span className="mt-0.5 block text-[11px] leading-relaxed text-muted">Poll beacon status between normal check-ins for this window.</span>
             </Switch.Content>
             <Switch.Control><Switch.Thumb /></Switch.Control>
           </Switch>
@@ -1549,20 +1543,16 @@ function OperationHistory({
   operations,
   page,
   error,
-  isLoading,
   isLoadingMore,
   onLoadMore,
   onOpen,
-  onRefresh,
 }: {
   operations: TargetOperationRecord[];
   page: PageSummary | undefined;
   error: string | undefined;
-  isLoading: boolean;
   isLoadingMore: boolean;
   onLoadMore: (cursor: string) => void;
   onOpen: (operation: TargetOperationRecord) => void;
-  onRefresh: () => void;
 }): React.JSX.Element {
   const columns = useMemo<DataGridColumn<TargetOperationRecord>[]>(() => [
     {
@@ -1613,7 +1603,7 @@ function OperationHistory({
 
   return (
     <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="operation-history-heading">
-      <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="flex items-center gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faClockRotateLeft} /></span>
           <div className="min-w-0">
@@ -1621,12 +1611,6 @@ function OperationHistory({
             <p className="text-xs text-muted">Across sessions and beacons on this backend; local requests retain their owning window.</p>
           </div>
         </div>
-        <Tooltip delay={250}>
-          <Button aria-label="Refresh operation history" isDisabled={isLoadingMore} isIconOnly isPending={isLoading} size="sm" variant="ghost" onPress={onRefresh}>
-            <FontAwesomeIcon aria-hidden icon={faRotate} />
-          </Button>
-          <Tooltip.Content>Refresh operation history</Tooltip.Content>
-        </Tooltip>
       </div>
       {error ? <InlineNotice tone="danger" message={error} /> : null}
       <DataGrid
@@ -2336,9 +2320,9 @@ function DomainNotice({
   truncated: boolean;
 }): React.JSX.Element | null {
   const label = mode === "session" ? "session" : "beacon";
-  if (status === "loading") return <InlineNotice tone="default" message={`Refreshing ${label} inventory…`} pending />;
+  if (status === "loading") return <InlineNotice tone="default" message={`Updating ${label} inventory…`} pending />;
   if (status === "unsupported") return <InlineNotice tone="warning" message={error ?? `This server does not support ${label} inventory.`} />;
-  if (status === "error") return <InlineNotice tone="danger" message={error ?? `${capitalize(label)} inventory could not be refreshed.`} />;
+  if (status === "error") return <InlineNotice tone="danger" message={error ?? `${capitalize(label)} inventory could not be updated.`} />;
   if (truncated) return <InlineNotice tone="default" message={`Additional ${label}s are available from the bounded server catalog.`} />;
   return null;
 }
