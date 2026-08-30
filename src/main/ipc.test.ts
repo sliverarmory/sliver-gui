@@ -429,10 +429,22 @@ describe("trusted Electron IPC boundary", () => {
     const open = vi.fn(async () => ({ ok: true as const }));
     const context = {
       kind: "console" as const,
-      attachmentToken: "C".repeat(43),
       configName: "Production",
+      initialTab: {
+        tabId: "T".repeat(43),
+        attachmentToken: "C".repeat(43),
+        label: "Console 1",
+      },
     };
     const claim = vi.fn(async () => ({ ok: true as const, value: context }));
+    const nextTab = {
+      tabId: "N".repeat(43),
+      attachmentToken: "E".repeat(43),
+      label: "Console 2",
+    };
+    const createTab = vi.fn(async () => ({ ok: true as const, value: nextTab }));
+    const closeResult = { remainingTabs: 1 };
+    const closeTab = vi.fn(async () => ({ ok: true as const, value: closeResult }));
     const attach = vi.fn();
     registerIpcHandlers(
       registryMock(),
@@ -442,7 +454,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       undefined,
       undefined,
-      { open, claim, attach },
+      { open, claim, createTab, closeTab, attach },
     );
     const trusted = invokeEvent("http://127.0.0.1:5173/", 77);
 
@@ -451,6 +463,14 @@ describe("trusted Electron IPC boundary", () => {
       ok: true,
       value: context,
     });
+    await expect(electronMocks.handlers.get(IPC.createConsoleTab)?.(trusted.event)).resolves.toEqual({
+      ok: true,
+      value: nextTab,
+    });
+    await expect(electronMocks.handlers.get(IPC.closeConsoleTab)?.(
+      trusted.event,
+      nextTab.tabId,
+    )).resolves.toEqual({ ok: true, value: closeResult });
     expect(open).toHaveBeenCalledExactlyOnceWith({
       contentsId: 77,
       rendererProcessId: 100,
@@ -461,9 +481,24 @@ describe("trusted Electron IPC boundary", () => {
       rendererProcessId: 100,
       rendererFrameToken: "main-frame",
     });
+    expect(createTab).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+    expect(closeTab).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    }, nextTab.tabId);
     expect(() => electronMocks.handlers.get(IPC.openConsoleWindow)?.(trusted.event, {
       configPath: "/tmp/attacker.cfg",
     })).toThrow(/invalid arguments/iu);
+    expect(() => electronMocks.handlers.get(IPC.createConsoleTab)?.(trusted.event, {})).toThrow(/invalid arguments/iu);
+    expect(() => electronMocks.handlers.get(IPC.closeConsoleTab)?.(trusted.event, "short")).toThrow(
+      /invalid console tab ID/iu,
+    );
+    expect(closeTab).toHaveBeenCalledOnce();
 
     const port = messagePort();
     const request = { v: 1 as const, attachmentToken: "D".repeat(43) };

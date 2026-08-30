@@ -254,15 +254,34 @@ async function verifyPackagedSliverConsole({
 
     assert.equal(new URL(consolePage.url()).search, "?surface=console");
     await consolePage.getByRole("main", { name: "Sliver client console window", exact: true }).waitFor();
-    await consolePage.getByText("Active configuration: m0-packaged-operator", { exact: true }).waitFor();
-    await consolePage.getByText("Connected", { exact: true }).waitFor();
+    await consolePage.getByLabel(
+      "Sliver client consoles using m0-packaged-operator",
+      { exact: true },
+    ).waitFor();
+    await consolePage.getByRole("tab", { name: /Console 1.*Connected/iu }).waitFor();
 
     const terminal = consolePage.getByRole("textbox", {
-      name: "Sliver client console using m0-packaged-operator",
+      name: "Sliver client Console 1 using m0-packaged-operator",
       exact: true,
     });
     await terminal.waitFor({ timeout: 30_000 });
     await consolePage.locator('[data-terminal-state="ready"]').waitFor({ timeout: 30_000 });
+    const embeddedFontLoads = await consolePage.evaluate(async (families) => {
+      const browserDocument = (globalThis as unknown as {
+        document: { fonts: { load(value: string): Promise<unknown[]>; check(value: string): boolean } };
+      }).document;
+      return Object.fromEntries(await Promise.all(families.map(async (family) => [
+        family,
+        (await browserDocument.fonts.load(`13px "${family}"`)).length > 0 &&
+          browserDocument.fonts.check(`13px "${family}"`),
+      ])));
+    }, ["Fira Code", "JetBrains Mono", "Cascadia Mono", "Source Code Pro"]);
+    assert.deepEqual(embeddedFontLoads, {
+      "Fira Code": true,
+      "JetBrains Mono": true,
+      "Cascadia Mono": true,
+      "Source Code Pro": true,
+    });
     await waitForFixtureCalls(fixture, {
       events: initialEventCalls + 1,
       getVersion: initialGetVersionCalls + 1,

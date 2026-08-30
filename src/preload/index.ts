@@ -169,6 +169,17 @@ const api: SliverDesktopAPI = {
     ipcRenderer.on(IPC.applicationUpdateChanged, handler);
     return () => ipcRenderer.removeListener(IPC.applicationUpdateChanged, handler);
   },
+  onConsoleNewTabRequested: (listener) => onFixedEvent(IPC.consoleNewTabRequested, listener),
+  onConsoleCloseTabRequested: (listener) => onFixedEvent(IPC.consoleCloseTabRequested, listener),
+  onConsoleSettingsRequested: (listener) => onFixedEvent(IPC.consoleSettingsRequested, listener),
 };
 
 contextBridge.exposeInMainWorld("sliver", Object.freeze(api));
+
+function onFixedEvent(channel: string, listener: () => void): () => void {
+  const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+    if (payload.length === 0) listener();
+  };
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}

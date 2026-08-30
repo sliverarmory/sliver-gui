@@ -56,7 +56,11 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "./execution-contracts.js";
-import type { ConsoleWindowLaunchContext } from "./console-contracts.js";
+import type {
+  ConsoleTabCloseResult,
+  ConsoleTabLaunchContext,
+  ConsoleWindowLaunchContext,
+} from "./console-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -79,6 +83,8 @@ export const IPC_INVOKE = {
   claimSessionShellWindow: "sliver:window:claim-session-shells",
   openConsoleWindow: "sliver:window:open-console",
   claimConsoleWindow: "sliver:window:claim-console",
+  createConsoleTab: "sliver:console-tab:create",
+  closeConsoleTab: "sliver:console-tab:close",
   chooseCertificatePair: "sliver:listener:choose-certificate-pair",
   startListener: "sliver:listener:start",
   prepareStopJob: "sliver:job:prepare-stop",
@@ -132,6 +138,9 @@ export const IPC_EVENTS = {
   sessionShellsChanged: "sliver:session-shell:changed",
   releaseDownloadChanged: "sliver:release-download:changed",
   applicationUpdateChanged: "sliver:application-update:changed",
+  consoleNewTabRequested: "sliver:console:new-tab-requested",
+  consoleCloseTabRequested: "sliver:console:close-tab-requested",
+  consoleSettingsRequested: "sliver:console:settings-requested",
 } as const;
 
 export const IPC = {
@@ -616,6 +625,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [];
     result: OperationResult<ConsoleWindowLaunchContext>;
   };
+  [IPC.createConsoleTab]: {
+    args: [];
+    result: OperationResult<ConsoleTabLaunchContext>;
+  };
+  [IPC.closeConsoleTab]: {
+    args: [tabId: string];
+    result: OperationResult<ConsoleTabCloseResult>;
+  };
   [IPC.chooseCertificatePair]: {
     args: [];
     result: OperationResult<CertificatePairSelection>;
@@ -799,6 +816,9 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
   onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
   onApplicationUpdateChanged: (listener: (state: ApplicationUpdateState) => void) => () => void;
+  onConsoleNewTabRequested: (listener: () => void) => () => void;
+  onConsoleCloseTabRequested: (listener: () => void) => () => void;
+  onConsoleSettingsRequested: (listener: () => void) => () => void;
 };
 
 export function disconnectedSnapshot(error?: string): SliverSnapshot {

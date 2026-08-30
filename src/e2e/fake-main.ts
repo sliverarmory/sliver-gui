@@ -64,6 +64,9 @@ interface FakeMainState {
       rootDirectory: string;
       configEntries: string[];
       configSha256: string;
+      writes: string[];
+      resizes: Array<{ columns: number; rows: number }>;
+      kills: number;
     }>;
     writes: string[];
     resizes: Array<{ columns: number; rows: number }>;
@@ -74,6 +77,8 @@ interface FakeMainState {
 interface FakeMainControl {
   setEventStreamStatus(status: "connected" | "retrying"): void;
   completeTask(taskId: string, emitEvent?: boolean): void;
+  holdNextConsoleExit(): void;
+  releaseConsoleExitHold(): void;
 }
 
 declare global {
@@ -123,6 +128,8 @@ const state: FakeMainState = {
   },
 };
 globalThis.__SLIVER_GUI_E2E_STATE__ = state;
+let holdNextConsoleExit = false;
+let heldConsoleExit: (() => void) | undefined;
 
 const registry = new ConnectionRegistry({
   savedConfigDirectory: requiredArgument("--saved-config-directory="),
@@ -167,23 +174,30 @@ function createFakeConsolePtyFactory(testState: FakeMainState): NativePtyFactory
       } finally {
         activeConfig.fill(0);
       }
-      testState.console.spawns.push({
+      const spawnRecord = {
         executable: file,
         args: [...args],
         cwd: options.cwd,
         rootDirectory,
         configEntries,
         configSha256,
-      });
+        writes: [] as string[],
+        resizes: [] as Array<{ columns: number; rows: number }>,
+        kills: 0,
+      };
+      testState.console.spawns.push(spawnRecord);
 
       const dataListeners = new Set<(data: string) => void>();
       const exitListeners = new Set<(event: NativePtyExitEvent) => void>();
       let killed = false;
       return {
         write(data) {
-          testState.console.writes.push(Buffer.isBuffer(data) ? data.toString("utf8") : data);
+          const text = Buffer.isBuffer(data) ? data.toString("utf8") : data;
+          spawnRecord.writes.push(text);
+          testState.console.writes.push(text);
         },
         resize(columns, rows) {
+          spawnRecord.resizes.push({ columns, rows });
           testState.console.resizes.push({ columns, rows });
         },
         pause() {},
@@ -191,10 +205,17 @@ function createFakeConsolePtyFactory(testState: FakeMainState): NativePtyFactory
         kill() {
           if (killed) return;
           killed = true;
+          spawnRecord.kills += 1;
           testState.console.kills += 1;
-          queueMicrotask(() => {
+          const deliverExit = (): void => {
             for (const listener of exitListeners) listener({ exitCode: 0 });
-          });
+          };
+          if (holdNextConsoleExit) {
+            holdNextConsoleExit = false;
+            heldConsoleExit = deliverExit;
+          } else {
+            queueMicrotask(deliverExit);
+          }
         },
         onData(listener) {
           dataListeners.add(listener);
@@ -289,6 +310,16 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       task.CompletedAt = epochSeconds();
       synchronizeTasks();
       if (emitEvent) eventSubject.next(fakeEvent("beacon-taskresult"));
+    },
+    holdNextConsoleExit() {
+      if (holdNextConsoleExit || heldConsoleExit) throw new Error("A fake console exit is already held");
+      holdNextConsoleExit = true;
+    },
+    releaseConsoleExitHold() {
+      holdNextConsoleExit = false;
+      const release = heldConsoleExit;
+      heldConsoleExit = undefined;
+      if (release) queueMicrotask(release);
     },
   };
 

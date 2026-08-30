@@ -4,6 +4,12 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
+const terminalFonts = JSON.parse(
+  await readFile(join(rootDir, "protocol/terminal-fonts-provenance.json"), "utf8"),
+);
+const openFontLicense = (
+  await readFile(join(rootDir, "LICENSES/OFL-1.1.txt"), "utf8")
+).trim();
 const packagePaths = Object.keys(lock.packages ?? {})
   .filter((packagePath) => packagePath.includes("node_modules/"))
   .sort();
@@ -70,8 +76,8 @@ const divider = "=".repeat(80);
 const output = [
   "THIRD-PARTY SOFTWARE LICENSES",
   "",
-  "Generated from package-lock.json and the exact dependency tree installed for this build.",
-  "Packages unavailable on the build platform are omitted.",
+  "Generated from package-lock.json, the exact dependency tree installed for this build,",
+  "and protocol/terminal-fonts-provenance.json. Packages unavailable on the build platform are omitted.",
   "",
 ];
 
@@ -90,6 +96,40 @@ for (const entry of [...packages.values()].sort((left, right) =>
   }
 }
 
-output.push(divider, `Inventory entries: ${packages.size}`, "");
+if (terminalFonts.schemaVersion !== 1 || !Array.isArray(terminalFonts.fonts)) {
+  throw new Error("Invalid terminal font provenance manifest");
+}
+for (const font of terminalFonts.fonts) {
+  if (
+    typeof font.family !== "string" ||
+    typeof font.version !== "string" ||
+    font.license !== "OFL-1.1" ||
+    typeof font.copyrightNotice !== "string" ||
+    typeof font.repository !== "string" ||
+    !Array.isArray(font.files) ||
+    font.files.length === 0
+  ) {
+    throw new Error("Invalid terminal font provenance entry");
+  }
+  output.push(
+    divider,
+    `${font.family}@${font.version} (embedded terminal font)`,
+    "Declared license: OFL-1.1",
+    font.copyrightNotice,
+    `Source: ${font.repository}`,
+    "",
+    "--- OFL-1.1.txt ---",
+    openFontLicense,
+    "",
+  );
+}
+
+output.push(
+  divider,
+  `Inventory entries: ${packages.size + terminalFonts.fonts.length}`,
+  `Package entries: ${packages.size}`,
+  `Embedded terminal font entries: ${terminalFonts.fonts.length}`,
+  "",
+);
 await mkdir(join(rootDir, "dist"), { recursive: true });
 await writeFile(join(rootDir, "dist", "THIRD_PARTY_LICENSES.txt"), output.join("\n"), "utf8");

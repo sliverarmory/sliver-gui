@@ -21,6 +21,13 @@ export interface ApplicationMenuActions {
   readonly restartToApplyApplicationUpdate: () => void;
 }
 
+export interface ConsoleApplicationMenuActions {
+  readonly newTab: () => void;
+  readonly closeTab: () => void;
+  readonly closeWindow: () => void;
+  readonly showSettings: () => void;
+}
+
 export interface ContextMenuActions {
   readonly copyImageAt: (x: number, y: number) => void;
   readonly copyText: (text: string) => void;
@@ -35,6 +42,7 @@ export function buildApplicationMenuTemplate(
   actions: ApplicationMenuActions,
   releaseCatalog: ReleaseMenuCatalog = { status: "loading" },
   applicationUpdateState?: ApplicationUpdateState,
+  consoleActions?: ConsoleApplicationMenuActions,
 ): MenuItemConstructorOptions[] {
   const updateItems = applicationUpdateState
     ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
@@ -73,7 +81,15 @@ export function buildApplicationMenuTemplate(
           click: actions.duplicateConnectedWindow,
         },
         { type: "separator" },
-        platform === "darwin" ? { role: "close" } : { role: "quit" },
+        platform === "darwin"
+          ? consoleActions
+            ? {
+                label: "Close Window",
+                accelerator: "CmdOrCtrl+Shift+W",
+                click: consoleActions.closeWindow,
+              }
+            : { role: "close" }
+          : { role: "quit" },
       ],
     },
     {
@@ -105,6 +121,32 @@ export function buildApplicationMenuTemplate(
         { role: "toggleDevTools" },
       ],
     },
+    ...(consoleActions
+      ? [{
+          label: "Terminal",
+          submenu: [
+            {
+              id: "console.new-tab",
+              label: "New Tab",
+              accelerator: "CmdOrCtrl+T",
+              click: consoleActions.newTab,
+            },
+            {
+              id: "console.close-tab",
+              label: "Close Tab",
+              accelerator: "CmdOrCtrl+W",
+              click: consoleActions.closeTab,
+            },
+            { type: "separator" as const },
+            {
+              id: "console.settings",
+              label: "Terminal Settings…",
+              accelerator: "CmdOrCtrl+,",
+              click: consoleActions.showSettings,
+            },
+          ],
+        }]
+      : []),
     {
       label: "Window",
       submenu: [
@@ -113,7 +155,13 @@ export function buildApplicationMenuTemplate(
         { type: "separator" },
         ...(platform === "darwin"
           ? [{ role: "front" as const }]
-          : [{ role: "close" as const }]),
+          : consoleActions
+            ? [{
+                label: "Close Window",
+                accelerator: "CmdOrCtrl+Shift+W",
+                click: consoleActions.closeWindow,
+              }]
+            : [{ role: "close" as const }]),
       ],
     },
     {

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -23,10 +24,13 @@ import {
   type SliverSnapshot,
   type WindowLaunchContext,
 } from "../shared/contracts.js";
-import type {
-  ConsoleAttachRequest,
-  ConsoleCloseReason,
-  ConsoleWindowLaunchContext,
+import {
+  CONSOLE_MAX_TABS_PER_WINDOW,
+  type ConsoleAttachRequest,
+  type ConsoleTabCloseResult,
+  type ConsoleTabLaunchContext,
+  type ConsoleCloseReason,
+  type ConsoleWindowLaunchContext,
 } from "../shared/console-contracts.js";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
@@ -117,9 +121,26 @@ interface ConsoleWindowRecord {
   claimingBy?: TrustedWindowIdentity;
   claimPromise?: Promise<OperationResult<ConsoleWindowLaunchContext>>;
   closePromise?: Promise<void>;
+  configName?: string;
+  readonly tabsById: Map<string, ConsoleTabRecord>;
+  readonly tabsByAttachmentToken: Map<string, ConsoleTabRecord>;
+  nextTabOrdinal: number;
+  finalizing: boolean;
+}
+
+interface ConsoleTabRecord {
+  readonly id: string;
+  readonly ordinal: number;
+  startPromise?: Promise<StartedConsoleTab>;
+  closePromise?: Promise<void>;
   runtime?: SliverConsoleRuntime;
   portSession?: ConsolePortSession;
   finalizing: boolean;
+}
+
+interface StartedConsoleTab {
+  readonly context: ConsoleTabLaunchContext;
+  readonly configName: string;
 }
 
 /**
@@ -197,6 +218,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
     hardenWindow(window, rendererUrl);
     installContextMenu(window);
+    window.on("focus", installMenu);
     window.once("ready-to-show", () => window.show());
     let completedInitialLoad = false;
     window.webContents.once("did-finish-load", () => {
@@ -282,6 +304,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       ]).then(() => undefined);
       pendingWindowCleanup.add(cleanup);
       void cleanup.finally(() => pendingWindowCleanup.delete(cleanup));
+      if (!shutdown.isStopping) setTimeout(installMenu, 0);
     });
   }
 
@@ -698,7 +721,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
       const key = `${source.contentsId}:${incarnation}`;
       const existing = consoleWindowsByKey.get(key);
-      if (existing && !existing.window.isDestroyed() && !existing.portSession?.isClosed) {
+      if (existing && !existing.window.isDestroyed() && !existing.finalizing) {
         if (existing.window.isMinimized()) existing.window.restore();
         existing.window.show();
         existing.window.focus();
@@ -712,6 +735,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         window,
         source,
         connectionIncarnation: incarnation,
+        tabsById: new Map(),
+        tabsByAttachmentToken: new Map(),
+        nextTabOrdinal: 1,
         finalizing: false,
       };
       consoleWindowsByKey.set(key, record);
@@ -774,64 +800,189 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     record: ConsoleWindowRecord,
     destination: TrustedWindowIdentity,
   ): Promise<OperationResult<ConsoleWindowLaunchContext>> {
-    const sourceWindow = windowsByContentsId.get(record.source.contentsId);
-    const assertCurrentClaimLease = (): void => {
-      if (
-        !sourceWindow ||
-        sourceWindow.isDestroyed() ||
-        !sameWindowIdentity(record.source, identityForWindow(sourceWindow)) ||
-        record.finalizing ||
-        record.window.isDestroyed() ||
-        consoleWindowsByContentsId.get(destination.contentsId) !== record ||
-        !sameWindowIdentity(destination, identityForWindow(record.window)) ||
-        registry.snapshot(record.source.contentsId).connection.incarnation !== record.connectionIncarnation
-      ) {
-        throw new Error("The active Sliver connection changed before its console started");
-      }
-    };
     try {
-      assertCurrentClaimLease();
+      assertConsoleWindowLease(record, destination);
     } catch {
       retireConsoleWindow(record, "window-closed");
       return { ok: false, error: "The active Sliver connection changed before its console started" };
     }
 
+    try {
+      const initialTab = await beginConsoleTab(record, destination);
+      const context = Object.freeze({
+        kind: "console" as const,
+        configName: initialTab.configName,
+        initialTab: initialTab.context,
+      });
+      record.configName = initialTab.configName;
+      record.claimedBy = destination;
+      record.claimedContext = context;
+      record.window.setTitle(`Sliver Console — ${initialTab.configName}`);
+      return { ok: true, value: context };
+    } catch {
+      retireConsoleWindow(record, "transport-error");
+      return { ok: false, error: "The active Sliver console could not be started" };
+    }
+  }
+
+  async function createConsoleTab(
+    destination: TrustedWindowIdentity,
+  ): Promise<OperationResult<ConsoleTabLaunchContext>> {
+    const record = authorizedConsoleWindow(destination);
+    if (!record) {
+      return { ok: false, error: "This window is not authorized to create a Sliver console tab" };
+    }
+    if (record.tabsById.size >= CONSOLE_MAX_TABS_PER_WINDOW) {
+      return { ok: false, error: `A Sliver console window supports at most ${CONSOLE_MAX_TABS_PER_WINDOW} tabs` };
+    }
+    try {
+      const started = await beginConsoleTab(record, destination);
+      return { ok: true, value: started.context };
+    } catch {
+      return { ok: false, error: "The Sliver console tab could not be started" };
+    }
+  }
+
+  async function closeConsoleTab(
+    destination: TrustedWindowIdentity,
+    tabId: string,
+  ): Promise<OperationResult<ConsoleTabCloseResult>> {
+    const record = authorizedConsoleWindow(destination);
+    const tab = record?.tabsById.get(tabId);
+    if (!record || !tab || tab.finalizing) {
+      return { ok: false, error: "This Sliver console tab is unavailable" };
+    }
+    await closeConsoleTabRecord(record, tab, "operator-close");
+    const value = Object.freeze({ remainingTabs: record.tabsById.size });
+    // An empty console window remains a stable, authorized tab host. This lets
+    // the renderer offer an explicit New Tab action and avoids racing a later
+    // open/create request against deferred window destruction. Close Window
+    // remains available through the native menu.
+    return { ok: true, value };
+  }
+
+  function beginConsoleTab(
+    record: ConsoleWindowRecord,
+    destination: TrustedWindowIdentity,
+  ): Promise<StartedConsoleTab> {
+    assertConsoleWindowLease(record, destination);
+    if (record.tabsById.size >= CONSOLE_MAX_TABS_PER_WINDOW) {
+      throw new Error("The console tab limit was reached");
+    }
+    const tab: ConsoleTabRecord = {
+      id: createConsoleTabId(record),
+      ordinal: record.nextTabOrdinal,
+      finalizing: false,
+    };
+    record.nextTabOrdinal += 1;
+    record.tabsById.set(tab.id, tab);
+    const startPromise = performConsoleTabStart(record, tab, destination)
+      .catch((error: unknown) => {
+        if (record.tabsById.get(tab.id) === tab) record.tabsById.delete(tab.id);
+        if (tab.portSession) record.tabsByAttachmentToken.delete(tab.portSession.attachmentToken);
+        throw error;
+      })
+      .finally(() => {
+        if (tab.startPromise === startPromise) delete tab.startPromise;
+      });
+    tab.startPromise = startPromise;
+    return startPromise;
+  }
+
+  async function performConsoleTabStart(
+    record: ConsoleWindowRecord,
+    tab: ConsoleTabRecord,
+    destination: TrustedWindowIdentity,
+  ): Promise<StartedConsoleTab> {
     let configBytes: Buffer | undefined;
     let runtime: SliverConsoleRuntime | undefined;
+    let portSession: ConsolePortSession | undefined;
+    const assertSpawnLease = (): void => {
+      assertConsoleWindowLease(record, destination);
+      if (tab.finalizing || record.tabsById.get(tab.id) !== tab) {
+        throw new Error("The Sliver console tab changed before it started");
+      }
+    };
     try {
       // Load the native PTY binding before copying profile material. The
       // synchronous lease below is then the final operation before spawn.
       const ptyFactory = options.consolePtyFactory ?? await loadNodePtyFactory();
       const material = await registry.copyActiveConfig(record.source.contentsId);
       configBytes = material.configBytes;
-      assertCurrentClaimLease();
+      assertSpawnLease();
+      if (record.configName !== undefined && material.configName !== record.configName) {
+        throw new Error("The active Sliver configuration changed before the console tab started");
+      }
       runtime = await startConsoleRuntime({
         clientExecutable: consoleClientExecutable,
         configBytes,
         ptyFactory,
-        assertSpawnLease: assertCurrentClaimLease,
+        assertSpawnLease,
       });
       configBytes = undefined; // Runtime consumed and zeroized the transferred buffer.
-      assertCurrentClaimLease();
+      assertSpawnLease();
 
-      const portSession = new ConsolePortSession(runtime, destination);
+      portSession = new ConsolePortSession(runtime, destination);
+      if (record.tabsByAttachmentToken.has(portSession.attachmentToken)) {
+        throw new Error("The console attachment capability collided");
+      }
       const context = Object.freeze({
-        kind: "console" as const,
+        tabId: tab.id,
         attachmentToken: portSession.attachmentToken,
-        configName: material.configName,
+        label: `Console ${tab.ordinal}`,
       });
-      record.runtime = runtime;
-      record.portSession = portSession;
-      record.claimedBy = destination;
-      record.claimedContext = context;
-      record.window.setTitle(`Sliver Console — ${material.configName}`);
-      return { ok: true, value: context };
-    } catch {
+      tab.runtime = runtime;
+      tab.portSession = portSession;
+      record.tabsByAttachmentToken.set(portSession.attachmentToken, tab);
+      return Object.freeze({ context, configName: material.configName });
+    } catch (error) {
       configBytes?.fill(0);
-      await runtime?.close().catch(() => undefined);
-      retireConsoleWindow(record, "transport-error");
-      return { ok: false, error: "The active Sliver console could not be started" };
+      if (portSession) await portSession.close("transport-error").catch(() => undefined);
+      else await runtime?.close().catch(() => undefined);
+      throw error;
     }
+  }
+
+  function createConsoleTabId(record: ConsoleWindowRecord): string {
+    let id: string;
+    do id = randomBytes(32).toString("base64url");
+    while (record.tabsById.has(id));
+    return id;
+  }
+
+  function assertConsoleWindowLease(
+    record: ConsoleWindowRecord,
+    destination: TrustedWindowIdentity,
+  ): void {
+    const sourceWindow = windowsByContentsId.get(record.source.contentsId);
+    const destinationOwner = record.claimedBy ?? record.claimingBy;
+    if (
+      !sourceWindow ||
+      sourceWindow.isDestroyed() ||
+      !sameWindowIdentity(record.source, identityForWindow(sourceWindow)) ||
+      !destinationOwner ||
+      !sameWindowIdentity(destinationOwner, destination) ||
+      record.finalizing ||
+      record.window.isDestroyed() ||
+      consoleWindowsByContentsId.get(destination.contentsId) !== record ||
+      !sameWindowIdentity(destination, identityForWindow(record.window)) ||
+      registry.snapshot(record.source.contentsId).connection.incarnation !== record.connectionIncarnation
+    ) {
+      throw new Error("The active Sliver connection changed before its console started");
+    }
+  }
+
+  function authorizedConsoleWindow(destination: TrustedWindowIdentity): ConsoleWindowRecord | undefined {
+    const record = consoleWindowsByContentsId.get(destination.contentsId);
+    return record &&
+      !record.finalizing &&
+      !record.window.isDestroyed() &&
+      record.claimedBy &&
+      sameWindowIdentity(record.claimedBy, destination) &&
+      sameWindowIdentity(destination, identityForWindow(record.window)) &&
+      isConsoleSurfaceUrl(record.window.webContents.getURL(), rendererUrl)
+      ? record
+      : undefined;
   }
 
   function attachConsoleWindow(
@@ -839,20 +990,20 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     request: ConsoleAttachRequest,
     port: MessagePortMain,
   ): void {
-    const record = consoleWindowsByContentsId.get(destination.contentsId);
+    const record = authorizedConsoleWindow(destination);
     try {
+      const tab = record?.tabsByAttachmentToken.get(request.attachmentToken);
       if (
         !record ||
-        record.finalizing ||
-        !record.claimedBy ||
-        !sameWindowIdentity(record.claimedBy, destination) ||
-        !sameWindowIdentity(destination, identityForWindow(record.window)) ||
-        !record.portSession ||
-        !isConsoleSurfaceUrl(record.window.webContents.getURL(), rendererUrl)
+        !tab ||
+        tab.finalizing ||
+        !tab.portSession
       ) {
         throw new Error("The console stream is unavailable for this renderer");
       }
-      record.portSession.attach(destination, request.attachmentToken, consoleAttachmentPort(port));
+      // The attachment capability is single-use even if the attempted attach fails.
+      record.tabsByAttachmentToken.delete(request.attachmentToken);
+      tab.portSession.attach(destination, request.attachmentToken, consoleAttachmentPort(port));
     } catch (error) {
       try {
         port.close();
@@ -877,10 +1028,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     reason: ConsoleCloseReason,
   ): Promise<void> {
     if (record.closePromise) return record.closePromise;
+    record.finalizing = true;
     const closePromise = (async (): Promise<void> => {
       await record.claimPromise?.catch(() => undefined);
-      if (record.portSession) await record.portSession.close(reason).catch(() => undefined);
-      else await record.runtime?.close().catch(() => undefined);
+      await Promise.all(
+        [...record.tabsById.values()].map((tab) => closeConsoleTabRecord(record, tab, reason)),
+      );
     })();
     record.closePromise = closePromise;
     pendingWindowCleanup.add(closePromise);
@@ -888,7 +1041,30 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return closePromise;
   }
 
+  async function closeConsoleTabRecord(
+    record: ConsoleWindowRecord,
+    tab: ConsoleTabRecord,
+    reason: ConsoleCloseReason,
+  ): Promise<void> {
+    if (tab.closePromise) return tab.closePromise;
+    tab.finalizing = true;
+    const closePromise = (async (): Promise<void> => {
+      await tab.startPromise?.catch(() => undefined);
+      if (tab.portSession) record.tabsByAttachmentToken.delete(tab.portSession.attachmentToken);
+      if (tab.portSession) await tab.portSession.close(reason).catch(() => undefined);
+      else await tab.runtime?.close().catch(() => undefined);
+      // Keep closing tabs admitted against the per-window cap until their
+      // native runtimes are actually gone; a hostile renderer cannot cycle
+      // close/create calls to exceed the bounded process count.
+      if (record.tabsById.get(tab.id) === tab) record.tabsById.delete(tab.id);
+    })();
+    tab.closePromise = closePromise;
+    return closePromise;
+  }
+
   function installMenu(): void {
+    if (shutdown.isStopping) return;
+    const focusedConsole = focusedConsoleWindow();
     const template = buildApplicationMenuTemplate(process.platform, APPLICATION_DISPLAY_NAME, {
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
@@ -899,8 +1075,36 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       restartToApplyApplicationUpdate: () => {
         void confirmApplicationUpdateRestart();
       },
-    }, releaseCatalog, applicationUpdateState);
+    }, releaseCatalog, applicationUpdateState, focusedConsole
+      ? {
+          newTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleNewTabRequested),
+          closeTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleCloseTabRequested),
+          closeWindow: () => {
+            if (focusedConsoleWindow() === focusedConsole && !focusedConsole.window.isDestroyed()) {
+              focusedConsole.window.close();
+            }
+          },
+          showSettings: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleSettingsRequested),
+        }
+      : undefined);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
+
+  function focusedConsoleWindow(): ConsoleWindowRecord | undefined {
+    const focused = BrowserWindow.getFocusedWindow();
+    if (!focused || focused.isDestroyed() || focused.webContents.isDestroyed()) return undefined;
+    const record = consoleWindowsByContentsId.get(focused.webContents.id);
+    return record &&
+      !record.finalizing &&
+      record.window === focused &&
+      isConsoleSurfaceUrl(focused.webContents.getURL(), rendererUrl)
+      ? record
+      : undefined;
+  }
+
+  function sendConsoleMenuEvent(record: ConsoleWindowRecord, channel: string): void {
+    if (focusedConsoleWindow() !== record || record.window.webContents.isDestroyed()) return;
+    record.window.webContents.send(channel);
   }
 
   function beginShutdown(): void {
@@ -1067,6 +1271,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     {
       open: openConsoleWindow,
       claim: claimConsoleWindow,
+      createTab: createConsoleTab,
+      closeTab: closeConsoleTab,
       attach: attachConsoleWindow,
     },
   );

@@ -68,7 +68,10 @@ import {
 import type { ConnectionRegistry } from "./connection-registry.js";
 import {
   parseConsoleAttachRequest,
+  parseConsoleTabId,
   type ConsoleAttachRequest,
+  type ConsoleTabCloseResult,
+  type ConsoleTabLaunchContext,
   type ConsoleWindowLaunchContext,
 } from "../shared/console-contracts.js";
 import {
@@ -116,6 +119,11 @@ export interface ApplicationUpdateController {
 export interface ConsoleWindowController {
   open(source: TrustedWindowIdentity): MaybePromise<OperationResult>;
   claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<ConsoleWindowLaunchContext>>;
+  createTab(destination: TrustedWindowIdentity): MaybePromise<OperationResult<ConsoleTabLaunchContext>>;
+  closeTab(
+    destination: TrustedWindowIdentity,
+    tabId: string,
+  ): MaybePromise<OperationResult<ConsoleTabCloseResult>>;
   attach(
     destination: TrustedWindowIdentity,
     request: ConsoleAttachRequest,
@@ -326,6 +334,25 @@ export function registerIpcHandlers(
       rendererProcessId,
       rendererFrameToken,
     }) ?? { ok: false, error: "This window is not authorized to host a Sliver console" },
+  );
+  handleTrusted(
+    IPC.createConsoleTab,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => consoleWindows?.createTab({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "This window is not authorized to create a Sliver console tab" },
+  );
+  handleTrusted(
+    IPC.closeConsoleTab,
+    rendererUrl,
+    parseConsoleTabIdArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, tabId) => consoleWindows?.closeTab(
+      { contentsId, rendererProcessId, rendererFrameToken },
+      tabId,
+    ) ?? { ok: false, error: "This window is not authorized to close a Sliver console tab" },
   );
   handleTrusted(IPC.chooseCertificatePair, rendererUrl, parseNoArguments, ({ sender }) =>
     registry.chooseCertificatePair(sender),
@@ -644,6 +671,15 @@ function handleTrusted<Channel extends IpcInvokeChannel>(
 function parseNoArguments(args: readonly unknown[]): [] {
   requireArgumentCount(args, 0, "arguments");
   return [];
+}
+
+function parseConsoleTabIdArguments(args: readonly unknown[]): [tabId: string] {
+  const value = requireSingleArgument(args, "console tab ID");
+  try {
+    return [parseConsoleTabId(value)];
+  } catch {
+    throw invalidArguments("console tab ID");
+  }
 }
 
 function parseSavedConfigIdArguments(args: readonly unknown[]): [id: string] {

@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   CONSOLE_MAX_FRAME_BYTES,
+  CONSOLE_MAX_TABS_PER_WINDOW,
   CONSOLE_PROTOCOL_VERSION,
   parseConsoleAttachRequest,
   parseConsoleClientFrame,
   parseConsoleServerFrame,
+  parseConsoleTabId,
 } from "./console-contracts.js";
 
 const opaque = "A".repeat(43);
@@ -20,6 +22,13 @@ describe("console contracts", () => {
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(() => parseConsoleAttachRequest({ v: 2, attachmentToken: opaque })).toThrow(/version/u);
     expect(() => parseConsoleAttachRequest({ v: 1, attachmentToken: "short" })).toThrow(/invalid/u);
+  });
+
+  it("bounds windows to sixteen consoles and accepts only opaque tab IDs", () => {
+    expect(CONSOLE_MAX_TABS_PER_WINDOW).toBe(16);
+    expect(parseConsoleTabId(opaque)).toBe(opaque);
+    expect(() => parseConsoleTabId("short")).toThrow(/console tab ID is invalid/u);
+    expect(() => parseConsoleTabId({ tabId: opaque })).toThrow(/console tab ID is invalid/u);
   });
 
   it("bounds terminal data and dimensions at both protocol boundaries", () => {

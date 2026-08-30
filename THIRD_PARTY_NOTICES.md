@@ -35,6 +35,29 @@ License. Its retained package license and the complete MIT text are included in
 the native package and generated dependency inventory. Source:
 https://github.com/microsoft/node-pty
 
+The renderer embeds the following unmodified terminal font files under the SIL
+Open Font License, Version 1.1. The complete OFL text is reproduced in
+`LICENSES/OFL-1.1.txt`, and exact source tags, commits, URLs, sizes, and SHA-256
+digests are pinned in `protocol/terminal-fonts-provenance.json`:
+
+- Fira Code 6.2: Copyright (c) 2014, The Fira Code Project Authors
+  (https://github.com/tonsky/FiraCode).
+- JetBrains Mono 2.304: Copyright 2020 The JetBrains Mono Project Authors
+  (https://github.com/JetBrains/JetBrainsMono).
+- Cascadia Mono 2407.24: Copyright (c) 2019 - Present, Microsoft Corporation,
+  with Reserved Font Name Cascadia Code.
+- Source Code Pro 2.042R-u/1.062R-i/1.026R-vf: © 2023 Adobe
+  (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights
+  Reserved. Source is a trademark of Adobe in the United States and/or other
+  countries.
+
+These font notices and the OFL terms apply only to the named font files and do
+not dual-license Sliver GUI. Source repositories:
+https://github.com/tonsky/FiraCode,
+https://github.com/JetBrains/JetBrainsMono,
+https://github.com/microsoft/cascadia-code, and
+https://github.com/adobe-fonts/source-code-pro.
+
 The application uses the open-source `@heroui/react` and `@heroui/styles`
 packages. Version 3.2.4 has conflicting upstream metadata: the package
 manifests declare MIT, while the bundled licenses and upstream release history

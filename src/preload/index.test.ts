@@ -35,6 +35,8 @@ const invokeArguments = {
   claimSessionShellWindow: [],
   openConsoleWindow: [],
   claimConsoleWindow: [],
+  createConsoleTab: [],
+  closeConsoleTab: ["T".repeat(43)],
   chooseCertificatePair: [],
   startListener: [{ kind: "mtls", host: "127.0.0.1", port: 8888 }],
   prepareStopJob: [7],
@@ -156,6 +158,9 @@ describe("sandboxed preload bridge", () => {
       "onSessionShellsChanged",
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
+      "onConsoleNewTabRequested",
+      "onConsoleCloseTabRequested",
+      "onConsoleSettingsRequested",
       "openStream",
       "openConsoleStream",
     ].sort());
@@ -193,6 +198,9 @@ describe("sandboxed preload bridge", () => {
       "onSessionShellsChanged",
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
+      "onConsoleNewTabRequested",
+      "onConsoleCloseTabRequested",
+      "onConsoleSettingsRequested",
       "openStream",
       "openConsoleStream",
     ].sort());
@@ -226,6 +234,32 @@ describe("sandboxed preload bridge", () => {
       IPC.sessionShellsChanged,
       handler,
     );
+  });
+
+  it.each([
+    ["onConsoleNewTabRequested", IPC.consoleNewTabRequested],
+    ["onConsoleCloseTabRequested", IPC.consoleCloseTabRequested],
+    ["onConsoleSettingsRequested", IPC.consoleSettingsRequested],
+  ] as const)("delivers the fixed no-payload %s event and removes its listener", (method, channel) => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed[method](listener);
+    expect(electronMocks.on).toHaveBeenCalledOnce();
+    const [registeredChannel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(registeredChannel).toBe(channel);
+    if (typeof handler !== "function") throw new Error("Expected a fixed console event handler");
+
+    handler({} as Electron.IpcRendererEvent);
+    handler({} as Electron.IpcRendererEvent, { attackerPayload: true });
+    expect(listener).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(channel, handler);
   });
 
   it("delivers only validated release-download progress events and removes the listener", () => {

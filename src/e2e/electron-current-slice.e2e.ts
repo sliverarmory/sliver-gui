@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
 import { IPC, IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { SliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import type { SessionShellResourceList } from "../shared/stream-contracts.js";
@@ -107,7 +108,12 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       assert.ok(stateAfterConnect.methods.includes(method), `expected ConnectionRegistry to call ${method}`);
     }
 
-    await verifySliverConsoleWindow(electronApplication, page, fakeOperatorConfig());
+    await verifySliverConsoleWindow(
+      electronApplication,
+      page,
+      fakeOperatorConfig(),
+      artifactDirectory,
+    );
 
     await verifyM1TargetsAndOperations(
       electronApplication,
@@ -190,6 +196,9 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onSessionShellsChanged",
     "onReleaseDownloadChanged",
     "onApplicationUpdateChanged",
+    "onConsoleNewTabRequested",
+    "onConsoleCloseTabRequested",
+    "onConsoleSettingsRequested",
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
@@ -248,6 +257,7 @@ async function verifySliverConsoleWindow(
   electronApplication: ElectronApplication,
   sourcePage: Page,
   activeConfig: string,
+  artifactDirectory: string,
 ): Promise<void> {
   const existingWindows = new Set(electronApplication.windows());
   const initialWindowCount = existingWindows.size;
@@ -259,65 +269,252 @@ async function verifySliverConsoleWindow(
   const consolePage = await waitForConsoleWindow(electronApplication, existingWindows);
   const pageErrors: string[] = [];
   consolePage.on("pageerror", (error) => pageErrors.push(error.message));
-  let rootDirectory: string | undefined;
+  const rootDirectories: string[] = [];
 
   try {
     assert.equal(new URL(consolePage.url()).search, "?surface=console");
     await consolePage.getByRole("main", { name: "Sliver client console window", exact: true }).waitFor();
-    await consolePage.getByText("Active configuration: chosen-m0-operator.cfg", { exact: true }).waitFor();
-    await consolePage.getByText("Connected", { exact: true }).waitFor();
+    await consolePage.getByLabel(
+      "Sliver client consoles using chosen-m0-operator.cfg",
+      { exact: true },
+    ).waitFor();
+    await consolePage.getByRole("tab", { name: /Console 1.*Connected/iu }).waitFor();
 
-    const terminal = consolePage.getByRole("textbox", {
-      name: "Sliver client console using chosen-m0-operator.cfg",
+    const firstTerminal = consolePage.getByRole("textbox", {
+      name: "Sliver client Console 1 using chosen-m0-operator.cfg",
       exact: true,
     });
-    await terminal.waitFor();
+    await firstTerminal.waitFor();
     await consolePage.locator('[data-terminal-state="ready"]').waitFor();
+    const embeddedFontLoads = await consolePage.evaluate(async (families) => {
+      const browserDocument = (globalThis as unknown as {
+        document: { fonts: { load(value: string): Promise<unknown[]>; check(value: string): boolean } };
+      }).document;
+      return Object.fromEntries(await Promise.all(families.map(async (family) => [
+        family,
+        (await browserDocument.fonts.load(`13px "${family}"`)).length > 0 &&
+          browserDocument.fonts.check(`13px "${family}"`),
+      ])));
+    }, ["Fira Code", "JetBrains Mono", "Cascadia Mono", "Source Code Pro"]);
+    assert.deepEqual(embeddedFontLoads, {
+      "Fira Code": true,
+      "JetBrains Mono": true,
+      "Cascadia Mono": true,
+      "Source Code Pro": true,
+    });
+    assert.equal(await consolePage.getByRole("tab").count(), 1);
+    assert.equal(await consolePage.locator("[data-console-terminal-tab-id]").count(), 1);
+    const terminalRegionClass = await consolePage
+      .getByRole("region", { name: "Console terminal" })
+      .getAttribute("class");
+    assert.ok(!terminalRegionClass?.split(/\s+/u).includes("p-2"), "terminal surface must be full bleed");
 
-    const spawnedState = await waitForConsoleState(
+    const firstSpawnedState = await waitForConsoleState(
       electronApplication,
       (state) => state.console.spawns.length === initialSpawnCount + 1,
       "one native console spawn",
     );
-    const spawn = spawnedState.console.spawns.at(-1);
-    assert.ok(spawn, "the dedicated console must spawn one PTY");
-    rootDirectory = spawn.rootDirectory;
-    assert.deepEqual(spawn.args, ["--disable-wg"]);
-    assert.equal(spawn.cwd, spawn.rootDirectory);
-    assert.deepEqual(spawn.configEntries, ["active.cfg"]);
+    const firstSpawn = firstSpawnedState.console.spawns[initialSpawnCount];
+    assert.ok(firstSpawn, "the first console tab must spawn one PTY");
+    rootDirectories.push(firstSpawn.rootDirectory);
+    assert.deepEqual(firstSpawn.args, ["--disable-wg"]);
+    assert.equal(firstSpawn.cwd, firstSpawn.rootDirectory);
+    assert.deepEqual(firstSpawn.configEntries, ["active.cfg"]);
     assert.equal(
-      spawn.configSha256,
+      firstSpawn.configSha256,
       createHash("sha256").update(activeConfig).digest("hex"),
       "the PTY must receive the exact active profile selected by the source window",
     );
-    assert.equal(await pathExists(rootDirectory), true, "the private console root must exist while its window is open");
+    assert.equal(
+      await pathExists(firstSpawn.rootDirectory),
+      true,
+      "the first private console root must exist while its tab is open",
+    );
 
-    const initialWriteCount = spawnedState.console.writes.length;
-    await terminal.pressSequentially("version");
-    await terminal.press("Enter");
+    await consolePage.getByRole("button", { name: "New console tab" }).click();
+    await consolePage.getByRole("tab", { name: /Console 2.*Connected/iu }).waitFor();
+    const twoTabState = await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.spawns.length === initialSpawnCount + 2,
+      "a second native console spawn",
+    );
+    const secondSpawn = twoTabState.console.spawns[initialSpawnCount + 1];
+    assert.ok(secondSpawn, "the second console tab must spawn its own PTY");
+    rootDirectories.push(secondSpawn.rootDirectory);
+    assert.notEqual(secondSpawn.rootDirectory, firstSpawn.rootDirectory);
+    assert.deepEqual(secondSpawn.args, ["--disable-wg"]);
+    assert.deepEqual(secondSpawn.configEntries, ["active.cfg"]);
+    assert.equal(secondSpawn.configSha256, firstSpawn.configSha256);
+    assert.equal(await pathExists(secondSpawn.rootDirectory), true);
+    assert.equal(await consolePage.getByRole("tab").count(), 2);
+    assert.equal(await consolePage.locator("[data-console-terminal-tab-id]").count(), 2);
+    assert.equal(await consolePage.locator("[data-console-terminal-tab-id][inert]").count(), 1);
+
+    const secondTerminal = consolePage.getByRole("textbox", {
+      name: "Sliver client Console 2 using chosen-m0-operator.cfg",
+      exact: true,
+    });
+    await secondTerminal.waitFor();
+    const firstWritesBefore = firstSpawn.writes.length;
+    await secondTerminal.pressSequentially("version");
+    await secondTerminal.press("Enter");
+    const commandState = await waitForConsoleState(
+      electronApplication,
+      (state) => {
+        const selectedSpawn = state.console.spawns[initialSpawnCount + 1];
+        return selectedSpawn?.writes.join("").includes("version\r") === true &&
+          selectedSpawn.resizes.length > 0;
+      },
+      "Ghostty input and its debounced resize to reach the selected console tab",
+    );
+    assert.equal(commandState.console.spawns[initialSpawnCount]?.writes.length, firstWritesBefore);
+    assert.ok(commandState.console.spawns[initialSpawnCount + 1]?.resizes.length);
+
+    await consolePage.screenshot({
+      animations: "disabled",
+      path: join(artifactDirectory, "console-tabs.png"),
+    });
+    await consolePage.bringToFront();
+    await invokeConsoleMenuItem(electronApplication, "console.settings");
+    const settingsDialog = consolePage.getByRole("dialog", { name: "Terminal Settings" });
+    await settingsDialog.waitFor();
+    await settingsDialog.getByText("Fira Code", { exact: true }).first().waitFor();
+    await consolePage.screenshot({
+      animations: "disabled",
+      path: join(artifactDirectory, "console-tabs-settings.png"),
+    });
+    await settingsDialog.getByRole("button", { name: "Cancel" }).click();
+
+    await consolePage.getByRole("button", { name: "Close active console tab" }).click();
+    await consolePage.getByRole("tab", { name: /Console 1.*Connected/iu }).waitFor();
+    const oneTabState = await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.kills === initialKillCount + 1,
+      "second console tab cleanup",
+    );
+    assert.equal(oneTabState.console.spawns[initialSpawnCount]?.kills, 0);
+    assert.equal(oneTabState.console.spawns[initialSpawnCount + 1]?.kills, 1);
+    await waitForPathRemoval(secondSpawn.rootDirectory);
+    assert.equal(await pathExists(firstSpawn.rootDirectory), true);
+
+    await consolePage.getByRole("button", { name: "Close active console tab" }).click();
+    await consolePage.getByText("No console tabs", { exact: true }).waitFor();
     await waitForConsoleState(
       electronApplication,
-      (state) => state.console.writes.slice(initialWriteCount).join("").includes("version\r"),
-      "Ghostty input to reach the console PTY",
+      (state) => state.console.kills === initialKillCount + 2,
+      "last console tab cleanup",
     );
+    await waitForPathRemoval(firstSpawn.rootDirectory);
+    assert.equal(consolePage.isClosed(), false, "an empty console window must remain reusable");
+    const emptyNewTabButton = consolePage
+      .getByRole("region", { name: "Console terminal" })
+      .getByRole("button", { name: "New console tab" });
+    await emptyNewTabButton.waitFor();
+    await emptyNewTabButton.click();
+    await consolePage.getByRole("tab", { name: /Console 3.*Connected/iu }).waitFor();
+    const reusedWindowState = await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.spawns.length === initialSpawnCount + 3,
+      "a console spawn from the reusable empty window",
+    );
+    const thirdSpawn = reusedWindowState.console.spawns[initialSpawnCount + 2];
+    assert.ok(thirdSpawn, "the reused console window must spawn a fresh PTY");
+    rootDirectories.push(thirdSpawn.rootDirectory);
+    assert.notEqual(thirdSpawn.rootDirectory, firstSpawn.rootDirectory);
+    assert.notEqual(thirdSpawn.rootDirectory, secondSpawn.rootDirectory);
+    assert.deepEqual(thirdSpawn.args, ["--disable-wg"]);
+    assert.deepEqual(thirdSpawn.configEntries, ["active.cfg"]);
+    assert.equal(thirdSpawn.configSha256, firstSpawn.configSha256);
+    assert.equal(await pathExists(thirdSpawn.rootDirectory), true);
+
+    const lastTabOrdinalAtCap = 3 + CONSOLE_MAX_TABS_PER_WINDOW - 1;
+    for (let ordinal = 4; ordinal <= lastTabOrdinalAtCap; ordinal += 1) {
+      await consolePage.getByRole("button", { name: "New console tab" }).click();
+      await consolePage.getByRole("tab", {
+        name: new RegExp(`Console ${ordinal}.*Connected`, "iu"),
+      }).waitFor();
+      const atOrdinal = await waitForConsoleState(
+        electronApplication,
+        (state) => state.console.spawns.length === initialSpawnCount + ordinal,
+        `native console spawn ${ordinal} while filling the tab cap`,
+      );
+      const spawn = atOrdinal.console.spawns[initialSpawnCount + ordinal - 1];
+      assert.ok(spawn, `console tab ${ordinal} must own a PTY`);
+      rootDirectories.push(spawn.rootDirectory);
+      assert.equal(spawn.configSha256, firstSpawn.configSha256);
+    }
+    assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
+
+    await electronApplication.evaluate(() => {
+      globalThis.__SLIVER_GUI_E2E_CONTROL__.holdNextConsoleExit();
+    });
+    await consolePage.getByRole("button", { name: "Close active console tab" }).click();
     await waitForConsoleState(
       electronApplication,
-      (state) => state.console.resizes.length > 0,
-      "Ghostty to size the native console PTY",
+      (state) => state.console.kills === initialKillCount + 3,
+      "the held native console shutdown to begin",
     );
+    const spawnCountAtCap = initialSpawnCount + lastTabOrdinalAtCap;
+    await consolePage.getByRole("button", { name: "New console tab" }).click();
+    await consolePage.getByText(
+      `A Sliver console window supports at most ${CONSOLE_MAX_TABS_PER_WINDOW} tabs`,
+      { exact: true },
+    ).waitFor();
+    const rejectedAtCap = await readFakeState(electronApplication);
+    assert.equal(
+      rejectedAtCap.console.spawns.length,
+      spawnCountAtCap,
+      "a closing native runtime must remain admitted against the process cap",
+    );
+
+    await electronApplication.evaluate(() => {
+      globalThis.__SLIVER_GUI_E2E_CONTROL__.releaseConsoleExitHold();
+    });
+    await consolePage.getByRole("tab", {
+      name: new RegExp(`Console ${lastTabOrdinalAtCap}.*Connected`, "iu"),
+    }).waitFor({ state: "detached" });
+    const closedAtCapRoot = rootDirectories.at(-1);
+    assert.ok(closedAtCapRoot);
+    await waitForPathRemoval(closedAtCapRoot);
+
+    const replacementOrdinal = lastTabOrdinalAtCap + 1;
+    await consolePage.getByRole("button", { name: "New console tab" }).click();
+    await consolePage.getByRole("tab", {
+      name: new RegExp(`Console ${replacementOrdinal}.*Connected`, "iu"),
+    }).waitFor();
+    const replacementState = await waitForConsoleState(
+      electronApplication,
+      (state) => state.console.spawns.length === spawnCountAtCap + 1,
+      "a replacement console spawn after held shutdown completes",
+    );
+    const replacementSpawn = replacementState.console.spawns[spawnCountAtCap];
+    assert.ok(replacementSpawn);
+    rootDirectories.push(replacementSpawn.rootDirectory);
+    assert.equal(replacementSpawn.configSha256, firstSpawn.configSha256);
+    assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
     assert.deepEqual(pageErrors, []);
+
+    // Close the BrowserWindow with a live tab to cover native process and private-root teardown.
+    await consolePage.close();
   } finally {
-    await consolePage.close().catch(() => undefined);
+    await electronApplication.evaluate(() => {
+      globalThis.__SLIVER_GUI_E2E_CONTROL__.releaseConsoleExitHold();
+    }).catch(() => undefined);
+    if (!consolePage.isClosed()) await consolePage.close().catch(() => undefined);
   }
 
   const closedState = await waitForConsoleState(
     electronApplication,
-    (state) => state.console.kills === initialKillCount + 1,
-    "console PTY cleanup",
+    (state) => state.console.kills === initialKillCount + CONSOLE_MAX_TABS_PER_WINDOW + 3,
+    "live console tab cleanup when its reusable window closes",
   );
-  assert.equal(closedState.console.spawns.length, initialSpawnCount + 1);
-  assert.ok(rootDirectory, "the fake PTY must record its private root");
-  await waitForPathRemoval(rootDirectory);
+  assert.equal(
+    closedState.console.spawns.length,
+    initialSpawnCount + CONSOLE_MAX_TABS_PER_WINDOW + 3,
+  );
+  assert.equal(closedState.console.spawns.at(-1)?.kills, 1);
+  assert.equal(rootDirectories.length, CONSOLE_MAX_TABS_PER_WINDOW + 3);
+  for (const rootDirectory of rootDirectories) await waitForPathRemoval(rootDirectory);
   await waitForWindowCount(electronApplication, initialWindowCount);
 }
 
@@ -2142,6 +2339,71 @@ async function waitForWindowCount(
   throw new Error(`Application window count did not settle at ${expectedCount}; latest count was ${latest}`);
 }
 
+async function invokeConsoleMenuItem(
+  electronApplication: ElectronApplication,
+  itemId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const invoked = await electronApplication.evaluate(({ app, BrowserWindow, Menu }, id) => {
+      const consoleWindow = BrowserWindow.getAllWindows().find((window) => {
+        try {
+          return new URL(window.webContents.getURL()).search === "?surface=console";
+        } catch {
+          return false;
+        }
+      });
+      if (!consoleWindow) return false;
+      app.focus({ steal: true });
+      consoleWindow.show();
+      consoleWindow.focus();
+      consoleWindow.webContents.focus();
+      const invokeFocusedMenuItem = (): boolean => {
+        const focusedWindow = BrowserWindow.getFocusedWindow();
+        const item = Menu.getApplicationMenu()?.getMenuItemById(id);
+        if (focusedWindow !== consoleWindow || !item || typeof item.click !== "function") return false;
+        Reflect.apply(item.click, item, [item, focusedWindow, {}]);
+        return true;
+      };
+      if (invokeFocusedMenuItem()) return true;
+
+      // macOS automation can leave Electron visible but inactive even after
+      // app.focus({ steal: true }). Emit the same BrowserWindow focus event
+      // under a narrowly scoped getFocusedWindow shim so production rebuilds
+      // and invokes its exact native Terminal menu deterministically.
+      const descriptor = Object.getOwnPropertyDescriptor(BrowserWindow, "getFocusedWindow");
+      if (!descriptor?.configurable) return false;
+      try {
+        Object.defineProperty(BrowserWindow, "getFocusedWindow", {
+          configurable: true,
+          value: () => consoleWindow,
+        });
+        consoleWindow.emit("focus");
+        return invokeFocusedMenuItem();
+      } finally {
+        Object.defineProperty(BrowserWindow, "getFocusedWindow", descriptor);
+      }
+    }, itemId);
+    if (invoked) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const diagnostic = await electronApplication.evaluate(({ app, BrowserWindow, Menu }) => ({
+    active: app.isActive(),
+    focusedUrl: BrowserWindow.getFocusedWindow()?.webContents.getURL(),
+    menuIds: Menu.getApplicationMenu()?.items.flatMap((item) => [
+      item.id,
+      ...(item.submenu?.items.map((child) => child.id) ?? []),
+    ]),
+    windows: BrowserWindow.getAllWindows().map((window) => ({
+      focused: window.isFocused(),
+      visible: window.isVisible(),
+      url: window.webContents.getURL(),
+    })),
+  }));
+  throw new Error(`Timed out waiting for native console menu item ${itemId}: ${JSON.stringify(diagnostic)}`);
+}
+
 async function waitForConsoleState(
   electronApplication: ElectronApplication,
   predicate: (state: FakeStateSnapshot) => boolean,
@@ -2355,6 +2617,9 @@ interface FakeStateSnapshot {
       rootDirectory: string;
       configEntries: string[];
       configSha256: string;
+      writes: string[];
+      resizes: Array<{ columns: number; rows: number }>;
+      kills: number;
     }>;
     writes: string[];
     resizes: Array<{ columns: number; rows: number }>;

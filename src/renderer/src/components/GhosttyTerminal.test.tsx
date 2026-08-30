@@ -172,6 +172,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   Reflect.deleteProperty(navigator, "clipboard");
   Reflect.deleteProperty(document, "execCommand");
+  Reflect.deleteProperty(document, "fonts");
 });
 
 describe("GhosttyTerminal", () => {
@@ -227,6 +228,7 @@ describe("GhosttyTerminal", () => {
     });
 
     const terminal = requireTerminal();
+    expect(terminal.options["fontFamily"]).toBe('"Fira Code", monospace');
     expect(terminal.write).toHaveBeenCalledOnce();
     expect(decoder.decode(terminal.write.mock.calls[0]?.[0] as Uint8Array)).toBe(
       "safelinkhttps://plain.example",
@@ -370,6 +372,118 @@ describe("GhosttyTerminal", () => {
     await waitFor(() => expect(transport.resize).toHaveBeenLastCalledWith(1, 1_000));
   });
 
+  it("uses Fira Code by default and applies live appearance changes without remounting", async () => {
+    const { instantiate } = installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const wasmBytes = new Uint8Array([0x00]);
+    const rendered = render(
+      <GhosttyTerminal
+        appearance={{
+          cursorBlink: true,
+          cursorStyle: "block",
+          fontFamily: '"Fira Code", monospace',
+          fontSize: 13,
+          smoothScrollDuration: 0,
+        }}
+        transport={transport.api}
+        wasmBytes={wasmBytes}
+      />,
+    );
+    await waitFor(() => expect(ghosttyMocks.terminals).toHaveLength(1));
+    const terminal = requireTerminal();
+    const fitAddon = ghosttyMocks.fitAddons[0];
+    const initialFitCalls = fitAddon?.fit.mock.calls.length ?? 0;
+
+    expect(terminal.options).toMatchObject({
+      cursorBlink: true,
+      cursorStyle: "block",
+      fontFamily: '"Fira Code", monospace',
+      fontSize: 13,
+      smoothScrollDuration: 0,
+    });
+
+    rendered.rerender(
+      <GhosttyTerminal
+        appearance={{
+          cursorBlink: false,
+          cursorStyle: "bar",
+          fontFamily: '"JetBrains Mono", monospace',
+          fontSize: 18,
+          smoothScrollDuration: 100,
+        }}
+        transport={transport.api}
+        wasmBytes={wasmBytes}
+      />,
+    );
+
+    await waitFor(() => expect(terminal.options).toMatchObject({
+      cursorBlink: false,
+      cursorStyle: "bar",
+      fontFamily: '"JetBrains Mono", monospace',
+      fontSize: 18,
+      smoothScrollDuration: 100,
+    }));
+    expect(ghosttyMocks.terminals).toHaveLength(1);
+    expect(instantiate).toHaveBeenCalledOnce();
+    expect(transport.unsubscribe).not.toHaveBeenCalled();
+    expect(terminal.dispose).not.toHaveBeenCalled();
+    expect(fitAddon?.fit.mock.calls.length).toBeGreaterThan(initialFitCalls);
+  });
+
+  it("applies the latest appearance when settings change during async font loading", async () => {
+    installWebAssemblyMocks();
+    const initialFontLoad = deferred<unknown[]>();
+    const load = vi.fn()
+      .mockImplementationOnce(() => initialFontLoad.promise)
+      .mockResolvedValue([]);
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { load },
+    });
+    const transport = fakeTransport();
+    const wasmBytes = new Uint8Array([0x00]);
+    const rendered = render(
+      <GhosttyTerminal
+        appearance={{
+          cursorBlink: true,
+          cursorStyle: "block",
+          fontFamily: '"Fira Code", monospace',
+          fontSize: 13,
+          smoothScrollDuration: 0,
+        }}
+        transport={transport.api}
+        wasmBytes={wasmBytes}
+      />,
+    );
+    await waitFor(() => expect(load).toHaveBeenCalledWith('13px "Fira Code", monospace'));
+
+    rendered.rerender(
+      <GhosttyTerminal
+        appearance={{
+          cursorBlink: false,
+          cursorStyle: "underline",
+          fontFamily: '"JetBrains Mono", monospace',
+          fontSize: 18,
+          smoothScrollDuration: 100,
+        }}
+        transport={transport.api}
+        wasmBytes={wasmBytes}
+      />,
+    );
+    expect(ghosttyMocks.terminals).toHaveLength(0);
+    initialFontLoad.resolve([]);
+
+    await waitFor(() => expect(requireTerminal().options).toMatchObject({
+      cursorBlink: false,
+      cursorStyle: "underline",
+      fontFamily: '"JetBrains Mono", monospace',
+      fontSize: 18,
+      smoothScrollDuration: 100,
+    }));
+    expect(ghosttyMocks.terminals).toHaveLength(1);
+    expect(load).toHaveBeenCalledWith('18px "JetBrains Mono", monospace');
+  });
+
   it("disposes a grapheme-bearing terminal and creates a fresh isolated WASM instance", async () => {
     const { instantiate } = installWebAssemblyMocks();
     const firstTransport = fakeTransport();
@@ -469,4 +583,12 @@ async function delay(milliseconds: number): Promise<void> {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, milliseconds));
   });
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
 }

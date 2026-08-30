@@ -55,6 +55,7 @@ export interface GhosttyTerminalAppearance {
   fontFamily?: string;
   fontSize?: number;
   scrollback?: number;
+  smoothScrollDuration?: number;
   theme?: ITheme;
 }
 
@@ -96,6 +97,8 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
   ): React.JSX.Element {
     const hostRef = useRef<HTMLDivElement>(null);
     const terminalRef = useRef<Terminal | undefined>(undefined);
+    const fitAddonRef = useRef<FitAddon | undefined>(undefined);
+    const appearanceRef = useLatest(appearance);
     const onCloseRef = useLatest(onClose);
     const onErrorRef = useLatest(onError);
     const onReadyRef = useLatest(onReady);
@@ -275,22 +278,34 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         });
         if (disposed) return;
 
+        const currentAppearance = appearanceRef.current;
+        const fontFamily = currentAppearance?.fontFamily ?? '"Fira Code", monospace';
+        const fontSize = boundedNumber(currentAppearance?.fontSize, 8, 32, 13);
+        await loadTerminalFont(fontFamily, fontSize);
+        if (disposed) return;
+
         const ghostty = new Ghostty(wasmInstance);
         terminal = new Terminal({
-          cursorBlink: appearance?.cursorBlink ?? true,
-          cursorStyle: appearance?.cursorStyle ?? "block",
+          cursorBlink: currentAppearance?.cursorBlink ?? true,
+          cursorStyle: currentAppearance?.cursorStyle ?? "block",
           disableStdin: disableInput,
-          fontFamily: appearance?.fontFamily ?? "SFMono-Regular, Consolas, Liberation Mono, monospace",
-          fontSize: boundedNumber(appearance?.fontSize, 8, 32, 13),
+          fontFamily,
+          fontSize,
           ghostty,
-          scrollback: boundedNumber(appearance?.scrollback, 0, 50_000, 5_000),
-          smoothScrollDuration: 0,
-          ...(appearance?.theme ? { theme: appearance.theme } : {}),
+          scrollback: boundedNumber(currentAppearance?.scrollback, 0, 50_000, 5_000),
+          smoothScrollDuration: boundedNumber(
+            currentAppearance?.smoothScrollDuration,
+            0,
+            1_000,
+            0,
+          ),
+          ...(currentAppearance?.theme ? { theme: currentAppearance.theme } : {}),
         });
         terminalRef.current = terminal;
         if (!disableInput) inputSubscription = terminal.onData(sendTerminalData);
         resizeSubscription = terminal.onResize(({ cols, rows }) => scheduleResize(cols, rows));
         fitAddon = new FitAddon();
+        fitAddonRef.current = fitAddon;
         terminal.loadAddon(fitAddon);
         terminal.open(host);
         disablePinnedGhosttyAutoCopy(terminal);
@@ -318,6 +333,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         inputSubscription?.dispose();
         resizeSubscription?.dispose();
         terminalRef.current = undefined;
+        fitAddonRef.current = undefined;
         terminal?.dispose();
         terminal = undefined;
         setTerminalState("failed");
@@ -331,6 +347,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         inputSubscription?.dispose();
         resizeSubscription?.dispose();
         terminalRef.current = undefined;
+        fitAddonRef.current = undefined;
         terminal?.dispose();
         terminal = undefined;
         fitAddon = undefined;
@@ -346,10 +363,6 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         host.removeEventListener("paste", denyNativeTransfer, true);
       };
     }, [
-      appearance?.cursorBlink,
-      appearance?.cursorStyle,
-      appearance?.fontFamily,
-      appearance?.fontSize,
       appearance?.scrollback,
       appearance?.theme,
       ariaLabel,
@@ -360,6 +373,43 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       terminalResponseBudgetBytes,
       transport,
       wasmBytes,
+    ]);
+
+    useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      let cancelled = false;
+      const fontFamily = appearance?.fontFamily ?? '"Fira Code", monospace';
+      const fontSize = boundedNumber(appearance?.fontSize, 8, 32, 13);
+      const fontChanged = terminal.options.fontFamily !== fontFamily ||
+        terminal.options.fontSize !== fontSize;
+      terminal.options.cursorBlink = appearance?.cursorBlink ?? true;
+      terminal.options.cursorStyle = appearance?.cursorStyle ?? "block";
+      terminal.options.smoothScrollDuration = boundedNumber(
+        appearance?.smoothScrollDuration,
+        0,
+        1_000,
+        0,
+      );
+      terminal.options.fontFamily = fontFamily;
+      terminal.options.fontSize = fontSize;
+      if (fontChanged) fitAddonRef.current?.fit();
+
+      void loadTerminalFont(fontFamily, fontSize).then(() => {
+        if (cancelled || terminalRef.current !== terminal || !fontChanged) return;
+        fitAddonRef.current?.fit();
+      });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [
+      appearance?.cursorBlink,
+      appearance?.cursorStyle,
+      appearance?.fontFamily,
+      appearance?.fontSize,
+      appearance?.smoothScrollDuration,
+      terminalState,
     ]);
 
     return (
@@ -435,6 +485,15 @@ function boundedText(value: string): string {
   const bytes = textEncoder.encode(value);
   if (bytes.byteLength <= MAX_EXPLICIT_TEXT_BYTES) return value;
   return textDecoder.decode(bytes.subarray(0, MAX_EXPLICIT_TEXT_BYTES));
+}
+
+async function loadTerminalFont(fontFamily: string, fontSize: number): Promise<void> {
+  if (!("fonts" in document) || typeof document.fonts.load !== "function") return;
+  try {
+    await document.fonts.load(`${fontSize}px ${fontFamily}`);
+  } catch {
+    // An unavailable optional face falls back to the final monospace family.
+  }
 }
 
 /**

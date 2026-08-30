@@ -13,6 +13,7 @@ export const CONSOLE_MAX_QUEUE_BYTES = 128 * KiB;
 // stops reading while a renderer continues to send data.
 export const CONSOLE_MAX_SESSION_INPUT_BYTES = 16 * 1_024 * KiB;
 export const CONSOLE_MAX_TERMINAL_DIMENSION = 1_000 as const;
+export const CONSOLE_MAX_TABS_PER_WINDOW = 16 as const;
 export const CONSOLE_ATTACHMENT_TTL_MILLISECONDS = 15_000 as const;
 export const CONSOLE_HANDSHAKE_TIMEOUT_MILLISECONDS = 5_000 as const;
 
@@ -32,10 +33,20 @@ export const CONSOLE_CLOSE_REASONS = [
 
 export type ConsoleCloseReason = (typeof CONSOLE_CLOSE_REASONS)[number];
 
+export interface ConsoleTabLaunchContext {
+  readonly tabId: string;
+  readonly attachmentToken: string;
+  readonly label: string;
+}
+
 export interface ConsoleWindowLaunchContext {
   readonly kind: "console";
-  readonly attachmentToken: string;
   readonly configName: string;
+  readonly initialTab: ConsoleTabLaunchContext;
+}
+
+export interface ConsoleTabCloseResult {
+  readonly remainingTabs: number;
 }
 
 export interface ConsoleAttachRequest {
@@ -122,6 +133,10 @@ export class ConsoleContractError extends TypeError {
 
 export function isOpaqueConsoleId(value: unknown): value is string {
   return typeof value === "string" && OPAQUE_ID_PATTERN.test(value);
+}
+
+export function parseConsoleTabId(value: unknown): string {
+  return requireOpaqueId(value, "console tab ID");
 }
 
 export function parseConsoleAttachRequest(value: unknown): ConsoleAttachRequest {

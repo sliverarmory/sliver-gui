@@ -78,6 +78,81 @@ describe("application menu templates", () => {
     expect(showAboutPanel).toHaveBeenCalledOnce();
   });
 
+  it("adds terminal commands only for a focused console without colliding with close-window", () => {
+    const actions = {
+      newWindow: vi.fn(),
+      duplicateConnectedWindow: vi.fn(),
+      openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
+      downloadRelease: vi.fn(),
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
+    };
+    const consoleActions = {
+      newTab: vi.fn(),
+      closeTab: vi.fn(),
+      closeWindow: vi.fn(),
+      showSettings: vi.fn(),
+    };
+    const macTemplate = buildApplicationMenuTemplate(
+      "darwin",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      undefined,
+      consoleActions,
+    );
+
+    expect(macTemplate.map((item) => item.label)).toEqual([
+      "Sliver GUI",
+      "File",
+      "Edit",
+      "View",
+      "Terminal",
+      "Window",
+      "Help",
+    ]);
+    const terminal = menuItems(macTemplate, "Terminal");
+    expect(terminal).toEqual([
+      expect.objectContaining({ id: "console.new-tab", label: "New Tab", accelerator: "CmdOrCtrl+T" }),
+      expect.objectContaining({ id: "console.close-tab", label: "Close Tab", accelerator: "CmdOrCtrl+W" }),
+      expect.objectContaining({ type: "separator" }),
+      expect.objectContaining({
+        id: "console.settings",
+        label: "Terminal Settings…",
+        accelerator: "CmdOrCtrl+,",
+      }),
+    ]);
+    clickItem(terminal[0]);
+    clickItem(terminal[1]);
+    clickItem(terminal[3]);
+    expect(consoleActions.newTab).toHaveBeenCalledOnce();
+    expect(consoleActions.closeTab).toHaveBeenCalledOnce();
+    expect(consoleActions.showSettings).toHaveBeenCalledOnce();
+
+    const macCloseWindow = menuItems(macTemplate, "File").at(-1);
+    expect(macCloseWindow).toMatchObject({
+      label: "Close Window",
+      accelerator: "CmdOrCtrl+Shift+W",
+    });
+    clickItem(macCloseWindow);
+    expect(consoleActions.closeWindow).toHaveBeenCalledOnce();
+
+    const windowsTemplate = buildApplicationMenuTemplate(
+      "win32",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      undefined,
+      consoleActions,
+    );
+    expect(menuItems(windowsTemplate, "File").at(-1)).toMatchObject({ role: "quit" });
+    expect(menuItems(windowsTemplate, "Window").at(-1)).toMatchObject({
+      label: "Close Window",
+      accelerator: "CmdOrCtrl+Shift+W",
+    });
+  });
+
   it("builds server and console-client submenus from every latest-release target", () => {
     const downloadRelease = vi.fn();
     const template = buildApplicationMenuTemplate("darwin", "Sliver GUI", {

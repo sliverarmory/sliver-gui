@@ -52,6 +52,7 @@ const requiredBuilderPaths = [
   "protocol/sliver-script-provenance.json",
   "protocol/sliver-script-handwritten-overlay.patch",
   "protocol/ghostty-web-provenance.json",
+  "protocol/terminal-fonts-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -64,6 +65,7 @@ const requiredPackagedFiles = [
   "LICENSES/Apache-2.0.txt",
   "LICENSES/GPL-3.0-or-later.txt",
   "LICENSES/MIT.txt",
+  "LICENSES/OFL-1.1.txt",
   "LICENSES/README.md",
   "package.json",
   "node_modules/ghostty-web/LICENSE",
@@ -88,6 +90,7 @@ const requiredPackagedFiles = [
   "protocol/sliver-script-provenance.json",
   "protocol/sliver-script-handwritten-overlay.patch",
   "protocol/ghostty-web-provenance.json",
+  "protocol/terminal-fonts-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -117,6 +120,119 @@ async function listFiles(directory) {
   return files;
 }
 
+async function verifyTerminalFontAssets(distributionFiles) {
+  const manifestPath = join(rootDir, "protocol/terminal-fonts-provenance.json");
+  const manifestBytes = await readFile(manifestPath);
+  const manifest = JSON.parse(manifestBytes.toString("utf8"));
+  const expectedIds = ["cascadia-mono", "fira-code", "jetbrains-mono", "source-code-pro"];
+  const actualIds = Array.isArray(manifest.fonts)
+    ? manifest.fonts.map((font) => font.id).sort()
+    : [];
+  if (
+    manifest.schemaVersion !== 1 ||
+    manifest.defaultFontId !== "fira-code" ||
+    JSON.stringify(actualIds) !== JSON.stringify(expectedIds)
+  ) {
+    throw new Error("Terminal font provenance must pin the approved four-family inventory");
+  }
+
+  const sourceStyles = await readFile(join(rootDir, "src/renderer/src/styles.css"), "utf8");
+  const expectedFiles = [];
+  const seenPaths = new Set();
+  for (const font of manifest.fonts) {
+    if (
+      typeof font.family !== "string" ||
+      typeof font.version !== "string" ||
+      font.license !== "OFL-1.1" ||
+      typeof font.copyrightNotice !== "string" ||
+      typeof font.repository !== "string" ||
+      !font.repository.startsWith("https://github.com/") ||
+      typeof font.tag !== "string" ||
+      typeof font.commit !== "string" ||
+      !/^[0-9a-f]{40}$/u.test(font.commit) ||
+      typeof font.licenseUrl !== "string" ||
+      !font.licenseUrl.includes(font.commit) ||
+      !Array.isArray(font.files) ||
+      font.files.length === 0
+    ) {
+      throw new Error(`Invalid terminal font provenance entry: ${String(font.id)}`);
+    }
+    if (!sourceStyles.includes(`font-family: "${font.family}"`)) {
+      throw new Error(`Renderer CSS does not declare embedded terminal font: ${font.family}`);
+    }
+
+    for (const file of font.files) {
+      const archive = font.archive;
+      if (
+        typeof file.path !== "string" ||
+        !/^src\/renderer\/src\/assets\/fonts\/[a-z0-9-]+\/[A-Za-z0-9._-]+\.woff2$/u.test(file.path) ||
+        seenPaths.has(file.path) ||
+        !Number.isSafeInteger(file.size) ||
+        file.size < 1 ||
+        typeof file.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(file.sha256) ||
+        (typeof file.sourceUrl !== "string" && typeof file.sourcePath !== "string")
+      ) {
+        throw new Error(`Invalid terminal font file provenance: ${String(file.path)}`);
+      }
+      if (typeof file.sourceUrl === "string" && !file.sourceUrl.includes(font.commit)) {
+        throw new Error(`Terminal font raw source is not pinned to its commit: ${file.path}`);
+      }
+      if (
+        typeof file.sourcePath === "string" &&
+        (
+          typeof archive !== "object" ||
+          archive === null ||
+          typeof archive.url !== "string" ||
+          !archive.url.includes(font.tag) ||
+          !Number.isSafeInteger(archive.size) ||
+          archive.size < 1 ||
+          typeof archive.sha256 !== "string" ||
+          !/^[0-9a-f]{64}$/u.test(archive.sha256)
+        )
+      ) {
+        throw new Error(`Terminal font archive source is not pinned: ${file.path}`);
+      }
+      seenPaths.add(file.path);
+      const absolutePath = join(rootDir, ...file.path.split("/"));
+      const [content, metadata] = await Promise.all([readFile(absolutePath), stat(absolutePath)]);
+      if (!metadata.isFile() || content.byteLength !== file.size || sha256(content) !== file.sha256) {
+        throw new Error(`Terminal font source failed its integrity check: ${file.path}`);
+      }
+      const cssPath = `./${file.path.slice("src/renderer/src/".length)}`;
+      if (!sourceStyles.includes(`url("${cssPath}")`)) {
+        throw new Error(`Renderer CSS does not reference pinned terminal font: ${file.path}`);
+      }
+      expectedFiles.push({ sha256: file.sha256, size: file.size });
+    }
+  }
+  if (!sourceStyles.includes('--font-mono: "Fira Code"')) {
+    throw new Error("Fira Code must remain the default renderer monospace font");
+  }
+
+  const builtFontFiles = distributionFiles.filter((filePath) =>
+    filePath.endsWith(".woff2") && filePath.startsWith(join(distDir, "renderer", "assets")),
+  );
+  const builtFiles = await Promise.all(builtFontFiles.map(async (filePath) => {
+    const content = await readFile(filePath);
+    return { sha256: sha256(content), size: content.byteLength };
+  }));
+  assertExactTerminalFonts(builtFiles, expectedFiles, "Built renderer");
+  return Object.freeze({
+    files: Object.freeze(expectedFiles),
+    manifestSha256: sha256(manifestBytes),
+  });
+}
+
+function assertExactTerminalFonts(actual, expected, label) {
+  const tokens = (fontFiles) => fontFiles
+    .map((file) => `${file.size}:${file.sha256}`)
+    .sort((left, right) => left.localeCompare(right));
+  if (JSON.stringify(tokens(actual)) !== JSON.stringify(tokens(expected))) {
+    throw new Error(`${label} does not contain the exact pinned terminal font inventory`);
+  }
+}
+
 const files = await listFiles(distDir);
 const sourceMaps = files.filter((filePath) => filePath.endsWith(".map"));
 
@@ -130,6 +246,8 @@ for (const filePath of files.filter((path) => /\.(?:c?js|html|css|json)$/u.test(
   assertNoBannedMarkers(content, relative(rootDir, filePath));
 }
 
+const terminalFontEvidence = await verifyTerminalFontAssets(files);
+
 const licenseInventory = await readFile(join(distDir, "THIRD_PARTY_LICENSES.txt"), "utf8");
 for (const requiredText of [
   "@heroui-pro/react@1.0.0-beta.8",
@@ -141,6 +259,11 @@ for (const requiredText of [
   "ghostty-web@0.4.0",
   "node-pty@1.1.0",
   "electron-updater@6.8.9",
+  "Fira Code@6.2 (embedded terminal font)",
+  "JetBrains Mono@2.304 (embedded terminal font)",
+  "Cascadia Mono@2407.24 (embedded terminal font)",
+  "Source Code Pro@2.042R-u/1.062R-i/1.026R-vf (embedded terminal font)",
+  "Embedded terminal font entries: 4",
   "Inventory entries:",
 ]) {
   if (!licenseInventory.includes(requiredText)) {
@@ -148,12 +271,13 @@ for (const requiredText of [
   }
 }
 
-const [projectLicense, gplLicense, mitLicense, apacheLicense, licensingGuide, thirdPartyNotices] =
+const [projectLicense, gplLicense, mitLicense, apacheLicense, oflLicense, licensingGuide, thirdPartyNotices] =
   await Promise.all([
     readFile(join(rootDir, "LICENSE"), "utf8"),
     readFile(join(rootDir, "LICENSES/GPL-3.0-or-later.txt"), "utf8"),
     readFile(join(rootDir, "LICENSES/MIT.txt"), "utf8"),
     readFile(join(rootDir, "LICENSES/Apache-2.0.txt"), "utf8"),
+    readFile(join(rootDir, "LICENSES/OFL-1.1.txt"), "utf8"),
     readFile(join(rootDir, "LICENSING.md"), "utf8"),
     readFile(join(rootDir, "THIRD_PARTY_NOTICES.md"), "utf8"),
   ]);
@@ -175,6 +299,7 @@ if (projectLicense.includes("Permission is hereby granted") || projectLicense.in
 for (const [name, content, markers] of [
   ["MIT", mitLicense, ["MIT License", "Permission is hereby granted"]],
   ["Apache-2.0", apacheLicense, ["Apache License", "Version 2.0, January 2004", "Copyright 2025 NextUI Inc."]],
+  ["OFL-1.1", oflLicense, ["SIL OPEN FONT LICENSE Version 1.1", "PERMISSION & CONDITIONS", "Reserved Font Name"]],
 ]) {
   for (const marker of markers) {
     if (!content.includes(marker)) throw new Error(`${name} license text is missing: ${marker}`);
@@ -230,7 +355,7 @@ if (verifyPackaged) {
     : [await newestPackagedArchive()];
 
   for (const archive of archives) {
-    verifyArchive(archive);
+    verifyArchive(archive, terminalFontEvidence);
     await verifyExternalBrandAsset(archive);
     await verifyExternalLegalAssets(archive);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
@@ -490,6 +615,7 @@ async function verifyExternalLegalAssets(archivePath) {
     [join(rootDir, "LICENSES/Apache-2.0.txt"), "licenses/Apache-2.0.txt"],
     [join(rootDir, "LICENSES/GPL-3.0-or-later.txt"), "licenses/GPL-3.0-or-later.txt"],
     [join(rootDir, "LICENSES/MIT.txt"), "licenses/MIT.txt"],
+    [join(rootDir, "LICENSES/OFL-1.1.txt"), "licenses/OFL-1.1.txt"],
     [join(rootDir, "LICENSES/README.md"), "licenses/README.md"],
     [join(rootDir, "LICENSING.md"), "licenses/LICENSING.md"],
     [join(rootDir, "THIRD_PARTY_NOTICES.md"), "licenses/THIRD_PARTY_NOTICES.md"],
@@ -549,7 +675,7 @@ async function newestFile(paths) {
   return dated[0].path;
 }
 
-function verifyArchive(archivePath) {
+function verifyArchive(archivePath, terminalFontEvidence) {
   const entries = listPackage(archivePath, { isPack: false }).map(asarEntryPaths);
   const normalizedEntries = entries.map(({ normalizedPath }) => normalizedPath);
   const forbiddenEntries = normalizedEntries.filter((entry) =>
@@ -566,6 +692,23 @@ function verifyArchive(archivePath) {
     if (!normalizedEntries.includes(requiredPath)) {
       throw new Error(`Packaged archive is missing required application/source evidence: ${requiredPath}`);
     }
+  }
+  const packagedFontEntries = entries.filter(({ normalizedPath }) =>
+    normalizedPath.startsWith("dist/renderer/assets/") && normalizedPath.endsWith(".woff2"),
+  );
+  const packagedFonts = packagedFontEntries.map((entry) => {
+    const content = extractFile(archivePath, entry.lookupPath, false);
+    return { sha256: sha256(content), size: content.byteLength };
+  });
+  assertExactTerminalFonts(packagedFonts, terminalFontEvidence.files, "Packaged renderer");
+  const fontManifestEntry = entries.find(
+    ({ normalizedPath }) => normalizedPath === "protocol/terminal-fonts-provenance.json",
+  );
+  if (
+    !fontManifestEntry ||
+    sha256(extractFile(archivePath, fontManifestEntry.lookupPath, false)) !== terminalFontEvidence.manifestSha256
+  ) {
+    throw new Error("Packaged terminal font provenance manifest failed its integrity check");
   }
   const terminalRuntimeEntry = entries.find(
     ({ normalizedPath }) => normalizedPath === "node_modules/ghostty-web/ghostty-vt.wasm",
