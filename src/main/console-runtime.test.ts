@@ -327,6 +327,20 @@ describe("SliverConsoleRuntime bounded terminal transport", () => {
     expect([...oversized]).toEqual(new Array(9).fill(0));
   });
 
+  it("preserves input retained by an asynchronous native PTY write", async () => {
+    const factory = new FakePtyFactory();
+    factory.pty.deferWriteInspection = true;
+    const runtime = await startRuntime(factory, Buffer.from("active config"));
+    const input = Uint8Array.from(Buffer.from("version\r", "utf8"));
+
+    runtime.write(input);
+    expect([...input]).toEqual(new Array(input.length).fill(0));
+    expect(factory.pty.writes).toEqual([]);
+
+    await Promise.resolve();
+    expect(factory.pty.writes).toEqual(["version\r"]);
+  });
+
   it("converts native write failures to a fixed notice, zeroizes input, and cleans up", async () => {
     const factory = new FakePtyFactory();
     const runtime = await startRuntime(factory, Buffer.from("active config"));
@@ -464,10 +478,15 @@ class FakePty implements NativePty {
   emitExitOnKill = true;
   writeError: Error | undefined;
   exitListenerError: Error | undefined;
+  deferWriteInspection = false;
 
   write(data: string | Buffer): void {
     if (this.writeError) throw this.writeError;
-    this.writes.push(Buffer.isBuffer(data) ? data.toString("utf8") : data);
+    const inspect = (): void => {
+      this.writes.push(Buffer.isBuffer(data) ? data.toString("utf8") : data);
+    };
+    if (this.deferWriteInspection) queueMicrotask(inspect);
+    else inspect();
   }
 
   resize(columns: number, rows: number): void {

@@ -276,7 +276,10 @@ export class SliverConsoleRuntime {
       if (data.byteLength > this.limits.maxInputBytes) throw new SliverConsoleRuntimeError("invalid-input");
       if (data.byteLength === 0) return;
       owned = Buffer.from(data);
-      this.pty.write(owned);
+      // node-pty may retain Buffer instances until an asynchronous Windows
+      // ConPTY pipe write runs. Hand off immutable text before zeroizing our
+      // owned bytes so the native terminal never observes cleared input.
+      this.pty.write(owned.toString("utf8"));
     } catch (error) {
       if (error instanceof SliverConsoleRuntimeError) throw error;
       const safeError = new SliverConsoleRuntimeError("terminal-io-failed");
