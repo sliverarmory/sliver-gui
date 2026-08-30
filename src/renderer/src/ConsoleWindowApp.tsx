@@ -140,13 +140,16 @@ export function ConsoleWindowApp(): React.JSX.Element {
         </div>
         {exitMessage ? (
           <div
-            className="absolute inset-x-5 bottom-5 flex items-start gap-3 rounded-xl border border-warning/30 bg-warning-soft px-4 py-3 text-warning-soft-foreground shadow-lg"
+            aria-atomic="true"
+            className="absolute inset-x-5 bottom-5 isolate flex items-start gap-3 rounded-xl border border-warning/50 bg-overlay px-4 py-3 text-overlay-foreground shadow-overlay"
             role="alert"
           >
-            <FontAwesomeIcon aria-hidden className="mt-0.5 flex-none" icon={faTriangleExclamation} />
+            <span className="grid size-8 flex-none place-items-center rounded-lg bg-warning text-warning-foreground shadow-sm">
+              <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} />
+            </span>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Console process exited</p>
-              <p className="mt-0.5 break-words text-xs opacity-80">{exitMessage}</p>
+              <p className="text-sm font-semibold">Console process exited</p>
+              <p className="mt-1 break-words text-xs leading-relaxed text-overlay-foreground">{exitMessage}</p>
             </div>
           </div>
         ) : null}

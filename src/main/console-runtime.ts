@@ -36,6 +36,8 @@ export interface NativePtyDisposable {
 export interface NativePty {
   write(data: string | Buffer): void;
   resize(columns: number, rows: number): void;
+  pause(): void;
+  resume(): void;
   kill(signal?: string): void;
   onData(listener: (data: string) => void): NativePtyDisposable;
   onExit(listener: (event: NativePtyExitEvent) => void): NativePtyDisposable;
@@ -142,6 +144,9 @@ export class SliverConsoleRuntime {
   private terminalExit: SliverConsoleExit | undefined;
   private lastNotice: SliverConsoleRuntimeNotice | undefined;
   private ptyExited = false;
+  private outputPaused = false;
+  private drainingOutput = false;
+  private readonly pendingOutput = new Array<Generator<Buffer>>();
 
   private constructor(
     private readonly pty: NativePty,
@@ -220,17 +225,23 @@ export class SliverConsoleRuntime {
   }
 
   /** Replays only the bounded retained scrollback, followed by terminal state. */
-  subscribe(subscriber: SliverConsoleSubscriber): () => void {
+  subscribe(
+    subscriber: SliverConsoleSubscriber,
+    replayLimitBytes = this.limits.maxScrollbackBytes,
+  ): () => void {
     if (this.state === "closed") {
       if (this.lastNotice) this.deliverNotice(subscriber, this.lastNotice);
       if (this.terminalExit) this.deliverExit(subscriber, this.terminalExit);
       return () => undefined;
     }
+    if (!Number.isSafeInteger(replayLimitBytes) || replayLimitBytes < 0) {
+      throw new SliverConsoleRuntimeError("invalid-input");
+    }
     if (this.subscribers.size >= this.limits.maxSubscribers) {
       throw new SliverConsoleRuntimeError("invalid-input");
     }
     this.subscribers.add(subscriber);
-    for (const chunk of this.scrollback) this.deliverOutput(subscriber, chunk);
+    this.replayScrollback(subscriber, Math.min(replayLimitBytes, this.limits.maxScrollbackBytes));
     if (this.lastNotice) this.deliverNotice(subscriber, this.lastNotice);
     if (this.terminalExit) this.deliverExit(subscriber, this.terminalExit);
     let subscribed = true;
@@ -276,6 +287,41 @@ export class SliverConsoleRuntime {
     }
   }
 
+  /** Stops native PTY reads while a bounded downstream transport drains. */
+  pauseOutput(): void {
+    this.assertRunning();
+    if (this.outputPaused) return;
+    try {
+      this.pty.pause();
+      this.outputPaused = true;
+    } catch {
+      const safeError = new SliverConsoleRuntimeError("terminal-io-failed");
+      this.reportNotice("terminal-io-failed");
+      void this.beginCleanup(true);
+      throw safeError;
+    }
+  }
+
+  /** Drains the already-read native chunk before resuming PTY reads. */
+  resumeOutput(): void {
+    this.assertRunning();
+    if (!this.outputPaused) return;
+    try {
+      this.outputPaused = false;
+      this.drainOutput();
+      // Draining a partially delivered native chunk can fill the downstream
+      // queue and synchronously pause us again. It can also synchronously
+      // trigger teardown through a subscriber transport failure.
+      if (this.state === "running" && !this.outputPaused) this.pty.resume();
+    } catch (error) {
+      if (error instanceof SliverConsoleRuntimeError) throw error;
+      const safeError = new SliverConsoleRuntimeError("terminal-io-failed");
+      this.reportNotice("terminal-io-failed");
+      void this.beginCleanup(true);
+      throw safeError;
+    }
+  }
+
   close(): Promise<void> {
     return this.beginCleanup(true);
   }
@@ -298,13 +344,35 @@ export class SliverConsoleRuntime {
   private receiveOutput(data: string): void {
     if (this.state !== "running" || data.length === 0) return;
     try {
-      for (const chunk of encodeOutputChunks(data, this.limits.maxOutputChunkBytes)) {
-        this.retainScrollback(chunk);
-        for (const subscriber of this.subscribers) this.deliverOutput(subscriber, chunk);
-      }
+      // Keep the generator itself when downstream pauses. It owns only the
+      // native chunk already handed to this callback and resumes at the exact
+      // UTF-8 boundary without expanding the bounded MessagePort queue.
+      this.pendingOutput.push(encodeOutputChunks(data, this.limits.maxOutputChunkBytes));
+      this.drainOutput();
     } catch {
       this.reportNotice("terminal-io-failed");
       void this.beginCleanup(true);
+    }
+  }
+
+  private drainOutput(): void {
+    if (this.drainingOutput || this.outputPaused || this.state !== "running") return;
+    this.drainingOutput = true;
+    try {
+      while (this.state === "running" && !this.outputPaused && this.pendingOutput.length > 0) {
+        const iterator = this.pendingOutput[0];
+        if (!iterator) break;
+        const next = iterator.next();
+        if (next.done) {
+          this.pendingOutput.shift();
+          continue;
+        }
+        const chunk = next.value;
+        this.retainScrollback(chunk);
+        for (const subscriber of this.subscribers) this.deliverOutput(subscriber, chunk);
+      }
+    } finally {
+      this.drainingOutput = false;
     }
   }
 
@@ -336,6 +404,18 @@ export class SliverConsoleRuntime {
       oldest.fill(0);
       this.scrollback[0] = retained;
       this.scrollbackBytes -= excess;
+    }
+  }
+
+  private replayScrollback(subscriber: SliverConsoleSubscriber, limitBytes: number): void {
+    let skipBytes = Math.max(0, this.scrollbackBytes - limitBytes);
+    for (const chunk of this.scrollback) {
+      if (skipBytes >= chunk.byteLength) {
+        skipBytes -= chunk.byteLength;
+        continue;
+      }
+      this.deliverOutput(subscriber, skipBytes === 0 ? chunk : chunk.subarray(skipBytes));
+      skipBytes = 0;
     }
   }
 
@@ -410,6 +490,7 @@ export class SliverConsoleRuntime {
     for (const chunk of this.scrollback) chunk.fill(0);
     this.scrollback.length = 0;
     this.scrollbackBytes = 0;
+    this.pendingOutput.length = 0;
     this.subscribers.clear();
     this.state = "closed";
     this.resolveClosed();
@@ -475,15 +556,27 @@ export async function scavengeStaleSliverConsoleRoots(tempDirectory: string = tm
 function normalizeLimits(overrides: Partial<SliverConsoleRuntimeLimits> | undefined): SliverConsoleRuntimeLimits {
   const limits = { ...DEFAULT_SLIVER_CONSOLE_LIMITS, ...overrides };
   validatePositiveLimit(limits.maxInputBytes, "input limit", 1);
-  validatePositiveLimit(limits.maxOutputChunkBytes, "output chunk limit", 1_024);
+  // ConsolePortSession reserves this much hard-queue headroom before pausing
+  // node-pty, so a single already-delivered runtime chunk must not exceed it.
+  validatePositiveLimit(
+    limits.maxOutputChunkBytes,
+    "output chunk limit",
+    1_024,
+    DEFAULT_SLIVER_CONSOLE_LIMITS.maxOutputChunkBytes,
+  );
   validatePositiveLimit(limits.maxScrollbackBytes, "scrollback limit", limits.maxOutputChunkBytes);
   validatePositiveLimit(limits.maxSubscribers, "subscriber limit", 1);
   if (limits.maxSubscribers > 64) throw new Error("Invalid subscriber limit");
   return limits;
 }
 
-function validatePositiveLimit(value: number, label: string, minimum: number): void {
-  if (!Number.isSafeInteger(value) || value < minimum || value > 64 * 1024 * 1024) {
+function validatePositiveLimit(
+  value: number,
+  label: string,
+  minimum: number,
+  maximum = 64 * 1024 * 1024,
+): void {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`Invalid ${label}`);
   }
 }

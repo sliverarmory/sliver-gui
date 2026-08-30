@@ -98,7 +98,14 @@ describe("ConsoleWindowApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Exit client" }));
 
     expect(screen.getByText("Console process exited")).toBeInTheDocument();
-    expect(screen.getByText("Sliver client exited with code 7")).toBeInTheDocument();
+    const exitReason = screen.getByText("Sliver client exited with code 7");
+    const alert = screen.getByRole("alert");
+    expect(exitReason).toBeInTheDocument();
+    expect(exitReason).toHaveClass("text-overlay-foreground");
+    expect(exitReason).not.toHaveClass("opacity-80");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(alert).toHaveClass("bg-overlay", "text-overlay-foreground", "shadow-overlay");
+    expect(alert).not.toHaveClass("bg-warning-soft");
     expect(screen.getByText("Exited")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Sliver client console using Production operator" }))
       .toBeInTheDocument();

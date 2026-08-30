@@ -207,11 +207,70 @@ describe("SliverConsoleRuntime bounded terminal transport", () => {
     runtime.subscribe({
       onOutput: (data) => replayed.push(data),
       onExit: () => undefined,
-    });
-    expect(Buffer.concat(replayed.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe(output.slice(-1_536));
+    }, 512);
+    expect(Buffer.concat(replayed.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe(output.slice(-512));
     expect(() => runtime.subscribe({ onOutput: () => undefined, onExit: () => undefined })).toThrow(
       SliverConsoleRuntimeError,
     );
+  });
+
+  it("pauses native reads and resumes the undelivered tail of an oversized PTY callback", async () => {
+    const factory = new FakePtyFactory();
+    const runtime = await startRuntime(factory, Buffer.from("active config"), {
+      limits: {
+        maxOutputChunkBytes: 1_024,
+        maxScrollbackBytes: 4_096,
+      },
+    });
+    const output = "x".repeat(2_500);
+    const received: Uint8Array[] = [];
+    runtime.subscribe({
+      onOutput: (data) => {
+        received.push(data);
+        if (received.length === 1) runtime.pauseOutput();
+      },
+      onExit: () => undefined,
+    });
+
+    factory.pty.emitData(output);
+
+    expect(factory.pty.pauseCalls).toBe(1);
+    expect(factory.pty.resumeCalls).toBe(0);
+    expect(Buffer.concat(received.map((chunk) => Buffer.from(chunk))).byteLength).toBeLessThan(output.length);
+
+    runtime.resumeOutput();
+
+    expect(factory.pty.resumeCalls).toBe(1);
+    expect(Buffer.concat(received.map((chunk) => Buffer.from(chunk))).toString("utf8")).toBe(output);
+  });
+
+  it("does not consume pending output or resume native reads after synchronous teardown", async () => {
+    const factory = new FakePtyFactory();
+    const runtime = await startRuntime(factory, Buffer.from("active config"), {
+      limits: {
+        maxOutputChunkBytes: 1_024,
+        maxScrollbackBytes: 4_096,
+      },
+    });
+    const received: Uint8Array[] = [];
+    let closing: Promise<void> | undefined;
+    runtime.subscribe({
+      onOutput: (data) => {
+        received.push(data);
+        if (received.length === 1) runtime.pauseOutput();
+        if (received.length === 2) closing = runtime.close();
+      },
+      onExit: () => undefined,
+    });
+
+    factory.pty.emitData("x".repeat(2_500));
+    runtime.resumeOutput();
+
+    expect(closing).toBeDefined();
+    expect(received).toHaveLength(2);
+    expect(factory.pty.resumeCalls).toBe(0);
+    await closing;
+    expect(runtime.isClosed).toBe(true);
   });
 
   it("consumes and zeroizes bounded input and validates resize dimensions", async () => {
@@ -367,6 +426,8 @@ class FakePty implements NativePty {
   readonly dataListeners = new Set<(data: string) => void>();
   readonly exitListeners = new Set<(event: NativePtyExitEvent) => void>();
   killCalls = 0;
+  pauseCalls = 0;
+  resumeCalls = 0;
   emitExitOnKill = true;
   writeError: Error | undefined;
   exitListenerError: Error | undefined;
@@ -378,6 +439,14 @@ class FakePty implements NativePty {
 
   resize(columns: number, rows: number): void {
     this.resizes.push({ columns, rows });
+  }
+
+  pause(): void {
+    this.pauseCalls += 1;
+  }
+
+  resume(): void {
+    this.resumeCalls += 1;
   }
 
   kill(): void {

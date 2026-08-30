@@ -186,6 +186,8 @@ function createFakeConsolePtyFactory(testState: FakeMainState): NativePtyFactory
         resize(columns, rows) {
           testState.console.resizes.push({ columns, rows });
         },
+        pause() {},
+        resume() {},
         kill() {
           if (killed) return;
           killed = true;

@@ -18,6 +18,11 @@ import type { SliverConsoleRuntime } from "./console-runtime.js";
 
 type Timer = ReturnType<typeof setTimeout>;
 
+// Pause with one default runtime chunk of headroom. Resume below a lower
+// watermark so renderer credit cannot make the PTY oscillate for every frame.
+const CONSOLE_OUTPUT_PAUSE_BYTES = Math.floor(CONSOLE_MAX_QUEUE_BYTES / 2);
+const CONSOLE_OUTPUT_RESUME_BYTES = Math.floor(CONSOLE_OUTPUT_PAUSE_BYTES / 2);
+
 export interface ConsoleOwnerIdentity {
   readonly contentsId: number;
   readonly rendererProcessId: number;
@@ -56,6 +61,7 @@ export class ConsolePortSession {
   private expectedInputSequence = 0;
   private nextOutputSequence = 0;
   private totalInputBytes = 0;
+  private runtimeOutputPaused = false;
   private state: "awaiting-attach" | "handshaking" | "open" | "closing" | "closed" = "awaiting-attach";
   private attachmentTimer: Timer | undefined;
   private handshakeTimer: Timer | undefined;
@@ -198,13 +204,19 @@ export class ConsolePortSession {
     this.handshakeTimer = undefined;
     this.outputCreditBytes = frame.receiveCreditBytes;
     this.state = "open";
-    this.unsubscribeRuntime = this.runtime.subscribe({
-      onOutput: (data) => this.queueOutput(data),
-      onExit: (exit) => void this.close("completed", exit.exitCode),
-      onError: (notice) => {
-        if (notice.code === "terminal-io-failed") void this.close("transport-error");
+    this.unsubscribeRuntime = this.runtime.subscribe(
+      {
+        onOutput: (data) => this.queueOutput(data),
+        onExit: (exit) => void this.close("completed", exit.exitCode),
+        onError: (notice) => {
+          if (notice.code === "terminal-io-failed") void this.close("transport-error");
+        },
       },
-    });
+      // The runtime can retain more scrollback than this transport can queue.
+      // Replaying only the newest queue-sized tail keeps attachment bounded;
+      // live output resumes losslessly through native PTY backpressure.
+      CONSOLE_MAX_QUEUE_BYTES,
+    );
     this.flushOutput();
   }
 
@@ -265,8 +277,8 @@ export class ConsolePortSession {
         }
         this.outputQueue.push(chunk);
         this.outputQueueBytes += chunk.byteLength;
+        this.flushOutput();
       }
-      this.flushOutput();
     } catch {
       void this.close("transport-error");
     } finally {
@@ -303,6 +315,32 @@ export class ConsolePortSession {
         });
       } finally {
         sending.fill(0);
+      }
+    }
+    this.updateOutputBackpressure();
+  }
+
+  private updateOutputBackpressure(): void {
+    if (this.state !== "open") return;
+    if (!this.runtimeOutputPaused && this.outputQueueBytes >= CONSOLE_OUTPUT_PAUSE_BYTES) {
+      this.runtimeOutputPaused = true;
+      try {
+        this.runtime.pauseOutput();
+      } catch (error) {
+        this.runtimeOutputPaused = false;
+        throw error;
+      }
+      return;
+    }
+    if (this.runtimeOutputPaused && this.outputQueueBytes <= CONSOLE_OUTPUT_RESUME_BYTES) {
+      // resumeOutput can synchronously drain the remainder of the native chunk;
+      // clear our flag first so that nested output can pause again.
+      this.runtimeOutputPaused = false;
+      try {
+        this.runtime.resumeOutput();
+      } catch (error) {
+        this.runtimeOutputPaused = true;
+        throw error;
       }
     }
   }

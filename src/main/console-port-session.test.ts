@@ -3,6 +3,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CONSOLE_INITIAL_CREDIT_BYTES,
+  CONSOLE_MAX_FRAME_BYTES,
+  CONSOLE_MAX_QUEUE_BYTES,
   CONSOLE_PROTOCOL_VERSION,
   type ConsoleClientFrame,
   type ConsoleServerFrame,
@@ -69,6 +72,67 @@ describe("ConsolePortSession", () => {
     expect(port.last("closed")).toMatchObject({ reason: "operator-close" });
   });
 
+  it("backpressures a multi-hundred-KiB output burst until delayed renderer credits drain it", async () => {
+    const runtime = new FakeRuntime();
+    const port = new FakePort();
+    const session = new ConsolePortSession(runtime.asRuntime(), owner);
+    session.attach(owner, session.attachmentToken, port);
+    const ready = port.last("ready")!;
+    port.send({
+      v: CONSOLE_PROTOCOL_VERSION,
+      type: "start",
+      streamId: ready.streamId,
+      receiveCreditBytes: CONSOLE_INITIAL_CREDIT_BYTES,
+    });
+
+    // Before native output backpressure, the initial 64 KiB credit plus the
+    // 128 KiB main-process queue tolerated exactly 192 KiB; the next byte
+    // closed the whole client as a transport error. Keep renderer credits
+    // delayed while a substantially larger native burst arrives.
+    const burstBytes = 512 * 1_024;
+    runtime.outputBurst(burstBytes, 64 * 1_024);
+
+    expect(runtime.pauseOutput).toHaveBeenCalled();
+    expect(runtime.pendingOutputBytes).toBeGreaterThan(0);
+    expect(port.last("closed")).toBeUndefined();
+    expect(runtime.close).not.toHaveBeenCalled();
+
+    let creditedFrames = 0;
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      const outputFrames = port.all("data");
+      const deliveredBytes = outputFrames.reduce((total, frame) => total + frame.data.byteLength, 0);
+      if (deliveredBytes === burstBytes) break;
+      expect(deliveredBytes).toBeLessThan(burstBytes);
+      const uncreditedFrames = outputFrames.slice(creditedFrames);
+      expect(uncreditedFrames.length).toBeGreaterThan(0);
+      for (const frame of uncreditedFrames) {
+        port.send({
+          v: CONSOLE_PROTOCOL_VERSION,
+          type: "credit",
+          streamId: ready.streamId,
+          bytes: frame.data.byteLength,
+        });
+        creditedFrames += 1;
+      }
+    }
+
+    const outputFrames = port.all("data");
+    expect(outputFrames.every((frame) => frame.data.byteLength <= CONSOLE_MAX_FRAME_BYTES)).toBe(true);
+    expect(outputFrames.reduce((total, frame) => total + frame.data.byteLength, 0)).toBe(burstBytes);
+    const output = Buffer.concat(outputFrames.map((frame) => Buffer.from(frame.data)));
+    expect(Array.from({ length: burstBytes / (64 * 1_024) }, (_, index) => output[index * 64 * 1_024]))
+      .toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(runtime.pendingOutputBytes).toBe(0);
+    expect(runtime.resumeOutput).toHaveBeenCalled();
+    expect(port.last("closed")).toBeUndefined();
+    expect(runtime.close).not.toHaveBeenCalled();
+
+    // The old failure boundary is documented in terms of the negotiated
+    // constants so a future limit change cannot silently weaken this case.
+    expect(CONSOLE_INITIAL_CREDIT_BYTES + CONSOLE_MAX_QUEUE_BYTES).toBe(192 * 1_024);
+    await session.close("operator-close");
+  });
+
   it("rejects another renderer without consuming the valid owner capability", async () => {
     const runtime = new FakeRuntime();
     const session = new ConsolePortSession(runtime.asRuntime(), owner);
@@ -119,7 +183,21 @@ class FakeRuntime {
   readonly writes: number[][] = [];
   readonly resizes: Array<[number, number]> = [];
   readonly close = vi.fn(async () => undefined);
+  readonly pauseOutput = vi.fn(() => {
+    this.outputPaused = true;
+  });
+  readonly resumeOutput = vi.fn(() => {
+    this.outputPaused = false;
+    this.drainPendingOutput();
+  });
   private subscriber: SliverConsoleSubscriber | undefined;
+  private readonly pendingOutput: Uint8Array[] = [];
+  private outputPaused = false;
+  private drainingOutput = false;
+
+  get pendingOutputBytes(): number {
+    return this.pendingOutput.reduce((total, chunk) => total + chunk.byteLength, 0);
+  }
 
   asRuntime(): SliverConsoleRuntime {
     return this as unknown as SliverConsoleRuntime;
@@ -145,8 +223,30 @@ class FakeRuntime {
     this.subscriber?.onOutput(data);
   }
 
+  outputBurst(byteLength: number, eventBytes: number): void {
+    for (let offset = 0; offset < byteLength; offset += eventBytes) {
+      const eventNumber = Math.floor(offset / eventBytes) + 1;
+      this.pendingOutput.push(new Uint8Array(Math.min(eventBytes, byteLength - offset)).fill(eventNumber));
+    }
+    this.drainPendingOutput();
+  }
+
   exit(exit: SliverConsoleExit): void {
     this.subscriber?.onExit(exit);
+  }
+
+  private drainPendingOutput(): void {
+    if (this.drainingOutput) return;
+    this.drainingOutput = true;
+    try {
+      while (!this.outputPaused) {
+        const chunk = this.pendingOutput.shift();
+        if (!chunk) break;
+        this.subscriber?.onOutput(chunk);
+      }
+    } finally {
+      this.drainingOutput = false;
+    }
   }
 }
 
@@ -186,6 +286,12 @@ class FakePort implements ConsoleAttachmentPort {
 
   last<T extends ConsoleServerFrame["type"]>(type: T): Extract<ConsoleServerFrame, { type: T }> | undefined {
     return this.frames.findLast(
+      (frame): frame is Extract<ConsoleServerFrame, { type: T }> => frame.type === type,
+    );
+  }
+
+  all<T extends ConsoleServerFrame["type"]>(type: T): Array<Extract<ConsoleServerFrame, { type: T }>> {
+    return this.frames.filter(
       (frame): frame is Extract<ConsoleServerFrame, { type: T }> => frame.type === type,
     );
   }
