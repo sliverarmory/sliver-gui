@@ -106,6 +106,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await page.getByText("#41", { exact: true }).waitFor();
     await page.getByText("Seeded mTLS listener", { exact: true }).waitFor();
     await assertJobActionColumnSurface(page, 41);
+    await verifyCollapsedSidebar(page, artifactDirectory);
 
     const stateAfterConnect = await readFakeState(electronApplication);
     assert.equal(stateAfterConnect.configFactoryCalls, 1);
@@ -279,6 +280,140 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     webSecurity: true,
     webviewTag: false,
   });
+}
+
+async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Promise<void> {
+  const sidebar = page.locator(".sidebar.app-sidebar").first();
+  const appHeader = page.locator(".app-header");
+  const toggle = page.getByRole("button", { name: "Toggle navigation" });
+
+  await toggle.click();
+  assert.equal(await sidebar.getAttribute("data-state"), "collapsed");
+  await waitForSidebarWidth(page, "--sidebar-width-collapsed");
+
+  const brand = sidebar.locator(".brand-mark");
+  const brandHeader = sidebar.locator('[data-slot="sidebar-header"]');
+  const sessions = sidebar.locator('[data-slot="sidebar-menu-item"][aria-label="Sessions"]');
+  const sessionsContent = sessions.locator('[data-slot="sidebar-menu-item-content"]');
+  const applicationMenu = sidebar.getByRole("button", { name: /^Current server:/i });
+  const applicationMenuIcon = applicationMenu.locator(".connection-summary__menu-icon");
+  const [sidebarBox, brandBox, brandHeaderBox, appHeaderBox, sessionsBox, sessionsContentBox, menuBox, menuIconBox] =
+    await Promise.all([
+      sidebar.boundingBox(),
+      brand.boundingBox(),
+      brandHeader.boundingBox(),
+      appHeader.boundingBox(),
+      sessions.boundingBox(),
+      sessionsContent.boundingBox(),
+      applicationMenu.boundingBox(),
+      applicationMenuIcon.boundingBox(),
+    ]);
+
+  assert.ok(sidebarBox, "collapsed sidebar must have measurable geometry");
+  assert.ok(brandBox, "collapsed brand mark must have measurable geometry");
+  assert.ok(brandHeaderBox, "collapsed brand header must have measurable geometry");
+  assert.ok(appHeaderBox, "application header must have measurable geometry");
+  assert.ok(sessionsBox, "collapsed Sessions row must have measurable geometry");
+  assert.ok(sessionsContentBox, "collapsed Sessions content must have measurable geometry");
+  assert.ok(menuBox, "collapsed application menu must have measurable geometry");
+  assert.ok(menuIconBox, "collapsed application menu icon must have measurable geometry");
+
+  const sidebarCenter = sidebarBox.x + sidebarBox.width / 2;
+  assert.ok(
+    Math.abs(brandBox.width - brandBox.height) <= 0.5,
+    `collapsed brand mark must remain square (${brandBox.width}x${brandBox.height})`,
+  );
+  assert.ok(
+    Math.abs(brandBox.x + brandBox.width / 2 - sidebarCenter) <= 0.5,
+    "collapsed brand mark must be horizontally centered",
+  );
+  assert.ok(
+    Math.abs(brandHeaderBox.height - appHeaderBox.height) <= 1.5,
+    "sidebar and application header dividers must stay aligned",
+  );
+  assert.ok(
+    Math.abs(sessionsContentBox.width - sessionsContentBox.height) <= 0.5,
+    `collapsed nav target must be square (${sessionsContentBox.width}x${sessionsContentBox.height})`,
+  );
+  assert.ok(
+    Math.abs(sessionsContentBox.x + sessionsContentBox.width / 2 - sidebarCenter) <= 0.5,
+    "collapsed nav target must be horizontally centered",
+  );
+  assert.ok(
+    Math.abs(menuBox.width - menuBox.height) <= 0.5,
+    `collapsed application menu must be square (${menuBox.width}x${menuBox.height})`,
+  );
+  assert.ok(
+    Math.abs(menuBox.x + menuBox.width / 2 - sidebarCenter) <= 0.5,
+    "collapsed application menu must be horizontally centered",
+  );
+  assert.ok(
+    Math.abs(menuIconBox.x + menuIconBox.width / 2 - sidebarCenter) <= 1.5,
+    `collapsed application menu icon must be horizontally centered (${menuIconBox.x + menuIconBox.width / 2 - sidebarCenter}px offset)`,
+  );
+
+  await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "sidebar-collapsed.png"),
+  });
+
+  await page.mouse.move(sessionsContentBox.x + 4, sessionsContentBox.y + 4);
+  const sessionsTooltip = page.getByRole("tooltip").filter({ hasText: "Sessions" });
+  await sessionsTooltip.waitFor();
+  await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "sidebar-collapsed-tooltip.png"),
+  });
+  await appHeader.hover();
+  await sessionsTooltip.waitFor({ state: "hidden" });
+
+  await sessions.click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+  const operations = sidebar.locator('[data-slot="sidebar-menu-item"][aria-label="Jobs & listeners"]');
+  await operations.click();
+  await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
+
+  await applicationMenu.hover();
+  const applicationMenuTooltip = page.getByRole("tooltip").filter({ hasText: "Application menu" });
+  await applicationMenuTooltip.waitFor();
+  await appHeader.hover();
+  await applicationMenuTooltip.waitFor({ state: "hidden" });
+
+  await applicationMenu.click();
+  assert.equal(await applicationMenu.getAttribute("aria-expanded"), "true");
+  const applicationActions = page.locator(
+    '[role="menu"][aria-label="Application and current server actions"]',
+  );
+  await applicationActions.waitFor();
+  assert.deepEqual(await applicationActions.getByRole("menuitem").allTextContents(), [
+    "Exit app",
+    "Disconnect",
+    "Switch config",
+    "Settings",
+  ]);
+  await page.keyboard.press("Escape");
+  await applicationActions.waitFor({ state: "hidden" });
+
+  await toggle.click();
+  assert.equal(await sidebar.getAttribute("data-state"), "expanded");
+  await waitForSidebarWidth(page, "--sidebar-width");
+}
+
+async function waitForSidebarWidth(
+  page: Page,
+  cssVariable: "--sidebar-width" | "--sidebar-width-collapsed",
+): Promise<void> {
+  await page.waitForFunction((variable) => {
+    type BrowserElement = { getBoundingClientRect(): { width: number } };
+    const browser = globalThis as unknown as {
+      document: { querySelector(selector: string): BrowserElement | null };
+      getComputedStyle(element: BrowserElement): { getPropertyValue(name: string): string };
+    };
+    const element = browser.document.querySelector(".sidebar.app-sidebar");
+    if (!element) return false;
+    const expectedWidth = Number.parseFloat(browser.getComputedStyle(element).getPropertyValue(variable));
+    return Math.abs(element.getBoundingClientRect().width - expectedWidth) <= 0.5;
+  }, cssVariable);
 }
 
 async function verifyApplicationSettings(

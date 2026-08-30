@@ -194,7 +194,19 @@
 
   .sidebar.app-sidebar > .brand-block {
     -webkit-app-region: drag;
-    padding-block-start: 3rem;
+    padding-block-start: 2rem;
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] > .brand-block {
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] > .brand-block > .brand-mark {
+    width: 2rem;
+    min-width: 2rem;
+    height: 2rem;
   }
 
   .brand-mark {
@@ -233,16 +245,44 @@
   }
 
   .app-sidebar .connection-summary--trigger {
+    position: relative;
     height: auto;
     justify-content: flex-start;
     color: var(--color-foreground);
     cursor: var(--cursor-interactive);
   }
 
+  .sidebar.app-sidebar[data-state="collapsed"] > .sidebar__footer {
+    align-items: center;
+  }
+
   .sidebar.app-sidebar[data-state="collapsed"] .connection-summary--trigger {
+    width: 2.75rem;
+    min-width: 2.75rem;
+    height: 2.75rem;
+    min-height: 2.75rem;
+    flex: none;
     justify-content: center;
     gap: 0;
-    padding-inline: 0;
+    border-radius: calc(var(--radius) * 2);
+    padding: 0;
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] .connection-summary__menu-icon {
+    margin-inline-start: 0;
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] .connection-summary__status {
+    position: absolute;
+    right: 0.35rem;
+    bottom: 0.35rem;
+    width: 0.375rem;
+    height: 0.375rem;
+  }
+
+  .sidebar.app-sidebar[data-state="collapsed"] .sidebar__menu-item-content {
+    min-height: 2.75rem;
+    padding-block: 0;
   }
 
   @media (hover: hover) {

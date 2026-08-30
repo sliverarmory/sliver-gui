@@ -684,7 +684,10 @@ describe("Current server menu", () => {
     );
 
     const trigger = screen.getByRole("button", { name: "Current server: m0-manual-verification" });
-    expect(trigger.querySelectorAll('[data-sidebar="label"]')).toHaveLength(2);
+    expect(trigger.querySelectorAll('[data-sidebar="label"]')).toHaveLength(1);
+    const menuIcon = trigger.querySelector(".connection-summary__menu-icon");
+    expect(menuIcon).not.toHaveAttribute("data-sidebar");
+    expect(menuIcon).toHaveClass("ms-auto");
     expect(screen.queryByRole("menuitem", { name: "Switch config" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Disconnect" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Exit app" })).not.toBeInTheDocument();
@@ -820,27 +823,26 @@ describe("Sidebar navigation", () => {
     const user = userEvent.setup();
     const onViewChange = renderNavigation(false);
     const generateItem = screen.getByRole("row", { name: "Generate" });
-    const tooltipTrigger = generateItem.querySelector<HTMLElement>("[data-slot=tooltip-trigger]");
 
     expect(generateItem).toHaveAttribute("aria-disabled", "true");
+    const tooltipTrigger = generateItem.querySelector("[data-slot=tooltip-trigger]");
     expect(tooltipTrigger).not.toBeNull();
-    if (!tooltipTrigger) throw new Error("Generate tooltip trigger is missing");
+    expect(tooltipTrigger?.querySelector('[data-slot="sidebar-menu-item-content"]')).not.toBeNull();
+    if (!(tooltipTrigger instanceof HTMLElement)) throw new Error("Generate tooltip trigger is missing");
     await user.hover(tooltipTrigger);
     expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Generate");
 
     await user.unhover(tooltipTrigger);
     const sessionsItem = screen.getByRole("row", { name: "Sessions" });
-    const sessionsTooltipTrigger = sessionsItem.querySelector<HTMLElement>("[data-slot=tooltip-trigger]");
-    expect(sessionsTooltipTrigger).not.toBeNull();
-    if (!sessionsTooltipTrigger) throw new Error("Sessions tooltip trigger is missing");
+    const sessionsTooltipTrigger = sessionsItem.querySelector("[data-slot=tooltip-trigger]");
+    if (!(sessionsTooltipTrigger instanceof HTMLElement)) throw new Error("Sessions tooltip trigger is missing");
     await user.hover(sessionsTooltipTrigger);
     expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Sessions");
 
     await user.unhover(sessionsTooltipTrigger);
     const beaconsItem = screen.getByRole("row", { name: "Beacons" });
-    const beaconsTooltipTrigger = beaconsItem.querySelector<HTMLElement>("[data-slot=tooltip-trigger]");
-    expect(beaconsTooltipTrigger).not.toBeNull();
-    if (!beaconsTooltipTrigger) throw new Error("Beacons tooltip trigger is missing");
+    const beaconsTooltipTrigger = beaconsItem.querySelector("[data-slot=tooltip-trigger]");
+    if (!(beaconsTooltipTrigger instanceof HTMLElement)) throw new Error("Beacons tooltip trigger is missing");
     await user.hover(beaconsTooltipTrigger);
     expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Beacons");
 
@@ -850,7 +852,7 @@ describe("Sidebar navigation", () => {
     cleanup();
     renderNavigation(true);
     const expandedItem = screen.getByRole("row", { name: "Generate" });
-    expect(expandedItem.querySelector("[data-slot=tooltip-trigger]")).toBeNull();
+    await user.hover(expandedItem);
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
@@ -1118,7 +1120,13 @@ describe("Sidebar navigation", () => {
       </Sidebar.Provider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "Current server: alice" }));
+    const trigger = screen.getByRole("button", { name: "Current server: alice" });
+    expect(trigger).toHaveClass("button--icon-only");
+    expect(trigger).not.toHaveClass("button--full-width");
+    expect(trigger.querySelector(".connection-summary__menu-icon")).not.toHaveClass("ms-auto");
+    await user.hover(trigger);
+    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Application menu");
+    await user.click(trigger);
     await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
     expect(onSwitchConfig).toHaveBeenCalledOnce();
   });

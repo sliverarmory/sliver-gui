@@ -37,9 +37,15 @@ describe("sidebar glass styles", () => {
     );
   });
 
-  it("keeps the desktop brand header draggable and collapsed disabled items tooltip-capable", () => {
+  it("keeps the desktop brand header draggable and collapsed rail controls aligned", () => {
     expect(styles).toMatch(
-      /\.sidebar\.app-sidebar\s*>\s*\.brand-block\s*\{[^}]*-webkit-app-region:\s*drag;[^}]*padding-block-start:\s*3rem;/s,
+      /\.sidebar\.app-sidebar\s*>\s*\.brand-block\s*\{[^}]*-webkit-app-region:\s*drag;[^}]*padding-block-start:\s*2rem;/s,
+    );
+    expect(styles).toMatch(
+      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s*>\s*\.brand-block\s*\{[^}]*justify-content:\s*center;[^}]*gap:\s*0;[^}]*padding-inline:\s*0;/s,
+    );
+    expect(styles).toMatch(
+      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s*>\s*\.brand-block\s*>\s*\.brand-mark\s*\{[^}]*width:\s*2rem;[^}]*min-width:\s*2rem;[^}]*height:\s*2rem;/s,
     );
     expect(styles).toMatch(
       /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.sidebar__menu-item\[aria-disabled="true"\]\s*\{[^}]*pointer-events:\s*auto;/s,
@@ -48,7 +54,10 @@ describe("sidebar glass styles", () => {
       /button,\s*input,\s*textarea,\s*select\s*\{[^}]*-webkit-app-region:\s*no-drag;/s,
     );
     expect(styles).toMatch(
-      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.connection-summary--trigger\s*\{[^}]*justify-content:\s*center;[^}]*gap:\s*0;[^}]*padding-inline:\s*0;/s,
+      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.connection-summary--trigger\s*\{[^}]*width:\s*2\.75rem;[^}]*height:\s*2\.75rem;[^}]*justify-content:\s*center;[^}]*padding:\s*0;/s,
+    );
+    expect(styles).toMatch(
+      /\.sidebar\.app-sidebar\[data-state="collapsed"\]\s+\.sidebar__menu-item-content\s*\{[^}]*min-height:\s*2\.75rem;[^}]*padding-block:\s*0;/s,
     );
   });
 });

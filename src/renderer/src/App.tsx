@@ -65,6 +65,53 @@ const dataNavItems = [
   { id: "credentials" as const, label: "Credentials", icon: faKey },
 ];
 
+type NavigationItem =
+  | (typeof infrastructureNavItems)[number]
+  | (typeof interactNavItems)[number]
+  | (typeof dataNavItems)[number];
+
+function SidebarNavigationItem({
+  count,
+  isDisabled,
+  item,
+  isCurrent,
+  onAction,
+}: {
+  count?: number | undefined;
+  isDisabled: boolean;
+  item: NavigationItem;
+  isCurrent: boolean;
+  onAction: () => void;
+}) {
+  const { collapsible, isMobile, isOpen } = useSidebar();
+  const isIconCollapsed = collapsible === "icon" && !isMobile && !isOpen;
+
+  return (
+    <Sidebar.MenuItem
+      id={item.id}
+      aria-label={item.label}
+      textValue={item.label}
+      isCurrent={isCurrent}
+      isDisabled={isDisabled}
+      tooltip={false}
+      onAction={onAction}
+      {...(isIconCollapsed
+        ? {
+            tooltipProps: {
+              content: item.label,
+              delay: 250,
+              placement: "right" as const,
+            },
+          }
+        : {})}
+    >
+      <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
+      <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
+      {count && count > 0 ? <Sidebar.MenuChip>{count}</Sidebar.MenuChip> : null}
+    </Sidebar.MenuItem>
+  );
+}
+
 export function App() {
   const applicationSettings = useApplicationSettings();
   const [standaloneSettings, setStandaloneSettings] = useState<ApplicationSettingsState>(
@@ -536,22 +583,14 @@ export function NavigationContent({
           <Sidebar.GroupLabel>Infrastructure</Sidebar.GroupLabel>
           <Sidebar.Menu aria-label="Infrastructure navigation" showGuideLines={false}>
             {infrastructureNavItems.map((item) => (
-              <Sidebar.MenuItem
+              <SidebarNavigationItem
                 key={item.id}
-                id={item.id}
-                aria-label={item.label}
-                textValue={item.label}
+                count={item.id === "operations" ? snapshot.jobs.length : undefined}
+                item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}
-                tooltip={item.label}
                 onAction={() => navigate(item.id)}
-              >
-                <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
-                <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
-                {item.id === "operations" && snapshot.jobs.length > 0 ? (
-                  <Sidebar.MenuChip>{snapshot.jobs.length}</Sidebar.MenuChip>
-                ) : null}
-              </Sidebar.MenuItem>
+              />
             ))}
           </Sidebar.Menu>
         </Sidebar.Group>
@@ -559,22 +598,16 @@ export function NavigationContent({
           <Sidebar.GroupLabel>Interact</Sidebar.GroupLabel>
           <Sidebar.Menu aria-label="Interact navigation" showGuideLines={false}>
             {interactNavItems.map((item) => (
-              <Sidebar.MenuItem
+              <SidebarNavigationItem
                 key={item.id}
-                id={item.id}
-                aria-label={item.label}
-                textValue={item.label}
+                count={item.id === "sessions"
+                  ? snapshot.domains.sessions.page.total
+                  : snapshot.domains.beacons.page.total}
+                item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}
-                tooltip={item.label}
                 onAction={() => navigate(item.id)}
-              >
-                <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
-                <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
-                {(item.id === "sessions" ? snapshot.domains.sessions.page.total : snapshot.domains.beacons.page.total) > 0 ? (
-                  <Sidebar.MenuChip>{item.id === "sessions" ? snapshot.domains.sessions.page.total : snapshot.domains.beacons.page.total}</Sidebar.MenuChip>
-                ) : null}
-              </Sidebar.MenuItem>
+              />
             ))}
           </Sidebar.Menu>
         </Sidebar.Group>
@@ -582,19 +615,13 @@ export function NavigationContent({
           <Sidebar.GroupLabel>Data</Sidebar.GroupLabel>
           <Sidebar.Menu aria-label="Data navigation" showGuideLines={false}>
             {dataNavItems.map((item) => (
-              <Sidebar.MenuItem
+              <SidebarNavigationItem
                 key={item.id}
-                id={item.id}
-                aria-label={item.label}
-                textValue={item.label}
+                item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}
-                tooltip={item.label}
                 onAction={() => navigate(item.id)}
-              >
-                <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
-                <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
-              </Sidebar.MenuItem>
+              />
             ))}
           </Sidebar.Menu>
         </Sidebar.Group>
@@ -627,60 +654,67 @@ export function ConnectionMenu({
 }) {
   const connected = isUsableConnection(snapshot.connection.status);
   const operator = snapshot.connection.operator ?? "Current server";
+  const { collapsible, isMobile, isOpen } = useSidebar();
+  const isIconCollapsed = collapsible === "icon" && !isMobile && !isOpen;
 
   return (
-    <Dropdown>
-      <Button
-        aria-label={connected ? `Current server: ${operator}` : "Application menu, offline"}
-        className="connection-summary connection-summary--trigger"
-        fullWidth
-        variant="ghost"
-      >
-        <span className={`status-dot status-dot--${connected ? "connected" : "stopped"}`} />
-        <span className="min-w-0 text-left" data-sidebar="label">
-          <span className="block truncate text-xs font-medium">{connected ? operator : "Offline"}</span>
-          <span className="block truncate text-[11px] text-muted">
-            {connected ? snapshot.connection.version : "No active channel"}
-          </span>
-        </span>
-        <FontAwesomeIcon
-          aria-hidden
-          className="ms-auto size-3.5 shrink-0 text-muted"
-          data-sidebar="label"
-          icon={faEllipsisVertical}
-        />
-      </Button>
-      <Dropdown.Popover className="min-w-56" placement="top start">
-        <Dropdown.Menu
-          aria-label="Application and current server actions"
-          onAction={(key) => {
-            if (String(key) === "switch-config") onSwitchConfig();
-            if (String(key) === "disconnect") onDisconnect();
-            if (String(key) === "exit-app") onExitApp();
-            if (String(key) === "settings") onSettings();
-          }}
+    <Tooltip delay={250} isDisabled={!isIconCollapsed}>
+      <Dropdown>
+        <Button
+          aria-label={connected ? `Current server: ${operator}` : "Application menu, offline"}
+          className="connection-summary connection-summary--trigger"
+          fullWidth={!isIconCollapsed}
+          isIconOnly={isIconCollapsed}
+          variant="ghost"
         >
-          <Dropdown.Item id="exit-app" textValue="Exit app" variant="danger">
-            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faPowerOff} />
-            <Label>Exit app</Label>
-          </Dropdown.Item>
-          {connected ? (
-            <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
-              <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
-              <Label>Disconnect</Label>
+          <span
+            className={`connection-summary__status status-dot status-dot--${connected ? "connected" : "stopped"}`}
+          />
+          <span className="min-w-0 text-left" data-sidebar="label">
+            <span className="block truncate text-xs font-medium">{connected ? operator : "Offline"}</span>
+            <span className="block truncate text-[11px] text-muted">
+              {connected ? snapshot.connection.version : "No active channel"}
+            </span>
+          </span>
+          <FontAwesomeIcon
+            aria-hidden
+            className={`connection-summary__menu-icon size-3.5 shrink-0 text-muted${isIconCollapsed ? "" : " ms-auto"}`}
+            icon={faEllipsisVertical}
+          />
+        </Button>
+        <Dropdown.Popover className="min-w-56" placement="top start">
+          <Dropdown.Menu
+            aria-label="Application and current server actions"
+            onAction={(key) => {
+              if (String(key) === "switch-config") onSwitchConfig();
+              if (String(key) === "disconnect") onDisconnect();
+              if (String(key) === "exit-app") onExitApp();
+              if (String(key) === "settings") onSettings();
+            }}
+          >
+            <Dropdown.Item id="exit-app" textValue="Exit app" variant="danger">
+              <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faPowerOff} />
+              <Label>Exit app</Label>
             </Dropdown.Item>
-          ) : null}
-          <Dropdown.Item id="switch-config" textValue="Switch config">
-            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
-            <Label>Switch config</Label>
-          </Dropdown.Item>
-          <Dropdown.Item id="settings" textValue="Settings">
-            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faGear} />
-            <Label>Settings</Label>
-          </Dropdown.Item>
-        </Dropdown.Menu>
-      </Dropdown.Popover>
-    </Dropdown>
+            {connected ? (
+              <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
+                <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
+                <Label>Disconnect</Label>
+              </Dropdown.Item>
+            ) : null}
+            <Dropdown.Item id="switch-config" textValue="Switch config">
+              <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
+              <Label>Switch config</Label>
+            </Dropdown.Item>
+            <Dropdown.Item id="settings" textValue="Settings">
+              <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faGear} />
+              <Label>Settings</Label>
+            </Dropdown.Item>
+          </Dropdown.Menu>
+        </Dropdown.Popover>
+      </Dropdown>
+      <Tooltip.Content placement="right">Application menu</Tooltip.Content>
+    </Tooltip>
   );
 }
 
