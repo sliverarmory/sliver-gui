@@ -45,6 +45,10 @@ import type {
 import type { SliverReleaseDownloadEvent } from "./release-contracts.js";
 import type { ApplicationUpdateState } from "./application-update-contracts.js";
 import type {
+  ApplicationSettingsState,
+  ApplicationSettingsUpdateInput,
+} from "./application-settings-contracts.js";
+import type {
   ExecuteExecutionPlanInput,
   ExecutionActionPlan,
   ExecutionActionResult,
@@ -76,6 +80,8 @@ export const IPC_INVOKE = {
   openInteractionWindow: "sliver:window:open-interaction",
   claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
+  getApplicationSettings: "sliver:application-settings:get",
+  updateApplicationSettings: "sliver:application-settings:update",
   getApplicationUpdateState: "sliver:application-update:get",
   checkForApplicationUpdates: "sliver:application-update:check",
   restartToApplyApplicationUpdate: "sliver:application-update:restart",
@@ -138,6 +144,7 @@ export const IPC_EVENTS = {
   sessionShellsChanged: "sliver:session-shell:changed",
   releaseDownloadChanged: "sliver:release-download:changed",
   applicationUpdateChanged: "sliver:application-update:changed",
+  applicationSettingsChanged: "sliver:application-settings:changed",
   consoleNewTabRequested: "sliver:console:new-tab-requested",
   consoleCloseTabRequested: "sliver:console:close-tab-requested",
   consoleSelectTabRequested: "sliver:console:select-tab-requested",
@@ -598,6 +605,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [];
     result: OperationResult;
   };
+  [IPC.getApplicationSettings]: {
+    args: [];
+    result: ApplicationSettingsState;
+  };
+  [IPC.updateApplicationSettings]: {
+    args: [input: ApplicationSettingsUpdateInput];
+    result: OperationResult<ApplicationSettingsState>;
+  };
   [IPC.getApplicationUpdateState]: {
     args: [];
     result: ApplicationUpdateState;
@@ -817,6 +832,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
   onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
   onApplicationUpdateChanged: (listener: (state: ApplicationUpdateState) => void) => () => void;
+  onApplicationSettingsChanged: (listener: (state: ApplicationSettingsState) => void) => () => void;
   onConsoleNewTabRequested: (listener: () => void) => () => void;
   onConsoleCloseTabRequested: (listener: () => void) => () => void;
   onConsoleSelectTabRequested: (listener: (index: number) => void) => () => void;

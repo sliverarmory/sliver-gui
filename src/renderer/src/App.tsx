@@ -23,19 +23,27 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { disconnectedSnapshot } from "../../shared/contracts";
 import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
+import {
+  APPLICATION_SETTINGS_VERSION,
+  DEFAULT_APPLICATION_SETTINGS_STATE,
+  type ApplicationSettingsState,
+  type ApplicationSettingsValues,
+} from "../../shared/application-settings-contracts";
 import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import sliverSidebarIcon from "./assets/sliver-sidebar.png";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
+import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { OperationsPage } from "./pages/OperationsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import {
   SessionWorkspacePage,
   type SessionWorkspaceRoute,
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts";
+type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "settings";
 
 const infrastructureNavItems = [
   { id: "operations" as const, label: "Jobs & listeners", icon: faSatelliteDish },
@@ -49,6 +57,10 @@ const interactNavItems = [
 ];
 
 export function App() {
+  const applicationSettings = useApplicationSettings();
+  const [standaloneSettings, setStandaloneSettings] = useState<ApplicationSettingsState>(
+    DEFAULT_APPLICATION_SETTINGS_STATE,
+  );
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const [view, setView] = useState<ViewId>("operations");
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
@@ -263,6 +275,23 @@ export function App() {
     setSessionWorkspaceRoute(undefined);
     setView(nextView);
   }, []);
+  const updateSettings = useCallback((
+    updater: (current: ApplicationSettingsValues) => ApplicationSettingsValues,
+  ): void => {
+    if (applicationSettings) {
+      void applicationSettings.updateSettings(updater);
+      return;
+    }
+    setStandaloneSettings((current) => ({
+      v: APPLICATION_SETTINGS_VERSION,
+      revision: current.revision + 1,
+      ...updater({
+        theme: current.theme,
+        reduceMotion: current.reduceMotion,
+        terminal: current.terminal,
+      }),
+    }));
+  }, [applicationSettings]);
   const openSessionWorkspace = useCallback((session: SessionSummary, target: TargetRef) => {
     const backendEpoch = snapshot.connection.epoch;
     if (
@@ -308,6 +337,10 @@ export function App() {
           view={view}
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
+          onSettings={() => {
+            setIsConfigSelectorOpen(false);
+            changeView("settings");
+          }}
           onSwitchConfig={() => setIsConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
@@ -319,6 +352,10 @@ export function App() {
           view={view}
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
+          onSettings={() => {
+            setIsConfigSelectorOpen(false);
+            changeView("settings");
+          }}
           onSwitchConfig={() => setIsConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
@@ -375,7 +412,26 @@ export function App() {
             ? "app-content app-content--generate"
             : "app-content"}
         >
-          {connected ? (
+          {view === "settings" ? (
+            <SettingsPage
+              isSaving={applicationSettings
+                ? !applicationSettings.isReady || applicationSettings.isSaving
+                : false}
+              settings={applicationSettings?.settings ?? standaloneSettings}
+              onReduceMotionChange={(reduceMotion) => updateSettings((current) => ({
+                ...current,
+                reduceMotion,
+              }))}
+              onTerminalChange={(terminal) => updateSettings((current) => ({
+                ...current,
+                terminal,
+              }))}
+              onThemeChange={(theme) => updateSettings((current) => ({
+                ...current,
+                theme,
+              }))}
+            />
+          ) : connected ? (
             <>
               {view === "operations" ? <OperationsPage snapshot={snapshot} /> : null}
               {view === "sessions" ? (
@@ -435,6 +491,7 @@ export function NavigationContent({
   view,
   onDisconnect,
   onExitApp,
+  onSettings,
   onSwitchConfig,
   onViewChange,
 }: {
@@ -442,6 +499,7 @@ export function NavigationContent({
   view: ViewId;
   onDisconnect: () => void;
   onExitApp: () => void;
+  onSettings: () => void;
   onSwitchConfig: () => void;
   onViewChange: (view: ViewId) => void;
 }) {
@@ -458,6 +516,10 @@ export function NavigationContent({
   const exitApp = () => {
     setMobileOpen(false);
     onExitApp();
+  };
+  const openSettings = () => {
+    setMobileOpen(false);
+    onSettings();
   };
   const navigate = (nextView: ViewId) => {
     setMobileOpen(false);
@@ -528,6 +590,7 @@ export function NavigationContent({
           snapshot={snapshot}
           onDisconnect={disconnectCurrentServer}
           onExitApp={exitApp}
+          onSettings={openSettings}
           onSwitchConfig={switchConfig}
         />
       </Sidebar.Footer>
@@ -539,41 +602,32 @@ export function ConnectionMenu({
   snapshot,
   onDisconnect,
   onExitApp,
+  onSettings,
   onSwitchConfig,
 }: {
   snapshot: SliverSnapshot;
   onDisconnect: () => void;
   onExitApp: () => void;
+  onSettings: () => void;
   onSwitchConfig: () => void;
 }) {
   const connected = isUsableConnection(snapshot.connection.status);
-
-  if (!connected) {
-    return (
-      <div className="connection-summary">
-        <span className="status-dot status-dot--stopped" />
-        <div className="min-w-0" data-sidebar="label">
-          <p className="truncate text-xs font-medium">Offline</p>
-          <p className="truncate text-[11px] text-muted">No active channel</p>
-        </div>
-      </div>
-    );
-  }
-
   const operator = snapshot.connection.operator ?? "Current server";
 
   return (
     <Dropdown>
       <Button
-        aria-label={`Current server: ${operator}`}
+        aria-label={connected ? `Current server: ${operator}` : "Application menu, offline"}
         className="connection-summary connection-summary--trigger"
         fullWidth
         variant="ghost"
       >
-        <span className="status-dot status-dot--connected" />
+        <span className={`status-dot status-dot--${connected ? "connected" : "stopped"}`} />
         <span className="min-w-0 text-left" data-sidebar="label">
-          <span className="block truncate text-xs font-medium">{operator}</span>
-          <span className="block truncate text-[11px] text-muted">{snapshot.connection.version}</span>
+          <span className="block truncate text-xs font-medium">{connected ? operator : "Offline"}</span>
+          <span className="block truncate text-[11px] text-muted">
+            {connected ? snapshot.connection.version : "No active channel"}
+          </span>
         </span>
         <FontAwesomeIcon
           aria-hidden
@@ -589,16 +643,19 @@ export function ConnectionMenu({
             if (String(key) === "switch-config") onSwitchConfig();
             if (String(key) === "disconnect") onDisconnect();
             if (String(key) === "exit-app") onExitApp();
+            if (String(key) === "settings") onSettings();
           }}
         >
           <Dropdown.Item id="exit-app" textValue="Exit app" variant="danger">
             <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faPowerOff} />
             <Label>Exit app</Label>
           </Dropdown.Item>
-          <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
-            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
-            <Label>Disconnect</Label>
-          </Dropdown.Item>
+          {connected ? (
+            <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
+              <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
+              <Label>Disconnect</Label>
+            </Dropdown.Item>
+          ) : null}
           <Dropdown.Item id="switch-config" textValue="Switch config">
             <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
             <Label>Switch config</Label>

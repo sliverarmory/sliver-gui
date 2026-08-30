@@ -45,6 +45,8 @@ import {
   GhosttyTerminal,
   type GhosttyTerminalHandle,
 } from "../components/GhosttyTerminal";
+import { applicationTerminalAppearance } from "../components/application-terminal-appearance";
+import { useApplicationSettings } from "../components/ApplicationSettingsProvider";
 import {
   SessionShellTransport,
   type SessionShellTransportSnapshot,
@@ -124,6 +126,7 @@ export function SessionTerminalPanel({
   route,
   session,
 }: SessionTerminalPanelProps): React.JSX.Element {
+  const applicationSettings = useApplicationSettings();
   const routeIdentity = terminalRouteIdentity(route);
   const routeIdentityRef = useRef(routeIdentity);
   routeIdentityRef.current = routeIdentity;
@@ -816,6 +819,13 @@ export function SessionTerminalPanel({
     ? selectedResourceId
     : undefined;
   const runtime = runtimeRef.current;
+  const terminalAppearance = useMemo(() => applicationSettings
+    ? applicationTerminalAppearance(
+        applicationSettings.settings.terminal,
+        applicationSettings.resolvedTheme,
+        applicationSettings.settings.reduceMotion,
+      )
+    : undefined, [applicationSettings]);
   const terminals = runtime ? attachedTerminals.map((entry) => {
     const isSelected = entry.resourceId === selectedResourceId;
     return (
@@ -830,6 +840,7 @@ export function SessionTerminalPanel({
       >
         <GhosttyTerminal
           ref={entry.terminalRef}
+          {...(terminalAppearance ? { appearance: terminalAppearance } : {})}
           ariaLabel={`Interactive shell for ${session.name || session.hostname || session.id}`}
           className="min-h-[360px]"
           disableInput={isWindows(session.os)}

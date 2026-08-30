@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
 import { IPC, IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { SliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
@@ -108,6 +109,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       assert.ok(stateAfterConnect.methods.includes(method), `expected ConnectionRegistry to call ${method}`);
     }
 
+    await verifyApplicationSettings(electronApplication, page, artifactDirectory);
+
     await verifySliverConsoleWindow(
       electronApplication,
       page,
@@ -197,6 +200,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onSessionShellsChanged",
     "onReleaseDownloadChanged",
     "onApplicationUpdateChanged",
+    "onApplicationSettingsChanged",
     "onConsoleNewTabRequested",
     "onConsoleCloseTabRequested",
     "onConsoleSelectTabRequested",
@@ -255,6 +259,57 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
   });
 }
 
+async function verifyApplicationSettings(
+  electronApplication: ElectronApplication,
+  page: Page,
+  artifactDirectory: string,
+): Promise<void> {
+  await page.getByRole("button", { name: /^Current server:/i }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: "General" }).getAttribute("aria-selected"), "true");
+
+  await page.getByRole("radio", { name: "Light" }).click();
+  await page.locator("html.light[data-theme='light']").waitFor();
+  await page.getByText("Reduce motion", { exact: true }).click();
+  await page.locator("html[data-reduce-motion='true']").waitFor();
+  await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "application-settings-general-light.png"),
+  });
+
+  await page.getByRole("tab", { name: "Terminal" }).click();
+  await page.getByText("Smooth scrolling", { exact: true }).click();
+  await page.getByRole("button", { name: "Save" }).click();
+  const settings = await waitForApplicationSettings(
+    page,
+    (candidate) => candidate.theme === "light" &&
+      candidate.reduceMotion &&
+      candidate.terminal.smoothScrolling,
+  );
+  await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "application-settings-terminal-light.png"),
+  });
+
+  assert.equal(settings.theme, "light");
+  assert.equal(settings.reduceMotion, true);
+  assert.equal(settings.terminal.smoothScrolling, true);
+  assert.ok(settings.revision >= 3);
+
+  const native = await electronApplication.evaluate(({ BrowserWindow, nativeTheme }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    return {
+      background: window?.getBackgroundColor().toLowerCase(),
+      shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+      themeSource: nativeTheme.themeSource,
+    };
+  });
+  assert.equal(native.themeSource, "light");
+  assert.equal(native.shouldUseDarkColors, false);
+  assert.match(native.background ?? "", /^#0{6}(?:00)?$/u);
+}
+
 async function verifySliverConsoleWindow(
   electronApplication: ElectronApplication,
   sourcePage: Page,
@@ -290,6 +345,14 @@ async function verifySliverConsoleWindow(
     });
     await firstTerminal.waitFor();
     await consolePage.locator('[data-terminal-state="ready"]').waitFor();
+    await consolePage.locator("html.light[data-theme='light'][data-reduce-motion='true']").waitFor();
+    assert.equal(
+      await consolePage.locator('[data-terminal-state="ready"]').evaluate((element) =>
+        (globalThis as unknown as {
+          getComputedStyle(target: unknown): { backgroundColor: string };
+        }).getComputedStyle(element).backgroundColor),
+      "rgb(250, 250, 250)",
+    );
     const embeddedFontLoads = await consolePage.evaluate(async (families) => {
       const browserDocument = (globalThis as unknown as {
         document: { fonts: { load(value: string): Promise<unknown[]>; check(value: string): boolean } };
@@ -423,6 +486,7 @@ async function verifySliverConsoleWindow(
     const settingsDialog = consolePage.getByRole("dialog", { name: "Terminal Settings" });
     await settingsDialog.waitFor();
     await settingsDialog.getByText("Fira Code", { exact: true }).first().waitFor();
+    assert.equal(await settingsDialog.getByRole("switch", { name: "Smooth scrolling" }).isChecked(), true);
     await consolePage.screenshot({
       animations: "disabled",
       path: join(artifactDirectory, "console-tabs-settings.png"),
@@ -2497,6 +2561,27 @@ async function waitForSelectedConsoleTab(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for selected console tab ${String(name)}`);
+}
+
+async function waitForApplicationSettings(
+  page: Page,
+  predicate: (settings: ApplicationSettingsState) => boolean,
+  timeoutMs = 10_000,
+): Promise<ApplicationSettingsState> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = await page.evaluate(async () => {
+    const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
+    return api.getApplicationSettings();
+  }) as ApplicationSettingsState;
+  while (Date.now() < deadline) {
+    latest = await page.evaluate(async () => {
+      const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
+      return api.getApplicationSettings();
+    }) as ApplicationSettingsState;
+    if (predicate(latest)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for application settings revision after ${latest.revision}`);
 }
 
 async function waitForConsoleState(

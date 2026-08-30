@@ -10,8 +10,13 @@ import { SessionShellWindowApp } from "./SessionShellWindowApp";
 import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
+import {
+  ApplicationSettingsProvider,
+  initializeRendererTheme,
+} from "./components/ApplicationSettingsProvider";
 
 config.autoAddCss = false;
+initializeRendererTheme();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Renderer root element was not found");
@@ -27,9 +32,11 @@ function RendererSurface(): React.JSX.Element {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <RendererSurface />
-    <ApplicationUpdateStatus showIdleControl={surface === null} />
-    <ReleaseDownloadToasts />
-    <Toast.Provider placement="bottom" maxVisibleToasts={4} />
+    <ApplicationSettingsProvider>
+      <RendererSurface />
+      <ApplicationUpdateStatus showIdleControl={surface === null} />
+      <ReleaseDownloadToasts />
+      <Toast.Provider placement="bottom" maxVisibleToasts={4} />
+    </ApplicationSettingsProvider>
   </React.StrictMode>,
 );

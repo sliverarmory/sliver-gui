@@ -9,12 +9,7 @@ import {
 } from "react";
 import {
   Button,
-  Description,
-  Label,
-  ListBox,
   Modal,
-  NumberField,
-  Select,
   Spinner,
   Tabs,
   Tooltip,
@@ -39,20 +34,17 @@ import {
 import type { TerminalRuntimeAsset } from "../../shared/stream-contracts";
 import {
   GhosttyTerminal,
-  type GhosttyTerminalAppearance,
   type GhosttyTerminalHandle,
 } from "./components/GhosttyTerminal";
-import { SwitchRow } from "./components/FormControls";
+import { applicationTerminalAppearance } from "./components/application-terminal-appearance";
+import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
+import {
+  isValidTerminalSettings,
+  TerminalSettingsFields,
+} from "./components/TerminalSettingsFields";
 import { ConsoleTerminalTransport } from "./components/console-terminal-transport";
 import {
-  CONSOLE_TERMINAL_FONTS,
-  CONSOLE_TERMINAL_FONT_SIZE_MAX,
-  CONSOLE_TERMINAL_FONT_SIZE_MIN,
-  CONSOLE_TERMINAL_SMOOTH_SCROLL_DURATION_MS,
   DEFAULT_CONSOLE_TERMINAL_SETTINGS,
-  consoleTerminalFontFamily,
-  isConsoleTerminalCursorStyle,
-  isConsoleTerminalFontId,
   loadConsoleTerminalSettings,
   saveConsoleTerminalSettings,
   type ConsoleTerminalSettings,
@@ -87,6 +79,7 @@ let cachedConsoleTerminalRuntime: TerminalRuntimeAsset | undefined;
 let pendingConsoleTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
 
 export function ConsoleWindowApp(): React.JSX.Element {
+  const applicationSettings = useApplicationSettings();
   const [phase, setPhase] = useState<ConsoleWindowPhase>("claiming");
   const [context, setContext] = useState<ConsoleWindowLaunchContext>();
   const [runtime, setRuntime] = useState<TerminalRuntimeAsset>();
@@ -96,7 +89,8 @@ export function ConsoleWindowApp(): React.JSX.Element {
   const [actionError, setActionError] = useState<string>();
   const [isCreatingTab, setIsCreatingTab] = useState(false);
   const [closingTabId, setClosingTabId] = useState<string>();
-  const [settings, setSettingsState] = useState(loadConsoleTerminalSettings);
+  const [localSettings, setLocalSettings] = useState(loadConsoleTerminalSettings);
+  const settings = applicationSettings?.settings.terminal ?? localSettings;
   const [settingsDraft, setSettingsDraft] = useState(settings);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const tabsRef = useRef<readonly ReadyConsoleTab[]>([]);
@@ -292,7 +286,8 @@ export function ConsoleWindowApp(): React.JSX.Element {
 
   useEffect(() => {
     settingsRef.current = settings;
-  }, [settings]);
+    if (!isSettingsOpen) setSettingsDraft(settings);
+  }, [isSettingsOpen, settings]);
 
   const activeTab = tabs.find(({ context: tabContext }) => tabContext.tabId === activeTabId);
   useEffect(() => {
@@ -302,15 +297,11 @@ export function ConsoleWindowApp(): React.JSX.Element {
       : `Sliver console — ${context.configName}`;
   }, [activeTab, context]);
 
-  const appearance = useMemo<GhosttyTerminalAppearance>(() => ({
-    cursorBlink: settings.cursorBlink,
-    cursorStyle: settings.cursorStyle,
-    fontFamily: consoleTerminalFontFamily(settings.fontId),
-    fontSize: settings.fontSize,
-    smoothScrollDuration: settings.smoothScrolling
-      ? CONSOLE_TERMINAL_SMOOTH_SCROLL_DURATION_MS
-      : 0,
-  }), [settings]);
+  const appearance = useMemo(() => applicationTerminalAppearance(
+    settings,
+    applicationSettings?.resolvedTheme ?? "dark",
+    applicationSettings?.settings.reduceMotion ?? false,
+  ), [applicationSettings?.resolvedTheme, applicationSettings?.settings.reduceMotion, settings]);
 
   if (fatalError) {
     return (
@@ -416,7 +407,11 @@ export function ConsoleWindowApp(): React.JSX.Element {
           </div>
         </header>
 
-        <section className="relative min-h-0 flex-1 bg-[#1e1e1e]" aria-label="Console terminal">
+        <section
+          className="relative min-h-0 flex-1"
+          style={{ backgroundColor: appearance.theme?.background }}
+          aria-label="Console terminal"
+        >
           {tabs.map((tab) => {
             const isActive = tab.context.tabId === activeTabId;
             const message = tab.terminalError ?? tab.exitMessage ?? tab.actionError;
@@ -511,9 +506,19 @@ export function ConsoleWindowApp(): React.JSX.Element {
         }}
         onSave={() => {
           const next = Object.freeze({ ...settingsDraft });
+          if (applicationSettings) {
+            void applicationSettings.updateSettings((current) => ({ ...current, terminal: next }))
+              .then((saved) => {
+                if (!saved) return;
+                settingsRef.current = next;
+                setIsSettingsOpen(false);
+                focusActiveTerminal();
+              });
+            return;
+          }
           saveConsoleTerminalSettings(next);
           settingsRef.current = next;
-          setSettingsState(next);
+          setLocalSettings(next);
           setIsSettingsOpen(false);
           focusActiveTerminal();
         }}
@@ -535,10 +540,7 @@ function TerminalSettingsModal({
   readonly onOpenChange: (isOpen: boolean) => void;
   readonly onSave: () => void;
 }): React.JSX.Element {
-  const validFontSize = Number.isSafeInteger(draft.fontSize) &&
-    draft.fontSize >= CONSOLE_TERMINAL_FONT_SIZE_MIN &&
-    draft.fontSize <= CONSOLE_TERMINAL_FONT_SIZE_MAX;
-  const selectedFont = CONSOLE_TERMINAL_FONTS.find(({ id }) => id === draft.fontId);
+  const validSettings = isValidTerminalSettings(draft);
 
   return (
     <Modal.Backdrop isOpen={isOpen} variant="blur" onOpenChange={onOpenChange}>
@@ -552,96 +554,12 @@ function TerminalSettingsModal({
             <div className="min-w-0">
               <Modal.Heading>Terminal Settings</Modal.Heading>
               <p className="mt-1 text-sm leading-5 text-muted">
-                Applied to every console tab in this window.
+                Applied to every console and managed shell window.
               </p>
             </div>
           </Modal.Header>
           <Modal.Body className="flex flex-col gap-5">
-            <Select
-              fullWidth
-              value={draft.fontId}
-              variant="secondary"
-              onChange={(value) => {
-                if (isConsoleTerminalFontId(value)) onDraftChange({ ...draft, fontId: value });
-              }}
-            >
-              <Label>Font family</Label>
-              <Select.Trigger>
-                <Select.Value>{selectedFont?.label}</Select.Value>
-                <Select.Indicator />
-              </Select.Trigger>
-              <Select.Popover>
-                <ListBox>
-                  {CONSOLE_TERMINAL_FONTS.map((font) => (
-                    <ListBox.Item id={font.id} key={font.id} textValue={font.label}>
-                      <span style={{ fontFamily: `"${font.family}", monospace` }}>{font.label}</span>
-                      <ListBox.ItemIndicator />
-                    </ListBox.Item>
-                  ))}
-                </ListBox>
-              </Select.Popover>
-              <Description>Embedded in Sliver GUI and available offline.</Description>
-            </Select>
-
-            <NumberField
-              commitBehavior="validate"
-              formatOptions={{ useGrouping: false }}
-              isInvalid={!validFontSize}
-              maxValue={CONSOLE_TERMINAL_FONT_SIZE_MAX}
-              minValue={CONSOLE_TERMINAL_FONT_SIZE_MIN}
-              step={1}
-              value={draft.fontSize}
-              variant="secondary"
-              onChange={(fontSize) => onDraftChange({
-                ...draft,
-                fontSize: Number.isFinite(fontSize) ? Math.trunc(fontSize) : 0,
-              })}
-            >
-              <Label>Font size</Label>
-              <NumberField.Group className="grid-cols-1">
-                <NumberField.Input />
-              </NumberField.Group>
-              <Description>{CONSOLE_TERMINAL_FONT_SIZE_MIN}–{CONSOLE_TERMINAL_FONT_SIZE_MAX} pixels.</Description>
-            </NumberField>
-
-            <Select
-              fullWidth
-              value={draft.cursorStyle}
-              variant="secondary"
-              onChange={(value) => {
-                if (isConsoleTerminalCursorStyle(value)) {
-                  onDraftChange({ ...draft, cursorStyle: value });
-                }
-              }}
-            >
-              <Label>Cursor shape</Label>
-              <Select.Trigger>
-                <Select.Value />
-                <Select.Indicator />
-              </Select.Trigger>
-              <Select.Popover>
-                <ListBox>
-                  <ListBox.Item id="block">Block<ListBox.ItemIndicator /></ListBox.Item>
-                  <ListBox.Item id="underline">Underline<ListBox.ItemIndicator /></ListBox.Item>
-                  <ListBox.Item id="bar">Bar<ListBox.ItemIndicator /></ListBox.Item>
-                </ListBox>
-              </Select.Popover>
-            </Select>
-
-            <div className="grid gap-px overflow-hidden rounded-xl bg-surface-secondary p-1">
-              <SwitchRow
-                description="Animate the cursor while the console is active."
-                label="Blinking cursor"
-                selected={draft.cursorBlink}
-                onChange={(cursorBlink) => onDraftChange({ ...draft, cursorBlink })}
-              />
-              <SwitchRow
-                description="Animate movement through terminal scrollback."
-                label="Smooth scrolling"
-                selected={draft.smoothScrolling}
-                onChange={(smoothScrolling) => onDraftChange({ ...draft, smoothScrolling })}
-              />
-            </div>
+            <TerminalSettingsFields settings={draft} onChange={onDraftChange} />
           </Modal.Body>
           <Modal.Footer className="items-center justify-between gap-3">
             <Button
@@ -653,7 +571,7 @@ function TerminalSettingsModal({
             </Button>
             <div className="flex items-center gap-2">
               <Button size="sm" variant="secondary" onPress={() => onOpenChange(false)}>Cancel</Button>
-              <Button isDisabled={!validFontSize} size="sm" onPress={onSave}>Save</Button>
+              <Button isDisabled={!validSettings} size="sm" onPress={onSave}>Save</Button>
             </div>
           </Modal.Footer>
         </Modal.Dialog>

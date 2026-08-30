@@ -4,6 +4,7 @@ import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../../shared/contracts";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import type {
   OperationResult,
   SavedConfigSummary,
@@ -60,6 +61,15 @@ function installSliverAPI(
     disconnect: vi.fn(failedOperation),
     downloadBuild: vi.fn(failedOperation),
     exitApp: vi.fn(failedOperation),
+    getApplicationSettings: vi.fn().mockResolvedValue(DEFAULT_APPLICATION_SETTINGS_STATE),
+    updateApplicationSettings: vi.fn(async (input) => ({
+      ok: true as const,
+      value: {
+        v: 1 as const,
+        revision: input.expectedRevision + 1,
+        ...input.settings,
+      },
+    })),
     getApplicationUpdateState: vi.fn().mockResolvedValue({
       status: "disabled",
       revision: 0,
@@ -87,6 +97,7 @@ function installSliverAPI(
     onSessionShellsChanged: vi.fn(() => vi.fn()),
     onReleaseDownloadChanged: vi.fn(() => vi.fn()),
     onApplicationUpdateChanged: vi.fn(() => vi.fn()),
+    onApplicationSettingsChanged: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
@@ -578,6 +589,32 @@ describe("App startup", () => {
 });
 
 describe("Current server menu", () => {
+  it("opens the application Settings surface from the footer menu", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+
+    render(<App />);
+
+    const trigger = await screen.findByRole("button", { name: "Current server: alice" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "Settings" }));
+
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
+  });
+
   it("opens from the server summary and orders application and server actions nearest the trigger", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
@@ -591,12 +628,14 @@ describe("Current server menu", () => {
     const onSwitchConfig = vi.fn();
     const onDisconnect = vi.fn();
     const onExitApp = vi.fn();
+    const onSettings = vi.fn();
 
     render(
       <ConnectionMenu
         snapshot={snapshot}
         onDisconnect={onDisconnect}
         onExitApp={onExitApp}
+        onSettings={onSettings}
         onSwitchConfig={onSwitchConfig}
       />,
     );
@@ -624,28 +663,43 @@ describe("Current server menu", () => {
     expect(onSwitchConfig).toHaveBeenCalledOnce();
     expect(onDisconnect).not.toHaveBeenCalled();
     expect(onExitApp).not.toHaveBeenCalled();
+    expect(onSettings).not.toHaveBeenCalled();
 
     await user.click(trigger);
     await user.click(await screen.findByRole("menuitem", { name: "Disconnect" }));
     expect(onDisconnect).toHaveBeenCalledOnce();
 
     await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "Settings" }));
+    expect(onSettings).toHaveBeenCalledOnce();
+
+    await user.click(trigger);
     await user.click(await screen.findByRole("menuitem", { name: "Exit app" }));
     expect(onExitApp).toHaveBeenCalledOnce();
   });
 
-  it("leaves the offline summary noninteractive", () => {
+  it("keeps application settings and exit available while offline", async () => {
+    const user = userEvent.setup();
+    const onSettings = vi.fn();
     render(
       <ConnectionMenu
         snapshot={disconnectedSnapshot()}
         onDisconnect={vi.fn()}
         onExitApp={vi.fn()}
+        onSettings={onSettings}
         onSwitchConfig={vi.fn()}
       />,
     );
 
     expect(screen.getByText("Offline")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Current server:/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Application menu, offline" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Exit app",
+      "Switch config",
+      "Settings",
+    ]);
+    await user.click(screen.getByRole("menuitem", { name: "Settings" }));
+    expect(onSettings).toHaveBeenCalledOnce();
   });
 });
 
@@ -660,6 +714,7 @@ describe("Sidebar navigation", () => {
             view="operations"
             onDisconnect={vi.fn()}
             onExitApp={vi.fn()}
+            onSettings={vi.fn()}
             onSwitchConfig={vi.fn()}
             onViewChange={onViewChange}
           />
@@ -739,6 +794,7 @@ describe("Sidebar navigation", () => {
             view="operations"
             onDisconnect={vi.fn()}
             onExitApp={vi.fn()}
+            onSettings={vi.fn()}
             onSwitchConfig={vi.fn()}
             onViewChange={onViewChange}
           />
@@ -915,6 +971,7 @@ describe("Sidebar navigation", () => {
               view="operations"
               onDisconnect={vi.fn()}
               onExitApp={vi.fn()}
+              onSettings={vi.fn()}
               onSwitchConfig={vi.fn()}
               onViewChange={onViewChange}
             />
@@ -958,6 +1015,7 @@ describe("Sidebar navigation", () => {
             view="operations"
             onDisconnect={vi.fn()}
             onExitApp={vi.fn()}
+            onSettings={vi.fn()}
             onSwitchConfig={onSwitchConfig}
             onViewChange={vi.fn()}
           />

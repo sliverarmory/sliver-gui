@@ -18,6 +18,7 @@ import {
 } from "../shared/contracts.js";
 import type { PrepareExecutionActionInput } from "../shared/execution-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
@@ -134,6 +135,56 @@ describe("trusted Electron IPC boundary", () => {
     expect(getState).toHaveBeenCalledOnce();
     expect(checkForUpdates).toHaveBeenCalledOnce();
     expect(restartToApply).toHaveBeenCalledOnce();
+  });
+
+  it("exposes strict revision-bound application settings operations", async () => {
+    const getState = vi.fn(() => DEFAULT_APPLICATION_SETTINGS_STATE);
+    const update = vi.fn(async (input) => ({
+      ok: true as const,
+      value: {
+        v: 1 as const,
+        revision: input.expectedRevision + 1,
+        ...input.settings,
+      },
+    }));
+    registerIpcHandlers(
+      registryMock(),
+      vi.fn(),
+      RENDERER_URL,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { getState, update },
+    );
+    const { event } = invokeEvent("http://127.0.0.1:5173/", 42);
+    const input = {
+      expectedRevision: 0,
+      settings: {
+        theme: "light" as const,
+        reduceMotion: true,
+        terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+      },
+    };
+
+    expect(electronMocks.handlers.get(IPC.getApplicationSettings)?.(event))
+      .toBe(DEFAULT_APPLICATION_SETTINGS_STATE);
+    await expect(electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, input))
+      .resolves.toMatchObject({ ok: true, value: { revision: 1, theme: "light" } });
+    expect(update).toHaveBeenCalledOnce();
+    expect(update.mock.calls[0]?.[0]).toEqual(input);
+    expect(Object.isFrozen(update.mock.calls[0]?.[0])).toBe(true);
+
+    expect(() => electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, {
+      ...input,
+      settings: { ...input.settings, theme: "sepia" },
+    })).toThrow(/invalid application settings update/);
+    expect(() => electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, {
+      ...input,
+      destinationPath: "/tmp/private",
+    })).toThrow(/invalid application settings update/);
+    expect(update).toHaveBeenCalledOnce();
   });
 
   it("rejects origins that merely prefix-match the configured renderer", () => {
@@ -255,6 +306,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.openInteractionWindow,
     IPC.claimInteractionWindow,
     IPC.exitApp,
+    IPC.getApplicationSettings,
     IPC.getApplicationUpdateState,
     IPC.checkForApplicationUpdates,
     IPC.restartToApplyApplicationUpdate,

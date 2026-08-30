@@ -3,6 +3,18 @@ import type { BrowserWindowConstructorOptions } from "electron";
 import { secureWebPreferences } from "./security.js";
 
 const TRANSPARENT_WINDOW_COLOR = "#00000000";
+export const DARK_NATIVE_WINDOW_COLOR = "#09090b";
+export const LIGHT_NATIVE_WINDOW_COLOR = "#fafafa";
+export const DARK_TITLE_BAR_SYMBOL_COLOR = "#f4f4f5";
+export const LIGHT_TITLE_BAR_SYMBOL_COLOR = "#18181b";
+
+export function nativeWindowBackgroundColor(dark: boolean): string {
+  return dark ? DARK_NATIVE_WINDOW_COLOR : LIGHT_NATIVE_WINDOW_COLOR;
+}
+
+export function titleBarSymbolColor(dark: boolean): string {
+  return dark ? DARK_TITLE_BAR_SYMBOL_COLOR : LIGHT_TITLE_BAR_SYMBOL_COLOR;
+}
 
 /**
  * Keep the native surface transparent so renderer alpha can reveal the desktop.
@@ -15,6 +27,7 @@ export function mainWindowOptions(
   preload: string,
   platform: NodeJS.Platform = process.platform,
   icon?: string,
+  dark = true,
 ): BrowserWindowConstructorOptions {
   return {
     width: 1440,
@@ -43,7 +56,7 @@ export function mainWindowOptions(
           ...(icon ? { icon } : {}),
           titleBarOverlay: {
             color: TRANSPARENT_WINDOW_COLOR,
-            symbolColor: "#f4f4f5",
+            symbolColor: titleBarSymbolColor(dark),
             height: 72,
           },
         }
@@ -62,6 +75,7 @@ export function sessionShellWindowOptions(
   preload: string,
   platform: NodeJS.Platform = process.platform,
   icon?: string,
+  dark = true,
 ): BrowserWindowConstructorOptions {
   return {
     width: 1180,
@@ -70,7 +84,7 @@ export function sessionShellWindowOptions(
     minHeight: 540,
     show: false,
     title: "Managed Shells",
-    backgroundColor: "#09090b",
+    backgroundColor: nativeWindowBackgroundColor(dark),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: secureWebPreferences(preload),
   };
@@ -85,6 +99,7 @@ export function consoleWindowOptions(
   preload: string,
   platform: NodeJS.Platform = process.platform,
   icon?: string,
+  dark = true,
 ): BrowserWindowConstructorOptions {
   return {
     width: 1180,
@@ -93,7 +108,7 @@ export function consoleWindowOptions(
     minHeight: 540,
     show: false,
     title: "Sliver Console",
-    backgroundColor: "#09090b",
+    backgroundColor: nativeWindowBackgroundColor(dark),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: secureWebPreferences(preload),
   };
@@ -109,6 +124,7 @@ export function interactionWindowOptions(
   preload: string,
   platform: NodeJS.Platform = process.platform,
   icon?: string,
+  dark = true,
 ): BrowserWindowConstructorOptions {
   return {
     width: 1360,
@@ -117,7 +133,7 @@ export function interactionWindowOptions(
     minHeight: 640,
     show: false,
     title: "Interact",
-    backgroundColor: "#09090b",
+    backgroundColor: nativeWindowBackgroundColor(dark),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: secureWebPreferences(preload),
   };

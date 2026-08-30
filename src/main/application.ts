@@ -11,6 +11,7 @@ import {
   dialog,
   Menu,
   net,
+  nativeTheme,
   session,
   shell,
   type MessageEvent as ElectronMessageEvent,
@@ -33,6 +34,10 @@ import {
   type ConsoleWindowLaunchContext,
 } from "../shared/console-contracts.js";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
+import type {
+  ApplicationSettingsState,
+  ApplicationSettingsUpdateInput,
+} from "../shared/application-settings-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
 import type {
   SliverReleaseDownloadEvent,
@@ -50,6 +55,7 @@ import {
   type ApplicationUpdater,
 } from "./application-updater.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
+import { ApplicationSettingsStore } from "./application-settings.js";
 import { ConnectionRegistry } from "./connection-registry.js";
 import { resolveDownloadsDirectory } from "./download-directory.js";
 import {
@@ -63,7 +69,9 @@ import {
   consoleWindowOptions,
   interactionWindowOptions,
   mainWindowOptions,
+  nativeWindowBackgroundColor,
   sessionShellWindowOptions,
+  titleBarSymbolColor,
 } from "./window-options.js";
 import {
   ConsolePortSession,
@@ -75,6 +83,9 @@ import {
 } from "./console-runtime.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
+const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
+
+type NativeWindowSurface = "workspace" | "interaction" | "managed-shells" | "console";
 
 export interface StartApplicationOptions {
   registry?: ConnectionRegistry;
@@ -175,6 +186,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
   const rendererUrl = developmentRendererUrl ?? pathToFileURL(rendererEntryPath).href;
   const windows = new Set<BrowserWindow>();
+  const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
@@ -186,6 +198,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let releaseDownloader: SliverReleaseDownloader | undefined;
   let applicationUpdater: ApplicationUpdater | undefined;
   let applicationUpdateState: ApplicationUpdateState | undefined;
+  let applicationSettingsStore: ApplicationSettingsStore | undefined;
   const shutdown = new ApplicationShutdownCoordinator({
     stopReleaseDownloads: () => releaseDownloader?.stop(),
     disposeApplicationUpdater: () => applicationUpdater?.dispose(),
@@ -213,8 +226,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     consoleWindowRecord?: ConsoleWindowRecord,
   ): void {
     const contentsId = window.webContents.id;
+    const surface: NativeWindowSurface = consoleWindowRecord
+      ? "console"
+      : interactionWindowRecord
+        ? "interaction"
+        : sessionShellRecord
+          ? "managed-shells"
+          : "workspace";
     windows.add(window);
+    nativeWindowSurfaces.set(window, surface);
     windowsByContentsId.set(contentsId, window);
+    applyNativeThemeToWindow(window, surface);
     registry.registerWindow(contentsId);
     if (inheritFromContentsId !== undefined) registry.inheritConnection(inheritFromContentsId, contentsId);
 
@@ -302,6 +324,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     }
     window.on("closed", () => {
       windows.delete(window);
+      nativeWindowSurfaces.delete(window);
       windowsByContentsId.delete(contentsId);
       if (sessionShellRecord) {
         sessionShellWindowsByContentsId.delete(contentsId);
@@ -331,7 +354,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function createWindow(inheritFromContentsId?: number): BrowserWindow {
-    const window = new BrowserWindow(mainWindowOptions(preloadPath, process.platform, runtimeIconPath));
+    const window = new BrowserWindow(mainWindowOptions(
+      preloadPath,
+      process.platform,
+      runtimeIconPath,
+      nativeTheme.shouldUseDarkColors,
+    ));
     trackWindow(window, inheritFromContentsId);
     void loadRenderer(window);
     return window;
@@ -355,7 +383,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         throw new Error("Select a session or beacon before popping out its interaction workspace");
       }
 
-      window = new BrowserWindow(interactionWindowOptions(preloadPath, process.platform, runtimeIconPath));
+      window = new BrowserWindow(interactionWindowOptions(
+        preloadPath,
+        process.platform,
+        runtimeIconPath,
+        nativeTheme.shouldUseDarkColors,
+      ));
       interactionRecord = {
         window,
         source,
@@ -602,7 +635,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         return { ok: true };
       }
 
-      const window = new BrowserWindow(sessionShellWindowOptions(preloadPath, process.platform, runtimeIconPath));
+      const window = new BrowserWindow(sessionShellWindowOptions(
+        preloadPath,
+        process.platform,
+        runtimeIconPath,
+        nativeTheme.shouldUseDarkColors,
+      ));
       const record: SessionShellWindowRecord = {
         key,
         window,
@@ -751,7 +789,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       }
       if (existing) retireConsoleWindow(existing, "window-closed");
 
-      const window = new BrowserWindow(consoleWindowOptions(preloadPath, process.platform, runtimeIconPath));
+      const window = new BrowserWindow(consoleWindowOptions(
+        preloadPath,
+        process.platform,
+        runtimeIconPath,
+        nativeTheme.shouldUseDarkColors,
+      ));
       const record: ConsoleWindowRecord = {
         key,
         window,
@@ -1178,6 +1221,65 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     shutdown.beginQuit();
   }
 
+  function applyNativeThemeToWindow(
+    window: BrowserWindow,
+    surface: NativeWindowSurface,
+  ): void {
+    if (window.isDestroyed()) return;
+    const dark = nativeTheme.shouldUseDarkColors;
+    try {
+      if (surface === "workspace") {
+        window.setBackgroundColor("#00000000");
+        if (process.platform !== "darwin") {
+          window.setTitleBarOverlay({
+            color: "#00000000",
+            symbolColor: titleBarSymbolColor(dark),
+            height: 72,
+          });
+        }
+      } else {
+        window.setBackgroundColor(nativeWindowBackgroundColor(dark));
+      }
+    } catch {
+      // A native window can enter teardown while the operating-system theme
+      // changes. Its renderer has either already gone or will read the current
+      // theme on the next trusted load.
+    }
+  }
+
+  function applyNativeWindowTheme(): void {
+    for (const [window, surface] of nativeWindowSurfaces) {
+      applyNativeThemeToWindow(window, surface);
+    }
+  }
+
+  function publishApplicationSettingsState(state: ApplicationSettingsState): void {
+    if (shutdown.isStopping) return;
+    for (const window of windows) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try {
+        window.webContents.send(IPC.applicationSettingsChanged, state);
+      } catch {
+        // Navigation and renderer teardown can race a main-process event. The
+        // next trusted renderer reads the current persisted snapshot.
+      }
+    }
+  }
+
+  async function updateApplicationSettings(
+    input: ApplicationSettingsUpdateInput,
+  ): Promise<OperationResult<ApplicationSettingsState>> {
+    if (!applicationSettingsStore) {
+      return { ok: false, error: "Application settings are unavailable" };
+    }
+    const result = await applicationSettingsStore.update(input);
+    if (!result.ok || !result.value) return result;
+    nativeTheme.themeSource = result.value.theme;
+    applyNativeWindowTheme();
+    publishApplicationSettingsState(result.value);
+    return result;
+  }
+
   function publishApplicationUpdateState(state: ApplicationUpdateState): void {
     if (shutdown.isStopping) return;
     const previousMenuState = applicationUpdateState
@@ -1282,8 +1384,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       });
   };
   const onBeforeQuitForUpdate = (): void => beginShutdown();
+  const onNativeThemeUpdated = (): void => applyNativeWindowTheme();
 
   await app.whenReady();
+  const loadedApplicationSettingsStore = await ApplicationSettingsStore.load(
+    join(app.getPath("userData"), APPLICATION_SETTINGS_FILE_NAME),
+  );
+  applicationSettingsStore = loadedApplicationSettingsStore;
+  nativeTheme.themeSource = loadedApplicationSettingsStore.getState().theme;
+  nativeTheme.on("updated", onNativeThemeUpdated);
   app.setAboutPanelOptions({
     applicationName: APPLICATION_DISPLAY_NAME,
     applicationVersion: app.getVersion(),
@@ -1337,6 +1446,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       closeTab: closeConsoleTab,
       attach: attachConsoleWindow,
     },
+    {
+      getState: () => loadedApplicationSettingsStore.getState(),
+      update: updateApplicationSettings,
+    },
   );
   installMenu();
   void refreshReleaseMenu();
@@ -1361,6 +1474,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("window-all-closed", onWindowAllClosed);
       app.removeListener("before-quit", onBeforeQuit);
       nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
+      nativeTheme.removeListener("updated", onNativeThemeUpdated);
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);

@@ -91,7 +91,11 @@
     background: transparent;
   }
 
-  html {
+  html.light {
+    color-scheme: light;
+  }
+
+  html.dark {
     color-scheme: dark;
   }
 
@@ -125,12 +129,12 @@
     background-color: color-mix(in srgb, var(--color-surface) 22%, transparent);
     background-image: linear-gradient(
       115deg,
-      color-mix(in srgb, white 4%, transparent),
+      color-mix(in srgb, var(--color-foreground) 4%, transparent),
       transparent 42%
     );
     box-shadow:
-      inset -1px 0 0 color-mix(in srgb, white 8%, transparent),
-      inset 0 1px 0 color-mix(in srgb, white 4%, transparent);
+      inset -1px 0 0 color-mix(in srgb, var(--color-foreground) 8%, transparent),
+      inset 0 1px 0 color-mix(in srgb, var(--color-foreground) 4%, transparent);
     backdrop-filter: blur(28px) saturate(135%);
     -webkit-backdrop-filter: blur(28px) saturate(135%);
   }
@@ -148,9 +152,9 @@
   }
 
   .sidebar__mobile-dialog:has(> .sidebar__mobile.app-sidebar) {
-    border-inline-end: 1px solid color-mix(in srgb, white 8%, transparent);
+    border-inline-end: 1px solid color-mix(in srgb, var(--color-foreground) 8%, transparent);
     background: color-mix(in srgb, var(--color-overlay) 18%, transparent);
-    box-shadow: 12px 0 36px color-mix(in srgb, black 18%, transparent);
+    box-shadow: 12px 0 36px color-mix(in srgb, var(--color-foreground) 18%, transparent);
     backdrop-filter: blur(28px) saturate(135%);
     -webkit-backdrop-filter: blur(28px) saturate(135%);
   }
@@ -224,7 +228,7 @@
   }
 
   .app-sidebar .connection-summary {
-    border: 1px solid color-mix(in srgb, white 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-foreground) 6%, transparent);
     background: color-mix(in srgb, var(--color-surface-secondary) 32%, transparent);
   }
 
@@ -256,8 +260,8 @@
   .app-sidebar .sidebar__menu-item[data-current="true"] .sidebar__menu-item-content {
     background-color: color-mix(in srgb, var(--color-surface) 46%, transparent);
     box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, white 6%, transparent),
-      0 1px 2px color-mix(in srgb, black 8%, transparent);
+      inset 0 0 0 1px color-mix(in srgb, var(--color-foreground) 6%, transparent),
+      0 1px 2px color-mix(in srgb, var(--color-foreground) 8%, transparent);
   }
 
   @media (hover: hover) {
@@ -579,4 +583,13 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+html[data-reduce-motion="true"] *,
+html[data-reduce-motion="true"] *::before,
+html[data-reduce-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
 }

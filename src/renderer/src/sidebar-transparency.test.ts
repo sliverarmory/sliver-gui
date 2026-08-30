@@ -14,7 +14,9 @@ describe("sidebar glass styles", () => {
     expect(styles).toMatch(
       /\.sidebar\.app-sidebar\s*\{[^}]*backdrop-filter:\s*blur\(28px\) saturate\(135%\);/s,
     );
-    expect(styles).toMatch(/inset -1px 0 0 color-mix\(in srgb, white 8%, transparent\)/);
+    expect(styles).toMatch(
+      /inset -1px 0 0 color-mix\(in srgb, var\(--color-foreground\) 8%, transparent\)/,
+    );
     expect(styles).toMatch(
       /\.sidebar\.app-sidebar\s*>\s*\.sidebar__header,[^{]+\{\s*background:\s*transparent;/s,
     );

@@ -68,6 +68,15 @@ describe("main window transparency", () => {
     expect(linux).not.toHaveProperty("vibrancy");
     expect(linux).not.toHaveProperty("backgroundMaterial");
   });
+
+  it("uses a readable title-bar symbol color for each application theme", () => {
+    expect(mainWindowOptions("/preload.js", "linux", undefined, true)).toMatchObject({
+      titleBarOverlay: { symbolColor: "#f4f4f5" },
+    });
+    expect(mainWindowOptions("/preload.js", "linux", undefined, false)).toMatchObject({
+      titleBarOverlay: { symbolColor: "#18181b" },
+    });
+  });
 });
 
 describe("managed-shell window", () => {
@@ -94,6 +103,11 @@ describe("managed-shell window", () => {
     });
     expect(options).not.toHaveProperty("parent");
   });
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(sessionShellWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
+  });
 });
 
 describe("Sliver console window", () => {
@@ -119,6 +133,11 @@ describe("Sliver console window", () => {
       },
     });
     expect(JSON.stringify(options)).not.toMatch(/config|operator|certificate|token/iu);
+  });
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(consoleWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
   });
 });
 
@@ -149,5 +168,10 @@ describe("interaction window", () => {
     expect(options).not.toHaveProperty("parent");
     expect(options).not.toHaveProperty("transparent");
     expect(options).not.toHaveProperty("titleBarOverlay");
+  });
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(interactionWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
   });
 });

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
 import type { SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
 import type {
   BeaconSummary,
@@ -253,6 +254,8 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     disconnect: vi.fn(failed),
     downloadBuild: vi.fn(failed),
     exitApp: vi.fn(failed),
+    getApplicationSettings: vi.fn().mockResolvedValue(DEFAULT_APPLICATION_SETTINGS_STATE),
+    updateApplicationSettings: vi.fn(failed),
     getApplicationUpdateState: vi.fn().mockResolvedValue({
       status: "disabled",
       revision: 0,
@@ -292,6 +295,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     onSessionShellsChanged: vi.fn(() => vi.fn()),
     onReleaseDownloadChanged: vi.fn(() => vi.fn()),
     onApplicationUpdateChanged: vi.fn(() => vi.fn()),
+    onApplicationSettingsChanged: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),

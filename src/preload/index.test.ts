@@ -9,6 +9,7 @@ import {
   type SliverDesktopAPI,
 } from "../shared/contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 
 type InvokeArgumentsByMethod = {
   [Method in keyof typeof IPC_INVOKE]: IpcInvokeArgs<(typeof IPC_INVOKE)[Method]>;
@@ -28,6 +29,15 @@ const invokeArguments = {
   openInteractionWindow: [],
   claimInteractionWindow: [],
   exitApp: [],
+  getApplicationSettings: [],
+  updateApplicationSettings: [{
+    expectedRevision: 0,
+    settings: {
+      theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
+      reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+      terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+    },
+  }],
   getApplicationUpdateState: [],
   checkForApplicationUpdates: [],
   restartToApplyApplicationUpdate: [],
@@ -158,6 +168,7 @@ describe("sandboxed preload bridge", () => {
       "onSessionShellsChanged",
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
+      "onApplicationSettingsChanged",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
       "onConsoleSelectTabRequested",
@@ -199,6 +210,7 @@ describe("sandboxed preload bridge", () => {
       "onSessionShellsChanged",
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
+      "onApplicationSettingsChanged",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
       "onConsoleSelectTabRequested",
@@ -353,6 +365,33 @@ describe("sandboxed preload bridge", () => {
     unsubscribe();
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
       IPC.applicationUpdateChanged,
+      handler,
+    );
+  });
+
+  it("delivers only exact application settings states and removes the listener", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed.onApplicationSettingsChanged(listener);
+    const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(channel).toBe(IPC.applicationSettingsChanged);
+    if (typeof handler !== "function") throw new Error("Expected the application-settings event handler");
+    const valid = { ...DEFAULT_APPLICATION_SETTINGS_STATE, revision: 4, theme: "light" };
+    handler({} as Electron.IpcRendererEvent, valid);
+    handler({} as Electron.IpcRendererEvent, { ...valid, untrustedPath: "/tmp/private" });
+    handler({} as Electron.IpcRendererEvent, { ...valid, theme: "sepia" });
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0].terminal)).toBe(true);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
+      IPC.applicationSettingsChanged,
       handler,
     );
   });

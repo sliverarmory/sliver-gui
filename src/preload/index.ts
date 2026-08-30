@@ -9,6 +9,7 @@ import {
 } from "../shared/contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
+import { parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import { parseSliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -169,6 +170,17 @@ const api: SliverDesktopAPI = {
     };
     ipcRenderer.on(IPC.applicationUpdateChanged, handler);
     return () => ipcRenderer.removeListener(IPC.applicationUpdateChanged, handler);
+  },
+  onApplicationSettingsChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      try {
+        listener(parseApplicationSettingsState(value));
+      } catch {
+        // Drop malformed main-to-renderer events instead of widening the bridge.
+      }
+    };
+    ipcRenderer.on(IPC.applicationSettingsChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.applicationSettingsChanged, handler);
   },
   onConsoleNewTabRequested: (listener) => onFixedEvent(IPC.consoleNewTabRequested, listener),
   onConsoleCloseTabRequested: (listener) => onFixedEvent(IPC.consoleCloseTabRequested, listener),

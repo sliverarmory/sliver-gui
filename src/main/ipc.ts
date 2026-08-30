@@ -30,6 +30,12 @@ import {
   type ApplicationUpdateState,
 } from "../shared/application-update-contracts.js";
 import {
+  DEFAULT_APPLICATION_SETTINGS_STATE,
+  parseApplicationSettingsUpdateInput,
+  type ApplicationSettingsState,
+  type ApplicationSettingsUpdateInput,
+} from "../shared/application-settings-contracts.js";
+import {
   parseCancelBeaconTaskInput,
   parseCancelTargetOperationInput,
   parseGetBeaconTaskInput,
@@ -114,6 +120,11 @@ export interface ApplicationUpdateController {
   getState(): ApplicationUpdateState;
   checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>>;
   restartToApply(): OperationResult;
+}
+
+export interface ApplicationSettingsController {
+  getState(): ApplicationSettingsState;
+  update(input: ApplicationSettingsUpdateInput): MaybePromise<OperationResult<ApplicationSettingsState>>;
 }
 
 export interface ConsoleWindowController {
@@ -220,6 +231,7 @@ export function registerIpcHandlers(
   interactionWindows?: InteractionWindowController,
   applicationUpdates?: ApplicationUpdateController,
   consoleWindows?: ConsoleWindowController,
+  applicationSettings?: ApplicationSettingsController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -281,6 +293,18 @@ export function registerIpcHandlers(
     exitApplication();
     return { ok: true };
   });
+  handleTrusted(IPC.getApplicationSettings, rendererUrl, parseNoArguments, () =>
+    applicationSettings?.getState() ?? DEFAULT_APPLICATION_SETTINGS_STATE,
+  );
+  handleTrusted(
+    IPC.updateApplicationSettings,
+    rendererUrl,
+    parseApplicationSettingsUpdateArguments,
+    (_sender, input) => applicationSettings?.update(input) ?? {
+      ok: false,
+      error: "Application settings are unavailable",
+    },
+  );
   handleTrusted(IPC.getApplicationUpdateState, rendererUrl, parseNoArguments, () =>
     applicationUpdates?.getState() ?? APPLICATION_UPDATES_UNAVAILABLE,
   );
@@ -671,6 +695,17 @@ function handleTrusted<Channel extends IpcInvokeChannel>(
 function parseNoArguments(args: readonly unknown[]): [] {
   requireArgumentCount(args, 0, "arguments");
   return [];
+}
+
+function parseApplicationSettingsUpdateArguments(
+  args: readonly unknown[],
+): [input: ApplicationSettingsUpdateInput] {
+  const value = requireSingleArgument(args, "application settings update");
+  try {
+    return [parseApplicationSettingsUpdateInput(value)];
+  } catch {
+    throw invalidArguments("application settings update");
+  }
 }
 
 function parseConsoleTabIdArguments(args: readonly unknown[]): [tabId: string] {

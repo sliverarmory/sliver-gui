@@ -3,7 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { OperationResult } from "../../shared/contracts";
+import type { OperationResult, SliverDesktopAPI } from "../../shared/contracts";
+import {
+  DEFAULT_APPLICATION_SETTINGS_STATE,
+  type ApplicationSettingsState,
+} from "../../shared/application-settings-contracts";
 import type {
   ConsoleTabCloseResult,
   ConsoleTabLaunchContext,
@@ -12,6 +16,7 @@ import type {
 import type { TerminalRuntimeAsset } from "../../shared/stream-contracts";
 import type { GhosttyTerminalAppearance } from "./components/GhosttyTerminal";
 import { CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY } from "./components/console-terminal-settings";
+import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 
 const openConsoleTransport = vi.fn();
 
@@ -35,6 +40,7 @@ vi.mock("./components/GhosttyTerminal", () => ({
       data-font-family={props.appearance?.fontFamily}
       data-font-size={props.appearance?.fontSize}
       data-smooth-scroll-duration={props.appearance?.smoothScrollDuration}
+      data-theme-background={props.appearance?.theme?.background}
       data-terminal-mock
     >
       <button type="button" onClick={() => props.onClose?.("Sliver client exited with code 7")}>Exit client</button>
@@ -140,6 +146,53 @@ describe("ConsoleWindowApp", () => {
     expect(openConsoleTransport).toHaveBeenCalledOnce();
     expect(openConsoleTransport).toHaveBeenCalledWith({ attachmentToken: initialTab.attachmentToken });
     expect(document.title).toBe("Sliver console — Production operator — Console 1");
+  });
+
+  it("applies app-wide terminal, theme, and reduced-motion changes to an open console", async () => {
+    const transport = fakeTransport();
+    openConsoleTransport.mockResolvedValue(transport);
+    const api = installAPI({
+      applicationSettings: {
+        ...DEFAULT_APPLICATION_SETTINGS_STATE,
+        revision: 1,
+        theme: "light",
+        reduceMotion: true,
+        terminal: {
+          ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+          fontSize: 18,
+          cursorBlink: true,
+          smoothScrolling: true,
+        },
+      },
+    });
+
+    render(
+      <ApplicationSettingsProvider>
+        <ConsoleWindowApp />
+      </ApplicationSettingsProvider>,
+    );
+
+    const terminal = await screen.findByRole("region", {
+      name: "Sliver client Console 1 using Production operator",
+    });
+    await waitFor(() => expect(terminal).toHaveAttribute("data-font-size", "18"));
+    expect(terminal).toHaveAttribute("data-cursor-blink", "false");
+    expect(terminal).toHaveAttribute("data-smooth-scroll-duration", "0");
+    expect(terminal).toHaveAttribute("data-theme-background", "#fafafa");
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 2,
+      theme: "dark",
+      terminal: {
+        ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+        fontSize: 20,
+      },
+    }));
+
+    await waitFor(() => expect(terminal).toHaveAttribute("data-font-size", "20"));
+    expect(terminal).toHaveAttribute("data-cursor-blink", "true");
+    expect(terminal).toHaveAttribute("data-theme-background", "#1e1e1e");
   });
 
   it("adds and switches tabs while every Ghostty instance stays mounted and inactive tabs are inert", async () => {
@@ -500,6 +553,7 @@ interface ConsoleTestListeners {
   closeTab?: () => void;
   selectTab?: (index: number) => void;
   settings?: () => void;
+  applicationSettings?: (settings: ApplicationSettingsState) => void;
 }
 
 function installAPI(overrides: Partial<{
@@ -507,6 +561,7 @@ function installAPI(overrides: Partial<{
   createConsoleTab: () => Promise<OperationResult<ConsoleTabLaunchContext>>;
   closeConsoleTab: (tabId: string) => Promise<OperationResult<ConsoleTabCloseResult>>;
   getTerminalRuntime: () => Promise<OperationResult<TerminalRuntimeAsset>>;
+  applicationSettings: ApplicationSettingsState;
 }> = {}) {
   const listeners: ConsoleTestListeners = {};
   const api = {
@@ -517,6 +572,16 @@ function installAPI(overrides: Partial<{
     }))),
     closeConsoleTab: vi.fn(overrides.closeConsoleTab ?? (async () => ok({ remainingTabs: 0 }))),
     getTerminalRuntime: vi.fn(overrides.getTerminalRuntime ?? (async () => ok(runtime()))),
+    getApplicationSettings: vi.fn(async () =>
+      overrides.applicationSettings ?? DEFAULT_APPLICATION_SETTINGS_STATE),
+    updateApplicationSettings: vi.fn<SliverDesktopAPI["updateApplicationSettings"]>(async () => ({
+      ok: false,
+      error: "Application settings updates are not part of this console test",
+    })),
+    onApplicationSettingsChanged: vi.fn((listener: (settings: ApplicationSettingsState) => void) => {
+      listeners.applicationSettings = listener;
+      return vi.fn();
+    }),
     onConsoleNewTabRequested: vi.fn((listener: () => void) => {
       listeners.newTab = listener;
       return vi.fn();
