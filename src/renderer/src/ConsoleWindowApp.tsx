@@ -30,10 +30,11 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult } from "../../shared/contracts";
-import type {
-  ConsoleTabCloseResult,
-  ConsoleTabLaunchContext,
-  ConsoleWindowLaunchContext,
+import {
+  CONSOLE_MAX_TABS_PER_WINDOW,
+  type ConsoleTabCloseResult,
+  type ConsoleTabLaunchContext,
+  type ConsoleWindowLaunchContext,
 } from "../../shared/console-contracts";
 import type { TerminalRuntimeAsset } from "../../shared/stream-contracts";
 import {
@@ -268,6 +269,28 @@ export function ConsoleWindowApp(): React.JSX.Element {
   }, [closeActiveTab, createTab, openSettings, selectTabByShortcut]);
 
   useEffect(() => {
+    if (!context) return;
+    const handleTabShortcut = (event: KeyboardEvent): void => {
+      const shortcut = consoleKeyboardShortcutForEvent(context.shortcutModifier, event);
+      if (!shortcut) return;
+      // Electron claims native input in the main process. Keep this capture
+      // guard as a renderer boundary too: Ghostty owns the focused target and
+      // must never encode an application shortcut into PTY input.
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      if (event.repeat) return;
+      if (shortcut.type === "new-tab") {
+        void createTab();
+      } else {
+        selectTabByShortcut(shortcut.index);
+      }
+    };
+    window.addEventListener("keydown", handleTabShortcut, true);
+    return () => window.removeEventListener("keydown", handleTabShortcut, true);
+  }, [context, createTab, selectTabByShortcut]);
+
+  useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
 
@@ -317,6 +340,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
       <Tabs
         className="contents"
         selectedKey={activeTabId ?? EMPTY_CONSOLE_TAB_KEY}
+        variant="secondary"
         onSelectionChange={(key) => setActiveTabId(String(key))}
       >
         <header className="flex h-16 min-h-16 flex-none items-center gap-2 border-b border-border bg-surface px-3 py-2">
@@ -330,16 +354,16 @@ export function ConsoleWindowApp(): React.JSX.Element {
             <Tooltip.Content placement="bottom">{context.configName}</Tooltip.Content>
           </Tooltip>
 
-          <Tabs.ListContainer className="min-w-0 flex-1 rounded-none bg-transparent">
+          <Tabs.ListContainer className="min-w-0 flex-1 rounded-none border-b border-border bg-transparent">
             <Tabs.List aria-label="Sliver console tabs" className="min-w-0 bg-transparent p-0 shadow-none">
               {tabs.map((tab, index) => {
                 const state = consoleTabState(tab);
                 const shortcutDigit = consoleTabShortcutDigit(index);
                 return (
                   <Tabs.Tab
-                    aria-label={`${tab.context.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut Command+${shortcutDigit}`}
+                    aria-label={`${tab.context.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
                     key={tab.context.tabId}
-                    className="max-w-56 min-w-28 gap-2 rounded-lg px-3"
+                    className="max-w-56 min-w-28 gap-2 rounded-none px-3 data-[selected=true]:text-foreground"
                     id={tab.context.tabId}
                   >
                     <span
@@ -351,10 +375,10 @@ export function ConsoleWindowApp(): React.JSX.Element {
                       aria-hidden
                       className="flex-none rounded-md bg-surface-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted tabular-nums"
                     >
-                      ⌘{shortcutDigit}
+                      {context.shortcutModifier === "Command" ? "⌘" : "Ctrl+"}{shortcutDigit}
                     </kbd>
                     <span className="sr-only"> {state === "connected" ? "Connected" : "Exited"}</span>
-                    <Tabs.Indicator />
+                    <Tabs.Indicator className="top-auto bottom-0 h-0.5 rounded-none bg-accent shadow-none" />
                   </Tabs.Tab>
                 );
               })}
@@ -662,6 +686,29 @@ function consoleTabState(tab: ReadyConsoleTab): "connected" | "exited" {
 
 function consoleTabShortcutDigit(index: number): number {
   return index === 9 ? 0 : index + 1;
+}
+
+type ConsoleKeyboardShortcut =
+  | { readonly type: "new-tab" }
+  | { readonly type: "select-tab"; readonly index: number };
+
+function consoleKeyboardShortcutForEvent(
+  modifier: ConsoleWindowLaunchContext["shortcutModifier"],
+  event: KeyboardEvent,
+): ConsoleKeyboardShortcut | undefined {
+  if (event.isComposing || event.shiftKey || event.altKey) return undefined;
+  const primaryModifierOnly = modifier === "Command"
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+  if (!primaryModifierOnly) return undefined;
+  if (event.code === "KeyT") return { type: "new-tab" };
+  const codeMatch = /^Digit([0-9])$/u.exec(event.code);
+  if (!codeMatch?.[1]) return undefined;
+  const digit = Number(codeMatch[1]);
+  return {
+    type: "select-tab",
+    index: digit === 0 ? CONSOLE_MAX_TABS_PER_WINDOW - 1 : digit - 1,
+  };
 }
 
 function consoleWindowApi(): ConsoleWindowAPI {

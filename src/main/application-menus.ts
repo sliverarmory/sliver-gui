@@ -30,12 +30,57 @@ export interface ConsoleApplicationMenuActions {
   readonly showSettings: () => void;
 }
 
+export interface ConsoleTabShortcutInput {
+  readonly type: string;
+  readonly key: string;
+  readonly code: string;
+  readonly isComposing: boolean;
+  readonly shift: boolean;
+  readonly control: boolean;
+  readonly alt: boolean;
+  readonly meta: boolean;
+}
+
 export interface ContextMenuActions {
   readonly copyImageAt: (x: number, y: number) => void;
   readonly copyText: (text: string) => void;
   readonly inspectElement: (x: number, y: number) => void;
   readonly openExternal: (url: string) => void;
   readonly replaceMisspelling: (text: string) => void;
+}
+
+export function consoleTabShortcutIndexForInput(
+  platform: NodeJS.Platform,
+  input: ConsoleTabShortcutInput,
+): number | undefined {
+  if (!isConsolePrimaryShortcutInput(platform, input)) return undefined;
+
+  const codeMatch = /^Digit([0-9])$/u.exec(input.code);
+  if (!codeMatch?.[1]) return undefined;
+  const digit = Number(codeMatch[1]);
+  return digit === 0 ? CONSOLE_MAX_TABS_PER_WINDOW - 1 : digit - 1;
+}
+
+export function isConsoleNewTabShortcutInput(
+  platform: NodeJS.Platform,
+  input: ConsoleTabShortcutInput,
+): boolean {
+  return isConsolePrimaryShortcutInput(platform, input) && input.code === "KeyT";
+}
+
+function isConsolePrimaryShortcutInput(
+  platform: NodeJS.Platform,
+  input: ConsoleTabShortcutInput,
+): boolean {
+  if (
+    input.type !== "keyDown" ||
+    input.isComposing ||
+    input.shift ||
+    input.alt
+  ) return false;
+  return platform === "darwin"
+    ? input.meta && !input.control
+    : input.control && !input.meta;
 }
 
 export function buildApplicationMenuTemplate(

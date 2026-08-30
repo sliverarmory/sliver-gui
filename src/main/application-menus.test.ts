@@ -6,9 +6,62 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildApplicationMenuTemplate,
   buildContextMenuTemplate,
+  consoleTabShortcutIndexForInput,
+  isConsoleNewTabShortcutInput,
   isSafeExternalWebUrl,
   type ContextMenuActions,
 } from "./application-menus.js";
+
+const shortcutInput = (overrides: Partial<Parameters<typeof consoleTabShortcutIndexForInput>[1]> = {}) => ({
+  type: "keyDown",
+  key: "1",
+  code: "Digit1",
+  isComposing: false,
+  shift: false,
+  control: false,
+  alt: false,
+  meta: true,
+  ...overrides,
+});
+
+describe("console tab shortcut input", () => {
+  it("maps the macOS Command digits to positions one through ten", () => {
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput())).toBe(0);
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ key: "9", code: "Digit9" }))).toBe(8);
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ key: "0", code: "Digit0" }))).toBe(9);
+  });
+
+  it("uses Control off macOS and rejects modified or non-keydown terminal input", () => {
+    const controlOne = shortcutInput({ meta: false, control: true });
+    expect(consoleTabShortcutIndexForInput("win32", controlOne)).toBe(0);
+    expect(consoleTabShortcutIndexForInput("linux", controlOne)).toBe(0);
+    expect(consoleTabShortcutIndexForInput("darwin", controlOne)).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("win32", shortcutInput())).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ control: true }))).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ shift: true }))).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ alt: true }))).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ type: "keyUp" }))).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ isComposing: true }))).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ key: "a", code: "KeyA" }))).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ code: "Numpad1" }))).toBeUndefined();
+  });
+
+  it("recognizes the exact platform new-tab chord", () => {
+    const commandT = shortcutInput({ key: "t", code: "KeyT" });
+    const controlT = shortcutInput({ key: "t", code: "KeyT", meta: false, control: true });
+    expect(isConsoleNewTabShortcutInput("darwin", commandT)).toBe(true);
+    expect(isConsoleNewTabShortcutInput("win32", controlT)).toBe(true);
+    expect(isConsoleNewTabShortcutInput("linux", controlT)).toBe(true);
+    expect(isConsoleNewTabShortcutInput("darwin", controlT)).toBe(false);
+    expect(isConsoleNewTabShortcutInput("win32", commandT)).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", control: true }))).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", shift: true }))).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", alt: true }))).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", type: "keyUp" }))).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", isComposing: true }))).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyR" }))).toBe(false);
+  });
+});
 
 describe("application menu templates", () => {
   it("keeps explicit Edit, View, and Help menus with the expected platform actions", () => {

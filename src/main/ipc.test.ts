@@ -430,6 +430,7 @@ describe("trusted Electron IPC boundary", () => {
     const context = {
       kind: "console" as const,
       configName: "Production",
+      shortcutModifier: "Command" as const,
       initialTab: {
         tabId: "T".repeat(43),
         attachmentToken: "C".repeat(43),

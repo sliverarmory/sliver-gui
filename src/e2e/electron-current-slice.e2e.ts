@@ -265,6 +265,8 @@ async function verifySliverConsoleWindow(
   const initialState = await readFakeState(electronApplication);
   const initialSpawnCount = initialState.console.spawns.length;
   const initialKillCount = initialState.console.kills;
+  const shortcutModifier = process.platform === "darwin" ? "Command" : "Control";
+  const shortcutKeyModifier = process.platform === "darwin" ? "Meta" : "Control";
 
   await sourcePage.locator('button[aria-label="Open Sliver console"]').click();
   const consolePage = await waitForConsoleWindow(electronApplication, existingWindows);
@@ -304,6 +306,7 @@ async function verifySliverConsoleWindow(
       "Source Code Pro": true,
     });
     assert.equal(await consolePage.getByRole("tab").count(), 1);
+    assert.equal(await consolePage.locator(".tabs.tabs--secondary").count(), 1);
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id]").count(), 1);
     const terminalRegionClass = await consolePage
       .getByRole("region", { name: "Console terminal" })
@@ -332,7 +335,12 @@ async function verifySliverConsoleWindow(
       "the first private console root must exist while its tab is open",
     );
 
-    await consolePage.getByRole("button", { name: "New console tab" }).click();
+    const firstWritesBeforeNewTabShortcut = [...firstSpawn.writes];
+    await firstTerminal.focus();
+    assert.equal(await firstTerminal.evaluate((element) =>
+      (globalThis as unknown as { document: { activeElement: unknown } })
+        .document.activeElement === element), true);
+    await firstTerminal.press(`${shortcutKeyModifier}+t`);
     await consolePage.getByRole("tab", { name: /Console 2.*Connected/iu }).waitFor();
     const twoTabState = await waitForConsoleState(
       electronApplication,
@@ -341,6 +349,12 @@ async function verifySliverConsoleWindow(
     );
     const secondSpawn = twoTabState.console.spawns[initialSpawnCount + 1];
     assert.ok(secondSpawn, "the second console tab must spawn its own PTY");
+    assert.deepEqual(
+      twoTabState.console.spawns[initialSpawnCount]?.writes,
+      firstWritesBeforeNewTabShortcut,
+      "the new-tab shortcut must not reach the focused Ghostty PTY",
+    );
+    assert.deepEqual(secondSpawn.writes, [], "one new-tab shortcut must create exactly one untouched PTY");
     rootDirectories.push(secondSpawn.rootDirectory);
     assert.notEqual(secondSpawn.rootDirectory, firstSpawn.rootDirectory);
     assert.deepEqual(secondSpawn.args, ["--disable-wg"]);
@@ -351,23 +365,39 @@ async function verifySliverConsoleWindow(
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id]").count(), 2);
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id][inert]").count(), 1);
     await consolePage.getByRole("tab", {
-      name: /Console 1.*shortcut Command\+1/iu,
+      name: new RegExp(`Console 1.*shortcut ${shortcutModifier}\\+1`, "iu"),
     }).waitFor();
     await consolePage.getByRole("tab", {
-      name: /Console 2.*shortcut Command\+2/iu,
+      name: new RegExp(`Console 2.*shortcut ${shortcutModifier}\\+2`, "iu"),
     }).waitFor();
-
-    await consolePage.bringToFront();
-    await invokeConsoleMenuItem(electronApplication, "console.select-tab-1");
-    await waitForSelectedConsoleTab(consolePage, /Console 1/iu);
-    await invokeConsoleMenuItem(electronApplication, "console.select-tab-2");
-    await waitForSelectedConsoleTab(consolePage, /Console 2/iu);
 
     const secondTerminal = consolePage.getByRole("textbox", {
       name: "Sliver client Console 2 using chosen-m0-operator.cfg",
       exact: true,
     });
     await secondTerminal.waitFor();
+    await secondTerminal.focus();
+    assert.equal(await secondTerminal.evaluate((element) =>
+      (globalThis as unknown as { document: { activeElement: unknown } })
+        .document.activeElement === element), true);
+    const shortcutWritesBefore = [
+      [...firstSpawn.writes],
+      [...secondSpawn.writes],
+    ];
+    await secondTerminal.press(`${shortcutKeyModifier}+1`);
+    await waitForSelectedConsoleTab(consolePage, /Console 1/iu);
+    await firstTerminal.press(`${shortcutKeyModifier}+2`);
+    await waitForSelectedConsoleTab(consolePage, /Console 2/iu);
+    const shortcutState = await readFakeState(electronApplication);
+    assert.deepEqual(
+      [
+        shortcutState.console.spawns[initialSpawnCount]?.writes,
+        shortcutState.console.spawns[initialSpawnCount + 1]?.writes,
+      ],
+      shortcutWritesBefore,
+      "console tab shortcuts must not reach either Ghostty PTY",
+    );
+
     const firstWritesBefore = firstSpawn.writes.length;
     await secondTerminal.pressSequentially("version");
     await secondTerminal.press("Enter");
@@ -458,15 +488,33 @@ async function verifySliverConsoleWindow(
     }
     assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
     await consolePage.getByRole("tab", {
-      name: new RegExp(`Console ${lastTabOrdinalAtCap}.*shortcut Command\\+0`, "iu"),
+      name: new RegExp(`Console ${lastTabOrdinalAtCap}.*shortcut ${shortcutModifier}\\+0`, "iu"),
     }).waitFor();
-    await consolePage.bringToFront();
-    await invokeConsoleMenuItem(electronApplication, "console.select-tab-1");
+    const lastTerminal = consolePage.getByRole("textbox", {
+      name: `Sliver client Console ${lastTabOrdinalAtCap} using chosen-m0-operator.cfg`,
+      exact: true,
+    });
+    await lastTerminal.focus();
+    assert.equal(await lastTerminal.evaluate((element) =>
+      (globalThis as unknown as { document: { activeElement: unknown } })
+        .document.activeElement === element), true);
+    const capWritesBefore = (await readFakeState(electronApplication)).console.spawns
+      .map(({ writes }) => [...writes]);
+    await lastTerminal.press(`${shortcutKeyModifier}+1`);
     await waitForSelectedConsoleTab(consolePage, /Console 3/iu);
-    await invokeConsoleMenuItem(electronApplication, "console.select-tab-0");
+    const firstTerminalAtCap = consolePage.getByRole("textbox", {
+      name: "Sliver client Console 3 using chosen-m0-operator.cfg",
+      exact: true,
+    });
+    await firstTerminalAtCap.press(`${shortcutKeyModifier}+0`);
     await waitForSelectedConsoleTab(
       consolePage,
       new RegExp(`Console ${lastTabOrdinalAtCap}`, "iu"),
+    );
+    assert.deepEqual(
+      (await readFakeState(electronApplication)).console.spawns.map(({ writes }) => writes),
+      capWritesBefore,
+      "first and tenth tab shortcuts must not reach any Ghostty PTY",
     );
 
     await electronApplication.evaluate(() => {
@@ -479,7 +527,10 @@ async function verifySliverConsoleWindow(
       "the held native console shutdown to begin",
     );
     const spawnCountAtCap = initialSpawnCount + lastTabOrdinalAtCap;
-    await consolePage.getByRole("button", { name: "New console tab" }).click();
+    const rejectedShortcutWritesBefore = (await readFakeState(electronApplication)).console.spawns
+      .map(({ writes }) => [...writes]);
+    await lastTerminal.focus();
+    await lastTerminal.press(`${shortcutKeyModifier}+t`);
     await consolePage.getByText(
       `A Sliver console window supports at most ${CONSOLE_MAX_TABS_PER_WINDOW} tabs`,
       { exact: true },
@@ -489,6 +540,11 @@ async function verifySliverConsoleWindow(
       rejectedAtCap.console.spawns.length,
       spawnCountAtCap,
       "a closing native runtime must remain admitted against the process cap",
+    );
+    assert.deepEqual(
+      rejectedAtCap.console.spawns.map(({ writes }) => writes),
+      rejectedShortcutWritesBefore,
+      "a rejected new-tab shortcut must not reach any Ghostty PTY",
     );
 
     await electronApplication.evaluate(() => {

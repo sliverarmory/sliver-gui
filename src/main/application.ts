@@ -41,6 +41,8 @@ import type {
 import {
   buildApplicationMenuTemplate,
   buildContextMenuTemplate,
+  consoleTabShortcutIndexForInput,
+  isConsoleNewTabShortcutInput,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
 import {
@@ -218,6 +220,26 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
     hardenWindow(window, rendererUrl);
     installContextMenu(window);
+    if (consoleWindowRecord) {
+      window.webContents.on("before-input-event", (event, input) => {
+        const index = consoleTabShortcutIndexForInput(process.platform, input);
+        const requestsNewTab = isConsoleNewTabShortcutInput(process.platform, input);
+        if (
+          (index === undefined && !requestsNewTab) ||
+          !isClaimedConsoleWindow(consoleWindowRecord)
+        ) return;
+        // Ghostty consumes terminal key events before Electron's menu accelerator
+        // dispatch. This trusted event originates from this exact webContents,
+        // so claim the chord before it reaches the renderer or its PTY.
+        event.preventDefault();
+        if (input.isAutoRepeat) return;
+        if (requestsNewTab) {
+          sendConsoleMenuEventFromInput(consoleWindowRecord, IPC.consoleNewTabRequested);
+        } else if (index !== undefined) {
+          sendConsoleTabSelectionFromInput(consoleWindowRecord, index);
+        }
+      });
+    }
     window.on("focus", installMenu);
     window.once("ready-to-show", () => window.show());
     let completedInitialLoad = false;
@@ -812,6 +834,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const context = Object.freeze({
         kind: "console" as const,
         configName: initialTab.configName,
+        shortcutModifier: process.platform === "darwin" ? "Command" as const : "Control" as const,
         initialTab: initialTab.context,
       });
       record.configName = initialTab.configName;
@@ -1103,8 +1126,25 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       : undefined;
   }
 
+  function isClaimedConsoleWindow(record: ConsoleWindowRecord): boolean {
+    if (
+      record.finalizing ||
+      record.window.isDestroyed() ||
+      record.window.webContents.isDestroyed() ||
+      consoleWindowsByContentsId.get(record.window.webContents.id) !== record ||
+      !record.claimedBy ||
+      !sameWindowIdentity(record.claimedBy, identityForWindow(record.window))
+    ) return false;
+    return isConsoleSurfaceUrl(record.window.webContents.getURL(), rendererUrl);
+  }
+
   function sendConsoleMenuEvent(record: ConsoleWindowRecord, channel: string): void {
     if (focusedConsoleWindow() !== record || record.window.webContents.isDestroyed()) return;
+    record.window.webContents.send(channel);
+  }
+
+  function sendConsoleMenuEventFromInput(record: ConsoleWindowRecord, channel: string): void {
+    if (!isClaimedConsoleWindow(record)) return;
     record.window.webContents.send(channel);
   }
 
@@ -1115,6 +1155,16 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       index >= CONSOLE_MAX_TABS_PER_WINDOW ||
       focusedConsoleWindow() !== record ||
       record.window.webContents.isDestroyed()
+    ) return;
+    record.window.webContents.send(IPC.consoleSelectTabRequested, index);
+  }
+
+  function sendConsoleTabSelectionFromInput(record: ConsoleWindowRecord, index: number): void {
+    if (
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= CONSOLE_MAX_TABS_PER_WINDOW ||
+      !isClaimedConsoleWindow(record)
     ) return;
     record.window.webContents.send(IPC.consoleSelectTabRequested, index);
   }

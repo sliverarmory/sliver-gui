@@ -61,6 +61,7 @@ const secondTab: ConsoleTabLaunchContext = {
 const launchContext: ConsoleWindowLaunchContext = {
   kind: "console",
   configName: "Production operator",
+  shortcutModifier: "Command",
   initialTab,
 };
 
@@ -104,11 +105,23 @@ describe("ConsoleWindowApp", () => {
     );
 
     expect(await screen.findByRole("main", { name: "Sliver client console window" })).toBeInTheDocument();
-    expect(screen.getByRole("tablist", { name: "Sliver console tabs" })).toBeInTheDocument();
+    const tabList = screen.getByRole("tablist", { name: "Sliver console tabs" });
+    expect(tabList).toBeInTheDocument();
     const initialTabButton = screen.getByRole("tab", { name: /Console 1 Connected/u });
     expect(initialTabButton).toHaveAttribute("aria-selected", "true");
     expect(initialTabButton).toHaveAccessibleName("Console 1 Connected, shortcut Command+1");
     expect(initialTabButton).toHaveTextContent("⌘1");
+    expect(initialTabButton.closest(".tabs")).toHaveClass("tabs--secondary");
+    expect(tabList.closest(".tabs__list-container")).toHaveClass("border-b", "border-border");
+    expect(initialTabButton).toHaveClass("rounded-none", "data-[selected=true]:text-foreground");
+    expect(initialTabButton.querySelector(".tabs__indicator")).toHaveClass(
+      "top-auto",
+      "bottom-0",
+      "h-0.5",
+      "rounded-none",
+      "bg-accent",
+      "shadow-none",
+    );
     const terminal = screen.getByRole("region", {
       name: "Sliver client Console 1 using Production operator",
     });
@@ -163,6 +176,64 @@ describe("ConsoleWindowApp", () => {
     expect(document.querySelectorAll("[data-terminal-mock]")).toHaveLength(2);
     expect(firstTransport.close).not.toHaveBeenCalled();
     expect(secondTransport.close).not.toHaveBeenCalled();
+  });
+
+  it("captures Command shortcuts before a focused Ghostty terminal can consume them", async () => {
+    openConsoleTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    const api = installAPI({ createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)) });
+    render(<ConsoleWindowApp />);
+    await screen.findByRole("tab", { name: /Console 1 Connected/u });
+
+    const firstTerminal = screen.getByRole("region", {
+      name: "Sliver client Console 1 using Production operator",
+    });
+    const downstreamKeydown = vi.fn();
+    firstTerminal.addEventListener("keydown", downstreamKeydown);
+    const newTabShortcut = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "KeyT",
+      key: "t",
+      metaKey: true,
+    });
+    act(() => expect(firstTerminal.dispatchEvent(newTabShortcut)).toBe(false));
+    expect(downstreamKeydown).not.toHaveBeenCalled();
+    await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    expect(api.createConsoleTab).toHaveBeenCalledOnce();
+
+    const secondTerminal = screen.getByRole("region", {
+      name: "Sliver client Console 2 using Production operator",
+    });
+    secondTerminal.addEventListener("keydown", downstreamKeydown);
+    const shortcut = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Digit1",
+      key: "1",
+      metaKey: true,
+    });
+    act(() => expect(secondTerminal.dispatchEvent(shortcut)).toBe(false));
+    expect(downstreamKeydown).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: /Console 2 Connected/u }));
+    const repeatedShortcut = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Digit1",
+      key: "1",
+      metaKey: true,
+      repeat: true,
+    });
+    act(() => expect(secondTerminal.dispatchEvent(repeatedShortcut)).toBe(false));
+    expect(downstreamKeydown).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: /Console 2 Connected/u })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("closes only the active tab and selects its nearest sibling", async () => {

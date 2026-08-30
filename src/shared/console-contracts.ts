@@ -42,6 +42,7 @@ export interface ConsoleTabLaunchContext {
 export interface ConsoleWindowLaunchContext {
   readonly kind: "console";
   readonly configName: string;
+  readonly shortcutModifier: "Command" | "Control";
   readonly initialTab: ConsoleTabLaunchContext;
 }
 
