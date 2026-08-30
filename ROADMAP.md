@@ -199,11 +199,15 @@ exception approved on 2026-08-29. It runs the exact pinned native Go
 `sliver-client` behind a main-process-owned PTY and treats terminal bytes as an
 opaque bounded stream rendered by Ghostty Web. The renderer cannot select the
 executable, operator configuration, environment, or arguments. Electron main
-revalidates the active window's config, stages only that config in a private
-temporary Sliver root so no profile picker appears, and tears down the process
-and staged credentials with the owning window. This exception does not turn
-console text into application state or relax the closed typed IPC boundary for
-any other GUI workflow.
+revalidates the active window's config and stages only that config in a private
+temporary workspace. A provenance-bound client override selects the staged
+profile without a picker while `SLIVER_CLIENT_ROOT_DIR` remains the user's
+absolute `~/.sliver-client`, preserving installed aliases, extensions, Armory
+data, themes, and settings. Embedded sessions force transcript logging off,
+keep command history in the private workspace, and tear down the process and
+staged credentials with the owning window. This exception does not turn console
+text into application state or relax the closed typed IPC boundary for any
+other GUI workflow.
 
 ### 2. Preserve the Electron security boundary
 

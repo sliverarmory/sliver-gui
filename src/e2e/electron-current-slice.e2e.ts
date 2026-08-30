@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import { IPC, IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
 import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
@@ -41,6 +41,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
   const managedConfigDirectory = join(temporaryRoot, "managed-configs");
   const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  const consoleClientRootMarker = join(consoleClientRootDirectory, "installed-armory-package.marker");
   const selectedConfigPath = join(temporaryRoot, "chosen-m0-operator.cfg");
   const m4PrivateKeyPath = join(temporaryRoot, "m4-e2e-private.key");
   const m4SavedOutputPath = join(temporaryRoot, "m4-ssh-stdout.txt");
@@ -49,8 +51,10 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     mkdir(savedConfigDirectory, { recursive: true }),
     mkdir(managedConfigDirectory, { recursive: true }),
     mkdir(userDataDirectory, { recursive: true }),
+    mkdir(consoleClientRootDirectory, { recursive: true }),
     mkdir(artifactDirectory, { recursive: true }),
   ]);
+  await writeFile(consoleClientRootMarker, "preserve shared client assets", { mode: 0o600 });
   await writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 });
   await writeFile(m4PrivateKeyPath, M4_PRIVATE_KEY_CONTENT, { mode: 0o600 });
 
@@ -67,6 +71,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
         `--saved-config-directory=${savedConfigDirectory}`,
         `--managed-config-directory=${managedConfigDirectory}`,
         `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
       ],
       bypassCSP: false,
       chromiumSandbox: true,
@@ -116,6 +121,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       page,
       fakeOperatorConfig(),
       artifactDirectory,
+      consoleClientRootDirectory,
+      consoleClientRootMarker,
     );
 
     await verifyM1TargetsAndOperations(
@@ -315,6 +322,8 @@ async function verifySliverConsoleWindow(
   sourcePage: Page,
   activeConfig: string,
   artifactDirectory: string,
+  clientRootDirectory: string,
+  clientRootMarker: string,
 ): Promise<void> {
   const existingWindows = new Set(electronApplication.windows());
   const initialWindowCount = existingWindows.size;
@@ -387,6 +396,11 @@ async function verifySliverConsoleWindow(
     rootDirectories.push(firstSpawn.rootDirectory);
     assert.deepEqual(firstSpawn.args, ["--disable-wg"]);
     assert.equal(firstSpawn.cwd, firstSpawn.rootDirectory);
+    assert.equal(firstSpawn.clientRootDirectory, clientRootDirectory);
+    assert.equal(firstSpawn.configPath, join(firstSpawn.rootDirectory, "configs", "active.cfg"));
+    assert.equal(firstSpawn.historyPath, join(firstSpawn.rootDirectory, "history"));
+    assert.equal(firstSpawn.disableConsoleLogs, "1");
+    assert.notEqual(firstSpawn.clientRootDirectory, firstSpawn.rootDirectory);
     assert.deepEqual(firstSpawn.configEntries, ["active.cfg"]);
     assert.equal(
       firstSpawn.configSha256,
@@ -660,6 +674,11 @@ async function verifySliverConsoleWindow(
   assert.equal(closedState.console.spawns.at(-1)?.kills, 1);
   assert.equal(rootDirectories.length, CONSOLE_MAX_TABS_PER_WINDOW + 3);
   for (const rootDirectory of rootDirectories) await waitForPathRemoval(rootDirectory);
+  assert.equal(
+    await readFile(clientRootMarker, "utf8"),
+    "preserve shared client assets",
+    "private console cleanup must never remove or alter the shared Sliver client root",
+  );
   await waitForWindowCount(electronApplication, initialWindowCount);
 }
 
@@ -1375,10 +1394,15 @@ async function verifyM2SessionWorkspace(
   await deleteDialog.waitFor({ state: "hidden" });
   await createdFolderRow.waitFor({ state: "hidden" });
 
-  await filesystemMode.getByRole("radio", { name: "Search", exact: true }).click();
+  await selectRadioOption(filesystemMode.getByRole("radio", { name: "Search", exact: true }));
   await page.getByRole("textbox", { name: "Search path", exact: true }).fill("/Users/e2e/workspace");
   await page.getByRole("textbox", { name: "Pattern", exact: true }).fill(M2_SEARCH_PATTERN);
-  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const grepCalls = fakeMethodCount(await readFakeState(electronApplication), "grepSession");
+  const searchButton = page.getByRole("button", { name: "Search", exact: true });
+  await waitForRendererCommit(searchButton);
+  assert.equal(await searchButton.isEnabled(), true, "the populated filesystem search must be actionable");
+  await searchButton.click();
+  await waitForFakeMethodCount(electronApplication, "grepSession", grepCalls + 1);
   const searchGrid = page.getByRole("grid", { name: "Filesystem search results" });
   await searchGrid.waitFor();
   await searchGrid.getByText("/Users/e2e/workspace/match-001.txt", { exact: true }).waitFor();
@@ -2563,6 +2587,28 @@ async function waitForSelectedConsoleTab(
   throw new Error(`Timed out waiting for selected console tab ${String(name)}`);
 }
 
+async function selectRadioOption(option: Locator, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await option.getAttribute("aria-checked") === "true") return;
+    await option.click();
+    if (await option.getAttribute("aria-checked") === "true") return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out selecting radio option ${await option.textContent() ?? "unknown"}`);
+}
+
+async function waitForRendererCommit(locator: Locator): Promise<void> {
+  await locator.evaluate(() => new Promise<void>((resolveCommit) => {
+    const browserGlobal = globalThis as unknown as {
+      requestAnimationFrame(callback: () => void): number;
+    };
+    browserGlobal.requestAnimationFrame(() => {
+      browserGlobal.requestAnimationFrame(() => resolveCommit());
+    });
+  }));
+}
+
 async function waitForApplicationSettings(
   page: Page,
   predicate: (settings: ApplicationSettingsState) => boolean,
@@ -2795,6 +2841,10 @@ interface FakeStateSnapshot {
       args: string[];
       cwd: string;
       rootDirectory: string;
+      clientRootDirectory: string;
+      configPath: string;
+      historyPath: string;
+      disableConsoleLogs: string;
       configEntries: string[];
       configSha256: string;
       writes: string[];

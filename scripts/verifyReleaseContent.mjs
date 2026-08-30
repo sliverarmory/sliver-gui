@@ -12,6 +12,8 @@ import {
   hermeticGoEnvironment,
   SLIVER_CLIENT_LINKER_DEFAULTS,
   validateGoBuildInfo,
+  verifyPackagedSourceOverlayFiles,
+  verifySourceOverlayReplacements,
 } from "./buildSliverConsole.mjs";
 import { packagedRuntimeFilesForPlatform, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
 
@@ -403,15 +405,27 @@ async function verifyNodePtyDirectory(moduleDirectory, platform, packaged = fals
 }
 
 async function verifyPreparedSliverConsole() {
-  const [sourceManifestContent, baselineContent, buildRecordContent, sourceLicense] = await Promise.all([
+  const [sourceManifestContent, baselineContent, buildRecordContent, sourceLicense, applicationPackageContent] = await Promise.all([
     readFile(join(rootDir, "protocol/sliver-console-provenance.json"), "utf8"),
     readFile(join(rootDir, "protocol/sliver-baseline.json"), "utf8"),
     readFile(join(rootDir, "native/sliver-console/provenance.json"), "utf8"),
     readFile(join(rootDir, "native/sliver-console/LICENSE")),
+    readFile(join(rootDir, "package.json"), "utf8"),
   ]);
   const sourceManifest = JSON.parse(sourceManifestContent);
   const baseline = JSON.parse(baselineContent);
   const buildRecord = JSON.parse(buildRecordContent);
+  const applicationPackage = JSON.parse(applicationPackageContent);
+  const sourceOverlay = await verifySourceOverlayReplacements({
+    sourceManifest,
+    repositoryDirectory: rootDir,
+  });
+  if (
+    applicationPackage.version !== sourceOverlay.record.correspondingSource.packageVersion ||
+    JSON.stringify(buildRecord.build?.overlay) !== JSON.stringify(sourceOverlay.record)
+  ) {
+    throw new Error("Native Sliver console source overlay provenance does not match the application release");
+  }
   if (
     sourceManifest.schemaVersion !== 1 ||
     sourceManifest.source?.commit !== baseline.commit ||
@@ -501,6 +515,11 @@ async function verifyExternalSliverConsole(archivePath, evidence) {
   if (!sourceLicense || sha256(sourceLicense) !== sha256(evidence.sourceLicense)) {
     throw new Error(`Packaged application is missing the pinned Sliver console license: ${resourceDirectory}`);
   }
+  await verifyPackagedSourceOverlayFiles({
+    packagedDirectory: resourceDirectory,
+    sourceOverlay: evidence.sourceManifest.build?.overlay,
+    buildOverlay: evidence.buildRecord.build?.overlay,
+  });
   const executablePath = join(resourceDirectory, evidence.buildRecord.artifact.fileName);
   const exactUnsignedDigest = sha256(executable) === evidence.buildRecord.artifact.sha256;
   const signatureRequired = process.env.SLIVER_GUI_REQUIRE_SIGNED_CHILD === "true" ||

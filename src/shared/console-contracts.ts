@@ -16,6 +16,8 @@ export const CONSOLE_MAX_TERMINAL_DIMENSION = 1_000 as const;
 export const CONSOLE_MAX_TABS_PER_WINDOW = 10 as const;
 export const CONSOLE_ATTACHMENT_TTL_MILLISECONDS = 15_000 as const;
 export const CONSOLE_HANDSHAKE_TIMEOUT_MILLISECONDS = 5_000 as const;
+export const CONSOLE_WINDOW_OPEN_REQUEST_ERROR =
+  "Sliver Desktop could not request a console window. Restart Sliver Desktop, then try again. Reference: CONSOLE_OPEN_REQUEST_FAILED";
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 

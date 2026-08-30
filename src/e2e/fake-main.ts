@@ -62,6 +62,10 @@ interface FakeMainState {
       args: string[];
       cwd: string;
       rootDirectory: string;
+      clientRootDirectory: string;
+      configPath: string;
+      historyPath: string;
+      disableConsoleLogs: string;
       configEntries: string[];
       configSha256: string;
       writes: string[];
@@ -130,6 +134,7 @@ const state: FakeMainState = {
 globalThis.__SLIVER_GUI_E2E_STATE__ = state;
 let holdNextConsoleExit = false;
 let heldConsoleExit: (() => void) | undefined;
+const consoleClientRootDirectory = requiredArgument("--console-client-root-directory=");
 
 const registry = new ConnectionRegistry({
   savedConfigDirectory: requiredArgument("--saved-config-directory="),
@@ -150,7 +155,8 @@ void startApplication({
   registry,
   applicationAssetsDirectory: `${repositoryRoot}/build`,
   consoleClientExecutable: process.execPath,
-  consolePtyFactory: createFakeConsolePtyFactory(state),
+  consoleClientRootDirectory,
+  consolePtyFactory: createFakeConsolePtyFactory(state, consoleClientRootDirectory),
   rendererEntryPath: `${repositoryRoot}/dist/renderer/index.html`,
   preloadPath: `${repositoryRoot}/dist/preload/index.cjs`,
 }).catch((error: unknown) => {
@@ -158,16 +164,32 @@ void startApplication({
   app.exit(1);
 });
 
-function createFakeConsolePtyFactory(testState: FakeMainState): NativePtyFactory {
+function createFakeConsolePtyFactory(
+  testState: FakeMainState,
+  expectedClientRootDirectory: string,
+): NativePtyFactory {
   return Object.freeze({
     spawn(file: string, args: string[], options: NativePtySpawnOptions): NativePty {
-      const rootDirectory = options.env["SLIVER_CLIENT_ROOT_DIR"];
-      if (!rootDirectory || rootDirectory !== options.cwd) {
-        throw new Error("Fake console received an invalid private root");
+      const rootDirectory = options.cwd;
+      const clientRootDirectory = options.env["SLIVER_CLIENT_ROOT_DIR"];
+      const configPath = options.env["SLIVER_CLIENT_CONFIG"];
+      const historyPath = options.env["SLIVER_CLIENT_HISTORY_FILE"];
+      const disableConsoleLogs = options.env["SLIVER_CLIENT_DISABLE_CONSOLE_LOGS"];
+      if (!clientRootDirectory || clientRootDirectory !== expectedClientRootDirectory) {
+        throw new Error("Fake console received an invalid shared client root");
       }
       const configsDirectory = join(rootDirectory, "configs");
+      if (!configPath || configPath !== join(configsDirectory, "active.cfg")) {
+        throw new Error("Fake console received an invalid private active config path");
+      }
+      if (!historyPath || historyPath !== join(rootDirectory, "history")) {
+        throw new Error("Fake console received an invalid private history path");
+      }
+      if (disableConsoleLogs !== "1") {
+        throw new Error("Fake console did not disable transcript logging");
+      }
       const configEntries = readdirSync(configsDirectory).sort();
-      const activeConfig = readFileSync(join(configsDirectory, "active.cfg"));
+      const activeConfig = readFileSync(configPath);
       let configSha256: string;
       try {
         configSha256 = createHash("sha256").update(activeConfig).digest("hex");
@@ -179,6 +201,10 @@ function createFakeConsolePtyFactory(testState: FakeMainState): NativePtyFactory
         args: [...args],
         cwd: options.cwd,
         rootDirectory,
+        clientRootDirectory,
+        configPath,
+        historyPath,
+        disableConsoleLogs,
         configEntries,
         configSha256,
         writes: [] as string[],

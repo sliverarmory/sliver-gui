@@ -5500,7 +5500,15 @@ export class ConnectionRegistry {
 
   private pushSnapshot(contentsId: number, snapshot: SliverSnapshot): void {
     const contents = webContents.fromId(contentsId);
-    if (contents && !contents.isDestroyed()) contents.send(IPC.snapshotChanged, snapshot);
+    if (!contents || contents.isDestroyed()) return;
+    try {
+      contents.send(IPC.snapshotChanged, snapshot);
+    } catch {
+      // A newly-created native window is registered before its first renderer
+      // frame exists, and teardown can invalidate a frame between the guards
+      // above and send(). Snapshot delivery is advisory: the trusted renderer
+      // reads the authoritative registry snapshot once it has loaded.
+    }
   }
 }
 

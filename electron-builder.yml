@@ -73,6 +73,10 @@ extraResources:
       - LICENSE
   - from: protocol/sliver-console-provenance.json
     to: sliver-console/source-provenance.json
+  - from: protocol/sliver-console-overlay
+    to: sliver-console/source-overlay
+    filter:
+      - "**/*.go"
 extraMetadata:
   main: dist/main/index.js
 mac:

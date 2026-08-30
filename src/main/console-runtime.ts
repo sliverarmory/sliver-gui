@@ -11,11 +11,16 @@ const CONSOLE_ROOT_NAME_PATTERN = /^sliver-gui-console-[A-Za-z0-9]{6}$/u;
 const CONSOLE_ROOT_MARKER_FILE = ".sliver-gui-console-root";
 const CONSOLE_ROOT_MARKER = Buffer.from("sliver-gui-console-root-v1\n", "utf8");
 const ACTIVE_CONFIG_FILE = "active.cfg";
-const CLIENT_SETTINGS_FILE = "tui-settings.yaml";
-const CLIENT_SETTINGS = Buffer.from("console_logs: false\n", "utf8");
 const PTY_EXIT_GRACE_MILLISECONDS = 1_500;
 const PTY_FORCE_EXIT_GRACE_MILLISECONDS = 500;
-const PROTECTED_ENVIRONMENT_KEYS = new Set(["COLORTERM", "SLIVER_CLIENT_ROOT_DIR", "TERM"]);
+const PROTECTED_ENVIRONMENT_KEYS = new Set([
+  "COLORTERM",
+  "SLIVER_CLIENT_CONFIG",
+  "SLIVER_CLIENT_DISABLE_CONSOLE_LOGS",
+  "SLIVER_CLIENT_HISTORY_FILE",
+  "SLIVER_CLIENT_ROOT_DIR",
+  "TERM",
+]);
 const SAFE_ERROR_MESSAGES = {
   "cleanup-failed": "The private Sliver console workspace could not be removed.",
   "terminal-io-failed": "The Sliver console stopped after a local terminal error.",
@@ -69,6 +74,8 @@ export interface SliverConsoleRuntimeLimits {
 
 export interface StartSliverConsoleRuntimeOptions {
   readonly clientExecutable: string;
+  /** Absolute Sliver client asset root, normally the user's ~/.sliver-client directory. */
+  readonly clientRootDirectory: string;
   /** Ownership transfers to this call. The supplied view is zeroized on every outcome. */
   readonly configBytes: Uint8Array;
   readonly ptyFactory: NativePtyFactory;
@@ -125,7 +132,9 @@ export class SliverConsoleRuntimeError extends Error {
 }
 
 /**
- * Owns one native Sliver client process and its private, one-configuration root.
+ * Owns one native Sliver client process and its private, one-configuration workspace.
+ * Non-configuration client assets remain rooted in the caller-supplied Sliver
+ * client directory, which is never owned or removed by this runtime.
  * Renderer code must only reach this object through a separately authenticated
  * main-process transport.
  */
@@ -170,6 +179,7 @@ export class SliverConsoleRuntime {
 
     try {
       validateExecutable(options.clientExecutable);
+      const clientRootDirectory = validateClientRootDirectory(options.clientRootDirectory);
       await assertExecutableFile(options.clientExecutable);
       validateConfig(options.configBytes);
       const limits = normalizeLimits(options.limits);
@@ -187,14 +197,20 @@ export class SliverConsoleRuntime {
       // The marker is written before any credential material. A later startup
       // scavenges only exact mkdtemp roots bearing this private marker.
       await writePrivateFileAtomic(join(rootDirectory, CONSOLE_ROOT_MARKER_FILE), CONSOLE_ROOT_MARKER);
-      await writePrivateFileAtomic(join(configsDirectory, ACTIVE_CONFIG_FILE), stagedConfig);
-      await writePrivateFileAtomic(join(rootDirectory, CLIENT_SETTINGS_FILE), CLIENT_SETTINGS);
+      const activeConfigPath = join(configsDirectory, ACTIVE_CONFIG_FILE);
+      const historyPath = join(rootDirectory, "history");
+      await writePrivateFileAtomic(activeConfigPath, stagedConfig);
       const configEntries = await readdir(configsDirectory);
       if (configEntries.length !== 1 || configEntries[0] !== ACTIVE_CONFIG_FILE) {
         throw new Error("Unexpected staged configuration directory contents");
       }
 
-      const environment = buildEnvironment(options.environment, rootDirectory);
+      const environment = buildEnvironment(
+        options.environment,
+        clientRootDirectory,
+        activeConfigPath,
+        historyPath,
+      );
       options.assertSpawnLease?.();
       pty = options.ptyFactory.spawn(options.clientExecutable, ["--disable-wg"], {
         name: "xterm-256color",
@@ -592,6 +608,19 @@ function validateExecutable(executable: string): void {
   }
 }
 
+function validateClientRootDirectory(path: string): string {
+  if (
+    typeof path !== "string" ||
+    !isAbsolute(path) ||
+    path.length > 4_096 ||
+    path.includes("\0") ||
+    /[\r\n]/u.test(path)
+  ) {
+    throw new Error("Invalid Sliver client root directory");
+  }
+  return path;
+}
+
 async function assertExecutableFile(executable: string): Promise<void> {
   const stats = await lstat(executable);
   if (stats.isSymbolicLink() || !stats.isFile()) throw new Error("Invalid console executable");
@@ -630,7 +659,9 @@ function isPrivateRootOwnedByCurrentUser(stats: Stats): boolean {
 
 function buildEnvironment(
   overlay: Readonly<NodeJS.ProcessEnv> | undefined,
-  rootDirectory: string,
+  clientRootDirectory: string,
+  activeConfigPath: string,
+  historyPath: string,
 ): Readonly<Record<string, string>> {
   const result: Record<string, string> = {};
   for (const source of [process.env, overlay ?? {}]) {
@@ -641,7 +672,10 @@ function buildEnvironment(
   }
   result["TERM"] = "xterm-256color";
   result["COLORTERM"] = "truecolor";
-  result["SLIVER_CLIENT_ROOT_DIR"] = rootDirectory;
+  result["SLIVER_CLIENT_ROOT_DIR"] = clientRootDirectory;
+  result["SLIVER_CLIENT_CONFIG"] = activeConfigPath;
+  result["SLIVER_CLIENT_DISABLE_CONSOLE_LOGS"] = "1";
+  result["SLIVER_CLIENT_HISTORY_FILE"] = historyPath;
   return result;
 }
 

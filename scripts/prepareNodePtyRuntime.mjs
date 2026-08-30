@@ -21,8 +21,11 @@ export function runtimeFilesForPlatform(platform) {
       };
     case "linux":
       return {
-        required: ["build/Release/pty.node", "build/Release/spawn-helper"],
-        helpers: ["build/Release/spawn-helper"],
+        // node-pty's spawn-helper target is macOS-only. Linux starts the child
+        // directly through forkpty(3), so a clean Linux build contains only
+        // the native addon under build/Release.
+        required: ["build/Release/pty.node"],
+        helpers: [],
       };
     case "win32":
       return {
@@ -43,10 +46,14 @@ export function runtimeFilesForPlatform(platform) {
 export function packagedRuntimeFilesForPlatform(platform) {
   switch (platform) {
     case "darwin":
-    case "linux":
       return {
         required: ["build/Release/pty.node", "build/Release/spawn-helper"],
         helpers: ["build/Release/spawn-helper"],
+      };
+    case "linux":
+      return {
+        required: ["build/Release/pty.node"],
+        helpers: [],
       };
     case "win32":
       return {

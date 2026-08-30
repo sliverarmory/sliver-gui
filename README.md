@@ -50,9 +50,11 @@ configuration files and their private keys stay in the Electron main process.
   or logs.
 - A dedicated full Sliver console window backed by the pinned native Go
   `sliver-client` and rendered with Ghostty Web. It opens directly against the
-  active window's verified operator configuration; Electron main stages that
-  single config in a private temporary Sliver root and owns the PTY, process,
-  input/output bounds, and cleanup.
+  active window's verified operator configuration while using the user's real
+  `~/.sliver-client` root for installed aliases, extensions, Armory data,
+  themes, and settings. Electron main stages the selected config and command
+  history in a private temporary workspace, disables transcript logging, and
+  owns the PTY, process, input/output bounds, and cleanup.
 - A target execution workbench for bounded process, assembly, raw-shellcode,
   shared-library, reflective-DLL, migration, Metasploit, psexec, SSH, backdoor,
   DLL-hijack, token, identity, get-system, child-process, and privilege
@@ -201,7 +203,10 @@ authorized disposable server and operator configuration.
 
 `npm run build:console` creates only ignored artifacts under
 `native/sliver-console/`: the platform executable and a digest-bound build
-record. On macOS the executable is universal. `npm run package` creates an
+record. The build applies the reviewed, hash-bound Go sources under
+`protocol/sliver-console-overlay/`; packaged applications include those exact
+replacement sources beside their provenance. On macOS the executable is
+universal. `npm run package` creates an
 unpacked application for the current platform in `release/`; `npm run dist`
 creates the configured macOS, Windows, or Linux installers. Packaging verifies
 the exact executable digest before signing, then verifies architecture,

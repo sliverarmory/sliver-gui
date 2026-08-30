@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, mkdir, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -23,7 +24,8 @@ test("packaged production app completes current mTLS read and mutation flows", {
   const isolatedHome = join(temporaryRoot, "home");
   const savedConfigDirectory = join(isolatedHome, ".sliver-client", "configs");
   const userDataDirectory = join(temporaryRoot, "user-data");
-  const configPath = join(savedConfigDirectory, "m0-packaged-operator.cfg");
+  const configPath = join(temporaryRoot, "m0-packaged-operator.cfg");
+  const decoyConfigPath = join(savedConfigDirectory, "unselected-decoy.cfg");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   const fixture = await startMtlsFixture(repositoryRoot);
   const diagnosticRedactions = [
@@ -41,7 +43,10 @@ test("packaged production app completes current mTLS read and mutation flows", {
     mkdir(userDataDirectory, { recursive: true }),
     mkdir(artifactDirectory, { recursive: true }),
   ]);
-  await writeFile(configPath, packagedOperatorConfig(fixture), { mode: 0o600 });
+  await Promise.all([
+    writeFile(configPath, packagedOperatorConfig(fixture), { mode: 0o600 }),
+    writeFile(decoyConfigPath, decoyOperatorConfig(), { mode: 0o600 }),
+  ]);
   if (process.platform !== "win32") {
     assert.equal((await stat(configPath)).mode & 0o777, 0o600, "operator config must be mode 0600");
     await access(executablePath, constants.X_OK);
@@ -114,12 +119,14 @@ test("packaged production app completes current mTLS read and mutation flows", {
     assert.match(productionState.rendererUrl ?? "", /^file:/u);
     assert.equal(await realpath(productionState.executablePath), await realpath(executablePath));
 
+    await electronApplication.evaluate(({ dialog }, selectedConfigPath) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedConfigPath] });
+    }, configPath);
+
     const savedConfigsDialog = page.getByRole("dialog", { name: /saved configurations/i });
     await savedConfigsDialog.waitFor();
-    const savedOption = savedConfigsDialog.getByRole("option", { name: /m0-packaged-operator/i });
-    await savedOption.waitFor();
-    if ((await savedOption.getAttribute("aria-selected")) !== "true") await savedOption.click();
-    await savedConfigsDialog.getByRole("button", { name: /^connect$/i }).click();
+    await savedConfigsDialog.getByRole("option", { name: /unselected-decoy/i }).waitFor();
+    await savedConfigsDialog.getByRole("button", { name: "Connect external file" }).click();
     try {
       await savedConfigsDialog.waitFor({ state: "hidden" });
     } catch (error) {
@@ -158,6 +165,10 @@ test("packaged production app completes current mTLS read and mutation flows", {
       diagnosticRedactions,
       electronApplication,
       fixture,
+      expectedConfigSha256: createHash("sha256")
+        .update(packagedOperatorConfig(fixture), "utf8")
+        .digest("hex"),
+      sharedClientRoot: join(isolatedHome, ".sliver-client"),
       sourcePage: page,
     });
 
@@ -226,12 +237,16 @@ async function verifyPackagedSliverConsole({
   diagnosticRedactions,
   electronApplication,
   fixture,
+  expectedConfigSha256,
+  sharedClientRoot,
   sourcePage,
 }: {
   artifactDirectory: string;
   diagnosticRedactions: string[];
   electronApplication: ElectronApplication;
   fixture: MtlsFixture;
+  expectedConfigSha256: string;
+  sharedClientRoot: string;
   sourcePage: Page;
 }): Promise<void> {
   const existingWindows = new Set(electronApplication.windows());
@@ -255,14 +270,12 @@ async function verifyPackagedSliverConsole({
     assert.equal(new URL(consolePage.url()).search, "?surface=console");
     await consolePage.getByRole("main", { name: "Sliver client console window", exact: true }).waitFor();
     await consolePage.getByLabel(
-      "Sliver client consoles using m0-packaged-operator",
-      { exact: true },
+      /^Sliver client consoles using (?!unselected-decoy).+/u,
     ).waitFor();
     await consolePage.getByRole("tab", { name: /Console 1.*Connected/iu }).waitFor();
 
     const terminal = consolePage.getByRole("textbox", {
-      name: "Sliver client Console 1 using m0-packaged-operator",
-      exact: true,
+      name: /^Sliver client Console 1 using (?!unselected-decoy).+/u,
     });
     await terminal.waitFor({ timeout: 30_000 });
     await consolePage.locator('[data-terminal-state="ready"]').waitFor({ timeout: 30_000 });
@@ -290,10 +303,35 @@ async function verifyPackagedSliverConsole({
 
     privateRootName = await waitForAdditionalConsoleRoot(rootsBefore);
     const privateRoot = join(tmpdir(), privateRootName);
+    const stagedConfig = await readFile(join(privateRoot, "configs", "active.cfg"));
+    try {
+      assert.equal(
+        createHash("sha256").update(stagedConfig).digest("hex"),
+        expectedConfigSha256,
+        "the embedded console must consume the exact externally selected profile from private staging",
+      );
+    } finally {
+      stagedConfig.fill(0);
+    }
+    assert.equal(
+      await pathExists(join(sharedClientRoot, "version")),
+      true,
+      "the embedded console must initialize assets in the user's shared Sliver client root",
+    );
+    assert.equal(
+      await pathExists(join(privateRoot, "version")),
+      false,
+      "the private active-config workspace must not become the Sliver client asset root",
+    );
     assert.equal(
       await pathExists(join(privateRoot, "logs", "console")),
       false,
       "the embedded console must not create JSON or asciicast transcript storage",
+    );
+    assert.equal(
+      await pathExists(join(sharedClientRoot, "logs", "console")),
+      false,
+      "sharing the user's Sliver root must not re-enable embedded-console transcripts",
     );
 
     const promptCanvas = await waitForTerminalInk(terminal, 750);
@@ -656,6 +694,18 @@ function packagedOperatorConfig(fixture: {
     certificate: fixture.clientCertificate,
     private_key: fixture.clientPrivateKey,
     token: PACKAGED_FIXTURE_TOKEN,
+  });
+}
+
+function decoyOperatorConfig(): string {
+  return JSON.stringify({
+    operator: "unselected-decoy",
+    lhost: "127.0.0.1",
+    lport: 1,
+    ca_certificate: "not-a-certificate",
+    certificate: "not-a-certificate",
+    private_key: "not-a-private-key",
+    token: "unselected-decoy-token",
   });
 }
 

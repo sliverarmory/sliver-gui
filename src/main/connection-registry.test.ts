@@ -846,6 +846,35 @@ describe("connection registry with an injected Sliver client", () => {
     }
   });
 
+  it("inherits a connection while a new renderer frame cannot yet receive snapshots", async () => {
+    const destinationSend = vi.fn(() => {
+      throw new Error("Render frame was disposed before WebContents.send");
+    });
+    electronMocks.fromId.mockImplementation((contentsId: number) => ({
+      isDestroyed: () => false,
+      send: contentsId === 2 ? destinationSend : vi.fn(),
+    }));
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+
+    expect(() => registry.inheritConnection(1, 2)).not.toThrow();
+    expect(destinationSend).toHaveBeenCalledWith(
+      IPC.snapshotChanged,
+      expect.objectContaining({
+        connection: expect.objectContaining({
+          configName: "operator",
+          status: "connected",
+        }),
+      }),
+    );
+    expect(registry.snapshot(2).connection).toMatchObject({
+      configName: "operator",
+      status: "connected",
+    });
+  });
+
   it("refuses to launch from changed or disconnected active profile material", async () => {
     const registry = createRegistry(() => new FakeSliverClient().adapter);
     registry.registerWindow(1);

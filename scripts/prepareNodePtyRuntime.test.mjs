@@ -36,11 +36,16 @@ test("prepares both universal macOS spawn helpers", async () => {
   }
 });
 
-test("prepares the compiled Linux spawn helper", async () => {
+test("accepts the Linux runtime without the macOS-only spawn helper", async () => {
   const { directory, files } = await fixture("linux");
   try {
     await prepareNodePtyRuntime({ platform: "linux", moduleDirectory: directory });
-    assert.equal((await stat(join(directory, ...files.helpers[0].split("/")))).mode & 0o777, 0o755);
+    await prepareNodePtyRuntime({ platform: "linux", moduleDirectory: directory, packaged: true });
+    assert.deepEqual(files, {
+      required: ["build/Release/pty.node"],
+      helpers: [],
+    });
+    assert.deepEqual(packagedRuntimeFilesForPlatform("linux"), files);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -110,7 +115,22 @@ test("afterPack rejects a changed Sliver console before signing", async () => {
   const sourceDirectory = join(projectDirectory, "native", "sliver-console");
   const packagedDirectory = join(projectDirectory, "packaged", "sliver-console");
   const executable = Buffer.from("pinned-sliver-client");
+  const overlaySourcePath = "client/cli/config.go";
+  const overlayReplacementPath = `protocol/sliver-console-overlay/${overlaySourcePath}`;
+  const overlaySource = Buffer.from("package cli\n\n// Reviewed source overlay.\n");
+  const overlay = {
+    format: "go-build-overlay-v1",
+    files: [{
+      sourcePath: overlaySourcePath,
+      replacementPath: overlayReplacementPath,
+      baseSha256: "a".repeat(64),
+      sha256: createHash("sha256").update(overlaySource).digest("hex"),
+      review: "Test source overlay",
+    }],
+  };
+  const sourceManifest = `${JSON.stringify({ build: { overlay } })}\n`;
   const record = `${JSON.stringify({
+    build: { overlay },
     artifact: {
       fileName: "sliver-client",
       sha256: createHash("sha256").update(executable).digest("hex"),
@@ -118,15 +138,17 @@ test("afterPack rejects a changed Sliver console before signing", async () => {
     },
   })}\n`;
   await Promise.all([
-    mkdir(join(projectDirectory, "protocol"), { recursive: true }),
+    mkdir(join(projectDirectory, "protocol", "sliver-console-overlay", "client", "cli"), { recursive: true }),
     mkdir(sourceDirectory, { recursive: true }),
-    mkdir(packagedDirectory, { recursive: true }),
+    mkdir(join(packagedDirectory, "source-overlay", "client", "cli"), { recursive: true }),
   ]);
   await Promise.all([
-    writeFile(join(projectDirectory, "protocol", "sliver-console-provenance.json"), "pinned source\n"),
+    writeFile(join(projectDirectory, "protocol", "sliver-console-provenance.json"), sourceManifest),
+    writeFile(join(projectDirectory, ...overlayReplacementPath.split("/")), overlaySource),
     writeFile(join(sourceDirectory, "provenance.json"), record),
     writeFile(join(sourceDirectory, "LICENSE"), "license\n"),
-    writeFile(join(packagedDirectory, "source-provenance.json"), "pinned source\n"),
+    writeFile(join(packagedDirectory, "source-provenance.json"), sourceManifest),
+    writeFile(join(packagedDirectory, "source-overlay", ...overlaySourcePath.split("/")), overlaySource),
     writeFile(join(packagedDirectory, "provenance.json"), record),
     writeFile(join(packagedDirectory, "LICENSE"), "license\n"),
     writeFile(join(packagedDirectory, "sliver-client"), executable, { mode: 0o755 }),
@@ -137,6 +159,17 @@ test("afterPack rejects a changed Sliver console before signing", async () => {
       projectDirectory,
       resourcesDirectory: join(projectDirectory, "packaged"),
     });
+    const packagedOverlayPath = join(packagedDirectory, "source-overlay", ...overlaySourcePath.split("/"));
+    await writeFile(packagedOverlayPath, "changed source overlay\n");
+    await assert.rejects(
+      verifySliverConsoleBeforeSigning({
+        platform: "linux",
+        projectDirectory,
+        resourcesDirectory: join(projectDirectory, "packaged"),
+      }),
+      /source overlay changed before signing/u,
+    );
+    await writeFile(packagedOverlayPath, overlaySource);
     await writeFile(join(packagedDirectory, "sliver-client"), "changed", { mode: 0o755 });
     await assert.rejects(
       verifySliverConsoleBeforeSigning({

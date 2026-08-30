@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -78,6 +79,10 @@ import {
   type ConsoleAttachmentPort,
 } from "./console-port-session.js";
 import {
+  consoleWindowOpenError,
+  type ConsoleWindowOpenFailureKind,
+} from "./console-window-open-errors.js";
+import {
   SliverConsoleRuntime,
   type NativePtyFactory,
 } from "./console-runtime.js";
@@ -94,6 +99,7 @@ export interface StartApplicationOptions {
   developmentRendererUrl?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
+  consoleClientRootDirectory?: string;
   consolePtyFactory?: NativePtyFactory;
   startConsoleRuntime?: typeof SliverConsoleRuntime.start;
 }
@@ -133,6 +139,7 @@ interface ConsoleWindowRecord {
   claimedContext?: ConsoleWindowLaunchContext;
   claimingBy?: TrustedWindowIdentity;
   claimPromise?: Promise<OperationResult<ConsoleWindowLaunchContext>>;
+  openPromise?: Promise<OperationResult>;
   closePromise?: Promise<void>;
   configName?: string;
   readonly tabsById: Map<string, ConsoleTabRecord>;
@@ -176,6 +183,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     process.resourcesPath,
     mainBundleDirectory,
     process.platform,
+  );
+  const consoleClientRootDirectory = options.consoleClientRootDirectory ?? join(
+    homedir(),
+    ".sliver-client",
   );
   const startConsoleRuntime = options.startConsoleRuntime ?? SliverConsoleRuntime.start;
   // Packaged applications always trust their immutable file entry. A caller's
@@ -757,8 +768,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   async function openConsoleWindow(source: TrustedWindowIdentity): Promise<OperationResult> {
+    let failureKind: ConsoleWindowOpenFailureKind = "application-stopping";
+    let candidateWindow: BrowserWindow | undefined;
+    let candidateRecord: ConsoleWindowRecord | undefined;
     try {
-      if (shutdown.isStopping) throw new Error("The application is shutting down");
+      if (shutdown.isStopping) throw new Error("Application stopping");
+      failureKind = "source-changed";
       const sourceWindow = windowsByContentsId.get(source.contentsId);
       if (
         !sourceWindow ||
@@ -768,8 +783,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       ) {
         throw new Error("The source window changed before its console could be opened");
       }
+      failureKind = "connection-inspection-failed";
       const snapshot = registry.snapshot(source.contentsId);
       const incarnation = snapshot.connection.incarnation;
+      failureKind = "connection-required";
       if (
         typeof incarnation !== "number" ||
         !Number.isSafeInteger(incarnation) ||
@@ -782,6 +799,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const key = `${source.contentsId}:${incarnation}`;
       const existing = consoleWindowsByKey.get(key);
       if (existing && !existing.window.isDestroyed() && !existing.finalizing) {
+        if (existing.openPromise) return existing.openPromise;
+        failureKind = "window-restore-failed";
+        candidateWindow = existing.window;
+        candidateRecord = existing;
         if (existing.window.isMinimized()) existing.window.restore();
         existing.window.show();
         existing.window.focus();
@@ -789,12 +810,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       }
       if (existing) retireConsoleWindow(existing, "window-closed");
 
+      failureKind = "window-create-failed";
       const window = new BrowserWindow(consoleWindowOptions(
         preloadPath,
         process.platform,
         runtimeIconPath,
         nativeTheme.shouldUseDarkColors,
       ));
+      candidateWindow = window;
       const record: ConsoleWindowRecord = {
         key,
         window,
@@ -805,17 +828,72 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         nextTabOrdinal: 1,
         finalizing: false,
       };
+      candidateRecord = record;
       consoleWindowsByKey.set(key, record);
       consoleWindowsByContentsId.set(window.webContents.id, record);
+      failureKind = "window-register-failed";
       trackWindow(window, source.contentsId, undefined, undefined, record);
-      void loadRenderer(window, "console");
-      return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: consoleApplicationError(error, "The Sliver console could not be opened"),
-      };
+      const openPromise = finishConsoleWindowOpen(record);
+      record.openPromise = openPromise;
+      return openPromise;
+    } catch {
+      if (candidateWindow) await rollbackConsoleWindowOpen(candidateWindow, candidateRecord);
+      return consoleWindowOpenFailure(failureKind);
     }
+  }
+
+  async function finishConsoleWindowOpen(record: ConsoleWindowRecord): Promise<OperationResult> {
+    try {
+      await loadRenderer(record.window, "console");
+      if (
+        record.window.isDestroyed() ||
+        record.finalizing ||
+        consoleWindowsByKey.get(record.key) !== record ||
+        consoleWindowsByContentsId.get(record.window.webContents.id) !== record
+      ) {
+        throw new Error("The console window changed while its renderer was loading");
+      }
+      return { ok: true };
+    } catch {
+      await rollbackConsoleWindowOpen(record.window, record);
+      return consoleWindowOpenFailure("renderer-load-failed");
+    } finally {
+      delete record.openPromise;
+    }
+  }
+
+  function consoleWindowOpenFailure(kind: ConsoleWindowOpenFailureKind): OperationResult {
+    const error = consoleWindowOpenError(kind);
+    try {
+      process.stderr.write(`[sliver-console] ${error}\n`);
+    } catch {
+      // Diagnostics are best-effort and must not replace the stable IPC result.
+    }
+    return { ok: false, error };
+  }
+
+  async function rollbackConsoleWindowOpen(
+    window: BrowserWindow,
+    record: ConsoleWindowRecord | undefined,
+  ): Promise<void> {
+    const contentsId = window.webContents.id;
+    if (record) {
+      retireConsoleWindow(record, "window-closed");
+      if (!window.isDestroyed()) window.destroy();
+      await record.closePromise?.catch(() => undefined);
+    } else if (!window.isDestroyed()) {
+      window.destroy();
+    }
+    windows.delete(window);
+    nativeWindowSurfaces.delete(window);
+    windowsByContentsId.delete(contentsId);
+    if (record && consoleWindowsByContentsId.get(contentsId) === record) {
+      consoleWindowsByContentsId.delete(contentsId);
+    }
+    if (record && consoleWindowsByKey.get(record.key) === record) {
+      consoleWindowsByKey.delete(record.key);
+    }
+    await registry.unregisterWindow(contentsId).catch(() => undefined);
   }
 
   async function claimConsoleWindow(
@@ -981,6 +1059,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       }
       runtime = await startConsoleRuntime({
         clientExecutable: consoleClientExecutable,
+        clientRootDirectory: consoleClientRootDirectory,
         configBytes,
         ptyFactory,
         assertSpawnLease,
@@ -1680,15 +1759,6 @@ function applicationErrorMessage(error: unknown, fallback: string): string {
   if (
     error.message === "The source window changed before managed shells could be popped out" ||
     error.message === "Select an active session before popping out managed shells"
-  ) return error.message;
-  return fallback;
-}
-
-function consoleApplicationError(error: unknown, fallback: string): string {
-  if (!(error instanceof Error)) return fallback;
-  if (
-    error.message === "Connect to a Sliver server before opening its console" ||
-    error.message === "The source window changed before its console could be opened"
   ) return error.message;
   return fallback;
 }

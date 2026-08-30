@@ -29,6 +29,7 @@ import {
   type ApplicationSettingsState,
   type ApplicationSettingsValues,
 } from "../../shared/application-settings-contracts";
+import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
 import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import sliverSidebarIcon from "./assets/sliver-sidebar.png";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
@@ -230,9 +231,9 @@ export function App() {
       if (!result.ok) {
         toast.danger("Could not open Sliver console", { description: result.error });
       }
-    } catch (error) {
+    } catch {
       toast.danger("Could not open Sliver console", {
-        description: error instanceof Error ? error.message : String(error),
+        description: CONSOLE_WINDOW_OPEN_REQUEST_ERROR,
       });
     }
   }

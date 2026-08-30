@@ -21,11 +21,14 @@ import {
 
 let fixtureDirectory: string;
 let executablePath: string;
+let clientRootDirectory: string;
 const openRuntimes = new Set<SliverConsoleRuntime>();
 
 beforeEach(async () => {
   fixtureDirectory = await mkdtemp(join(tmpdir(), "sliver-gui-console-runtime-test-"));
   executablePath = join(fixtureDirectory, process.platform === "win32" ? "sliver-client.exe" : "sliver-client");
+  clientRootDirectory = join(fixtureDirectory, "shared-sliver-client");
+  await mkdir(clientRootDirectory, { mode: 0o700 });
   await writeFile(executablePath, "test executable", { mode: 0o700 });
 });
 
@@ -36,13 +39,22 @@ afterEach(async () => {
 });
 
 describe("SliverConsoleRuntime private staging", () => {
-  it("stages exactly the active config, forces the private root env, and launches without a picker", async () => {
+  it("uses the shared client root while privately staging the exact active config", async () => {
     const factory = new FakePtyFactory();
     const config = Buffer.from("verified active config", "utf8");
+    const sharedMarker = join(clientRootDirectory, "installed-armory-package.marker");
+    await writeFile(sharedMarker, "preserve shared client assets", { mode: 0o600 });
     const runtime = await startRuntime(factory, config, {
       environment: {
         CUSTOM_CONSOLE_VALUE: "preserved",
+        SLIVER_CLIENT_CONFIG: "/attacker/active.cfg",
+        SLIVER_CLIENT_DISABLE_CONSOLE_LOGS: "0",
+        SLIVER_CLIENT_HISTORY_FILE: "/attacker/history",
         SLIVER_CLIENT_ROOT_DIR: "/attacker/root",
+        sliver_client_config: "/case-insensitive-attacker/active.cfg",
+        sliver_client_disable_console_logs: "0",
+        sliver_client_history_file: "/case-insensitive-attacker/history",
+        sliver_client_root_dir: "/case-insensitive-attacker/root",
         TERM: "attacker-term",
         term: "case-insensitive-attacker-term",
       },
@@ -59,30 +71,50 @@ describe("SliverConsoleRuntime private staging", () => {
       cols: 132,
       rows: 41,
     });
-    expect(call.options.cwd).toBe(call.options.env["SLIVER_CLIENT_ROOT_DIR"]);
+    const activeConfigPath = join(call.options.cwd, "configs", "active.cfg");
+    expect(call.options.cwd).not.toBe(clientRootDirectory);
     expect(call.options.env).toMatchObject({
       CUSTOM_CONSOLE_VALUE: "preserved",
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
-      SLIVER_CLIENT_ROOT_DIR: call.options.cwd,
+      SLIVER_CLIENT_ROOT_DIR: clientRootDirectory,
+      SLIVER_CLIENT_CONFIG: activeConfigPath,
+      SLIVER_CLIENT_DISABLE_CONSOLE_LOGS: "1",
+      SLIVER_CLIENT_HISTORY_FILE: join(call.options.cwd, "history"),
     });
     expect(call.options.env["term"]).toBeUndefined();
+    expect(call.options.env["sliver_client_config"]).toBeUndefined();
+    expect(call.options.env["sliver_client_disable_console_logs"]).toBeUndefined();
+    expect(call.options.env["sliver_client_history_file"]).toBeUndefined();
+    expect(call.options.env["sliver_client_root_dir"]).toBeUndefined();
 
     const configsDirectory = join(call.options.cwd, "configs");
     expect(await readdir(configsDirectory)).toEqual(["active.cfg"]);
     expect(await readFile(join(configsDirectory, "active.cfg"), "utf8")).toBe("verified active config");
-    expect(await readFile(join(call.options.cwd, "tui-settings.yaml"), "utf8")).toBe("console_logs: false\n");
     if (process.platform !== "win32") {
       expect((await stat(call.options.cwd)).mode & 0o777).toBe(0o700);
       expect((await stat(configsDirectory)).mode & 0o777).toBe(0o700);
       expect((await stat(join(configsDirectory, "active.cfg"))).mode & 0o777).toBe(0o600);
-      expect((await stat(join(call.options.cwd, "tui-settings.yaml"))).mode & 0o777).toBe(0o600);
     }
 
     await runtime.close();
     expect(factory.pty.killCalls).toBe(1);
     await expect(access(call.options.cwd)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(sharedMarker, "utf8")).resolves.toBe("preserve shared client assets");
     await expect(access(executablePath)).resolves.toBeUndefined();
+  });
+
+  it("rejects a non-absolute client root before staging or spawning", async () => {
+    const factory = new FakePtyFactory();
+    const config = Buffer.from("active config", "utf8");
+
+    await expect(startUntracked(factory, config, {
+      clientRootDirectory: "relative/.sliver-client",
+    })).rejects.toEqual(new SliverConsoleStartError());
+
+    expect(factory.calls).toHaveLength(0);
+    expect([...config]).toEqual(new Array(config.length).fill(0));
+    expect((await readdir(fixtureDirectory)).filter((entry) => entry.startsWith("sliver-gui-console-"))).toEqual([]);
   });
 
   it("zeroizes the config and removes staging when native spawn or listener setup fails", async () => {
@@ -389,6 +421,7 @@ async function startUntracked(
 ): Promise<SliverConsoleRuntime> {
   return SliverConsoleRuntime.start({
     clientExecutable: executablePath,
+    clientRootDirectory,
     configBytes,
     ptyFactory: factory,
     tempDirectory: fixtureDirectory,

@@ -1,10 +1,12 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
+import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../../shared/contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
+import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
 import type {
   OperationResult,
   SavedConfigSummary,
@@ -425,6 +427,36 @@ describe("App startup", () => {
     await user.click(consoleButton);
 
     expect(api.openConsoleWindow).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("does not expose an IPC exception when opening a console fails", async () => {
+    const user = userEvent.setup();
+    const danger = vi.spyOn(toast, "danger");
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+      incarnation: 9,
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+    const privateFailure = "spawn failed for /Users/operator/.sliver-client/configs/production.cfg";
+    vi.mocked(api.openConsoleWindow).mockRejectedValue(new Error(privateFailure));
+
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Open Sliver console" }));
+
+    await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not open Sliver console", {
+      description: CONSOLE_WINDOW_OPEN_REQUEST_ERROR,
+    }));
+    expect(danger).not.toHaveBeenCalledWith("Could not open Sliver console", {
+      description: expect.stringContaining(privateFailure),
+    });
   });
 
   it("keeps the saved configuration selector closed across a delayed connecting snapshot", async () => {
