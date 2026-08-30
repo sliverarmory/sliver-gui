@@ -104,6 +104,7 @@ function installSliverAPI(
     closeConsoleTab: vi.fn(failedOperation),
     onConsoleNewTabRequested: vi.fn(() => vi.fn()),
     onConsoleCloseTabRequested: vi.fn(() => vi.fn()),
+    onConsoleSelectTabRequested: vi.fn(() => vi.fn()),
     onConsoleSettingsRequested: vi.fn(() => vi.fn()),
     openWindow: vi.fn(failedOperation),
     prepareStopAllJobs: vi.fn(failedOperation),

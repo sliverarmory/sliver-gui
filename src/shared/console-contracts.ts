@@ -13,7 +13,7 @@ export const CONSOLE_MAX_QUEUE_BYTES = 128 * KiB;
 // stops reading while a renderer continues to send data.
 export const CONSOLE_MAX_SESSION_INPUT_BYTES = 16 * 1_024 * KiB;
 export const CONSOLE_MAX_TERMINAL_DIMENSION = 1_000 as const;
-export const CONSOLE_MAX_TABS_PER_WINDOW = 16 as const;
+export const CONSOLE_MAX_TABS_PER_WINDOW = 10 as const;
 export const CONSOLE_ATTACHMENT_TTL_MILLISECONDS = 15_000 as const;
 export const CONSOLE_HANDSHAKE_TIMEOUT_MILLISECONDS = 5_000 as const;
 
@@ -137,6 +137,15 @@ export function isOpaqueConsoleId(value: unknown): value is string {
 
 export function parseConsoleTabId(value: unknown): string {
   return requireOpaqueId(value, "console tab ID");
+}
+
+export function parseConsoleTabShortcutIndex(value: unknown): number {
+  return requireInteger(
+    value,
+    "console tab shortcut index",
+    0,
+    CONSOLE_MAX_TABS_PER_WINDOW - 1,
+  );
 }
 
 export function parseConsoleAttachRequest(value: unknown): ConsoleAttachRequest {

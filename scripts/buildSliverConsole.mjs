@@ -10,11 +10,16 @@ export const ROOT_DIRECTORY = resolve(scriptDirectory, "..");
 export const SOURCE_MANIFEST_PATH = join(ROOT_DIRECTORY, "protocol", "sliver-console-provenance.json");
 export const OUTPUT_DIRECTORY = join(ROOT_DIRECTORY, "native", "sliver-console");
 
-const ARMORY_PUBLIC_KEY = "RWSBpxpRWDr7Fe+VvRE3c2VEDC2NK80rlNCj+BX0gz44Xw07r6KQD9L";
+const ARMORY_PUBLIC_KEY = "RWSBpxpRWDrD7Fe+VvRE3c2VEDC2NK80rlNCj+BX0gz44Xw07r6KQD9L";
 const ARMORY_REPOSITORY = "https://api.github.com/repos/sliverarmory/armory/releases";
 const SLIVER_PUBLIC_KEY = "RWTZPg959v3b7tLG7VzKHRB1/QT+d3c71Uzetfa44qAoX5rH7mGoQTTR";
 const CLIENT_ASSETS_PACKAGE = "github.com/bishopfox/sliver/client/assets";
 const UPDATE_PACKAGE = "github.com/bishopfox/sliver/client/command/update";
+export const SLIVER_CLIENT_LINKER_DEFAULTS = Object.freeze({
+  sliverPublicKey: SLIVER_PUBLIC_KEY,
+  armoryPublicKey: ARMORY_PUBLIC_KEY,
+  armoryRepoUrl: ARMORY_REPOSITORY,
+});
 const GO_ENVIRONMENT_PASSTHROUGH = [
   "APPDATA",
   "COMSPEC",
@@ -62,6 +67,8 @@ export function targetSlices(target) {
 }
 
 export function goBuildArguments(outputPath) {
+  validateMinisignPublicKey(ARMORY_PUBLIC_KEY, "Armory public key");
+  validateMinisignPublicKey(SLIVER_PUBLIC_KEY, "Sliver update public key");
   const linkerFlags = [
     "-s",
     "-w",
@@ -81,6 +88,30 @@ export function goBuildArguments(outputPath) {
     outputPath,
     "./client",
   ];
+}
+
+export function validateMinisignPublicKey(value, label = "Minisign public key") {
+  const decoded = Buffer.from(value, "base64");
+  const canonical = decoded.toString("base64").replace(/=+$/u, "");
+  if (value.length !== 56 || decoded.byteLength !== 42 || canonical !== value) {
+    throw new Error(`${label} is not a canonical 42-byte Minisign public key`);
+  }
+  return value;
+}
+
+export function validatePinnedClientLinkerDefaults(makefile) {
+  const expected = new Map([
+    ["SLIVER_PUBLIC_KEY", SLIVER_PUBLIC_KEY],
+    ["ARMORY_PUBLIC_KEY", ARMORY_PUBLIC_KEY],
+    ["ARMORY_REPO_URL", ARMORY_REPOSITORY],
+  ]);
+  for (const [name, expectedValue] of expected) {
+    const match = makefile.match(new RegExp(`^${name}\\s*\\?=\\s*(\\S+)\\s*$`, "mu"));
+    const actualValue = match?.[1];
+    if (actualValue !== expectedValue) {
+      throw new Error(`Sliver Makefile ${name} is ${actualValue ?? "missing"}, expected ${expectedValue}`);
+    }
+  }
 }
 
 export function hermeticGoEnvironment(baseEnvironment = process.env, slice = {}) {
@@ -179,6 +210,7 @@ export async function buildSliverConsole({
   goBinary ??= environment.SLIVER_GO_BINARY ?? "go";
   const sourceManifest = suppliedSourceManifest ?? JSON.parse(await readFile(SOURCE_MANIFEST_PATH, "utf8"));
   await verifyPinnedCheckout({ sourceDirectory, sourceManifest, run });
+  validatePinnedClientLinkerDefaults(await readFile(join(sourceDirectory, "Makefile"), "utf8"));
 
   const baseGoEnvironment = hermeticGoEnvironment(environment);
   const goVersion = (await run(goBinary, ["env", "GOVERSION"], {
@@ -261,6 +293,7 @@ export async function buildSliverConsole({
         trimpath: true,
         moduleMode: "vendor",
         tags: sourceManifest.build.tags,
+        linkerDefaults: SLIVER_CLIENT_LINKER_DEFAULTS,
         slices: sliceRecords.map(({ goos, goarch, buildInfo, sha256: digest, size }) => ({
           goos,
           goarch,

@@ -1079,6 +1079,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       ? {
           newTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleNewTabRequested),
           closeTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleCloseTabRequested),
+          selectTab: (index) => sendConsoleTabSelectionEvent(focusedConsole, index),
           closeWindow: () => {
             if (focusedConsoleWindow() === focusedConsole && !focusedConsole.window.isDestroyed()) {
               focusedConsole.window.close();
@@ -1105,6 +1106,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   function sendConsoleMenuEvent(record: ConsoleWindowRecord, channel: string): void {
     if (focusedConsoleWindow() !== record || record.window.webContents.isDestroyed()) return;
     record.window.webContents.send(channel);
+  }
+
+  function sendConsoleTabSelectionEvent(record: ConsoleWindowRecord, index: number): void {
+    if (
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= CONSOLE_MAX_TABS_PER_WINDOW ||
+      focusedConsoleWindow() !== record ||
+      record.window.webContents.isDestroyed()
+    ) return;
+    record.window.webContents.send(IPC.consoleSelectTabRequested, index);
   }
 
   function beginShutdown(): void {

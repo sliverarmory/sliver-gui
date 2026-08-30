@@ -198,6 +198,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onApplicationUpdateChanged",
     "onConsoleNewTabRequested",
     "onConsoleCloseTabRequested",
+    "onConsoleSelectTabRequested",
     "onConsoleSettingsRequested",
   ].sort();
   const rendererState = await page.evaluate(async () => {
@@ -349,6 +350,18 @@ async function verifySliverConsoleWindow(
     assert.equal(await consolePage.getByRole("tab").count(), 2);
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id]").count(), 2);
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id][inert]").count(), 1);
+    await consolePage.getByRole("tab", {
+      name: /Console 1.*shortcut Command\+1/iu,
+    }).waitFor();
+    await consolePage.getByRole("tab", {
+      name: /Console 2.*shortcut Command\+2/iu,
+    }).waitFor();
+
+    await consolePage.bringToFront();
+    await invokeConsoleMenuItem(electronApplication, "console.select-tab-1");
+    await waitForSelectedConsoleTab(consolePage, /Console 1/iu);
+    await invokeConsoleMenuItem(electronApplication, "console.select-tab-2");
+    await waitForSelectedConsoleTab(consolePage, /Console 2/iu);
 
     const secondTerminal = consolePage.getByRole("textbox", {
       name: "Sliver client Console 2 using chosen-m0-operator.cfg",
@@ -444,6 +457,17 @@ async function verifySliverConsoleWindow(
       assert.equal(spawn.configSha256, firstSpawn.configSha256);
     }
     assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
+    await consolePage.getByRole("tab", {
+      name: new RegExp(`Console ${lastTabOrdinalAtCap}.*shortcut Command\\+0`, "iu"),
+    }).waitFor();
+    await consolePage.bringToFront();
+    await invokeConsoleMenuItem(electronApplication, "console.select-tab-1");
+    await waitForSelectedConsoleTab(consolePage, /Console 3/iu);
+    await invokeConsoleMenuItem(electronApplication, "console.select-tab-0");
+    await waitForSelectedConsoleTab(
+      consolePage,
+      new RegExp(`Console ${lastTabOrdinalAtCap}`, "iu"),
+    );
 
     await electronApplication.evaluate(() => {
       globalThis.__SLIVER_GUI_E2E_CONTROL__.holdNextConsoleExit();
@@ -2402,6 +2426,20 @@ async function invokeConsoleMenuItem(
     })),
   }));
   throw new Error(`Timed out waiting for native console menu item ${itemId}: ${JSON.stringify(diagnostic)}`);
+}
+
+async function waitForSelectedConsoleTab(
+  page: Page,
+  name: RegExp,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const tab = page.getByRole("tab", { name });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await tab.getAttribute("aria-selected") === "true") return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for selected console tab ${String(name)}`);
 }
 
 async function waitForConsoleState(

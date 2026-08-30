@@ -1,5 +1,6 @@
 import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
+import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
 
 export type ReleaseMenuCatalog =
@@ -24,6 +25,7 @@ export interface ApplicationMenuActions {
 export interface ConsoleApplicationMenuActions {
   readonly newTab: () => void;
   readonly closeTab: () => void;
+  readonly selectTab: (index: number) => void;
   readonly closeWindow: () => void;
   readonly showSettings: () => void;
 }
@@ -137,6 +139,16 @@ export function buildApplicationMenuTemplate(
               accelerator: "CmdOrCtrl+W",
               click: consoleActions.closeTab,
             },
+            { type: "separator" as const },
+            ...Array.from({ length: CONSOLE_MAX_TABS_PER_WINDOW }, (_, index): MenuItemConstructorOptions => {
+              const digit = index === 9 ? 0 : index + 1;
+              return {
+                id: `console.select-tab-${digit}`,
+                label: `Select Tab ${index + 1}`,
+                accelerator: `CmdOrCtrl+${digit}`,
+                click: () => consoleActions.selectTab(index),
+              };
+            }),
             { type: "separator" as const },
             {
               id: "console.settings",

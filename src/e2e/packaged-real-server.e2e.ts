@@ -303,6 +303,7 @@ async function assertPackagedRendererSecurity(
     "onSessionShellsChanged",
     "onConsoleNewTabRequested",
     "onConsoleCloseTabRequested",
+    "onConsoleSelectTabRequested",
     "onConsoleSettingsRequested",
   ].sort();
   const rendererState = await page.evaluate(async () => {

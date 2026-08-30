@@ -160,6 +160,7 @@ describe("sandboxed preload bridge", () => {
       "onApplicationUpdateChanged",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
+      "onConsoleSelectTabRequested",
       "onConsoleSettingsRequested",
       "openStream",
       "openConsoleStream",
@@ -200,6 +201,7 @@ describe("sandboxed preload bridge", () => {
       "onApplicationUpdateChanged",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
+      "onConsoleSelectTabRequested",
       "onConsoleSettingsRequested",
       "openStream",
       "openConsoleStream",
@@ -257,6 +259,32 @@ describe("sandboxed preload bridge", () => {
     handler({} as Electron.IpcRendererEvent);
     handler({} as Electron.IpcRendererEvent, { attackerPayload: true });
     expect(listener).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(channel, handler);
+  });
+
+  it("delivers only one validated console-tab shortcut index and removes its listener", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed.onConsoleSelectTabRequested(listener);
+    expect(electronMocks.on).toHaveBeenCalledOnce();
+    const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(channel).toBe(IPC.consoleSelectTabRequested);
+    if (typeof handler !== "function") throw new Error("Expected a console-tab selection handler");
+
+    handler({} as Electron.IpcRendererEvent, 0);
+    handler({} as Electron.IpcRendererEvent, 9);
+    handler({} as Electron.IpcRendererEvent, 10);
+    handler({} as Electron.IpcRendererEvent, -1);
+    handler({} as Electron.IpcRendererEvent, "1");
+    handler({} as Electron.IpcRendererEvent, 1, 2);
+    expect(listener.mock.calls).toEqual([[0], [9]]);
 
     unsubscribe();
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(channel, handler);

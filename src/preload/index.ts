@@ -19,6 +19,7 @@ import type { TargetRef } from "../shared/target-contracts.js";
 import {
   CONSOLE_PROTOCOL_VERSION,
   parseConsoleAttachRequest,
+  parseConsoleTabShortcutIndex,
 } from "../shared/console-contracts.js";
 
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -171,6 +172,18 @@ const api: SliverDesktopAPI = {
   },
   onConsoleNewTabRequested: (listener) => onFixedEvent(IPC.consoleNewTabRequested, listener),
   onConsoleCloseTabRequested: (listener) => onFixedEvent(IPC.consoleCloseTabRequested, listener),
+  onConsoleSelectTabRequested: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length !== 1) return;
+      try {
+        listener(parseConsoleTabShortcutIndex(payload[0]));
+      } catch {
+        // Drop malformed main-to-renderer events instead of widening the bridge.
+      }
+    };
+    ipcRenderer.on(IPC.consoleSelectTabRequested, handler);
+    return () => ipcRenderer.removeListener(IPC.consoleSelectTabRequested, handler);
+  },
   onConsoleSettingsRequested: (listener) => onFixedEvent(IPC.consoleSettingsRequested, listener),
 };
 

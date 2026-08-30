@@ -8,7 +8,11 @@ import { fileURLToPath } from "node:url";
 import { extractFile, listPackage, statFile } from "@electron/asar";
 
 import { asarEntryPaths } from "./asarEntryPaths.mjs";
-import { hermeticGoEnvironment, validateGoBuildInfo } from "./buildSliverConsole.mjs";
+import {
+  hermeticGoEnvironment,
+  SLIVER_CLIENT_LINKER_DEFAULTS,
+  validateGoBuildInfo,
+} from "./buildSliverConsole.mjs";
 import { packagedRuntimeFilesForPlatform, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -440,6 +444,9 @@ async function verifyPreparedSliverConsole() {
       : "linux-amd64";
   if (buildRecord.build?.target !== expectedTarget) {
     throw new Error(`Native Sliver console target ${buildRecord.build?.target} does not match ${expectedTarget}`);
+  }
+  if (JSON.stringify(buildRecord.build?.linkerDefaults) !== JSON.stringify(SLIVER_CLIENT_LINKER_DEFAULTS)) {
+    throw new Error("Native Sliver console linker defaults do not match the audited Sliver client build");
   }
   const expectedSlices = expectedTarget === "darwin-universal"
     ? [{ goos: "darwin", goarch: "amd64" }, { goos: "darwin", goarch: "arm64" }]

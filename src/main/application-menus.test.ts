@@ -91,6 +91,7 @@ describe("application menu templates", () => {
     const consoleActions = {
       newTab: vi.fn(),
       closeTab: vi.fn(),
+      selectTab: vi.fn(),
       closeWindow: vi.fn(),
       showSettings: vi.fn(),
     };
@@ -113,9 +114,24 @@ describe("application menu templates", () => {
       "Help",
     ]);
     const terminal = menuItems(macTemplate, "Terminal");
-    expect(terminal).toEqual([
+    expect(terminal.slice(0, 3)).toEqual([
       expect.objectContaining({ id: "console.new-tab", label: "New Tab", accelerator: "CmdOrCtrl+T" }),
       expect.objectContaining({ id: "console.close-tab", label: "Close Tab", accelerator: "CmdOrCtrl+W" }),
+      expect.objectContaining({ type: "separator" }),
+    ]);
+    expect(terminal.slice(3, 13).map(({ id, label, accelerator }) => ({ id, label, accelerator }))).toEqual([
+      { id: "console.select-tab-1", label: "Select Tab 1", accelerator: "CmdOrCtrl+1" },
+      { id: "console.select-tab-2", label: "Select Tab 2", accelerator: "CmdOrCtrl+2" },
+      { id: "console.select-tab-3", label: "Select Tab 3", accelerator: "CmdOrCtrl+3" },
+      { id: "console.select-tab-4", label: "Select Tab 4", accelerator: "CmdOrCtrl+4" },
+      { id: "console.select-tab-5", label: "Select Tab 5", accelerator: "CmdOrCtrl+5" },
+      { id: "console.select-tab-6", label: "Select Tab 6", accelerator: "CmdOrCtrl+6" },
+      { id: "console.select-tab-7", label: "Select Tab 7", accelerator: "CmdOrCtrl+7" },
+      { id: "console.select-tab-8", label: "Select Tab 8", accelerator: "CmdOrCtrl+8" },
+      { id: "console.select-tab-9", label: "Select Tab 9", accelerator: "CmdOrCtrl+9" },
+      { id: "console.select-tab-0", label: "Select Tab 10", accelerator: "CmdOrCtrl+0" },
+    ]);
+    expect(terminal.slice(13)).toEqual([
       expect.objectContaining({ type: "separator" }),
       expect.objectContaining({
         id: "console.settings",
@@ -126,8 +142,11 @@ describe("application menu templates", () => {
     clickItem(terminal[0]);
     clickItem(terminal[1]);
     clickItem(terminal[3]);
+    clickItem(terminal[12]);
+    clickItem(terminal[14]);
     expect(consoleActions.newTab).toHaveBeenCalledOnce();
     expect(consoleActions.closeTab).toHaveBeenCalledOnce();
+    expect(consoleActions.selectTab.mock.calls).toEqual([[0], [9]]);
     expect(consoleActions.showSettings).toHaveBeenCalledOnce();
 
     const macCloseWindow = menuItems(macTemplate, "File").at(-1);

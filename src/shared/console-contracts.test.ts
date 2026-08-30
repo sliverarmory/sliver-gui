@@ -8,6 +8,7 @@ import {
   parseConsoleClientFrame,
   parseConsoleServerFrame,
   parseConsoleTabId,
+  parseConsoleTabShortcutIndex,
 } from "./console-contracts.js";
 
 const opaque = "A".repeat(43);
@@ -24,11 +25,16 @@ describe("console contracts", () => {
     expect(() => parseConsoleAttachRequest({ v: 1, attachmentToken: "short" })).toThrow(/invalid/u);
   });
 
-  it("bounds windows to sixteen consoles and accepts only opaque tab IDs", () => {
-    expect(CONSOLE_MAX_TABS_PER_WINDOW).toBe(16);
+  it("bounds windows to ten consoles and accepts only opaque tab IDs and shortcut positions", () => {
+    expect(CONSOLE_MAX_TABS_PER_WINDOW).toBe(10);
     expect(parseConsoleTabId(opaque)).toBe(opaque);
     expect(() => parseConsoleTabId("short")).toThrow(/console tab ID is invalid/u);
     expect(() => parseConsoleTabId({ tabId: opaque })).toThrow(/console tab ID is invalid/u);
+    expect(parseConsoleTabShortcutIndex(0)).toBe(0);
+    expect(parseConsoleTabShortcutIndex(9)).toBe(9);
+    expect(() => parseConsoleTabShortcutIndex(-1)).toThrow(/shortcut index/u);
+    expect(() => parseConsoleTabShortcutIndex(10)).toThrow(/shortcut index/u);
+    expect(() => parseConsoleTabShortcutIndex("1")).toThrow(/shortcut index/u);
   });
 
   it("bounds terminal data and dimensions at both protocol boundaries", () => {

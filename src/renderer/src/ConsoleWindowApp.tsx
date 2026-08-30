@@ -77,6 +77,7 @@ interface ConsoleWindowAPI {
   getTerminalRuntime(): Promise<OperationResult<TerminalRuntimeAsset>>;
   onConsoleNewTabRequested(listener: () => void): () => void;
   onConsoleCloseTabRequested(listener: () => void): () => void;
+  onConsoleSelectTabRequested(listener: (index: number) => void): () => void;
   onConsoleSettingsRequested(listener: () => void): () => void;
 }
 
@@ -136,6 +137,13 @@ export function ConsoleWindowApp(): React.JSX.Element {
     setSettingsDraft(settingsRef.current);
     setIsSettingsOpen(true);
   }, []);
+
+  const selectTabByShortcut = useCallback((index: number): void => {
+    const tab = tabsRef.current[index];
+    if (!tab) return;
+    setActiveTabId(tab.context.tabId);
+    queueMicrotask(() => tab.terminalRef.current?.focus());
+  }, [setActiveTabId]);
 
   const createTab = useCallback(async (): Promise<void> => {
     if (!tabHostReadyRef.current || creatingTabRef.current) return;
@@ -251,12 +259,13 @@ export function ConsoleWindowApp(): React.JSX.Element {
     const unsubscribers = [
       api.onConsoleNewTabRequested(() => void createTab()),
       api.onConsoleCloseTabRequested(() => void closeActiveTab()),
+      api.onConsoleSelectTabRequested(selectTabByShortcut),
       api.onConsoleSettingsRequested(openSettings),
     ];
     return () => {
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [closeActiveTab, createTab, openSettings]);
+  }, [closeActiveTab, createTab, openSettings, selectTabByShortcut]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -323,11 +332,12 @@ export function ConsoleWindowApp(): React.JSX.Element {
 
           <Tabs.ListContainer className="min-w-0 flex-1 rounded-none bg-transparent">
             <Tabs.List aria-label="Sliver console tabs" className="min-w-0 bg-transparent p-0 shadow-none">
-              {tabs.map((tab) => {
+              {tabs.map((tab, index) => {
                 const state = consoleTabState(tab);
+                const shortcutDigit = consoleTabShortcutDigit(index);
                 return (
                   <Tabs.Tab
-                    aria-label={`${tab.context.label} ${state === "connected" ? "Connected" : "Exited"}`}
+                    aria-label={`${tab.context.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut Command+${shortcutDigit}`}
                     key={tab.context.tabId}
                     className="max-w-56 min-w-28 gap-2 rounded-lg px-3"
                     id={tab.context.tabId}
@@ -337,6 +347,12 @@ export function ConsoleWindowApp(): React.JSX.Element {
                       className={`size-2 shrink-0 rounded-full ${state === "connected" ? "bg-success" : "bg-warning"}`}
                     />
                     <span className="truncate">{tab.context.label}</span>
+                    <kbd
+                      aria-hidden
+                      className="flex-none rounded-md bg-surface-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted tabular-nums"
+                    >
+                      ⌘{shortcutDigit}
+                    </kbd>
                     <span className="sr-only"> {state === "connected" ? "Connected" : "Exited"}</span>
                     <Tabs.Indicator />
                   </Tabs.Tab>
@@ -642,6 +658,10 @@ function ConsoleTabNotice({ title, message }: { readonly title: string; readonly
 
 function consoleTabState(tab: ReadyConsoleTab): "connected" | "exited" {
   return tab.exitMessage || tab.terminalError ? "exited" : "connected";
+}
+
+function consoleTabShortcutDigit(index: number): number {
+  return index === 9 ? 0 : index + 1;
 }
 
 function consoleWindowApi(): ConsoleWindowAPI {

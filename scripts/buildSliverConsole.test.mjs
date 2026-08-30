@@ -9,11 +9,24 @@ import {
   buildSliverConsole,
   goBuildArguments,
   hermeticGoEnvironment,
+  SLIVER_CLIENT_LINKER_DEFAULTS,
   targetForHost,
   targetSlices,
   validateGoBuildInfo,
+  validateMinisignPublicKey,
+  validatePinnedClientLinkerDefaults,
   verifyPinnedCheckout,
 } from "./buildSliverConsole.mjs";
+
+const SLIVER_PUBLIC_KEY = "RWTZPg959v3b7tLG7VzKHRB1/QT+d3c71Uzetfa44qAoX5rH7mGoQTTR";
+const ARMORY_PUBLIC_KEY = "RWSBpxpRWDrD7Fe+VvRE3c2VEDC2NK80rlNCj+BX0gz44Xw07r6KQD9L";
+const ARMORY_REPOSITORY = "https://api.github.com/repos/sliverarmory/armory/releases";
+const CLIENT_MAKEFILE_DEFAULTS = [
+  `SLIVER_PUBLIC_KEY ?= ${SLIVER_PUBLIC_KEY}`,
+  `ARMORY_PUBLIC_KEY ?= ${ARMORY_PUBLIC_KEY}`,
+  `ARMORY_REPO_URL ?= ${ARMORY_REPOSITORY}`,
+  "",
+].join("\n");
 
 const manifest = {
   source: {
@@ -38,9 +51,22 @@ test("build arguments retain upstream client tags, vendoring, stripping, and ent
   assert.deepEqual(args.slice(0, 5), ["build", "-mod=vendor", "-trimpath", "-tags", "go_sqlite,client"]);
   assert.equal(args.at(-1), "./client");
   assert.equal(args.at(-2), "/tmp/output/sliver-client");
-  assert.match(args[6], /DefaultArmoryPublicKey/u);
-  assert.match(args[6], /DefaultArmoryRepoURL/u);
-  assert.match(args[6], /SliverPublicKey/u);
+  assert.ok(args[6].includes(`DefaultArmoryPublicKey=${ARMORY_PUBLIC_KEY}`));
+  assert.ok(args[6].includes(`DefaultArmoryRepoURL=${ARMORY_REPOSITORY}`));
+  assert.ok(args[6].includes(`SliverPublicKey=${SLIVER_PUBLIC_KEY}`));
+});
+
+test("rejects malformed Minisign keys and linker defaults that drift from pinned Sliver", () => {
+  assert.equal(validateMinisignPublicKey(ARMORY_PUBLIC_KEY), ARMORY_PUBLIC_KEY);
+  assert.throws(
+    () => validateMinisignPublicKey("RWSBpxpRWDr7Fe+VvRE3c2VEDC2NK80rlNCj+BX0gz44Xw07r6KQD9L"),
+    /canonical 42-byte Minisign public key/u,
+  );
+  assert.doesNotThrow(() => validatePinnedClientLinkerDefaults(CLIENT_MAKEFILE_DEFAULTS));
+  assert.throws(
+    () => validatePinnedClientLinkerDefaults(CLIENT_MAKEFILE_DEFAULTS.replace("RWDrD7Fe", "RWDr7Fe")),
+    /ARMORY_PUBLIC_KEY/u,
+  );
 });
 
 test("clears hostile inherited Go configuration and workspace overrides", () => {
@@ -153,6 +179,7 @@ test("emits a digest-bound native artifact and build record", async () => {
   await mkdir(sourceDirectory);
   const license = Buffer.from("test Sliver license\n");
   await writeFile(join(sourceDirectory, "LICENSE"), license);
+  await writeFile(join(sourceDirectory, "Makefile"), CLIENT_MAKEFILE_DEFAULTS);
 
   const pinnedCommit = "ca685f5eed64c3327c0e57504928cfd2d2e96bea";
   const pinnedTree = "25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1";
@@ -225,6 +252,7 @@ test("emits a digest-bound native artifact and build record", async () => {
     assert.equal(record.artifact.sha256, createHash("sha256").update(bytes).digest("hex"));
     assert.equal(record.artifact.size, bytes.byteLength);
     assert.equal(record.build.target, "linux-amd64");
+    assert.deepEqual(record.build.linkerDefaults, SLIVER_CLIENT_LINKER_DEFAULTS);
     assert.equal(record.build.slices[0].buildInfo.vcsRevision, pinnedCommit);
     assert.deepEqual(writtenRecord, record);
     assert.ok(goEnvironments.length >= 3);

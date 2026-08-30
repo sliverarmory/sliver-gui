@@ -140,6 +140,7 @@ export const IPC_EVENTS = {
   applicationUpdateChanged: "sliver:application-update:changed",
   consoleNewTabRequested: "sliver:console:new-tab-requested",
   consoleCloseTabRequested: "sliver:console:close-tab-requested",
+  consoleSelectTabRequested: "sliver:console:select-tab-requested",
   consoleSettingsRequested: "sliver:console:settings-requested",
 } as const;
 
@@ -818,6 +819,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onApplicationUpdateChanged: (listener: (state: ApplicationUpdateState) => void) => () => void;
   onConsoleNewTabRequested: (listener: () => void) => () => void;
   onConsoleCloseTabRequested: (listener: () => void) => () => void;
+  onConsoleSelectTabRequested: (listener: (index: number) => void) => () => void;
   onConsoleSettingsRequested: (listener: () => void) => () => void;
 };
 

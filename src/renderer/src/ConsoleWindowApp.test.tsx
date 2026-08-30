@@ -105,7 +105,10 @@ describe("ConsoleWindowApp", () => {
 
     expect(await screen.findByRole("main", { name: "Sliver client console window" })).toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "Sliver console tabs" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute("aria-selected", "true");
+    const initialTabButton = screen.getByRole("tab", { name: /Console 1 Connected/u });
+    expect(initialTabButton).toHaveAttribute("aria-selected", "true");
+    expect(initialTabButton).toHaveAccessibleName("Console 1 Connected, shortcut Command+1");
+    expect(initialTabButton).toHaveTextContent("⌘1");
     const terminal = screen.getByRole("region", {
       name: "Sliver client Console 1 using Production operator",
     });
@@ -142,6 +145,8 @@ describe("ConsoleWindowApp", () => {
 
     const secondTabButton = await screen.findByRole("tab", { name: /Console 2 Connected/u });
     expect(secondTabButton).toHaveAttribute("aria-selected", "true");
+    expect(secondTabButton).toHaveAccessibleName("Console 2 Connected, shortcut Command+2");
+    expect(secondTabButton).toHaveTextContent("⌘2");
     expect(api.createConsoleTab).toHaveBeenCalledOnce();
     expect(openConsoleTransport).toHaveBeenLastCalledWith({ attachmentToken: secondTab.attachmentToken });
     expect(document.querySelectorAll("[data-terminal-mock]")).toHaveLength(2);
@@ -181,6 +186,25 @@ describe("ConsoleWindowApp", () => {
     expect(secondTransport.close).toHaveBeenCalledOnce();
     expect(firstTransport.close).not.toHaveBeenCalled();
     expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("relabels positional shortcuts after a preceding tab closes", async () => {
+    openConsoleTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    installAPI({
+      createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
+      closeConsoleTab: vi.fn().mockResolvedValue(ok<ConsoleTabCloseResult>({ remainingTabs: 1 })),
+    });
+    render(<ConsoleWindowApp />);
+    await screen.findByRole("tab", { name: /Console 1 Connected/u });
+    fireEvent.click(screen.getByRole("button", { name: "New console tab" }));
+    await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    fireEvent.click(screen.getByRole("tab", { name: /Console 1 Connected/u }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close active console tab" }));
+
+    const remaining = await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    expect(remaining).toHaveAccessibleName("Console 2 Connected, shortcut Command+1");
+    expect(remaining).toHaveTextContent("⌘1");
   });
 
   it("keeps an authorized empty window after the last tab closes and can create another tab", async () => {
@@ -299,6 +323,12 @@ describe("ConsoleWindowApp", () => {
 
     act(() => api.listeners.newTab?.());
     await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    act(() => api.listeners.selectTab?.(0));
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute("aria-selected", "true");
+    act(() => api.listeners.selectTab?.(9));
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute("aria-selected", "true");
+    act(() => api.listeners.selectTab?.(1));
+    expect(screen.getByRole("tab", { name: /Console 2 Connected/u })).toHaveAttribute("aria-selected", "true");
     act(() => api.listeners.closeTab?.());
     await waitFor(() => expect(screen.queryByRole("tab", { name: /Console 2/u })).not.toBeInTheDocument());
 
@@ -397,6 +427,7 @@ function memoryStorage(): Storage {
 interface ConsoleTestListeners {
   newTab?: () => void;
   closeTab?: () => void;
+  selectTab?: (index: number) => void;
   settings?: () => void;
 }
 
@@ -421,6 +452,10 @@ function installAPI(overrides: Partial<{
     }),
     onConsoleCloseTabRequested: vi.fn((listener: () => void) => {
       listeners.closeTab = listener;
+      return vi.fn();
+    }),
+    onConsoleSelectTabRequested: vi.fn((listener: (index: number) => void) => {
+      listeners.selectTab = listener;
       return vi.fn();
     }),
     onConsoleSettingsRequested: vi.fn((listener: () => void) => {
