@@ -65,6 +65,22 @@ import type {
   ConsoleTabLaunchContext,
   ConsoleWindowLaunchContext,
 } from "./console-contracts.js";
+import type {
+  AddCredentialInput,
+  AddLootInput,
+  CopyCredentialSecretInput,
+  CredentialCatalogPage,
+  CredentialClipboardResult,
+  CredentialSecretReveal,
+  ListCredentialsInput,
+  ListLootInput,
+  LootCatalogPage,
+  LootDetail,
+  LootDownloadResult,
+  LootSummary,
+  RenameLootInput,
+  RevealCredentialSecretInput,
+} from "./operator-data-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -103,6 +119,18 @@ export const IPC_INVOKE = {
   setStagedBuilds: "sliver:build:set-staged",
   saveProfile: "sliver:profile:save",
   deleteProfile: "sliver:profile:delete",
+  listLoot: "sliver:loot:list",
+  addLoot: "sliver:loot:add-local",
+  getLootDetail: "sliver:loot:detail",
+  downloadLoot: "sliver:loot:download",
+  renameLoot: "sliver:loot:rename",
+  deleteLoot: "sliver:loot:delete",
+  listCredentials: "sliver:credential:list",
+  revealCredentialSecret: "sliver:credential:reveal-secret",
+  addCredential: "sliver:credential:add",
+  deleteCredential: "sliver:credential:delete",
+  copyCredentialSecret: "sliver:credential:copy-secret",
+  clearCredentialClipboard: "sliver:credential:clear-clipboard",
   listTargets: "sliver:target:list",
   selectTarget: "sliver:target:select",
   backgroundTarget: "sliver:target:background",
@@ -695,6 +723,54 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   };
   [IPC.deleteProfile]: {
     args: [profileName: string];
+    result: OperationResult;
+  };
+  [IPC.listLoot]: {
+    args: [input: ListLootInput];
+    result: OperationResult<LootCatalogPage>;
+  };
+  [IPC.addLoot]: {
+    args: [input: AddLootInput];
+    result: OperationResult<LootSummary>;
+  };
+  [IPC.getLootDetail]: {
+    args: [lootId: string];
+    result: OperationResult<LootDetail>;
+  };
+  [IPC.downloadLoot]: {
+    args: [lootId: string];
+    result: OperationResult<LootDownloadResult>;
+  };
+  [IPC.renameLoot]: {
+    args: [input: RenameLootInput];
+    result: OperationResult<LootSummary>;
+  };
+  [IPC.deleteLoot]: {
+    args: [lootId: string];
+    result: OperationResult;
+  };
+  [IPC.listCredentials]: {
+    args: [input: ListCredentialsInput];
+    result: OperationResult<CredentialCatalogPage>;
+  };
+  [IPC.revealCredentialSecret]: {
+    args: [input: RevealCredentialSecretInput];
+    result: OperationResult<CredentialSecretReveal>;
+  };
+  [IPC.addCredential]: {
+    args: [input: AddCredentialInput];
+    result: OperationResult;
+  };
+  [IPC.deleteCredential]: {
+    args: [credentialId: string];
+    result: OperationResult;
+  };
+  [IPC.copyCredentialSecret]: {
+    args: [input: CopyCredentialSecretInput];
+    result: OperationResult<CredentialClipboardResult>;
+  };
+  [IPC.clearCredentialClipboard]: {
+    args: [];
     result: OperationResult;
   };
   [IPC.listTargets]: {

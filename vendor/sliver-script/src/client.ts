@@ -33,6 +33,7 @@ import type {
   ImplantConfig,
   ImplantProfile,
   Loot,
+  Credential,
   WebContent,
   Compiler,
   Generate,
@@ -65,6 +66,9 @@ const M4_REMOTE_HOSTNAME_MAX_CHARACTERS = 255;
 const M4_REMOTE_SERVICE_NAME_MAX_CHARACTERS = 256;
 const M4_REMOTE_SERVICE_DESCRIPTION_MAX_CHARACTERS = 4_096;
 const M4_REMOTE_COMMAND_LINE_MAX_CHARACTERS = 32_767;
+const CREDENTIAL_ID_MAX_CHARACTERS = 64;
+const CREDENTIAL_METADATA_MAX_CHARACTERS = 256;
+const CREDENTIAL_SECRET_MAX_BYTES = 64 * 1024;
 const EVENT_RETRY_INITIAL_MS = 500;
 const EVENT_RETRY_MAX_MS = 10_000;
 
@@ -2553,6 +2557,62 @@ export class SliverClient {
     return withTimeoutSignal(timeoutSeconds, (signal) => this.artifactRpc.lootContent({ ID: lootId }, { signal }));
   }
 
+  credentialsAll(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Credential[]> {
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const response = await this.inventoryRpc.creds(this.empty, { signal });
+      return response.Credentials;
+    });
+  }
+
+  credentialById(credentialId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Credential> {
+    assertBoundedNonEmptyString(credentialId, "Credential id", CREDENTIAL_ID_MAX_CHARACTERS);
+    return withTimeoutSignal(timeoutSeconds, (signal) =>
+      this.rpc.getCredByID({ ID: credentialId }, { signal }),
+    );
+  }
+
+  credentialAdd(credential: Credential, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+    assertBoundedString(credential.Username, "Credential username", CREDENTIAL_METADATA_MAX_CHARACTERS);
+    assertBoundedString(credential.Collection, "Credential collection", CREDENTIAL_METADATA_MAX_CHARACTERS);
+    assertCredentialSecret(credential.Plaintext, "Credential plaintext");
+    assertCredentialSecret(credential.Hash, "Credential hash");
+    if (!credential.Plaintext && !credential.Hash) {
+      throw new Error("Credential plaintext or hash must not be empty");
+    }
+    if (!Number.isSafeInteger(credential.HashType)) {
+      throw new Error("Credential hash type must be an integer");
+    }
+    const request: Credential = {
+      ID: "",
+      Username: credential.Username,
+      Plaintext: credential.Plaintext,
+      Hash: credential.Hash,
+      HashType: credential.HashType,
+      IsCracked: Boolean(credential.Hash && credential.Plaintext),
+      OriginHostUUID: "",
+      Collection: credential.Collection,
+    };
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      await this.rpc.credsAdd({ Credentials: [request] }, { signal });
+    });
+  }
+
+  credentialRemove(credentialId: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<void> {
+    assertBoundedNonEmptyString(credentialId, "Credential id", CREDENTIAL_ID_MAX_CHARACTERS);
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      await this.rpc.credsRm({ Credentials: [{ ID: credentialId }] }, { signal });
+    });
+  }
+
+  credentialSniffHashType(hash: string, timeoutSeconds = DEFAULT_TIMEOUT_SECONDS): Promise<Credential["HashType"]> {
+    assertCredentialSecret(hash, "Credential hash");
+    if (!hash) throw new Error("Credential hash must not be empty");
+    return withTimeoutSignal(timeoutSeconds, async (signal) => {
+      const response = await this.rpc.credsSniffHashType({ Hash: hash }, { signal });
+      return response.HashType;
+    });
+  }
+
   websites(timeoutSeconds = DEFAULT_TIMEOUT_SECONDS) {
     return withTimeoutSignal(timeoutSeconds, async (signal) => {
       const res = await this.inventoryRpc.websites(this.empty, { signal });
@@ -2849,6 +2909,13 @@ function assertBoundedString(value: string, label: string, maxCharacters: number
 function assertBoundedNonEmptyString(value: string, label: string, maxCharacters: number): void {
   assertNonEmptyString(value, label);
   assertBoundedString(value, label, maxCharacters);
+}
+
+function assertCredentialSecret(value: string, label: string): void {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  if (Buffer.byteLength(value, "utf8") > CREDENTIAL_SECRET_MAX_BYTES) {
+    throw new Error(`${label} must not exceed ${CREDENTIAL_SECRET_MAX_BYTES} bytes`);
+  }
 }
 
 function boundedUint32(value: number, label: string): number {

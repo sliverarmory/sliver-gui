@@ -1,7 +1,7 @@
 import type { SliverClient, SliverClientConfig } from "sliver-script";
 
 /**
- * The complete, reviewed main-process Sliver surface for M0 through M2.
+ * The complete, reviewed main-process Sliver surface.
  *
  * Keeping this as an explicit Pick is a security boundary: target operations
  * cannot obtain the raw RPC client or select a method from renderer data.
@@ -28,6 +28,16 @@ export type SliverClientMethod =
   | "stageImplantBuild"
   | "saveImplantProfile"
   | "deleteImplantProfile"
+  | "lootAll"
+  | "lootAdd"
+  | "lootUpdate"
+  | "lootRemove"
+  | "lootContent"
+  | "credentialsAll"
+  | "credentialById"
+  | "credentialAdd"
+  | "credentialRemove"
+  | "credentialSniffHashType"
   | "getOperators"
   | "getSessions"
   | "getBeacons"

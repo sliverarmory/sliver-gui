@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -296,6 +296,47 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   ];
   let sessions = [seedSession(testState.sessionName)];
   let beacons = [seedBeacon(testState.beaconName)];
+  let lootStore: clientpb.Loot[] = [
+    clientpb.Loot.create({
+      ID: "591a16d2-e138-4a21-b38f-f166aa23e044",
+      Name: "incident-notes",
+      FileType: clientpb.FileType.TEXT,
+      OriginHostUUID: "76955e80-e700-4bc1-84d0-4e8090d5b900",
+      Size: "74",
+      File: {
+        Name: "incident-notes.txt",
+        Data: Buffer.from("Deterministic loot preview.\nNo renderer-authored filesystem path is required.\n"),
+      },
+    }),
+    clientpb.Loot.create({
+      ID: "47f75f14-8849-4ea6-b9b8-3c6246eb643d",
+      Name: "browser-memory",
+      FileType: clientpb.FileType.BINARY,
+      OriginHostUUID: "65c591f4-3a87-419f-bc26-c8598650742c",
+      Size: "8192",
+      File: { Name: "browser-memory.bin", Data: Buffer.alloc(8192, 0xa5) },
+    }),
+  ];
+  let credentialStore: clientpb.Credential[] = [
+    clientpb.Credential.create({
+      ID: "8f45c4cd-8309-46de-88b8-1f08b92e9541",
+      Username: "ACME\\alice",
+      Plaintext: "FAKE_CREDENTIAL_SECRET_DO_NOT_RENDER_BY_DEFAULT",
+      Hash: "8846f7eaee8fb117ad06bdd830b7586c",
+      HashType: clientpb.HashType.NTLM,
+      IsCracked: true,
+      OriginHostUUID: "65c591f4-3a87-419f-bc26-c8598650742c",
+      Collection: "workstation triage",
+    }),
+    clientpb.Credential.create({
+      ID: "9f84127a-ed9d-4316-afb0-50cd604410f2",
+      Username: "svc-backup",
+      Hash: "d41d8cd98f00b204e9800998ecf8427e",
+      HashType: clientpb.HashType.MD5,
+      OriginHostUUID: "76955e80-e700-4bc1-84d0-4e8090d5b900",
+      Collection: "manual",
+    }),
+  ];
   let workspaceFiles = [
     fakeFile(
       "notes.txt",
@@ -588,6 +629,73 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async stageImplantBuild() { return unsupported("stageImplantBuild"); },
     async saveImplantProfile() { return unsupported("saveImplantProfile"); },
     async deleteImplantProfile() { return unsupported("deleteImplantProfile"); },
+    async lootAll() {
+      record("lootAll");
+      return lootStore.map((loot) => clientpb.Loot.create({
+        ...loot,
+        File: loot.File ? { ...loot.File, Data: Buffer.alloc(0) } : undefined,
+      }));
+    },
+    async lootAdd(loot) {
+      record("lootAdd");
+      const stored = clientpb.Loot.create({
+        ...loot,
+        ID: randomUUID(),
+        Size: String(loot.File?.Data.byteLength ?? 0),
+        File: loot.File ? { ...loot.File, Data: Buffer.from(loot.File.Data) } : undefined,
+      });
+      lootStore = [...lootStore, stored];
+      eventSubject.next(fakeEvent("loot-added"));
+      return clientpb.Loot.create({
+        ...stored,
+        File: stored.File ? { ...stored.File, Data: Buffer.from(stored.File.Data) } : undefined,
+      });
+    },
+    async lootUpdate(loot) {
+      record("lootUpdate");
+      const stored = lootStore.find((candidate) => candidate.ID === loot.ID);
+      if (!stored) throw new Error("Unknown deterministic loot");
+      stored.Name = loot.Name;
+      eventSubject.next(fakeEvent("loot-added"));
+      return clientpb.Loot.create({ ...stored, File: undefined });
+    },
+    async lootRemove(lootId) {
+      record("lootRemove");
+      lootStore = lootStore.filter((loot) => loot.ID !== lootId);
+      eventSubject.next(fakeEvent("loot-removed"));
+    },
+    async lootContent(lootId) {
+      record("lootContent");
+      const loot = lootStore.find((candidate) => candidate.ID === lootId);
+      if (!loot) throw new Error("Unknown deterministic loot");
+      return clientpb.Loot.create({
+        ...loot,
+        File: loot.File ? { ...loot.File, Data: Buffer.from(loot.File.Data) } : undefined,
+      });
+    },
+    async credentialsAll() {
+      record("credentialsAll");
+      return credentialStore.map((credential) => clientpb.Credential.create(credential));
+    },
+    async credentialById(credentialId) {
+      record("credentialById");
+      const credential = credentialStore.find((candidate) => candidate.ID === credentialId);
+      if (!credential) throw new Error("Unknown deterministic credential");
+      return clientpb.Credential.create(credential);
+    },
+    async credentialAdd(credential) {
+      record("credentialAdd");
+      credentialStore = [...credentialStore, clientpb.Credential.create({ ...credential, ID: randomUUID() })];
+    },
+    async credentialRemove(credentialId) {
+      record("credentialRemove");
+      credentialStore = credentialStore.filter((credential) => credential.ID !== credentialId);
+    },
+    async credentialSniffHashType(hash) {
+      record("credentialSniffHashType");
+      if (/^[0-9a-f]{32}$/iu.test(hash)) return clientpb.HashType.MD5;
+      return clientpb.HashType.INVALID;
+    },
     async renameSession(sessionId: string, name: string) {
       record("renameSession");
       sessions = sessions.map((session) => session.ID === sessionId ? { ...session, Name: name } : session);

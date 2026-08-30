@@ -9,7 +9,7 @@ interface ConfirmDialogProps {
   confirmLabel: string;
   isPending?: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: () => void | Promise<void>;
+  onConfirm: () => void | boolean | Promise<void | boolean>;
 }
 
 export function ConfirmDialog({
@@ -44,8 +44,8 @@ export function ConfirmDialog({
                   variant="danger"
                   isPending={isPending}
                   onPress={async () => {
-                    await onConfirm();
-                    close();
+                    const confirmed = await onConfirm();
+                    if (confirmed !== false) close();
                   }}
                 >
                   {confirmLabel}

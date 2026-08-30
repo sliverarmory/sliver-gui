@@ -7085,7 +7085,7 @@
     {
       "id": "server.creds",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -7116,12 +7116,12 @@
       "testIds": [
         "parity-contract:server.creds"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI now provides paged redacted metadata, field-scoped reveal, and main-owned expiring copy. Disposable real-server verification and the remaining M6 credential slice are still pending."
     },
     {
       "id": "server.creds.add",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -7156,7 +7156,7 @@
       "testIds": [
         "parity-contract:server.creds.add"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI supports bounded singular plaintext and hash creation with main-process hash detection and byte cleanup. Duplicate reporting and disposable real-server verification remain pending."
     },
     {
       "id": "server.creds.add.file",
@@ -7199,7 +7199,7 @@
     {
       "id": "server.creds.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -7228,7 +7228,7 @@
       "testIds": [
         "parity-contract:server.creds.rm"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI supports confirmed singular removal by exact credential ID. Disposable real-server verification remains pending."
     },
     {
       "id": "server.dns",
@@ -8268,7 +8268,7 @@
     {
       "id": "server.loot",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -8300,12 +8300,12 @@
       "testIds": [
         "parity-contract:server.loot"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI now provides paged metadata with type and text search filters. Disposable real-server verification and remote collection remain pending."
     },
     {
       "id": "server.loot.fetch",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -8337,12 +8337,12 @@
       "testIds": [
         "parity-contract:server.loot.fetch"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI supports bounded text preview, binary metadata, and native atomic save without renderer filesystem paths. Disposable real-server verification remains pending."
     },
     {
       "id": "server.loot.local",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -8375,7 +8375,7 @@
       "testIds": [
         "parity-contract:server.loot.local"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI supports bounded local-file ingest through a native picker with automatic or explicit file type. Disposable real-server verification remains pending."
     },
     {
       "id": "server.loot.remote",
@@ -8418,7 +8418,7 @@
     {
       "id": "server.loot.rename",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -8447,12 +8447,12 @@
       "testIds": [
         "parity-contract:server.loot.rename"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI supports confirmed exact-ID rename and immediate inventory refresh; the upstream RPC has no compare-before-write token. Disposable real-server verification remains pending."
     },
     {
       "id": "server.loot.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -8483,7 +8483,7 @@
       "testIds": [
         "parity-contract:server.loot.rm"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "The GUI supports confirmed exact-ID removal and immediate inventory refresh; the upstream RPC has no compare-before-write token. Disposable real-server verification remains pending."
     },
     {
       "id": "server.mcp",

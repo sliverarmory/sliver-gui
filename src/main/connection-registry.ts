@@ -6,6 +6,7 @@ import { createSecureContext } from "node:tls";
 
 import {
   BrowserWindow,
+  clipboard,
   dialog,
   webContents,
   type MessageEvent,
@@ -15,6 +16,7 @@ import {
 import {
   SliverClient,
   clientpb,
+  commonpb,
   parseConfig,
   type SliverClientConfig,
   type SliverEventStreamState,
@@ -119,6 +121,25 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "../shared/execution-contracts.js";
+import {
+  OPERATOR_DATA_LIMITS,
+  type AddCredentialInput,
+  type AddLootInput,
+  type CopyCredentialSecretInput,
+  type CredentialCatalogPage,
+  type CredentialClipboardResult,
+  type CredentialHashTypeOption,
+  type CredentialSecretReveal,
+  type CredentialSummary,
+  type ListCredentialsInput,
+  type ListLootInput,
+  type LootCatalogPage,
+  type LootDetail,
+  type LootDownloadResult,
+  type LootSummary,
+  type RenameLootInput,
+  type RevealCredentialSecretInput,
+} from "../shared/operator-data-contracts.js";
 import {
   artifactFormatFromProto,
   buildImplantConfig,
@@ -337,6 +358,7 @@ const MAX_SUMMARY_LIST_ITEMS = 32;
 const OPERATION_RECONCILE_INTERVAL_MS = 2_000;
 const MAX_POOL_TASK_CLAIMS = 1_000;
 const MAX_POOL_RECOVERABLE_TASK_CLAIMS = 400;
+const CREDENTIAL_CLIPBOARD_TTL_MS = 30_000;
 const POOL_TASK_CLAIM_TTL_MS = 24 * 60 * 60_000;
 const SESSION_MUTATION_TARGET_REJECTED_MESSAGE =
   "The target rejected the session mutation. Refresh the session state before taking another action.";
@@ -496,6 +518,12 @@ export class ConnectionRegistry {
   private readonly sessionSaveLocks = new Map<string, Promise<void>>();
   private sessionSaveReservationTail: Promise<void> = Promise.resolve();
   private targetCatalogSnapshotBytes = 0;
+  private credentialClipboard?: {
+    digest: string;
+    expiresAt: number;
+    ownerContentsId: number;
+    timer: NodeJS.Timeout;
+  };
 
   private readonly configStore: OperatorConfigStore;
   private readonly clientFactory: SliverClientFactory;
@@ -569,6 +597,9 @@ export class ConnectionRegistry {
     context?.savedConfigs.clear();
     await this.streams.closeWindow(contentsId, "window-closed").catch(() => undefined);
     if (context?.poolKey) await this.releasePool(context.poolKey, contentsId).catch(() => undefined);
+    if (this.credentialClipboard?.ownerContentsId === contentsId || this.windows.size === 0) {
+      this.clearCredentialClipboardIfCurrent();
+    }
   }
 
   async closeWindowStreams(
@@ -4902,6 +4933,321 @@ export class ConnectionRegistry {
     });
   }
 
+  async listLoot(contentsId: number, input: ListLootInput): Promise<OperationResult<LootCatalogPage>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const loot = await pool.client.lootAll();
+      try {
+        assertBinding();
+        const query = (input.query ?? "").trim().toLocaleLowerCase();
+        const fileType = input.fileType ?? "all";
+        const items = loot
+          .map((item) => lootSummary(item))
+          .filter((item) => fileType === "all" || item.fileType === fileType)
+          .filter((item) => !query || [item.name, item.fileName, item.originHostId, item.id]
+            .some((value) => value.toLocaleLowerCase().includes(query)))
+          .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+        return operatorDataPage(items, input.cursor, input.limit);
+      } finally {
+        for (const item of loot) item.File?.Data.fill(0);
+      }
+    });
+  }
+
+  async addLoot(sender: WebContents, input: AddLootInput): Promise<OperationResult<LootSummary>> {
+    const owner = requireOwnerWindow(sender);
+    return this.withPool(sender.id, async (pool, assertBinding) => {
+      const selection = await dialog.showOpenDialog(owner, {
+        title: "Add local file to loot",
+        properties: ["openFile"],
+      });
+      assertBinding();
+      const filePath = selection.filePaths[0];
+      if (selection.canceled || !filePath) throw new Error("Loot selection canceled");
+      const selected = await readBoundedRegularFile(filePath, {
+        label: "Loot source",
+        maxBytes: OPERATOR_DATA_LIMITS.artifactBytes,
+      });
+      try {
+        assertBinding();
+        const fileName = safeArtifactFileName(basename(filePath));
+        const name = input.name.trim() ? requireKnownName(input.name, "Loot name") : fileName;
+        const fileType = input.fileType === "text" || (
+          input.fileType === "auto" && isProbablyTextLoot(selected.data)
+        )
+          ? clientpb.FileType.TEXT
+          : clientpb.FileType.BINARY;
+        const response = await pool.client.lootAdd(clientpb.Loot.create({
+          Name: name,
+          FileType: fileType,
+          File: commonpb.File.create({ Name: fileName, Data: selected.data }),
+        }));
+        try {
+          assertBinding();
+          return lootSummary(response);
+        } finally {
+          response.File?.Data.fill(0);
+        }
+      } finally {
+        selected.data.fill(0);
+      }
+    });
+  }
+
+  async getLootDetail(contentsId: number, lootId: string): Promise<OperationResult<LootDetail>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const item = await loadLootSummary(pool.client, lootId);
+      assertBinding();
+      if (item.fileType === "binary") return { item, previewState: "binary", preview: new Uint8Array() };
+      const declaredSize = decimalByteSize(item.sizeBytes);
+      if (declaredSize === 0n) return { item, previewState: "empty", preview: new Uint8Array() };
+      if (declaredSize > BigInt(OPERATOR_DATA_LIMITS.previewBytes)) {
+        return { item, previewState: "too-large", preview: new Uint8Array() };
+      }
+      const response = await pool.client.lootContent(lootId);
+      const data = response.File?.Data;
+      if (!data) throw new Error("The server returned no loot content");
+      try {
+        assertBinding();
+        if (response.ID && response.ID !== lootId) throw new Error("The loot changed while its preview was loading");
+        if (data.byteLength > OPERATOR_DATA_LIMITS.previewBytes) {
+          throw new Error("The loot preview exceeds the in-memory preview limit");
+        }
+        return {
+          item,
+          previewState: data.byteLength === 0 ? "empty" : "text",
+          preview: new Uint8Array(data),
+        };
+      } finally {
+        data.fill(0);
+      }
+    });
+  }
+
+  async downloadLoot(sender: WebContents, lootId: string): Promise<OperationResult<LootDownloadResult>> {
+    const owner = requireOwnerWindow(sender);
+    return this.withPool(sender.id, async (pool, assertBinding) => {
+      const item = await loadLootSummary(pool.client, lootId);
+      assertBinding();
+      if (decimalByteSize(item.sizeBytes) > BigInt(OPERATOR_DATA_LIMITS.artifactBytes)) {
+        throw new Error("The loot exceeds the local artifact size limit");
+      }
+      const fileName = safeArtifactFileName(item.fileName || item.name);
+      const selection = await dialog.showSaveDialog(owner, {
+        title: "Save loot",
+        defaultPath: fileName,
+      });
+      assertBinding();
+      if (selection.canceled || !selection.filePath) return { saved: false, fileName, size: 0 };
+      const intent = await this.reserveSessionSaveIntent(selection.filePath);
+      assertBinding();
+      const response = await pool.client.lootContent(lootId);
+      const data = response.File?.Data;
+      if (!data) throw new Error("The server returned no loot content");
+      try {
+        assertBinding();
+        if (response.ID && response.ID !== lootId) throw new Error("The loot changed while it was downloading");
+        if (data.byteLength > OPERATOR_DATA_LIMITS.artifactBytes) {
+          throw new Error("The loot exceeds the local artifact size limit");
+        }
+        const ownedCopy = Buffer.from(data);
+        try {
+          await this.commitSessionSaveIntent(intent, ownedCopy, assertBinding);
+          return { saved: true, fileName, size: data.byteLength };
+        } finally {
+          ownedCopy.fill(0);
+        }
+      } finally {
+        data.fill(0);
+      }
+    });
+  }
+
+  async renameLoot(contentsId: number, input: RenameLootInput): Promise<OperationResult<LootSummary>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      await loadLootSummary(pool.client, input.id);
+      assertBinding();
+      const response = await pool.client.lootUpdate(clientpb.Loot.create({
+        ID: input.id,
+        Name: requireKnownName(input.name, "Loot name"),
+      }));
+      try {
+        assertBinding();
+        return lootSummary(response);
+      } finally {
+        response.File?.Data.fill(0);
+      }
+    });
+  }
+
+  async deleteLoot(contentsId: number, lootId: string): Promise<OperationResult> {
+    return this.withPoolWithoutValue(contentsId, async (pool, assertBinding) => {
+      await loadLootSummary(pool.client, lootId);
+      assertBinding();
+      await pool.client.lootRemove(lootId);
+      assertBinding();
+    });
+  }
+
+  async listCredentials(
+    contentsId: number,
+    input: ListCredentialsInput,
+  ): Promise<OperationResult<CredentialCatalogPage>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const credentials = await pool.client.credentialsAll();
+      try {
+        assertBinding();
+        const summaries = credentials.map((credential) => credentialSummary(credential));
+        const collections = [...new Set(summaries.map((item) => item.collection).filter(Boolean))]
+          .sort((left, right) => left.localeCompare(right));
+        const query = (input.query ?? "").trim().toLocaleLowerCase();
+        const kind = input.kind ?? "all";
+        const filtered = summaries
+          .filter((item) => (
+            kind === "all" ||
+            (kind === "plaintext" && item.hasPlaintext) ||
+            (kind === "hash" && item.hasHash) ||
+            (kind === "cracked" && item.isCracked)
+          ))
+          .filter((item) => !query || [
+            item.username,
+            item.collection,
+            item.originHostId,
+            item.hashTypeName,
+            item.id,
+          ].some((value) => value.toLocaleLowerCase().includes(query)))
+          .sort((left, right) => left.username.localeCompare(right.username) || left.id.localeCompare(right.id));
+        return {
+          ...operatorDataPage(filtered, input.cursor, input.limit),
+          collections,
+          hashTypes: credentialHashTypeOptions(),
+        };
+      } finally {
+        for (const credential of credentials) clearCredentialSecrets(credential);
+      }
+    });
+  }
+
+  async revealCredentialSecret(
+    contentsId: number,
+    input: RevealCredentialSecretInput,
+  ): Promise<OperationResult<CredentialSecretReveal>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const credential = await pool.client.credentialById(input.id);
+      try {
+        assertBinding();
+        if (credential.ID !== input.id) throw new Error("The credential changed while its secret was loading");
+        const secret = credentialSecret(credential, input.field);
+        if (!secret) throw new Error(`This credential has no ${input.field} value`);
+        return {
+          item: credentialSummary(credential),
+          field: input.field,
+          value: new TextEncoder().encode(secret),
+        };
+      } finally {
+        clearCredentialSecrets(credential);
+      }
+    });
+  }
+
+  async addCredential(contentsId: number, input: AddCredentialInput): Promise<OperationResult> {
+    try {
+      return await this.withPoolWithoutValue(contentsId, async (pool, assertBinding) => {
+        const plaintext = new TextDecoder("utf-8", { fatal: true }).decode(input.plaintext);
+        const hash = new TextDecoder("utf-8", { fatal: true }).decode(input.hash);
+        if (!plaintext && !hash) throw new Error("A plaintext value or hash is required");
+        let hashType = clientpb.HashType.INVALID;
+        if (hash) {
+          if (input.hashType === null) {
+            const detected = await pool.client.credentialSniffHashType(hash);
+            assertBinding();
+            hashType = detected;
+          } else {
+            hashType = input.hashType;
+          }
+          if (!credentialHashTypeValues().has(hashType)) {
+            throw new Error("The hash type is unsupported or could not be detected");
+          }
+        } else if (input.hashType !== null) {
+          throw new Error("A hash type may only be selected when a hash is provided");
+        }
+        await pool.client.credentialAdd(clientpb.Credential.create({
+          Username: boundedServerText(input.username, OPERATOR_DATA_LIMITS.usernameCharacters),
+          Collection: boundedServerText(input.collection, OPERATOR_DATA_LIMITS.collectionCharacters),
+          Plaintext: plaintext,
+          Hash: hash,
+          HashType: hashType,
+          IsCracked: Boolean(hash && plaintext),
+        }));
+        assertBinding();
+      });
+    } finally {
+      input.plaintext.fill(0);
+      input.hash.fill(0);
+    }
+  }
+
+  async deleteCredential(contentsId: number, credentialId: string): Promise<OperationResult> {
+    return this.withPoolWithoutValue(contentsId, async (pool, assertBinding) => {
+      const credential = await pool.client.credentialById(credentialId);
+      try {
+        assertBinding();
+        if (credential.ID !== credentialId) throw new Error("The credential changed before it could be removed");
+        await pool.client.credentialRemove(credentialId);
+        assertBinding();
+      } finally {
+        clearCredentialSecrets(credential);
+      }
+    });
+  }
+
+  async copyCredentialSecret(
+    contentsId: number,
+    input: CopyCredentialSecretInput,
+  ): Promise<OperationResult<CredentialClipboardResult>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const credential = await pool.client.credentialById(input.id);
+      try {
+        assertBinding();
+        if (credential.ID !== input.id) throw new Error("The credential changed while its secret was loading");
+        const secret = credentialSecret(credential, input.field);
+        if (!secret) throw new Error(`This credential has no ${input.field} value`);
+        clipboard.writeText(secret);
+        // Keep an earlier app-owned cleanup timer alive if the replacement write
+        // fails. A successful synchronous write can safely supersede it here.
+        this.cancelCredentialClipboardTimer();
+        const expiresAt = this.now() + CREDENTIAL_CLIPBOARD_TTL_MS;
+        const digest = clipboardDigest(secret);
+        const timer = setTimeout(() => this.clearCredentialClipboardIfCurrent(digest), CREDENTIAL_CLIPBOARD_TTL_MS);
+        timer.unref?.();
+        this.credentialClipboard = { digest, expiresAt, ownerContentsId: contentsId, timer };
+        return { expiresAt: new Date(expiresAt).toISOString() };
+      } finally {
+        clearCredentialSecrets(credential);
+      }
+    });
+  }
+
+  clearCredentialClipboard(): OperationResult {
+    this.clearCredentialClipboardIfCurrent();
+    return { ok: true };
+  }
+
+  private cancelCredentialClipboardTimer(): void {
+    if (this.credentialClipboard) clearTimeout(this.credentialClipboard.timer);
+    delete this.credentialClipboard;
+  }
+
+  private clearCredentialClipboardIfCurrent(expectedDigest?: string): void {
+    const state = this.credentialClipboard;
+    if (!state || (expectedDigest !== undefined && state.digest !== expectedDigest)) return;
+    this.cancelCredentialClipboardTimer();
+    try {
+      if (clipboardDigest(clipboard.readText()) === state.digest) clipboard.clear();
+    } catch {
+      // Clipboard cleanup is best effort and must never replace operation state.
+    }
+  }
+
   private async startHttpListener(
     contentsId: number,
     pool: BackendPool,
@@ -7137,6 +7483,156 @@ function requireKnownName(name: string, label: string): string {
   const normalized = name.trim();
   if (!normalized || normalized.length > 256 || normalized.includes("\0")) throw new Error(`${label} is invalid`);
   return normalized;
+}
+
+async function loadLootSummary(client: SliverClientAdapter, lootId: string): Promise<LootSummary> {
+  const loot = await client.lootAll();
+  try {
+    const match = loot.find((item) => item.ID === lootId);
+    if (!match) throw new Error("The selected loot is no longer available");
+    return lootSummary(match);
+  } finally {
+    for (const item of loot) item.File?.Data.fill(0);
+  }
+}
+
+function lootSummary(loot: clientpb.Loot): LootSummary {
+  const id = operatorDataServerId(loot.ID, "loot");
+  const name = boundedServerText(loot.Name, OPERATOR_DATA_LIMITS.nameCharacters) || "Untitled loot";
+  const fileName = safeArtifactFileName(loot.File?.Name || name);
+  const sizeBytes = loot.Size || String(loot.File?.Data.byteLength ?? 0);
+  decimalByteSize(sizeBytes);
+  return {
+    id,
+    name,
+    fileName,
+    fileType: loot.FileType === clientpb.FileType.TEXT ? "text" : "binary",
+    originHostId: boundedServerText(loot.OriginHostUUID, 64),
+    sizeBytes,
+  };
+}
+
+function credentialSummary(credential: clientpb.Credential): CredentialSummary {
+  const hasHash = credential.Hash.length > 0;
+  return {
+    id: operatorDataServerId(credential.ID, "credential"),
+    username: boundedServerText(credential.Username, OPERATOR_DATA_LIMITS.usernameCharacters),
+    collection: boundedServerText(credential.Collection, OPERATOR_DATA_LIMITS.collectionCharacters),
+    originHostId: boundedServerText(credential.OriginHostUUID, 64),
+    hashType: credential.HashType,
+    hashTypeName: hasHash ? credentialHashTypeName(credential.HashType) : "None",
+    isCracked: credential.IsCracked,
+    hasPlaintext: credential.Plaintext.length > 0,
+    hasHash,
+  };
+}
+
+function credentialSecret(
+  credential: clientpb.Credential,
+  field: CopyCredentialSecretInput["field"],
+): string {
+  return field === "plaintext" ? credential.Plaintext : credential.Hash;
+}
+
+function clearCredentialSecrets(credential: clientpb.Credential): void {
+  credential.Plaintext = "";
+  credential.Hash = "";
+}
+
+function credentialHashTypeValues(): ReadonlySet<number> {
+  return new Set(credentialHashTypeOptions().map((option) => option.value));
+}
+
+function credentialHashTypeOptions(): CredentialHashTypeOption[] {
+  const options = Object.entries(clientpb.HashType)
+    .filter((entry): entry is [string, number] => (
+      typeof entry[1] === "number" &&
+      entry[1] >= 0 &&
+      entry[1] !== clientpb.HashType.INVALID
+    ))
+    .map(([name, value]) => ({
+      value,
+      name,
+      label: hashTypeLabel(name),
+    }));
+  return [...new Map(options.map((option) => [option.value, option])).values()]
+    .sort((left, right) => left.label.localeCompare(right.label) || left.value - right.value);
+}
+
+function credentialHashTypeName(value: number): string {
+  if (value === clientpb.HashType.INVALID) return "Invalid";
+  const name = clientpb.HashType[value];
+  return typeof name === "string" ? name : `Unknown (${value})`;
+}
+
+function hashTypeLabel(name: string): string {
+  return name
+    .replaceAll("_", " ")
+    .replace(/\bSha(\d)/giu, "SHA-$1")
+    .replace(/\bMd(\d)/giu, "MD$1")
+    .replace(/\bNtlm\b/giu, "NTLM");
+}
+
+function operatorDataPage<T>(
+  items: readonly T[],
+  cursor: string | undefined,
+  requestedLimit: number | undefined,
+): { items: T[]; page: LootCatalogPage["page"] } {
+  const limit = requestedLimit ?? OPERATOR_DATA_LIMITS.pageSize;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > OPERATOR_DATA_LIMITS.maxPageSize) {
+    throw new Error("The operator-data page size is invalid");
+  }
+  const offset = cursor === undefined ? 0 : Number(cursor);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("The operator-data cursor is invalid");
+  const pageItems = items.slice(offset, offset + limit);
+  const nextOffset = offset + pageItems.length;
+  const truncated = nextOffset < items.length;
+  return {
+    items: pageItems,
+    page: {
+      limit,
+      total: items.length,
+      truncated,
+      ...(truncated ? { nextCursor: String(nextOffset) } : {}),
+    },
+  };
+}
+
+function operatorDataServerId(value: string, label: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) {
+    throw new Error(`The server returned an invalid ${label} identifier`);
+  }
+  return value;
+}
+
+function boundedServerText(value: string, maximum: number): string {
+  return boundedText(value, maximum);
+}
+
+function decimalByteSize(value: string): bigint {
+  if (!/^(0|[1-9][0-9]{0,19})$/u.test(value)) throw new Error("The server returned an invalid loot size");
+  return BigInt(value);
+}
+
+function isProbablyTextLoot(data: Uint8Array): boolean {
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(data);
+    if (decoded.includes("\0")) return false;
+    let controls = 0;
+    for (const character of decoded) {
+      const code = character.codePointAt(0) ?? 0;
+      if ((code < 32 && character !== "\n" && character !== "\r" && character !== "\t") || code === 127) {
+        controls += 1;
+      }
+    }
+    return controls <= Math.max(1, Math.floor(decoded.length / 100));
+  } catch {
+    return false;
+  }
+}
+
+function clipboardDigest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function errorMessage(error: unknown): string {

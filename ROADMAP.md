@@ -941,7 +941,7 @@ and M5 does not begin until the operator accepts this delivered M4 scope.
 
 ## M6 - Operator data, collaboration, monitoring, and cracking
 
-- Status: Not started
+- Status: In progress
 - Dependencies: M1; large artifact flows also depend on M2 transfer primitives
 
 ### Operator-accessible shared C2 resources
@@ -963,9 +963,9 @@ and M5 does not begin until the operator accepts this delivered M4 scope.
 
 ### Loot
 
-- [ ] Metadata-first paginated inventory.
-- [ ] Explicit bounded text preview and binary metadata view.
-- [ ] Native save via streamed or temporary main-process storage.
+- [x] Metadata-first paginated inventory.
+- [x] Explicit bounded text preview and binary metadata view.
+- [x] Native save via streamed or temporary main-process storage.
 - [ ] Use a private per-instance temporary directory, exclusive and symlink-safe
   creation, restrictive permissions, explicit retention, and startup scavenging
   after crashes. Sensitive artifacts must not be added to OS recent-item or
@@ -976,13 +976,13 @@ and M5 does not begin until the operator accepts this delivered M4 scope.
 
 ### Credentials
 
-- [ ] Paginated, filterable credential metadata inventory.
-- [ ] Redacted values by default with deliberate reveal and copy.
-- [ ] Clipboard expiry and clear controls. Expiry clears only when the clipboard
+- [x] Paginated, filterable credential metadata inventory.
+- [x] Redacted values by default with deliberate reveal and copy.
+- [x] Clipboard expiry and clear controls. Expiry clears only when the clipboard
   still contains the value placed by this application, never a newer value the
   user copied elsewhere.
 - [ ] Add, bounded bulk import, and remove with clear duplicate/error reporting.
-- [ ] Keep plaintext, hashes, and source files out of snapshots, event summaries,
+- [x] Keep plaintext, hashes, and source files out of snapshots, event summaries,
   logs, crash reports, and persistent renderer storage.
 
 ### Hosts, IOCs, events, and monitoring

@@ -7,12 +7,14 @@ import {
   faArrowsRotate,
   faBars,
   faBolt,
+  faBoxOpen,
   faBoxesStacked,
   faComputer,
   faEllipsisVertical,
   faGear,
   faLink,
   faLinkSlash,
+  faKey,
   faPlus,
   faPowerOff,
   faSatellite,
@@ -36,6 +38,8 @@ import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
+import { LootPage } from "./pages/LootPage";
+import { CredentialsPage } from "./pages/CredentialsPage";
 import { OperationsPage } from "./pages/OperationsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import {
@@ -44,7 +48,7 @@ import {
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "settings";
+type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
 
 const infrastructureNavItems = [
   { id: "operations" as const, label: "Jobs & listeners", icon: faSatelliteDish },
@@ -55,6 +59,11 @@ const infrastructureNavItems = [
 const interactNavItems = [
   { id: "sessions" as const, label: "Sessions", icon: faComputer },
   { id: "beacons" as const, label: "Beacons", icon: faSatellite },
+];
+
+const dataNavItems = [
+  { id: "loot" as const, label: "Loot", icon: faBoxOpen },
+  { id: "credentials" as const, label: "Credentials", icon: faKey },
 ];
 
 export function App() {
@@ -461,6 +470,8 @@ export function App() {
               {view === "beacons" ? <TargetsPage key="beacons" mode="beacon" snapshot={snapshot} onSnapshot={setSnapshot} /> : null}
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
+              {view === "loot" ? <LootPage snapshot={snapshot} /> : null}
+              {view === "credentials" ? <CredentialsPage snapshot={snapshot} /> : null}
             </>
           ) : null}
         </div>
@@ -581,6 +592,26 @@ export function NavigationContent({
                 {(item.id === "sessions" ? snapshot.domains.sessions.page.total : snapshot.domains.beacons.page.total) > 0 ? (
                   <Sidebar.MenuChip>{item.id === "sessions" ? snapshot.domains.sessions.page.total : snapshot.domains.beacons.page.total}</Sidebar.MenuChip>
                 ) : null}
+              </Sidebar.MenuItem>
+            ))}
+          </Sidebar.Menu>
+        </Sidebar.Group>
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>Data</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label="Data navigation" showGuideLines={false}>
+            {dataNavItems.map((item) => (
+              <Sidebar.MenuItem
+                key={item.id}
+                id={item.id}
+                aria-label={item.label}
+                textValue={item.label}
+                isCurrent={view === item.id}
+                isDisabled={!connected}
+                tooltip={item.label}
+                onAction={() => navigate(item.id)}
+              >
+                <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
+                <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
               </Sidebar.MenuItem>
             ))}
           </Sidebar.Menu>

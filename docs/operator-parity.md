@@ -188,10 +188,10 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.crack.wordlists` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.wordlists |
 | `server.crack.wordlists.add` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.wordlists.add |
 | `server.crack.wordlists.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.wordlists.rm |
-| `server.creds` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds |
-| `server.creds.add` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds.add |
+| `server.creds` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds |
+| `server.creds.add` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds.add |
 | `server.creds.add.file` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds.add.file |
-| `server.creds.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds.rm |
+| `server.creds.rm` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.creds.rm |
 | `server.dns` | in-progress | M0 | not-applicable | not-applicable | jobs-listeners | parity-contract:server.dns |
 | `server.docs` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.docs |
 | `server.exit` | operator-out-of-scope | none | not-applicable | not-applicable | none | scope-denial:server.exit |
@@ -217,12 +217,12 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.info` | complete | M1 | not-applicable | not-applicable | targets | parity-contract:server.info |
 | `server.jobs` | in-progress | M0 | not-applicable | not-applicable | jobs-listeners | parity-contract:server.jobs, operations-job, operations-page |
 | `server.licenses` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.licenses |
-| `server.loot` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot |
-| `server.loot.fetch` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.fetch |
-| `server.loot.local` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.local |
+| `server.loot` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot |
+| `server.loot.fetch` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.fetch |
+| `server.loot.local` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.local |
 | `server.loot.remote` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.remote |
-| `server.loot.rename` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.rename |
-| `server.loot.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.rm |
+| `server.loot.rename` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.rename |
+| `server.loot.rm` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.rm |
 | `server.mcp` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.mcp |
 | `server.mcp.console` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.mcp.console |
 | `server.mcp.start` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.mcp.start |

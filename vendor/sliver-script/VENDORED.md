@@ -121,6 +121,15 @@ Submitted beacon operations return the exact upstream task ID so the main
 operation journal can reconcile task summary state without decoding arbitrary
 M4 result content through the M1 typed-result path.
 
+The credential-store overlay adds five named methods only: bounded inventory,
+detail by exact ID, singular add, singular remove, and hash-type sniffing. List
+traffic uses the inventory channel; the smaller detail and mutation requests use
+the control channel. Add and remove construct the upstream repeated-message
+envelopes internally, credential text is bounded before dispatch, and no generic
+batch or method selector is exposed. `CredsUpdate` is deliberately excluded:
+the upstream zero-value update behavior cannot reliably clear every credential
+field and exposes no conditional-write token for a safe shared-store mutation.
+
 Packaged WireGuard operator transport and native-helper certification are
 deferred beyond M0; mTLS is the M0 packaged transport baseline. This does not
 change the independently classified implant-side WireGuard commands.

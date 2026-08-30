@@ -71,6 +71,15 @@ import {
   type TargetCatalogPageRequest,
   type TargetRef,
 } from "../shared/target-contracts.js";
+import {
+  parseAddCredentialInput,
+  parseAddLootInput,
+  parseCopyCredentialSecretInput,
+  parseListCredentialsInput,
+  parseListLootInput,
+  parseOperatorDataId,
+  parseRenameLootInput,
+} from "../shared/operator-data-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import {
   parseConsoleAttachRequest,
@@ -168,6 +177,18 @@ export type IpcConnectionRegistry = Pick<
   | "setStagedBuilds"
   | "saveProfile"
   | "deleteProfile"
+  | "listLoot"
+  | "addLoot"
+  | "getLootDetail"
+  | "downloadLoot"
+  | "renameLoot"
+  | "deleteLoot"
+  | "listCredentials"
+  | "revealCredentialSecret"
+  | "addCredential"
+  | "deleteCredential"
+  | "copyCredentialSecret"
+  | "clearCredentialClipboard"
   | "listTargets"
   | "selectTarget"
   | "backgroundTarget"
@@ -422,6 +443,52 @@ export function registerIpcHandlers(
     rendererUrl,
     (args) => parseStringArguments(args, "profile name"),
     ({ contentsId }, name) => registry.deleteProfile(contentsId, name),
+  );
+  handleTrusted(IPC.listLoot, rendererUrl, parseListLootArguments, ({ contentsId }, input) =>
+    registry.listLoot(contentsId, input),
+  );
+  handleTrusted(IPC.addLoot, rendererUrl, parseAddLootArguments, ({ sender }, input) =>
+    registry.addLoot(sender, input),
+  );
+  handleTrusted(IPC.getLootDetail, rendererUrl, parseLootIdArguments, ({ contentsId }, id) =>
+    registry.getLootDetail(contentsId, id),
+  );
+  handleTrusted(IPC.downloadLoot, rendererUrl, parseLootIdArguments, ({ sender }, id) =>
+    registry.downloadLoot(sender, id),
+  );
+  handleTrusted(IPC.renameLoot, rendererUrl, parseRenameLootArguments, ({ contentsId }, input) =>
+    registry.renameLoot(contentsId, input),
+  );
+  handleTrusted(IPC.deleteLoot, rendererUrl, parseLootIdArguments, ({ contentsId }, id) =>
+    registry.deleteLoot(contentsId, id),
+  );
+  handleTrusted(IPC.listCredentials, rendererUrl, parseListCredentialsArguments, ({ contentsId }, input) =>
+    registry.listCredentials(contentsId, input),
+  );
+  handleTrusted(
+    IPC.revealCredentialSecret,
+    rendererUrl,
+    parseCredentialSecretArguments,
+    ({ contentsId }, input) => registry.revealCredentialSecret(contentsId, input),
+  );
+  handleTrusted(
+    IPC.addCredential,
+    rendererUrl,
+    parseAddCredentialArguments,
+    ({ contentsId }, input) => registry.addCredential(contentsId, input),
+    clearRawCredentialArguments,
+  );
+  handleTrusted(IPC.deleteCredential, rendererUrl, parseCredentialIdArguments, ({ contentsId }, id) =>
+    registry.deleteCredential(contentsId, id),
+  );
+  handleTrusted(
+    IPC.copyCredentialSecret,
+    rendererUrl,
+    parseCredentialSecretArguments,
+    ({ contentsId }, input) => registry.copyCredentialSecret(contentsId, input),
+  );
+  handleTrusted(IPC.clearCredentialClipboard, rendererUrl, parseNoArguments, () =>
+    registry.clearCredentialClipboard(),
   );
   handleTrusted(IPC.listTargets, rendererUrl, parseTargetCatalogPageArguments, ({ contentsId }, request) =>
     registry.listTargets(contentsId, request),
@@ -781,6 +848,84 @@ function parseTargetRefArguments(args: readonly unknown[]): [target: TargetRef] 
   return [{ mode, id, backendEpoch, domainRevision, fingerprint }];
 }
 
+function parseListLootArguments(args: readonly unknown[]): [input: ReturnType<typeof parseListLootInput>] {
+  requireArgumentCount(args, 1, "loot list input");
+  try {
+    return [parseListLootInput(args[0])];
+  } catch {
+    throw invalidArguments("loot list input");
+  }
+}
+
+function parseAddLootArguments(args: readonly unknown[]): [input: ReturnType<typeof parseAddLootInput>] {
+  requireArgumentCount(args, 1, "add loot input");
+  try {
+    return [parseAddLootInput(args[0])];
+  } catch {
+    throw invalidArguments("add loot input");
+  }
+}
+
+function parseRenameLootArguments(args: readonly unknown[]): [input: ReturnType<typeof parseRenameLootInput>] {
+  requireArgumentCount(args, 1, "rename loot input");
+  try {
+    return [parseRenameLootInput(args[0])];
+  } catch {
+    throw invalidArguments("rename loot input");
+  }
+}
+
+function parseLootIdArguments(args: readonly unknown[]): [id: string] {
+  const value = requireSingleArgument(args, "loot ID");
+  try {
+    return [parseOperatorDataId(value, "loot ID")];
+  } catch {
+    throw invalidArguments("loot ID");
+  }
+}
+
+function parseListCredentialsArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseListCredentialsInput>] {
+  requireArgumentCount(args, 1, "credential list input");
+  try {
+    return [parseListCredentialsInput(args[0])];
+  } catch {
+    throw invalidArguments("credential list input");
+  }
+}
+
+function parseCredentialIdArguments(args: readonly unknown[]): [id: string] {
+  const value = requireSingleArgument(args, "credential ID");
+  try {
+    return [parseOperatorDataId(value, "credential ID")];
+  } catch {
+    throw invalidArguments("credential ID");
+  }
+}
+
+function parseCredentialSecretArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseCopyCredentialSecretInput>] {
+  requireArgumentCount(args, 1, "credential secret input");
+  try {
+    return [parseCopyCredentialSecretInput(args[0])];
+  } catch {
+    throw invalidArguments("credential secret input");
+  }
+}
+
+function parseAddCredentialArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseAddCredentialInput>] {
+  requireArgumentCount(args, 1, "add credential input");
+  try {
+    return [parseAddCredentialInput(args[0])];
+  } catch {
+    throw invalidArguments("add credential input");
+  }
+}
+
 function parseTargetCatalogPageArguments(args: readonly unknown[]): [request: TargetCatalogPageRequest] {
   const value = requireRecord(requireSingleArgument(args, "target catalog page request"), "target catalog page request");
   const keys = Object.keys(value);
@@ -926,6 +1071,21 @@ function clearRawExecutionCredentialArguments(args: readonly unknown[]): void {
   // returns a distinct main-owned credential buffer, so erase every raw view
   // immediately on success, parse rejection, and untrusted-sender rejection.
   for (const argument of args) clearExecutionCredentialInput(argument);
+}
+
+function clearRawCredentialArguments(args: readonly unknown[]): void {
+  // These are Electron structured-clone copies. The parser gives the registry
+  // distinct main-owned buffers, so raw views can be erased immediately even
+  // when another field is malformed and parsing rejects the request.
+  for (const argument of args) {
+    try {
+      if (!isPlainRecord(argument)) continue;
+      zeroByteView(argument["plaintext"]);
+      zeroByteView(argument["hash"]);
+    } catch {
+      // Cleanup is best effort and must not replace the boundary error.
+    }
+  }
 }
 
 function clearExecutionCredentialInput(value: unknown): void {

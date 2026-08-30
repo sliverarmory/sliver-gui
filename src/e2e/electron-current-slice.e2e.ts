@@ -25,6 +25,8 @@ const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
 const M2_INITIAL_FILE_TEXT = `${M2_FILE_CONTENT}\nsecond deterministic line\n`;
 const M2_EDITED_CONTENT = "FAKE_M2_EDITED_CONTENT_DO_NOT_JOURNAL";
 const M2_SEARCH_PATTERN = "FAKE_M2_SEARCH_PATTERN_DO_NOT_JOURNAL";
+const M6_LOOT_CONTENT = "FAKE_M6_LOOT_CONTENT_DO_NOT_PERSIST_IN_RENDERER";
+const M6_CREDENTIAL_SECRET = "FAKE_M6_CREDENTIAL_SECRET_DO_NOT_RENDER_BY_DEFAULT";
 const M4_PRIVATE_KEY_SECRET = "FAKE_M4_PRIVATE_KEY_SECRET_DO_NOT_RENDER";
 const M4_SSH_STDOUT_TEXT = "deterministic M4 SSH stdout";
 const M4_SSH_STDOUT = `${M4_SSH_STDOUT_TEXT}\n`;
@@ -46,6 +48,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   const selectedConfigPath = join(temporaryRoot, "chosen-m0-operator.cfg");
   const m4PrivateKeyPath = join(temporaryRoot, "m4-e2e-private.key");
   const m4SavedOutputPath = join(temporaryRoot, "m4-ssh-stdout.txt");
+  const m6LootInputPath = join(temporaryRoot, "m6-loot-input.txt");
+  const m6LootSavedPath = join(temporaryRoot, "m6-loot-saved.txt");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   await Promise.all([
     mkdir(savedConfigDirectory, { recursive: true }),
@@ -57,6 +61,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   await writeFile(consoleClientRootMarker, "preserve shared client assets", { mode: 0o600 });
   await writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 });
   await writeFile(m4PrivateKeyPath, M4_PRIVATE_KEY_CONTENT, { mode: 0o600 });
+  await writeFile(m6LootInputPath, M6_LOOT_CONTENT, { mode: 0o600 });
 
   let electronApplication: ElectronApplication | undefined;
   let page: Page | undefined;
@@ -138,6 +143,14 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     assert.ok(stateAfterStop.methods.includes("startMTLSListener"));
     assert.ok(stateAfterStop.methods.includes("killJob"));
 
+    await verifyOperatorDataStores(
+      electronApplication,
+      page,
+      artifactDirectory,
+      m6LootInputPath,
+      m6LootSavedPath,
+    );
+
     const snapshotText = await page.evaluate(async () => {
       const browserGlobal = globalThis as unknown as {
         sliver: { getSnapshot(): Promise<unknown> };
@@ -160,6 +173,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       M2_FILE_CONTENT,
       M2_EDITED_CONTENT,
       M2_SEARCH_PATTERN,
+      M6_LOOT_CONTENT,
+      M6_CREDENTIAL_SECRET,
       M4_PRIVATE_KEY_SECRET,
       M4_SSH_STDOUT_TEXT,
       "/Users/e2e/workspace/notes.txt",
@@ -315,6 +330,125 @@ async function verifyApplicationSettings(
   assert.equal(native.themeSource, "light");
   assert.equal(native.shouldUseDarkColors, false);
   assert.match(native.background ?? "", /^#0{6}(?:00)?$/u);
+}
+
+async function verifyOperatorDataStores(
+  electronApplication: ElectronApplication,
+  page: Page,
+  artifactDirectory: string,
+  lootInputPath: string,
+  lootSavedPath: string,
+): Promise<void> {
+  await page.locator('[aria-label="Loot"]:visible').click();
+  await page.getByRole("heading", { name: "Loot", exact: true }).waitFor();
+  await page.getByText("incident-notes", { exact: true }).waitFor();
+  await page.getByText("browser-memory", { exact: true }).waitFor();
+  assert.ok((await readFakeState(electronApplication)).methods.includes("lootAll"));
+
+  await page.getByRole("button", { name: "Inspect incident-notes", exact: true }).click();
+  const seededLootDialog = page.getByRole("dialog", { name: "incident-notes", exact: true });
+  await seededLootDialog.waitFor();
+  await seededLootDialog.getByText("Deterministic loot preview.", { exact: false }).waitFor();
+  assert.ok((await readFakeState(electronApplication)).methods.includes("lootContent"));
+  await seededLootDialog.getByRole("button", { name: "Close", exact: true }).last().click();
+
+  await electronApplication.evaluate(({ dialog }, inputPath) => {
+    dialog.showOpenDialog = async () => {
+      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+      return { canceled: false, filePaths: [inputPath] };
+    };
+  }, lootInputPath);
+  await page.getByRole("button", { name: "Add local file", exact: true }).click();
+  const addLootDialog = page.getByRole("dialog", { name: "Add local loot", exact: true });
+  await addLootDialog.waitFor();
+  await addLootDialog.getByRole("textbox", { name: "Display name", exact: true }).fill("e2e-local-loot");
+  await addLootDialog.getByRole("button", { name: "Choose file and add", exact: true }).click();
+  await page.getByText("e2e-local-loot", { exact: true }).waitFor();
+  await waitForFakeMethodCount(electronApplication, "lootAdd", 1);
+
+  await electronApplication.evaluate(({ dialog }, outputPath) => {
+    dialog.showSaveDialog = async () => {
+      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+      return { canceled: false, filePath: outputPath };
+    };
+  }, lootSavedPath);
+  await page.getByRole("button", { name: "Save e2e-local-loot", exact: true }).click();
+  await page.getByText(/m6-loot-input\.txt|m6-loot-saved\.txt/u).first().waitFor();
+  assert.equal(await readFile(lootSavedPath, "utf8"), M6_LOOT_CONTENT);
+  const savedLootStats = await lstat(lootSavedPath);
+  assert.equal(savedLootStats.isFile(), true);
+  if (process.platform !== "win32") assert.equal(savedLootStats.mode & 0o777, 0o600);
+
+  await page.getByRole("button", { name: "Rename e2e-local-loot", exact: true }).click();
+  const renameDialog = page.getByRole("dialog", { name: "Rename loot", exact: true });
+  await renameDialog.getByRole("textbox", { name: "Display name", exact: true }).fill("e2e-renamed-loot");
+  await renameDialog.getByRole("button", { name: "Rename", exact: true }).click();
+  await page.getByText("e2e-renamed-loot", { exact: true }).waitFor();
+
+  const renamedLootRow = page.getByRole("row").filter({ hasText: "e2e-renamed-loot" });
+  await renamedLootRow.getByRole("button", { name: "Delete e2e-renamed-loot", exact: true }).click();
+  const lootDelete = page.getByRole("alertdialog", { name: "Delete e2e-renamed-loot?", exact: true });
+  await lootDelete.getByRole("button", { name: "Delete loot", exact: true }).click();
+  await renamedLootRow.waitFor({ state: "detached" });
+
+  await page.locator('[aria-label="Credentials"]:visible').click();
+  await page.getByRole("heading", { name: "Credentials", exact: true }).waitFor();
+  await page.getByText("ACME\\alice", { exact: true }).waitFor();
+  await page.getByText("svc-backup", { exact: true }).waitFor();
+  const redactedBody = await page.locator("body").innerText();
+  assert.ok(!redactedBody.includes("FAKE_CREDENTIAL_SECRET_DO_NOT_RENDER_BY_DEFAULT"));
+  assert.ok(!redactedBody.includes("8846f7eaee8fb117ad06bdd830b7586c"));
+
+  await page.getByRole("button", { name: "Add credential", exact: true }).click();
+  const addCredentialDialog = page.getByRole("dialog", { name: "Add credential", exact: true });
+  await addCredentialDialog.getByRole("textbox", { name: "Username", exact: true }).fill("e2e-created");
+  await addCredentialDialog.getByLabel("Plaintext value", { exact: true }).fill(M6_CREDENTIAL_SECRET);
+  await addCredentialDialog.getByRole("button", { name: "Add credential", exact: true }).click();
+  await page.getByText("e2e-created", { exact: true }).waitFor();
+  assert.ok(!(await page.locator("body").innerText()).includes(M6_CREDENTIAL_SECRET));
+  await waitForFakeMethodCount(electronApplication, "credentialAdd", 1);
+
+  const createdCredentialRow = page.getByRole("row").filter({ hasText: "e2e-created" });
+  await createdCredentialRow.getByRole("button", { name: "View credential", exact: true }).click();
+  const credentialDialog = page.getByRole("dialog", { name: "e2e-created", exact: true });
+  await credentialDialog.waitFor();
+  await credentialDialog.getByText("Redacted", { exact: true }).waitFor();
+  await credentialDialog.getByRole("button", { name: "Reveal", exact: true }).first().click();
+  await credentialDialog.getByText(M6_CREDENTIAL_SECRET, { exact: true }).waitFor();
+  await credentialDialog.getByRole("button", { name: "Hide", exact: true }).click();
+  await credentialDialog.getByText(M6_CREDENTIAL_SECRET, { exact: true }).waitFor({ state: "detached" });
+  await credentialDialog.getByRole("button", { name: "Copy", exact: true }).first().click();
+  await credentialDialog.getByRole("button", { name: "Clear clipboard", exact: true }).click();
+  await credentialDialog.getByRole("button", { name: "Done", exact: true }).click();
+
+  const credentialScreenshot = await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "operator-data-stores.png"),
+  });
+  assert.ok(!(await page.locator("body").innerText()).includes(M6_CREDENTIAL_SECRET));
+  assert.equal(credentialScreenshot.includes(Buffer.from(M6_CREDENTIAL_SECRET)), false);
+
+  await createdCredentialRow.getByRole("button", { name: "Delete credential", exact: true }).click();
+  const credentialDelete = page.getByRole("alertdialog", { name: "Delete e2e-created?", exact: true });
+  await credentialDelete.getByRole("button", { name: "Delete credential", exact: true }).click();
+  await createdCredentialRow.waitFor({ state: "detached" });
+
+  const state = await readFakeState(electronApplication);
+  for (const method of [
+    "lootAll",
+    "lootContent",
+    "lootAdd",
+    "lootUpdate",
+    "lootRemove",
+    "credentialsAll",
+    "credentialById",
+    "credentialAdd",
+    "credentialRemove",
+  ]) {
+    assert.ok(state.methods.includes(method), `expected the operator-data journey to call ${method}`);
+  }
+  await page.locator('[aria-label="Jobs & listeners"]:visible').click();
+  await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
 }
 
 async function verifySliverConsoleWindow(

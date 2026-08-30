@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,6 +28,10 @@ const electronMocks = vi.hoisted(() => ({
   fromId: vi.fn(),
   showOpenDialog: vi.fn(),
   showSaveDialog: vi.fn(),
+  clipboardText: "",
+  clipboardReadText: vi.fn(),
+  clipboardWriteText: vi.fn(),
+  clipboardClear: vi.fn(),
 }));
 
 const terminalRuntimeMocks = vi.hoisted(() => ({
@@ -36,6 +40,11 @@ const terminalRuntimeMocks = vi.hoisted(() => ({
 
 vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
+  clipboard: {
+    readText: electronMocks.clipboardReadText,
+    writeText: electronMocks.clipboardWriteText,
+    clear: electronMocks.clipboardClear,
+  },
   dialog: {
     showOpenDialog: electronMocks.showOpenDialog,
     showSaveDialog: electronMocks.showSaveDialog,
@@ -74,6 +83,13 @@ beforeEach(async () => {
   electronMocks.showOpenDialog.mockReset();
   electronMocks.showSaveDialog.mockReset();
   electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
+  electronMocks.clipboardText = "";
+  electronMocks.clipboardReadText.mockReset();
+  electronMocks.clipboardReadText.mockImplementation(() => electronMocks.clipboardText);
+  electronMocks.clipboardWriteText.mockReset();
+  electronMocks.clipboardWriteText.mockImplementation((value: string) => { electronMocks.clipboardText = value; });
+  electronMocks.clipboardClear.mockReset();
+  electronMocks.clipboardClear.mockImplementation(() => { electronMocks.clipboardText = ""; });
   terminalRuntimeMocks.loadTerminalRuntime.mockReset();
   terminalRuntimeMocks.loadTerminalRuntime.mockResolvedValue(terminalRuntimeAsset());
 });
@@ -112,6 +128,142 @@ describe("connection registry with an injected Sliver client", () => {
     expect(clients[0]?.disconnect).toHaveBeenCalledOnce();
     expect(clients[0]?.events.observed).toBe(false);
     expect(clients[0]?.streamStates.observed).toBe(false);
+  });
+
+  it("keeps loot and credential inventories metadata-only until an explicit content request", async () => {
+    const client = new FakeSliverClient();
+    const lootId = "591a16d2-e138-4a21-b38f-f166aa23e044";
+    const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    client.lootState = [clientpb.Loot.create({
+      ID: lootId,
+      Name: "operator-notes",
+      FileType: clientpb.FileType.TEXT,
+      OriginHostUUID: "76955e80-e700-4bc1-84d0-4e8090d5b900",
+      Size: "18",
+      File: { Name: "notes.txt", Data: Buffer.from("LOOT-CONTENT-SECRET") },
+    })];
+    client.credentialState = [clientpb.Credential.create({
+      ID: credentialId,
+      Username: "alice",
+      Plaintext: "CREDENTIAL-PLAINTEXT-SECRET",
+      Hash: "d41d8cd98f00b204e9800998ecf8427e",
+      HashType: clientpb.HashType.MD5,
+      IsCracked: true,
+      OriginHostUUID: "76955e80-e700-4bc1-84d0-4e8090d5b900",
+      Collection: "manual",
+    })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const loot = await registry.listLoot(1, { fileType: "all", limit: 100 });
+    const credentials = await registry.listCredentials(1, { kind: "all", limit: 100 });
+
+    expect(loot).toMatchObject({
+      ok: true,
+      value: { items: [{ id: lootId, name: "operator-notes", sizeBytes: "18" }] },
+    });
+    expect(credentials).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ id: credentialId, username: "alice", hasPlaintext: true, hasHash: true }],
+      },
+    });
+    expect(JSON.stringify({ loot, credentials })).not.toMatch(/LOOT-CONTENT-SECRET|CREDENTIAL-PLAINTEXT-SECRET|d41d8cd/iu);
+    expect(client.lootContent).not.toHaveBeenCalled();
+    expect(client.credentialById).not.toHaveBeenCalled();
+
+    const preview = await registry.getLootDetail(1, lootId);
+    expect(preview).toMatchObject({ ok: true, value: { previewState: "text" } });
+    if (!preview.ok) throw new Error(preview.error);
+    expect(new TextDecoder().decode(preview.value.preview)).toBe("LOOT-CONTENT-SECRET");
+    const revealed = await registry.revealCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    expect(revealed).toMatchObject({ ok: true, value: { field: "plaintext", item: { id: credentialId } } });
+    if (!revealed.ok) throw new Error(revealed.error);
+    expect(new TextDecoder().decode(revealed.value.value)).toBe("CREDENTIAL-PLAINTEXT-SECRET");
+    expect(revealed.value).not.toHaveProperty("hash");
+    preview.value.preview.fill(0);
+    revealed.value.value.fill(0);
+  });
+
+  it("opens the native loot save dialog before fetching content and writes a private bounded copy", async () => {
+    const client = new FakeSliverClient();
+    const lootId = "591a16d2-e138-4a21-b38f-f166aa23e044";
+    client.lootState = [clientpb.Loot.create({
+      ID: lootId,
+      Name: "operator-notes",
+      FileType: clientpb.FileType.BINARY,
+      Size: "12",
+      File: { Name: "notes.bin", Data: Buffer.from("loot-payload") },
+    })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    await expect(registry.downloadLoot(sender(1), lootId)).resolves.toEqual({
+      ok: true,
+      value: { saved: false, fileName: "notes.bin", size: 0 },
+    });
+    expect(client.lootContent).not.toHaveBeenCalled();
+
+    const destination = join(root, "saved-loot.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    await expect(registry.downloadLoot(sender(1), lootId)).resolves.toMatchObject({
+      ok: true,
+      value: { saved: true, fileName: "notes.bin", size: 12 },
+    });
+    expect(client.lootContent).toHaveBeenCalledOnce();
+    expect(await readFile(destination, "utf8")).toBe("loot-payload");
+  });
+
+  it("zeroes submitted credential buffers and clears only an unchanged copied secret", async () => {
+    const client = new FakeSliverClient();
+    const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    client.credentialState = [clientpb.Credential.create({
+      ID: credentialId,
+      Username: "alice",
+      Plaintext: "clipboard-secret",
+      HashType: clientpb.HashType.INVALID,
+      Collection: "manual",
+    })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const plaintext = new TextEncoder().encode("new-secret");
+    const hash = new Uint8Array();
+    await expect(registry.addCredential(1, {
+      username: "bob",
+      collection: "manual",
+      plaintext,
+      hash,
+      hashType: null,
+    })).resolves.toEqual({ ok: true });
+    expect(plaintext.every((byte) => byte === 0)).toBe(true);
+    expect(client.credentialAdd).toHaveBeenCalledWith(expect.objectContaining({
+      Username: "bob",
+      Plaintext: "new-secret",
+      HashType: clientpb.HashType.INVALID,
+    }));
+
+    vi.useFakeTimers();
+    const first = await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    expect(first).toMatchObject({ ok: true, value: { expiresAt: expect.any(String) } });
+    expect(electronMocks.clipboardText).toBe("clipboard-secret");
+    electronMocks.clipboardText = "operator-replaced-value";
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(electronMocks.clipboardText).toBe("operator-replaced-value");
+    expect(electronMocks.clipboardClear).not.toHaveBeenCalled();
+
+    await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    electronMocks.clipboardWriteText.mockImplementationOnce(() => { throw new Error("clipboard unavailable"); });
+    await expect(registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" })).resolves.toEqual({
+      ok: false,
+      error: "clipboard unavailable",
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(electronMocks.clipboardText).toBe("");
+    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
   });
 
   it("dispatches listener mutations and refreshes only the jobs domain", async () => {
@@ -5984,6 +6136,8 @@ class FakeSliverClient {
   jobState: clientpb.Job[] = [];
   buildState = clientpb.ImplantBuilds.create({ Configs: {}, ResourceIDs: {}, staged: {} });
   profileState = clientpb.ImplantProfiles.create({ Profiles: [] });
+  lootState: clientpb.Loot[] = [];
+  credentialState: clientpb.Credential[] = [];
   compilerState = clientpb.Compiler.create({ Targets: [], UnsupportedTargets: [] });
   sessionState = clientpb.Sessions.create({ Sessions: [] });
   beaconState = clientpb.Beacons.create({ Beacons: [] });
@@ -6291,6 +6445,55 @@ class FakeSliverClient {
   readonly deleteImplantProfile = vi.fn(async (name: string) => {
     this.profileState.Profiles = this.profileState.Profiles.filter((item) => item.Name !== name);
   });
+  readonly lootAll = vi.fn(async () => this.lootState.map((item) => clientpb.Loot.create({
+    ...item,
+    ...(item.File ? { File: { ...item.File, Data: Buffer.alloc(0) } } : {}),
+  })));
+  readonly lootAdd = vi.fn(async (loot: clientpb.Loot) => {
+    const stored = clientpb.Loot.create({
+      ...loot,
+      ID: randomUUID(),
+      Size: String(loot.File?.Data.byteLength ?? 0),
+      File: loot.File ? { ...loot.File, Data: Buffer.from(loot.File.Data) } : undefined,
+    });
+    this.lootState.push(stored);
+    return clientpb.Loot.create({
+      ...stored,
+      File: stored.File ? { ...stored.File, Data: Buffer.from(stored.File.Data) } : undefined,
+    });
+  });
+  readonly lootUpdate = vi.fn(async (loot: clientpb.Loot) => {
+    const current = this.lootState.find((item) => item.ID === loot.ID);
+    if (!current) throw new Error("unknown fake loot");
+    current.Name = loot.Name;
+    return clientpb.Loot.create({ ...current, File: undefined });
+  });
+  readonly lootRemove = vi.fn(async (lootId: string) => {
+    this.lootState = this.lootState.filter((item) => item.ID !== lootId);
+  });
+  readonly lootContent = vi.fn(async (lootId: string) => {
+    const current = this.lootState.find((item) => item.ID === lootId);
+    if (!current) throw new Error("unknown fake loot");
+    return clientpb.Loot.create({
+      ...current,
+      File: current.File ? { ...current.File, Data: Buffer.from(current.File.Data) } : undefined,
+    });
+  });
+  readonly credentialsAll = vi.fn(async () => this.credentialState.map((item) => clientpb.Credential.create(item)));
+  readonly credentialById = vi.fn(async (credentialId: string) => {
+    const current = this.credentialState.find((item) => item.ID === credentialId);
+    if (!current) throw new Error("unknown fake credential");
+    return clientpb.Credential.create(current);
+  });
+  readonly credentialAdd = vi.fn(async (credential: clientpb.Credential) => {
+    this.credentialState.push(clientpb.Credential.create({ ...credential, ID: randomUUID() }));
+  });
+  readonly credentialRemove = vi.fn(async (credentialId: string) => {
+    this.credentialState = this.credentialState.filter((item) => item.ID !== credentialId);
+  });
+  readonly credentialSniffHashType = vi.fn(async (hash: string) => (
+    /^[0-9a-f]{32}$/iu.test(hash) ? clientpb.HashType.MD5 : clientpb.HashType.INVALID
+  ));
 
   readonly adapter = {
     connect: this.connect,
@@ -6362,6 +6565,16 @@ class FakeSliverClient {
     stageImplantBuild: this.stageImplantBuild,
     saveImplantProfile: this.saveImplantProfile,
     deleteImplantProfile: this.deleteImplantProfile,
+    lootAll: this.lootAll,
+    lootAdd: this.lootAdd,
+    lootUpdate: this.lootUpdate,
+    lootRemove: this.lootRemove,
+    lootContent: this.lootContent,
+    credentialsAll: this.credentialsAll,
+    credentialById: this.credentialById,
+    credentialAdd: this.credentialAdd,
+    credentialRemove: this.credentialRemove,
+    credentialSniffHashType: this.credentialSniffHashType,
     event$: this.events.asObservable(),
     eventStreamState$: this.streamStates.asObservable(),
   } as unknown as SliverClientAdapter;

@@ -17,6 +17,7 @@ import {
   type ListenerInput,
 } from "../shared/contracts.js";
 import type { PrepareExecutionActionInput } from "../shared/execution-contracts.js";
+import type { AddCredentialInput } from "../shared/operator-data-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 
@@ -1113,6 +1114,91 @@ describe("trusted Electron IPC boundary", () => {
     expect(saveExecutionResult).not.toHaveBeenCalled();
   });
 
+  it("routes only field-scoped operator-data requests and immediately scrubs raw credential bytes", async () => {
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    let parsedInput: AddCredentialInput | undefined;
+    const addCredential = vi.fn(async (_contentsId: number, input: AddCredentialInput) => {
+      parsedInput = input;
+      await gate;
+      input.plaintext.fill(0);
+      input.hash.fill(0);
+      return { ok: true as const };
+    });
+    const revealCredentialSecret = vi.fn(async () => ({ ok: false as const, error: "reveal probe" }));
+    const listLoot = vi.fn(async () => ({ ok: false as const, error: "list probe" }));
+    registerIpcHandlers(
+      registryMock({ addCredential, revealCredentialSecret, listLoot }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event } = invokeEvent("http://127.0.0.1:5173/credentials", 77);
+    const plaintext = new TextEncoder().encode("credential-boundary-secret");
+    const hash = new TextEncoder().encode("d41d8cd98f00b204e9800998ecf8427e");
+
+    const pending = electronMocks.handlers.get(IPC.addCredential)?.(event, {
+      username: "alice",
+      collection: "manual",
+      plaintext,
+      hash,
+      hashType: 0,
+    });
+
+    expect(isZeroBytes(plaintext)).toBe(true);
+    expect(isZeroBytes(hash)).toBe(true);
+    expect(addCredential).toHaveBeenCalledOnce();
+    expect(addCredential.mock.calls[0]?.[0]).toBe(77);
+    expect(parsedInput?.plaintext).not.toBe(plaintext);
+    expect(parsedInput?.hash).not.toBe(hash);
+    expect(parsedInput && isZeroBytes(parsedInput.plaintext)).toBe(false);
+
+    await expect(electronMocks.handlers.get(IPC.revealCredentialSecret)?.(event, {
+      id: "80ae1382-e6e2-44d6-a663-537cafb60e74",
+      field: "hash",
+    })).resolves.toEqual({ ok: false, error: "reveal probe" });
+    expect(revealCredentialSecret).toHaveBeenCalledExactlyOnceWith(77, {
+      id: "80ae1382-e6e2-44d6-a663-537cafb60e74",
+      field: "hash",
+    });
+    await expect(electronMocks.handlers.get(IPC.listLoot)?.(event, { fileType: "text", limit: 25 }))
+      .resolves.toEqual({ ok: false, error: "list probe" });
+    expect(listLoot).toHaveBeenCalledExactlyOnceWith(77, { fileType: "text", limit: 25 });
+
+    releaseGate();
+    await expect(pending).resolves.toEqual({ ok: true });
+    expect(parsedInput && isZeroBytes(parsedInput.plaintext)).toBe(true);
+    expect(parsedInput && isZeroBytes(parsedInput.hash)).toBe(true);
+  });
+
+  it("scrubs credential-shaped bytes on operator-data parse and trust rejection", () => {
+    const addCredential = vi.fn(async () => ({ ok: true as const }));
+    registerIpcHandlers(registryMock({ addCredential }), vi.fn(), RENDERER_URL);
+    const trusted = invokeEvent("http://127.0.0.1:5173/credentials", 77);
+    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/credentials", 88);
+    const malformedSecret = new TextEncoder().encode("malformed-secret");
+
+    expect(() => electronMocks.handlers.get(IPC.addCredential)?.(trusted.event, {
+      username: "alice",
+      collection: "manual",
+      plaintext: malformedSecret,
+      hash: new Uint8Array(),
+      hashType: null,
+      path: "/tmp/renderer-authored",
+    })).toThrow(/invalid add credential input/iu);
+    expect(isZeroBytes(malformedSecret)).toBe(true);
+
+    const untrustedSecret = new TextEncoder().encode("untrusted-secret");
+    expect(() => electronMocks.handlers.get(IPC.addCredential)?.(untrusted.event, {
+      username: "alice",
+      collection: "manual",
+      plaintext: untrustedSecret,
+      hash: new Uint8Array(),
+      hashType: null,
+    })).toThrow(/untrusted renderer/iu);
+    expect(isZeroBytes(untrustedSecret)).toBe(true);
+    expect(addCredential).not.toHaveBeenCalled();
+  });
+
   it("transfers one validated stream port with the exact main-frame identity", () => {
     const attachStream = vi.fn();
     registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
@@ -1246,6 +1332,18 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     setStagedBuilds: vi.fn(unavailable),
     saveProfile: vi.fn(unavailable),
     deleteProfile: vi.fn(unavailable),
+    listLoot: vi.fn(unavailable),
+    addLoot: vi.fn(unavailable),
+    getLootDetail: vi.fn(unavailable),
+    downloadLoot: vi.fn(unavailable),
+    renameLoot: vi.fn(unavailable),
+    deleteLoot: vi.fn(unavailable),
+    listCredentials: vi.fn(unavailable),
+    revealCredentialSecret: vi.fn(unavailable),
+    addCredential: vi.fn(unavailable),
+    deleteCredential: vi.fn(unavailable),
+    copyCredentialSecret: vi.fn(unavailable),
+    clearCredentialClipboard: vi.fn(() => ({ ok: true as const })),
     listTargets: vi.fn(unavailable),
     selectTarget: vi.fn(unavailable),
     backgroundTarget: vi.fn(unavailable),

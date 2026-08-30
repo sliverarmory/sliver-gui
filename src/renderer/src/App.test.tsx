@@ -60,8 +60,11 @@ function installSliverAPI(
     connectSavedConfig: vi.fn(failedOperation),
     deleteBuild: vi.fn(failedOperation),
     deleteProfile: vi.fn(failedOperation),
+    deleteLoot: vi.fn(failedOperation),
+    deleteCredential: vi.fn(failedOperation),
     disconnect: vi.fn(failedOperation),
     downloadBuild: vi.fn(failedOperation),
+    downloadLoot: vi.fn(failedOperation),
     exitApp: vi.fn(failedOperation),
     getApplicationSettings: vi.fn().mockResolvedValue(DEFAULT_APPLICATION_SETTINGS_STATE),
     updateApplicationSettings: vi.fn(async (input) => ({
@@ -83,12 +86,16 @@ function installSliverAPI(
     generate: vi.fn(failedOperation),
     generateFromProfile: vi.fn(failedOperation),
     getBeaconTask: vi.fn(failedOperation),
+    getLootDetail: vi.fn(failedOperation),
+    revealCredentialSecret: vi.fn(failedOperation),
     getTerminalRuntime: vi.fn(failedOperation),
     getSnapshot: vi.fn().mockResolvedValue(initialSnapshot),
     getTargetOperation: vi.fn(failedOperation),
     getExecutionResult: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
+    listLoot: vi.fn(failedOperation),
+    listCredentials: vi.fn(failedOperation),
     listLocalNetworkInterfaces: vi.fn(failedOperation),
     listSavedConfigs,
     listSessionShells: vi.fn(failedOperation),
@@ -127,6 +134,11 @@ function installSliverAPI(
     refresh: vi.fn(failedOperation),
     removeSavedConfig: vi.fn(failedOperation),
     saveProfile: vi.fn(failedOperation),
+    addLoot: vi.fn(failedOperation),
+    renameLoot: vi.fn(failedOperation),
+    addCredential: vi.fn(failedOperation),
+    copyCredentialSecret: vi.fn(failedOperation),
+    clearCredentialClipboard: vi.fn(failedOperation),
     selectTarget: vi.fn(failedOperation),
     setBeaconWatch: vi.fn(failedOperation),
     setStagedBuilds: vi.fn(failedOperation),
@@ -756,6 +768,45 @@ describe("Sidebar navigation", () => {
     return onViewChange;
   }
 
+  it("opens the loot and credential stores from the shared Data navigation", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      status: "connected",
+      epoch: 7,
+      incarnation: 3,
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+    vi.mocked(api.listLoot).mockResolvedValue({
+      ok: true,
+      value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+    vi.mocked(api.listCredentials).mockResolvedValue({
+      ok: true,
+      value: {
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+        collections: [],
+        hashTypes: [],
+      },
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    const data = screen.getByRole("treegrid", { name: "Data navigation" });
+    await user.click(within(data).getByRole("row", { name: "Loot" }));
+    expect(await screen.findByRole("heading", { name: "Loot" })).toBeInTheDocument();
+    await waitFor(() => expect(api.listLoot).toHaveBeenCalledOnce());
+
+    await user.click(within(data).getByRole("row", { name: "Credentials" }));
+    expect(await screen.findByRole("heading", { name: "Credentials" })).toBeInTheDocument();
+    await waitFor(() => expect(api.listCredentials).toHaveBeenCalledOnce());
+  });
+
   it("uses the approved Sliver creature glyph for the sidebar brand mark", () => {
     renderNavigation(true);
 
@@ -804,7 +855,7 @@ describe("Sidebar navigation", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
-  it("places Sessions and Beacons in a distinct Interact section on the desktop sidebar", async () => {
+  it("keeps interaction and stored operator data in distinct desktop sidebar sections", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -836,11 +887,13 @@ describe("Sidebar navigation", () => {
 
     const infrastructure = screen.getByRole("treegrid", { name: "Infrastructure navigation" });
     const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
+    const data = screen.getByRole("treegrid", { name: "Data navigation" });
     expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
     expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
     expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
     expect(within(infrastructure).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
     expect(within(infrastructure).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();
+    expect(within(infrastructure).queryByRole("row", { name: "Loot" })).not.toBeInTheDocument();
     const sessionsItem = within(interact).getByRole("row", { name: "Sessions" });
     const beaconsItem = within(interact).getByRole("row", { name: "Beacons" });
     expect(sessionsItem).toBeInTheDocument();
@@ -848,11 +901,19 @@ describe("Sidebar navigation", () => {
     expect(within(sessionsItem).getByText("501")).toBeInTheDocument();
     expect(within(beaconsItem).getByText("702")).toBeInTheDocument();
     expect(screen.getByText("Interact")).toBeInTheDocument();
+    expect(within(data).getByRole("row", { name: "Loot" })).toBeInTheDocument();
+    expect(within(data).getByRole("row", { name: "Credentials" })).toBeInTheDocument();
+    expect(within(data).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(screen.getByText("Data")).toBeInTheDocument();
 
     await user.click(sessionsItem);
     expect(onViewChange).toHaveBeenCalledWith("sessions");
     await user.click(beaconsItem);
     expect(onViewChange).toHaveBeenCalledWith("beacons");
+    await user.click(within(data).getByRole("row", { name: "Loot" }));
+    expect(onViewChange).toHaveBeenCalledWith("loot");
+    await user.click(within(data).getByRole("row", { name: "Credentials" }));
+    expect(onViewChange).toHaveBeenCalledWith("credentials");
   });
 
   it("keeps Sessions current while an exact row opens the dedicated session workspace", async () => {
@@ -1015,10 +1076,13 @@ describe("Sidebar navigation", () => {
       await user.click(screen.getByRole("button", { name: "Open mobile navigation" }));
       const infrastructure = await screen.findByRole("treegrid", { name: "Infrastructure navigation" });
       const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
+      const data = await screen.findByRole("treegrid", { name: "Data navigation" });
       expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
       expect(within(interact).getByRole("row", { name: "Sessions" })).toBeInTheDocument();
+      expect(within(data).getByRole("row", { name: "Loot" })).toBeInTheDocument();
+      expect(within(data).getByRole("row", { name: "Credentials" })).toBeInTheDocument();
       await user.click(within(interact).getByRole("row", { name: "Beacons" }));
       expect(onViewChange).toHaveBeenCalledWith("beacons");
       await waitFor(() => expect(screen.queryByRole("treegrid", { name: "Interact navigation" })).not.toBeInTheDocument());
