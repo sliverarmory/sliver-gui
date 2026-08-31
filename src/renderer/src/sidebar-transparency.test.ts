@@ -38,6 +38,7 @@ describe("sidebar glass styles", () => {
   });
 
   it("keeps the desktop brand header draggable and collapsed rail controls aligned", () => {
+    expect(styles).not.toMatch(/\.brand-block\s*\{[^}]*border-bottom:/s);
     expect(styles).toMatch(
       /\.sidebar\.app-sidebar\s*>\s*\.brand-block\s*\{[^}]*-webkit-app-region:\s*drag;[^}]*padding-block-start:\s*2rem;/s,
     );

@@ -329,7 +329,7 @@ async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Pr
   );
   assert.ok(
     Math.abs(brandHeaderBox.height - appHeaderBox.height) <= 1.5,
-    "sidebar and application header dividers must stay aligned",
+    "sidebar brand block and application header must stay aligned",
   );
   assert.ok(
     Math.abs(sessionsContentBox.width - sessionsContentBox.height) <= 0.5,
