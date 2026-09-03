@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Chip, Tooltip, toast } from "@heroui/react";
+import { Button, Card, Chip, Pagination, Tabs, Tooltip, toast } from "@heroui/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
-import type { DataGridColumn, DataGridSelection } from "@heroui-pro/react/data-grid";
+import type {
+  DataGridColumn,
+  DataGridSelection,
+  DataGridSortDescriptor,
+} from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -22,6 +26,8 @@ interface BuildsPageProps {
   snapshot: SliverSnapshot;
 }
 
+const TABLE_PAGE_SIZE = 10;
+
 type DeleteTarget =
   | { kind: "build"; name: string }
   | { kind: "profile"; name: string }
@@ -40,11 +46,44 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>();
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdatingStage, setIsUpdatingStage] = useState(false);
+  const [buildPage, setBuildPage] = useState(1);
+  const [profilePage, setProfilePage] = useState(1);
+  const [buildSortDescriptor, setBuildSortDescriptor] = useState<DataGridSortDescriptor>();
+  const [profileSortDescriptor, setProfileSortDescriptor] = useState<DataGridSortDescriptor>();
   const isStageDirty = stagingAuthoritative && setKey(draftStaged) !== serverStagedKey;
+  const buildPageCount = pageCount(snapshot.builds.length);
+  const profilePageCount = pageCount(snapshot.profiles.length);
+  const currentBuildPage = Math.min(buildPage, buildPageCount);
+  const currentProfilePage = Math.min(profilePage, profilePageCount);
+
+  const sortedBuilds = useMemo(
+    () => sortRows(snapshot.builds, buildSortDescriptor, buildSortValue),
+    [snapshot.builds, buildSortDescriptor],
+  );
+  const sortedProfiles = useMemo(
+    () => sortRows(snapshot.profiles, profileSortDescriptor, profileSortValue),
+    [snapshot.profiles, profileSortDescriptor],
+  );
+  const visibleBuilds = useMemo(
+    () => pageRows(sortedBuilds, currentBuildPage),
+    [sortedBuilds, currentBuildPage],
+  );
+  const visibleProfiles = useMemo(
+    () => pageRows(sortedProfiles, currentProfilePage),
+    [sortedProfiles, currentProfilePage],
+  );
 
   useEffect(() => {
     setDraftStaged(new Set(serverStaged));
   }, [serverStagedKey]);
+
+  useEffect(() => {
+    setBuildPage((page) => Math.min(page, buildPageCount));
+  }, [buildPageCount]);
+
+  useEffect(() => {
+    setProfilePage((page) => Math.min(page, profilePageCount));
+  }, [profilePageCount]);
 
   async function downloadBuild(name: string) {
     const result = await window.sliver.downloadBuild(name);
@@ -244,81 +283,126 @@ export function BuildsPage({ snapshot }: BuildsPageProps) {
         </div>
       </section>
 
-      <Card variant="secondary" className="overflow-hidden">
-        <Card.Header className="flex-row items-center gap-3">
-          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxArchive} /></span>
-          <div className="min-w-0 flex-1">
-            <Card.Title>Archived builds</Card.Title>
-            <Card.Description>
-              {stagingAuthoritative
-                ? "Selection controls the server's complete HTTP staging allowlist."
-                : "HTTP staging changes are unavailable until the complete build inventory is loaded."}
-            </Card.Description>
-          </div>
-          {isStageDirty ? <Chip size="sm" color="warning" variant="soft">Unsaved staging changes</Chip> : null}
-        </Card.Header>
-        <Card.Content className="p-0">
-          <DataGrid
-            aria-label="Archived Sliver builds"
-            data={snapshot.builds}
-            columns={buildColumns}
-            getRowId={(build) => build.name}
-            {...(stagingAuthoritative
-              ? {
-                  selectionMode: "multiple" as const,
-                  selectionBehavior: "toggle" as const,
-                  showSelectionCheckboxes: true,
-                  selectedKeys: draftStaged,
-                  onSelectionChange: (selection: DataGridSelection) => setDraftStaged(selectionToSet(selection, snapshot.builds)),
-                }
-              : {})}
-            variant="secondary"
-            contentClassName="min-w-[1040px]"
-            renderEmptyState={() => <BuildEmptyState />}
-          />
-        </Card.Content>
-        {!stagingAuthoritative ? (
-          <Card.Footer className="border-t border-warning/30 bg-warning/10 px-5 py-4" role="status">
-            <p className="text-xs text-warning">
-              Showing {snapshot.builds.length} of {buildInventory.page.total} builds. Staging selection is read-only because
-              a replace-all update could remove unseen server builds.
-            </p>
-          </Card.Footer>
-        ) : isStageDirty ? (
-          <Card.Footer className="flex items-center justify-between border-t border-border px-5 py-4">
-            <p className="text-xs text-muted">This is a replace-all operation; unchecked builds stop being stageable.</p>
-            <div className="flex gap-2">
-              <Button size="sm" variant="tertiary" onPress={() => setDraftStaged(new Set(serverStaged))}>
-                <FontAwesomeIcon icon={faXmark} /> Discard
-              </Button>
-              <Button size="sm" isPending={isUpdatingStage} onPress={() => void applyStagedBuilds()}>
-                <FontAwesomeIcon icon={faLayerGroup} /> Apply staging set
-              </Button>
-            </div>
-          </Card.Footer>
-        ) : null}
-      </Card>
+      <Tabs defaultSelectedKey="builds" variant="secondary">
+        <Tabs.ListContainer className="w-fit max-w-full">
+          <Tabs.List aria-label="Builds and profiles tables">
+            <Tabs.Tab id="builds">
+              Builds
+              <Tabs.Indicator />
+            </Tabs.Tab>
+            <Tabs.Tab id="profiles">
+              Profiles
+              <Tabs.Indicator />
+            </Tabs.Tab>
+          </Tabs.List>
+        </Tabs.ListContainer>
 
-      <Card variant="secondary" className="overflow-hidden">
-        <Card.Header className="flex-row items-center gap-3">
-          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faFileShield} /></span>
-          <div className="min-w-0 flex-1">
-            <Card.Title>Generation profiles</Card.Title>
-            <Card.Description>Reusable configurations stored on the connected server.</Card.Description>
-          </div>
-        </Card.Header>
-        <Card.Content className="p-0">
-          <DataGrid
-            aria-label="Sliver generation profiles"
-            data={snapshot.profiles}
-            columns={profileColumns}
-            getRowId={(profile) => profile.name}
-            variant="secondary"
-            contentClassName="min-w-[860px]"
-            renderEmptyState={() => <ProfileEmptyState />}
-          />
-        </Card.Content>
-      </Card>
+        <Tabs.Panel className="pt-6" id="builds">
+          <Card variant="secondary" className="overflow-hidden">
+            <Card.Header className="flex-row items-center gap-3">
+              <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxArchive} /></span>
+              <div className="min-w-0 flex-1">
+                <Card.Title>Archived builds</Card.Title>
+                <Card.Description>
+                  {stagingAuthoritative
+                    ? "Selection controls the server's complete HTTP staging allowlist."
+                    : "HTTP staging changes are unavailable until the complete build inventory is loaded."}
+                </Card.Description>
+              </div>
+              {isStageDirty ? <Chip size="sm" color="warning" variant="soft">Unsaved staging changes</Chip> : null}
+            </Card.Header>
+            <Card.Content className="p-0">
+              <DataGrid
+                aria-label="Archived Sliver builds"
+                data={visibleBuilds}
+                columns={buildColumns}
+                getRowId={(build) => build.name}
+                {...(buildSortDescriptor ? { sortDescriptor: buildSortDescriptor } : {})}
+                onSortChange={(descriptor) => {
+                  setBuildSortDescriptor(descriptor);
+                  setBuildPage(1);
+                }}
+                {...(stagingAuthoritative
+                  ? {
+                      selectionMode: "multiple" as const,
+                      selectionBehavior: "toggle" as const,
+                      showSelectionCheckboxes: true,
+                      selectedKeys: draftStaged,
+                      onSelectionChange: (selection: DataGridSelection) => {
+                        setDraftStaged((current) => (
+                          mergePageSelection(current, selection, visibleBuilds)
+                        ));
+                      },
+                    }
+                  : {})}
+                variant="secondary"
+                contentClassName="min-w-[1040px]"
+                renderEmptyState={() => <BuildEmptyState />}
+              />
+              <TablePagination
+                itemName="build"
+                page={currentBuildPage}
+                totalItems={snapshot.builds.length}
+                onPageChange={setBuildPage}
+              />
+            </Card.Content>
+            {!stagingAuthoritative ? (
+              <Card.Footer className="border-t border-warning/30 bg-warning/10 px-5 py-4" role="status">
+                <p className="text-xs text-warning">
+                  Showing {snapshot.builds.length} of {buildInventory.page.total} builds. Staging selection is read-only because
+                  a replace-all update could remove unseen server builds.
+                </p>
+              </Card.Footer>
+            ) : isStageDirty ? (
+              <Card.Footer className="flex items-center justify-between border-t border-border px-5 py-4">
+                <p className="text-xs text-muted">This is a replace-all operation; unchecked builds stop being stageable.</p>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="tertiary" onPress={() => setDraftStaged(new Set(serverStaged))}>
+                    <FontAwesomeIcon icon={faXmark} /> Discard
+                  </Button>
+                  <Button size="sm" isPending={isUpdatingStage} onPress={() => void applyStagedBuilds()}>
+                    <FontAwesomeIcon icon={faLayerGroup} /> Apply staging set
+                  </Button>
+                </div>
+              </Card.Footer>
+            ) : null}
+          </Card>
+        </Tabs.Panel>
+
+        <Tabs.Panel className="pt-6" id="profiles">
+          <Card variant="secondary" className="overflow-hidden">
+            <Card.Header className="flex-row items-center gap-3">
+              <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faFileShield} /></span>
+              <div className="min-w-0 flex-1">
+                <Card.Title>Generation profiles</Card.Title>
+                <Card.Description>Reusable configurations stored on the connected server.</Card.Description>
+              </div>
+            </Card.Header>
+            <Card.Content className="p-0">
+              <DataGrid
+                aria-label="Sliver generation profiles"
+                data={visibleProfiles}
+                columns={profileColumns}
+                getRowId={(profile) => profile.name}
+                {...(profileSortDescriptor ? { sortDescriptor: profileSortDescriptor } : {})}
+                onSortChange={(descriptor) => {
+                  setProfileSortDescriptor(descriptor);
+                  setProfilePage(1);
+                }}
+                variant="secondary"
+                contentClassName="min-w-[860px]"
+                renderEmptyState={() => <ProfileEmptyState />}
+              />
+              <TablePagination
+                itemName="profile"
+                page={currentProfilePage}
+                totalItems={snapshot.profiles.length}
+                onPageChange={setProfilePage}
+              />
+            </Card.Content>
+          </Card>
+        </Tabs.Panel>
+      </Tabs>
 
       <ConfirmDialog
         isOpen={Boolean(deleteTarget)}
@@ -389,9 +473,128 @@ function ProfileEmptyState() {
   );
 }
 
-function selectionToSet(selection: DataGridSelection, builds: BuildSummary[]): Set<string> {
-  if (selection === "all") return new Set(builds.map((build) => build.name));
-  return new Set([...selection].map(String));
+function TablePagination({
+  itemName,
+  page,
+  totalItems,
+  onPageChange,
+}: {
+  itemName: "build" | "profile";
+  page: number;
+  totalItems: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalItems <= TABLE_PAGE_SIZE) return null;
+
+  const totalPages = pageCount(totalItems);
+  const firstItem = (page - 1) * TABLE_PAGE_SIZE + 1;
+  const lastItem = Math.min(page * TABLE_PAGE_SIZE, totalItems);
+  const pluralName = `${itemName}s`;
+
+  return (
+    <Pagination
+      aria-label={`${pluralName} table pages`}
+      className="border-t border-separator px-5 py-3"
+      size="sm"
+    >
+      <Pagination.Summary>
+        <span className="tabular-nums">{firstItem}–{lastItem}</span> of {totalItems} {pluralName}
+      </Pagination.Summary>
+      <Pagination.Content>
+        <Pagination.Item>
+          <Pagination.Previous
+            aria-label={`Previous ${itemName} page`}
+            isDisabled={page === 1}
+            onPress={() => onPageChange(page - 1)}
+          >
+            <Pagination.PreviousIcon />
+            <span>Previous</span>
+          </Pagination.Previous>
+        </Pagination.Item>
+        {paginationTokens(page, totalPages).map((token) => (
+          token === "start-ellipsis" || token === "end-ellipsis" ? (
+            <Pagination.Item key={token}>
+              <Pagination.Ellipsis />
+            </Pagination.Item>
+          ) : (
+            <Pagination.Item key={token}>
+              <Pagination.Link
+                aria-label={`${pluralName} page ${token}`}
+                isActive={token === page}
+                onPress={() => onPageChange(token)}
+              >
+                {token}
+              </Pagination.Link>
+            </Pagination.Item>
+          )
+        ))}
+        <Pagination.Item>
+          <Pagination.Next
+            aria-label={`Next ${itemName} page`}
+            isDisabled={page === totalPages}
+            onPress={() => onPageChange(page + 1)}
+          >
+            <span>Next</span>
+            <Pagination.NextIcon />
+          </Pagination.Next>
+        </Pagination.Item>
+      </Pagination.Content>
+    </Pagination>
+  );
+}
+
+function pageCount(totalItems: number): number {
+  return Math.max(1, Math.ceil(totalItems / TABLE_PAGE_SIZE));
+}
+
+function pageRows<T>(rows: T[], page: number): T[] {
+  const firstIndex = (page - 1) * TABLE_PAGE_SIZE;
+  return rows.slice(firstIndex, firstIndex + TABLE_PAGE_SIZE);
+}
+
+function paginationTokens(page: number, totalPages: number): Array<number | "start-ellipsis" | "end-ellipsis"> {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  if (page <= 4) return [1, 2, 3, 4, 5, "end-ellipsis", totalPages];
+  if (page >= totalPages - 3) {
+    return [1, "start-ellipsis", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+  }
+  return [1, "start-ellipsis", page - 1, page, page + 1, "end-ellipsis", totalPages];
+}
+
+function sortRows<T>(
+  rows: T[],
+  descriptor: DataGridSortDescriptor | undefined,
+  valueForColumn: (row: T, column: string) => string,
+): T[] {
+  if (!descriptor) return rows;
+  const direction = descriptor.direction === "descending" ? -1 : 1;
+  const column = String(descriptor.column);
+  return [...rows].sort((left, right) => (
+    valueForColumn(left, column).localeCompare(valueForColumn(right, column)) * direction
+  ));
+}
+
+function buildSortValue(build: BuildSummary, column: string): string {
+  return column === "target" ? build.target : build.name;
+}
+
+function profileSortValue(profile: ProfileSummary): string {
+  return profile.name;
+}
+
+function mergePageSelection(
+  current: Set<string>,
+  selection: DataGridSelection,
+  visibleBuilds: BuildSummary[],
+): Set<string> {
+  const next = new Set(current);
+  for (const build of visibleBuilds) next.delete(build.name);
+  if (selection === "all") {
+    for (const build of visibleBuilds) next.add(build.name);
+  } else {
+    for (const key of selection) next.add(String(key));
+  }
+  return next;
 }
 
 function setKey(values: Set<string>): string {
