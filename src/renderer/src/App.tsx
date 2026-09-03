@@ -13,9 +13,11 @@ import {
   faGear,
   faLink,
   faLinkSlash,
+  faMagnifyingGlass,
   faKey,
   faPlus,
   faPowerOff,
+  faRotate,
   faSatellite,
   faSatelliteDish,
   faTerminal,
@@ -33,6 +35,11 @@ import {
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
 import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import sliverSidebarIcon from "./assets/sliver-sidebar.png";
+import {
+  AppCommandPalette,
+  type AppCommandPaletteCommand,
+} from "./components/AppCommandPalette";
+import { CommandPaletteShortcutKbd } from "./components/CommandPaletteShortcut";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
 import { BuildsPage } from "./pages/BuildsPage";
@@ -50,19 +57,29 @@ import { TargetsPage } from "./pages/TargetsPage";
 type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
 
 const infrastructureNavItems = [
-  { id: "operations" as const, label: "Jobs & listeners", icon: faSatelliteDish },
-  { id: "generate" as const, label: "Generate", icon: faBolt },
-  { id: "artifacts" as const, label: "Builds & profiles", icon: faBoxesStacked },
+  {
+    id: "operations" as const,
+    label: "Jobs & listeners",
+    description: "Manage server jobs and listener endpoints.",
+    icon: faSatelliteDish,
+  },
+  { id: "generate" as const, label: "Generate", description: "Create implant artifacts.", icon: faBolt },
+  {
+    id: "artifacts" as const,
+    label: "Builds & profiles",
+    description: "Browse generated builds and reusable profiles.",
+    icon: faBoxesStacked,
+  },
 ];
 
 const interactNavItems = [
-  { id: "sessions" as const, label: "Sessions", icon: faComputer },
-  { id: "beacons" as const, label: "Beacons", icon: faSatellite },
+  { id: "sessions" as const, label: "Sessions", description: "Browse interactive sessions.", icon: faComputer },
+  { id: "beacons" as const, label: "Beacons", description: "Browse asynchronous beacons.", icon: faSatellite },
 ];
 
 const dataNavItems = [
-  { id: "loot" as const, label: "Loot", icon: faBoxOpen },
-  { id: "credentials" as const, label: "Credentials", icon: faKey },
+  { id: "loot" as const, label: "Loot", description: "Browse collected files.", icon: faBoxOpen },
+  { id: "credentials" as const, label: "Credentials", description: "Browse collected credentials.", icon: faKey },
 ];
 
 type NavigationItem =
@@ -119,6 +136,7 @@ export function App() {
   );
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const [view, setView] = useState<ViewId>("operations");
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [isConnecting, setIsConnecting] = useState(false);
   const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(true);
@@ -130,6 +148,10 @@ export function App() {
   const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+
+  useEffect(() => window.sliver.onCommandPaletteRequested(() => {
+    setIsCommandPaletteOpen((current) => !current);
+  }), []);
 
   const loadSavedConfigs = useCallback(async (afterInFlight = false): Promise<void> => {
     const activeRequest = savedConfigLoadRef.current;
@@ -260,6 +282,15 @@ export function App() {
     setSnapshot(result.value);
   }, []);
 
+  const refreshServer = useCallback(async (): Promise<void> => {
+    const result = await window.sliver.refresh();
+    if (!result.ok || !result.value) {
+      toast.danger("Could not refresh server", { description: result.error });
+      return;
+    }
+    setSnapshot(result.value);
+  }, []);
+
   async function openWindow(inheritConnection: boolean) {
     const result = await window.sliver.openWindow({ inheritConnection });
     if (!result.ok) toast.danger("Could not open window", { description: result.error });
@@ -329,6 +360,7 @@ export function App() {
       ...updater({
         theme: current.theme,
         reduceMotion: current.reduceMotion,
+        commandPaletteShortcut: current.commandPaletteShortcut,
         terminal: current.terminal,
       }),
     }));
@@ -369,6 +401,95 @@ export function App() {
     snapshot.connection.epoch,
     snapshot.connection.incarnation,
   ]);
+
+  const settings = applicationSettings?.settings ?? standaloneSettings;
+  const navigationCommands = [
+    ...infrastructureNavItems,
+    ...interactNavItems,
+    ...dataNavItems,
+  ].map((item): AppCommandPaletteCommand => ({
+    id: `navigate-${item.id}`,
+    group: "Navigate",
+    icon: item.icon,
+    label: item.label,
+    description: item.description,
+    isCurrent: view === item.id,
+    isDisabled: !connected,
+    onAction: () => changeView(item.id),
+  }));
+  const commandPaletteCommands: readonly AppCommandPaletteCommand[] = [
+    ...navigationCommands,
+    {
+      id: "navigate-settings",
+      group: "Navigate",
+      icon: faGear,
+      label: "Settings",
+      description: "Configure appearance, keyboard shortcuts, and terminals.",
+      keywords: ["preferences"],
+      isCurrent: view === "settings",
+      onAction: () => {
+        setIsConfigSelectorOpen(false);
+        changeView("settings");
+      },
+    },
+    {
+      id: "server-switch-config",
+      group: "Server",
+      icon: faLink,
+      label: "Saved configurations",
+      description: "Connect to or manage an operator configuration.",
+      keywords: ["switch server", "connect"],
+      onAction: () => setIsConfigSelectorOpen(true),
+    },
+    {
+      id: "server-console",
+      group: "Server",
+      icon: faTerminal,
+      label: "Open Sliver console",
+      description: connected ? "Open a console for the active server." : "Connect to a server first.",
+      keywords: ["terminal"],
+      isDisabled: !connected,
+      onAction: () => void openConsole(),
+    },
+    {
+      id: "server-disconnect",
+      group: "Server",
+      icon: faLinkSlash,
+      label: "Disconnect",
+      description: connected ? "Disconnect the active server." : "No active server connection.",
+      isDisabled: !connected,
+      onAction: () => void disconnect(),
+    },
+    {
+      id: "server-refresh",
+      group: "Server",
+      icon: faRotate,
+      label: "Refresh server",
+      description: connected ? "Reconcile the active server snapshot." : "Connect to a server first.",
+      keywords: ["reload", "sync"],
+      isDisabled: !connected,
+      onAction: () => void refreshServer(),
+    },
+    {
+      id: "window-same-server",
+      group: "Windows",
+      icon: faWindowRestore,
+      label: "New connected window",
+      description: connected ? "Open another window on the active server." : "Connect to a server first.",
+      keywords: ["duplicate", "same server"],
+      isDisabled: !connected,
+      onAction: () => void openWindow(true),
+    },
+    {
+      id: "window-different-server",
+      group: "Windows",
+      icon: faPlus,
+      label: "New connection window",
+      description: "Open another window for a different server.",
+      keywords: ["different server"],
+      onAction: () => void openWindow(false),
+    },
+  ];
 
   return (
     <Sidebar.Provider collapsible="icon" defaultOpen>
@@ -421,6 +542,25 @@ export function App() {
           <div className="header-actions">
             {connected ? <EventStatus status={snapshot.eventStream.status} /> : null}
             {connected && snapshot.connection.status === "reconnecting" ? <ReconnectingStatus /> : null}
+            <Tooltip delay={250}>
+              <Tooltip.Trigger>
+                <Button
+                  aria-label="Open command palette"
+                  isIconOnly
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => setIsCommandPaletteOpen(true)}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} />
+                </Button>
+              </Tooltip.Trigger>
+              <Tooltip.Content placement="bottom">
+                <span className="flex items-center gap-2">
+                  Command palette
+                  <CommandPaletteShortcutKbd className="text-xs" shortcut={settings.commandPaletteShortcut} />
+                </span>
+              </Tooltip.Content>
+            </Tooltip>
             <WindowMenu connected={connected} onOpenWindow={openWindow} />
             <Tooltip delay={250}>
               <Tooltip.Trigger>
@@ -456,7 +596,11 @@ export function App() {
               isSaving={applicationSettings
                 ? !applicationSettings.isReady || applicationSettings.isSaving
                 : false}
-              settings={applicationSettings?.settings ?? standaloneSettings}
+              settings={settings}
+              onCommandPaletteShortcutChange={(commandPaletteShortcut) => updateSettings((current) => ({
+                ...current,
+                commandPaletteShortcut,
+              }))}
               onReduceMotionChange={(reduceMotion) => updateSettings((current) => ({
                 ...current,
                 reduceMotion,
@@ -521,6 +665,12 @@ export function App() {
           isOpen={isCompatibilityNoticeOpen}
           snapshot={snapshot}
           onOpenChange={setCompatibilityNoticeOpen}
+        />
+        <AppCommandPalette
+          commands={commandPaletteCommands}
+          isOpen={isCommandPaletteOpen}
+          shortcut={settings.commandPaletteShortcut}
+          onOpenChange={setIsCommandPaletteOpen}
         />
       </Sidebar.Main>
     </Sidebar.Provider>

@@ -84,6 +84,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
             settings: {
               theme: current.theme,
               reduceMotion: current.reduceMotion,
+              commandPaletteShortcut: current.commandPaletteShortcut,
               terminal: legacyTerminal,
             },
           });
@@ -190,6 +191,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
   return Object.freeze({
     theme: state.theme,
     reduceMotion: state.reduceMotion,
+    commandPaletteShortcut: state.commandPaletteShortcut,
     terminal: state.terminal,
   });
 }
@@ -197,6 +199,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
 function sameSettings(left: ApplicationSettingsValues, right: ApplicationSettingsValues): boolean {
   return left.theme === right.theme &&
     left.reduceMotion === right.reduceMotion &&
+    left.commandPaletteShortcut === right.commandPaletteShortcut &&
     left.terminal.fontId === right.terminal.fontId &&
     left.terminal.fontSize === right.terminal.fontSize &&
     left.terminal.cursorStyle === right.terminal.cursorStyle &&

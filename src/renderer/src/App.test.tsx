@@ -70,7 +70,7 @@ function installSliverAPI(
     updateApplicationSettings: vi.fn(async (input) => ({
       ok: true as const,
       value: {
-        v: 1 as const,
+        v: 2 as const,
         revision: input.expectedRevision + 1,
         ...input.settings,
       },
@@ -107,6 +107,7 @@ function installSliverAPI(
     onReleaseDownloadChanged: vi.fn(() => vi.fn()),
     onApplicationUpdateChanged: vi.fn(() => vi.fn()),
     onApplicationSettingsChanged: vi.fn(() => vi.fn()),
+    onCommandPaletteRequested: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
@@ -194,6 +195,33 @@ describe("App startup", () => {
     expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Saved configurations" })).toBeInTheDocument();
+  });
+
+  it("opens the app-wide command palette and immediately adopts its saved shortcut", async () => {
+    const user = userEvent.setup();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    let requestCommandPalette: (() => void) | undefined;
+    vi.mocked(api.onCommandPaletteRequested).mockImplementation((listener) => {
+      requestCommandPalette = listener;
+      return vi.fn();
+    });
+    render(<App />);
+
+    await screen.findByText("No saved configurations");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    act(() => requestCommandPalette?.());
+
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: /Settings/u }));
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Command Palette" }));
+    await user.click(screen.getByRole("button", { name: "Change shortcut" }));
+    await user.keyboard("{Control>}{Shift>}p{/Shift}{/Control}");
+
+    expect(screen.getByLabelText(/(?:Command|Ctrl) \+ Shift \+ P/u)).toBeInTheDocument();
+    act(() => requestCommandPalette?.());
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
   });
 
   it("removes stale opaque config IDs when a catalog refresh fails", async () => {

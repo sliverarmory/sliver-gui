@@ -1,4 +1,5 @@
-export const APPLICATION_SETTINGS_VERSION = 1 as const;
+export const APPLICATION_SETTINGS_VERSION = 2 as const;
+const LEGACY_APPLICATION_SETTINGS_VERSION = 1 as const;
 
 export const CONSOLE_TERMINAL_FONT_SIZE_MIN = 8;
 export const CONSOLE_TERMINAL_FONT_SIZE_MAX = 32;
@@ -15,6 +16,8 @@ export type ApplicationTheme = "system" | "light" | "dark";
 export type ConsoleTerminalFontId = (typeof CONSOLE_TERMINAL_FONTS)[number]["id"];
 export type ConsoleTerminalCursorStyle = "block" | "underline" | "bar";
 
+export const DEFAULT_COMMAND_PALETTE_SHORTCUT = "mod+k";
+
 export interface ApplicationTerminalSettings {
   readonly fontId: ConsoleTerminalFontId;
   readonly fontSize: number;
@@ -26,6 +29,7 @@ export interface ApplicationTerminalSettings {
 export interface ApplicationSettingsValues {
   readonly theme: ApplicationTheme;
   readonly reduceMotion: boolean;
+  readonly commandPaletteShortcut: string;
   readonly terminal: ApplicationTerminalSettings;
 }
 
@@ -50,6 +54,7 @@ export const DEFAULT_APPLICATION_TERMINAL_SETTINGS: ApplicationTerminalSettings 
 export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Object.freeze({
   theme: "system",
   reduceMotion: false,
+  commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
   terminal: DEFAULT_APPLICATION_TERMINAL_SETTINGS,
 });
 
@@ -69,9 +74,40 @@ const TERMINAL_KEYS = [
   "cursorBlink",
   "smoothScrolling",
 ] as const;
-const SETTINGS_VALUE_KEYS = ["theme", "reduceMotion", "terminal"] as const;
+const SETTINGS_VALUE_KEYS = ["theme", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
 const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
+const LEGACY_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "terminal"] as const;
 const UPDATE_INPUT_KEYS = ["expectedRevision", "settings"] as const;
+const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
+  "alt+f4",
+  "mod+0",
+  "mod+1",
+  "mod+2",
+  "mod+3",
+  "mod+4",
+  "mod+5",
+  "mod+6",
+  "mod+7",
+  "mod+8",
+  "mod+9",
+  "mod+a",
+  "mod+c",
+  "mod+h",
+  "mod+alt+h",
+  "mod+m",
+  "mod+n",
+  "mod+shift+n",
+  "mod+q",
+  "mod+r",
+  "mod+shift+r",
+  "mod+t",
+  "mod+v",
+  "mod+w",
+  "mod+shift+w",
+  "mod+x",
+  "mod+y",
+  "mod+z",
+]);
 
 export function isApplicationTheme(value: unknown): value is ApplicationTheme {
   return typeof value === "string" && APPLICATION_THEMES.has(value as ApplicationTheme);
@@ -111,7 +147,11 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
   if (!hasExactKeys(value, SETTINGS_VALUE_KEYS)) {
     throw new TypeError("Invalid application settings");
   }
-  if (!isApplicationTheme(value["theme"]) || typeof value["reduceMotion"] !== "boolean") {
+  if (
+    !isApplicationTheme(value["theme"]) ||
+    typeof value["reduceMotion"] !== "boolean" ||
+    !isCommandPaletteShortcut(value["commandPaletteShortcut"])
+  ) {
     throw new TypeError("Invalid application settings");
   }
   let terminal: ApplicationTerminalSettings;
@@ -123,6 +163,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
   return Object.freeze({
     theme: value["theme"],
     reduceMotion: value["reduceMotion"],
+    commandPaletteShortcut: value["commandPaletteShortcut"],
     terminal,
   });
 }
@@ -140,6 +181,7 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
     settings = parseApplicationSettingsValues({
       theme: value["theme"],
       reduceMotion: value["reduceMotion"],
+      commandPaletteShortcut: value["commandPaletteShortcut"],
       terminal: value["terminal"],
     });
   } catch {
@@ -150,6 +192,55 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
     revision: value["revision"] as number,
     ...settings,
   });
+}
+
+export function parsePersistedApplicationSettingsState(value: unknown): ApplicationSettingsState {
+  try {
+    return parseApplicationSettingsState(value);
+  } catch {
+    if (
+      !hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) ||
+      value["v"] !== LEGACY_APPLICATION_SETTINGS_VERSION ||
+      !isRevision(value["revision"])
+    ) throw new TypeError("Invalid persisted application settings state");
+    try {
+      return parseApplicationSettingsState({
+        ...value,
+        v: APPLICATION_SETTINGS_VERSION,
+        commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
+      });
+    } catch {
+      throw new TypeError("Invalid persisted application settings state");
+    }
+  }
+}
+
+export function isCommandPaletteShortcut(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 64 || value !== value.toLowerCase()) return false;
+  if (RESERVED_COMMAND_PALETTE_SHORTCUTS.has(value)) return false;
+  const tokens = value.split("+");
+  if (tokens.length < 2 || tokens.some((token) => token === "" || token.trim() !== token)) return false;
+
+  const key = tokens.at(-1);
+  const modifiers = tokens.slice(0, -1);
+  if (!key || !isShortcutKey(key)) return false;
+  if (!modifiers.includes("mod")) return false;
+
+  const expectedOrder = ["mod", "alt", "shift"];
+  return modifiers.length <= expectedOrder.length &&
+    modifiers.every((modifier, index) => modifier === expectedOrder.filter((item) => modifiers.includes(item))[index]);
+}
+
+export function normalizeCommandPaletteShortcutKey(key: string, code = ""): string | undefined {
+  const normalizedKey = key.toLowerCase();
+  if (isShortcutKey(normalizedKey)) return normalizedKey;
+
+  const letter = /^Key([A-Z])$/u.exec(code)?.[1];
+  if (letter) return letter.toLowerCase();
+  const digit = /^Digit([0-9])$/u.exec(code)?.[1];
+  if (digit) return digit;
+  const functionKey = /^F(?:[1-9]|1[0-2])$/u.exec(code)?.[0];
+  return functionKey?.toLowerCase();
 }
 
 export function parseApplicationSettingsUpdateInput(value: unknown): ApplicationSettingsUpdateInput {
@@ -170,6 +261,10 @@ export function parseApplicationSettingsUpdateInput(value: unknown): Application
 
 function isRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isShortcutKey(value: string): boolean {
+  return /^[a-z0-9]$/u.test(value) || /^f(?:[1-9]|1[0-2])$/u.test(value);
 }
 
 function hasExactKeys<const Key extends string>(

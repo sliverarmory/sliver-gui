@@ -35,6 +35,7 @@ const invokeArguments = {
     settings: {
       theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+      commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
     },
   }],
@@ -187,6 +188,7 @@ describe("sandboxed preload bridge", () => {
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
       "onApplicationSettingsChanged",
+      "onCommandPaletteRequested",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
       "onConsoleSelectTabRequested",
@@ -229,6 +231,7 @@ describe("sandboxed preload bridge", () => {
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
       "onApplicationSettingsChanged",
+      "onCommandPaletteRequested",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
       "onConsoleSelectTabRequested",
@@ -269,6 +272,7 @@ describe("sandboxed preload bridge", () => {
   });
 
   it.each([
+    ["onCommandPaletteRequested", IPC.commandPaletteRequested],
     ["onConsoleNewTabRequested", IPC.consoleNewTabRequested],
     ["onConsoleCloseTabRequested", IPC.consoleCloseTabRequested],
     ["onConsoleSettingsRequested", IPC.consoleSettingsRequested],

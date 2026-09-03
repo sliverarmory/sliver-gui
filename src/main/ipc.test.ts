@@ -143,7 +143,7 @@ describe("trusted Electron IPC boundary", () => {
     const update = vi.fn(async (input) => ({
       ok: true as const,
       value: {
-        v: 1 as const,
+        v: 2 as const,
         revision: input.expectedRevision + 1,
         ...input.settings,
       },
@@ -165,6 +165,7 @@ describe("trusted Electron IPC boundary", () => {
       settings: {
         theme: "light" as const,
         reduceMotion: true,
+        commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     };

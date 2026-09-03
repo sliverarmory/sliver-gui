@@ -182,6 +182,7 @@ const api: SliverDesktopAPI = {
     ipcRenderer.on(IPC.applicationSettingsChanged, handler);
     return () => ipcRenderer.removeListener(IPC.applicationSettingsChanged, handler);
   },
+  onCommandPaletteRequested: (listener) => onFixedEvent(IPC.commandPaletteRequested, listener),
   onConsoleNewTabRequested: (listener) => onFixedEvent(IPC.consoleNewTabRequested, listener),
   onConsoleCloseTabRequested: (listener) => onFixedEvent(IPC.consoleCloseTabRequested, listener),
   onConsoleSelectTabRequested: (listener) => {

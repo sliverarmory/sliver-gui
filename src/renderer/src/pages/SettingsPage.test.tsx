@@ -45,6 +45,12 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Reduce motion" })).toBeInTheDocument();
 
+    await user.click(screen.getByRole("tab", { name: "Command Palette" }));
+
+    expect(screen.getByRole("heading", { name: "Command Palette" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change shortcut" })).toBeInTheDocument();
+    expect(screen.getByLabelText(/(?:Command|Ctrl) \+ K/u)).toBeInTheDocument();
+
     await user.click(screen.getByRole("tab", { name: "Terminal" }));
 
     expect(screen.getByRole("heading", { name: "Terminal Appearance" })).toBeInTheDocument();
@@ -53,6 +59,18 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("button", { name: "Reset defaults" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Discard" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("records the app-wide command palette shortcut from Command Palette settings", async () => {
+    const user = userEvent.setup();
+    const onCommandPaletteShortcutChange = vi.fn();
+    renderSettings({ onCommandPaletteShortcutChange });
+    await user.click(screen.getByRole("tab", { name: "Command Palette" }));
+
+    await user.click(screen.getByRole("button", { name: "Change shortcut" }));
+    await user.keyboard("{Control>}{Shift>}p{/Shift}{/Control}");
+
+    expect(onCommandPaletteShortcutChange).toHaveBeenCalledExactlyOnceWith("mod+shift+p");
   });
 
   it("applies app-wide theme and motion choices directly", async () => {
@@ -157,6 +175,7 @@ function settingsProps(overrides: Partial<SettingsPageProps> = {}): SettingsPage
     settings: DEFAULT_APPLICATION_SETTINGS_STATE,
     onThemeChange: vi.fn(),
     onReduceMotionChange: vi.fn(),
+    onCommandPaletteShortcutChange: vi.fn(),
     onTerminalChange: vi.fn(),
     ...overrides,
   };

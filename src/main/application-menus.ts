@@ -1,5 +1,9 @@
 import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
+import {
+  isCommandPaletteShortcut,
+  normalizeCommandPaletteShortcutKey,
+} from "../shared/application-settings-contracts.js";
 import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
 
@@ -43,6 +47,34 @@ export interface ConsoleTabShortcutInput {
 }
 
 export type ServerRefreshShortcutDisposition = "refresh" | "suppress";
+export type CommandPaletteShortcutDisposition = "request" | "suppress";
+
+export function commandPaletteShortcutDispositionForInput(
+  platform: NodeJS.Platform,
+  shortcut: string,
+  input: ConsoleTabShortcutInput,
+): CommandPaletteShortcutDisposition | undefined {
+  if (
+    !isCommandPaletteShortcut(shortcut) ||
+    input.type !== "keyDown" ||
+    input.isComposing
+  ) return undefined;
+
+  const tokens = shortcut.split("+");
+  const key = tokens.at(-1);
+  const modifiers = new Set(tokens.slice(0, -1));
+  const primaryPressed = platform === "darwin" ? input.meta : input.control;
+  const secondaryPressed = platform === "darwin" ? input.control : input.meta;
+  if (
+    secondaryPressed ||
+    normalizeCommandPaletteShortcutKey(input.key, input.code) !== key ||
+    primaryPressed !== modifiers.has("mod") ||
+    input.alt !== modifiers.has("alt") ||
+    input.shift !== modifiers.has("shift")
+  ) return undefined;
+
+  return input.isAutoRepeat ? "suppress" : "request";
+}
 
 export function serverRefreshShortcutDispositionForInput(
   input: ConsoleTabShortcutInput,

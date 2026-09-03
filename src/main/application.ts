@@ -47,6 +47,7 @@ import type {
 import {
   buildApplicationMenuTemplate,
   buildContextMenuTemplate,
+  commandPaletteShortcutDispositionForInput,
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
   serverRefreshShortcutDispositionForInput,
@@ -254,6 +255,34 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
     hardenWindow(window, rendererUrl);
     installContextMenu(window);
+    window.webContents.on("before-input-event", (event, input) => {
+      const commandPaletteDisposition = applicationSettingsStore
+        ? commandPaletteShortcutDispositionForInput(
+            process.platform,
+            applicationSettingsStore.getState().commandPaletteShortcut,
+            input,
+          )
+        : undefined;
+      if (!commandPaletteDisposition) return;
+
+      // Claim the configured application chord before an embedded terminal can
+      // interpret it as PTY input. Utility windows return to their trusted
+      // source workspace instead of gaining generic navigation capabilities.
+      event.preventDefault();
+      if (commandPaletteDisposition !== "request") return;
+      const sourceContentsId = sessionShellRecord?.source.contentsId ??
+        interactionWindowRecord?.source.contentsId ??
+        consoleWindowRecord?.source.contentsId;
+      const paletteWindow = sourceContentsId === undefined
+        ? window
+        : windowsByContentsId.get(sourceContentsId);
+      if (!paletteWindow || paletteWindow.isDestroyed() || paletteWindow.webContents.isDestroyed()) return;
+      if (paletteWindow !== window) {
+        paletteWindow.show();
+        paletteWindow.focus();
+      }
+      paletteWindow.webContents.send(IPC.commandPaletteRequested);
+    });
     if (surface === "workspace") {
       window.webContents.on("before-input-event", (event, input) => {
         const disposition = serverRefreshShortcutDispositionForInput(input);

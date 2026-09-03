@@ -224,6 +224,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     "onReleaseDownloadChanged",
     "onApplicationUpdateChanged",
     "onApplicationSettingsChanged",
+    "onCommandPaletteRequested",
     "onConsoleNewTabRequested",
     "onConsoleCloseTabRequested",
     "onConsoleSelectTabRequested",
@@ -416,6 +417,44 @@ async function waitForSidebarWidth(
   }, cssVariable);
 }
 
+async function sendNativeApplicationShortcut(
+  electronApplication: ElectronApplication,
+  page: Page,
+  key: string,
+  options: { readonly shift?: boolean } = {},
+): Promise<void> {
+  const sent = await electronApplication.evaluate(
+    ({ app, BrowserWindow }, input) => {
+      const window = BrowserWindow.getAllWindows().find(
+        (candidate) => candidate.webContents.getURL() === input.url,
+      );
+      if (!window) return false;
+
+      app.focus({ steal: true });
+      window.show();
+      window.focus();
+      window.webContents.focus();
+      const modifiers: Array<"meta" | "control" | "shift"> = [
+        process.platform === "darwin" ? "meta" : "control",
+        ...(input.shift ? ["shift" as const] : []),
+      ];
+      window.webContents.sendInputEvent({
+        type: "keyDown",
+        keyCode: input.key,
+        modifiers,
+      });
+      window.webContents.sendInputEvent({
+        type: "keyUp",
+        keyCode: input.key,
+        modifiers,
+      });
+      return true;
+    },
+    { key, shift: options.shift ?? false, url: page.url() },
+  );
+  assert.equal(sent, true, `expected a native Electron window for ${page.url()}`);
+}
+
 async function verifyApplicationSettings(
   electronApplication: ElectronApplication,
   page: Page,
@@ -435,6 +474,42 @@ async function verifyApplicationSettings(
     path: join(artifactDirectory, "application-settings-general-light.png"),
   });
 
+  const primaryModifier = process.platform === "darwin" ? "Meta" : "Control";
+  await sendNativeApplicationShortcut(electronApplication, page, "K");
+  const commandPalette = page.getByRole("dialog", { name: "Command palette" });
+  await commandPalette.waitFor({ timeout: 5_000 });
+  assert.equal(
+    await commandPalette.getByRole("menuitem").count(),
+    14,
+    "the connected workspace should expose the bounded app command catalog",
+  );
+  await page.keyboard.press("Escape");
+  await commandPalette.waitFor({ state: "hidden" });
+
+  await page.getByRole("tab", { name: "Command Palette" }).click();
+  await page.getByRole("button", { name: "Change shortcut" }).click();
+  await page.keyboard.press(`${primaryModifier}+Shift+p`);
+  await waitForApplicationSettings(
+    page,
+    (candidate) => candidate.commandPaletteShortcut === "mod+shift+p",
+  );
+  await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "application-settings-keyboard.png"),
+  });
+
+  await sendNativeApplicationShortcut(electronApplication, page, "K");
+  await page.waitForTimeout(150);
+  assert.equal(await commandPalette.count(), 0, "the replaced shortcut must stop opening the palette");
+  await sendNativeApplicationShortcut(electronApplication, page, "P", { shift: true });
+  await commandPalette.waitFor();
+  await page.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "command-palette.png"),
+  });
+  await page.keyboard.press("Escape");
+  await commandPalette.waitFor({ state: "hidden" });
+
   await page.getByRole("tab", { name: "Terminal" }).click();
   await page.getByText("Smooth scrolling", { exact: true }).click();
   await page.getByRole("button", { name: "Save" }).click();
@@ -442,6 +517,7 @@ async function verifyApplicationSettings(
     page,
     (candidate) => candidate.theme === "light" &&
       candidate.reduceMotion &&
+      candidate.commandPaletteShortcut === "mod+shift+p" &&
       candidate.terminal.smoothScrolling,
   );
   await page.screenshot({
@@ -451,8 +527,9 @@ async function verifyApplicationSettings(
 
   assert.equal(settings.theme, "light");
   assert.equal(settings.reduceMotion, true);
+  assert.equal(settings.commandPaletteShortcut, "mod+shift+p");
   assert.equal(settings.terminal.smoothScrolling, true);
-  assert.ok(settings.revision >= 3);
+  assert.ok(settings.revision >= 4);
 
   const native = await electronApplication.evaluate(({ BrowserWindow, nativeTheme }) => {
     const window = BrowserWindow.getAllWindows()[0];
@@ -498,7 +575,8 @@ async function verifyOperatorDataStores(
   await addLootDialog.waitFor();
   await addLootDialog.getByRole("textbox", { name: "Display name", exact: true }).fill("e2e-local-loot");
   await addLootDialog.getByRole("button", { name: "Choose file and add", exact: true }).click();
-  await page.getByText("e2e-local-loot", { exact: true }).waitFor();
+  const localLootRow = page.getByRole("row").filter({ hasText: "e2e-local-loot" });
+  await localLootRow.waitFor();
   await waitForFakeMethodCount(electronApplication, "lootAdd", 1);
 
   await electronApplication.evaluate(({ dialog }, outputPath) => {
@@ -539,11 +617,11 @@ async function verifyOperatorDataStores(
   await addCredentialDialog.getByRole("textbox", { name: "Username", exact: true }).fill("e2e-created");
   await addCredentialDialog.getByLabel("Plaintext value", { exact: true }).fill(M6_CREDENTIAL_SECRET);
   await addCredentialDialog.getByRole("button", { name: "Add credential", exact: true }).click();
-  await page.getByText("e2e-created", { exact: true }).waitFor();
+  const createdCredentialRow = page.getByRole("row").filter({ hasText: "e2e-created" });
+  await createdCredentialRow.waitFor();
   assert.ok(!(await page.locator("body").innerText()).includes(M6_CREDENTIAL_SECRET));
   await waitForFakeMethodCount(electronApplication, "credentialAdd", 1);
 
-  const createdCredentialRow = page.getByRole("row").filter({ hasText: "e2e-created" });
   await createdCredentialRow.getByRole("button", { name: "View credential", exact: true }).click();
   const credentialDialog = page.getByRole("dialog", { name: "e2e-created", exact: true });
   await credentialDialog.waitFor();
@@ -681,6 +759,21 @@ async function verifySliverConsoleWindow(
       true,
       "the first private console root must exist while its tab is open",
     );
+
+    const writesBeforeCommandPalette = [...firstSpawn.writes];
+    await firstTerminal.focus();
+    await sendNativeApplicationShortcut(electronApplication, consolePage, "P", { shift: true });
+    const sourceCommandPalette = sourcePage.getByRole("dialog", { name: "Command palette" });
+    await sourceCommandPalette.waitFor();
+    const paletteShortcutState = await readFakeState(electronApplication);
+    assert.deepEqual(
+      paletteShortcutState.console.spawns[initialSpawnCount]?.writes,
+      writesBeforeCommandPalette,
+      "the app command shortcut must not reach the focused console PTY",
+    );
+    await sourcePage.keyboard.press("Escape");
+    await sourceCommandPalette.waitFor({ state: "hidden" });
+    await consolePage.bringToFront();
 
     const firstWritesBeforeNewTabShortcut = [...firstSpawn.writes];
     await firstTerminal.focus();

@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildApplicationMenuTemplate,
   buildContextMenuTemplate,
+  commandPaletteShortcutDispositionForInput,
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
   isSafeExternalWebUrl,
@@ -62,6 +63,60 @@ describe("console tab shortcut input", () => {
     expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", type: "keyUp" }))).toBe(false);
     expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyT", isComposing: true }))).toBe(false);
     expect(isConsoleNewTabShortcutInput("darwin", shortcutInput({ code: "KeyR" }))).toBe(false);
+  });
+});
+
+describe("command palette shortcut input", () => {
+  it("matches the exact configured platform chord", () => {
+    const commandShiftP = shortcutInput({ key: "P", code: "KeyP", shift: true });
+    const controlShiftP = shortcutInput({
+      key: "P",
+      code: "KeyP",
+      shift: true,
+      meta: false,
+      control: true,
+    });
+    expect(commandPaletteShortcutDispositionForInput("darwin", "mod+shift+p", commandShiftP))
+      .toBe("request");
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+shift+p", controlShiftP))
+      .toBe("request");
+    expect(commandPaletteShortcutDispositionForInput("win32", "mod+shift+p", commandShiftP))
+      .toBeUndefined();
+    expect(commandPaletteShortcutDispositionForInput("darwin", "mod+shift+p", controlShiftP))
+      .toBeUndefined();
+  });
+
+  it("rejects near matches and consumes auto-repeat without another request", () => {
+    const controlAltP = shortcutInput({ key: "p", code: "KeyP", meta: false, control: true, alt: true });
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+alt+p", controlAltP)).toBe("request");
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+alt+p", {
+      ...controlAltP,
+      isAutoRepeat: true,
+    })).toBe("suppress");
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+alt+p", { ...controlAltP, key: "o" }))
+      .toBeUndefined();
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+alt+p", { ...controlAltP, shift: true }))
+      .toBeUndefined();
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+alt+p", { ...controlAltP, type: "keyUp" }))
+      .toBeUndefined();
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+alt+p", { ...controlAltP, isComposing: true }))
+      .toBeUndefined();
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+n", controlAltP)).toBeUndefined();
+  });
+
+  it("matches shifted digits and macOS Option characters by their physical key code", () => {
+    expect(commandPaletteShortcutDispositionForInput("linux", "mod+shift+1", shortcutInput({
+      code: "Digit1",
+      control: true,
+      key: "!",
+      meta: false,
+      shift: true,
+    }))).toBe("request");
+    expect(commandPaletteShortcutDispositionForInput("darwin", "mod+alt+k", shortcutInput({
+      alt: true,
+      code: "KeyK",
+      key: "˚",
+    }))).toBe("request");
   });
 });
 

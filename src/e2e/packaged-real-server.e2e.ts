@@ -301,10 +301,16 @@ async function assertPackagedRendererSecurity(
     "onOperationChanged",
     "onBeaconTasksInvalidated",
     "onSessionShellsChanged",
+    "onReleaseDownloadChanged",
+    "onApplicationUpdateChanged",
+    "onApplicationSettingsChanged",
+    "onCommandPaletteRequested",
     "onConsoleNewTabRequested",
     "onConsoleCloseTabRequested",
     "onConsoleSelectTabRequested",
     "onConsoleSettingsRequested",
+    "openStream",
+    "openConsoleStream",
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {

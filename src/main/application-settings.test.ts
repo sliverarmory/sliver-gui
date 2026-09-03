@@ -37,12 +37,13 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-one file", async () => {
+  it("loads an exact private version-two file", async () => {
     const persisted = {
-      v: 1,
+      v: 2,
       revision: 9,
       theme: "dark",
       reduceMotion: true,
+      commandPaletteShortcut: "mod+shift+p",
       terminal: {
         fontId: "source-code-pro",
         fontSize: 18,
@@ -61,9 +62,43 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
+  it("migrates an exact private version-one file without discarding preferences", async () => {
+    await writeFile(settingsPath, JSON.stringify({
+      v: 1,
+      revision: 9,
+      theme: "dark",
+      reduceMotion: true,
+      terminal: {
+        fontId: "source-code-pro",
+        fontSize: 18,
+        cursorStyle: "underline",
+        cursorBlink: false,
+        smoothScrolling: true,
+      },
+    }), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(settingsPath, 0o600);
+
+    const store = await ApplicationSettingsStore.load(settingsPath);
+
+    expect(store.getState()).toEqual({
+      v: 2,
+      revision: 9,
+      theme: "dark",
+      reduceMotion: true,
+      commandPaletteShortcut: "mod+k",
+      terminal: {
+        fontId: "source-code-pro",
+        fontSize: 18,
+        cursorStyle: "underline",
+        cursorBlink: false,
+        smoothScrolling: true,
+      },
+    });
+  });
+
   it.each([
     "not-json",
-    JSON.stringify({ v: 2 }),
+    JSON.stringify({ v: 3 }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, extra: true }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "sepia" }),
   ])("falls back to defaults for corrupt or unsupported state %#", async (contents) => {
@@ -145,6 +180,7 @@ describe("ApplicationSettingsStore", () => {
       settings: {
         theme: "dark",
         reduceMotion: false,
+        commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: { ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal, fontSize: 100 },
       },
     } as unknown as ApplicationSettingsUpdateInput;
@@ -173,6 +209,7 @@ function updateInput(
     settings: {
       theme: overrides.theme ?? DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       reduceMotion: overrides.reduceMotion ?? DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+      commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
     },
   };

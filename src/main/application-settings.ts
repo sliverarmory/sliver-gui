@@ -4,6 +4,7 @@ import {
   APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   parseApplicationSettingsState,
+  parsePersistedApplicationSettingsState,
   parseApplicationSettingsUpdateInput,
   type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
@@ -38,7 +39,7 @@ export class ApplicationSettingsStore {
         requirePrivateMode: true,
       });
       try {
-        state = parseApplicationSettingsState(JSON.parse(loaded.data.toString("utf8")) as unknown);
+        state = parsePersistedApplicationSettingsState(JSON.parse(loaded.data.toString("utf8")) as unknown);
       } finally {
         loaded.data.fill(0);
       }

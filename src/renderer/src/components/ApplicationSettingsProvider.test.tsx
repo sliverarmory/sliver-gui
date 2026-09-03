@@ -116,6 +116,7 @@ describe("ApplicationSettingsProvider", () => {
       settings: {
         theme: "light",
         reduceMotion: false,
+        commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     });
@@ -133,7 +134,7 @@ describe("ApplicationSettingsProvider", () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
       value: {
-        v: 1 as const,
+        v: 2 as const,
         revision: 1,
         ...input.settings,
       },
@@ -147,6 +148,7 @@ describe("ApplicationSettingsProvider", () => {
       settings: {
         theme: "system",
         reduceMotion: false,
+        commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: {
           fontId: "jetbrains-mono",
           fontSize: 17,

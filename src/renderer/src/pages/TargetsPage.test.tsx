@@ -303,6 +303,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     onReleaseDownloadChanged: vi.fn(() => vi.fn()),
     onApplicationUpdateChanged: vi.fn(() => vi.fn()),
     onApplicationSettingsChanged: vi.fn(() => vi.fn()),
+    onCommandPaletteRequested: vi.fn(() => vi.fn()),
     openStream: vi.fn(),
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
