@@ -13,11 +13,12 @@ Maxime Gris, and were provided under the MIT License. The MIT license text is
 reproduced in `LICENSES/MIT.txt`; that attribution does not change the license
 of the combined Sliver GUI application.
 
-The application bundles `sliver-script`, the TypeScript client for the Sliver
-Implant Framework, copyright Bishop Fox. It is distributed under
-GPL-3.0-or-later; its original license, retained source, exact Git provenance
-bundle, and reconstruction patches are under `vendor/sliver-script/` in this
-distribution.
+The application bundles `sliver-script` version 2.0.0-rc.2, the TypeScript
+client for the Sliver Implant Framework, copyright Bishop Fox. It is
+distributed under GPL-3.0-or-later. Native packages retain the exact published
+npm package's license, source, build metadata, and protobuf/integration locks
+under `node_modules/sliver-script/`; registry and source-tag provenance are
+pinned in `protocol/sliver-script-provenance.json`.
 
 The application bundles `ghostty-web` version 0.4.0, including its
 `ghostty-vt.wasm` terminal runtime. Ghostty Web is copyright (c) 2025 Coder and
@@ -66,9 +67,11 @@ identify Apache-2.0. Sliver GUI preserves the bundled Apache-2.0 text in
 interpreting the metadata discrepancy as an additional license grant.
 
 The complete corresponding source for a released binary is the Sliver GUI
-repository at the matching version tag, including the vendored client source:
+repository at the matching version tag together with the retained source for
+the exact published `sliver-script` package:
 
 https://github.com/sliverarmory/sliver-gui
+https://github.com/sliverarmory/sliver-script/tree/v2.0.0-rc.2
 
 GitHub release pages provide source archives for the matching tag alongside
 the native application packages. Build instructions are in `README.md`.

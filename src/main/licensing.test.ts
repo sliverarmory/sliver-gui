@@ -16,7 +16,7 @@ describe("repository licensing", () => {
         readFile(resolve(rootDir, "LICENSES/MIT.txt"), "utf8"),
         readFile(resolve(rootDir, "LICENSES/Apache-2.0.txt"), "utf8"),
         readFile(resolve(rootDir, "LICENSES/OFL-1.1.txt"), "utf8"),
-        readFile(resolve(rootDir, "LICENSING.md"), "utf8"),
+        readFile(resolve(rootDir, "LICENSES/LICENSING.md"), "utf8"),
         readFile(resolve(rootDir, "THIRD_PARTY_NOTICES.md"), "utf8"),
         readFile(resolve(rootDir, "electron-builder.yml"), "utf8"),
       ]);
@@ -40,7 +40,7 @@ describe("repository licensing", () => {
     expect(notices).toContain("JetBrains Mono 2.304");
     expect(notices).toContain("Cascadia Mono 2407.24");
     expect(notices).toContain("Source Code Pro 2.042R-u/1.062R-i/1.026R-vf");
-    expect(builder).toContain("- LICENSING.md");
+    expect(builder).toContain("- LICENSES/LICENSING.md");
     expect(builder).toContain("- LICENSES/**");
     expect(builder).toContain("- protocol/terminal-fonts-provenance.json");
     expect(builder).toContain("from: LICENSES");

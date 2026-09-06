@@ -21,7 +21,7 @@ describe("native distribution packaging", () => {
     );
     expect(packageJson.scripts?.["dist"]).toBe("electron-builder");
     expect(packageJson.scripts?.["postdist"]).toBe("npm run verify:packaged-content");
-    expect(packageJson.scripts?.["pretest:e2e:packaged-update"]).toBe("npm run build:client");
+    expect(packageJson.scripts?.["pretest:e2e:packaged-update"]).toBeUndefined();
     expect(workflow).toContain("run: npm run predist");
     expect(workflow).toContain(
       "run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never",

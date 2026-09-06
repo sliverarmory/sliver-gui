@@ -8,10 +8,8 @@ export default defineConfig({
   main: {
     plugins: [
       externalizeDepsPlugin({
-        // The local sliver-script checkout is intentionally linked during
-        // development. Bundle its runtime graph so packaged applications do
-        // not traverse that link and accidentally ship the upstream Sliver
-        // checkout, tests, docs, or development dependencies.
+        // Bundle sliver-script into Electron main's runtime graph so packaged
+        // applications do not load it as a separate installed npm module.
         exclude: [
           "sliver-script",
           "@bufbuild/protobuf",
@@ -26,7 +24,7 @@ export default defineConfig({
       outDir: resolve("dist/main"),
       sourcemap: false,
       commonjsOptions: {
-        include: [/node_modules/, /sliver-script\/lib/],
+        include: [/node_modules/],
       },
       rollupOptions: {
         input: resolve("src/main/index.ts"),

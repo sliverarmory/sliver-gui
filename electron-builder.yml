@@ -12,9 +12,10 @@ files:
   - dist/**
   - "!dist/**/*.map"
   - "!node_modules/**/*.map"
+  - "!node_modules/abort-controller-x/src/**/*.test.*"
   - package.json
   - LICENSE
-  - LICENSING.md
+  - LICENSES/LICENSING.md
   - LICENSES/**
   - THIRD_PARTY_NOTICES.md
   - node_modules/ghostty-web/LICENSE
@@ -32,17 +33,16 @@ files:
   - "!node_modules/node-pty/typings/**"
   - "!node_modules/node-pty/node-addon-api/**"
   - "!node_modules/node-pty/binding.gyp"
-  - vendor/sliver-script/LICENSE
-  - vendor/sliver-script/README.md
-  - vendor/sliver-script/VENDORED.md
-  - vendor/sliver-script/package.json
-  - vendor/sliver-script/tsconfig.json
-  - vendor/sliver-script/sliver-script-snapshot.bundle
-  - vendor/sliver-script/patches/**
-  - vendor/sliver-script/src/**
+  - node_modules/sliver-script/LICENSE
+  - node_modules/sliver-script/package.json
+  - node_modules/sliver-script/integration.lock.json
+  - node_modules/sliver-script/protobuf.lock.json
+  - node_modules/sliver-script/protobuf.sh
+  - node_modules/sliver-script/tsconfig.json
+  - node_modules/sliver-script/scripts/**
+  - node_modules/sliver-script/src/**
   - protocol/sliver-baseline.json
   - protocol/sliver-script-provenance.json
-  - protocol/sliver-script-handwritten-overlay.patch
   - protocol/ghostty-web-provenance.json
   - protocol/terminal-fonts-provenance.json
   - docs/operator-parity.generated.json
@@ -58,8 +58,6 @@ extraResources:
     to: sliver-desktop.png
   - from: LICENSES
     to: licenses
-  - from: LICENSING.md
-    to: licenses/LICENSING.md
   - from: THIRD_PARTY_NOTICES.md
     to: licenses/THIRD_PARTY_NOTICES.md
   - from: dist/THIRD_PARTY_LICENSES.txt

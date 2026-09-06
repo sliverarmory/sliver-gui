@@ -36,7 +36,7 @@ const requiredBuilderPaths = [
   "dist/**",
   "package.json",
   "LICENSE",
-  "LICENSING.md",
+  "LICENSES/LICENSING.md",
   "LICENSES/**",
   "THIRD_PARTY_NOTICES.md",
   "node_modules/ghostty-web/LICENSE",
@@ -46,17 +46,16 @@ const requiredBuilderPaths = [
   "node_modules/node-pty/package.json",
   "node_modules/node-pty/lib/**/*.js",
   "node_modules/node-pty/build/Release/**",
-  "vendor/sliver-script/LICENSE",
-  "vendor/sliver-script/README.md",
-  "vendor/sliver-script/VENDORED.md",
-  "vendor/sliver-script/package.json",
-  "vendor/sliver-script/tsconfig.json",
-  "vendor/sliver-script/sliver-script-snapshot.bundle",
-  "vendor/sliver-script/patches/**",
-  "vendor/sliver-script/src/**",
+  "node_modules/sliver-script/LICENSE",
+  "node_modules/sliver-script/package.json",
+  "node_modules/sliver-script/integration.lock.json",
+  "node_modules/sliver-script/protobuf.lock.json",
+  "node_modules/sliver-script/protobuf.sh",
+  "node_modules/sliver-script/tsconfig.json",
+  "node_modules/sliver-script/scripts/**",
+  "node_modules/sliver-script/src/**",
   "protocol/sliver-baseline.json",
   "protocol/sliver-script-provenance.json",
-  "protocol/sliver-script-handwritten-overlay.patch",
   "protocol/ghostty-web-provenance.json",
   "protocol/terminal-fonts-provenance.json",
   "docs/operator-parity.generated.json",
@@ -70,6 +69,7 @@ const requiredPackagedFiles = [
   "LICENSE",
   "LICENSES/Apache-2.0.txt",
   "LICENSES/GPL-3.0-or-later.txt",
+  "LICENSES/LICENSING.md",
   "LICENSES/MIT.txt",
   "LICENSES/OFL-1.1.txt",
   "LICENSES/README.md",
@@ -86,15 +86,14 @@ const requiredPackagedFiles = [
   "dist/main/index.js",
   "dist/preload/index.cjs",
   "dist/renderer/index.html",
-  "vendor/sliver-script/LICENSE",
-  "vendor/sliver-script/README.md",
-  "vendor/sliver-script/VENDORED.md",
-  "vendor/sliver-script/package.json",
-  "vendor/sliver-script/tsconfig.json",
-  "vendor/sliver-script/sliver-script-snapshot.bundle",
+  "node_modules/sliver-script/LICENSE",
+  "node_modules/sliver-script/package.json",
+  "node_modules/sliver-script/integration.lock.json",
+  "node_modules/sliver-script/protobuf.lock.json",
+  "node_modules/sliver-script/protobuf.sh",
+  "node_modules/sliver-script/tsconfig.json",
   "protocol/sliver-baseline.json",
   "protocol/sliver-script-provenance.json",
-  "protocol/sliver-script-handwritten-overlay.patch",
   "protocol/ghostty-web-provenance.json",
   "protocol/terminal-fonts-provenance.json",
   "docs/operator-parity.generated.json",
@@ -106,8 +105,9 @@ const requiredPackagedFiles = [
 ];
 const requiredPackagedPrefixes = [
   "dist/renderer/assets/",
-  "vendor/sliver-script/patches/",
-  "vendor/sliver-script/src/",
+  "node_modules/sliver-script/lib/",
+  "node_modules/sliver-script/scripts/",
+  "node_modules/sliver-script/src/",
   "node_modules/node-pty/lib/",
 ];
 
@@ -255,6 +255,14 @@ for (const filePath of files.filter((path) => /\.(?:c?js|html|css|json)$/u.test(
 const terminalFontEvidence = await verifyTerminalFontAssets(files);
 
 const licenseInventory = await readFile(join(distDir, "THIRD_PARTY_LICENSES.txt"), "utf8");
+const applicationPackage = JSON.parse(await readFile(join(rootDir, "package.json"), "utf8"));
+const sliverScriptVersion = applicationPackage.dependencies?.["sliver-script"];
+if (
+  typeof sliverScriptVersion !== "string"
+  || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(sliverScriptVersion)
+) {
+  throw new Error("Sliver client dependency must be an exact semantic version");
+}
 for (const requiredText of [
   "@heroui-pro/react@1.0.0-beta.8",
   "HeroUI Pro License Agreement",
@@ -265,6 +273,7 @@ for (const requiredText of [
   "ghostty-web@0.4.0",
   "node-pty@1.1.0",
   "electron-updater@6.8.9",
+  `sliver-script@${sliverScriptVersion}\nDeclared license: GPL-3.0-or-later`,
   "Fira Code@6.2 (embedded terminal font)",
   "JetBrains Mono@2.304 (embedded terminal font)",
   "Cascadia Mono@2407.24 (embedded terminal font)",
@@ -284,7 +293,7 @@ const [projectLicense, gplLicense, mitLicense, apacheLicense, oflLicense, licens
     readFile(join(rootDir, "LICENSES/MIT.txt"), "utf8"),
     readFile(join(rootDir, "LICENSES/Apache-2.0.txt"), "utf8"),
     readFile(join(rootDir, "LICENSES/OFL-1.1.txt"), "utf8"),
-    readFile(join(rootDir, "LICENSING.md"), "utf8"),
+    readFile(join(rootDir, "LICENSES/LICENSING.md"), "utf8"),
     readFile(join(rootDir, "THIRD_PARTY_NOTICES.md"), "utf8"),
   ]);
 if (projectLicense !== gplLicense) {
@@ -312,12 +321,22 @@ for (const [name, content, markers] of [
   }
 }
 for (const [name, content] of [
-  ["LICENSING.md", licensingGuide],
+  ["LICENSES/LICENSING.md", licensingGuide],
   ["THIRD_PARTY_NOTICES.md", thirdPartyNotices],
 ]) {
   if (!/not dual-licens(?:e|ed)/u.test(content)) {
     throw new Error(`${name} must state that third-party license texts do not dual-license Sliver GUI`);
   }
+}
+const sliverNoticeVersions = [...thirdPartyNotices.matchAll(/bundles `sliver-script` version ([^,\s]+)/gu)];
+if (sliverNoticeVersions.length !== 1 || sliverNoticeVersions[0][1] !== sliverScriptVersion) {
+  throw new Error("THIRD_PARTY_NOTICES.md must identify the exact installed sliver-script version once");
+}
+const sliverNoticeTags = [
+  ...thirdPartyNotices.matchAll(/https:\/\/github\.com\/sliverarmory\/sliver-script\/tree\/v([^\s]+)/gu),
+];
+if (sliverNoticeTags.length !== 1 || sliverNoticeTags[0][1] !== sliverScriptVersion) {
+  throw new Error("THIRD_PARTY_NOTICES.md must link the exact installed sliver-script source tag once");
 }
 
 const builderConfiguration = await readFile(join(rootDir, "electron-builder.yml"), "utf8");
@@ -331,8 +350,6 @@ for (const requiredSetting of [
   "to: sliver-desktop.png",
   "from: LICENSES",
   "to: licenses",
-  "from: LICENSING.md",
-  "to: licenses/LICENSING.md",
   "from: THIRD_PARTY_NOTICES.md",
   "to: licenses/THIRD_PARTY_NOTICES.md",
   "from: dist/THIRD_PARTY_LICENSES.txt",
@@ -352,6 +369,7 @@ for (const forbiddenPath of [".e2e-dist", "src/e2e", "tsconfig.e2e", "artifacts/
   }
 }
 
+const sliverClientEvidence = await verifyInstalledSliverClient();
 const sliverConsoleEvidence = await verifyPreparedSliverConsole();
 await verifyNodePtyDirectory(join(rootDir, "node_modules/node-pty"), process.platform);
 
@@ -361,7 +379,7 @@ if (verifyPackaged) {
     : [await newestPackagedArchive()];
 
   for (const archive of archives) {
-    verifyArchive(archive, terminalFontEvidence);
+    verifyArchive(archive, terminalFontEvidence, sliverClientEvidence);
     await verifyExternalBrandAsset(archive);
     await verifyExternalLegalAssets(archive);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
@@ -643,7 +661,7 @@ async function verifyExternalLegalAssets(archivePath) {
     [join(rootDir, "LICENSES/MIT.txt"), "licenses/MIT.txt"],
     [join(rootDir, "LICENSES/OFL-1.1.txt"), "licenses/OFL-1.1.txt"],
     [join(rootDir, "LICENSES/README.md"), "licenses/README.md"],
-    [join(rootDir, "LICENSING.md"), "licenses/LICENSING.md"],
+    [join(rootDir, "LICENSES/LICENSING.md"), "licenses/LICENSING.md"],
     [join(rootDir, "THIRD_PARTY_NOTICES.md"), "licenses/THIRD_PARTY_NOTICES.md"],
     [join(distDir, "THIRD_PARTY_LICENSES.txt"), "licenses/THIRD_PARTY_LICENSES.txt"],
   ];
@@ -701,7 +719,7 @@ async function newestFile(paths) {
   return dated[0].path;
 }
 
-function verifyArchive(archivePath, terminalFontEvidence) {
+function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) {
   const entries = listPackage(archivePath, { isPack: false }).map(asarEntryPaths);
   const normalizedEntries = entries.map(({ normalizedPath }) => normalizedPath);
   const forbiddenEntries = normalizedEntries.filter((entry) =>
@@ -759,6 +777,22 @@ function verifyArchive(archivePath, terminalFontEvidence) {
     }
   }
 
+  const applicationManifestEntry = entries.find(({ normalizedPath }) => normalizedPath === "package.json");
+  const applicationManifest = JSON.parse(
+    extractFile(archivePath, applicationManifestEntry.lookupPath, false).toString("utf8"),
+  );
+  if (applicationManifest.dependencies?.["sliver-script"] !== sliverClientEvidence.version) {
+    throw new Error("Packaged application manifest lost the exact sliver-script dependency version");
+  }
+  for (const [packagedPath, expected] of sliverClientEvidence.releaseFiles) {
+    const entry = entries.find(({ normalizedPath }) => normalizedPath === packagedPath);
+    if (!entry || !extractFile(archivePath, entry.lookupPath, false).equals(expected)) {
+      throw new Error(`Packaged sliver-script release evidence failed its integrity check: ${packagedPath}`);
+    }
+  }
+
+  verifyPackagedSliverClient(archivePath, entries, sliverClientEvidence);
+
   for (const entry of entries) {
     const metadata = statFile(archivePath, entry.lookupPath, false);
     if (!("size" in metadata)) continue;
@@ -767,6 +801,84 @@ function verifyArchive(archivePath, terminalFontEvidence) {
       `${archivePath}:${entry.normalizedPath}`,
     );
   }
+}
+
+async function verifyInstalledSliverClient() {
+  await runCommand(process.execPath, [join(rootDir, "scripts/protocol-verify-client-package.mjs")], {
+    cwd: rootDir,
+  });
+  const provenance = JSON.parse(
+    await readFile(join(rootDir, "protocol/sliver-script-provenance.json"), "utf8"),
+  );
+  const packageRoot = resolve(rootDir, provenance.installedPackage.root);
+  const files = new Map();
+  for (const absolutePath of await listFiles(packageRoot)) {
+    const packagePath = relative(packageRoot, absolutePath).replaceAll("\\", "/");
+    if (packagedSliverClientPath(packagePath)) {
+      files.set(packagePath, await readFile(absolutePath));
+    }
+  }
+  const releaseFiles = new Map();
+  for (const packagedPath of ["protocol/sliver-baseline.json", "protocol/sliver-script-provenance.json"]) {
+    releaseFiles.set(packagedPath, await readFile(join(rootDir, packagedPath)));
+  }
+  return Object.freeze({
+    root: provenance.installedPackage.root,
+    version: provenance.package.version,
+    files,
+    releaseFiles,
+  });
+}
+
+function verifyPackagedSliverClient(archivePath, entries, evidence) {
+  const prefix = `${evidence.root}/`;
+  const packagedFiles = new Map();
+  for (const entry of entries) {
+    if (!entry.normalizedPath.startsWith(prefix)) continue;
+    const metadata = statFile(archivePath, entry.lookupPath, false);
+    if (!("size" in metadata)) continue;
+    const packagePath = entry.normalizedPath.slice(prefix.length);
+    packagedFiles.set(packagePath, entry);
+  }
+
+  const expectedPaths = [...evidence.files.keys()].sort();
+  const actualPaths = [...packagedFiles.keys()].sort();
+  if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
+    throw new Error(
+      `Packaged sliver-script file inventory drifted; expected ${expectedPaths.length}, received ${actualPaths.length}`,
+    );
+  }
+  for (const packagePath of expectedPaths) {
+    const entry = packagedFiles.get(packagePath);
+    const expected = evidence.files.get(packagePath);
+    const actual = extractFile(archivePath, entry.lookupPath, false);
+    if (packagePath === "package.json") {
+      const expectedManifest = JSON.parse(expected.toString("utf8"));
+      const actualManifest = JSON.parse(actual.toString("utf8"));
+      for (const removedByElectronBuilder of ["bugs", "keywords", "scripts"]) {
+        delete expectedManifest[removedByElectronBuilder];
+      }
+      if (JSON.stringify(actualManifest) !== JSON.stringify(expectedManifest)) {
+        throw new Error("Packaged sliver-script manifest drifted beyond Electron Builder's fixed pruning");
+      }
+    } else if (!actual.equals(expected)) {
+      throw new Error(`Packaged sliver-script file failed its integrity check: ${packagePath}`);
+    }
+  }
+}
+
+function packagedSliverClientPath(path) {
+  return [
+    "LICENSE",
+    "integration.lock.json",
+    "package.json",
+    "protobuf.lock.json",
+    "protobuf.sh",
+    "tsconfig.json",
+  ].includes(path)
+    || path.startsWith("scripts/")
+    || path.startsWith("src/")
+    || (path.startsWith("lib/") && path.endsWith(".js"));
 }
 
 async function runCommand(command, args, options = {}) {

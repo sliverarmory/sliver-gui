@@ -61,7 +61,7 @@ describe("Sliver RPC message budgets", () => {
     }
   });
 
-  it("adds only the narrow authority overrides needed by a local transport proxy", () => {
+  it("adds an explicitly requested narrow authority override", () => {
     expect(rpcMessageChannelOptions("control", "operator.internal")).toEqual({
       "grpc.max_send_message_length": 8 * MiB,
       "grpc.max_receive_message_length": 16 * MiB,
@@ -71,9 +71,8 @@ describe("Sliver RPC message budgets", () => {
   });
 
   it("uses a DNS-form TLS authority for IP literals without overriding direct DNS targets", () => {
-    expect(rpcTlsAuthorityOverride("127.0.0.1", false)).toBe("sliver");
-    expect(rpcTlsAuthorityOverride("[::1]", false)).toBe("sliver");
-    expect(rpcTlsAuthorityOverride("operator.internal", false)).toBeUndefined();
-    expect(rpcTlsAuthorityOverride("operator.internal", true)).toBe("operator.internal");
+    expect(rpcTlsAuthorityOverride("127.0.0.1")).toBe("sliver");
+    expect(rpcTlsAuthorityOverride("[::1]")).toBe("sliver");
+    expect(rpcTlsAuthorityOverride("operator.internal")).toBeUndefined();
   });
 });

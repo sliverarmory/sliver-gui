@@ -1,126 +1,43 @@
 {
-  "schemaVersion": 1,
-  "wrapper": {
-    "repository": "https://github.com/sliverarmory/sliver-script.git",
-    "publishedBase": "837fb21c5291eef6285c2e168eef0620b99a5394",
-    "snapshot": "01f1029cc17898da681e52b64af4a708ff82c3d3"
-  },
-  "archivalEvidence": {
-    "bundle": {
-      "path": "vendor/sliver-script/sliver-script-snapshot.bundle",
-      "sha256": "56f71537e4ce8f9d75c29db27c4491ac69d008328563cfae14260c1c2f5ab0a2"
-    },
-    "commitPatches": [
-      {
-        "path": "vendor/sliver-script/patches/0001-Update-sliver.patch",
-        "sha256": "27e43bd38d3cbac374613dbda7a6744804b65e2f766b23bd5cbdc25376fe2f94"
-      },
-      {
-        "path": "vendor/sliver-script/patches/0002-Update-pb.patch",
-        "sha256": "1570034e1166f26e6696ce6d0da7617eef72fba96ae32b422196cdb3b77e87b0"
-      }
-    ],
-    "purpose": "Historical evidence for reconstructing the unpublished wrapper snapshot. These archival commit patches are not the generated-protobuf or GUI overlay inputs."
-  },
-  "generatedProtobuf": {
-    "baseline": "protocol/sliver-baseline.json",
-    "sourceCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
-    "paths": [
-      "src/pb/clientpb/client.ts",
-      "src/pb/commonpb/common.ts",
-      "src/pb/dnspb/dns.ts",
-      "src/pb/rpcpb/services.ts",
-      "src/pb/sliverpb/sliver.ts"
-    ]
-  },
-  "retainedSnapshotFiles": [
-    {
-      "path": "LICENSE",
-      "sha256": "3c48c70c1810279b31581f998473554d205567d65e522e1eac1112085511e50e"
-    },
-    {
-      "path": "README.md",
-      "sha256": "cd44f593a0dd88b39b96e4509e07da6ecfde4b507412ffef84ba3b23497bb73c"
-    },
-    {
-      "path": "package.json",
-      "sha256": "ddfcdb1a4be91a0485da09ee628d3e93b20f548e476a625a190ca326fa622e27"
-    },
-    {
-      "path": "tsconfig.json",
-      "sha256": "48a977a691c8e8a26a87b2e488aef1630371259e7ee93b5ff324ccc42897df88"
-    },
-    {
-      "path": "src/events/index.ts",
-      "sha256": "2e643c622faa5724f6f9aa76ea9fe1d3c98c7c2743d40374226a93a36755f11c"
-    },
-    {
-      "path": "src/internal/wgProxy.ts",
-      "sha256": "99141481aa6be46519c18ec8e229175d439f0a383e712270e133287d163dc7c8"
+  "schemaVersion": 2,
+  "package": {
+    "name": "sliver-script",
+    "version": "2.0.0-rc.2",
+    "dependencySpec": "2.0.0-rc.2",
+    "tarball": "https://registry.npmjs.org/sliver-script/-/sliver-script-2.0.0-rc.2.tgz",
+    "integrity": "sha512-OixPOHl4bakt1wNktiwuhe9SNJkrb0SIVYfOBu+CCesF3gbUhX4/KJilIIE0HH7KfFuNVgVbwzIs8RqfP2dvew==",
+    "shasum": "f507facaea98a542072ed7e40ef75fe234eaeb88",
+    "source": {
+      "repository": "https://github.com/sliverarmory/sliver-script.git",
+      "tag": "v2.0.0-rc.2",
+      "commit": "eb385632f2a390cba05dc06f0819d0f99d82c7d2"
     }
-  ],
-  "handwrittenOverlay": {
-    "baseCommit": "01f1029cc17898da681e52b64af4a708ff82c3d3",
-    "appliedAfterProtobufGeneration": true,
-    "patch": {
-      "path": "protocol/sliver-script-handwritten-overlay.patch",
-      "sha256": "a0a286d9717ea8349f4494606fa8719ebe115b30b46202786fdaca37a8057f1b"
+  },
+  "installedPackage": {
+    "root": "node_modules/sliver-script",
+    "tree": {
+      "files": 54,
+      "sha256": "fdc6cea64a012f8a9556d33de9cc46cb46b4edc6d4b2c659f20339dcd3173484"
     },
     "files": [
       {
-        "path": "src/client.ts",
-        "baseSha256": "3871ef29a23316186d9e8fcfb6810b31dd59a125daa5cc8174d44c31d2a5c4bf",
-        "sha256": "aa74caadf512e7481eaacbc22537e60239b9672df58b95a32c81937d7a722a15",
-        "review": "Route RPCs through bounded control, inventory, task-content, tunnel-stream, workbench-artifact, and artifact channels; retain the explicit typed M1 target and beacon-task wrappers; add explicit session-only M2 reconnaissance, filesystem, process, service, registry, and bounded artifact wrappers; add explicit typed M4 session/beacon process, children, assembly, shellcode, sideload, reflective-DLL, migration, Metasploit, token, identity, and privilege wrappers with exact target IDs, canonical request fields, bounded deadlines, authoritative configuration reads, and cleared mutable binary or credential-buffer copies; add session-only SSH, backdoor, DLL-hijack, get-system, and remote-service primitives for the main-owned psexec composite while preserving target response status for fixed main-process classification; add a main-only managed session-shell handle with early-output-safe binding, bounded chunked writes, PTY-gated resize, idempotent cleanup, fixed target-error mapping, and bounded canonical exit/logout signaling before CloseTunnel for explicit close and lost-response startup cleanup; add explicit bounded credential inventory, detail, singular add, singular remove, and hash-type sniff wrappers with canonical mutation envelopes and no ambiguous update wrapper; support bounded from-end downloads for Tail without combining incompatible range options; preserve upload response status for main-owned mutation classification; reject unavailable single-file downloads before decode; clear compressed and rejected artifact buffers; encode CommonRequest timeouts in canonical nanoseconds; and retain DNS-form TLS authority for IP-literal targets."
+        "path": "package.json",
+        "sha256": "a2dd23f8e1c48c4de3ef6a128bf13d7ffaa135c7204b8431636c2a6fb9dbe9a3"
       },
       {
-        "path": "src/config.ts",
-        "baseSha256": "0faca469d4500b9357f4b9e88a9221cd321dab9e015ea348b56e3afe5e6d002b",
-        "sha256": "1b7fa601ecb71b283e4d3b160fcdf1c6d0462712cb5889d1f0ffddfd60f06c48",
-        "review": "Require the Sliver-managed CA field to contain non-whitespace content so operator mTLS cannot fall back to default or system trust."
+        "path": "integration.lock.json",
+        "sha256": "9a99acec7acaa92b61953fc353a5caa31178637f58aec159c47629ebf916fc42"
       },
       {
-        "path": "src/index.ts",
-        "baseSha256": "37a8c9139932f7f1600f2da3b83e659e6706787ebdd69bad31d1c05de54af3d7",
-        "sha256": "ff338f7605ee0d4b310a15d4a2a462b490a9d3438f8d3efe5bd124834c924f85",
-        "review": "Export the reviewed message-budget API, exact timeout conversion helper, and validated timeout signal helper."
-      },
-      {
-        "path": "src/internal/asyncQueue.ts",
-        "baseSha256": "9804cd42b895dc24895e91e1bbe5b732526a28c371e56d9d1b386d302749da41",
-        "sha256": "39ddbf19932d68b621d0069a295f294f846bd9f38906fdec92d9157a1f235790",
-        "review": "Replace the unbounded generic queue with an explicitly item- and byte-budgeted single-consumer queue that fails atomically on overflow, zeroizes disposed byte payloads through owner callbacks, and has deterministic close, failure, and consumer-cancel behavior."
-      },
-      {
-        "path": "src/internal/credentials.ts",
-        "baseSha256": "599f662bc088be6382c73d903eb78638ec17cb54f70a9fd067e4803e3ecca950",
-        "sha256": "ee3f3f310ca4516bbc0b9f0492e0c560fe4ac60486ee10177f9072178c897b49",
-        "review": "Build operator RPC TLS credentials only from the Sliver-managed CA and client identity in the configuration, fail closed on a blank CA, and explicitly require certificate-chain verification."
-      },
-      {
-        "path": "src/internal/tunnelManager.ts",
-        "baseSha256": "fb6e1f4fc1b4eefda29bd57d95cfc1eec46e1f50ae43e41cbab9bf08219bca07",
-        "sha256": "0f026953ba8c66ac4ad3709b57ac61622915086bcaf1f7aa8b2fa9303c85d404",
-        "review": "Replace the shared unbounded tunnel writer with a bounded per-tunnel round-robin scheduler, delivery backpressure, fixed active/frame/byte quotas, stable payload copies, early-output queues, content-free statistics, and deterministic close, overflow, transport-failure, cancellation, and zeroization behavior."
-      },
-      {
-        "path": "src/internal/timeout.ts",
-        "baseSha256": "803b6e3b96988a1d547f94c8259f7c97922793fdaea0ea465363845b21a0349c",
-        "sha256": "d8bf70ed86bc3e316c64c125926d5c63db769f93aab7b615fbc406bcb42348cd",
-        "review": "Validate public timeouts as non-negative whole seconds within the safe timer ceiling before callbacks run, and convert them to canonical protobuf int64 nanoseconds without numeric precision loss."
-      },
-      {
-        "path": "src/messageBudget.ts",
-        "baseSha256": null,
-        "sha256": "a6c741989b60af5a879b1623e9b6b06f8a53524022168b6e7c7795d3df5e1788",
-        "review": "Define immutable per-domain send and receive allocation limits, including an isolated 80 KiB task-content response ceiling, a 66 KiB tunnel-stream wire budget with a 64 KiB payload ceiling, and a separate 66 MiB wire budget with a 64 MiB decoded ceiling for session workbench artifacts, plus IP-safe TLS authority selection."
+        "path": "protobuf.lock.json",
+        "sha256": "b20a238556d75e444c0dc68e1f7514a6d38c438ce0183e61a6b12eeb9b9b4bc5"
       }
     ]
   },
-  "omissions": [
-    "tests and fixtures",
-    "generated lib output",
-    "documentation site and examples",
-    "nested Sliver checkout"
-  ]
+  "protocol": {
+    "baseline": "protocol/sliver-baseline.json",
+    "integrationLock": "integration.lock.json",
+    "protobufLock": "protobuf.lock.json",
+    "generatedSourceRoot": "src/pb"
+  }
 }

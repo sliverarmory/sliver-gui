@@ -7,8 +7,6 @@
 /coverage/
 /artifacts/
 /native/sliver-console/
-/vendor/sliver-script/lib/
-/vendor/sliver-script/node_modules/
 *.tsbuildinfo
 *.log
 *.cfg

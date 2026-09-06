@@ -1874,7 +1874,7 @@ function nonceForRequest(targetId: string, operationCount: number): number {
   }
   // Ping.Nonce is a protobuf int32. Keep the deterministic nonce in the
   // non-negative signed range so every generated value can be encoded by the
-  // vendored protobuf runtime.
+  // pinned protobuf runtime.
   return hash & 0x7fff_ffff;
 }
 

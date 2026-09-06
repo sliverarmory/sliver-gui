@@ -182,8 +182,9 @@ Important implementation seams:
 - Per-window contexts and backend pooling:
   [`src/main/connection-registry.ts`](src/main/connection-registry.ts)
 - Renderer security policy: [`src/main/security.ts`](src/main/security.ts)
-- Vendored TypeScript Sliver client:
-  [`vendor/sliver-script/src/client.ts`](vendor/sliver-script/src/client.ts)
+- Exact published TypeScript Sliver client pin and provenance:
+  [`package.json`](package.json) and
+  [`protocol/sliver-script-provenance.json`](protocol/sliver-script-provenance.json)
 
 ## Engineering principles
 
@@ -381,8 +382,8 @@ milestone.
 - [x] Fetch and verify the exact pinned upstream commit for manifest generation;
   tooling must not assume the ignored adjacent `./sliver` checkout exists.
 - [x] Reconcile and correct the two original provenance baselines: operator parity
-  targeted Sliver `9ff9b553...`, while `vendor/sliver-script/VENDORED.md`
-  attributes the generated protobuf source to Sliver `4ef8644...`. The checked
+  targeted Sliver `9ff9b553...`, while the original client snapshot attributed
+  the generated protobuf source to Sliver `4ef8644...`. The checked
   generated API contains fields newer than that declared protobuf source, so
   provenance must be proven by byte/semantic regeneration rather than merely
   recording both hashes.
@@ -395,8 +396,9 @@ milestone.
   pinned Sliver baseline, or document and verify every intentional schema delta.
 - [x] Pin the protobuf compiler, TypeScript generator, plugin options, Node/npm
   toolchain, formatting step, and generated-file ordering.
-- [x] Preserve handwritten client-wrapper changes as an explicit reviewed patch
-  layer that can be reapplied after regeneration.
+- [x] Keep reusable client behavior and protobuf generation in upstream
+  `sliver-script`; pin its exact registry release and verify its source,
+  integration, and protobuf provenance without a GUI-owned patch layer.
 - [x] Add CI that reports generated API/schema drift when the baseline changes.
 - [x] Add server-version and capability negotiation with explicit supported,
   degraded, and unsupported states.
@@ -424,7 +426,7 @@ milestone.
   authoritative history; every reconnect obtains fresh authoritative state.
 - [x] Define pagination and bounded result contracts before adding large domain
   inventories.
-- [x] Replace the vendored client's approximately 2 GiB generic gRPC allocation
+- [x] Replace the client's approximately 2 GiB generic gRPC allocation
   limits with justified per-domain transport budgets. Reject oversized
   messages before protobuf decoding or renderer structured cloning.
 - [x] Finish operator-config import, local naming, selection, switching, and
@@ -466,8 +468,9 @@ milestone.
 ### M0 exit criteria
 
 - [x] Every reachable baseline command is classified in the parity manifest.
-- [x] Generated client code and provenance are reproducible from the recorded
-  source/toolchain plus the reviewed handwritten patch layer.
+- [x] The installed client package and protobuf provenance are reproducible from
+  its recorded upstream source and toolchain, with consumer-neutral integration
+  metadata.
 - [x] No background refresh path can produce an unhandled rejection.
 - [x] Connection health accurately distinguishes connected, degraded,
   reconnecting, disconnected, and incompatible states.

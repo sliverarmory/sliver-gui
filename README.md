@@ -119,17 +119,17 @@ operator checklist.
 
 ## Development
 
-The TypeScript gRPC client used by Electron main is tracked as a minimal source
-snapshot in `vendor/sliver-script`. This keeps clean checkouts reproducible
-without pulling the full upstream Sliver tree. Its provenance and update notes
-are recorded in `vendor/sliver-script/VENDORED.md`.
+The TypeScript gRPC client used by Electron main is the exact npm dependency
+`sliver-script@2.0.0-rc.2`. The lockfile pins its registry tarball integrity, and
+`protocol/sliver-script-provenance.json` verifies the installed package and its
+Sliver protobuf baseline without relying on an adjacent client checkout.
 
 Sliver GUI is licensed under GPL-3.0-or-later and is not dual-licensed under
 MIT or Apache-2.0. Separately identified third-party components retain their
-own licenses; see [`LICENSING.md`](LICENSING.md),
+own licenses; see [`LICENSES/LICENSING.md`](LICENSES/LICENSING.md),
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`LICENSES/`](LICENSES/).
-Native packages include these notices, the retained TypeScript client source,
-and its verifiable Git provenance bundle. The native Go console's exact
+Native packages include these notices, the published TypeScript client's source
+and package/protobuf provenance locks. The native Go console's exact
 upstream corresponding source is identified by
 `protocol/sliver-console-provenance.json` and its packaged copy; matching
 release tags provide the complete GUI source.
@@ -144,9 +144,9 @@ checkout. Source and toolchain requirements are pinned in
 
 All tracked first-party JavaScript and JSX application, test, and tool-config
 source has been converted to strict TypeScript. HTML, CSS, JSON, and packaging
-metadata remain in their native formats. Dependencies and generated `dist`,
-`release`, and vendored-client `lib` outputs are ignored and are not part of
-the GUI's TypeScript source project.
+metadata remain in their native formats. Dependencies and generated `dist` and
+`release` outputs are ignored and are not part of the GUI's TypeScript source
+project.
 
 Requirements: Node.js 24 or newer, npm 11.19 or newer, and a HeroUI Pro
 license. Native console/distribution builds additionally require Go 1.26.6;

@@ -49,13 +49,16 @@ jobs:
       - name: Set up exact npm
         run: npm install --global npm@11.19.0 --ignore-scripts
 
+      - name: Install exact production client dependency
+        run: npm ci --omit=dev --ignore-scripts
+
       - name: Install locked protobuf generator
         run: npm ci --ignore-scripts --prefix protocol/protobuf-toolchain
 
       - name: Verify native console build and provenance helper
         run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs
 
-      - name: Verify protocol, protobuf, parity, and vendor provenance
+      - name: Verify protocol, protobuf, parity, and client package provenance
         run: npm run protocol:check
 
   application-e2e:

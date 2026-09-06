@@ -36,23 +36,23 @@
     "outputs": [
       {
         "path": "commonpb/common.ts",
-        "sha256": "ac46d0ede448a5d7cdfdc3ad4699da32f1ebf7f6566e074eebb7476f65655189"
+        "sha256": "4dfd151e83eeaaa0ce0ac9ba7ace3666e4031b767b850d5cdca62de6ff9508c9"
       },
       {
         "path": "clientpb/client.ts",
-        "sha256": "eaf9b3fefacc227a729a82a5735a73dd01019cc2d5ea5953d5e4fe1760e04882"
+        "sha256": "9efd78c49b3103a12029b43ee0824042390bc535646c5961bc634fe468a02010"
       },
       {
         "path": "sliverpb/sliver.ts",
-        "sha256": "844a9c73939361e29ee27ca9af0fa3949c5fcb6ef89f94d372dd35379d8854fe"
+        "sha256": "1777f029dcba538a1daf85993518a1736349530fae288a0d1cc0c74d69f68133"
       },
       {
         "path": "rpcpb/services.ts",
-        "sha256": "64829545f3902c671c394b6404c735ec78a5bd33f5da9575fc5bdbe85fc0cd25"
+        "sha256": "b750a857dbf0c37dc13ff443f127a1fbda8e95da6b3cfb0bb4098fbe4adfefff"
       },
       {
         "path": "dnspb/dns.ts",
-        "sha256": "09e4c0a09a2535d9d6ad0795b0dafc669aee4efe0274afdd04d854c3d5d0e372"
+        "sha256": "5c7362c6a66f38ef1101e53333e1d76a68ed66bc3cf7965e1cf4b9734dd9a898"
       }
     ],
     "pluginOptions": [
@@ -70,16 +70,26 @@
     "node": "24.0.0",
     "npm": "11.19.0",
     "protoc": "35.1",
-    "tsProto": "2.11.4",
-    "typescript": "5.8.3",
+    "tsProto": "2.12.1",
+    "typescript": "5.9.3",
     "tsPoet": "6.12.0",
     "dprintNode": "1.0.8",
     "formatting": "ts-proto/ts-poet deterministic emitter; no post-generation formatter"
   },
-  "vendoredWrapper": {
-    "repository": "https://github.com/sliverarmory/sliver-script.git",
-    "publishedBase": "837fb21c5291eef6285c2e168eef0620b99a5394",
-    "snapshot": "01f1029cc17898da681e52b64af4a708ff82c3d3",
-    "bundleSha256": "56f71537e4ce8f9d75c29db27c4491ac69d008328563cfae14260c1c2f5ab0a2"
+  "clientPackage": {
+    "name": "sliver-script",
+    "version": "2.0.0-rc.2",
+    "integrity": "sha512-OixPOHl4bakt1wNktiwuhe9SNJkrb0SIVYfOBu+CCesF3gbUhX4/KJilIIE0HH7KfFuNVgVbwzIs8RqfP2dvew==",
+    "source": {
+      "repository": "https://github.com/sliverarmory/sliver-script.git",
+      "tag": "v2.0.0-rc.2",
+      "commit": "eb385632f2a390cba05dc06f0819d0f99d82c7d2"
+    },
+    "packageTree": {
+      "files": 54,
+      "sha256": "fdc6cea64a012f8a9556d33de9cc46cb46b4edc6d4b2c659f20339dcd3173484"
+    },
+    "protobufLockSha256": "b20a238556d75e444c0dc68e1f7514a6d38c438ce0183e61a6b12eeb9b9b4bc5",
+    "provenance": "protocol/sliver-script-provenance.json"
   }
 }
