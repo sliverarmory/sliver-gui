@@ -57,18 +57,18 @@ import { TargetsPage } from "./pages/TargetsPage";
 type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
 
 const infrastructureNavItems = [
-  {
-    id: "operations" as const,
-    label: "Jobs & listeners",
-    description: "Manage server jobs and listener endpoints.",
-    icon: faSatelliteDish,
-  },
   { id: "generate" as const, label: "Generate", description: "Create implant artifacts.", icon: faBolt },
   {
     id: "artifacts" as const,
     label: "Builds & profiles",
     description: "Browse generated builds and reusable profiles.",
     icon: faBoxesStacked,
+  },
+  {
+    id: "operations" as const,
+    label: "Jobs & listeners",
+    description: "Manage server jobs and listener endpoints.",
+    icon: faSatelliteDish,
   },
 ];
 

@@ -917,9 +917,11 @@ describe("Sidebar navigation", () => {
     const infrastructure = screen.getByRole("treegrid", { name: "Infrastructure navigation" });
     const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
     const data = screen.getByRole("treegrid", { name: "Data navigation" });
-    expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
-    expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
-    expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
+    expect(within(infrastructure).getAllByRole("row").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "Generate",
+      "Builds & profiles",
+      "Jobs & listeners",
+    ]);
     expect(within(infrastructure).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
     expect(within(infrastructure).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();
     expect(within(infrastructure).queryByRole("row", { name: "Loot" })).not.toBeInTheDocument();

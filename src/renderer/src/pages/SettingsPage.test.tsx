@@ -45,7 +45,9 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Reduce motion" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Command Palette" }));
+    const commandPaletteTab = screen.getByRole("tab", { name: "Command Palette" });
+    expect(commandPaletteTab).toHaveClass("w-auto", "shrink-0", "whitespace-nowrap");
+    await user.click(commandPaletteTab);
 
     expect(screen.getByRole("heading", { name: "Command Palette" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change shortcut" })).toBeInTheDocument();

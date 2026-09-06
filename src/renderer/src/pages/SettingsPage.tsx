@@ -61,9 +61,9 @@ export function SettingsPage({
       <Tabs defaultSelectedKey="general" variant="secondary">
         <Tabs.ListContainer className="w-fit max-w-full">
           <Tabs.List aria-label="Settings sections">
-            <Tabs.Tab id="general">General</Tabs.Tab>
-            <Tabs.Tab id="keyboard">Command Palette</Tabs.Tab>
-            <Tabs.Tab id="terminal">Terminal</Tabs.Tab>
+            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">General</Tabs.Tab>
+            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">Command Palette</Tabs.Tab>
+            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">Terminal</Tabs.Tab>
           </Tabs.List>
         </Tabs.ListContainer>
 
