@@ -15,11 +15,7 @@ try {
     : await fetchSource("protocol-fetch-baseline.mjs", "sliver-protocol-ci-");
 
   run("parity-check.mjs", ["--source", sliverSource, "--regenerate"]);
-  run("protocol-generate-protobuf.mjs", [
-    "--source", sliverSource, "--check",
-    ...(arguments_.allowNodeDrift ? ["--allow-node-drift"] : []),
-  ]);
-  console.log("Protocol, protobuf, parity, and installed-client provenance checks passed");
+  console.log("Protocol, parity, and installed-client provenance checks passed");
 } finally {
   for (const directory of temporaryRoots) {
     await rm(directory, { recursive: true, force: true });
@@ -41,10 +37,9 @@ function run(script, args) {
 }
 
 function parseArguments(values) {
-  const result = { sliverSource: undefined, allowNodeDrift: false };
+  const result = { sliverSource: undefined };
   for (let index = 0; index < values.length; index += 1) {
     if (values[index] === "--sliver-source") result.sliverSource = requireValue(values[++index], "--sliver-source");
-    else if (values[index] === "--allow-node-drift") result.allowNodeDrift = true;
     else throw new Error(`Unknown argument: ${values[index]}`);
   }
   return result;

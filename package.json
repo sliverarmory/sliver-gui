@@ -41,7 +41,6 @@
     "test:watch": "vitest",
     "protocol:check": "node ./scripts/protocol-check.mjs",
     "protocol:fetch": "node ./scripts/protocol-fetch-baseline.mjs",
-    "protocol:protobuf": "node ./scripts/protocol-generate-protobuf.mjs",
     "protocol:client": "node ./scripts/protocol-verify-client-package.mjs",
     "protocol:ghostty": "node ./scripts/verifyGhosttyRuntime.mjs",
     "parity:generate": "node ./scripts/parity-generate.mjs",

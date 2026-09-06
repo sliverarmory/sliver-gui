@@ -40,25 +40,16 @@ jobs:
           go-version: 1.26.6
           cache: false
 
-      - name: Set up exact protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          version: "35.1"
-          repo-token: ${{ github.token }}
-
       - name: Set up exact npm
         run: npm install --global npm@11.19.0 --ignore-scripts
 
       - name: Install exact production client dependency
         run: npm ci --omit=dev --ignore-scripts
 
-      - name: Install locked protobuf generator
-        run: npm ci --ignore-scripts --prefix protocol/protobuf-toolchain
-
       - name: Verify native console build and provenance helper
         run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs
 
-      - name: Verify protocol, protobuf, parity, and client package provenance
+      - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
 
   application-e2e:

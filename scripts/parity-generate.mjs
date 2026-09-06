@@ -13,6 +13,10 @@ const reportPath = join(repositoryRoot, "docs/operator-parity.md");
 const baseline = JSON.parse(await readFile(join(repositoryRoot, "protocol/sliver-baseline.json"), "utf8"));
 const arguments_ = parseArguments(process.argv.slice(2));
 
+if (baseline.schemaVersion !== 2) {
+  throw new Error(`Unsupported Sliver baseline schema: ${baseline.schemaVersion}`);
+}
+
 if (!arguments_.source) {
   throw new Error("Pass --source with a checkout created by protocol-fetch-baseline.mjs");
 }

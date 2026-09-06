@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "package": {
     "name": "sliver-script",
     "version": "2.0.0-rc.2",
@@ -37,7 +37,6 @@
   "protocol": {
     "baseline": "protocol/sliver-baseline.json",
     "integrationLock": "integration.lock.json",
-    "protobufLock": "protobuf.lock.json",
-    "generatedSourceRoot": "src/pb"
+    "protobufLock": "protobuf.lock.json"
   }
 }

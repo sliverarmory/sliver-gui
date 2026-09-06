@@ -9,6 +9,7 @@ const baseline = await readJSON("protocol/sliver-baseline.json");
 const generated = await readJSON("docs/operator-parity.generated.json");
 const annotations = await readJSON("docs/operator-parity.annotations.json");
 const arguments_ = parseArguments(process.argv.slice(2));
+assert(baseline.schemaVersion === 2, `Unsupported Sliver baseline schema: ${baseline.schemaVersion}`);
 const allowedStatuses = new Set([
   "planned", "in-progress", "complete", "deferred", "operator-out-of-scope", "upstream-blocked", "unreachable",
 ]);

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "repository": "https://github.com/BishopFox/sliver.git",
   "commit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
   "tree": "25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1",
@@ -8,88 +8,7 @@
     "client/command/sliver.go",
     "client/cli/cli.go"
   ],
-  "protobuf": {
-    "sourceCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
-    "descriptorSetSha256": "3494d2caef3f8dedf17c05d3f1d7eb246b162e282e98dca3f759b3d29abe616d",
-    "files": [
-      {
-        "path": "commonpb/common.proto",
-        "sha256": "4c14e2f8ac4d35ab5d20509c0c8398c5690ff3ea18f56eae84104a9c7adfeaf9"
-      },
-      {
-        "path": "clientpb/client.proto",
-        "sha256": "8b0ffbd495e6d80ebfa133d850558d7f4631ade4562e6873eb25a28837d15930"
-      },
-      {
-        "path": "sliverpb/sliver.proto",
-        "sha256": "e6f18211ab4ece5dd557fad79aeba218cf0b3097ba0d9237895e6a2b01fc5a76"
-      },
-      {
-        "path": "rpcpb/services.proto",
-        "sha256": "67373d58e2cea7f7fb56a5dbc850d03811bf74df1ce37a042ad2d62dd7419656"
-      },
-      {
-        "path": "dnspb/dns.proto",
-        "sha256": "960f188447fda858047224f3ef22f926e5b9afecc7a278807f6c764431a587a2"
-      }
-    ],
-    "outputs": [
-      {
-        "path": "commonpb/common.ts",
-        "sha256": "4dfd151e83eeaaa0ce0ac9ba7ace3666e4031b767b850d5cdca62de6ff9508c9"
-      },
-      {
-        "path": "clientpb/client.ts",
-        "sha256": "9efd78c49b3103a12029b43ee0824042390bc535646c5961bc634fe468a02010"
-      },
-      {
-        "path": "sliverpb/sliver.ts",
-        "sha256": "1777f029dcba538a1daf85993518a1736349530fae288a0d1cc0c74d69f68133"
-      },
-      {
-        "path": "rpcpb/services.ts",
-        "sha256": "b750a857dbf0c37dc13ff443f127a1fbda8e95da6b3cfb0bb4098fbe4adfefff"
-      },
-      {
-        "path": "dnspb/dns.ts",
-        "sha256": "5c7362c6a66f38ef1101e53333e1d76a68ed66bc3cf7965e1cf4b9734dd9a898"
-      }
-    ],
-    "pluginOptions": [
-      "env=node",
-      "esModuleInterop=true",
-      "forceLong=string",
-      "useExactTypes=false",
-      "useOptionals=messages",
-      "outputServices=nice-grpc",
-      "outputServices=generic-definitions"
-    ]
-  },
   "toolchain": {
-    "go": "1.26.6",
-    "node": "24.0.0",
-    "npm": "11.19.0",
-    "protoc": "35.1",
-    "tsProto": "2.12.1",
-    "typescript": "5.9.3",
-    "tsPoet": "6.12.0",
-    "dprintNode": "1.0.8",
-    "formatting": "ts-proto/ts-poet deterministic emitter; no post-generation formatter"
-  },
-  "clientPackage": {
-    "name": "sliver-script",
-    "version": "2.0.0-rc.2",
-    "integrity": "sha512-OixPOHl4bakt1wNktiwuhe9SNJkrb0SIVYfOBu+CCesF3gbUhX4/KJilIIE0HH7KfFuNVgVbwzIs8RqfP2dvew==",
-    "source": {
-      "repository": "https://github.com/sliverarmory/sliver-script.git",
-      "tag": "v2.0.0-rc.2",
-      "commit": "eb385632f2a390cba05dc06f0819d0f99d82c7d2"
-    },
-    "packageTree": {
-      "files": 54,
-      "sha256": "fdc6cea64a012f8a9556d33de9cc46cb46b4edc6d4b2c659f20339dcd3173484"
-    },
-    "protobufLockSha256": "b20a238556d75e444c0dc68e1f7514a6d38c438ce0183e61a6b12eeb9b9b4bc5",
-    "provenance": "protocol/sliver-script-provenance.json"
+    "go": "1.26.6"
   }
 }

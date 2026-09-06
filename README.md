@@ -122,7 +122,8 @@ operator checklist.
 The TypeScript gRPC client used by Electron main is the exact npm dependency
 `sliver-script@2.0.0-rc.2`. The lockfile pins its registry tarball integrity, and
 `protocol/sliver-script-provenance.json` verifies the installed package and its
-Sliver protobuf baseline without relying on an adjacent client checkout.
+generic integration/protobuf locks against the GUI's Sliver source baseline
+without relying on an adjacent client checkout.
 
 Sliver GUI is licensed under GPL-3.0-or-later and is not dual-licensed under
 MIT or Apache-2.0. Separately identified third-party components retain their
@@ -192,7 +193,7 @@ npm run test:m0
 ```
 
 `npm run protocol:check` is authoritative under the locked CI toolchain: Node
-24.0.0, npm 11.19.0, Go 1.26.6, and protoc 35.1. `npm run test:m0` retains the
+24.0.0, npm 11.19.0, and Go 1.26.6. `npm run test:m0` retains the
 M0 current-platform regression gate. `npm run test:e2e:electron` exercises the
 M1 target/task path, the dedicated session-first M2 workbench, and the
 deterministic M3 managed-shell and M4 execution paths through the production

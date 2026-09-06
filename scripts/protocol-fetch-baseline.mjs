@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +8,9 @@ import { execFileSync } from "node:child_process";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lock = JSON.parse(await readFile(join(repositoryRoot, "protocol/sliver-baseline.json"), "utf8"));
 const arguments_ = parseArguments(process.argv.slice(2));
+if (lock.schemaVersion !== 2) {
+  throw new Error(`Unsupported Sliver baseline schema: ${lock.schemaVersion}`);
+}
 const destination = resolve(
   arguments_.destination ?? (await mkdtemp(join(tmpdir(), "sliver-gui-baseline-"))),
 );
@@ -57,14 +59,6 @@ async function verifyCheckout(checkout) {
   const dirty = gitOutput(checkout, ["status", "--porcelain=v1", "--untracked-files=no"]);
   if (dirty !== "") {
     throw new Error(`Sliver baseline checkout is modified:\n${dirty}`);
-  }
-
-  for (const input of lock.protobuf.files) {
-    const data = await readFile(join(checkout, "protobuf", input.path));
-    const digest = createHash("sha256").update(data).digest("hex");
-    if (digest !== input.sha256) {
-      throw new Error(`Pinned protobuf digest mismatch for ${input.path}`);
-    }
   }
 }
 
