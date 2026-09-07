@@ -6,7 +6,10 @@ import { app } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
 import { clientpb, sliverpb, type SliverClientConfig } from "sliver-script";
 
-import { startApplication } from "../main/application.js";
+import {
+  startApplication,
+  type ApplicationCloudDeploymentController,
+} from "../main/application.js";
 import type {
   NativePty,
   NativePtyDisposable,
@@ -18,6 +21,7 @@ import {
   ConnectionRegistry,
   type SliverClientAdapter,
 } from "../main/connection-registry.js";
+import { loadTerminalRuntime } from "../main/terminal-runtime.js";
 import { SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
 
 interface FakeMainState {
@@ -94,6 +98,7 @@ declare global {
 
 const repositoryRoot = requiredArgument("--repository-root=");
 const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
+const E2E_AWS_CREDENTIAL_ID = "0f24a4da-28c1-4d94-a66d-eb224892745d";
 const state: FakeMainState = {
   configFactoryCalls: 0,
   dialogCalls: 0,
@@ -150,6 +155,93 @@ const registry = new ConnectionRegistry({
   },
 });
 
+const cloudDeploymentController: ApplicationCloudDeploymentController = {
+  getTerminalRuntime: async () => ({ ok: true, value: await loadTerminalRuntime() }),
+  detectCurrentEgressIpv4: () => ({
+    ok: true,
+    value: { address: "198.51.100.77", cidr: "198.51.100.77/32" },
+  }),
+  getSnapshot: () => ({
+    ok: true,
+    value: {
+      state: { v: 1, revision: 0, deployments: [] },
+      credentials: [{
+        id: E2E_AWS_CREDENTIAL_ID,
+        provider: "aws",
+        label: "E2E AWS profile",
+        persistence: "secure",
+        createdAt: "2026-09-06T18:00:00.000Z",
+        defaultRegion: "us-west-2",
+        sshUsername: "ubuntu",
+        profileName: "default",
+      }],
+      secureCredentialStorage: true,
+      awsProfiles: [{ name: "default", region: "us-west-2" }],
+      awsProfileDiscoveryError: null,
+      provisioningTranscripts: [],
+    },
+  }),
+  getProvisioningTranscripts: () => ({
+    ok: true,
+    value: { provisioningTranscripts: [] },
+  }),
+  chooseSshPrivateKey: () => ({ ok: false, error: "The E2E key picker is unavailable" }),
+  createCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  deleteCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  testCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  discoverAwsOptions: (input) => {
+    if (input.credentialId !== E2E_AWS_CREDENTIAL_ID || input.region !== "us-west-2") {
+      return { ok: false, error: "The E2E AWS discovery request was not renderer-safe" };
+    }
+    return {
+      ok: true,
+      value: {
+        region: "us-west-2",
+        instanceTypes: [
+          { name: "t3.micro", architecture: "x86_64", vCpuCount: 2, memoryMiB: 1_024, processor: "Intel Xeon", description: "Burstable x86 compute" },
+          { name: "t3.small", architecture: "x86_64", vCpuCount: 2, memoryMiB: 2_048, processor: "Intel Xeon", description: "Burstable x86 compute" },
+          { name: "t3.medium", architecture: "x86_64", vCpuCount: 2, memoryMiB: 4_096, processor: "Intel Xeon", description: "Burstable x86 compute" },
+          { name: "t3.large", architecture: "x86_64", vCpuCount: 2, memoryMiB: 8_192, processor: "Intel Xeon", description: "Burstable x86 compute" },
+          { name: "t3.xlarge", architecture: "x86_64", vCpuCount: 4, memoryMiB: 16_384, processor: "Intel Xeon", description: "Burstable x86 compute" },
+          { name: "t4g.micro", architecture: "arm64", vCpuCount: 2, memoryMiB: 1_024, processor: "AWS Graviton2", description: "Burstable Arm compute" },
+          { name: "t4g.small", architecture: "arm64", vCpuCount: 2, memoryMiB: 2_048, processor: "AWS Graviton2", description: "Burstable Arm compute" },
+          { name: "t4g.medium", architecture: "arm64", vCpuCount: 2, memoryMiB: 4_096, processor: "AWS Graviton2", description: "Burstable Arm compute" },
+          { name: "t4g.large", architecture: "arm64", vCpuCount: 2, memoryMiB: 8_192, processor: "AWS Graviton2", description: "Burstable Arm compute" },
+          { name: "t4g.xlarge", architecture: "arm64", vCpuCount: 4, memoryMiB: 16_384, processor: "AWS Graviton2", description: "Burstable Arm compute" },
+        ],
+        images: [
+          { id: "ami-11111111111111111", name: "ubuntu/images/hvm-ssd/ubuntu-noble-24.04-amd64-server", description: "Ubuntu Server 24.04 LTS", architecture: "x86_64", rootDeviceName: "/dev/sda1", distribution: "ubuntu", version: "24.04 LTS", creationDate: "2026-09-01T00:00:00.000Z", sshUsername: "ubuntu" },
+          { id: "ami-22222222222222222", name: "al2023-ami-2023-x86_64", description: "Amazon Linux 2023", architecture: "x86_64", rootDeviceName: "/dev/xvda", distribution: "amazon-linux", version: "2023", creationDate: "2026-09-01T00:00:00.000Z", sshUsername: "ec2-user" },
+          { id: "ami-aaaaaaaaaaaaaaaaa", name: "ubuntu/images/hvm-ssd/ubuntu-noble-24.04-arm64-server", description: "Ubuntu Server 24.04 LTS", architecture: "arm64", rootDeviceName: "/dev/sda1", distribution: "ubuntu", version: "24.04 LTS", creationDate: "2026-09-01T00:00:00.000Z", sshUsername: "ubuntu" },
+          { id: "ami-bbbbbbbbbbbbbbbbb", name: "al2023-ami-2023-arm64", description: "Amazon Linux 2023", architecture: "arm64", rootDeviceName: "/dev/xvda", distribution: "amazon-linux", version: "2023", creationDate: "2026-09-01T00:00:00.000Z", sshUsername: "ec2-user" },
+        ],
+        vpcs: [
+          { id: "vpc-0123456789abcdef0", name: "default", cidrBlock: "172.31.0.0/16", isDefault: true },
+          { id: "vpc-11111111111111111", name: "operations", cidrBlock: "10.20.0.0/16", isDefault: false },
+        ],
+        subnets: [
+          { id: "subnet-0123456789abcdef0", name: "default-public", vpcId: "vpc-0123456789abcdef0", availabilityZone: "us-west-2a", cidrBlock: "172.31.16.0/20", mapPublicIpOnLaunch: true },
+          { id: "subnet-11111111111111111", name: "operations-private", vpcId: "vpc-11111111111111111", availabilityZone: "us-west-2b", cidrBlock: "10.20.1.0/24", mapPublicIpOnLaunch: false },
+        ],
+        keyPairs: [
+          { name: "operator-existing", id: "key-0123456789abcdef0", fingerprint: "SHA256:abcdefghijklmnopqrstuv", keyType: "ed25519", isCredentialMatch: true },
+          { name: "unusable-key", id: "key-11111111111111111", fingerprint: "SHA256:does-not-match", keyType: "rsa", isCredentialMatch: false },
+        ],
+        credentialKey: {
+          type: "ed25519",
+          fingerprint: "SHA256:abcdefghijklmnopqrstuv",
+          matchingKeyPairNames: ["operator-existing"],
+        },
+      },
+    };
+  },
+  createDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  runLifecycleAction: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  updateFirewall: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  prepareDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  executeDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+};
+
 app.setPath("userData", requiredArgument("--user-data-directory="));
 void startApplication({
   registry,
@@ -159,6 +251,8 @@ void startApplication({
   consolePtyFactory: createFakeConsolePtyFactory(state, consoleClientRootDirectory),
   rendererEntryPath: `${repositoryRoot}/dist/renderer/index.html`,
   preloadPath: `${repositoryRoot}/dist/preload/index.cjs`,
+  cloudDeploymentPreloadPath: `${repositoryRoot}/dist/preload/cloud-deployment.cjs`,
+  cloudDeploymentController,
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);
   app.exit(1);

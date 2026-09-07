@@ -19,6 +19,7 @@ export type ReleaseMenuCatalog =
 export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly duplicateConnectedWindow: () => void;
+  readonly openCloudDeployment: () => void;
   readonly openDocumentation: () => void;
   readonly showAboutPanel: () => void;
   readonly downloadRelease: (target: SliverReleaseTarget) => void;
@@ -216,6 +217,16 @@ export function buildApplicationMenuTemplate(
         { type: "separator" },
         { role: "togglefullscreen" },
         { role: "toggleDevTools" },
+      ],
+    },
+    {
+      label: "Cloud",
+      submenu: [
+        {
+          id: "cloud.deployment",
+          label: "Deployment",
+          click: actions.openCloudDeployment,
+        },
       ],
     },
     ...(consoleActions

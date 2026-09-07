@@ -148,6 +148,7 @@ describe("application menu templates", () => {
     const actions = {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -161,6 +162,7 @@ describe("application menu templates", () => {
       "File",
       "Edit",
       "View",
+      "Cloud",
       "Window",
       "Help",
     ]);
@@ -187,6 +189,10 @@ describe("application menu templates", () => {
       "togglefullscreen",
       "toggleDevTools",
     ]);
+    const cloudDeployment = menuItems(template, "Cloud")[0];
+    expect(cloudDeployment).toMatchObject({ id: "cloud.deployment", label: "Deployment" });
+    clickItem(cloudDeployment);
+    expect(actions.openCloudDeployment).toHaveBeenCalledOnce();
     clickItem(menuItems(template, "Help")[0]);
     expect(actions.openDocumentation).toHaveBeenCalledOnce();
   });
@@ -196,6 +202,7 @@ describe("application menu templates", () => {
     const template = buildApplicationMenuTemplate("win32", "Sliver GUI", {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel,
       downloadRelease: vi.fn(),
@@ -203,7 +210,7 @@ describe("application menu templates", () => {
       restartToApplyApplicationUpdate: vi.fn(),
     });
 
-    expect(template.map((item) => item.label)).toEqual(["File", "Edit", "View", "Window", "Help"]);
+    expect(template.map((item) => item.label)).toEqual(["File", "Edit", "View", "Cloud", "Window", "Help"]);
     expect(menuRoles(template, "File")).toContain("quit");
     expect(menuRoles(template, "Window")).toContain("close");
     const about = menuItems(template, "Help").find((item) => item.label === "About Sliver GUI");
@@ -215,6 +222,7 @@ describe("application menu templates", () => {
     const actions = {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -242,6 +250,7 @@ describe("application menu templates", () => {
       "File",
       "Edit",
       "View",
+      "Cloud",
       "Terminal",
       "Window",
       "Help",
@@ -310,6 +319,7 @@ describe("application menu templates", () => {
     const template = buildApplicationMenuTemplate("darwin", "Sliver GUI", {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease,
@@ -350,6 +360,7 @@ describe("application menu templates", () => {
     const actions = {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -377,6 +388,7 @@ describe("application menu templates", () => {
     const actions = {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),

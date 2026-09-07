@@ -93,6 +93,7 @@ export const IPC_INVOKE = {
   refresh: "sliver:snapshot:refresh",
   listLocalNetworkInterfaces: "sliver:network-interfaces:list-local",
   openWindow: "sliver:window:open",
+  openCloudDeploymentWindow: "sliver:window:open-cloud-deployment",
   openInteractionWindow: "sliver:window:open-interaction",
   claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
@@ -166,6 +167,7 @@ export const IPC_STREAM = {
 } as const;
 
 export const IPC_EVENTS = {
+  cloudDeploymentThemeChanged: "sliver:cloud-deployment:theme-changed",
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
@@ -620,6 +622,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   };
   [IPC.openWindow]: {
     args: [input: OpenWindowInput];
+    result: OperationResult;
+  };
+  [IPC.openCloudDeploymentWindow]: {
+    args: [];
     result: OperationResult;
   };
   [IPC.openInteractionWindow]: {

@@ -13,6 +13,7 @@ import {
   Menu,
   net,
   nativeTheme,
+  safeStorage,
   session,
   shell,
   type MessageEvent as ElectronMessageEvent,
@@ -69,6 +70,19 @@ import {
 import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl } from "./security.js";
 import { SliverReleaseDownloader } from "./sliver-release-download.js";
 import {
+  CLOUD_DEPLOYMENT_IPC_EVENTS,
+  type CloudDeploymentChangeScope,
+} from "../shared/cloud-deployment-ipc.js";
+import {
+  registerCloudDeploymentIpcHandlers,
+  unregisterCloudDeploymentIpcHandlers,
+  type CloudDeploymentController,
+} from "./cloud-deployment-ipc.js";
+import { CloudDeploymentService } from "./cloud-deployment-service.js";
+import { detectCurrentEgressIpv4 } from "./cloud/current-egress-ipv4.js";
+import {
+  CLOUD_DEPLOYMENT_SESSION_PARTITION,
+  cloudDeploymentWindowOptions,
   consoleWindowOptions,
   interactionWindowOptions,
   mainWindowOptions,
@@ -92,18 +106,31 @@ import {
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
 
-type NativeWindowSurface = "workspace" | "interaction" | "managed-shells" | "console";
+type NativeWindowSurface =
+  | "workspace"
+  | "cloud-deployment"
+  | "interaction"
+  | "managed-shells"
+  | "console";
 
 export interface StartApplicationOptions {
   registry?: ConnectionRegistry;
   rendererEntryPath?: string;
   preloadPath?: string;
+  cloudDeploymentPreloadPath?: string;
   developmentRendererUrl?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
   consoleClientRootDirectory?: string;
   consolePtyFactory?: NativePtyFactory;
   startConsoleRuntime?: typeof SliverConsoleRuntime.start;
+  /** Test/embedding override. Production creates the main-owned service. */
+  cloudDeploymentController?: ApplicationCloudDeploymentController;
+}
+
+export interface ApplicationCloudDeploymentController extends CloudDeploymentController {
+  subscribe?(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
+  dispose?(): void;
 }
 
 export interface ApplicationHandle {
@@ -180,6 +207,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const developmentDockIconPath = join(applicationAssetsDirectory, "icon.png");
   const rendererEntryPath = options.rendererEntryPath ?? join(mainBundleDirectory, "../renderer/index.html");
   const preloadPath = options.preloadPath ?? join(mainBundleDirectory, "../preload/index.cjs");
+  const cloudDeploymentPreloadPath = options.cloudDeploymentPreloadPath ?? join(
+    mainBundleDirectory,
+    "../preload/cloud-deployment.cjs",
+  );
   const consoleClientExecutable = options.consoleClientExecutable ?? resolveConsoleClientExecutable(
     app.isPackaged,
     process.resourcesPath,
@@ -198,6 +229,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ? undefined
     : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
   const rendererUrl = developmentRendererUrl ?? pathToFileURL(rendererEntryPath).href;
+  const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
@@ -206,20 +238,49 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const interactionWindowsByContentsId = new Map<number, InteractionWindowRecord>();
   const consoleWindowsByKey = new Map<string, ConsoleWindowRecord>();
   const consoleWindowsByContentsId = new Map<number, ConsoleWindowRecord>();
+  let cloudDeploymentWindow: BrowserWindow | undefined;
   const pendingWindowCleanup = new Set<Promise<void>>();
   let releaseCatalog: ReleaseMenuCatalog = { status: "loading" };
   let releaseDownloader: SliverReleaseDownloader | undefined;
   let applicationUpdater: ApplicationUpdater | undefined;
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
+  let cloudDeploymentController = options.cloudDeploymentController;
+  let unsubscribeCloudDeployment: (() => void) | undefined;
+  let cloudDeploymentDisposed = false;
   const shutdown = new ApplicationShutdownCoordinator({
     stopReleaseDownloads: () => releaseDownloader?.stop(),
     disposeApplicationUpdater: () => applicationUpdater?.dispose(),
   });
 
+  function publishCloudDeploymentChanged(scope: CloudDeploymentChangeScope): void {
+    const window = cloudDeploymentWindow;
+    if (
+      shutdown.isStopping ||
+      !window ||
+      window.isDestroyed() ||
+      window.webContents.isDestroyed() ||
+      nativeWindowSurfaces.get(window) !== "cloud-deployment"
+    ) return;
+    try {
+      window.webContents.send(CLOUD_DEPLOYMENT_IPC_EVENTS.changed, scope);
+    } catch {
+      // The window may be navigating or closing; it reads a fresh snapshot on
+      // the next trusted load.
+    }
+  }
+
+  function disposeCloudDeployment(): void {
+    if (cloudDeploymentDisposed) return;
+    cloudDeploymentDisposed = true;
+    unsubscribeCloudDeployment?.();
+    unsubscribeCloudDeployment = undefined;
+    cloudDeploymentController?.dispose?.();
+  }
+
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "console" | "interaction" | "managed-shells",
+    surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells",
   ): Promise<void> {
     if (developmentRendererUrl) {
       const url = new URL(developmentRendererUrl);
@@ -237,25 +298,40 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     sessionShellRecord?: SessionShellWindowRecord,
     interactionWindowRecord?: InteractionWindowRecord,
     consoleWindowRecord?: ConsoleWindowRecord,
+    explicitSurface?: NativeWindowSurface,
+    registerWithConnectionRegistry = true,
   ): void {
     const contentsId = window.webContents.id;
-    const surface: NativeWindowSurface = consoleWindowRecord
-      ? "console"
-      : interactionWindowRecord
-        ? "interaction"
-        : sessionShellRecord
-          ? "managed-shells"
-          : "workspace";
+    const surface: NativeWindowSurface = explicitSurface ?? (
+      consoleWindowRecord
+        ? "console"
+        : interactionWindowRecord
+          ? "interaction"
+          : sessionShellRecord
+            ? "managed-shells"
+            : "workspace"
+    );
+    const retireFailedCloudDeploymentWindow = (): void => {
+      if (surface !== "cloud-deployment") return;
+      if (cloudDeploymentWindow === window) cloudDeploymentWindow = undefined;
+      if (!window.isDestroyed()) window.destroy();
+    };
     windows.add(window);
     nativeWindowSurfaces.set(window, surface);
     windowsByContentsId.set(contentsId, window);
     applyNativeThemeToWindow(window, surface);
-    registry.registerWindow(contentsId);
-    if (inheritFromContentsId !== undefined) registry.inheritConnection(inheritFromContentsId, contentsId);
+    if (registerWithConnectionRegistry) {
+      registry.registerWindow(contentsId);
+      if (inheritFromContentsId !== undefined) registry.inheritConnection(inheritFromContentsId, contentsId);
+    }
 
-    hardenWindow(window, rendererUrl);
+    hardenWindow(
+      window,
+      rendererUrl,
+      surface === "cloud-deployment" ? cloudDeploymentRendererUrl : undefined,
+    );
     installContextMenu(window);
-    window.webContents.on("before-input-event", (event, input) => {
+    if (registerWithConnectionRegistry) window.webContents.on("before-input-event", (event, input) => {
       const commandPaletteDisposition = applicationSettingsStore
         ? commandPaletteShortcutDispositionForInput(
             process.platform,
@@ -323,25 +399,33 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     });
     window.webContents.on("did-start-navigation", (details) => {
       if (details.isMainFrame && !details.isSameDocument) {
-        void registry.closeWindowStreams(contentsId, "navigation").catch(() => undefined);
+        if (registerWithConnectionRegistry) {
+          void registry.closeWindowStreams(contentsId, "navigation").catch(() => undefined);
+        }
         if (sessionShellRecord && completedInitialLoad) retireSessionShellWindow(sessionShellRecord);
         if (interactionWindowRecord && completedInitialLoad) resetInteractionWindowClaim(interactionWindowRecord);
         if (consoleWindowRecord && completedInitialLoad) retireConsoleWindow(consoleWindowRecord, "navigation");
       }
     });
     window.webContents.on("render-process-gone", () => {
-      void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
+      if (registerWithConnectionRegistry) {
+        void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
+      }
       if (sessionShellRecord) retireSessionShellWindow(sessionShellRecord);
       if (interactionWindowRecord) resetInteractionWindowClaim(interactionWindowRecord);
       if (consoleWindowRecord) retireConsoleWindow(consoleWindowRecord, "renderer-gone");
+      retireFailedCloudDeploymentWindow();
     });
     window.webContents.on("did-fail-load", (_event, _errorCode, _errorDescription, _url, isMainFrame) => {
       if (sessionShellRecord && isMainFrame) retireSessionShellWindow(sessionShellRecord);
       if (interactionWindowRecord && isMainFrame) resetInteractionWindowClaim(interactionWindowRecord);
       if (consoleWindowRecord && isMainFrame) retireConsoleWindow(consoleWindowRecord, "renderer-gone");
+      if (isMainFrame) retireFailedCloudDeploymentWindow();
     });
     window.webContents.on("destroyed", () => {
-      void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
+      if (registerWithConnectionRegistry) {
+        void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
+      }
     });
     if (sessionShellRecord) {
       window.on("close", (event) => {
@@ -395,7 +479,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         }
       }
       const cleanup = Promise.all([
-        registry.unregisterWindow(contentsId).catch(() => undefined),
+        registerWithConnectionRegistry
+          ? registry.unregisterWindow(contentsId).catch(() => undefined)
+          : Promise.resolve(),
         consoleWindowRecord
           ? closeConsoleWindow(consoleWindowRecord, "window-closed")
           : Promise.resolve(),
@@ -416,6 +502,74 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     trackWindow(window, inheritFromContentsId);
     void loadRenderer(window);
     return window;
+  }
+
+  async function openCloudDeploymentWindow(): Promise<OperationResult> {
+    if (shutdown.isStopping) {
+      return { ok: false, error: "Cloud Deployment is unavailable while the application is closing" };
+    }
+    let createdWindow: BrowserWindow | undefined;
+    try {
+      const existing = cloudDeploymentWindow;
+      if (existing && !existing.isDestroyed()) {
+        if (existing.isMinimized()) existing.restore();
+        existing.show();
+        existing.focus();
+        return { ok: true };
+      }
+
+      createdWindow = new BrowserWindow(cloudDeploymentWindowOptions(
+        cloudDeploymentPreloadPath,
+        process.platform,
+        runtimeIconPath,
+        nativeTheme.shouldUseDarkColors,
+      ));
+      cloudDeploymentWindow = createdWindow;
+      createdWindow.on("closed", () => {
+        if (cloudDeploymentWindow === createdWindow) cloudDeploymentWindow = undefined;
+      });
+      trackWindow(
+        createdWindow,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "cloud-deployment",
+        false,
+      );
+      await loadRenderer(createdWindow, "cloud-deployment");
+      if (createdWindow.isDestroyed()) {
+        throw new Error("The Cloud Deployment window closed while its renderer was loading");
+      }
+      createdWindow.setTitle("Cloud Deployment");
+      createdWindow.webContents.send(
+        CLOUD_DEPLOYMENT_IPC_EVENTS.themeChanged,
+        nativeTheme.shouldUseDarkColors,
+      );
+      return { ok: true };
+    } catch (error) {
+      if (cloudDeploymentWindow === createdWindow) cloudDeploymentWindow = undefined;
+      if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
+      return {
+        ok: false,
+        error: applicationErrorMessage(error, "Cloud Deployment could not be opened"),
+      };
+    }
+  }
+
+  function openCloudDeploymentWindowFromRenderer(
+    source: TrustedWindowIdentity,
+  ): Promise<OperationResult> | OperationResult {
+    const sourceWindow = windowsByContentsId.get(source.contentsId);
+    if (
+      !sourceWindow ||
+      sourceWindow.isDestroyed() ||
+      !sameWindowIdentity(source, identityForWindow(sourceWindow)) ||
+      nativeWindowSurfaces.get(sourceWindow) !== "workspace"
+    ) {
+      return { ok: false, error: "Cloud Deployment can only be opened from a workspace window" };
+    }
+    return openCloudDeploymentWindow();
   }
 
   async function openInteractionWindow(source: TrustedWindowIdentity): Promise<OperationResult> {
@@ -1255,6 +1409,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const template = buildApplicationMenuTemplate(process.platform, APPLICATION_DISPLAY_NAME, {
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
+      openCloudDeployment: () => void openCloudDeploymentWindow(),
       openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
       showAboutPanel: () => app.showAboutPanel(),
       downloadRelease: (target) => startReleaseDownload(target),
@@ -1335,6 +1490,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   function beginShutdown(): void {
     if (!shutdown.isStopping) {
+      disposeCloudDeployment();
       for (const record of consoleWindowsByContentsId.values()) {
         void closeConsoleWindow(record, "application-shutdown");
       }
@@ -1371,6 +1527,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   function applyNativeWindowTheme(): void {
     for (const [window, surface] of nativeWindowSurfaces) {
       applyNativeThemeToWindow(window, surface);
+    }
+    const cloudWindow = cloudDeploymentWindow;
+    if (
+      cloudWindow &&
+      !cloudWindow.isDestroyed() &&
+      !cloudWindow.webContents.isDestroyed()
+    ) {
+      cloudWindow.webContents.send(
+        CLOUD_DEPLOYMENT_IPC_EVENTS.themeChanged,
+        nativeTheme.shouldUseDarkColors,
+      );
     }
   }
 
@@ -1531,6 +1698,23 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     downloadsDirectory: resolveDownloadsDirectory((name) => app.getPath(name)),
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
   });
+  if (!cloudDeploymentController) {
+    try {
+      cloudDeploymentController = await CloudDeploymentService.create({
+        rootDirectory: join(consoleClientRootDirectory, "gui", "cloud-deployment", "v1"),
+        operatorConfigDirectory: join(consoleClientRootDirectory, "configs"),
+        safeStorage,
+        egressIpv4Detector: () => detectCurrentEgressIpv4(
+          (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+        ),
+      });
+    } catch (error) {
+      cloudDeploymentController = unavailableCloudDeploymentController(
+        applicationErrorMessage(error, "Cloud Deployment could not be initialized"),
+      );
+    }
+  }
+  unsubscribeCloudDeployment = cloudDeploymentController.subscribe?.(publishCloudDeploymentChanged);
   applicationUpdater = createApplicationUpdater({
     currentVersion: app.getVersion(),
     isPackaged: app.isPackaged,
@@ -1542,6 +1726,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   applicationUpdateState = applicationUpdater.getState();
   applicationUpdater.subscribe(publishApplicationUpdateState);
   configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
+  configureSessionSecurity(
+    session.fromPartition(CLOUD_DEPLOYMENT_SESSION_PARTITION),
+    developmentRendererUrl,
+  );
   registerIpcHandlers(
     registry,
     (inheritFromContentsId) => createWindow(inheritFromContentsId),
@@ -1571,6 +1759,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       getState: () => loadedApplicationSettingsStore.getState(),
       update: updateApplicationSettings,
     },
+    {
+      open: openCloudDeploymentWindowFromRenderer,
+    },
+  );
+  registerCloudDeploymentIpcHandlers(
+    cloudDeploymentController,
+    cloudDeploymentRendererUrl,
+    (identity, window) =>
+      cloudDeploymentWindow === window &&
+      nativeWindowSurfaces.get(window) === "cloud-deployment" &&
+      sameWindowIdentity(identity, identityForWindow(window)),
   );
   installMenu();
   void refreshReleaseMenu();
@@ -1596,6 +1795,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("before-quit", onBeforeQuit);
       nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
       nativeTheme.removeListener("updated", onNativeThemeUpdated);
+      unregisterCloudDeploymentIpcHandlers();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
@@ -1647,6 +1847,15 @@ export function readDevelopmentRendererUrl(): string | undefined {
   ) {
     throw new Error("ELECTRON_RENDERER_URL must be an HTTP(S) loopback URL");
   }
+  return url.href;
+}
+
+function rendererUrlForSurface(
+  rendererUrl: string,
+  surface: "cloud-deployment" | "console" | "interaction" | "managed-shells",
+): string {
+  const url = new URL(rendererUrl);
+  url.searchParams.set("surface", surface);
   return url.href;
 }
 
@@ -1794,6 +2003,28 @@ function setInteractionWindowTitle(window: BrowserWindow, snapshot: SliverSnapsh
   const summary = snapshot.targetContext.activeTargetSummary;
   if (!summary) return;
   window.setTitle(`Interact — ${summary.name || summary.hostname || summary.id}`);
+}
+
+function unavailableCloudDeploymentController(
+  message: string,
+): ApplicationCloudDeploymentController {
+  const controller: ApplicationCloudDeploymentController = {
+    getSnapshot: () => ({ ok: false, error: message }),
+    getProvisioningTranscripts: () => ({ ok: false, error: message }),
+    getTerminalRuntime: () => ({ ok: false, error: message }),
+    detectCurrentEgressIpv4: () => ({ ok: false, error: message }),
+    chooseSshPrivateKey: () => ({ ok: false, error: message }),
+    createCredential: () => ({ ok: false, error: message }),
+    deleteCredential: () => ({ ok: false, error: message }),
+    testCredential: () => ({ ok: false, error: message }),
+    discoverAwsOptions: () => ({ ok: false, error: message }),
+    createDeployment: () => ({ ok: false, error: message }),
+    runLifecycleAction: () => ({ ok: false, error: message }),
+    updateFirewall: () => ({ ok: false, error: message }),
+    prepareDestroyDeployment: () => ({ ok: false, error: message }),
+    executeDestroyDeployment: () => ({ ok: false, error: message }),
+  };
+  return Object.freeze(controller);
 }
 
 function applicationErrorMessage(error: unknown, fallback: string): string {

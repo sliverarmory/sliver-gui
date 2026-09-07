@@ -125,6 +125,10 @@ export interface InteractionWindowController {
   ): MaybePromise<OperationResult<SliverSnapshot>>;
 }
 
+export interface CloudDeploymentWindowController {
+  open(source: TrustedWindowIdentity): MaybePromise<OperationResult>;
+}
+
 export interface ApplicationUpdateController {
   getState(): ApplicationUpdateState;
   checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>>;
@@ -253,6 +257,7 @@ export function registerIpcHandlers(
   applicationUpdates?: ApplicationUpdateController,
   consoleWindows?: ConsoleWindowController,
   applicationSettings?: ApplicationSettingsController,
+  cloudDeploymentWindows?: CloudDeploymentWindowController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -289,6 +294,19 @@ export function registerIpcHandlers(
     createWindow(input.inheritConnection ? contentsId : undefined);
     return { ok: true };
   });
+  handleTrusted(
+    IPC.openCloudDeploymentWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => cloudDeploymentWindows?.open({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? {
+      ok: false,
+      error: "Cloud Deployment is unavailable",
+    },
+  );
   handleTrusted(
     IPC.openInteractionWindow,
     rendererUrl,

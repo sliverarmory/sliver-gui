@@ -84,6 +84,7 @@ const requiredPackagedFiles = [
   "node_modules/electron-updater/package.json",
   "node_modules/electron-updater/out/main.js",
   "dist/main/index.js",
+  "dist/preload/cloud-deployment.cjs",
   "dist/preload/index.cjs",
   "dist/renderer/index.html",
   "node_modules/sliver-script/LICENSE",

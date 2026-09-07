@@ -37,10 +37,13 @@ export default defineConfig({
       outDir: resolve("dist/preload"),
       sourcemap: false,
       rollupOptions: {
-        input: resolve("src/preload/index.ts"),
+        input: {
+          index: resolve("src/preload/index.ts"),
+          "cloud-deployment": resolve("src/preload/cloud-deployment.ts"),
+        },
         output: {
           format: "cjs",
-          entryFileNames: "index.cjs",
+          entryFileNames: "[name].cjs",
         },
       },
     },

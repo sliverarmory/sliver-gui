@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -70,6 +70,7 @@ function renderSelector(overrides: Partial<React.ComponentProps<typeof SavedConf
     onChooseFile: vi.fn(),
     onConnect: vi.fn(),
     onImport: vi.fn(),
+    onOpenCloudDeployment: vi.fn(),
     onOpenChange: vi.fn(),
     onRefresh: vi.fn(),
     onRemove: vi.fn(),
@@ -129,6 +130,24 @@ describe("SavedConfigSelector", () => {
     expect(onRefresh).toHaveBeenCalledOnce();
     expect(onChooseFile).toHaveBeenCalledOnce();
     expect(onImport).toHaveBeenCalledWith("Production west");
+  });
+
+  it("anchors Forget and Cloud Deployment on two explicit action rows", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    const onOpenCloudDeployment = vi.fn();
+    renderSelector({ onOpenChange, onOpenCloudDeployment });
+
+    const configurationActions = screen.getByRole("group", { name: "Configuration actions" });
+    const dialogActions = screen.getByRole("group", { name: "Dialog actions" });
+    expect(within(configurationActions).getAllByRole("button").map((button) => button.textContent?.trim()))
+      .toEqual(["Forget", "Import a copy", "Connect external file"]);
+    expect(within(dialogActions).getAllByRole("button").map((button) => button.textContent?.trim()))
+      .toEqual(["Cloud Deployment", "Cancel", "Connect"]);
+
+    await user.click(within(dialogActions).getByRole("button", { name: "Cloud Deployment" }));
+    expect(onOpenCloudDeployment).toHaveBeenCalledOnce();
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("keeps deferred WireGuard configurations unavailable", async () => {

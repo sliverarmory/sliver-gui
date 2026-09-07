@@ -9,6 +9,10 @@ import { _electron as electron, type ElectronApplication, type Locator, type Pag
 
 import { IPC, IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
 import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
+import {
+  CLOUD_DEPLOYMENT_IPC_INVOKE,
+  type CloudDeploymentAPI,
+} from "../shared/cloud-deployment-ipc.js";
 import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { SliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
@@ -46,6 +50,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
   const consoleClientRootMarker = join(consoleClientRootDirectory, "installed-armory-package.marker");
   const selectedConfigPath = join(temporaryRoot, "chosen-m0-operator.cfg");
+  const savedExistingConfigPath = join(savedConfigDirectory, "existing-m0-operator.cfg");
   const m4PrivateKeyPath = join(temporaryRoot, "m4-e2e-private.key");
   const m4SavedOutputPath = join(temporaryRoot, "m4-ssh-stdout.txt");
   const m6LootInputPath = join(temporaryRoot, "m6-loot-input.txt");
@@ -59,7 +64,10 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     mkdir(artifactDirectory, { recursive: true }),
   ]);
   await writeFile(consoleClientRootMarker, "preserve shared client assets", { mode: 0o600 });
-  await writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 });
+  await Promise.all([
+    writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 }),
+    writeFile(savedExistingConfigPath, fakeOperatorConfig(), { mode: 0o600 }),
+  ]);
   await writeFile(m4PrivateKeyPath, M4_PRIVATE_KEY_CONTENT, { mode: 0o600 });
   await writeFile(m6LootInputPath, M6_LOOT_CONTENT, { mode: 0o600 });
 
@@ -88,6 +96,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 
     await assertRendererSecurity(electronApplication, page);
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    await verifyCloudDeploymentWindow(electronApplication, page, artifactDirectory);
     await verifyReleaseDownloadToast(electronApplication, page);
 
     // Replace the native chooser from outside the app immediately before the
@@ -211,6 +220,417 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function verifyCloudDeploymentWindow(
+  electronApplication: ElectronApplication,
+  workspacePage: Page,
+  artifactDirectory: string,
+): Promise<void> {
+  const dialog = workspacePage.getByRole("dialog", { name: "Saved configurations" });
+  const forget = dialog.getByRole("button", { name: "Forget" });
+  const cloudDeployment = dialog.getByRole("button", { name: "Cloud Deployment" });
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  const connect = dialog.getByRole("button", { name: "Connect", exact: true });
+  const [forgetBox, cloudBox, cancelBox, connectBox] = await Promise.all([
+    forget.boundingBox(),
+    cloudDeployment.boundingBox(),
+    cancel.boundingBox(),
+    connect.boundingBox(),
+  ]);
+  if (!forgetBox || !cloudBox || !cancelBox || !connectBox) {
+    throw new Error("Expected both saved-configuration action rows to be visible");
+  }
+  assert.ok(Math.abs(forgetBox.x - cloudBox.x) < 1, "Forget and Cloud Deployment must share a left edge");
+  assert.ok(cloudBox.y > forgetBox.y, "Cloud Deployment must be below Forget");
+  assert.ok(Math.abs(cloudBox.y - cancelBox.y) < 1, "Cloud Deployment and Cancel must share a row");
+  assert.ok(Math.abs(cloudBox.y - connectBox.y) < 1, "Cloud Deployment and Connect must share a row");
+
+  const initialWindowCount = electronApplication.windows().filter((candidate) => !candidate.isClosed()).length;
+  await cloudDeployment.click();
+  await waitForWindowCount(electronApplication, initialWindowCount + 1);
+  const firstCloudPage = await cloudDeploymentPage(electronApplication);
+  await assertCloudDeploymentSurface(electronApplication, firstCloudPage);
+  await verifyAwsDeploymentWizard(firstCloudPage, artifactDirectory);
+  await assertCloudDeploymentThemeSync(electronApplication, workspacePage, firstCloudPage);
+  const firstWindowId = await cloudDeploymentWindowId(electronApplication);
+
+  await invokeApplicationMenuItem(electronApplication, "cloud.deployment");
+  await waitForWindowCount(electronApplication, initialWindowCount + 1);
+  assert.equal(await cloudDeploymentWindowId(electronApplication), firstWindowId);
+
+  await workspacePage.bringToFront();
+  await cloudDeployment.click();
+  await waitForWindowCount(electronApplication, initialWindowCount + 1);
+  assert.equal(await cloudDeploymentWindowId(electronApplication), firstWindowId);
+
+  await firstCloudPage.close();
+  await waitForWindowCount(electronApplication, initialWindowCount);
+  await invokeApplicationMenuItem(electronApplication, "cloud.deployment");
+  await waitForWindowCount(electronApplication, initialWindowCount + 1);
+  const reopenedCloudPage = await cloudDeploymentPage(electronApplication);
+  await assertCloudDeploymentSurface(electronApplication, reopenedCloudPage);
+  const reopenedWindowId = await cloudDeploymentWindowId(electronApplication);
+  assert.notEqual(reopenedWindowId, firstWindowId);
+
+  await electronApplication.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows().find((candidate) => {
+      try {
+        return new URL(candidate.webContents.getURL()).search === "?surface=cloud-deployment";
+      } catch {
+        return false;
+      }
+    });
+    if (!window) throw new Error("Expected a Cloud Deployment BrowserWindow to retire");
+    (window.webContents as unknown as {
+      emit(name: string, event: unknown, details: unknown): void;
+    }).emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+  });
+  await waitForWindowCount(electronApplication, initialWindowCount);
+  await invokeApplicationMenuItem(electronApplication, "cloud.deployment");
+  const recoveredCloudPage = await cloudDeploymentPage(electronApplication);
+  await assertCloudDeploymentSurface(electronApplication, recoveredCloudPage);
+  assert.notEqual(await cloudDeploymentWindowId(electronApplication), reopenedWindowId);
+  await recoveredCloudPage.close();
+  await waitForWindowCount(electronApplication, initialWindowCount);
+}
+
+async function verifyAwsDeploymentWizard(
+  cloudPage: Page,
+  artifactDirectory: string,
+): Promise<void> {
+  await cloudPage.getByRole("button", { name: "New Deployment", exact: true }).click();
+  await cloudPage.getByRole("textbox", { name: "Deployment Name" }).fill("e2e-aws-control");
+  await cloudPage.getByRole("button", { name: "Continue", exact: true }).click();
+
+  const instanceType = cloudPage.getByRole("button", { name: /Instance Type/u });
+  await instanceType.waitFor();
+  await instanceType.click();
+  for (const name of [
+    "t3.micro", "t3.small", "t3.medium", "t3.large", "t3.xlarge",
+    "t4g.micro", "t4g.small", "t4g.medium", "t4g.large", "t4g.xlarge",
+  ]) {
+    await cloudPage.getByRole("option", { name: new RegExp(`^${name.replace(".", "\\.")}`, "u") }).waitFor();
+  }
+  await assertTextContains(
+    cloudPage.getByRole("option", { name: /^t3\.micro/u }),
+    "2 vCPU · 1 GiB · x86-64",
+  );
+  await assertTextContains(
+    cloudPage.getByRole("option", { name: /^t4g\.xlarge/u }),
+    "4 vCPU · 16 GiB · Arm64",
+  );
+  await cloudPage.getByRole("option", { name: /^t4g\.small/u }).click();
+
+  const machineImage = cloudPage.getByRole("button", { name: /Machine Image/u });
+  await assertTextContains(machineImage, "Ubuntu 24.04 LTS");
+  await assertTextContains(machineImage, "Arm64");
+  await machineImage.click();
+  await assertTextContains(
+    cloudPage.getByRole("option", { name: /^Ubuntu 24\.04 LTS/u }),
+    "ami-aaaaaaaaaaaaaaaaa · Arm64 · SSH user ubuntu",
+  );
+  await assertTextContains(
+    cloudPage.getByRole("option", { name: /^Amazon Linux 2023/u }),
+    "ami-bbbbbbbbbbbbbbbbb · Arm64 · SSH user ec2-user",
+  );
+  const amazonLinuxOption = cloudPage.getByRole("option", { name: /^Amazon Linux 2023/u });
+  await amazonLinuxOption.click();
+  assert.equal(await cloudPage.getByRole("textbox", { name: "Linux SSH Username" }).inputValue(), "ec2-user");
+  // HeroUI keeps the animated popover mounted briefly after selection. Close
+  // it explicitly so subsequent control clicks exercise the page, not the
+  // retiring overlay.
+  await cloudPage.keyboard.press("Escape");
+  await amazonLinuxOption.waitFor({ state: "hidden" });
+
+  const manualAmi = cloudPage.getByRole("switch", { name: /^Enter AMI manually/u });
+  await manualAmi.press("Space");
+  await cloudPage.getByRole("textbox", { name: "AMI ID" }).waitFor();
+  assert.equal(await machineImage.count(), 0);
+  await manualAmi.press("Space");
+  await cloudPage.getByRole("button", { name: /Machine Image/u }).waitFor();
+
+  const vpc = cloudPage.getByRole("button", { name: /VPC/u });
+  await vpc.click();
+  await cloudPage.getByRole("option", { name: /^Create a new VPC/u }).waitFor();
+  await cloudPage.getByRole("option", { name: /^default · vpc-0123456789abcdef0/u }).waitFor();
+  await cloudPage.getByRole("option", { name: /^operations · vpc-11111111111111111/u }).click();
+  const subnet = cloudPage.getByRole("button", { name: /Subnet/u });
+  await assertTextContains(subnet, "operations-private");
+
+  await vpc.click();
+  await cloudPage.getByRole("option", { name: /^Create a new VPC/u }).click();
+  assert.equal(await cloudPage.getByRole("textbox", { name: "VPC CIDR" }).inputValue(), "10.0.0.0/16");
+  assert.equal(await cloudPage.getByRole("textbox", { name: "Subnet CIDR" }).inputValue(), "10.0.1.0/24");
+  assert.equal(await subnet.count(), 0);
+
+  const sshKey = cloudPage.getByRole("button", { name: /SSH Key/u });
+  await sshKey.click();
+  await cloudPage.getByRole("option", { name: /^Credential key \(managed\)/u }).waitFor();
+  await assertTextContains(
+    cloudPage.getByRole("option", { name: /^operator-existing/u }),
+    "Matches credential key",
+  );
+  const nonmatchingKey = cloudPage.getByRole("option", { name: /^unusable-key/u });
+  assert.equal(await nonmatchingKey.getAttribute("aria-disabled"), "true");
+  await assertTextContains(nonmatchingKey, "Unavailable — public key does not match this credential.");
+  await cloudPage.getByRole("option", { name: /^operator-existing/u }).click();
+
+  const elasticIp = cloudPage.getByRole("switch", { name: /^Elastic IP/u });
+  assert.equal(await elasticIp.isChecked(), true);
+  await cloudPage.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "cloud-aws-infrastructure.png"),
+  });
+
+  await cloudPage.getByRole("button", { name: "Continue", exact: true }).click();
+  assert.equal(
+    await cloudPage.getByRole("textbox", { name: "SSH Source CIDRs" }).inputValue(),
+    "198.51.100.77/32",
+  );
+  assert.equal(
+    await cloudPage.getByRole("textbox", { name: "Operator Source CIDRs" }).inputValue(),
+    "198.51.100.77/32",
+  );
+}
+
+async function assertTextContains(locator: Locator, expected: string): Promise<void> {
+  assert.ok((await locator.innerText()).includes(expected), `expected ${JSON.stringify(expected)} in control text`);
+}
+
+async function cloudDeploymentPage(electronApplication: ElectronApplication): Promise<Page> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const page = electronApplication.windows().find((candidate) => {
+      if (candidate.isClosed()) return false;
+      try {
+        return new URL(candidate.url()).search === "?surface=cloud-deployment";
+      } catch {
+        return false;
+      }
+    });
+    if (page) return page;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for the Cloud Deployment renderer surface");
+}
+
+async function cloudDeploymentWindowId(electronApplication: ElectronApplication): Promise<number> {
+  return electronApplication.evaluate(({ BrowserWindow }) => {
+    const matches = BrowserWindow.getAllWindows().filter((candidate) => {
+      try {
+        return new URL(candidate.webContents.getURL()).search === "?surface=cloud-deployment";
+      } catch {
+        return false;
+      }
+    });
+    if (matches.length !== 1 || !matches[0]) {
+      throw new Error(`Expected one Cloud Deployment BrowserWindow, received ${matches.length}`);
+    }
+    return matches[0].id;
+  });
+}
+
+async function assertCloudDeploymentSurface(
+  electronApplication: ElectronApplication,
+  cloudPage: Page,
+): Promise<void> {
+  await cloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
+  const deploymentsTab = cloudPage.getByRole("tab", { name: /^Deployments\b/ });
+  const credentialsTab = cloudPage.getByRole("tab", { name: /^Credentials\b/ });
+  await Promise.all([deploymentsTab.waitFor(), credentialsTab.waitFor()]);
+  assert.equal(await deploymentsTab.getAttribute("aria-selected"), "true");
+  const newDeploymentButtons = cloudPage.getByRole("button", { name: "New Deployment", exact: true });
+  await Promise.all([
+    cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor(),
+    cloudPage.getByText("No Managed Servers", { exact: true }).waitFor(),
+    newDeploymentButtons.first().waitFor(),
+    cloudPage.getByRole("button", { name: "Manage Credentials", exact: true }).waitFor(),
+    cloudPage.getByRole("button", { name: "Refresh cloud deployments", exact: true }).waitFor(),
+    cloudPage.getByText("Encrypted credentials", { exact: true }).waitFor(),
+  ]);
+  assert.ok(await newDeploymentButtons.count() >= 1, "expected the deployment dashboard to offer creation");
+  assert.equal(
+    await cloudPage.getByText("Cloud deployment workflows will be available here in a future update.", {
+      exact: true,
+    }).count(),
+    0,
+  );
+  assert.equal(await cloudPage.title(), "Cloud Deployment");
+  assert.equal(await cloudPage.getByText("Jobs & listeners", { exact: true }).count(), 0);
+  const url = new URL(cloudPage.url());
+  assert.equal(url.search, "?surface=cloud-deployment");
+  assert.equal(url.hash, "");
+  assert.equal(url.username, "");
+  assert.equal(url.password, "");
+  assert.equal(await cloudPage.evaluate(() => (
+    globalThis as unknown as { opener?: unknown }
+  ).opener === null), true);
+  assert.equal(await cloudPage.evaluate(() => typeof (
+    globalThis as unknown as { sliver?: unknown }
+  ).sliver), "undefined");
+  const bridge = await cloudPage.evaluate(() => {
+    const value = (globalThis as unknown as { cloudDeployment?: object }).cloudDeployment;
+    return {
+      frozen: value ? Object.isFrozen(value) : false,
+      keys: value ? Object.keys(value).sort() : [],
+    };
+  });
+  assert.deepEqual(bridge, {
+    frozen: true,
+    keys: [
+      ...Object.keys(CLOUD_DEPLOYMENT_IPC_INVOKE),
+      "onChanged",
+      "onThemeChanged",
+    ].sort(),
+  });
+  const cloudSnapshot = await cloudPage.evaluate(async () => (
+    globalThis as unknown as { cloudDeployment: CloudDeploymentAPI }
+  ).cloudDeployment.getSnapshot());
+  assert.deepEqual(cloudSnapshot, {
+    ok: true,
+    value: {
+      state: { v: 1, revision: 0, deployments: [] },
+      credentials: [{
+        id: "0f24a4da-28c1-4d94-a66d-eb224892745d",
+        provider: "aws",
+        label: "E2E AWS profile",
+        persistence: "secure",
+        createdAt: "2026-09-06T18:00:00.000Z",
+        defaultRegion: "us-west-2",
+        sshUsername: "ubuntu",
+        profileName: "default",
+      }],
+      secureCredentialStorage: true,
+      awsProfiles: [{ name: "default", region: "us-west-2" }],
+      awsProfileDiscoveryError: null,
+      provisioningTranscripts: [],
+    },
+  });
+  const clipboardState = await cloudPage.evaluate(async () => {
+    const clipboard = (globalThis.navigator as unknown as {
+      clipboard?: { readText(): Promise<string> };
+    }).clipboard;
+    if (!clipboard) return { available: false, readDenied: true };
+    try {
+      await clipboard.readText();
+      return { available: true, readDenied: false };
+    } catch {
+      return { available: true, readDenied: true };
+    }
+  });
+  assert.deepEqual(clipboardState, { available: true, readDenied: true });
+
+  const state = await electronApplication.evaluate(({ BrowserWindow, session }) => {
+    const window = BrowserWindow.getAllWindows().find((candidate) => {
+      try {
+        return new URL(candidate.webContents.getURL()).search === "?surface=cloud-deployment";
+      } catch {
+        return false;
+      }
+    });
+    if (!window) throw new Error("Expected a Cloud Deployment BrowserWindow");
+    const preferences = (window.webContents as unknown as {
+      getLastWebPreferences(): Record<string, unknown>;
+    }).getLastWebPreferences();
+    return {
+      title: window.getTitle(),
+      parent: window.getParentWindow()?.id ?? null,
+      modal: window.isModal(),
+      visible: window.isVisible(),
+      usesDedicatedSession: window.webContents.session === session.fromPartition("sliver-cloud-deployment"),
+      usesDefaultSession: window.webContents.session === session.defaultSession,
+      preferences: {
+        contextIsolation: preferences["contextIsolation"],
+        nodeIntegration: preferences["nodeIntegration"],
+        nodeIntegrationInWorker: preferences["nodeIntegrationInWorker"] ?? false,
+        nodeIntegrationInSubFrames: preferences["nodeIntegrationInSubFrames"],
+        sandbox: preferences["sandbox"],
+        webSecurity: preferences["webSecurity"],
+        webviewTag: preferences["webviewTag"],
+      },
+    };
+  });
+  assert.deepEqual(state, {
+    title: "Cloud Deployment",
+    parent: null,
+    modal: false,
+    visible: true,
+    usesDedicatedSession: true,
+    usesDefaultSession: false,
+    preferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+    },
+  });
+}
+
+async function assertCloudDeploymentThemeSync(
+  electronApplication: ElectronApplication,
+  workspacePage: Page,
+  cloudPage: Page,
+): Promise<void> {
+  const initialSettings = await workspacePage.evaluate(() => (
+    globalThis as unknown as { sliver: SliverDesktopAPI }
+  ).sliver.getApplicationSettings());
+  const rendererMarker = "cloud-deployment-theme-state";
+  await cloudPage.evaluate((marker) => {
+    (globalThis as unknown as { cloudDeploymentStateMarker?: string }).cloudDeploymentStateMarker = marker;
+  }, rendererMarker);
+  try {
+    await setApplicationTheme(workspacePage, "light");
+    await cloudPage.locator("html.light[data-theme='light']").waitFor();
+
+    await setApplicationTheme(workspacePage, "dark");
+    await cloudPage.locator("html.dark[data-theme='dark']").waitFor();
+    assert.equal(await cloudPage.evaluate(() => (
+      globalThis as unknown as { cloudDeploymentStateMarker?: string }
+    ).cloudDeploymentStateMarker), rendererMarker);
+  } finally {
+    await setApplicationTheme(workspacePage, initialSettings.theme);
+    const restoredDark = await electronApplication.evaluate(({ nativeTheme }) => nativeTheme.shouldUseDarkColors);
+    await cloudPage.locator(
+      restoredDark ? "html.dark[data-theme='dark']" : "html.light[data-theme='light']",
+    ).waitFor();
+  }
+}
+
+async function setApplicationTheme(
+  workspacePage: Page,
+  theme: ApplicationSettingsState["theme"],
+): Promise<void> {
+  const result = await workspacePage.evaluate(async (nextTheme) => {
+    const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
+    const current = await api.getApplicationSettings();
+    return api.updateApplicationSettings({
+      expectedRevision: current.revision,
+      settings: {
+        theme: nextTheme,
+        reduceMotion: current.reduceMotion,
+        commandPaletteShortcut: current.commandPaletteShortcut,
+        terminal: current.terminal,
+      },
+    });
+  }, theme);
+  assert.equal(result.ok, true, result.error ?? `Expected application theme ${theme} to save`);
+}
+
+async function invokeApplicationMenuItem(
+  electronApplication: ElectronApplication,
+  itemId: string,
+): Promise<void> {
+  const invoked = await electronApplication.evaluate(({ BrowserWindow, Menu }, id) => {
+    const item = Menu.getApplicationMenu()?.getMenuItemById(id);
+    if (!item || typeof item.click !== "function") return false;
+    Reflect.apply(item.click, item, [item, BrowserWindow.getFocusedWindow(), {}]);
+    return true;
+  }, itemId);
+  if (!invoked) throw new Error(`Expected native application menu item ${itemId}`);
+}
 
 async function assertRendererSecurity(electronApplication: ElectronApplication, page: Page): Promise<void> {
   const expectedApiKeys = [
@@ -586,7 +1006,10 @@ async function verifyOperatorDataStores(
     };
   }, lootSavedPath);
   await page.getByRole("button", { name: "Save e2e-local-loot", exact: true }).click();
-  await page.getByText(/m6-loot-input\.txt|m6-loot-saved\.txt/u).first().waitFor();
+  // The row already contains m6-loot-input.txt, so waiting for that filename
+  // does not prove the async native save has committed. The success toast is
+  // emitted only after the main process finishes the private file write.
+  await page.getByText("Loot saved", { exact: true }).waitFor();
   assert.equal(await readFile(lootSavedPath, "utf8"), M6_LOOT_CONTENT);
   const savedLootStats = await lstat(lootSavedPath);
   assert.equal(savedLootStats.isFile(), true);
@@ -615,8 +1038,12 @@ async function verifyOperatorDataStores(
   await page.getByRole("button", { name: "Add credential", exact: true }).click();
   const addCredentialDialog = page.getByRole("dialog", { name: "Add credential", exact: true });
   await addCredentialDialog.getByRole("textbox", { name: "Username", exact: true }).fill("e2e-created");
-  await addCredentialDialog.getByLabel("Plaintext value", { exact: true }).fill(M6_CREDENTIAL_SECRET);
-  await addCredentialDialog.getByRole("button", { name: "Add credential", exact: true }).click();
+  const plaintextInput = addCredentialDialog.getByLabel("Plaintext value", { exact: true });
+  await plaintextInput.pressSequentially(M6_CREDENTIAL_SECRET);
+  assert.equal(await plaintextInput.inputValue(), M6_CREDENTIAL_SECRET);
+  const addCredentialButton = addCredentialDialog.getByRole("button", { name: "Add credential", exact: true });
+  await addCredentialButton.press("Enter");
+  await page.getByText("Credential added", { exact: true }).waitFor();
   const createdCredentialRow = page.getByRole("row").filter({ hasText: "e2e-created" });
   await createdCredentialRow.waitFor();
   assert.ok(!(await page.locator("body").innerText()).includes(M6_CREDENTIAL_SECRET));

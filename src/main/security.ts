@@ -132,13 +132,33 @@ export function isTrustedRendererUrl(candidateUrl: string, expectedRendererUrl: 
   }
 }
 
-export function hardenWindow(window: BrowserWindow, rendererUrl: string): void {
+export function hardenWindow(
+  window: BrowserWindow,
+  rendererUrl: string,
+  exactRendererUrl?: string,
+): void {
+  const allowsNavigation = (url: string): boolean => exactRendererUrl === undefined
+    ? isTrustedRendererUrl(url, rendererUrl)
+    : isSameRendererDocument(url, exactRendererUrl);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
-    if (!isTrustedRendererUrl(url, rendererUrl)) event.preventDefault();
+    if (!allowsNavigation(url)) event.preventDefault();
   });
   window.webContents.on("will-redirect", (event, url) => {
-    if (!isTrustedRendererUrl(url, rendererUrl)) event.preventDefault();
+    if (!allowsNavigation(url)) event.preventDefault();
   });
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+}
+
+export function isSameRendererDocument(candidateUrl: string, expectedUrl: string): boolean {
+  try {
+    const candidate = new URL(candidateUrl);
+    const expected = new URL(expectedUrl);
+    return candidate.protocol === expected.protocol &&
+      candidate.host === expected.host &&
+      candidate.pathname === expected.pathname &&
+      candidate.search === expected.search;
+  } catch {
+    return false;
+  }
 }

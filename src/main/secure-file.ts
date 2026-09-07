@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 const READ_CHUNK_BYTES = 64 * 1024;
@@ -106,6 +106,57 @@ export async function writePrivateFileAtomic(path: string, data: Buffer): Promis
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Atomically creates a private file without replacing any existing entry.
+ * A hard-link commit gives the final name O_EXCL-style collision semantics
+ * while keeping partial bytes hidden under a random temporary name.
+ */
+export async function writePrivateFileExclusiveAtomic(path: string, data: Buffer): Promise<void> {
+  const directory = dirname(path);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directoryStats = await lstat(directory);
+  if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()) {
+    throw new Error("Private-file destination must be a regular directory");
+  }
+  if (process.platform !== "win32") await chmod(directory, 0o700);
+
+  const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
+  let handle;
+  let destinationCreated = false;
+  try {
+    handle = await open(temporaryPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    await handle.writeFile(data);
+    await handle.sync();
+    if (process.platform !== "win32") await handle.chmod(0o600);
+    const stats = await handle.stat();
+    assertPrivateMode(stats.mode, {
+      label: "Imported configuration",
+      maxBytes: Math.max(1, data.length),
+      requirePrivateMode: true,
+    });
+    await handle.close();
+    handle = undefined;
+    await link(temporaryPath, path);
+    destinationCreated = true;
+    await unlink(temporaryPath);
+
+    const final = await lstat(path);
+    if (!final.isFile() || final.isSymbolicLink()) {
+      throw new Error("Imported configuration is not a regular file");
+    }
+    assertPrivateMode(final.mode, {
+      label: "Imported configuration",
+      maxBytes: Math.max(1, data.length),
+      requirePrivateMode: true,
+    });
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    if (destinationCreated) await unlink(path).catch(() => undefined);
     throw error;
   }
 }

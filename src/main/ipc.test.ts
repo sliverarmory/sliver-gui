@@ -111,6 +111,37 @@ describe("trusted Electron IPC boundary", () => {
     expect(exitApplication).toHaveBeenCalledOnce();
   });
 
+  it("opens Cloud Deployment with the exact trusted renderer identity", async () => {
+    const open = vi.fn(async () => ({ ok: true as const }));
+    registerIpcHandlers(
+      registryMock(),
+      vi.fn(),
+      RENDERER_URL,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { open },
+    );
+    const trusted = invokeEvent("http://127.0.0.1:5173/", 77);
+
+    await expect(electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(trusted.event))
+      .resolves.toEqual({ ok: true });
+    expect(open).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    expect(electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(trusted.event)).toEqual({
+      ok: false,
+      error: "Cloud Deployment is unavailable",
+    });
+  });
+
   it("exposes only the bounded application-update controller methods", async () => {
     const state = { status: "idle", revision: 0, currentVersion: "1.2.3" } as const;
     const getState = vi.fn(() => state);
@@ -305,6 +336,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.getSnapshot,
     IPC.refresh,
     IPC.listLocalNetworkInterfaces,
+    IPC.openCloudDeploymentWindow,
     IPC.openInteractionWindow,
     IPC.claimInteractionWindow,
     IPC.exitApp,

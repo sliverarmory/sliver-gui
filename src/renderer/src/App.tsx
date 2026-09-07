@@ -296,6 +296,19 @@ export function App() {
     if (!result.ok) toast.danger("Could not open window", { description: result.error });
   }
 
+  async function openCloudDeployment() {
+    try {
+      const result = await window.sliver.openCloudDeploymentWindow();
+      if (!result.ok) {
+        toast.danger("Could not open Cloud Deployment", { description: result.error });
+      }
+    } catch (error) {
+      toast.danger("Could not open Cloud Deployment", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async function openConsole() {
     try {
       const result = await window.sliver.openConsoleWindow();
@@ -657,6 +670,7 @@ export function App() {
           onChooseFile={connect}
           onConnect={connectSavedConfig}
           onImport={importConfig}
+          onOpenCloudDeployment={openCloudDeployment}
           onOpenChange={setConfigSelectorOpen}
           onRefresh={loadSavedConfigs}
           onRemove={removeConfig}

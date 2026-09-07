@@ -18,6 +18,7 @@ import {
   faCheck,
   faCircleExclamation,
   faClock,
+  faCloudArrowUp,
   faFileCode,
   faFileImport,
   faFolderOpen,
@@ -44,6 +45,7 @@ export interface SavedConfigSelectorProps {
   onConnect: (config: SavedConfigSummary) => void | Promise<void>;
   onChooseFile: () => void | Promise<void>;
   onImport: (displayName: string) => void | Promise<void>;
+  onOpenCloudDeployment: () => void | Promise<void>;
   onRemove: (config: SavedConfigSummary) => void | Promise<void>;
 }
 
@@ -58,6 +60,7 @@ export function SavedConfigSelector({
   onConnect,
   onChooseFile,
   onImport,
+  onOpenCloudDeployment,
   onRemove,
 }: SavedConfigSelectorProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -361,62 +364,77 @@ export function SavedConfigSelector({
             )}
           </Modal.Body>
 
-          <Modal.Footer className="flex-wrap items-center gap-2">
-            <Button
-              isDisabled={isBusy || isImportFormOpen}
-              size="sm"
-              variant="outline"
-              onPress={() => setIsImportFormOpen(true)}
-            >
-              <FontAwesomeIcon aria-hidden icon={faFileImport} className="size-3.5" />
-              Import a copy
-            </Button>
-            <Button
-              isDisabled={isBusy}
-              isPending={isChoosingFile}
-              size="sm"
-              variant="tertiary"
-              onPress={() => void chooseFile()}
-            >
-              <FontAwesomeIcon aria-hidden icon={faFolderOpen} className="size-3.5" />
-              Connect external file
-            </Button>
-            {selectedConfig ? (
+          <Modal.Footer className="flex-col items-stretch gap-2">
+            <div aria-label="Configuration actions" className="flex w-full items-center gap-2" role="group">
+              {selectedConfig ? (
+                <Button
+                  isDisabled={isBusy || isCatalogRefreshing}
+                  size="sm"
+                  variant="danger-soft"
+                  onPress={() => {
+                    setRemoveError(undefined);
+                    setRemovalCandidate(selectedConfig);
+                  }}
+                >
+                  <FontAwesomeIcon
+                    aria-hidden
+                    icon={selectedConfig.removal === "delete-managed-copy" ? faTrashCan : faUnlink}
+                    className="size-3.5"
+                  />
+                  {selectedConfig.removal === "delete-managed-copy" ? "Delete copy" : "Forget"}
+                </Button>
+              ) : null}
+              <div className="ml-auto flex items-center gap-2">
+                <Button
+                  isDisabled={isBusy || isImportFormOpen}
+                  size="sm"
+                  variant="outline"
+                  onPress={() => setIsImportFormOpen(true)}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faFileImport} className="size-3.5" />
+                  Import a copy
+                </Button>
+                <Button
+                  isDisabled={isBusy}
+                  isPending={isChoosingFile}
+                  size="sm"
+                  variant="tertiary"
+                  onPress={() => void chooseFile()}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faFolderOpen} className="size-3.5" />
+                  Connect external file
+                </Button>
+              </div>
+            </div>
+            <div aria-label="Dialog actions" className="flex w-full items-center gap-2" role="group">
               <Button
-                isDisabled={isBusy || isCatalogRefreshing}
+                isDisabled={isBusy}
                 size="sm"
-                variant="danger-soft"
-                onPress={() => {
-                  setRemoveError(undefined);
-                  setRemovalCandidate(selectedConfig);
-                }}
+                variant="outline"
+                onPress={() => void onOpenCloudDeployment()}
               >
-                <FontAwesomeIcon
-                  aria-hidden
-                  icon={selectedConfig.removal === "delete-managed-copy" ? faTrashCan : faUnlink}
-                  className="size-3.5"
-                />
-                {selectedConfig.removal === "delete-managed-copy" ? "Delete copy" : "Forget"}
+                <FontAwesomeIcon aria-hidden icon={faCloudArrowUp} className="size-3.5" />
+                Cloud Deployment
               </Button>
-            ) : null}
-            <div className="ml-auto flex items-center gap-2">
-              <Button isDisabled={isBusy} size="sm" variant="tertiary" onPress={() => onOpenChange(false)}>
-                Cancel
-              </Button>
-              <Button
-                isDisabled={
-                  !selectedConfig ||
-                  selectedConfig.availability !== "available" ||
-                  isBusy ||
-                  isCatalogRefreshing
-                }
-                isPending={isConnecting || isSubmitting}
-                size="sm"
-                variant="primary"
-                onPress={() => void connect()}
-              >
-                Connect
-              </Button>
+              <div className="ml-auto flex items-center gap-2">
+                <Button isDisabled={isBusy} size="sm" variant="tertiary" onPress={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  isDisabled={
+                    !selectedConfig ||
+                    selectedConfig.availability !== "available" ||
+                    isBusy ||
+                    isCatalogRefreshing
+                  }
+                  isPending={isConnecting || isSubmitting}
+                  size="sm"
+                  variant="primary"
+                  onPress={() => void connect()}
+                >
+                  Connect
+                </Button>
+              </div>
             </div>
           </Modal.Footer>
         </Modal.Dialog>

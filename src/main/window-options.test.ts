@@ -3,6 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CLOUD_DEPLOYMENT_SESSION_PARTITION,
+  cloudDeploymentWindowOptions,
   consoleWindowOptions,
   interactionWindowOptions,
   mainWindowOptions,
@@ -76,6 +78,42 @@ describe("main window transparency", () => {
     expect(mainWindowOptions("/preload.js", "linux", undefined, false)).toMatchObject({
       titleBarOverlay: { symbolColor: "#18181b" },
     });
+  });
+});
+
+describe("Cloud Deployment window", () => {
+  it("uses standalone native chrome while preserving hardened renderer preferences", () => {
+    const options = cloudDeploymentWindowOptions("/cloud-preload.js", "linux", "/brand.png");
+
+    expect(options).toMatchObject({
+      title: "Cloud Deployment",
+      width: 1180,
+      height: 780,
+      minWidth: 800,
+      minHeight: 600,
+      show: false,
+      backgroundColor: "#09090b",
+      icon: "/brand.png",
+      webPreferences: {
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        nodeIntegrationInSubFrames: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        webviewTag: false,
+        partition: CLOUD_DEPLOYMENT_SESSION_PARTITION,
+        preload: "/cloud-preload.js",
+      },
+    });
+    expect(options).not.toHaveProperty("parent");
+    expect(options).not.toHaveProperty("transparent");
+    expect(options).not.toHaveProperty("titleBarOverlay");
+  });
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(cloudDeploymentWindowOptions("/cloud-preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
   });
 });
 

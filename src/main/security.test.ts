@@ -236,6 +236,7 @@ describe("Electron BrowserWindow hardening", () => {
       experimentalFeatures: false,
       webviewTag: false,
     });
+
   });
 
   it("denies new windows, webviews, external navigation, and origin-prefix attacks", () => {
@@ -275,5 +276,31 @@ describe("Electron BrowserWindow hardening", () => {
     const webviewEvent = { preventDefault: vi.fn() };
     attachWebview?.(webviewEvent);
     expect(webviewEvent.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("can pin a utility window to one exact renderer surface", () => {
+    const handlers = new Map<string, (...args: unknown[]) => void>();
+    const window = {
+      webContents: {
+        setWindowOpenHandler: vi.fn(),
+        on: vi.fn((name: string, callback: (...args: unknown[]) => void) => handlers.set(name, callback)),
+      },
+    };
+    const rendererUrl = "http://127.0.0.1:5173";
+    const cloudUrl = `${rendererUrl}/?surface=cloud-deployment`;
+    hardenWindow(window as unknown as BrowserWindow, rendererUrl, cloudUrl);
+    const navigate = handlers.get("will-navigate");
+
+    const exactSurface = { preventDefault: vi.fn() };
+    navigate?.(exactSurface, `${cloudUrl}#placeholder`);
+    expect(exactSurface.preventDefault).not.toHaveBeenCalled();
+
+    const workspace = { preventDefault: vi.fn() };
+    navigate?.(workspace, `${rendererUrl}/`);
+    expect(workspace.preventDefault).toHaveBeenCalledOnce();
+
+    const differentSurface = { preventDefault: vi.fn() };
+    navigate?.(differentSurface, `${rendererUrl}/?surface=interaction`);
+    expect(differentSurface.preventDefault).toHaveBeenCalledOnce();
   });
 });

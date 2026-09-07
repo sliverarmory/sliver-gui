@@ -1,0 +1,429 @@
+import { randomUUID } from "node:crypto";
+import { lstat, readdir, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+
+import {
+  isUuidV4,
+  parseAwsCredentialSecret,
+  parseCloudCredentialSummary,
+  parseProxmoxCredentialSecret,
+  parseResolvedCloudCredentialInput,
+  type AwsCloudCredentialSummary,
+  type AwsCredentialSecret,
+  type CloudCredentialSummary,
+  type CloudProvider,
+  type ProxmoxCloudCredentialSummary,
+  type ProxmoxCredentialSecret,
+  type ResolvedCloudCredentialInput,
+} from "../shared/cloud-deployment-contracts.js";
+import { readBoundedRegularFile, writePrivateFileExclusiveAtomic } from "./secure-file.js";
+
+export const CLOUD_CREDENTIAL_DIRECTORY = "credentials";
+export const CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES = 2 * 1024 * 1024;
+
+const CLOUD_CREDENTIAL_ENVELOPE_VERSION = 1 as const;
+const ENVELOPE_KEYS = ["v", "summary", "secret"] as const;
+
+export interface CloudSafeStorageAdapter {
+  isEncryptionAvailable(): boolean;
+  getSelectedStorageBackend(): string;
+  encryptString(plainText: string): Buffer;
+  decryptString(encrypted: Buffer): string;
+}
+
+export interface CloudCredentialVaultOptions {
+  readonly idFactory?: () => string;
+  readonly clock?: () => Date;
+  readonly platform?: NodeJS.Platform;
+}
+
+interface AwsCredentialEnvelope {
+  readonly v: typeof CLOUD_CREDENTIAL_ENVELOPE_VERSION;
+  readonly summary: AwsCloudCredentialSummary;
+  readonly secret: AwsCredentialSecret;
+}
+
+interface ProxmoxCredentialEnvelope {
+  readonly v: typeof CLOUD_CREDENTIAL_ENVELOPE_VERSION;
+  readonly summary: ProxmoxCloudCredentialSummary;
+  readonly secret: ProxmoxCredentialSecret;
+}
+
+type CloudCredentialEnvelope = AwsCredentialEnvelope | ProxmoxCredentialEnvelope;
+type CredentialSecretByProvider = {
+  readonly aws: AwsCredentialSecret;
+  readonly proxmox: ProxmoxCredentialSecret;
+};
+type CredentialSummaryByProvider = {
+  readonly aws: AwsCloudCredentialSummary;
+  readonly proxmox: ProxmoxCloudCredentialSummary;
+};
+
+interface SessionCredential {
+  readonly summary: CloudCredentialSummary;
+  readonly plaintext: Buffer;
+}
+
+/**
+ * Stores provider and SSH secrets only as safeStorage ciphertext. When native
+ * encryption is unavailable (or Electron selected basic_text), credentials
+ * remain in process memory for this application session and are wiped on
+ * deletion/disposal where Buffer semantics permit it.
+ */
+export class CloudCredentialVault {
+  readonly rootDirectory: string;
+  readonly credentialDirectory: string;
+
+  readonly #safeStorage: CloudSafeStorageAdapter;
+  readonly #idFactory: () => string;
+  readonly #clock: () => Date;
+  readonly #platform: NodeJS.Platform;
+  readonly #sessionCredentials = new Map<string, SessionCredential>();
+  #mutationChain: Promise<void> = Promise.resolve();
+  #disposed = false;
+
+  constructor(
+    rootDirectory: string,
+    safeStorage: CloudSafeStorageAdapter,
+    options: CloudCredentialVaultOptions = {},
+  ) {
+    assertRootDirectory(rootDirectory);
+    this.rootDirectory = rootDirectory;
+    this.credentialDirectory = join(rootDirectory, CLOUD_CREDENTIAL_DIRECTORY);
+    this.#safeStorage = safeStorage;
+    this.#idFactory = options.idFactory ?? randomUUID;
+    this.#clock = options.clock ?? (() => new Date());
+    this.#platform = options.platform ?? process.platform;
+  }
+
+  supportsSecurePersistence(): boolean {
+    this.#assertActive();
+    return this.#canPersistSecurely();
+  }
+
+  create(input: ResolvedCloudCredentialInput): Promise<CloudCredentialSummary> {
+    return this.#serializeMutation(async () => {
+      this.#assertActive();
+      const parsed = parseResolvedCloudCredentialInput(input);
+      const id = this.#idFactory();
+      if (!isUuidV4(id) || this.#sessionCredentials.has(id)) {
+        throw new Error("Cloud credential identity generation failed");
+      }
+      const createdAt = this.#clock().toISOString();
+      const persistence = this.#canPersistSecurely() ? "secure" : "session";
+      const envelope = createEnvelope(id, createdAt, persistence, parsed);
+      const serialized = Buffer.from(JSON.stringify(envelope), "utf8");
+      try {
+        if (serialized.length > CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES) {
+          throw new Error("Cloud credential is too large");
+        }
+        this.#assertActive();
+        if (persistence === "session") {
+          this.#sessionCredentials.set(id, {
+            summary: envelope.summary,
+            plaintext: Buffer.from(serialized),
+          });
+          return envelope.summary;
+        }
+
+        let ciphertext: Buffer | undefined;
+        try {
+          ciphertext = this.#safeStorage.encryptString(serialized.toString("utf8"));
+          if (ciphertext.length < 1 || ciphertext.length > CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES) {
+            throw new Error("Encrypted cloud credential is invalid");
+          }
+          await assertCredentialFileMissing(join(this.credentialDirectory, id));
+          await writePrivateFileExclusiveAtomic(join(this.credentialDirectory, id), ciphertext);
+        } finally {
+          ciphertext?.fill(0);
+        }
+        return envelope.summary;
+      } finally {
+        serialized.fill(0);
+      }
+    });
+  }
+
+  async list(): Promise<readonly CloudCredentialSummary[]> {
+    this.#assertActive();
+    await this.#mutationChain;
+    this.#assertActive();
+    const summaries: CloudCredentialSummary[] = [];
+    const fileNames = await listCredentialFileNames(this.credentialDirectory);
+    if (fileNames.length > 0 && !this.#canPersistSecurely()) {
+      throw new Error("Secure cloud credential storage is unavailable");
+    }
+    for (const fileName of fileNames) {
+      const envelope = await this.#readPersistentEnvelope(fileName);
+      summaries.push(envelope.summary);
+    }
+    summaries.push(...[...this.#sessionCredentials.values()].map(({ summary }) => summary));
+    if (new Set(summaries.map(({ id }) => id)).size !== summaries.length) {
+      throw new Error("Duplicate cloud credential identity");
+    }
+    return Object.freeze(summaries.sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt) || left.label.localeCompare(right.label)));
+  }
+
+  delete(id: string): Promise<boolean> {
+    return this.#serializeMutation(async () => {
+      this.#assertActive();
+      assertCredentialId(id);
+      const session = this.#sessionCredentials.get(id);
+      if (session) {
+        session.plaintext.fill(0);
+        this.#sessionCredentials.delete(id);
+        return true;
+      }
+
+      const path = join(this.credentialDirectory, id);
+      try {
+        const envelope = await this.#readPersistentEnvelope(id);
+        if (envelope.summary.id !== id) throw new Error("Cloud credential identity mismatch");
+        await unlink(path);
+        return true;
+      } catch (error) {
+        if (isMissingFile(error)) return false;
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Makes decrypted material available only for the duration of the callback.
+   * Callers must return non-secret operation results and must not retain the
+   * supplied object after the callback settles.
+   */
+  async withCredential<Provider extends CloudProvider, T>(
+    id: string,
+    provider: Provider,
+    operation: (
+      secret: CredentialSecretByProvider[Provider],
+      summary: CredentialSummaryByProvider[Provider],
+    ) => T | Promise<T>,
+  ): Promise<T> {
+    this.#assertActive();
+    assertCredentialId(id);
+    if (provider !== "aws" && provider !== "proxmox") throw new TypeError("Invalid cloud provider");
+    await this.#mutationChain;
+    this.#assertActive();
+
+    const session = this.#sessionCredentials.get(id);
+    const envelope = session
+      ? parseCredentialEnvelopeFromBuffer(Buffer.from(session.plaintext), id, "session")
+      : await this.#readPersistentEnvelope(id);
+    if (envelope.summary.provider !== provider) throw new Error("Cloud credential provider mismatch");
+    return operation(
+      envelope.secret as CredentialSecretByProvider[Provider],
+      envelope.summary as CredentialSummaryByProvider[Provider],
+    );
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    for (const credential of this.#sessionCredentials.values()) credential.plaintext.fill(0);
+    this.#sessionCredentials.clear();
+  }
+
+  async #readPersistentEnvelope(id: string): Promise<CloudCredentialEnvelope> {
+    assertCredentialId(id);
+    if (!this.#canPersistSecurely()) throw new Error("Secure cloud credential storage is unavailable");
+    await verifyCredentialDirectory(this.credentialDirectory);
+    const loaded = await readBoundedRegularFile(join(this.credentialDirectory, id), {
+      label: "Encrypted cloud credential",
+      maxBytes: CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES,
+      requirePrivateMode: true,
+    });
+    let plaintext: string | undefined;
+    try {
+      plaintext = this.#safeStorage.decryptString(loaded.data);
+      return parseCredentialEnvelope(JSON.parse(plaintext) as unknown, id, "secure");
+    } catch (error) {
+      throw new Error("Encrypted cloud credential is corrupt or unavailable", { cause: error });
+    } finally {
+      plaintext = undefined;
+      loaded.data.fill(0);
+    }
+  }
+
+  #canPersistSecurely(): boolean {
+    try {
+      if (!this.#safeStorage.isEncryptionAvailable()) return false;
+      if (this.#platform !== "linux") return true;
+      const backend = this.#safeStorage.getSelectedStorageBackend();
+      return backend !== "basic_text" && backend !== "unknown";
+    } catch {
+      return false;
+    }
+  }
+
+  #assertActive(): void {
+    if (this.#disposed) throw new Error("Cloud credential vault is disposed");
+  }
+
+  #serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#mutationChain.then(operation);
+    this.#mutationChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+function createEnvelope(
+  id: string,
+  createdAt: string,
+  persistence: "secure" | "session",
+  input: ResolvedCloudCredentialInput,
+): CloudCredentialEnvelope {
+  if (input.provider === "aws") {
+    const profileSummary = "profileName" in input.secret
+      ? { profileName: input.secret.profileName }
+      : {};
+    return Object.freeze({
+      v: CLOUD_CREDENTIAL_ENVELOPE_VERSION,
+      summary: parseCloudCredentialSummary({
+        id,
+        provider: "aws",
+        label: input.label,
+        persistence,
+        createdAt,
+        defaultRegion: input.defaultRegion,
+        sshUsername: input.sshUsername,
+        ...profileSummary,
+      }) as AwsCloudCredentialSummary,
+      secret: input.secret,
+    });
+  }
+  return Object.freeze({
+    v: CLOUD_CREDENTIAL_ENVELOPE_VERSION,
+    summary: parseCloudCredentialSummary({
+      id,
+      provider: "proxmox",
+      label: input.label,
+      persistence,
+      createdAt,
+      endpoint: input.secret.endpoint,
+      sshUsername: input.sshUsername,
+    }) as ProxmoxCloudCredentialSummary,
+    secret: input.secret,
+  });
+}
+
+function parseCredentialEnvelopeFromBuffer(
+  data: Buffer,
+  expectedId: string,
+  expectedPersistence: "secure" | "session",
+): CloudCredentialEnvelope {
+  try {
+    return parseCredentialEnvelope(JSON.parse(data.toString("utf8")) as unknown, expectedId, expectedPersistence);
+  } catch (error) {
+    throw new Error("Cloud credential is corrupt or unavailable", { cause: error });
+  } finally {
+    data.fill(0);
+  }
+}
+
+function parseCredentialEnvelope(
+  value: unknown,
+  expectedId: string,
+  expectedPersistence: "secure" | "session",
+): CloudCredentialEnvelope {
+  if (!hasExactKeys(value, ENVELOPE_KEYS) || value["v"] !== CLOUD_CREDENTIAL_ENVELOPE_VERSION) {
+    throw new TypeError("Invalid cloud credential envelope");
+  }
+  const summary = parseCloudCredentialSummary(value["summary"]);
+  if (summary.id !== expectedId || summary.persistence !== expectedPersistence) {
+    throw new TypeError("Invalid cloud credential envelope identity");
+  }
+  if (summary.provider === "aws") {
+    const secret = parseAwsCredentialSecret(value["secret"]);
+    const summaryUsesProfile = "profileName" in summary;
+    const secretUsesProfile = "profileName" in secret;
+    if (
+      summaryUsesProfile !== secretUsesProfile ||
+      (summaryUsesProfile && secretUsesProfile && summary.profileName !== secret.profileName)
+    ) {
+      throw new TypeError("Invalid AWS cloud credential source");
+    }
+    return Object.freeze({
+      v: CLOUD_CREDENTIAL_ENVELOPE_VERSION,
+      summary,
+      secret,
+    });
+  }
+  return Object.freeze({
+    v: CLOUD_CREDENTIAL_ENVELOPE_VERSION,
+    summary,
+    secret: parseProxmoxCredentialSecret(value["secret"]),
+  });
+}
+
+async function listCredentialFileNames(directory: string): Promise<readonly string[]> {
+  try {
+    await verifyCredentialDirectory(directory);
+    const entries = await readdir(directory, { withFileTypes: true });
+    const fileNames: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || entry.isSymbolicLink() || !isUuidV4(entry.name)) {
+        throw new Error("Cloud credential directory contains an invalid entry");
+      }
+      fileNames.push(entry.name);
+    }
+    return fileNames.sort();
+  } catch (error) {
+    if (isMissingFile(error)) return [];
+    throw error;
+  }
+}
+
+async function verifyCredentialDirectory(directory: string): Promise<void> {
+  const stats = await lstat(directory);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error("Cloud credential directory must be a private regular directory");
+  }
+  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
+    throw new Error("Cloud credential directory permissions must be private (0700 or stricter)");
+  }
+}
+
+async function assertCredentialFileMissing(path: string): Promise<void> {
+  try {
+    await lstat(path);
+    throw new Error("Cloud credential identity already exists");
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+}
+
+function assertCredentialId(id: string): void {
+  if (!isUuidV4(id)) throw new TypeError("Invalid cloud credential identity");
+}
+
+function assertRootDirectory(rootDirectory: string): void {
+  if (
+    typeof rootDirectory !== "string" ||
+    rootDirectory.trim() === "" ||
+    !isAbsolute(rootDirectory) ||
+    resolve(rootDirectory) !== rootDirectory ||
+    dirname(rootDirectory) === rootDirectory
+  ) {
+    throw new TypeError("An absolute bounded cloud credential root is required");
+  }
+}
+
+function hasExactKeys<const Key extends string>(
+  value: unknown,
+  keys: readonly Key[],
+): value is Record<Key, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+}

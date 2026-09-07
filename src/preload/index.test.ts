@@ -26,6 +26,7 @@ const invokeArguments = {
   refresh: [],
   listLocalNetworkInterfaces: [],
   openWindow: [{ inheritConnection: true }],
+  openCloudDeploymentWindow: [],
   openInteractionWindow: [],
   claimInteractionWindow: [],
   exitApp: [],

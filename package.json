@@ -77,6 +77,7 @@
     "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
+    "@types/ssh2": "1.15.6",
     "@vitejs/plugin-react": "5.2.0",
     "electron": "43.3.0",
     "electron-builder": "26.15.3",
@@ -102,17 +103,22 @@
   "allowScripts": {
     "@heroui-pro/react@1.0.0-beta.8": true,
     "@zowe/secrets-for-zowe-sdk": false,
+    "cpu-features@0.0.10": false,
     "electron-winstaller@5.4.0": true,
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true,
     "fsevents": false,
     "node-pty@1.1.0": true,
-    "protobufjs": false
+    "protobufjs": false,
+    "ssh2@1.17.0": false
   },
   "dependencies": {
+    "@aws-sdk/client-ec2": "3.1127.0",
+    "@aws-sdk/credential-providers": "3.1127.0",
     "electron-updater": "6.8.9",
     "ghostty-web": "0.4.0",
     "node-pty": "1.1.0",
-    "sliver-script": "2.0.0-rc.2"
+    "sliver-script": "2.0.0-rc.2",
+    "ssh2": "1.17.0"
   }
 }

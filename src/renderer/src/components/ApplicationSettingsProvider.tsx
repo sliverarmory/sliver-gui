@@ -42,6 +42,10 @@ const ApplicationSettingsContext = createContext<ApplicationSettingsContextValue
 
 export function initializeRendererTheme(): void {
   const dark = globalThis.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
+  applyRendererTheme(dark);
+}
+
+export function applyRendererTheme(dark: boolean): void {
   applyDocumentSettings(dark ? "dark" : "light", false);
 }
 

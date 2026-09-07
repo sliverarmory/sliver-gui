@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   readBoundedRegularFile,
   writePrivateArtifactFileAtomic,
+  writePrivateFileExclusiveAtomic,
   writePrivateFileAtomic,
 } from "./secure-file.js";
 
@@ -55,6 +56,17 @@ describe("bounded regular-file IO", () => {
     const info = await stat(destination);
     expect(info.isFile()).toBe(true);
     if (process.platform !== "win32") expect(info.mode & 0o777).toBe(0o600);
+  });
+
+  it("atomically creates a private file without replacing an existing entry", async () => {
+    const destination = join(directory, "managed", "operator.cfg");
+    await writePrivateFileExclusiveAtomic(destination, Buffer.from("first", "utf8"));
+
+    await expect(writePrivateFileExclusiveAtomic(destination, Buffer.from("second", "utf8")))
+      .rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(destination, "utf8")).toBe("first");
+    expect((await readdir(join(directory, "managed"))).filter((name) => name.endsWith(".tmp")))
+      .toEqual([]);
   });
 
   it("writes a private artifact without changing its selected parent directory", async () => {

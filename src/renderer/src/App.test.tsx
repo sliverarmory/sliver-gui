@@ -116,6 +116,7 @@ function installSliverAPI(
       return vi.fn();
     }),
     openInteractionWindow: vi.fn(failedOperation),
+    openCloudDeploymentWindow: vi.fn(failedOperation),
     claimInteractionWindow: vi.fn(failedOperation),
     openSessionShellWindow: vi.fn(failedOperation),
     claimSessionShellWindow: vi.fn(failedOperation),

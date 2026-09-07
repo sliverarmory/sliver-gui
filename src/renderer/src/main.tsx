@@ -8,6 +8,7 @@ import { App } from "./App";
 import { InteractionWindowApp } from "./InteractionWindowApp";
 import { SessionShellWindowApp } from "./SessionShellWindowApp";
 import { ConsoleWindowApp } from "./ConsoleWindowApp";
+import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 import {
@@ -32,11 +33,15 @@ function RendererSurface(): React.JSX.Element {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <ApplicationSettingsProvider>
-      <RendererSurface />
-      <ApplicationUpdateStatus showIdleControl={surface === null} />
-      <ReleaseDownloadToasts />
-      <Toast.Provider placement="bottom" maxVisibleToasts={4} />
-    </ApplicationSettingsProvider>
+    {surface === "cloud-deployment" ? (
+      <CloudDeploymentWindowApp />
+    ) : (
+      <ApplicationSettingsProvider>
+        <RendererSurface />
+        <ApplicationUpdateStatus showIdleControl={surface === null} />
+        <ReleaseDownloadToasts />
+        <Toast.Provider placement="bottom" maxVisibleToasts={4} />
+      </ApplicationSettingsProvider>
+    )}
   </React.StrictMode>,
 );

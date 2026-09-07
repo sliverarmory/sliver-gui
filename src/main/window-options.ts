@@ -3,6 +3,7 @@ import type { BrowserWindowConstructorOptions } from "electron";
 import { secureWebPreferences } from "./security.js";
 
 const TRANSPARENT_WINDOW_COLOR = "#00000000";
+export const CLOUD_DEPLOYMENT_SESSION_PARTITION = "sliver-cloud-deployment";
 export const DARK_NATIVE_WINDOW_COLOR = "#09090b";
 export const LIGHT_NATIVE_WINDOW_COLOR = "#fafafa";
 export const DARK_TITLE_BAR_SYMBOL_COLOR = "#f4f4f5";
@@ -62,6 +63,33 @@ export function mainWindowOptions(
         }
       : {}),
     webPreferences: secureWebPreferences(preload),
+  };
+}
+
+/**
+ * A standalone native window for the Cloud Deployment workspace. The surface
+ * is intentionally independent from an operator connection while its cloud
+ * management workflow remains usable without an operator connection.
+ */
+export function cloudDeploymentWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1180,
+    height: 780,
+    minWidth: 800,
+    minHeight: 600,
+    show: false,
+    title: "Cloud Deployment",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: {
+      ...secureWebPreferences(preload),
+      partition: CLOUD_DEPLOYMENT_SESSION_PARTITION,
+    },
   };
 }
 

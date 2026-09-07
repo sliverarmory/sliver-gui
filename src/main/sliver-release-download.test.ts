@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +22,7 @@ afterEach(async () => {
 });
 
 describe("latest Sliver release catalog", () => {
-  it("extracts only executable server and client assets and sorts their targets", () => {
+  it("associates Minisign sidecars with executable assets and sorts their targets", () => {
     const catalog = parseLatestRelease(releasePayload([
       releaseAsset("sliver-server_windows-amd64.exe", 30),
       releaseAsset("sliver-client_linux-arm64", 20),
@@ -32,8 +33,20 @@ describe("latest Sliver release catalog", () => {
     expect(catalog).toEqual({
       version: "v1.7.3",
       assets: [
-        expect.objectContaining({ artifact: "client", os: "linux", arch: "arm64", size: 20 }),
-        expect.objectContaining({ artifact: "server", os: "windows", arch: "amd64", size: 30 }),
+        expect.objectContaining({
+          artifact: "client",
+          os: "linux",
+          arch: "arm64",
+          size: 20,
+          signature: expect.objectContaining({ fileName: "sliver-client_linux-arm64.minisig", size: 320 }),
+        }),
+        expect.objectContaining({
+          artifact: "server",
+          os: "windows",
+          arch: "amd64",
+          size: 30,
+          signature: null,
+        }),
       ],
     });
   });
@@ -62,6 +75,93 @@ describe("latest Sliver release catalog", () => {
 });
 
 describe("Sliver release downloads", () => {
+  it("stages an allowlisted server asset at a private main-owned path", async () => {
+    const stagingDirectory = await testDirectory();
+    const outputPath = join(stagingDirectory, "server-stage");
+    const bytes = new TextEncoder().encode("server release bytes");
+    const fixture = signedFixture(bytes, "sliver-server_linux-amd64");
+    const downloader = new SliverReleaseDownloader({
+      downloadsDirectory: stagingDirectory,
+      fetch: releaseFetch("sliver-server_linux-amd64", bytes, bytes.byteLength, fixture.signature),
+      trustedMinisignPublicKey: fixture.publicKey,
+    });
+    const progress: Array<[number, number]> = [];
+
+    const staged = await downloader.stagePrivate(
+      { artifact: "server", os: "linux", arch: "amd64" },
+      outputPath,
+      (received, total) => progress.push([received, total]),
+    );
+
+    expect(staged).toEqual({
+      version: "v1.7.3",
+      fileName: "sliver-server_linux-amd64",
+      path: outputPath,
+      size: bytes.byteLength,
+    });
+    expect(progress).toEqual([[bytes.byteLength, bytes.byteLength]]);
+    expect(await readFile(outputPath)).toEqual(Buffer.from(bytes));
+    if (process.platform !== "win32") expect((await stat(outputPath)).mode & 0o777).toBe(0o700);
+  });
+
+  it("refuses a private stage before downloading executable bytes when the signature is missing", async () => {
+    const stagingDirectory = await testDirectory();
+    const outputPath = join(stagingDirectory, "server-stage");
+    const bytes = new TextEncoder().encode("server release bytes");
+    const fetch = releaseFetch("sliver-server_linux-amd64", bytes);
+    const downloader = new SliverReleaseDownloader({ downloadsDirectory: stagingDirectory, fetch });
+
+    await expect(downloader.stagePrivate(
+      { artifact: "server", os: "linux", arch: "amd64" },
+      outputPath,
+    )).rejects.toThrow(/missing its Minisign signature/u);
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(await readdir(stagingDirectory)).toEqual([]);
+  });
+
+  it("removes unverified bytes and never publishes the requested stage path", async () => {
+    const stagingDirectory = await testDirectory();
+    const outputPath = join(stagingDirectory, "server-stage");
+    const bytes = Buffer.from("tampered release byte", "utf8");
+    const fixture = signedFixture(Buffer.from("authentic release data", "utf8"), "sliver-server_linux-amd64");
+    const downloader = new SliverReleaseDownloader({
+      downloadsDirectory: stagingDirectory,
+      fetch: releaseFetch("sliver-server_linux-amd64", bytes, bytes.byteLength, fixture.signature),
+      trustedMinisignPublicKey: fixture.publicKey,
+    });
+
+    await expect(downloader.stagePrivate(
+      { artifact: "server", os: "linux", arch: "amd64" },
+      outputPath,
+    )).rejects.toThrow(/failed Minisign verification/u);
+
+    expect(await readdir(stagingDirectory)).toEqual([]);
+  });
+
+  it("removes a failed private stage instead of leaving partial executable data", async () => {
+    const stagingDirectory = await testDirectory();
+    const outputPath = join(stagingDirectory, "server-stage");
+    const bytes = new TextEncoder().encode("short");
+    const fixture = signedFixture(bytes, "sliver-server_linux-amd64");
+    const downloader = new SliverReleaseDownloader({
+      downloadsDirectory: stagingDirectory,
+      fetch: releaseFetch(
+        "sliver-server_linux-amd64",
+        bytes,
+        bytes.byteLength + 1,
+        fixture.signature,
+      ),
+      trustedMinisignPublicKey: fixture.publicKey,
+    });
+
+    await expect(downloader.stagePrivate(
+      { artifact: "server", os: "linux", arch: "amd64" },
+      outputPath,
+    )).rejects.toThrow(/size did not match/);
+    expect(await readdir(stagingDirectory)).toEqual([]);
+  });
+
   it("rechecks the latest release, streams progress, and writes a private executable into Downloads", async () => {
     const downloadsDirectory = await testDirectory();
     const bytes = new TextEncoder().encode("verified release bytes");
@@ -149,20 +249,73 @@ async function testDirectory(): Promise<string> {
   return directory;
 }
 
-function releaseFetch(fileName: string, bytes: Uint8Array, advertisedSize = bytes.byteLength) {
+function releaseFetch(
+  fileName: string,
+  bytes: Uint8Array,
+  advertisedSize = bytes.byteLength,
+  signature?: Uint8Array,
+) {
   return vi.fn<typeof fetch>(async (input) => {
     const url = String(input);
     if (url.includes("api.github.com")) {
-      return new Response(JSON.stringify(releasePayload([releaseAsset(fileName, advertisedSize)])), {
+      const assets = [releaseAsset(fileName, advertisedSize)];
+      if (signature !== undefined) assets.push(releaseAsset(`${fileName}.minisig`, signature.byteLength));
+      return new Response(JSON.stringify(releasePayload(assets)), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     }
-    return new Response(bytes, {
+    if (url.endsWith(".minisig")) {
+      return signature === undefined
+        ? new Response(null, { status: 404 })
+        : new Response(Uint8Array.from(signature).buffer, {
+            status: 200,
+            headers: { "content-length": String(signature.byteLength) },
+          });
+    }
+    return new Response(Uint8Array.from(bytes).buffer, {
       status: 200,
       headers: { "content-length": String(bytes.byteLength) },
     });
   });
+}
+
+function signedFixture(artifact: Uint8Array, fileName: string): {
+  readonly publicKey: string;
+  readonly signature: Buffer;
+} {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const keyId = Buffer.from("0102030405060708", "hex");
+  const exported = publicKey.export({ format: "der", type: "spki" });
+  const rawPublicKey = Buffer.from(exported).subarray(-32);
+  const minisignPublicKey = Buffer.concat([
+    Buffer.from("Ed", "ascii"),
+    keyId,
+    rawPublicKey,
+  ]).toString("base64");
+  const digest = createHash("blake2b512").update(artifact).digest();
+  const messageSignature = sign(null, digest, privateKey);
+  const trustedComment = `timestamp:1788721200\tfile:${fileName}`;
+  const commentSignature = sign(
+    null,
+    Buffer.concat([messageSignature, Buffer.from(trustedComment, "utf8")]),
+    privateKey,
+  );
+  const rawSignature = Buffer.concat([
+    Buffer.from("ED", "ascii"),
+    keyId,
+    messageSignature,
+  ]);
+  return {
+    publicKey: minisignPublicKey,
+    signature: Buffer.from([
+      "untrusted comment: signature from test minisign key",
+      rawSignature.toString("base64"),
+      `trusted comment: ${trustedComment}`,
+      commentSignature.toString("base64"),
+      "",
+    ].join("\n"), "utf8"),
+  };
 }
 
 function releasePayload(assets: unknown[]): Record<string, unknown> {
