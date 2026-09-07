@@ -32,6 +32,7 @@ vi.mock("electron", () => ({
 
 const CLOUD_RENDERER_URL = "http://127.0.0.1:5173/?surface=cloud-deployment";
 const CREDENTIAL_ID = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
 const PRIVATE_KEY_TOKEN = "939914c7-7b6d-4f35-bcd6-461d7ff3cf81";
 const CURRENT_WINDOW = { marker: "current-cloud-window" } as unknown as BrowserWindow;
 const OTHER_WINDOW = { marker: "stale-cloud-window" } as unknown as BrowserWindow;
@@ -252,6 +253,27 @@ describe("Cloud Deployment IPC boundary", () => {
         sshCidrs: [],
         operatorCidrs: [],
       }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.listFirewallRules, [{
+        deploymentId: CREDENTIAL_ID,
+        expectedRevision: 0,
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createFirewallRule, [{
+        deploymentId: CREDENTIAL_ID,
+        expectedRevision: 0,
+        rule: { ...validFirewallRule(), toPort: 70_000 },
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.updateFirewallRule, [{
+        deploymentId: CREDENTIAL_ID,
+        expectedRevision: 0,
+        ruleId: "not-a-rule-id",
+        rule: validFirewallRule(),
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteFirewallRule, [{
+        deploymentId: CREDENTIAL_ID,
+        expectedRevision: 0,
+        ruleId: FIREWALL_RULE_ID,
+        unexpected: true,
+      }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.prepareDestroyDeployment, [{
         deploymentId: CREDENTIAL_ID,
         expectedRevision: -1,
@@ -284,6 +306,70 @@ describe("Cloud Deployment IPC boundary", () => {
       credentialId: CREDENTIAL_ID,
       region: "us-west-2",
     });
+  });
+
+  it("validates and forwards AWS firewall rule operations", async () => {
+    const response = { ok: false as const, error: "firewall probe" };
+    const listFirewallRules = vi.fn<CloudDeploymentController["listFirewallRules"]>(async () => response);
+    const createFirewallRule = vi.fn<CloudDeploymentController["createFirewallRule"]>(async () => response);
+    const updateFirewallRule = vi.fn<CloudDeploymentController["updateFirewallRule"]>(async () => response);
+    const deleteFirewallRule = vi.fn<CloudDeploymentController["deleteFirewallRule"]>(async () => response);
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({
+        listFirewallRules,
+        createFirewallRule,
+        updateFirewallRule,
+        deleteFirewallRule,
+      }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const rule = validFirewallRule();
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.listFirewallRules, event, {
+      deploymentId: CREDENTIAL_ID,
+    })).resolves.toBe(response);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createFirewallRule, event, {
+      deploymentId: CREDENTIAL_ID,
+      expectedRevision: 4,
+      rule,
+    })).resolves.toBe(response);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.updateFirewallRule, event, {
+      deploymentId: CREDENTIAL_ID,
+      expectedRevision: 5,
+      ruleId: FIREWALL_RULE_ID,
+      rule,
+    })).resolves.toBe(response);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.deleteFirewallRule, event, {
+      deploymentId: CREDENTIAL_ID,
+      expectedRevision: 6,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toBe(response);
+
+    expect(listFirewallRules).toHaveBeenCalledExactlyOnceWith({ deploymentId: CREDENTIAL_ID });
+    expect(createFirewallRule).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: CREDENTIAL_ID,
+      expectedRevision: 4,
+      rule,
+    });
+    expect(updateFirewallRule).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: CREDENTIAL_ID,
+      expectedRevision: 5,
+      ruleId: FIREWALL_RULE_ID,
+      rule,
+    });
+    expect(deleteFirewallRule).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: CREDENTIAL_ID,
+      expectedRevision: 6,
+      ruleId: FIREWALL_RULE_ID,
+    });
+    for (const call of [
+      listFirewallRules.mock.calls[0]?.[0],
+      createFirewallRule.mock.calls[0]?.[0],
+      updateFirewallRule.mock.calls[0]?.[0],
+      deleteFirewallRule.mock.calls[0]?.[0],
+    ]) expect(Object.isFrozen(call)).toBe(true);
   });
 
   it("scrubs mutable credential arguments only after the controller finishes", async () => {
@@ -395,6 +481,10 @@ function controllerMock(
     createDeployment: vi.fn(unavailable),
     runLifecycleAction: vi.fn(unavailable),
     updateFirewall: vi.fn(unavailable),
+    listFirewallRules: vi.fn(unavailable),
+    createFirewallRule: vi.fn(unavailable),
+    updateFirewallRule: vi.fn(unavailable),
+    deleteFirewallRule: vi.fn(unavailable),
     prepareDestroyDeployment: vi.fn(unavailable),
     executeDestroyDeployment: vi.fn(unavailable),
     ...overrides,
@@ -456,5 +546,17 @@ function validAwsCredential() {
     secretAccessKey: "aws-secret-value",
     sessionToken: "aws-session-token",
     sshPassphrase: "ssh-passphrase",
+  };
+}
+
+function validFirewallRule() {
+  return {
+    direction: "ingress" as const,
+    protocol: "tcp",
+    fromPort: 8443,
+    toPort: 8443,
+    peerType: "ipv4" as const,
+    peer: "203.0.113.0/24",
+    description: "Operator API",
   };
 }

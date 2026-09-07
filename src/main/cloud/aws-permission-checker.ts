@@ -3,6 +3,7 @@ import {
   AssociateAddressCommand,
   AssociateRouteTableCommand,
   AttachInternetGatewayCommand,
+  AuthorizeSecurityGroupEgressCommand,
   AuthorizeSecurityGroupIngressCommand,
   CreateInternetGatewayCommand,
   CreateRouteCommand,
@@ -40,8 +41,10 @@ import {
   DisassociateRouteTableCommand,
   EC2Client,
   ImportKeyPairCommand,
+  ModifySecurityGroupRulesCommand,
   RebootInstancesCommand,
   ReleaseAddressCommand,
+  RevokeSecurityGroupEgressCommand,
   RevokeSecurityGroupIngressCommand,
   RunInstancesCommand,
   StartInstancesCommand,
@@ -70,6 +73,7 @@ const PLACEHOLDER = {
   networkInterfaceId: "eni-00000000000000000",
   routeTableAssociationId: "rtbassoc-00000000000000000",
   routeTableId: "rtb-00000000000000000",
+  securityGroupRuleId: "sgr-00000000000000000",
   securityGroupId: "sg-00000000000000000",
   subnetId: "subnet-00000000000000000",
   volumeId: "vol-00000000000000000",
@@ -81,6 +85,15 @@ const DRY_RUN_PUBLIC_KEY = Buffer.from(
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA sliver-gui-permission-check",
   "utf8",
 );
+const DRY_RUN_MANAGED_TAGS = [
+  { Key: "SliverGUIManaged", Value: "true" },
+  { Key: "SliverGUID", Value: "00000000-0000-4000-8000-000000000000" },
+  { Key: "Name", Value: "sliver-gui-permission-check" },
+] as { Key: string; Value: string }[];
+const DRY_RUN_CUSTOM_RULE_TAGS = [
+  ...DRY_RUN_MANAGED_TAGS,
+  { Key: "SliverGUIRuleType", Value: "custom" },
+] as { Key: string; Value: string }[];
 const MAX_PROBE_CONCURRENCY = 6;
 
 type PermissionStatus = "verified" | "missing" | "unverifiable";
@@ -215,6 +228,7 @@ function awsPermissionProbes(): readonly PermissionProbe[] {
     read("ec2:DescribeVpcs", new DescribeVpcsCommand({})),
     dryRun("ec2:AllocateAddress", new AllocateAddressCommand({ Domain: "vpc", DryRun: true })),
     dryRun("ec2:AssociateAddress", new AssociateAddressCommand({ AllocationId: PLACEHOLDER.allocationId, InstanceId: PLACEHOLDER.instanceId, DryRun: true })),
+    dryRun("ec2:AuthorizeSecurityGroupEgress", new AuthorizeSecurityGroupEgressCommand({ GroupId: PLACEHOLDER.securityGroupId, IpPermissions: firewallPermission, DryRun: true })),
     dryRun("ec2:AuthorizeSecurityGroupIngress", new AuthorizeSecurityGroupIngressCommand({ GroupId: PLACEHOLDER.securityGroupId, IpPermissions: firewallPermission, DryRun: true })),
     dryRun("ec2:CreateSecurityGroup", new CreateSecurityGroupCommand({ GroupName: "sliver-gui-permission-check", Description: "Sliver GUI permission check", VpcId: PLACEHOLDER.vpcId, DryRun: true })),
     // CreateTags is evaluated separately with tagged copies of every create
@@ -226,6 +240,21 @@ function awsPermissionProbes(): readonly PermissionProbe[] {
     dryRun("ec2:StartInstances", new StartInstancesCommand({ InstanceIds: [PLACEHOLDER.instanceId], DryRun: true })),
     dryRun("ec2:StopInstances", new StopInstancesCommand({ InstanceIds: [PLACEHOLDER.instanceId], DryRun: true })),
     dryRun("ec2:RebootInstances", new RebootInstancesCommand({ InstanceIds: [PLACEHOLDER.instanceId], DryRun: true })),
+    dryRun("ec2:ModifySecurityGroupRules", new ModifySecurityGroupRulesCommand({
+      GroupId: PLACEHOLDER.securityGroupId,
+      SecurityGroupRules: [{
+        SecurityGroupRuleId: PLACEHOLDER.securityGroupRuleId,
+        SecurityGroupRule: {
+          IpProtocol: "tcp",
+          FromPort: 22,
+          ToPort: 22,
+          CidrIpv4: "192.0.2.1/32",
+          Description: "Sliver GUI permission check",
+        },
+      }],
+      DryRun: true,
+    })),
+    dryRun("ec2:RevokeSecurityGroupEgress", new RevokeSecurityGroupEgressCommand({ GroupId: PLACEHOLDER.securityGroupId, SecurityGroupRuleIds: [PLACEHOLDER.securityGroupRuleId], DryRun: true })),
     dryRun("ec2:RevokeSecurityGroupIngress", new RevokeSecurityGroupIngressCommand({ GroupId: PLACEHOLDER.securityGroupId, IpPermissions: firewallPermission, DryRun: true })),
     dryRun("ec2:TerminateInstances", new TerminateInstancesCommand({ InstanceIds: [PLACEHOLDER.instanceId], DryRun: true })),
     dryRun("ec2:DeleteKeyPair", new DeleteKeyPairCommand({ KeyPairId: PLACEHOLDER.keyPairId, DryRun: true })),
@@ -268,30 +297,41 @@ function awsTagOnCreateProbes(): readonly TagOnCreateProbe[] {
     ToPort: 22,
     IpRanges: [{ CidrIp: "192.0.2.1/32", Description: "Sliver GUI permission check" }],
   }];
-  const tags = [{ Key: "SliverGUIManaged", Value: "true" }];
   return [
     tagOnCreate("ec2:AllocateAddress", new AllocateAddressCommand({
       Domain: "vpc",
-      TagSpecifications: [{ ResourceType: "elastic-ip", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "elastic-ip", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:AuthorizeSecurityGroupIngress", new AuthorizeSecurityGroupIngressCommand({
       GroupId: PLACEHOLDER.securityGroupId,
       IpPermissions: firewallPermission,
-      TagSpecifications: [{ ResourceType: "security-group-rule", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "security-group-rule", Tags: DRY_RUN_MANAGED_TAGS }],
+      DryRun: true,
+    })),
+    tagOnCreate("ec2:AuthorizeSecurityGroupIngress", new AuthorizeSecurityGroupIngressCommand({
+      GroupId: PLACEHOLDER.securityGroupId,
+      IpPermissions: firewallPermission,
+      TagSpecifications: [{ ResourceType: "security-group-rule", Tags: DRY_RUN_CUSTOM_RULE_TAGS }],
+      DryRun: true,
+    })),
+    tagOnCreate("ec2:AuthorizeSecurityGroupEgress", new AuthorizeSecurityGroupEgressCommand({
+      GroupId: PLACEHOLDER.securityGroupId,
+      IpPermissions: firewallPermission,
+      TagSpecifications: [{ ResourceType: "security-group-rule", Tags: DRY_RUN_CUSTOM_RULE_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:CreateSecurityGroup", new CreateSecurityGroupCommand({
       GroupName: "sliver-gui-permission-check",
       Description: "Sliver GUI permission check",
       VpcId: PLACEHOLDER.vpcId,
-      TagSpecifications: [{ ResourceType: "security-group", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "security-group", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:ImportKeyPair", new ImportKeyPairCommand({
       KeyName: "sliver-gui-permission-check",
       PublicKeyMaterial: DRY_RUN_PUBLIC_KEY,
-      TagSpecifications: [{ ResourceType: "key-pair", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "key-pair", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:RunInstances", new RunInstancesCommand({
@@ -302,30 +342,30 @@ function awsTagOnCreateProbes(): readonly TagOnCreateProbe[] {
       SubnetId: PLACEHOLDER.subnetId,
       MetadataOptions: { HttpEndpoint: "enabled", HttpTokens: "required" },
       TagSpecifications: [
-        { ResourceType: "instance", Tags: tags },
-        { ResourceType: "volume", Tags: tags },
-        { ResourceType: "network-interface", Tags: tags },
+        { ResourceType: "instance", Tags: DRY_RUN_MANAGED_TAGS },
+        { ResourceType: "volume", Tags: DRY_RUN_MANAGED_TAGS },
+        { ResourceType: "network-interface", Tags: DRY_RUN_MANAGED_TAGS },
       ],
       DryRun: true,
     })),
     tagOnCreate("ec2:CreateVpc", new CreateVpcCommand({
       CidrBlock: "10.255.0.0/16",
-      TagSpecifications: [{ ResourceType: "vpc", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "vpc", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:CreateSubnet", new CreateSubnetCommand({
       VpcId: PLACEHOLDER.vpcId,
       CidrBlock: "10.255.1.0/24",
-      TagSpecifications: [{ ResourceType: "subnet", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "subnet", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:CreateInternetGateway", new CreateInternetGatewayCommand({
-      TagSpecifications: [{ ResourceType: "internet-gateway", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "internet-gateway", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
     tagOnCreate("ec2:CreateRouteTable", new CreateRouteTableCommand({
       VpcId: PLACEHOLDER.vpcId,
-      TagSpecifications: [{ ResourceType: "route-table", Tags: tags }],
+      TagSpecifications: [{ ResourceType: "route-table", Tags: DRY_RUN_MANAGED_TAGS }],
       DryRun: true,
     })),
   ];

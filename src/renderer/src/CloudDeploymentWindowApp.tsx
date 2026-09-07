@@ -1,14 +1,17 @@
 import { faAmazon } from "@fortawesome/free-brands-svg-icons";
 import {
+  faArrowLeft,
   faArrowsRotate,
   faCheck,
   faCloudArrowUp,
   faKey,
-  faPause,
+  faPen,
   faPlay,
+  faPlus,
   faRotate,
   faServer,
   faShieldHalved,
+  faStop,
   faTrash,
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
@@ -24,6 +27,7 @@ import {
   Label,
   ListBox,
   ProgressBar,
+  ScrollShadow,
   Select,
   Skeleton,
   Switch,
@@ -32,8 +36,10 @@ import {
   TextField,
   Tooltip,
 } from "@heroui/react";
+import { DataGrid, type DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { NativeSelect } from "@heroui-pro/react/native-select";
+import { Sheet } from "@heroui-pro/react/sheet";
 import { Stepper } from "@heroui-pro/react/stepper";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -42,6 +48,11 @@ import {
   isAwsRegion,
   type AwsCloudDeploymentRecord,
   type AwsCliProfileSummary,
+  type AwsFirewallPeerType,
+  type AwsFirewallRule,
+  type AwsFirewallDirection,
+  type AwsFirewallRuleSpec,
+  type AwsFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentRecord,
   type CloudDeploymentStatus,
@@ -109,6 +120,59 @@ interface ProxmoxDeploymentDraft {
   readonly gateway: string;
 }
 
+type AwsFirewallPresetId =
+  | "ssh"
+  | "http"
+  | "https"
+  | "rdp"
+  | "custom-tcp"
+  | "custom-udp"
+  | "all-traffic"
+  | "all-icmp-ipv4"
+  | "custom-icmp-ipv4"
+  | "all-icmp-ipv6"
+  | "custom-icmp-ipv6"
+  | "custom-protocol";
+
+interface AwsFirewallRuleDraft {
+  readonly direction: AwsFirewallDirection;
+  readonly preset: AwsFirewallPresetId;
+  readonly protocol: string;
+  readonly fromPort: string;
+  readonly toPort: string;
+  readonly peerType: AwsFirewallPeerType;
+  readonly peer: string;
+  readonly description: string;
+}
+
+type AwsFirewallEditorState =
+  | { readonly mode: "create"; readonly draft: AwsFirewallRuleDraft }
+  | { readonly mode: "edit"; readonly ruleId: string; readonly draft: AwsFirewallRuleDraft };
+
+interface AwsFirewallPreset {
+  readonly id: AwsFirewallPresetId;
+  readonly label: string;
+  readonly description: string;
+  readonly protocol: string;
+  readonly fromPort: number | null;
+  readonly toPort: number | null;
+}
+
+const AWS_FIREWALL_PRESETS: readonly AwsFirewallPreset[] = [
+  { id: "ssh", label: "SSH", description: "TCP port 22", protocol: "tcp", fromPort: 22, toPort: 22 },
+  { id: "http", label: "HTTP", description: "TCP port 80", protocol: "tcp", fromPort: 80, toPort: 80 },
+  { id: "https", label: "HTTPS", description: "TCP port 443", protocol: "tcp", fromPort: 443, toPort: 443 },
+  { id: "rdp", label: "RDP", description: "TCP port 3389", protocol: "tcp", fromPort: 3_389, toPort: 3_389 },
+  { id: "custom-tcp", label: "Custom TCP", description: "Choose a TCP port range", protocol: "tcp", fromPort: null, toPort: null },
+  { id: "custom-udp", label: "Custom UDP", description: "Choose a UDP port range", protocol: "udp", fromPort: null, toPort: null },
+  { id: "all-traffic", label: "All traffic", description: "All protocols and ports", protocol: "-1", fromPort: null, toPort: null },
+  { id: "all-icmp-ipv4", label: "All ICMP IPv4", description: "All ICMP types and codes", protocol: "icmp", fromPort: -1, toPort: -1 },
+  { id: "custom-icmp-ipv4", label: "Custom ICMP IPv4", description: "Choose an ICMP type and code", protocol: "icmp", fromPort: null, toPort: null },
+  { id: "all-icmp-ipv6", label: "All ICMPv6", description: "All ICMPv6 types and codes", protocol: "icmpv6", fromPort: -1, toPort: -1 },
+  { id: "custom-icmp-ipv6", label: "Custom ICMPv6", description: "Choose an ICMPv6 type and code", protocol: "icmpv6", fromPort: null, toPort: null },
+  { id: "custom-protocol", label: "Custom protocol", description: "Enter an IP protocol number from 0 to 255", protocol: "", fromPort: null, toPort: null },
+];
+
 const INITIAL_AWS_DEPLOYMENT: AwsDeploymentDraft = {
   imageMode: "catalog",
   imageId: "",
@@ -156,6 +220,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const [loadError, setLoadError] = useState<RefreshFailure | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [selectedTab, setSelectedTab] = useState("deployments");
+  const [detailsDeploymentId, setDetailsDeploymentId] = useState<string | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshQueued = useRef<CloudDeploymentChangeScope | null>(null);
   const snapshotRef = useRef<CloudDeploymentSnapshot | null>(null);
@@ -249,46 +314,53 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
     };
   }, [api, refresh]);
 
-  return (
-    <main className="h-screen overflow-y-auto bg-background text-foreground">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-6 pb-12 pt-8 lg:px-8">
-        <header className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
-          <div className="flex items-start gap-3">
-            <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
-              <FontAwesomeIcon aria-hidden icon={faCloudArrowUp} className="size-5" />
-            </span>
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight">Cloud Deployment</h1>
-              <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
-                Provision and operate tagged Sliver multiplayer servers on AWS EC2 or Proxmox.
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {snapshot ? (
-              <Chip color={snapshot.secureCredentialStorage ? "success" : "warning"} size="sm" variant="soft">
-                {snapshot.secureCredentialStorage ? "Encrypted credentials" : "Session-only credentials"}
-              </Chip>
-            ) : null}
-            <Tooltip delay={0}>
-              <Button
-                aria-label="Refresh cloud deployments"
-                isDisabled={isLoading}
-                isIconOnly
-                variant="outline"
-                onPress={() => void refresh()}
-              >
-                <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoading ? "animate-spin" : ""} />
-              </Button>
-              <Tooltip.Content>Refresh cloud deployments</Tooltip.Content>
-            </Tooltip>
-          </div>
-        </header>
+  const detailsDeployment = detailsDeploymentId
+    ? snapshot?.state.deployments.find(({ id }) => id === detailsDeploymentId)
+    : undefined;
+  const awsDetailsDeployment = detailsDeployment?.provider === "aws" ? detailsDeployment : undefined;
 
-        {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
+  return (
+    <main className={`h-screen bg-background text-foreground ${awsDetailsDeployment ? "overflow-hidden" : "overflow-y-auto"}`}>
+      <div className={`mx-auto flex w-full max-w-7xl flex-col px-6 pt-8 lg:px-8 ${awsDetailsDeployment ? "h-full min-h-0" : "gap-6 pb-12"}`}>
+        {!awsDetailsDeployment ? (
+          <header className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+            <div className="flex items-start gap-3">
+              <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
+                <FontAwesomeIcon aria-hidden icon={faCloudArrowUp} className="size-5" />
+              </span>
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight">Cloud Deployment</h1>
+                <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
+                  Provision and operate tagged Sliver multiplayer servers on AWS EC2 or Proxmox.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {snapshot ? (
+                <Chip color={snapshot.secureCredentialStorage ? "success" : "warning"} size="sm" variant="soft">
+                  {snapshot.secureCredentialStorage ? "Encrypted credentials" : "Session-only credentials"}
+                </Chip>
+              ) : null}
+              <Tooltip delay={0}>
+                <Button
+                  aria-label="Refresh cloud deployments"
+                  isDisabled={isLoading}
+                  isIconOnly
+                  variant="outline"
+                  onPress={() => void refresh()}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoading ? "animate-spin" : ""} />
+                </Button>
+                <Tooltip.Content>Refresh cloud deployments</Tooltip.Content>
+              </Tooltip>
+            </div>
+          </header>
+        ) : null}
+
+        {!awsDetailsDeployment && feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
         {isLoading && !snapshot ? <LoadingSurface /> : null}
         {loadError && !snapshot ? <LoadError message={loadError.message} onRetry={() => void refresh()} /> : null}
-        {loadError && snapshot ? (
+        {!awsDetailsDeployment && loadError && snapshot ? (
           <InlineMessage
             tone="warning"
             title="Refresh failed"
@@ -296,7 +368,28 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           />
         ) : null}
 
-        {snapshot && api ? (
+        {snapshot && api && awsDetailsDeployment ? (
+          <AwsInstanceDetails
+            api={api}
+            deployment={awsDetailsDeployment}
+            notices={(
+              <>
+                {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
+                {loadError ? (
+                  <InlineMessage
+                    tone="warning"
+                    title="Refresh failed"
+                    detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
+                  />
+                ) : null}
+              </>
+            )}
+            revision={snapshot.state.revision}
+            onBack={() => setDetailsDeploymentId(null)}
+            onFeedback={setFeedback}
+            onRefresh={refresh}
+          />
+        ) : snapshot && api ? (
           <Tabs
             selectedKey={selectedTab}
             variant="secondary"
@@ -322,6 +415,10 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                 api={api}
                 snapshot={snapshot}
                 onFeedback={setFeedback}
+                onOpenAwsDetails={(deploymentId) => {
+                  setFeedback(null);
+                  setDetailsDeploymentId(deploymentId);
+                }}
                 onRefresh={refresh}
                 onShowCredentials={() => setSelectedTab("credentials")}
               />
@@ -345,12 +442,14 @@ function DeploymentsPanel({
   api,
   snapshot,
   onFeedback,
+  onOpenAwsDetails,
   onRefresh,
   onShowCredentials,
 }: {
   readonly api: CloudDeploymentAPI;
   readonly snapshot: CloudDeploymentSnapshot;
   readonly onFeedback: (feedback: Feedback) => void;
+  readonly onOpenAwsDetails: (deploymentId: string) => void;
   readonly onRefresh: () => Promise<void>;
   readonly onShowCredentials: () => void;
 }): React.JSX.Element {
@@ -403,6 +502,7 @@ function DeploymentsPanel({
           revision={snapshot.state.revision}
           {...(resumedTranscript ? { transcript: resumedTranscript } : {})}
           onFeedback={onFeedback}
+          onOpenAwsDetails={() => onOpenAwsDetails(resumedDeployment.id)}
           onRefresh={onRefresh}
         />
       ) : null}
@@ -447,6 +547,7 @@ function DeploymentsPanel({
               key={deployment.id}
               revision={snapshot.state.revision}
               onFeedback={onFeedback}
+              onOpenAwsDetails={() => onOpenAwsDetails(deployment.id)}
               onRefresh={onRefresh}
             />
           ))}
@@ -1227,6 +1328,7 @@ function DeploymentCard({
   revision,
   transcript,
   onFeedback,
+  onOpenAwsDetails,
   onRefresh,
   onTerminated,
 }: {
@@ -1236,6 +1338,7 @@ function DeploymentCard({
   readonly revision: number;
   readonly transcript?: CloudProvisioningTranscript;
   readonly onFeedback: (feedback: Feedback) => void;
+  readonly onOpenAwsDetails?: () => void;
   readonly onRefresh: () => Promise<void>;
   readonly onTerminated?: () => void;
 }): React.JSX.Element {
@@ -1360,7 +1463,7 @@ function DeploymentCard({
           <DeploymentDetail label="Managed Assets" value={String(deployment.managedAssets.length)} />
         </dl>
 
-        {editingFirewall ? (
+        {editingFirewall && deployment.provider === "proxmox" ? (
           <div className="space-y-4 rounded-2xl bg-surface p-4">
             <div>
               <h3 className="text-sm font-semibold">Firewall Sources</h3>
@@ -1388,7 +1491,7 @@ function DeploymentCard({
           <FontAwesomeIcon aria-hidden icon={faPlay} /> Start
         </Button>
         <Button aria-label={`Stop ${deployment.name}`} isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="outline" onPress={() => void lifecycle("stop")}>
-          <FontAwesomeIcon aria-hidden icon={faPause} /> Stop
+          <FontAwesomeIcon aria-hidden icon={faStop} /> Stop
         </Button>
         <Button aria-label={`Reboot ${deployment.name}`} isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="outline" onPress={() => void lifecycle("reboot")}>
           <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
@@ -1398,7 +1501,10 @@ function DeploymentCard({
           isDisabled={deployment.managedAssets.length === 0 || deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
           size="sm"
           variant="outline"
-          onPress={() => setEditingFirewall((value) => !value)}
+          onPress={() => {
+            if (deployment.provider === "aws") onOpenAwsDetails?.();
+            else setEditingFirewall((value) => !value);
+          }}
         >
           <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
         </Button>
@@ -1438,6 +1544,878 @@ function DeploymentCard({
       </AlertDialog.Backdrop>
     </Card>
   );
+}
+
+function AwsInstanceDetails({
+  api,
+  deployment,
+  notices,
+  revision,
+  onBack,
+  onFeedback,
+  onRefresh,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly deployment: AwsCloudDeploymentRecord;
+  readonly notices: React.JSX.Element;
+  readonly revision: number;
+  readonly onBack: () => void;
+  readonly onFeedback: (feedback: Feedback) => void;
+  readonly onRefresh: () => Promise<void>;
+}): React.JSX.Element {
+  const [firewall, setFirewall] = useState<AwsFirewallSnapshot | null>(null);
+  const [selectedDirection, setSelectedDirection] = useState<AwsFirewallDirection>("ingress");
+  const [isLoadingRules, setIsLoadingRules] = useState(true);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [editor, setEditor] = useState<AwsFirewallEditorState | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
+  const [deleteRule, setDeleteRule] = useState<AwsFirewallRule | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | null>(null);
+  const loadGeneration = useRef(0);
+
+  const loadRules = useCallback(async (): Promise<void> => {
+    const generation = ++loadGeneration.current;
+    setIsLoadingRules(true);
+    setRulesError(null);
+    try {
+      const result = await api.listFirewallRules({ deploymentId: deployment.id });
+      if (generation !== loadGeneration.current) return;
+      if (!result.ok || !result.value) {
+        setRulesError(result.error ?? "AWS EC2 firewall rules could not be loaded.");
+        return;
+      }
+      setFirewall(result.value);
+    } catch (error) {
+      if (generation === loadGeneration.current) setRulesError(errorMessage(error));
+    } finally {
+      if (generation === loadGeneration.current) setIsLoadingRules(false);
+    }
+  }, [api, deployment.id]);
+
+  useEffect(() => {
+    void loadRules();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [loadRules]);
+
+  const openCreateRule = (): void => {
+    setEditorError(null);
+    setEditor({ mode: "create", draft: initialAwsFirewallRuleDraft(selectedDirection) });
+  };
+
+  const openEditRule = (rule: AwsFirewallRule): void => {
+    setEditorError(null);
+    setEditor({ mode: "edit", ruleId: rule.id, draft: awsFirewallRuleDraft(rule) });
+  };
+
+  const saveRule = async (): Promise<void> => {
+    if (!editor) return;
+    const parsed = parseAwsFirewallRuleDraft(editor.draft);
+    if (!parsed.ok) {
+      setEditorError(parsed.error);
+      return;
+    }
+    const action = editor.mode === "create" ? "create" : "update";
+    setPendingMutation(action);
+    setEditorError(null);
+    try {
+      const result = editor.mode === "create"
+        ? await api.createFirewallRule({ deploymentId: deployment.id, expectedRevision: revision, rule: parsed.value })
+        : await api.updateFirewallRule({ deploymentId: deployment.id, expectedRevision: revision, ruleId: editor.ruleId, rule: parsed.value });
+      if (!result.ok || !result.value) {
+        setEditorError(result.error ?? `The firewall rule could not be ${action === "create" ? "created" : "updated"}.`);
+        return;
+      }
+      setFirewall(result.value);
+      setSelectedDirection(parsed.value.direction);
+      setEditor(null);
+      onFeedback({
+        tone: "success",
+        title: action === "create" ? "Firewall rule added" : "Firewall rule updated",
+        detail: `${deployment.name} now uses the updated ${directionLabel(parsed.value.direction).toLowerCase()} policy.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setEditorError(errorMessage(error));
+    } finally {
+      setPendingMutation(null);
+    }
+  };
+
+  const removeRule = async (): Promise<void> => {
+    if (!deleteRule) return;
+    setPendingMutation("delete");
+    setDeleteError(null);
+    try {
+      const result = await api.deleteFirewallRule({
+        deploymentId: deployment.id,
+        expectedRevision: revision,
+        ruleId: deleteRule.id,
+      });
+      if (!result.ok || !result.value) {
+        setDeleteError(result.error ?? "The firewall rule could not be deleted.");
+        return;
+      }
+      setFirewall(result.value);
+      setDeleteRule(null);
+      onFeedback({
+        tone: "success",
+        title: "Firewall rule deleted",
+        detail: `${ruleTypeLabel(deleteRule)} was removed from ${deployment.name}.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setDeleteError(errorMessage(error));
+    } finally {
+      setPendingMutation(null);
+    }
+  };
+
+  const ingressRules = firewall?.rules.filter(({ direction }) => direction === "ingress") ?? [];
+  const egressRules = firewall?.rules.filter(({ direction }) => direction === "egress") ?? [];
+  const visibleRules = selectedDirection === "ingress" ? ingressRules : egressRules;
+  const securityGroupId = firewall?.securityGroupId ?? deployment.runtime.securityGroupIds[0] ?? "Pending";
+  const securityGroupName = firewall?.securityGroupName ?? "Managed security group";
+  const columns = awsFirewallColumns({
+    direction: selectedDirection,
+    isPending: pendingMutation !== null,
+    onDelete: (rule) => {
+      setDeleteError(null);
+      setDeleteRule(rule);
+    },
+    onEdit: openEditRule,
+  });
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header
+        aria-label="Instance details header"
+        className="sticky top-0 z-20 shrink-0 space-y-6 bg-background pb-6"
+        data-testid="aws-instance-sticky-header"
+      >
+        <div>
+          <Button
+            aria-label="Back to managed servers"
+            size="sm"
+            variant="ghost"
+            onPress={onBack}
+          >
+            <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+            Managed Servers
+          </Button>
+        </div>
+        <section aria-labelledby="aws-instance-heading" className="space-y-4">
+          <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-surface-secondary text-muted">
+                <FontAwesomeIcon aria-hidden icon={faAmazon} className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted">Instance details</p>
+                <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight" id="aws-instance-heading">{deployment.name}</h1>
+                <p className="mt-1 truncate text-sm text-muted">AWS EC2 · {deployment.runtime.instanceId ?? "Instance pending"}</p>
+              </div>
+            </div>
+            <Chip color={statusColor(deployment.status)} size="sm" variant="soft">
+              {deployment.status === "deleting" ? "Terminating" : titleCase(deployment.status)}
+            </Chip>
+          </div>
+        </section>
+      </header>
+
+      <ScrollShadow
+        aria-label="Instance details content"
+        className="min-h-0 flex-1 overflow-y-auto pb-12"
+        orientation="vertical"
+        role="region"
+        size={48}
+      >
+        <div className="space-y-6">
+          {notices}
+
+          <Card variant="secondary">
+            <Card.Header>
+              <Card.Title>Instance summary</Card.Title>
+              <Card.Description>Compute and network identifiers for this managed server.</Card.Description>
+            </Card.Header>
+            <Card.Content>
+              <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
+                <DeploymentDetail label="Instance ID" value={deployment.runtime.instanceId ?? "Pending"} mono />
+                <DeploymentDetail label="Instance type" value={deployment.spec.instanceType} mono />
+                <DeploymentDetail label="Availability Zone" value={deployment.runtime.availabilityZone ?? "Pending"} mono />
+                <DeploymentDetail label="Public IP" value={deployment.runtime.publicIpAddress ?? "None"} mono />
+                <DeploymentDetail label="Private IP" value={deployment.runtime.privateIpAddress ?? "Pending"} mono />
+                <DeploymentDetail label="VPC" value={firewall?.vpcId ?? deployment.runtime.vpcId ?? deployment.spec.vpcId ?? "Pending"} mono />
+                <DeploymentDetail label="Subnet" value={deployment.runtime.subnetId ?? deployment.spec.subnetId ?? "Pending"} mono />
+                <DeploymentDetail label="Security group" value={securityGroupId} mono />
+              </dl>
+            </Card.Content>
+          </Card>
+
+          <Card variant="secondary">
+            <Card.Header className="flex-col items-stretch gap-4 sm:flex-row sm:items-start">
+              <div className="min-w-0 flex-1">
+                <Card.Title>Firewall rules</Card.Title>
+                <Card.Description>
+                  {securityGroupName} · {securityGroupId}
+                </Card.Description>
+              </div>
+              <div className="flex items-center gap-2 self-end sm:self-auto">
+                <Tooltip delay={0}>
+                  <Button
+                    aria-label="Refresh firewall rules"
+                    isDisabled={isLoadingRules || pendingMutation !== null}
+                    isIconOnly
+                    size="sm"
+                    variant="outline"
+                    onPress={() => void loadRules()}
+                  >
+                    <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoadingRules ? "animate-spin" : ""} />
+                  </Button>
+                  <Tooltip.Content>Refresh firewall rules</Tooltip.Content>
+                </Tooltip>
+                <Button
+                  isDisabled={!firewall || isLoadingRules || pendingMutation !== null}
+                  size="sm"
+                  variant="primary"
+                  onPress={openCreateRule}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faPlus} />
+                  Add rule
+                </Button>
+              </div>
+            </Card.Header>
+            <Card.Content className="space-y-4">
+              <Tabs
+                selectedKey={selectedDirection}
+                variant="secondary"
+                onSelectionChange={(key) => {
+                  if (key === "ingress" || key === "egress") setSelectedDirection(key);
+                }}
+              >
+                <Tabs.ListContainer className="w-fit max-w-full">
+                  <Tabs.List aria-label="Firewall rule direction" className="w-fit whitespace-nowrap">
+                    <Tabs.Tab className="min-w-28 whitespace-nowrap" id="ingress">
+                      Inbound
+                      <Chip className="ml-1" size="sm" variant="soft">{ingressRules.length}</Chip>
+                      <Tabs.Indicator />
+                    </Tabs.Tab>
+                    <Tabs.Tab className="min-w-28 whitespace-nowrap" id="egress">
+                      Outbound
+                      <Chip className="ml-1" size="sm" variant="soft">{egressRules.length}</Chip>
+                      <Tabs.Indicator />
+                    </Tabs.Tab>
+                  </Tabs.List>
+                </Tabs.ListContainer>
+                <Tabs.Panel className="pt-4" id="ingress">
+                  <AwsFirewallRulesContent
+                    columns={columns}
+                    direction="ingress"
+                    firewall={firewall}
+                    isLoading={isLoadingRules}
+                    isPending={pendingMutation !== null}
+                    rules={visibleRules}
+                    rulesError={rulesError}
+                    onEdit={openEditRule}
+                    onRetry={() => void loadRules()}
+                  />
+                </Tabs.Panel>
+                <Tabs.Panel className="pt-4" id="egress">
+                  <AwsFirewallRulesContent
+                    columns={columns}
+                    direction="egress"
+                    firewall={firewall}
+                    isLoading={isLoadingRules}
+                    isPending={pendingMutation !== null}
+                    rules={visibleRules}
+                    rulesError={rulesError}
+                    onEdit={openEditRule}
+                    onRetry={() => void loadRules()}
+                  />
+                </Tabs.Panel>
+              </Tabs>
+            </Card.Content>
+          </Card>
+        </div>
+      </ScrollShadow>
+
+      <AwsFirewallRuleSheet
+        editor={editor}
+        error={editorError}
+        isPending={pendingMutation === "create" || pendingMutation === "update"}
+        onChange={setEditor}
+        onClose={() => {
+          if (pendingMutation === null) {
+            setEditor(null);
+            setEditorError(null);
+          }
+        }}
+        onSave={() => void saveRule()}
+      />
+
+      <AlertDialog.Backdrop
+        isOpen={deleteRule !== null}
+        variant="blur"
+        onOpenChange={(open) => {
+          if (!open && pendingMutation !== "delete") {
+            setDeleteRule(null);
+            setDeleteError(null);
+          }
+        }}
+      >
+        <AlertDialog.Container placement="center" size="sm">
+          <AlertDialog.Dialog className="sm:max-w-[460px]">
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="danger">
+                <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} className="size-5" />
+              </AlertDialog.Icon>
+              <AlertDialog.Heading>Delete firewall rule?</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              <div className="space-y-3 text-sm leading-6 text-muted">
+                <p>
+                  {deleteRule
+                    ? `${ruleTypeLabel(deleteRule)} access for ${deleteRule.peer} will be removed from ${directionLabel(deleteRule.direction).toLowerCase()}.`
+                    : "This managed firewall rule will be removed."}
+                </p>
+                <p>This change takes effect immediately in AWS EC2.</p>
+                {deleteError ? <InlineMessage tone="danger" title="Rule deletion failed" detail={deleteError} /> : null}
+              </div>
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <Button isDisabled={pendingMutation === "delete"} variant="tertiary" onPress={() => setDeleteRule(null)}>Cancel</Button>
+              <Button isPending={pendingMutation === "delete"} variant="danger" onPress={() => void removeRule()}>Delete rule</Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
+    </div>
+  );
+}
+
+function AwsFirewallRulesContent({
+  columns,
+  direction,
+  firewall,
+  isLoading,
+  isPending,
+  rules,
+  rulesError,
+  onEdit,
+  onRetry,
+}: {
+  readonly columns: DataGridColumn<AwsFirewallRule>[];
+  readonly direction: AwsFirewallDirection;
+  readonly firewall: AwsFirewallSnapshot | null;
+  readonly isLoading: boolean;
+  readonly isPending: boolean;
+  readonly rules: readonly AwsFirewallRule[];
+  readonly rulesError: string | null;
+  readonly onEdit: (rule: AwsFirewallRule) => void;
+  readonly onRetry: () => void;
+}): React.JSX.Element {
+  if (isLoading && !firewall) {
+    return (
+      <div aria-label={`Loading ${directionLabel(direction).toLowerCase()} rules`} className="space-y-2 py-2">
+        <Skeleton className="h-10 w-full rounded-xl" />
+        <Skeleton className="h-12 w-full rounded-xl" />
+        <Skeleton className="h-12 w-full rounded-xl" />
+      </div>
+    );
+  }
+  if (rulesError && !firewall) {
+    return (
+      <div className="space-y-3">
+        <InlineMessage tone="danger" title="Firewall rules unavailable" detail={rulesError} />
+        <Button size="sm" variant="outline" onPress={onRetry}>Try again</Button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {rulesError ? <InlineMessage tone="warning" title="Refresh failed" detail={`${rulesError} The last loaded rules remain visible.`} /> : null}
+      <DataGrid
+        aria-label={`${directionLabel(direction)} firewall rules`}
+        className="[&_tbody_tr]:cursor-[var(--cursor-interactive)]"
+        columns={columns}
+        contentClassName="min-w-[900px]"
+        data={[...rules]}
+        {...(isPending ? { disabledKeys: rules.map(({ id }) => id) } : {})}
+        getRowId={(rule) => rule.id}
+        onRowAction={(key) => {
+          const rule = rules.find(({ id }) => id === String(key));
+          if (rule && !isPending) onEdit(rule);
+        }}
+        renderEmptyState={() => (
+          <div className="py-8 text-center">
+            <p className="text-sm font-medium">No {directionLabel(direction).toLowerCase()} rules</p>
+            <p className="mt-1 text-xs text-muted">Add a managed rule to allow the traffic this server needs.</p>
+          </div>
+        )}
+        verticalAlign="top"
+        variant="secondary"
+      />
+    </div>
+  );
+}
+
+function AwsFirewallRuleSheet({
+  editor,
+  error,
+  isPending,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  readonly editor: AwsFirewallEditorState | null;
+  readonly error: string | null;
+  readonly isPending: boolean;
+  readonly onChange: (editor: AwsFirewallEditorState) => void;
+  readonly onClose: () => void;
+  readonly onSave: () => void;
+}): React.JSX.Element {
+  const draft = editor?.draft;
+  const isEdit = editor?.mode === "edit";
+  const selectedPreset = AWS_FIREWALL_PRESETS.find(({ id }) => id === draft?.preset);
+  const publicIngress = Boolean(
+    draft?.direction === "ingress" &&
+    ((draft.peerType === "ipv4" && draft.peer.trim() === "0.0.0.0/0") ||
+      (draft.peerType === "ipv6" && draft.peer.trim() === "::/0")),
+  );
+
+  const updateDraft = (nextDraft: AwsFirewallRuleDraft): void => {
+    if (!editor) return;
+    onChange(editor.mode === "edit"
+      ? { mode: "edit", ruleId: editor.ruleId, draft: nextDraft }
+      : { mode: "create", draft: nextDraft });
+  };
+
+  return (
+    <Sheet
+      isDismissable={!isPending}
+      isOpen={editor !== null}
+      placement="right"
+      shouldAutoFocus
+      onOpenChange={(open) => { if (!open) onClose(); }}
+    >
+      <Sheet.Backdrop variant="blur">
+        <Sheet.Content className="h-full w-full max-w-[500px]">
+          <Sheet.Dialog className="h-full">
+            <Sheet.CloseTrigger aria-label="Close firewall rule editor" isDisabled={isPending} />
+            <Sheet.Header>
+              <Sheet.Heading>{isEdit ? "Edit firewall rule" : "Add firewall rule"}</Sheet.Heading>
+              <p className="text-sm leading-6 text-muted">
+                {isEdit
+                  ? "AWS keeps the rule direction and peer kind fixed. Other rule fields can be updated."
+                  : "Create one managed rule in the deployment security group."}
+              </p>
+            </Sheet.Header>
+            <Sheet.Body className="min-h-0 space-y-5 overflow-auto">
+              {draft ? (
+                <>
+                  {error ? <InlineMessage tone="danger" title="Firewall rule invalid" detail={error} /> : null}
+                  {publicIngress ? (
+                    <InlineMessage
+                      tone="warning"
+                      title="Public inbound access"
+                      detail={`${draft.peer.trim()} allows this port or protocol from every ${draft.peerType === "ipv4" ? "IPv4" : "IPv6"} address. Review the exposure before saving.`}
+                    />
+                  ) : null}
+                  <CloudNativeSelect
+                    description={isEdit ? "Direction cannot be changed after AWS creates a rule." : undefined}
+                    isDisabled={isEdit || isPending}
+                    label="Direction"
+                    options={[
+                      { value: "ingress", label: "Inbound" },
+                      { value: "egress", label: "Outbound" },
+                    ]}
+                    value={draft.direction}
+                    onChange={(direction) => {
+                      if (direction === "ingress" || direction === "egress") updateDraft({ ...draft, direction });
+                    }}
+                  />
+                  <CloudRichSelect
+                    description={selectedPreset?.description}
+                    isDisabled={isPending}
+                    label="Type"
+                    options={AWS_FIREWALL_PRESETS.map((preset) => ({
+                      value: preset.id,
+                      label: preset.label,
+                      description: preset.description,
+                    }))}
+                    value={draft.preset}
+                    onChange={(presetId) => updateDraft(applyAwsFirewallPreset(draft, presetId))}
+                  />
+                  {draft.preset === "custom-protocol" ? (
+                    <CloudTextField
+                      description="Use the canonical IP protocol number from 0 to 255."
+                      inputMode="numeric"
+                      isDisabled={isPending}
+                      label="Protocol number"
+                      placeholder="For example, 50"
+                      value={draft.protocol}
+                      onChange={(protocol) => updateDraft({ ...draft, protocol })}
+                    />
+                  ) : null}
+                  {awsFirewallPresetNeedsPorts(draft.preset) ? (
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <CloudTextField
+                        description={awsFirewallPresetUsesIcmp(draft.preset) ? "-1 means every type." : "0–65535"}
+                        inputMode="numeric"
+                        isDisabled={isPending}
+                        label={awsFirewallPresetUsesIcmp(draft.preset) ? "ICMP type" : "From port"}
+                        value={draft.fromPort}
+                        onChange={(fromPort) => updateDraft({ ...draft, fromPort })}
+                      />
+                      <CloudTextField
+                        description={awsFirewallPresetUsesIcmp(draft.preset) ? "-1 means every code." : "0–65535"}
+                        inputMode="numeric"
+                        isDisabled={isPending}
+                        label={awsFirewallPresetUsesIcmp(draft.preset) ? "ICMP code" : "To port"}
+                        value={draft.toPort}
+                        onChange={(toPort) => updateDraft({ ...draft, toPort })}
+                      />
+                    </div>
+                  ) : null}
+                  <CloudNativeSelect
+                    description={isEdit ? "Peer type cannot be changed after AWS creates a rule." : undefined}
+                    isDisabled={isEdit || isPending}
+                    label={draft.direction === "ingress" ? "Source type" : "Destination type"}
+                    options={[
+                      { value: "ipv4", label: "IPv4 CIDR" },
+                      { value: "ipv6", label: "IPv6 CIDR" },
+                      { value: "prefix-list", label: "Prefix list" },
+                      { value: "security-group", label: "Security group" },
+                    ]}
+                    value={draft.peerType}
+                    onChange={(peerType) => {
+                      if (isAwsFirewallPeerType(peerType)) updateDraft({ ...draft, peerType, peer: "" });
+                    }}
+                  />
+                  <CloudTextField
+                    description={awsFirewallPeerDescription(draft.direction, draft.peerType)}
+                    isDisabled={isPending}
+                    label={draft.direction === "ingress" ? "Source" : "Destination"}
+                    placeholder={awsFirewallPeerPlaceholder(draft.peerType)}
+                    value={draft.peer}
+                    onChange={(peer) => updateDraft({ ...draft, peer })}
+                  />
+                  <CloudTextField
+                    description="Optional AWS security-group rule description."
+                    isDisabled={isPending}
+                    label="Description"
+                    placeholder="Why this access is needed"
+                    value={draft.description}
+                    onChange={(description) => updateDraft({ ...draft, description })}
+                  />
+                </>
+              ) : null}
+            </Sheet.Body>
+            <Sheet.Footer>
+              <Button isDisabled={isPending} variant="tertiary" onPress={onClose}>Cancel</Button>
+              <Button isPending={isPending} variant="primary" onPress={onSave}>{isEdit ? "Save changes" : "Add rule"}</Button>
+            </Sheet.Footer>
+          </Sheet.Dialog>
+        </Sheet.Content>
+      </Sheet.Backdrop>
+    </Sheet>
+  );
+}
+
+function awsFirewallColumns({
+  direction,
+  isPending,
+  onDelete,
+  onEdit,
+}: {
+  readonly direction: AwsFirewallDirection;
+  readonly isPending: boolean;
+  readonly onDelete: (rule: AwsFirewallRule) => void;
+  readonly onEdit: (rule: AwsFirewallRule) => void;
+}): DataGridColumn<AwsFirewallRule>[] {
+  return [
+    {
+      id: "id",
+      header: "Rule ID",
+      isRowHeader: true,
+      minWidth: 180,
+      cell: (rule) => (
+        <div className="flex min-w-0 flex-col items-start gap-1">
+          <span className="max-w-44 truncate font-mono text-xs" title={rule.id}>{rule.id}</span>
+          <Chip size="sm" variant="soft">{rule.managed ? "Sliver GUI" : "AWS"}</Chip>
+        </div>
+      ),
+    },
+    {
+      id: "peerType",
+      header: direction === "ingress" ? "IP version / source type" : "IP version / destination type",
+      minWidth: 155,
+      cell: (rule) => awsFirewallPeerTypeLabel(rule.peerType),
+    },
+    {
+      id: "type",
+      header: "Type",
+      minWidth: 130,
+      cell: ruleTypeLabel,
+    },
+    {
+      id: "protocol",
+      header: "Protocol",
+      minWidth: 100,
+      cell: (rule) => awsFirewallProtocolLabel(rule.protocol),
+    },
+    {
+      id: "ports",
+      header: "Port range",
+      minWidth: 120,
+      cell: awsFirewallPortRange,
+    },
+    {
+      id: "peer",
+      header: direction === "ingress" ? "Source" : "Destination",
+      minWidth: 180,
+      cellClassName: "font-mono text-xs",
+      accessorKey: "peer",
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      align: "end",
+      minWidth: 104,
+      cell: (rule) => (
+        <div
+          className="flex justify-end gap-1"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <Tooltip delay={0}>
+            <Button
+              aria-label={`Edit firewall rule ${rule.id}`}
+              isDisabled={isPending}
+              isIconOnly
+              size="sm"
+              variant="ghost"
+              onPress={() => onEdit(rule)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faPen} />
+            </Button>
+            <Tooltip.Content>Edit rule</Tooltip.Content>
+          </Tooltip>
+          <Tooltip delay={0}>
+            <Button
+              aria-label={`Delete firewall rule ${rule.id}`}
+              isDisabled={isPending}
+              isIconOnly
+              size="sm"
+              variant="danger-soft"
+              onPress={() => onDelete(rule)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faTrash} />
+            </Button>
+            <Tooltip.Content>Delete rule</Tooltip.Content>
+          </Tooltip>
+        </div>
+      ),
+    },
+  ];
+}
+
+function initialAwsFirewallRuleDraft(direction: AwsFirewallDirection): AwsFirewallRuleDraft {
+  return applyAwsFirewallPreset({
+    direction,
+    preset: "custom-tcp",
+    protocol: "tcp",
+    fromPort: "",
+    toPort: "",
+    peerType: "ipv4",
+    peer: "",
+    description: "",
+  }, "custom-tcp");
+}
+
+function awsFirewallRuleDraft(rule: AwsFirewallRule): AwsFirewallRuleDraft {
+  return {
+    direction: rule.direction,
+    preset: awsFirewallPresetForRule(rule),
+    protocol: rule.protocol,
+    fromPort: rule.fromPort === null ? "" : String(rule.fromPort),
+    toPort: rule.toPort === null ? "" : String(rule.toPort),
+    peerType: rule.peerType,
+    peer: rule.peer,
+    description: rule.description ?? "",
+  };
+}
+
+function applyAwsFirewallPreset(
+  draft: AwsFirewallRuleDraft,
+  presetId: AwsFirewallPresetId,
+): AwsFirewallRuleDraft {
+  const preset = AWS_FIREWALL_PRESETS.find(({ id }) => id === presetId)!;
+  return {
+    ...draft,
+    preset: preset.id,
+    protocol: preset.protocol,
+    fromPort: preset.fromPort === null ? "" : String(preset.fromPort),
+    toPort: preset.toPort === null ? "" : String(preset.toPort),
+  };
+}
+
+function awsFirewallPresetForRule(rule: AwsFirewallRuleSpec): AwsFirewallPresetId {
+  if (rule.protocol === "-1") return "all-traffic";
+  if (rule.protocol === "icmp") {
+    return rule.fromPort === -1 && rule.toPort === -1 ? "all-icmp-ipv4" : "custom-icmp-ipv4";
+  }
+  if (rule.protocol === "icmpv6") {
+    return rule.fromPort === -1 && rule.toPort === -1 ? "all-icmp-ipv6" : "custom-icmp-ipv6";
+  }
+  if (rule.protocol === "tcp" && rule.fromPort === rule.toPort) {
+    if (rule.fromPort === 22) return "ssh";
+    if (rule.fromPort === 80) return "http";
+    if (rule.fromPort === 443) return "https";
+    if (rule.fromPort === 3_389) return "rdp";
+  }
+  if (rule.protocol === "tcp") return "custom-tcp";
+  if (rule.protocol === "udp") return "custom-udp";
+  return "custom-protocol";
+}
+
+function parseAwsFirewallRuleDraft(
+  draft: AwsFirewallRuleDraft,
+): { readonly ok: true; readonly value: AwsFirewallRuleSpec } | { readonly ok: false; readonly error: string } {
+  const protocol = draft.protocol.trim();
+  if (!validAwsFirewallProtocol(protocol)) {
+    return { ok: false, error: "Enter a protocol number from 0 to 255." };
+  }
+  let fromPort: number | null = null;
+  let toPort: number | null = null;
+  if (protocol === "tcp" || protocol === "udp") {
+    fromPort = strictInteger(draft.fromPort);
+    toPort = strictInteger(draft.toPort);
+    if (fromPort === null || toPort === null || fromPort < 0 || toPort > 65_535 || fromPort > toPort) {
+      return { ok: false, error: "Enter an ordered port range between 0 and 65535." };
+    }
+  } else if (protocol === "icmp" || protocol === "icmpv6") {
+    fromPort = strictInteger(draft.fromPort);
+    toPort = strictInteger(draft.toPort);
+    if (
+      fromPort === null || toPort === null ||
+      fromPort < -1 || fromPort > 255 || toPort < -1 || toPort > 255 ||
+      (fromPort === -1 && toPort !== -1)
+    ) {
+      return { ok: false, error: "Enter an ICMP type and code from -1 to 255; type -1 requires code -1." };
+    }
+  }
+  const peer = draft.peer.trim();
+  if (!validAwsFirewallPeer(draft.peerType, peer)) {
+    return { ok: false, error: `Enter a valid ${awsFirewallPeerTypeLabel(draft.peerType)} value.` };
+  }
+  const description = draft.description.trim();
+  if (description.length > 255 || !/^[A-Za-z0-9 ._:/()#,@\[\]+=&;{}!$*-]*$/u.test(description)) {
+    return { ok: false, error: "Description must be 255 characters or fewer and use AWS-supported characters." };
+  }
+  return {
+    ok: true,
+    value: {
+      direction: draft.direction,
+      protocol,
+      fromPort,
+      toPort,
+      peerType: draft.peerType,
+      peer,
+      description: description || null,
+    },
+  };
+}
+
+function validAwsFirewallProtocol(value: string): boolean {
+  if (["-1", "tcp", "udp", "icmp", "icmpv6"].includes(value)) return true;
+  return /^(?:0|[1-9]\d{0,2})$/u.test(value) && Number(value) <= 255;
+}
+
+function validAwsFirewallPeer(peerType: AwsFirewallPeerType, value: string): boolean {
+  if (peerType === "prefix-list") return /^pl-[0-9a-f]+$/u.test(value) && value.length <= 128;
+  if (peerType === "security-group") return /^sg-[0-9a-f]+$/u.test(value) && value.length <= 128;
+  const match = /^(.+)\/(\d{1,3})$/u.exec(value);
+  if (!match) return false;
+  const address = match[1] ?? "";
+  const prefix = Number(match[2]);
+  return peerType === "ipv6"
+    ? prefix >= 0 && prefix <= 128 && validIpv6Address(address)
+    : prefix >= 0 && prefix <= 32 && validIpv4Address(address);
+}
+
+function strictInteger(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^-?(?:0|[1-9]\d*)$/u.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function awsFirewallPresetNeedsPorts(preset: AwsFirewallPresetId): boolean {
+  return preset === "custom-tcp" || preset === "custom-udp" ||
+    preset === "custom-icmp-ipv4" || preset === "custom-icmp-ipv6";
+}
+
+function awsFirewallPresetUsesIcmp(preset: AwsFirewallPresetId): boolean {
+  return preset === "custom-icmp-ipv4" || preset === "custom-icmp-ipv6";
+}
+
+function isAwsFirewallPeerType(value: string): value is AwsFirewallPeerType {
+  return value === "ipv4" || value === "ipv6" || value === "prefix-list" || value === "security-group";
+}
+
+function directionLabel(direction: AwsFirewallDirection): string {
+  return direction === "ingress" ? "Inbound" : "Outbound";
+}
+
+function awsFirewallPeerTypeLabel(peerType: AwsFirewallPeerType): string {
+  const labels: Record<AwsFirewallPeerType, string> = {
+    ipv4: "IPv4",
+    ipv6: "IPv6",
+    "prefix-list": "Prefix list",
+    "security-group": "Security group",
+  };
+  return labels[peerType];
+}
+
+function awsFirewallProtocolLabel(protocol: string): string {
+  if (protocol === "-1") return "All";
+  if (protocol === "icmpv6") return "ICMPv6";
+  return protocol.toUpperCase();
+}
+
+function awsFirewallPortRange(rule: AwsFirewallRuleSpec): string {
+  if (rule.fromPort === null || rule.toPort === null) return "All";
+  if (rule.protocol === "icmp" || rule.protocol === "icmpv6") {
+    return rule.fromPort === -1 ? "All types / codes" : `Type ${rule.fromPort} / code ${rule.toPort}`;
+  }
+  return rule.fromPort === rule.toPort ? String(rule.fromPort) : `${rule.fromPort}–${rule.toPort}`;
+}
+
+function ruleTypeLabel(rule: AwsFirewallRuleSpec): string {
+  const presetId = awsFirewallPresetForRule(rule);
+  return AWS_FIREWALL_PRESETS.find(({ id }) => id === presetId)?.label ?? "Custom";
+}
+
+function awsFirewallPeerDescription(
+  direction: AwsFirewallDirection,
+  peerType: AwsFirewallPeerType,
+): string {
+  const side = direction === "ingress" ? "traffic may come from" : "traffic may go to";
+  return `${awsFirewallPeerTypeLabel(peerType)} ${side}. Public /0 CIDRs are allowed but highlighted before saving.`;
+}
+
+function awsFirewallPeerPlaceholder(peerType: AwsFirewallPeerType): string {
+  const placeholders: Record<AwsFirewallPeerType, string> = {
+    ipv4: "203.0.113.10/32",
+    ipv6: "2001:db8::/64",
+    "prefix-list": "pl-0123456789abcdef0",
+    "security-group": "sg-0123456789abcdef0",
+  };
+  return placeholders[peerType];
 }
 
 function CredentialsPanel({
@@ -1968,6 +2946,7 @@ function CloudTextField({
   placeholder,
   autoComplete,
   inputMode,
+  isDisabled = false,
   isReadOnly = false,
 }: {
   readonly label: string;
@@ -1978,10 +2957,11 @@ function CloudTextField({
   readonly placeholder?: string | undefined;
   readonly autoComplete?: string | undefined;
   readonly inputMode?: "numeric" | undefined;
+  readonly isDisabled?: boolean | undefined;
   readonly isReadOnly?: boolean | undefined;
 }): React.JSX.Element {
   return (
-    <TextField fullWidth isReadOnly={isReadOnly} value={value} variant="secondary" onChange={onChange}>
+    <TextField fullWidth isDisabled={isDisabled} isReadOnly={isReadOnly} value={value} variant="secondary" onChange={onChange}>
       <Label>{label}</Label>
       <Input
         {...(autoComplete ? { autoComplete } : {})}
@@ -2025,6 +3005,7 @@ function CloudNativeSelect({
   options,
   onChange,
   description,
+  isDisabled = false,
   placeholder,
 }: {
   readonly label: string;
@@ -2032,12 +3013,13 @@ function CloudNativeSelect({
   readonly options: readonly { readonly value: string; readonly label: string }[];
   readonly onChange: (value: string) => void;
   readonly description?: string | undefined;
+  readonly isDisabled?: boolean | undefined;
   readonly placeholder?: string | undefined;
 }): React.JSX.Element {
   return (
     <NativeSelect fullWidth variant="secondary">
       <Label>{label}</Label>
-      <NativeSelect.Trigger aria-label={label} value={value} onChange={(event) => onChange(event.currentTarget.value)}>
+      <NativeSelect.Trigger aria-label={label} disabled={isDisabled} value={value} onChange={(event) => onChange(event.currentTarget.value)}>
         {placeholder ? <NativeSelect.Option value="">{placeholder}</NativeSelect.Option> : null}
         {options.map((option) => <NativeSelect.Option key={option.value} value={option.value}>{option.label}</NativeSelect.Option>)}
         <NativeSelect.Indicator />

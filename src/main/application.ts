@@ -2021,6 +2021,10 @@ function unavailableCloudDeploymentController(
     createDeployment: () => ({ ok: false, error: message }),
     runLifecycleAction: () => ({ ok: false, error: message }),
     updateFirewall: () => ({ ok: false, error: message }),
+    listFirewallRules: () => ({ ok: false, error: message }),
+    createFirewallRule: () => ({ ok: false, error: message }),
+    updateFirewallRule: () => ({ ok: false, error: message }),
+    deleteFirewallRule: () => ({ ok: false, error: message }),
     prepareDestroyDeployment: () => ({ ok: false, error: message }),
     executeDestroyDeployment: () => ({ ok: false, error: message }),
   };

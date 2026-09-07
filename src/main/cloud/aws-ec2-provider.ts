@@ -5,6 +5,7 @@ import {
   AssociateAddressCommand,
   AssociateRouteTableCommand,
   AttachInternetGatewayCommand,
+  AuthorizeSecurityGroupEgressCommand,
   AuthorizeSecurityGroupIngressCommand,
   CreateInternetGatewayCommand,
   CreateRouteCommand,
@@ -42,10 +43,12 @@ import {
   DetachInternetGatewayCommand,
   EC2Client,
   ImportKeyPairCommand,
+  ModifySecurityGroupRulesCommand,
   ModifySubnetAttributeCommand,
   ModifyVpcAttributeCommand,
   RebootInstancesCommand,
   ReleaseAddressCommand,
+  RevokeSecurityGroupEgressCommand,
   RevokeSecurityGroupIngressCommand,
   RunInstancesCommand,
   StartInstancesCommand,
@@ -59,6 +62,8 @@ import {
   waitUntilSystemStatusOk,
   waitUntilVpcAvailable,
   type AllocateAddressCommandOutput,
+  type AuthorizeSecurityGroupEgressCommandOutput,
+  type AuthorizeSecurityGroupIngressCommandOutput,
   type AssociateAddressCommandOutput,
   type AssociateRouteTableCommandOutput,
   type CreateInternetGatewayCommandOutput,
@@ -88,6 +93,8 @@ import {
   type RunInstancesCommandInput,
   type RunInstancesCommandOutput,
   type SecurityGroup,
+  type SecurityGroupRule,
+  type SecurityGroupRuleRequest,
   type Tag,
   type TagSpecification,
 } from "@aws-sdk/client-ec2";
@@ -96,13 +103,20 @@ import {
   AWS_SUPPORTED_INSTANCE_TYPES,
   isAwsRegion,
   isSupportedAwsInstanceType,
+  type AwsFirewallDirection,
+  type AwsFirewallPeerType,
+  type AwsFirewallRule,
+  type AwsFirewallRuleSpec,
+  type AwsFirewallSnapshot,
 } from "../../shared/cloud-deployment-contracts.js";
 import { openSshPublicKeysEqual } from "./aws-inventory.js";
 
 const MANAGED_TAG_KEY = "SliverGUIManaged";
 const GUID_TAG_KEY = "SliverGUID";
 const NAME_TAG_KEY = "Name";
+const RULE_TYPE_TAG_KEY = "SliverGUIRuleType";
 const MANAGED_TAG_VALUE = "true";
+const CUSTOM_RULE_TYPE = "custom";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const AWS_ID_PATTERNS = {
   allocation: /^eipalloc-[0-9a-f]+$/u,
@@ -118,6 +132,7 @@ const AWS_ID_PATTERNS = {
   internetGateway: /^igw-[0-9a-f]+$/u,
   routeTable: /^rtb-[0-9a-f]+$/u,
   routeTableAssociation: /^rtbassoc-[0-9a-f]+$/u,
+  securityGroupRule: /^sgr-[0-9a-f]+$/u,
 } as const;
 const MAX_USER_DATA_BYTES = 16 * 1024;
 const MAX_PUBLIC_KEY_BYTES = 16 * 1024;
@@ -891,7 +906,7 @@ export class AwsEc2Provider {
       }),
     );
     const managedRuleIds = (ruleResponse.SecurityGroupRules ?? [])
-      .filter((rule) => hasManagedTags(rule.Tags, resource.guid))
+      .filter((rule) => isBaselineManagedFirewallRule(rule, resource.guid))
       .flatMap((rule) => rule.SecurityGroupRuleId ? [rule.SecurityGroupRuleId] : []);
     if (managedRuleIds.length > 0) {
       await this.send(
@@ -909,6 +924,106 @@ export class AwsEc2Provider {
       validated,
     );
     return await this.refresh(resource);
+  }
+
+  async listFirewallRules(resource: AwsEc2DeploymentResource): Promise<AwsFirewallSnapshot> {
+    const group = await this.describeOwnedSecurityGroup(resource);
+    const responses = await this.paginate<DescribeSecurityGroupRulesCommandOutput>(
+      "list firewall rules",
+      (nextToken) => new DescribeSecurityGroupRulesCommand({
+        Filters: [{ Name: "group-id", Values: [resource.securityGroupId] }],
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      }),
+    );
+    const rules = normalizeFirewallRules(
+      responses.flatMap((response) => response.SecurityGroupRules ?? []),
+      resource.securityGroupId,
+      resource.guid,
+    );
+    return {
+      securityGroupId: resource.securityGroupId,
+      securityGroupName: normalizeOptionalAwsString(group.GroupName, "security group name", 255),
+      vpcId: group.VpcId === undefined
+        ? null
+        : requireAwsId(group.VpcId, "VPC", AWS_ID_PATTERNS.vpc),
+      rules,
+    };
+  }
+
+  async createFirewallRule(
+    resource: AwsEc2DeploymentResource,
+    spec: AwsFirewallRuleSpec,
+  ): Promise<AwsFirewallRule> {
+    const validated = validateFirewallRuleSpec(spec);
+    await this.describeOwnedSecurityGroup(resource);
+    const permission = firewallRulePermission(validated);
+    const tags = [...managedTags(resource.guid, resource.name), { Key: RULE_TYPE_TAG_KEY, Value: CUSTOM_RULE_TYPE }];
+    const response = validated.direction === "ingress"
+      ? await this.send<AuthorizeSecurityGroupIngressCommandOutput>(
+        "create the managed ingress firewall rule",
+        new AuthorizeSecurityGroupIngressCommand({
+          GroupId: resource.securityGroupId,
+          IpPermissions: [permission],
+          TagSpecifications: [{ ResourceType: "security-group-rule", Tags: tags }],
+        }),
+      )
+      : await this.send<AuthorizeSecurityGroupEgressCommandOutput>(
+        "create the managed egress firewall rule",
+        new AuthorizeSecurityGroupEgressCommand({
+          GroupId: resource.securityGroupId,
+          IpPermissions: [permission],
+          TagSpecifications: [{ ResourceType: "security-group-rule", Tags: tags }],
+        }),
+      );
+    const created = normalizeFirewallRules(
+      response.SecurityGroupRules ?? [],
+      resource.securityGroupId,
+      resource.guid,
+    );
+    if (created.length !== 1 || !firewallSpecsEqual(created[0]!, validated)) {
+      throw new AwsEc2ProviderError("AWS EC2 did not return the created firewall rule.");
+    }
+    return created[0]!;
+  }
+
+  async updateFirewallRule(
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+    spec: AwsFirewallRuleSpec,
+  ): Promise<AwsFirewallRule> {
+    const id = requireAwsId(ruleId, "security group rule", AWS_ID_PATTERNS.securityGroupRule);
+    const validated = validateFirewallRuleSpec(spec);
+    await this.describeOwnedSecurityGroup(resource);
+    const current = await this.describeFirewallRule(resource, id);
+    if (current.direction !== validated.direction) {
+      throw new AwsEc2ProviderError("A firewall rule cannot change between ingress and egress.");
+    }
+    if (current.peerType !== validated.peerType) {
+      throw new AwsEc2ProviderError("A firewall rule cannot change its peer type.");
+    }
+    await this.send(
+      "update the managed firewall rule",
+      new ModifySecurityGroupRulesCommand({
+        GroupId: resource.securityGroupId,
+        SecurityGroupRules: [{
+          SecurityGroupRuleId: id,
+          SecurityGroupRule: firewallRuleRequest(validated),
+        }],
+      }),
+    );
+    return await this.describeFirewallRule(resource, id);
+  }
+
+  async deleteFirewallRule(resource: AwsEc2DeploymentResource, ruleId: string): Promise<void> {
+    const id = requireAwsId(ruleId, "security group rule", AWS_ID_PATTERNS.securityGroupRule);
+    await this.describeOwnedSecurityGroup(resource);
+    const current = await this.describeFirewallRule(resource, id);
+    const input = { GroupId: resource.securityGroupId, SecurityGroupRuleIds: [id] };
+    if (current.direction === "ingress") {
+      await this.send("delete the ingress firewall rule", new RevokeSecurityGroupIngressCommand(input));
+    } else {
+      await this.send("delete the egress firewall rule", new RevokeSecurityGroupEgressCommand(input));
+    }
   }
 
   async destroy(resource: AwsEc2DestroyResource): Promise<void> {
@@ -1347,6 +1462,25 @@ export class AwsEc2Provider {
     if (!group) throw new AwsEc2ProviderError("The tracked EC2 security group was not found.");
     assertManagedTags(group.Tags, resource.guid, "security group");
     return group;
+  }
+
+  private async describeFirewallRule(
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+  ): Promise<AwsFirewallRule> {
+    const response = await this.send<DescribeSecurityGroupRulesCommandOutput>(
+      "read the firewall rule",
+      new DescribeSecurityGroupRulesCommand({ SecurityGroupRuleIds: [ruleId] }),
+    );
+    const rules = normalizeFirewallRules(
+      response.SecurityGroupRules ?? [],
+      resource.securityGroupId,
+      resource.guid,
+    );
+    if (rules.length !== 1 || rules[0]!.id !== ruleId) {
+      throw new AwsEc2ProviderError("The tracked EC2 security group rule was not found.");
+    }
+    return rules[0]!;
   }
 
   private async describeOwnedElasticIp(resource: AwsEc2DeploymentResource) {
@@ -1936,12 +2070,298 @@ function permissionForCidrs(port: number, cidrs: readonly string[], description:
   };
 }
 
+function validateFirewallRuleSpec(input: AwsFirewallRuleSpec): AwsFirewallRuleSpec {
+  if (!input || typeof input !== "object") {
+    throw new AwsEc2ProviderError("The firewall rule is invalid.");
+  }
+  const direction = validateFirewallRuleDirection(input.direction);
+  const protocol = validateFirewallRuleProtocol(input.protocol);
+  const [fromPort, toPort] = validateFirewallRulePorts(protocol, input.fromPort, input.toPort);
+  const peerType = validateFirewallPeerType(input.peerType);
+  const peer = validateFirewallPeer(peerType, input.peer);
+  const description = validateFirewallRuleDescription(input.description);
+  return { direction, protocol, fromPort, toPort, peerType, peer, description };
+}
+
+function validateFirewallRuleDirection(value: unknown): AwsFirewallDirection {
+  if (value !== "ingress" && value !== "egress") {
+    throw new AwsEc2ProviderError("The firewall rule direction is invalid.");
+  }
+  return value;
+}
+
+function validateFirewallPeerType(value: unknown): AwsFirewallPeerType {
+  if (value !== "ipv4" && value !== "ipv6" && value !== "prefix-list" && value !== "security-group") {
+    throw new AwsEc2ProviderError("The firewall rule peer type is invalid.");
+  }
+  return value;
+}
+
+function validateFirewallRuleProtocol(value: unknown): string {
+  if (typeof value !== "string" || value.trim() !== value) {
+    throw new AwsEc2ProviderError("The firewall rule protocol is invalid.");
+  }
+  if (value === "-1" || value === "tcp" || value === "udp" || value === "icmp" || value === "icmpv6") {
+    return value;
+  }
+  if (!/^(?:0|[1-9][0-9]{0,2})$/u.test(value) || Number(value) > 255) {
+    throw new AwsEc2ProviderError("The firewall rule protocol is invalid.");
+  }
+  return value;
+}
+
+function validateFirewallRulePorts(
+  protocol: string,
+  fromPort: unknown,
+  toPort: unknown,
+): readonly [number | null, number | null] {
+  if (protocol === "tcp" || protocol === "udp") {
+    if (
+      !Number.isSafeInteger(fromPort) ||
+      !Number.isSafeInteger(toPort) ||
+      (fromPort as number) < 0 ||
+      (toPort as number) > 65_535 ||
+      (fromPort as number) > (toPort as number)
+    ) {
+      throw new AwsEc2ProviderError("The TCP or UDP firewall rule port range is invalid.");
+    }
+    return [fromPort as number, toPort as number];
+  }
+  if (protocol === "icmp" || protocol === "icmpv6") {
+    if (
+      !Number.isSafeInteger(fromPort) ||
+      !Number.isSafeInteger(toPort) ||
+      (fromPort as number) < -1 ||
+      (fromPort as number) > 255 ||
+      (toPort as number) < -1 ||
+      (toPort as number) > 255 ||
+      (fromPort === -1 && toPort !== -1)
+    ) {
+      throw new AwsEc2ProviderError("The ICMP firewall rule type or code is invalid.");
+    }
+    return [fromPort as number, toPort as number];
+  }
+  if (fromPort !== null || toPort !== null) {
+    throw new AwsEc2ProviderError("All-protocol and numeric-protocol firewall rules cannot specify ports.");
+  }
+  return [null, null];
+}
+
+function validateFirewallPeer(type: AwsFirewallPeerType, value: unknown): string {
+  if (typeof value !== "string" || value.trim() !== value) {
+    throw new AwsEc2ProviderError("The firewall rule peer is invalid.");
+  }
+  if (type === "ipv4" || type === "ipv6") {
+    const separator = value.lastIndexOf("/");
+    const address = separator > 0 ? value.slice(0, separator) : "";
+    const prefixText = separator > 0 ? value.slice(separator + 1) : "";
+    const family = type === "ipv4" ? 4 : 6;
+    const maximum = family === 4 ? 32 : 128;
+    if (
+      value.indexOf("/") !== separator ||
+      isIP(address) !== family ||
+      !/^(?:0|[1-9][0-9]{0,2})$/u.test(prefixText) ||
+      Number(prefixText) > maximum
+    ) {
+      throw new AwsEc2ProviderError(`The firewall rule ${type.toUpperCase()} CIDR is invalid.`);
+    }
+    return value;
+  }
+  const pattern = type === "prefix-list" ? /^pl-[0-9a-f]+$/u : AWS_ID_PATTERNS.securityGroup;
+  if (!pattern.test(value)) throw new AwsEc2ProviderError(`The firewall rule ${type} peer is invalid.`);
+  return value;
+}
+
+function validateFirewallRuleDescription(value: unknown): string | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "string" ||
+    value.length > 255 ||
+    !/^[A-Za-z0-9 ._:/()#,@\[\]+=&;{}!$*-]*$/u.test(value)
+  ) {
+    throw new AwsEc2ProviderError("The firewall rule description is invalid.");
+  }
+  return value;
+}
+
+function firewallRulePermission(spec: AwsFirewallRuleSpec): IpPermission {
+  const ports = spec.fromPort === null ? {} : { FromPort: spec.fromPort, ToPort: spec.toPort! };
+  const description = spec.description === null ? {} : { Description: spec.description };
+  return {
+    IpProtocol: spec.protocol,
+    ...ports,
+    ...(spec.peerType === "ipv4" ? { IpRanges: [{ CidrIp: spec.peer, ...description }] } : {}),
+    ...(spec.peerType === "ipv6" ? { Ipv6Ranges: [{ CidrIpv6: spec.peer, ...description }] } : {}),
+    ...(spec.peerType === "prefix-list" ? { PrefixListIds: [{ PrefixListId: spec.peer, ...description }] } : {}),
+    ...(spec.peerType === "security-group" ? { UserIdGroupPairs: [{ GroupId: spec.peer, ...description }] } : {}),
+  };
+}
+
+function firewallRuleRequest(spec: AwsFirewallRuleSpec): SecurityGroupRuleRequest {
+  return {
+    IpProtocol: spec.protocol,
+    ...(spec.fromPort === null ? {} : { FromPort: spec.fromPort, ToPort: spec.toPort! }),
+    ...(spec.peerType === "ipv4" ? { CidrIpv4: spec.peer } : {}),
+    ...(spec.peerType === "ipv6" ? { CidrIpv6: spec.peer } : {}),
+    ...(spec.peerType === "prefix-list" ? { PrefixListId: spec.peer } : {}),
+    ...(spec.peerType === "security-group" ? { ReferencedGroupId: spec.peer } : {}),
+    ...(spec.description === null ? {} : { Description: spec.description }),
+  };
+}
+
+function normalizeFirewallRules(
+  values: readonly SecurityGroupRule[],
+  expectedGroupId: string,
+  guid: string,
+): AwsFirewallRule[] {
+  const byId = new Map<string, AwsFirewallRule>();
+  for (const value of values) {
+    const rule = normalizeFirewallRule(value, expectedGroupId, guid);
+    if (byId.has(rule.id)) {
+      throw new AwsEc2ProviderError("AWS EC2 returned a duplicate security group rule.");
+    }
+    byId.set(rule.id, rule);
+  }
+  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function normalizeFirewallRule(
+  value: SecurityGroupRule,
+  expectedGroupId: string,
+  guid: string,
+): AwsFirewallRule {
+  const id = requireAwsId(value.SecurityGroupRuleId, "security group rule", AWS_ID_PATTERNS.securityGroupRule);
+  if (value.GroupId !== expectedGroupId) {
+    throw new AwsEc2ProviderError("AWS EC2 returned a security group rule from an unexpected group.");
+  }
+  if (typeof value.IsEgress !== "boolean") {
+    throw new AwsEc2ProviderError("AWS EC2 returned a security group rule with an invalid direction.");
+  }
+  const peers: Array<readonly [AwsFirewallPeerType, unknown]> = [];
+  if (value.CidrIpv4 !== undefined) peers.push(["ipv4", value.CidrIpv4]);
+  if (value.CidrIpv6 !== undefined) peers.push(["ipv6", value.CidrIpv6]);
+  if (value.PrefixListId !== undefined) peers.push(["prefix-list", value.PrefixListId]);
+  if (value.ReferencedGroupInfo !== undefined) {
+    peers.push(["security-group", value.ReferencedGroupInfo.GroupId]);
+  }
+  if (peers.length !== 1) {
+    throw new AwsEc2ProviderError("AWS EC2 returned a security group rule without exactly one peer.");
+  }
+  const [peerType, peerValue] = peers[0]!;
+  const protocol = validateFirewallRuleProtocol(value.IpProtocol);
+  const reportedPorts = normalizeReportedFirewallRulePorts(protocol, value.FromPort, value.ToPort);
+  const spec = validateFirewallRuleSpec({
+    direction: value.IsEgress ? "egress" : "ingress",
+    protocol,
+    fromPort: reportedPorts[0],
+    toPort: reportedPorts[1],
+    peerType,
+    peer: peerValue as string,
+    description: value.Description ?? null,
+  });
+  return { id, ...spec, managed: hasManagedTags(value.Tags, guid) };
+}
+
+function normalizeReportedFirewallRulePorts(
+  protocol: string,
+  fromPort: number | undefined,
+  toPort: number | undefined,
+): readonly [number | null, number | null] {
+  if (protocol === "icmpv6" && fromPort === undefined && toPort === undefined) {
+    return [-1, -1];
+  }
+  const usesPorts = protocol === "tcp" || protocol === "udp" || protocol === "icmp" || protocol === "icmpv6";
+  if (usesPorts) return [fromPort ?? null, toPort ?? null];
+  return [null, null];
+}
+
+function firewallSpecsEqual(left: AwsFirewallRuleSpec, right: AwsFirewallRuleSpec): boolean {
+  return left.direction === right.direction &&
+    left.protocol === right.protocol &&
+    left.fromPort === right.fromPort &&
+    left.toPort === right.toPort &&
+    left.peerType === right.peerType &&
+    firewallPeersEqual(left.peerType, left.peer, right.peer) &&
+    left.description === right.description;
+}
+
+function firewallPeersEqual(type: AwsFirewallPeerType, left: string, right: string): boolean {
+  if (left === right) return true;
+  if (type !== "ipv4" && type !== "ipv6") return false;
+  const leftSeparator = left.lastIndexOf("/");
+  const rightSeparator = right.lastIndexOf("/");
+  const leftPrefix = Number(left.slice(leftSeparator + 1));
+  const rightPrefix = Number(right.slice(rightSeparator + 1));
+  if (leftPrefix !== rightPrefix) return false;
+  if (type === "ipv4") {
+    const leftAddress = ipv4AddressNumber(left.slice(0, leftSeparator));
+    const rightAddress = ipv4AddressNumber(right.slice(0, rightSeparator));
+    if (leftAddress === undefined || rightAddress === undefined) return false;
+    const mask = leftPrefix === 0 ? 0 : (0xffff_ffff << (32 - leftPrefix)) >>> 0;
+    return (leftAddress & mask) === (rightAddress & mask);
+  }
+  const leftAddress = ipv6AddressBigInt(left.slice(0, leftSeparator));
+  const rightAddress = ipv6AddressBigInt(right.slice(0, rightSeparator));
+  if (leftAddress === undefined || rightAddress === undefined) return false;
+  const hostBits = 128n - BigInt(leftPrefix);
+  const mask = leftPrefix === 0 ? 0n : ((1n << 128n) - 1n) ^ ((1n << hostBits) - 1n);
+  return (leftAddress & mask) === (rightAddress & mask);
+}
+
+function ipv6AddressBigInt(value: string): bigint | undefined {
+  if (isIP(value) !== 6) return undefined;
+  const halves = value.toLowerCase().split("::");
+  if (halves.length > 2) return undefined;
+  const left = ipv6Words(halves[0] ?? "");
+  const right = ipv6Words(halves[1] ?? "");
+  if (!left || !right) return undefined;
+  const omitted = 8 - left.length - right.length;
+  if ((halves.length === 1 && omitted !== 0) || (halves.length === 2 && omitted < 1)) return undefined;
+  const words = halves.length === 1 ? left : [...left, ...Array<number>(omitted).fill(0), ...right];
+  if (words.length !== 8) return undefined;
+  return words.reduce((result, word) => (result << 16n) | BigInt(word), 0n);
+}
+
+function ipv6Words(value: string): number[] | undefined {
+  if (value.length === 0) return [];
+  const parts = value.split(":");
+  const words: number[] = [];
+  for (const [index, part] of parts.entries()) {
+    if (part.includes(".")) {
+      if (index !== parts.length - 1) return undefined;
+      const address = ipv4AddressNumber(part);
+      if (address === undefined) return undefined;
+      words.push(address >>> 16, address & 0xffff);
+      continue;
+    }
+    if (!/^[0-9a-f]{1,4}$/u.test(part)) return undefined;
+    words.push(Number.parseInt(part, 16));
+  }
+  return words;
+}
+
+function normalizeOptionalAwsString(value: string | undefined, label: string, maximum: number): string | null {
+  if (value === undefined) return null;
+  if (value.trim() !== value || value.length < 1 || value.length > maximum || /\p{Cc}/u.test(value)) {
+    throw new AwsEc2ProviderError(`AWS EC2 returned an invalid ${label}.`);
+  }
+  return value;
+}
+
 function managedTags(guid: string, name: string): Tag[] {
   return [
     { Key: MANAGED_TAG_KEY, Value: MANAGED_TAG_VALUE },
     { Key: GUID_TAG_KEY, Value: guid },
     { Key: NAME_TAG_KEY, Value: name },
   ];
+}
+
+function isBaselineManagedFirewallRule(rule: SecurityGroupRule, guid: string): boolean {
+  if (!hasManagedTags(rule.Tags, guid) || tagValue(rule.Tags, RULE_TYPE_TAG_KEY) === CUSTOM_RULE_TYPE) {
+    return false;
+  }
+  return rule.Description === `sliver-gui:${guid}:ssh` ||
+    rule.Description === `sliver-gui:${guid}:multiplayer`;
 }
 
 function launchTagSpecifications(tags: Tag[]): TagSpecification[] {
@@ -2192,6 +2612,11 @@ function sanitizeAwsError(operation: string, error: unknown): AwsEc2ProviderErro
   const record = typeof error === "object" && error !== null ? error as Record<string, unknown> : undefined;
   const rawCode = record?.["name"] ?? record?.["Code"] ?? record?.["code"];
   const code = typeof rawCode === "string" && /^[A-Za-z0-9_.-]{1,80}$/u.test(rawCode) ? rawCode : undefined;
+  if (code === "AwsSharedProfileError") {
+    return new AwsEc2ProviderError(
+      `AWS EC2 could not ${operation}. Refresh the selected AWS CLI profile with \`aws login\` and try again.`,
+    );
+  }
   const metadata = record?.["$metadata"];
   const rawStatus = typeof metadata === "object" && metadata !== null
     ? (metadata as Record<string, unknown>)["httpStatusCode"]

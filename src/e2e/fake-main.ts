@@ -238,6 +238,10 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   createDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   runLifecycleAction: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewall: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  listFirewallRules: () => ({ ok: false, error: "Cloud inventory is disabled in this E2E fixture" }),
+  createFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  updateFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  deleteFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   prepareDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   executeDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
 };

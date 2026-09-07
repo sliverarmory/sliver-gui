@@ -1,11 +1,16 @@
 import type {
   AwsCliProfileSummary,
+  AwsFirewallSnapshot,
   CloudCredentialSummary,
   CloudDeploymentActionInput,
   CloudDeploymentRecord,
   CloudDeploymentState,
+  CreateAwsFirewallRuleInput,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
+  DeleteAwsFirewallRuleInput,
+  ListAwsFirewallRulesInput,
+  UpdateAwsFirewallRuleInput,
   UpdateCloudFirewallInput,
 } from "./cloud-deployment-contracts.js";
 import type { OperationResult } from "./contracts.js";
@@ -29,6 +34,10 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   createDeployment: "sliver:cloud-deployment:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
   updateFirewall: "sliver:cloud-deployment:firewall:update",
+  listFirewallRules: "sliver:cloud-deployment:firewall-rules:list",
+  createFirewallRule: "sliver:cloud-deployment:firewall-rule:create",
+  updateFirewallRule: "sliver:cloud-deployment:firewall-rule:update",
+  deleteFirewallRule: "sliver:cloud-deployment:firewall-rule:delete",
   prepareDestroyDeployment: "sliver:cloud-deployment:destroy:prepare",
   executeDestroyDeployment: "sliver:cloud-deployment:destroy:execute",
 } as const;
@@ -116,6 +125,10 @@ export interface CloudDeploymentAPI {
   createDeployment(input: CreateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
   runLifecycleAction(input: CloudDeploymentActionInput): Promise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): Promise<OperationResult<CloudDeploymentRecord>>;
+  listFirewallRules(input: ListAwsFirewallRulesInput): Promise<OperationResult<AwsFirewallSnapshot>>;
+  createFirewallRule(input: CreateAwsFirewallRuleInput): Promise<OperationResult<AwsFirewallSnapshot>>;
+  updateFirewallRule(input: UpdateAwsFirewallRuleInput): Promise<OperationResult<AwsFirewallSnapshot>>;
+  deleteFirewallRule(input: DeleteAwsFirewallRuleInput): Promise<OperationResult<AwsFirewallSnapshot>>;
   prepareDestroyDeployment(
     input: PrepareDestroyCloudDeploymentInput,
   ): Promise<OperationResult<DestroyCloudDeploymentPlan>>;

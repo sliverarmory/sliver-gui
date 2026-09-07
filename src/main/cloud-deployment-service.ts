@@ -22,22 +22,33 @@ import type {
 import {
   isUuidV4,
   parseCloudDeploymentActionInput,
+  parseCreateAwsFirewallRuleInput,
   parseCreateCloudCredentialInput,
   parseCreateCloudDeploymentInput,
+  parseDeleteAwsFirewallRuleInput,
+  parseListAwsFirewallRulesInput,
+  parseUpdateAwsFirewallRuleInput,
   parseUpdateCloudFirewallInput,
   type AwsCloudDeploymentRecord,
   type AwsCliProfileSummary,
   type AwsCredentialSecret,
+  type AwsFirewallRule,
+  type AwsFirewallRuleSpec,
+  type AwsFirewallSnapshot,
   type AwsManagedAssetType,
   type CloudCredentialSummary,
   type CloudDeploymentActionInput,
   type CloudDeploymentPhase,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
+  type CreateAwsFirewallRuleInput,
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
+  type DeleteAwsFirewallRuleInput,
+  type ListAwsFirewallRulesInput,
   type ProxmoxCloudDeploymentRecord,
   type ProxmoxCredentialSecret,
+  type UpdateAwsFirewallRuleInput,
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
@@ -124,6 +135,17 @@ export interface CloudAwsProvider {
     resource: AwsEc2DeploymentResource,
     firewall: Parameters<AwsEc2Provider["replaceFirewall"]>[1],
   ): Promise<AwsEc2DeploymentResource>;
+  listFirewallRules(resource: AwsEc2DeploymentResource): Promise<AwsFirewallSnapshot>;
+  createFirewallRule(
+    resource: AwsEc2DeploymentResource,
+    rule: AwsFirewallRuleSpec,
+  ): Promise<AwsFirewallRule>;
+  updateFirewallRule(
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+    rule: AwsFirewallRuleSpec,
+  ): Promise<AwsFirewallRule>;
+  deleteFirewallRule(resource: AwsEc2DeploymentResource, ruleId: string): Promise<void>;
   destroy(resource: AwsEc2DestroyResource): Promise<void>;
 }
 
@@ -589,6 +611,98 @@ export class CloudDeploymentService {
     }
   }
 
+  async listFirewallRules(
+    input: ListAwsFirewallRulesInput,
+  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    try {
+      this.#assertActive();
+      const parsed = parseListAwsFirewallRulesInput(input);
+      const deployment = this.#requireAwsDeployment(parsed.deploymentId);
+      if (deployment.status === "provisioning" || deployment.status === "deleting") {
+        return { ok: false, error: "The deployment is busy" };
+      }
+      return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+        try {
+          const provider = this.#awsProviderFactory(
+            await this.#awsConnection(deployment.spec.region, secret),
+          );
+          return {
+            ok: true,
+            value: await provider.listFirewallRules(awsResourceFromRecord(deployment)),
+          };
+        } catch (error) {
+          return failure(
+            error,
+            "The AWS firewall rules could not be listed",
+            credentialValues(secret),
+          );
+        }
+      });
+    } catch (error) {
+      return failure(error, "The AWS firewall rule list request was rejected");
+    }
+  }
+
+  async createFirewallRule(
+    input: CreateAwsFirewallRuleInput,
+  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    try {
+      this.#assertActive();
+      const parsed = parseCreateAwsFirewallRuleInput(input);
+      return await this.#mutateAwsFirewall(
+        parsed.deploymentId,
+        parsed.expectedRevision,
+        "The AWS firewall rule could not be created",
+        async (provider, resource, before) => upsertAwsFirewallRule(
+          before,
+          await provider.createFirewallRule(resource, parsed.rule),
+        ),
+      );
+    } catch (error) {
+      return failure(error, "The AWS firewall rule creation request was rejected");
+    }
+  }
+
+  async updateFirewallRule(
+    input: UpdateAwsFirewallRuleInput,
+  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    try {
+      this.#assertActive();
+      const parsed = parseUpdateAwsFirewallRuleInput(input);
+      return await this.#mutateAwsFirewall(
+        parsed.deploymentId,
+        parsed.expectedRevision,
+        "The AWS firewall rule could not be updated",
+        async (provider, resource, before) => upsertAwsFirewallRule(
+          before,
+          await provider.updateFirewallRule(resource, parsed.ruleId, parsed.rule),
+        ),
+      );
+    } catch (error) {
+      return failure(error, "The AWS firewall rule update request was rejected");
+    }
+  }
+
+  async deleteFirewallRule(
+    input: DeleteAwsFirewallRuleInput,
+  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    try {
+      this.#assertActive();
+      const parsed = parseDeleteAwsFirewallRuleInput(input);
+      return await this.#mutateAwsFirewall(
+        parsed.deploymentId,
+        parsed.expectedRevision,
+        "The AWS firewall rule could not be deleted",
+        async (provider, resource, before) => {
+          await provider.deleteFirewallRule(resource, parsed.ruleId);
+          return removeAwsFirewallRule(before, parsed.ruleId);
+        },
+      );
+    } catch (error) {
+      return failure(error, "The AWS firewall rule deletion request was rejected");
+    }
+  }
+
   prepareDestroyDeployment(
     input: PrepareDestroyCloudDeploymentInput,
   ): OperationResult<DestroyCloudDeploymentPlan> {
@@ -1029,6 +1143,72 @@ export class CloudDeploymentService {
     }
   }
 
+  async #mutateAwsFirewall(
+    deploymentId: string,
+    expectedRevision: number,
+    fallback: string,
+    mutate: (
+      provider: CloudAwsProvider,
+      resource: AwsEc2DeploymentResource,
+      before: AwsFirewallSnapshot,
+    ) => Promise<AwsFirewallSnapshot>,
+  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    return await this.#serializeDeployment(deploymentId, async () => {
+      try {
+        const deployment = this.#requireDeploymentAtRevision(deploymentId, expectedRevision);
+        if (deployment.provider !== "aws") {
+          throw new Error("Firewall rule management is only available for AWS deployments");
+        }
+        if (deployment.status === "provisioning" || deployment.status === "deleting") {
+          return { ok: false, error: "The deployment is busy" };
+        }
+        return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+          try {
+            const provider = this.#awsProviderFactory(
+              await this.#awsConnection(deployment.spec.region, secret),
+            );
+            const resource = awsResourceFromRecord(deployment);
+            const before = await provider.listFirewallRules(resource);
+            const fallbackSnapshot = await mutate(provider, resource, before);
+
+            let refreshedResource = resource;
+            try {
+              const updated = await this.#persistPatch(deployment.id, (current) => current);
+              if (updated.provider === "aws") {
+                refreshedResource = awsResourceFromRecord(updated);
+              }
+            } catch {
+              // The AWS mutation is already complete and no deployment fields
+              // changed. A local revision-journal failure must not turn that
+              // confirmed remote success into a retryable mutation failure.
+            }
+            try {
+              return { ok: true, value: await provider.listFirewallRules(refreshedResource) };
+            } catch {
+              // Preserve a truthful result when the post-mutation inventory
+              // refresh is transiently unavailable.
+              return { ok: true, value: fallbackSnapshot };
+            }
+          } catch (error) {
+            return failure(error, fallback, credentialValues(secret));
+          }
+        });
+      } catch (error) {
+        return failure(error, fallback);
+      }
+    });
+  }
+
+  #requireAwsDeployment(deploymentId: string): AwsCloudDeploymentRecord {
+    if (!isUuidV4(deploymentId)) throw new TypeError("Invalid cloud deployment identity");
+    const deployment = this.#store.getState().deployments.find(({ id }) => id === deploymentId);
+    if (!deployment) throw new Error("The cloud deployment no longer exists");
+    if (deployment.provider !== "aws") {
+      throw new Error("Firewall rule management is only available for AWS deployments");
+    }
+    return deployment;
+  }
+
   async #requireMatchingCredential(credentialId: string, provider: "aws" | "proxmox"): Promise<void> {
     await this.#vault.withCredential(credentialId, provider, () => undefined);
   }
@@ -1263,6 +1443,21 @@ function permissionSummary(
     prerequisite,
   ].filter((value): value is string => value !== undefined);
   return `${provider}: ${verified}${qualifiers.length > 0 ? `; ${qualifiers.join("; ")}` : ""}`;
+}
+
+function upsertAwsFirewallRule(
+  snapshot: AwsFirewallSnapshot,
+  rule: AwsFirewallRule,
+): AwsFirewallSnapshot {
+  return {
+    ...snapshot,
+    rules: [...snapshot.rules.filter(({ id }) => id !== rule.id), rule]
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  };
+}
+
+function removeAwsFirewallRule(snapshot: AwsFirewallSnapshot, ruleId: string): AwsFirewallSnapshot {
+  return { ...snapshot, rules: snapshot.rules.filter(({ id }) => id !== ruleId) };
 }
 
 function publicKeyForCredential(secret: AwsCredentialSecret | ProxmoxCredentialSecret): string {

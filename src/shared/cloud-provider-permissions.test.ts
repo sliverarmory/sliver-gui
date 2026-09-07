@@ -17,6 +17,9 @@ describe("cloud provider permission manifests", () => {
     expect(ids).toContain("ec2:RunInstances");
     expect(ids).toContain("ec2:CreateVpc");
     expect(ids).toContain("ec2:AuthorizeSecurityGroupIngress");
+    expect(ids).toContain("ec2:AuthorizeSecurityGroupEgress");
+    expect(ids).toContain("ec2:ModifySecurityGroupRules");
+    expect(ids).toContain("ec2:RevokeSecurityGroupEgress");
     expect(ids).toContain("ec2:StopInstances");
     expect(ids).toContain("ec2:TerminateInstances");
     expect(new Set(ids).size).toBe(ids.length);

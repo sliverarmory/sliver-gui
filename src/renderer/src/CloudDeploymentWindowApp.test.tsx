@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import type {
   AwsCloudDeploymentRecord,
+  AwsFirewallSnapshot,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
 } from "../../shared/cloud-deployment-contracts";
@@ -38,6 +39,7 @@ let themeListener: ((dark: boolean) => void) | undefined;
 let changedListener: ((scope: CloudDeploymentChangeScope) => void) | undefined;
 let capturedCredential: CreateCloudCredentialInput | undefined;
 let capturedDeployment: CreateCloudDeploymentInput | undefined;
+let currentFirewallSnapshot: AwsFirewallSnapshot;
 const unsubscribeTheme = vi.fn();
 const unsubscribeChanged = vi.fn();
 
@@ -104,6 +106,36 @@ const runningDeployment: AwsCloudDeploymentRecord = {
     routeTableId: null,
     routeTableAssociationId: null,
   },
+};
+
+const firewallSnapshot: AwsFirewallSnapshot = {
+  securityGroupId: "sg-abc123",
+  securityGroupName: "sliver-gui-range-control",
+  vpcId: "vpc-0123456789abcdef0",
+  rules: [
+    {
+      id: "sgr-11111111111111111",
+      managed: true,
+      direction: "ingress",
+      protocol: "tcp",
+      fromPort: 22,
+      toPort: 22,
+      peerType: "ipv4",
+      peer: "203.0.113.8/32",
+      description: "Operator SSH",
+    },
+    {
+      id: "sgr-22222222222222222",
+      managed: false,
+      direction: "egress",
+      protocol: "-1",
+      fromPort: null,
+      toPort: null,
+      peerType: "ipv4",
+      peer: "0.0.0.0/0",
+      description: null,
+    },
+  ],
 };
 
 const awsDeploymentOptions: AwsDeploymentOptions = {
@@ -221,6 +253,10 @@ const api: CloudDeploymentAPI = {
   }),
   runLifecycleAction: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
   updateFirewall: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
+  listFirewallRules: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
+  createFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
+  updateFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
+  deleteFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
   prepareDestroyDeployment: vi.fn(async () => ({
     ok: true as const,
     value: {
@@ -252,11 +288,26 @@ beforeAll(() => {
     configurable: true,
     value: () => [],
   });
+  Object.defineProperty(Element.prototype, "setPointerCapture", {
+    configurable: true,
+    value: () => undefined,
+  });
+  Object.defineProperty(Element.prototype, "releasePointerCapture", {
+    configurable: true,
+    value: () => undefined,
+  });
+  Object.defineProperty(Element.prototype, "hasPointerCapture", {
+    configurable: true,
+    value: () => false,
+  });
 });
 
 afterAll(() => {
   vi.unstubAllGlobals();
   Reflect.deleteProperty(Element.prototype, "getAnimations");
+  Reflect.deleteProperty(Element.prototype, "setPointerCapture");
+  Reflect.deleteProperty(Element.prototype, "releasePointerCapture");
+  Reflect.deleteProperty(Element.prototype, "hasPointerCapture");
 });
 
 beforeEach(() => {
@@ -265,6 +316,7 @@ beforeEach(() => {
   changedListener = undefined;
   capturedCredential = undefined;
   capturedDeployment = undefined;
+  currentFirewallSnapshot = firewallSnapshot;
   unsubscribeTheme.mockClear();
   unsubscribeChanged.mockClear();
   vi.mocked(api.getSnapshot).mockClear();
@@ -281,6 +333,10 @@ beforeEach(() => {
   vi.mocked(api.createDeployment).mockClear();
   vi.mocked(api.runLifecycleAction).mockClear();
   vi.mocked(api.updateFirewall).mockClear();
+  vi.mocked(api.listFirewallRules).mockClear();
+  vi.mocked(api.createFirewallRule).mockClear();
+  vi.mocked(api.updateFirewallRule).mockClear();
+  vi.mocked(api.deleteFirewallRule).mockClear();
   vi.mocked(api.prepareDestroyDeployment).mockClear();
   vi.mocked(api.executeDestroyDeployment).mockClear();
   Object.defineProperty(window, "cloudDeployment", { configurable: true, value: Object.freeze(api) });
@@ -967,7 +1023,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(discoverAwsOptions).toHaveBeenCalledTimes(2);
   });
 
-  it("routes lifecycle, firewall, and reviewed destruction through their dedicated bridge methods", async () => {
+  it("routes lifecycle and reviewed destruction through their dedicated bridge methods", async () => {
     currentSnapshot = {
       state: { v: 1, revision: 9, deployments: [runningDeployment] },
       credentials: [awsCredential],
@@ -980,29 +1036,211 @@ describe("CloudDeploymentWindowApp", () => {
     render(<CloudDeploymentWindowApp />);
 
     expect(await screen.findByText("range-control")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Stop/i }));
+    const stopButton = screen.getByRole("button", { name: /Stop/i });
+    expect(stopButton.querySelector('svg[data-icon="stop"]')).toBeInTheDocument();
+    await user.click(stopButton);
     await waitFor(() => expect(api.runLifecycleAction).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9, action: "stop" }));
 
-    await user.click(screen.getByRole("button", { name: /Firewall/i }));
-    const firewallHeading = screen.getByRole("heading", { name: "Firewall Sources" });
-    const firewallPanel = firewallHeading.parentElement?.parentElement;
-    if (!firewallPanel) throw new Error("Firewall editor was not rendered");
-    const sshInput = within(firewallPanel).getByRole("textbox", { name: "SSH Source CIDRs" });
-    await user.clear(sshInput);
-    await user.type(sshInput, "192.0.2.4/32");
-    await user.click(within(firewallPanel).getByRole("button", { name: "Save Firewall" }));
-    await waitFor(() => expect(api.updateFirewall).toHaveBeenCalledWith({
-      deploymentId: DEPLOYMENT_ID,
-      expectedRevision: 9,
-      sshCidrs: ["192.0.2.4/32"],
-      operatorCidrs: ["203.0.113.8/32"],
-    }));
+    await user.click(screen.getByRole("button", { name: "Edit firewall for range-control" }));
+    expect(await screen.findByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
+    await waitFor(() => expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID }));
+    await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
 
     await user.click(screen.getByRole("button", { name: "Terminate range-control" }));
     expect(await screen.findByRole("alertdialog", { name: "Terminate range-control?" })).toBeInTheDocument();
     expect(api.prepareDestroyDeployment).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9 });
     await user.click(screen.getByRole("button", { name: "Terminate Instance" }));
     await waitFor(() => expect(api.executeDestroyDeployment).toHaveBeenCalledWith({ token: "destroy-token" }));
+  });
+
+  it("opens a dedicated AWS instance details view with inbound and outbound rule tables", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    const { container } = render(<CloudDeploymentWindowApp />);
+
+    expect(await screen.findByText("range-control")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit firewall for range-control" }));
+
+    const instanceHeading = await screen.findByRole("heading", { level: 1, name: "range-control" });
+    await waitFor(() => expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID }));
+    const backButton = screen.getByRole("button", { name: "Back to managed servers" });
+    const stickyHeader = screen.getByTestId("aws-instance-sticky-header");
+    const scrollRegion = screen.getByRole("region", { name: "Instance details content" });
+    expect(container.querySelector("main")).toHaveClass("h-screen", "overflow-hidden");
+    expect(stickyHeader).toHaveClass("sticky", "top-0", "z-20", "shrink-0", "bg-background");
+    expect(stickyHeader).toContainElement(backButton);
+    expect(stickyHeader).toContainElement(instanceHeading);
+    expect(scrollRegion).toHaveAttribute("data-slot", "scroll-shadow");
+    expect(scrollRegion).toHaveAttribute("data-orientation", "vertical");
+    expect(scrollRegion).toHaveAttribute("data-scroll-shadow-size", "48");
+    expect(scrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(backButton.compareDocumentPosition(instanceHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Cloud Deployment" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^Deployments/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^Credentials/u })).not.toBeInTheDocument();
+    expect(within(scrollRegion).getByRole("heading", { name: "Instance summary" })).toBeInTheDocument();
+    expect(within(scrollRegion).getByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
+    expect(screen.getByText("sg-abc123")).toBeInTheDocument();
+    expect(screen.queryByText(/Managed provenance identifies/u)).not.toBeInTheDocument();
+
+    const inboundTab = screen.getByRole("tab", { name: /Inbound/u });
+    const outboundTab = screen.getByRole("tab", { name: /Outbound/u });
+    expect(within(inboundTab).getByText("Inbound")).toBeInTheDocument();
+    expect(within(outboundTab).getByText("Outbound")).toBeInTheDocument();
+    expect(inboundTab).toHaveClass("min-w-28", "whitespace-nowrap");
+    expect(outboundTab).toHaveClass("min-w-28", "whitespace-nowrap");
+
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    expect(within(inboundGrid).getByText("sgr-11111111111111111")).toBeInTheDocument();
+    expect(within(inboundGrid).getByText("203.0.113.8/32")).toBeInTheDocument();
+    expect(within(inboundGrid).queryByRole("columnheader", { name: "Description" })).not.toBeInTheDocument();
+    expect(within(inboundGrid).queryByText("Operator SSH")).not.toBeInTheDocument();
+    expect(within(inboundGrid).getByRole("button", { name: "Edit firewall rule sgr-11111111111111111" })).toBeInTheDocument();
+    const actionsHeader = within(inboundGrid).getByRole("columnheader", { name: "Actions" });
+    const editButton = within(inboundGrid).getByRole("button", { name: "Edit firewall rule sgr-11111111111111111" });
+    expect(actionsHeader).not.toHaveAttribute("data-pinned");
+    expect(editButton.closest('[role="gridcell"]')).not.toHaveAttribute("data-pinned");
+
+    await user.click(outboundTab);
+    const outboundGrid = await screen.findByRole("grid", { name: "Outbound firewall rules" });
+    expect(within(outboundGrid).getByText("sgr-22222222222222222")).toBeInTheDocument();
+    expect(within(outboundGrid).getByText("0.0.0.0/0")).toBeInTheDocument();
+    expect(within(outboundGrid).getByRole("button", { name: "Delete firewall rule sgr-22222222222222222" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
+    expect(container.querySelector("main")).toHaveClass("overflow-y-auto");
+    expect(container.querySelector("main")).not.toHaveClass("overflow-hidden");
+    expect(screen.queryByRole("region", { name: "Instance details content" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit firewall for range-control" })).toBeInTheDocument();
+  });
+
+  it("opens rule editing from accessible row actions without bubbling nested delete actions", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    render(<CloudDeploymentWindowApp />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    const ruleRow = within(inboundGrid).getByText("sgr-11111111111111111").closest('[role="row"]');
+    if (!(ruleRow instanceof HTMLElement)) throw new Error("Firewall rule row was not rendered");
+
+    await user.click(ruleRow);
+    expect(await screen.findByRole("dialog", { name: "Edit firewall rule" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit firewall rule" })).not.toBeInTheDocument());
+
+    ruleRow.focus();
+    expect(ruleRow).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("dialog", { name: "Edit firewall rule" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit firewall rule" })).not.toBeInTheDocument());
+
+    await user.click(within(inboundGrid).getByRole("button", { name: "Delete firewall rule sgr-11111111111111111" }));
+    expect(await screen.findByRole("alertdialog", { name: "Delete firewall rule?" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Edit firewall rule" })).not.toBeInTheDocument();
+  });
+
+  it("creates an AWS firewall rule from the add-rule sheet and warns about public inbound access", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    render(<CloudDeploymentWindowApp />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    await user.click(screen.getByRole("button", { name: "Add rule" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Add firewall rule" });
+    expect(within(sheet).getByRole("combobox", { name: "Direction" })).toHaveValue("ingress");
+    expect(within(sheet).getByRole("combobox", { name: "Source type" })).toHaveValue("ipv4");
+    await user.type(within(sheet).getByRole("textbox", { name: "From port" }), "8443");
+    await user.type(within(sheet).getByRole("textbox", { name: "To port" }), "8443");
+    await user.type(within(sheet).getByRole("textbox", { name: "Source" }), "0.0.0.0/0");
+    await user.type(within(sheet).getByRole("textbox", { name: "Description" }), "Public test endpoint");
+
+    expect(within(sheet).getByText("Public inbound access")).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("button", { name: "Add rule" }));
+
+    await waitFor(() => expect(api.createFirewallRule).toHaveBeenCalledWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 9,
+      rule: {
+        direction: "ingress",
+        protocol: "tcp",
+        fromPort: 8_443,
+        toPort: 8_443,
+        peerType: "ipv4",
+        peer: "0.0.0.0/0",
+        description: "Public test endpoint",
+      },
+    }));
+    expect(await screen.findByText("Firewall rule added")).toBeInTheDocument();
+  });
+
+  it("updates an AWS firewall rule while keeping its direction and peer type fixed", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    render(<CloudDeploymentWindowApp />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    await user.click(within(inboundGrid).getByRole("button", { name: "Edit firewall rule sgr-11111111111111111" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Edit firewall rule" });
+    expect(within(sheet).getByRole("combobox", { name: "Direction" })).toBeDisabled();
+    expect(within(sheet).getByRole("combobox", { name: "Source type" })).toBeDisabled();
+    const source = within(sheet).getByRole("textbox", { name: "Source" });
+    const description = within(sheet).getByRole("textbox", { name: "Description" });
+    await user.clear(source);
+    await user.type(source, "198.51.100.18/32");
+    await user.clear(description);
+    await user.type(description, "Updated operator SSH");
+    await user.click(within(sheet).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateFirewallRule).toHaveBeenCalledWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 9,
+      ruleId: "sgr-11111111111111111",
+      rule: {
+        direction: "ingress",
+        protocol: "tcp",
+        fromPort: 22,
+        toPort: 22,
+        peerType: "ipv4",
+        peer: "198.51.100.18/32",
+        description: "Updated operator SSH",
+      },
+    }));
+    expect(await screen.findByText("Firewall rule updated")).toBeInTheDocument();
+  });
+
+  it("deletes any rule in the deployment security group after confirmation", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.deleteFirewallRule).mockResolvedValueOnce({
+      ok: true,
+      value: { ...firewallSnapshot, rules: firewallSnapshot.rules.filter(({ direction }) => direction === "ingress") },
+    });
+    const user = userEvent.setup();
+    render(<CloudDeploymentWindowApp />);
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    await user.click(screen.getByRole("tab", { name: /Outbound/u }));
+    const outboundGrid = await screen.findByRole("grid", { name: "Outbound firewall rules" });
+    await user.click(within(outboundGrid).getByRole("button", { name: "Delete firewall rule sgr-22222222222222222" }));
+
+    const confirmation = await screen.findByRole("alertdialog", { name: "Delete firewall rule?" });
+    expect(within(confirmation).getByText(/All traffic access for 0\.0\.0\.0\/0/u)).toBeInTheDocument();
+    await user.click(within(confirmation).getByRole("button", { name: "Delete rule" }));
+
+    await waitFor(() => expect(api.deleteFirewallRule).toHaveBeenCalledWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 9,
+      ruleId: "sgr-22222222222222222",
+    }));
+    expect(await screen.findByText("No outbound rules")).toBeInTheDocument();
+    expect(screen.getByText("Firewall rule deleted")).toBeInTheDocument();
   });
 
   it("keeps the last good snapshot visible and reports a later refresh failure", async () => {
@@ -1030,6 +1268,17 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByText(/provider snapshot unavailable/u)).toBeInTheDocument();
   });
 });
+
+function runningCloudSnapshot(): CloudDeploymentSnapshot {
+  return {
+    state: { v: 1, revision: 9, deployments: [runningDeployment] },
+    credentials: [awsCredential],
+    secureCredentialStorage: true,
+    awsProfiles: [{ name: "default", region: "us-west-2" }],
+    awsProfileDiscoveryError: null,
+    provisioningTranscripts: [],
+  };
+}
 
 function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
   let resolve!: (value: T) => void;

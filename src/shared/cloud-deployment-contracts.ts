@@ -61,6 +61,8 @@ export type AwsDeploymentInstanceState =
   | "stopped"
   | "unknown";
 export type AwsDeploymentHealth = "ok" | "impaired" | "initializing" | "unknown";
+export type AwsFirewallDirection = "ingress" | "egress";
+export type AwsFirewallPeerType = "ipv4" | "ipv6" | "prefix-list" | "security-group";
 
 export interface AwsAccessKeyCredentialSecret {
   readonly accessKeyId: string;
@@ -362,6 +364,48 @@ export interface UpdateCloudFirewallInput {
   readonly operatorCidrs: readonly string[];
 }
 
+export interface AwsFirewallRuleSpec {
+  readonly direction: AwsFirewallDirection;
+  readonly protocol: string;
+  readonly fromPort: number | null;
+  readonly toPort: number | null;
+  readonly peerType: AwsFirewallPeerType;
+  readonly peer: string;
+  readonly description: string | null;
+}
+
+export interface AwsFirewallRule extends AwsFirewallRuleSpec {
+  readonly id: string;
+  readonly managed: boolean;
+}
+
+export interface AwsFirewallSnapshot {
+  readonly securityGroupId: string;
+  readonly securityGroupName: string | null;
+  readonly vpcId: string | null;
+  readonly rules: readonly AwsFirewallRule[];
+}
+
+export interface ListAwsFirewallRulesInput {
+  readonly deploymentId: string;
+}
+
+export interface CreateAwsFirewallRuleInput {
+  readonly deploymentId: string;
+  readonly expectedRevision: number;
+  readonly rule: AwsFirewallRuleSpec;
+}
+
+export interface UpdateAwsFirewallRuleInput extends CreateAwsFirewallRuleInput {
+  readonly ruleId: string;
+}
+
+export interface DeleteAwsFirewallRuleInput {
+  readonly deploymentId: string;
+  readonly expectedRevision: number;
+  readonly ruleId: string;
+}
+
 const AWS_ACCESS_KEY_SECRET_KEYS = ["accessKeyId", "secretAccessKey", "sessionToken", "sshPrivateKey", "sshPassphrase"] as const;
 const AWS_PROFILE_SECRET_KEYS = ["profileName", "sshPrivateKey", "sshPassphrase"] as const;
 const PROXMOX_SECRET_KEYS = ["endpoint", "tokenId", "tokenSecret", "tlsCaCertificate", "sshPrivateKey", "sshPassphrase"] as const;
@@ -388,6 +432,11 @@ const UPDATE_KEYS = ["expectedRevision", "deployment"] as const;
 const DELETE_KEYS = ["expectedRevision", "deploymentId"] as const;
 const ACTION_KEYS = ["deploymentId", "expectedRevision", "action"] as const;
 const FIREWALL_KEYS = ["deploymentId", "expectedRevision", "sshCidrs", "operatorCidrs"] as const;
+const AWS_FIREWALL_RULE_KEYS = ["direction", "protocol", "fromPort", "toPort", "peerType", "peer", "description"] as const;
+const LIST_AWS_FIREWALL_RULES_KEYS = ["deploymentId"] as const;
+const CREATE_AWS_FIREWALL_RULE_KEYS = ["deploymentId", "expectedRevision", "rule"] as const;
+const UPDATE_AWS_FIREWALL_RULE_KEYS = ["deploymentId", "expectedRevision", "rule", "ruleId"] as const;
+const DELETE_AWS_FIREWALL_RULE_KEYS = ["deploymentId", "expectedRevision", "ruleId"] as const;
 
 const CREDENTIAL_PERSISTENCE = new Set<CloudCredentialPersistence>(["secure", "session"]);
 const DEPLOYMENT_ACTIONS = new Set<CloudDeploymentAction>(CLOUD_DEPLOYMENT_ACTIONS);
@@ -395,6 +444,8 @@ const DEPLOYMENT_STATUSES = new Set<CloudDeploymentStatus>(CLOUD_DEPLOYMENT_STAT
 const DEPLOYMENT_PHASES = new Set<CloudDeploymentPhase>(CLOUD_DEPLOYMENT_PHASES);
 const AWS_INSTANCE_STATES = new Set<AwsDeploymentInstanceState>(["pending", "running", "shutting-down", "terminated", "stopping", "stopped", "unknown"]);
 const AWS_HEALTH_VALUES = new Set<AwsDeploymentHealth>(["ok", "impaired", "initializing", "unknown"]);
+const AWS_FIREWALL_DIRECTIONS = new Set<AwsFirewallDirection>(["ingress", "egress"]);
+const AWS_FIREWALL_PEER_TYPES = new Set<AwsFirewallPeerType>(["ipv4", "ipv6", "prefix-list", "security-group"]);
 const AWS_ASSET_TYPES = new Set<AwsManagedAssetType>(["ec2-instance", "ec2-volume", "ec2-network-interface", "ec2-security-group", "ec2-key-pair", "ec2-elastic-ip", "ec2-vpc", "ec2-subnet", "ec2-internet-gateway", "ec2-route-table", "ec2-route-table-association"]);
 const PROXMOX_ASSET_TYPES = new Set<ProxmoxManagedAssetType>(["proxmox-vm"]);
 
@@ -629,6 +680,78 @@ export function parseUpdateCloudFirewallInput(value: unknown): UpdateCloudFirewa
   return Object.freeze({ deploymentId: value["deploymentId"], expectedRevision: value["expectedRevision"], sshCidrs: parseIngressCidrs(value["sshCidrs"]), operatorCidrs: parseIngressCidrs(value["operatorCidrs"]) });
 }
 
+export function parseAwsFirewallRuleSpec(value: unknown): AwsFirewallRuleSpec {
+  if (
+    !hasExactKeys(value, AWS_FIREWALL_RULE_KEYS) ||
+    typeof value["direction"] !== "string" ||
+    !AWS_FIREWALL_DIRECTIONS.has(value["direction"] as AwsFirewallDirection) ||
+    !isAwsFirewallProtocol(value["protocol"]) ||
+    typeof value["peerType"] !== "string" ||
+    !AWS_FIREWALL_PEER_TYPES.has(value["peerType"] as AwsFirewallPeerType) ||
+    !isAwsFirewallPeer(value["peerType"] as AwsFirewallPeerType, value["peer"]) ||
+    !isAwsFirewallDescription(value["description"]) ||
+    !areValidAwsFirewallPorts(value["protocol"], value["fromPort"], value["toPort"])
+  ) throw invalid("AWS firewall rule");
+  return Object.freeze({
+    direction: value["direction"] as AwsFirewallDirection,
+    protocol: value["protocol"],
+    fromPort: value["fromPort"] as number | null,
+    toPort: value["toPort"] as number | null,
+    peerType: value["peerType"] as AwsFirewallPeerType,
+    peer: value["peer"] as string,
+    description: value["description"],
+  });
+}
+
+export function parseListAwsFirewallRulesInput(value: unknown): ListAwsFirewallRulesInput {
+  if (!hasExactKeys(value, LIST_AWS_FIREWALL_RULES_KEYS) || !isUuidV4(value["deploymentId"])) {
+    throw invalid("AWS firewall rule list request");
+  }
+  return Object.freeze({ deploymentId: value["deploymentId"] });
+}
+
+export function parseCreateAwsFirewallRuleInput(value: unknown): CreateAwsFirewallRuleInput {
+  if (
+    !hasExactKeys(value, CREATE_AWS_FIREWALL_RULE_KEYS) ||
+    !isUuidV4(value["deploymentId"]) ||
+    !isRevision(value["expectedRevision"])
+  ) throw invalid("AWS firewall rule creation");
+  return Object.freeze({
+    deploymentId: value["deploymentId"],
+    expectedRevision: value["expectedRevision"],
+    rule: parseAwsFirewallRuleSpec(value["rule"]),
+  });
+}
+
+export function parseUpdateAwsFirewallRuleInput(value: unknown): UpdateAwsFirewallRuleInput {
+  if (
+    !hasExactKeys(value, UPDATE_AWS_FIREWALL_RULE_KEYS) ||
+    !isUuidV4(value["deploymentId"]) ||
+    !isRevision(value["expectedRevision"]) ||
+    !isAwsSecurityGroupRuleId(value["ruleId"])
+  ) throw invalid("AWS firewall rule update");
+  return Object.freeze({
+    deploymentId: value["deploymentId"],
+    expectedRevision: value["expectedRevision"],
+    rule: parseAwsFirewallRuleSpec(value["rule"]),
+    ruleId: value["ruleId"],
+  });
+}
+
+export function parseDeleteAwsFirewallRuleInput(value: unknown): DeleteAwsFirewallRuleInput {
+  if (
+    !hasExactKeys(value, DELETE_AWS_FIREWALL_RULE_KEYS) ||
+    !isUuidV4(value["deploymentId"]) ||
+    !isRevision(value["expectedRevision"]) ||
+    !isAwsSecurityGroupRuleId(value["ruleId"])
+  ) throw invalid("AWS firewall rule deletion");
+  return Object.freeze({
+    deploymentId: value["deploymentId"],
+    expectedRevision: value["expectedRevision"],
+    ruleId: value["ruleId"],
+  });
+}
+
 export function isUuidV4(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
 }
@@ -706,6 +829,72 @@ function isCidr(value: unknown): value is string {
   const address = match[1] ?? "";
   if (address.includes(":")) return prefix > 0 && prefix <= 128 && isIpv6Address(address);
   return prefix > 0 && prefix <= 32 && isIpv4Address(address);
+}
+
+function isAwsFirewallProtocol(value: unknown): value is string {
+  if (value === "-1" || value === "tcp" || value === "udp" || value === "icmp" || value === "icmpv6") {
+    return true;
+  }
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d{0,2})$/u.test(value)) return false;
+  return Number(value) <= 255;
+}
+
+function areValidAwsFirewallPorts(
+  protocol: string,
+  fromPort: unknown,
+  toPort: unknown,
+): boolean {
+  if (protocol === "tcp" || protocol === "udp") {
+    return boundedInteger(fromPort, 0, 65_535) &&
+      boundedInteger(toPort, 0, 65_535) &&
+      fromPort <= toPort;
+  }
+  if (protocol === "icmp" || protocol === "icmpv6") {
+    return boundedInteger(fromPort, -1, 255) &&
+      boundedInteger(toPort, -1, 255) &&
+      (fromPort !== -1 || toPort === -1);
+  }
+  return fromPort === null && toPort === null;
+}
+
+function isAwsFirewallPeer(type: AwsFirewallPeerType, value: unknown): value is string {
+  if (type === "ipv4") return isAwsFirewallCidr(value, false);
+  if (type === "ipv6") return isAwsFirewallCidr(value, true);
+  if (type === "prefix-list") {
+    return boundedPattern(value, 4, 128, /^pl-[0-9a-f]+$/u);
+  }
+  return boundedPattern(value, 4, 128, /^sg-[0-9a-f]+$/u);
+}
+
+function isAwsFirewallCidr(value: unknown, ipv6: boolean): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length < 3 ||
+    value.length > 64 ||
+    value.trim() !== value ||
+    /[\s\0]/u.test(value)
+  ) return false;
+  const match = /^(.+)\/(\d{1,3})$/u.exec(value);
+  if (!match) return false;
+  const address = match[1] ?? "";
+  const prefixText = match[2] ?? "";
+  if (!/^(?:0|[1-9]\d{0,2})$/u.test(prefixText)) return false;
+  const prefix = Number(prefixText);
+  return ipv6
+    ? prefix >= 0 && prefix <= 128 && isIpv6Address(address)
+    : prefix >= 0 && prefix <= 32 && isIpv4Address(address);
+}
+
+function isAwsFirewallDescription(value: unknown): value is string | null {
+  return value === null || (
+    typeof value === "string" &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9 ._:/()#,@\[\]+=&;{}!$*-]*$/u.test(value)
+  );
+}
+
+function isAwsSecurityGroupRuleId(value: unknown): value is string {
+  return boundedPattern(value, 5, 128, /^sgr-[0-9a-f]+$/u);
 }
 
 function isIpv6Address(value: string): boolean {

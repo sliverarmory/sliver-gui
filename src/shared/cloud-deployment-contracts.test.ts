@@ -2,19 +2,25 @@ import { describe, expect, it } from "vitest";
 
 import {
   CLOUD_DEPLOYMENT_STATE_VERSION,
+  parseAwsFirewallRuleSpec,
   parseCloudCredentialSummary,
   parseCloudDeploymentActionInput,
   parseCloudDeploymentRecord,
   parseCloudDeploymentState,
+  parseCreateAwsFirewallRuleInput,
   parseCreateCloudCredentialInput,
   parseCreateCloudDeploymentInput,
+  parseDeleteAwsFirewallRuleInput,
+  parseListAwsFirewallRulesInput,
   parseResolvedCloudCredentialInput,
+  parseUpdateAwsFirewallRuleInput,
   parseUpdateCloudFirewallInput,
 } from "./cloud-deployment-contracts.js";
 
 const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const KEY_TOKEN = "33333333-3333-4333-8333-333333333333";
+const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
 
 describe("cloud deployment contracts", () => {
   it("parses a renderer-safe AWS credential with an opaque private-key token", () => {
@@ -373,6 +379,111 @@ describe("cloud deployment contracts", () => {
       action: "terminate",
     })).toThrow(/Invalid/u);
   });
+
+  it("parses exact AWS firewall rule requests and permits intentional internet-wide peers", () => {
+    const rule = parseAwsFirewallRuleSpec({
+      ...awsFirewallRule(),
+      peer: "0.0.0.0/0",
+    });
+    const listed = parseListAwsFirewallRulesInput({ deploymentId: DEPLOYMENT_ID });
+    const created = parseCreateAwsFirewallRuleInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 4,
+      rule,
+    });
+    const updated = parseUpdateAwsFirewallRuleInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 5,
+      ruleId: FIREWALL_RULE_ID,
+      rule: {
+        direction: "egress",
+        protocol: "icmpv6",
+        fromPort: -1,
+        toPort: -1,
+        peerType: "ipv6",
+        peer: "::/0",
+        description: null,
+      },
+    });
+    const deleted = parseDeleteAwsFirewallRuleInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 6,
+      ruleId: FIREWALL_RULE_ID,
+    });
+
+    expect(rule.peer).toBe("0.0.0.0/0");
+    expect(listed).toEqual({ deploymentId: DEPLOYMENT_ID });
+    expect(created).toMatchObject({ expectedRevision: 4, rule: { protocol: "tcp" } });
+    expect(updated).toMatchObject({ ruleId: FIREWALL_RULE_ID, rule: { peer: "::/0" } });
+    expect(deleted).toEqual({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 6,
+      ruleId: FIREWALL_RULE_ID,
+    });
+    expect(Object.isFrozen(created)).toBe(true);
+    expect(Object.isFrozen(created.rule)).toBe(true);
+
+    expect(parseAwsFirewallRuleSpec({
+      direction: "egress",
+      protocol: "6",
+      fromPort: null,
+      toPort: null,
+      peerType: "prefix-list",
+      peer: "pl-0123456789abcdef0",
+      description: "AWS service prefix list",
+    })).toMatchObject({ protocol: "6", peerType: "prefix-list" });
+    expect(parseAwsFirewallRuleSpec({
+      direction: "ingress",
+      protocol: "udp",
+      fromPort: 0,
+      toPort: 65_535,
+      peerType: "security-group",
+      peer: "sg-0123456789abcdef0",
+      description: "Allowed punctuation: ._-:/()#,@[]+=&;{}!$*",
+    })).toMatchObject({ fromPort: 0, toPort: 65_535 });
+  });
+
+  it("rejects malformed AWS firewall rules before they cross the IPC boundary", () => {
+    const invalidRules = [
+      { ...awsFirewallRule(), extra: true },
+      { ...awsFirewallRule(), direction: "both" },
+      { ...awsFirewallRule(), protocol: "256", fromPort: null, toPort: null },
+      { ...awsFirewallRule(), protocol: "06", fromPort: null, toPort: null },
+      { ...awsFirewallRule(), fromPort: 8444, toPort: 8443 },
+      { ...awsFirewallRule(), protocol: "icmp", fromPort: -1, toPort: 0 },
+      { ...awsFirewallRule(), protocol: "17", fromPort: 53, toPort: 53 },
+      { ...awsFirewallRule(), peer: "203.0.113.0/024" },
+      { ...awsFirewallRule(), peerType: "ipv6", peer: "203.0.113.0/24" },
+      { ...awsFirewallRule(), peerType: "prefix-list", peer: "pl-not-hex" },
+      { ...awsFirewallRule(), peerType: "security-group", peer: "sg-not-hex" },
+      { ...awsFirewallRule(), description: "question marks are not allowed?" },
+      { ...awsFirewallRule(), description: "x".repeat(256) },
+    ];
+    for (const rule of invalidRules) {
+      expect(() => parseAwsFirewallRuleSpec(rule)).toThrow(/Invalid AWS firewall rule/u);
+    }
+    expect(() => parseListAwsFirewallRulesInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 0,
+    })).toThrow(/Invalid/u);
+    expect(() => parseCreateAwsFirewallRuleInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: -1,
+      rule: awsFirewallRule(),
+    })).toThrow(/Invalid/u);
+    expect(() => parseUpdateAwsFirewallRuleInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 0,
+      ruleId: "sg-0123456789abcdef0",
+      rule: awsFirewallRule(),
+    })).toThrow(/Invalid/u);
+    expect(() => parseDeleteAwsFirewallRuleInput({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 0,
+      ruleId: FIREWALL_RULE_ID,
+      unexpected: true,
+    })).toThrow(/Invalid/u);
+  });
 });
 
 function awsCredentialInput() {
@@ -487,5 +598,17 @@ function awsDeploymentRecord() {
       availabilityZone: "us-west-2a",
       elasticIpAllocationId: "eipalloc-0123456789abcdef0",
     },
+  };
+}
+
+function awsFirewallRule() {
+  return {
+    direction: "ingress" as const,
+    protocol: "tcp",
+    fromPort: 8443,
+    toPort: 8443,
+    peerType: "ipv4" as const,
+    peer: "203.0.113.0/24",
+    description: "Operator API",
   };
 }

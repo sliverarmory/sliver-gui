@@ -34,6 +34,7 @@ describe("AWS EC2 permission checker", () => {
 
     for (const name of [
       "AllocateAddressCommand",
+      "AuthorizeSecurityGroupEgressCommand",
       "AuthorizeSecurityGroupIngressCommand",
       "CreateInternetGatewayCommand",
       "CreateRouteTableCommand",
@@ -47,6 +48,30 @@ describe("AWS EC2 permission checker", () => {
       expect(calls.some(({ input }) => input["TagSpecifications"] === undefined), name).toBe(true);
       expect(calls.some(({ input }) => Array.isArray(input["TagSpecifications"])), name).toBe(true);
     }
+    const ingressTagSets = client.calls
+      .filter(({ name, input }) => name === "AuthorizeSecurityGroupIngressCommand" && input["TagSpecifications"])
+      .map(({ input }) => tagKeySets(input)[0]);
+    expect(ingressTagSets).toEqual([
+      ["SliverGUIManaged", "SliverGUID", "Name"],
+      ["SliverGUIManaged", "SliverGUID", "Name", "SliverGUIRuleType"],
+    ]);
+    const egressTagged = client.calls.find(({ name, input }) => (
+      name === "AuthorizeSecurityGroupEgressCommand" && input["TagSpecifications"]
+    ));
+    expect(egressTagged && tagKeySets(egressTagged.input)[0]).toEqual([
+      "SliverGUIManaged",
+      "SliverGUID",
+      "Name",
+      "SliverGUIRuleType",
+    ]);
+    const nonRuleTagSets = client.calls
+      .filter(({ name, input }) => (
+        name !== "AuthorizeSecurityGroupIngressCommand" &&
+        name !== "AuthorizeSecurityGroupEgressCommand" &&
+        input["TagSpecifications"]
+      ))
+      .flatMap(({ input }) => tagKeySets(input));
+    expect(nonRuleTagSets.every((keys) => keys.join(",") === "SliverGUIManaged,SliverGUID,Name")).toBe(true);
   });
 
   it("distinguishes explicit authorization failures from inconclusive resource validation", async () => {
@@ -98,6 +123,24 @@ describe("AWS EC2 permission checker", () => {
     const result = await checker.check();
 
     expect(result.verified).toContain("ec2:CreateVpc");
+    expect(result.missing).toContain("ec2:CreateTags");
+    expect(result.unverifiable).not.toContain("ec2:CreateTags");
+  });
+
+  it("tests the custom firewall rule tag key before verifying CreateTags", async () => {
+    const client = new PermissionClient({}, (name, input) => (
+      name === "AuthorizeSecurityGroupIngressCommand" && tagKeys(input).includes("SliverGUIRuleType")
+    )
+      ? {
+          code: "UnauthorizedOperation",
+          message: "User is not authorized to perform: ec2:CreateTags on the requested resource.",
+        }
+      : undefined);
+    const checker = new AwsEc2PermissionChecker(connection, { clientFactory: () => client });
+
+    const result = await checker.check();
+
+    expect(result.verified).toContain("ec2:AuthorizeSecurityGroupIngress");
     expect(result.missing).toContain("ec2:CreateTags");
     expect(result.unverifiable).not.toContain("ec2:CreateTags");
   });
@@ -159,4 +202,19 @@ class PermissionClient implements AwsEc2ClientLike {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function tagKeys(input: Readonly<Record<string, unknown>>): string[] {
+  return tagKeySets(input).flat();
+}
+
+function tagKeySets(input: Readonly<Record<string, unknown>>): string[][] {
+  const specifications = input["TagSpecifications"];
+  if (!Array.isArray(specifications)) return [];
+  return specifications.flatMap((specification) => {
+    if (!isRecord(specification) || !Array.isArray(specification["Tags"])) return [];
+    return [specification["Tags"].flatMap((tag) => (
+      isRecord(tag) && typeof tag["Key"] === "string" ? [tag["Key"]] : []
+    ))];
+  });
 }

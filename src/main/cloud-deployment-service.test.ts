@@ -9,6 +9,9 @@ import ssh2 from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AwsFirewallRule,
+  AwsFirewallRuleSpec,
+  AwsFirewallSnapshot,
   CreateAwsCloudDeploymentInput,
   CreateProxmoxCloudDeploymentInput,
   ResolvedAwsCloudCredentialInput,
@@ -37,6 +40,7 @@ const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_DEPLOYMENT_ID = "55555555-5555-4555-8555-555555555555";
 const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const DESTROY_TOKEN = "33333333-3333-4333-8333-333333333333";
+const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
 const NOW = new Date("2026-09-06T18:00:00.000Z");
 
 let temporaryDirectory = "";
@@ -349,6 +353,227 @@ describe("CloudDeploymentService", () => {
     await expect(service.executeDestroyDeployment({ token: DESTROY_TOKEN })).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/invalid or expired/u),
+    });
+    service.dispose();
+  });
+
+  it("lists and mutates AWS firewall rules with revision bumps and fresh snapshots", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const rule = awsFirewallRuleSpec();
+
+    const revisionBeforeList = store.getState().revision;
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID })).resolves.toEqual({
+      ok: true,
+      value: awsFirewallSnapshot(),
+    });
+    expect(store.getState().revision).toBe(revisionBeforeList);
+
+    const created = await service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      rule,
+    });
+    expect(created).toEqual({ ok: true, value: awsFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeList + 1);
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID, securityGroupId: "sg-0123456789abcdef0" }),
+      rule,
+    );
+
+    const updatedRule = { ...rule, toPort: 8444, description: "Operator API range" };
+    const revisionBeforeUpdate = store.getState().revision;
+    await expect(service.updateFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeUpdate,
+      ruleId: FIREWALL_RULE_ID,
+      rule: updatedRule,
+    })).resolves.toEqual({ ok: true, value: awsFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeUpdate + 1);
+    expect(provider.updateFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      FIREWALL_RULE_ID,
+      updatedRule,
+    );
+
+    const revisionBeforeDelete = store.getState().revision;
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeDelete,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toEqual({ ok: true, value: awsFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeDelete + 1);
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      FIREWALL_RULE_ID,
+    );
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(7);
+
+    provider.createFirewallRule.mockRejectedValueOnce(
+      new Error("AWS rejected secret-cloud-value while creating a rule"),
+    );
+    const beforeFailure = store.getState();
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: beforeFailure.revision,
+      rule,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.not.stringContaining("secret-cloud-value"),
+    });
+    expect(store.getState()).toBe(beforeFailure);
+    expect(store.getState().deployments[0]).toMatchObject({ status: "running", phase: "ready" });
+
+    const createCalls = provider.createFirewallRule.mock.calls.length;
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: beforeFailure.revision - 1,
+      rule,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/changed in another window/u),
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledTimes(createCalls);
+
+    const busy = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...deployed.value, status: "provisioning", phase: "installing-sliver" },
+    });
+    if (!busy.ok) throw new Error(busy.error);
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID }))
+      .resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("returns a synthesized AWS firewall snapshot when the post-mutation refresh fails", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const newSpec = {
+      ...awsFirewallRuleSpec(),
+      description: "Additional operator API",
+    };
+    const newRule = awsFirewallRule(newSpec, "sgr-11111111111111111");
+    provider.listFirewallRules
+      .mockResolvedValueOnce(awsFirewallSnapshot())
+      .mockRejectedValueOnce(new Error("transient post-mutation inventory failure"));
+    provider.createFirewallRule.mockResolvedValueOnce(newRule);
+    const previousRevision = store.getState().revision;
+
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: previousRevision,
+      rule: newSpec,
+    })).resolves.toEqual({
+      ok: true,
+      value: {
+        ...awsFirewallSnapshot(),
+        rules: [awsFirewallRule(), newRule],
+      },
+    });
+    expect(store.getState().revision).toBe(previousRevision + 1);
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  it("does not report a completed AWS mutation as failed when the local revision journal fails", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    provider.listFirewallRules
+      .mockResolvedValueOnce(awsFirewallSnapshot())
+      .mockRejectedValueOnce(new Error("transient post-mutation inventory failure"));
+    vi.spyOn(store, "update").mockRejectedValueOnce(new Error("local journal unavailable"));
+    const previousRevision = store.getState().revision;
+
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: previousRevision,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toEqual({
+      ok: true,
+      value: { ...awsFirewallSnapshot(), rules: [] },
+    });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    expect(store.getState().revision).toBe(previousRevision);
+    service.dispose();
+  });
+
+  it("rejects AWS firewall rule management for Proxmox deployments", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const { store, vault } = await dependencies();
+    await vault.create(proxmoxCredential(privateKey));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      proxmoxProviderFactory: () => new FakeProxmoxProvider(),
+    });
+    const deployed = await service.createDeployment(proxmoxDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/only available for AWS/u),
+    });
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      rule: awsFirewallRuleSpec(),
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/only available for AWS/u),
     });
     service.dispose();
   });
@@ -1606,6 +1831,20 @@ class FakeAwsProvider implements CloudAwsProvider {
     state: "running" as const,
   }));
   readonly replaceFirewall = vi.fn(async (_resource: AwsEc2DeploymentResource) => awsResource());
+  readonly listFirewallRules = vi.fn(async (_resource: AwsEc2DeploymentResource) => awsFirewallSnapshot());
+  readonly createFirewallRule = vi.fn(async (
+    _resource: AwsEc2DeploymentResource,
+    rule: AwsFirewallRuleSpec,
+  ) => awsFirewallRule(rule));
+  readonly updateFirewallRule = vi.fn(async (
+    _resource: AwsEc2DeploymentResource,
+    _ruleId: string,
+    rule: AwsFirewallRuleSpec,
+  ) => awsFirewallRule(rule));
+  readonly deleteFirewallRule = vi.fn(async (
+    _resource: AwsEc2DeploymentResource,
+    _ruleId: string,
+  ) => undefined);
   readonly destroy = vi.fn(async (_resource?: unknown) => undefined);
 
   async preflight() {
@@ -1665,6 +1904,34 @@ function awsResource(): AwsEc2DeploymentResource {
       associationId: "eipassoc-0123456789abcdef0",
       publicIp: "203.0.113.20",
     },
+  };
+}
+
+function awsFirewallRule(
+  rule: AwsFirewallRuleSpec = awsFirewallRuleSpec(),
+  id = FIREWALL_RULE_ID,
+): AwsFirewallRule {
+  return { id, ...rule, managed: true };
+}
+
+function awsFirewallRuleSpec(): AwsFirewallRuleSpec {
+  return {
+    direction: "ingress",
+    protocol: "tcp",
+    fromPort: 8443,
+    toPort: 8443,
+    peerType: "ipv4",
+    peer: "203.0.113.0/24",
+    description: "Operator API",
+  };
+}
+
+function awsFirewallSnapshot(): AwsFirewallSnapshot {
+  return {
+    securityGroupId: "sg-0123456789abcdef0",
+    securityGroupName: "sliver-gui-managed",
+    vpcId: "vpc-0123456789abcdef0",
+    rules: [awsFirewallRule()],
   };
 }
 

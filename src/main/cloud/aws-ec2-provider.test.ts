@@ -11,6 +11,7 @@ import {
   type AwsEc2DeploymentResource,
   type AwsEc2Waiters,
 } from "./aws-ec2-provider.js";
+import type { AwsFirewallRuleSpec } from "../../shared/cloud-deployment-contracts.js";
 
 const guid = "8e577480-5dc2-4dde-aa58-23c8f1770627";
 const region = "us-west-2";
@@ -19,6 +20,8 @@ const subnetId = "subnet-0123456789abcdef0";
 const vpcId = "vpc-0123456789abcdef0";
 const instanceId = "i-0123456789abcdef0";
 const securityGroupId = "sg-0123456789abcdef0";
+const ingressRuleId = "sgr-11111111111111111";
+const egressRuleId = "sgr-22222222222222222";
 const volumeId = "vol-0123456789abcdef0";
 const networkInterfaceId = "eni-0123456789abcdef0";
 const allocationId = "eipalloc-0123456789abcdef0";
@@ -133,6 +136,26 @@ describe("AWS EC2 provider authentication and discovery", () => {
     expect(error).toBeInstanceOf(Error);
     expect(String(error)).toContain("UnauthorizedOperation");
     expect(String(error)).toContain("HTTP 403");
+    expect(String(error)).not.toContain(credentials.secretAccessKey);
+    expect(String(error)).not.toContain("do not expose");
+  });
+
+  it("turns an unavailable AWS CLI login profile into actionable safe guidance", async () => {
+    const client = new RecordingEc2Client({
+      DescribeAvailabilityZonesCommand: () => {
+        throw Object.assign(
+          new Error(`do not expose ${credentials.secretAccessKey}`),
+          { name: "AwsSharedProfileError" },
+        );
+      },
+    });
+    const provider = providerFor(client);
+
+    const error = await provider.preflight().catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("Refresh the selected AWS CLI profile with `aws login` and try again.");
+    expect(String(error)).not.toContain("AwsSharedProfileError");
     expect(String(error)).not.toContain(credentials.secretAccessKey);
     expect(String(error)).not.toContain("do not expose");
   });
@@ -966,10 +989,19 @@ describe("AWS EC2 owned lifecycle and firewall operations", () => {
     const client = managedResourceClient({
       DescribeSecurityGroupRulesCommand: {
         SecurityGroupRules: [
-          { SecurityGroupRuleId: "sgr-managed", Tags: managedTags() },
-          { SecurityGroupRuleId: "sgr-manual", Tags: [{ Key: "Owner", Value: "human" }] },
           {
-            SecurityGroupRuleId: "sgr-other-deployment",
+            SecurityGroupRuleId: ingressRuleId,
+            Description: `sliver-gui:${guid}:ssh`,
+            Tags: managedTags(),
+          },
+          {
+            SecurityGroupRuleId: "sgr-33333333333333333",
+            Description: `sliver-gui:${guid}:ssh`,
+            Tags: [{ Key: "Owner", Value: "human" }],
+          },
+          {
+            SecurityGroupRuleId: "sgr-44444444444444444",
+            Description: "sliver-gui:5f44a268-802f-47c0-a62e-89c1b3783ba2:ssh",
             Tags: [
               { Key: "SliverGUIManaged", Value: "true" },
               { Key: "SliverGUID", Value: "5f44a268-802f-47c0-a62e-89c1b3783ba2" },
@@ -989,9 +1021,427 @@ describe("AWS EC2 owned lifecycle and firewall operations", () => {
 
     expect(client.input("RevokeSecurityGroupIngressCommand")).toEqual({
       GroupId: securityGroupId,
-      SecurityGroupRuleIds: ["sgr-managed"],
+      SecurityGroupRuleIds: [ingressRuleId],
     });
     expect(client.inputs("AuthorizeSecurityGroupIngressCommand")).toHaveLength(1);
+  });
+
+  it("preserves custom managed rules when replacing the baseline firewall", async () => {
+    const customRuleId = "sgr-55555555555555555";
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [{
+          SecurityGroupRuleId: customRuleId,
+          Description: `sliver-gui:${guid}:ssh`,
+          Tags: [
+            ...managedTags(),
+            { Key: "SliverGUIRuleType", Value: "custom" },
+          ],
+        }],
+      },
+    });
+    const provider = providerFor(client);
+
+    await provider.replaceFirewall(resource(), {
+      sshPort: 22,
+      sshSourceCidrs: ["192.0.2.10/32"],
+      multiplayerPort: 31_337,
+      multiplayerSourceCidrs: ["198.51.100.10/32"],
+    });
+
+    expect(client.commandNames()).not.toContain("RevokeSecurityGroupIngressCommand");
+    expect(client.inputs("AuthorizeSecurityGroupIngressCommand")).toHaveLength(1);
+  });
+
+  it("lists and normalizes every paginated ingress and egress peer type", async () => {
+    const ipv4 = firewallRuleSpec({
+      peer: "0.0.0.0/0",
+      description: "Public HTTPS",
+      fromPort: 443,
+      toPort: 443,
+    });
+    const ipv6 = firewallRuleSpec({
+      direction: "egress",
+      protocol: "-1",
+      fromPort: null,
+      toPort: null,
+      peerType: "ipv6",
+      peer: "::/0",
+      description: null,
+    });
+    const prefixList = firewallRuleSpec({
+      direction: "egress",
+      protocol: "udp",
+      fromPort: 53,
+      toPort: 53,
+      peerType: "prefix-list",
+      peer: "pl-0123456789abcdef0",
+      description: "DNS prefix",
+    });
+    const referencedGroup = firewallRuleSpec({
+      protocol: "icmp",
+      fromPort: 8,
+      toPort: -1,
+      peerType: "security-group",
+      peer: "sg-11111111111111111",
+      description: "Peer health",
+    });
+    const client = managedResourceClient({
+      DescribeSecurityGroupsCommand: {
+        SecurityGroups: [{
+          GroupId: securityGroupId,
+          GroupName: "sliver-gui-managed",
+          VpcId: vpcId,
+          Tags: managedTags(),
+        }],
+      },
+      DescribeSecurityGroupRulesCommand: (command: unknown) => {
+        const input = commandInput(command);
+        return input["NextToken"] === undefined
+          ? {
+            SecurityGroupRules: [
+              describedFirewallRule("sgr-40000000000000000", ipv4, managedTags()),
+              // EC2 reports -1/-1 for the default allow-all egress rule.
+              describedFirewallRule("sgr-30000000000000000", ipv6, [], { FromPort: -1, ToPort: -1 }),
+            ],
+            NextToken: "firewall-page-2",
+          }
+          : {
+            SecurityGroupRules: [
+              describedFirewallRule("sgr-20000000000000000", prefixList),
+              describedFirewallRule("sgr-10000000000000000", referencedGroup),
+            ],
+          };
+      },
+    });
+    const provider = providerFor(client);
+
+    await expect(provider.listFirewallRules(resource())).resolves.toEqual({
+      securityGroupId,
+      securityGroupName: "sliver-gui-managed",
+      vpcId,
+      rules: [
+        { id: "sgr-10000000000000000", ...referencedGroup, managed: false },
+        { id: "sgr-20000000000000000", ...prefixList, managed: false },
+        { id: "sgr-30000000000000000", ...ipv6, managed: false },
+        { id: "sgr-40000000000000000", ...ipv4, managed: true },
+      ],
+    });
+    expect(client.inputs("DescribeSecurityGroupRulesCommand")).toEqual([
+      { Filters: [{ Name: "group-id", Values: [securityGroupId] }] },
+      { Filters: [{ Name: "group-id", Values: [securityGroupId] }], NextToken: "firewall-page-2" },
+    ]);
+  });
+
+  it("normalizes omitted ICMPv6 ports as all types and codes", async () => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [{
+          SecurityGroupRuleId: ingressRuleId,
+          GroupId: securityGroupId,
+          IsEgress: false,
+          IpProtocol: "icmpv6",
+          CidrIpv6: "2001:db8::/64",
+          Description: "IPv6 diagnostics",
+          Tags: managedTags(),
+        }],
+      },
+    });
+
+    await expect(providerFor(client).listFirewallRules(resource())).resolves.toMatchObject({
+      rules: [{
+        id: ingressRuleId,
+        direction: "ingress",
+        protocol: "icmpv6",
+        fromPort: -1,
+        toPort: -1,
+        peerType: "ipv6",
+        peer: "2001:db8::/64",
+        description: "IPv6 diagnostics",
+        managed: true,
+      }],
+    });
+  });
+
+  it.each([
+    ["all-protocol", "-1", -1, -1],
+    ["numeric-protocol", "6", 22, 443],
+  ])("ignores AWS-reported port fields for an %s rule", async (_case, protocol, fromPort, toPort) => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [{
+          SecurityGroupRuleId: ingressRuleId,
+          GroupId: securityGroupId,
+          IsEgress: false,
+          IpProtocol: protocol,
+          FromPort: fromPort,
+          ToPort: toPort,
+          CidrIpv4: "192.0.2.0/24",
+        }],
+      },
+    });
+
+    await expect(providerFor(client).listFirewallRules(resource())).resolves.toMatchObject({
+      rules: [{ protocol, fromPort: null, toPort: null }],
+    });
+  });
+
+  it.each([
+    ["another group", {
+      ...describedFirewallRule(ingressRuleId, firewallRuleSpec()),
+      GroupId: "sg-11111111111111111",
+    }],
+    ["multiple peers", {
+      ...describedFirewallRule(ingressRuleId, firewallRuleSpec()),
+      CidrIpv6: "2001:db8::/64",
+    }],
+  ])("rejects a listed firewall rule from %s", async (_case, rule) => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: { SecurityGroupRules: [rule] },
+    });
+
+    await expect(providerFor(client).listFirewallRules(resource())).rejects.toThrow(/security group rule/u);
+  });
+
+  it("creates and tags one managed ingress IPv4 rule", async () => {
+    const spec = firewallRuleSpec({
+      fromPort: 443,
+      toPort: 8443,
+      peer: "0.0.0.0/0",
+      description: "Public TLS",
+    });
+    const client = managedResourceClient({
+      AuthorizeSecurityGroupIngressCommand: {
+        Return: true,
+        SecurityGroupRules: [describedFirewallRule(ingressRuleId, spec, [
+          ...managedTags(),
+          { Key: "SliverGUIRuleType", Value: "custom" },
+        ])],
+      },
+    });
+    const provider = providerFor(client);
+
+    await expect(provider.createFirewallRule(resource(), spec)).resolves.toEqual({
+      id: ingressRuleId,
+      ...spec,
+      managed: true,
+    });
+    expect(client.input("AuthorizeSecurityGroupIngressCommand")).toEqual({
+      GroupId: securityGroupId,
+      IpPermissions: [{
+        IpProtocol: "tcp",
+        FromPort: 443,
+        ToPort: 8443,
+        IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "Public TLS" }],
+      }],
+      TagSpecifications: [{
+        ResourceType: "security-group-rule",
+        Tags: [
+          ...managedTags(),
+          { Key: "SliverGUIRuleType", Value: "custom" },
+        ],
+      }],
+    });
+  });
+
+  it("accepts the canonical CIDR returned by AWS after creating a rule", async () => {
+    const requested = firewallRuleSpec({ peer: "100.68.0.18/18" });
+    const canonical = firewallRuleSpec({ peer: "100.68.0.0/18" });
+    const client = managedResourceClient({
+      AuthorizeSecurityGroupIngressCommand: {
+        SecurityGroupRules: [describedFirewallRule(ingressRuleId, canonical, managedTags())],
+      },
+    });
+
+    await expect(providerFor(client).createFirewallRule(resource(), requested)).resolves.toMatchObject({
+      id: ingressRuleId,
+      peer: "100.68.0.0/18",
+    });
+    expect(client.input("AuthorizeSecurityGroupIngressCommand")).toMatchObject({
+      IpPermissions: [{ IpRanges: [{ CidrIp: "100.68.0.18/18" }] }],
+    });
+  });
+
+  it("creates a managed allow-all IPv6 egress rule with the egress API", async () => {
+    const spec = firewallRuleSpec({
+      direction: "egress",
+      protocol: "-1",
+      fromPort: null,
+      toPort: null,
+      peerType: "ipv6",
+      peer: "::/0",
+      description: null,
+    });
+    const client = managedResourceClient({
+      AuthorizeSecurityGroupEgressCommand: {
+        Return: true,
+        SecurityGroupRules: [describedFirewallRule(egressRuleId, spec, managedTags(), {
+          FromPort: -1,
+          ToPort: -1,
+        })],
+      },
+    });
+
+    await expect(providerFor(client).createFirewallRule(resource(), spec)).resolves.toMatchObject({
+      id: egressRuleId,
+      ...spec,
+      managed: true,
+    });
+    expect(client.input("AuthorizeSecurityGroupEgressCommand")).toMatchObject({
+      GroupId: securityGroupId,
+      IpPermissions: [{ IpProtocol: "-1", Ipv6Ranges: [{ CidrIpv6: "::/0" }] }],
+    });
+    expect(client.commandNames()).not.toContain("AuthorizeSecurityGroupIngressCommand");
+  });
+
+  it("updates an exact unmanaged rule without changing its direction or peer type", async () => {
+    const original = firewallRuleSpec({
+      direction: "egress",
+      protocol: "udp",
+      fromPort: 53,
+      toPort: 53,
+      peerType: "prefix-list",
+      peer: "pl-0123456789abcdef0",
+      description: "Original DNS",
+    });
+    const updated = { ...original, toPort: 5353, description: "DNS services" } satisfies AwsFirewallRuleSpec;
+    let reads = 0;
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: () => ({
+        SecurityGroupRules: [describedFirewallRule(
+          egressRuleId,
+          reads++ === 0 ? original : updated,
+          [{ Key: "Owner", Value: "human" }],
+        )],
+      }),
+      ModifySecurityGroupRulesCommand: { Return: true },
+    });
+    const provider = providerFor(client);
+
+    await expect(provider.updateFirewallRule(resource(), egressRuleId, updated)).resolves.toEqual({
+      id: egressRuleId,
+      ...updated,
+      managed: false,
+    });
+    expect(client.input("ModifySecurityGroupRulesCommand")).toEqual({
+      GroupId: securityGroupId,
+      SecurityGroupRules: [{
+        SecurityGroupRuleId: egressRuleId,
+        SecurityGroupRule: {
+          IpProtocol: "udp",
+          FromPort: 53,
+          ToPort: 5353,
+          PrefixListId: "pl-0123456789abcdef0",
+          Description: "DNS services",
+        },
+      }],
+    });
+    expect(client.commandNames().slice(0, 4)).toEqual([
+      "DescribeSecurityGroupsCommand",
+      "DescribeSecurityGroupRulesCommand",
+      "ModifySecurityGroupRulesCommand",
+      "DescribeSecurityGroupRulesCommand",
+    ]);
+  });
+
+  it.each([
+    ["direction", firewallRuleSpec({ direction: "egress" })],
+    ["peer type", firewallRuleSpec({ peerType: "ipv6", peer: "2001:db8::/64" })],
+  ])("refuses to update a firewall rule's %s", async (_case, updated) => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [describedFirewallRule(ingressRuleId, firewallRuleSpec())],
+      },
+    });
+    const provider = providerFor(client);
+
+    await expect(provider.updateFirewallRule(resource(), ingressRuleId, updated)).rejects.toThrow(/cannot change/u);
+    expect(client.commandNames()).not.toContain("ModifySecurityGroupRulesCommand");
+  });
+
+  it.each([
+    ["ingress", ingressRuleId, "RevokeSecurityGroupIngressCommand"],
+    ["egress", egressRuleId, "RevokeSecurityGroupEgressCommand"],
+  ] as const)("deletes an exact unmanaged %s rule with the direction-specific API", async (
+    direction,
+    ruleId,
+    expectedCommand,
+  ) => {
+    const spec = firewallRuleSpec({ direction });
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [describedFirewallRule(ruleId, spec, [{ Key: "Owner", Value: "human" }])],
+      },
+    });
+
+    await providerFor(client).deleteFirewallRule(resource(), ruleId);
+
+    expect(client.input(expectedCommand)).toEqual({
+      GroupId: securityGroupId,
+      SecurityGroupRuleIds: [ruleId],
+    });
+  });
+
+  it("refuses a rule mutation when the security group ownership does not match", async () => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupsCommand: securityGroupResponse("5f44a268-802f-47c0-a62e-89c1b3783ba2"),
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [describedFirewallRule(ingressRuleId, firewallRuleSpec())],
+      },
+    });
+
+    await expect(providerFor(client).deleteFirewallRule(resource(), ingressRuleId)).rejects.toThrow(
+      /ownership tags do not match/u,
+    );
+    expect(client.commandNames()).not.toContain("DescribeSecurityGroupRulesCommand");
+    expect(client.commandNames()).not.toContain("RevokeSecurityGroupIngressCommand");
+  });
+
+  it("refuses a rule returned for a different security group before mutating it", async () => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [{
+          ...describedFirewallRule(ingressRuleId, firewallRuleSpec()),
+          GroupId: "sg-11111111111111111",
+        }],
+      },
+    });
+
+    await expect(providerFor(client).deleteFirewallRule(resource(), ingressRuleId)).rejects.toThrow(
+      /unexpected group/u,
+    );
+    expect(client.commandNames()).not.toContain("RevokeSecurityGroupIngressCommand");
+  });
+
+  it.each([
+    ["unsupported protocol", { protocol: "all" }],
+    ["out-of-range numeric protocol", { protocol: "256" }],
+    ["noncanonical numeric protocol", { protocol: "01" }],
+    ["missing TCP ports", { fromPort: null, toPort: null }],
+    ["reversed TCP ports", { fromPort: 443, toPort: 22 }],
+    ["out-of-range TCP port", { fromPort: 0, toPort: 65_536 }],
+    ["invalid ICMP wildcard", { protocol: "icmp", fromPort: -1, toPort: 0 }],
+    ["numeric protocol ports", { protocol: "6", fromPort: 22, toPort: 22 }],
+    ["wrong-family CIDR", { peerType: "ipv4", peer: "2001:db8::/64" }],
+    ["out-of-range CIDR", { peer: "192.0.2.0/33" }],
+    ["invalid prefix list", { peerType: "prefix-list", peer: "pl-not-hex" }],
+    ["invalid security group", { peerType: "security-group", peer: "sg-not-hex" }],
+    ["invalid description", { description: "not ☃ allowed" }],
+  ])("rejects a firewall rule with %s before any AWS call", async (_case, overrides) => {
+    const client = managedResourceClient();
+    const invalid = { ...firewallRuleSpec(), ...overrides } as AwsFirewallRuleSpec;
+
+    await expect(providerFor(client).createFirewallRule(resource(), invalid)).rejects.toThrow(/firewall rule/u);
+    expect(client.commands).toHaveLength(0);
+  });
+
+  it("rejects an invalid security group rule ID before any AWS call", async () => {
+    const client = managedResourceClient();
+
+    await expect(providerFor(client).deleteFirewallRule(resource(), "sgr-not-hex")).rejects.toThrow(
+      /security group rule ID is invalid/u,
+    );
+    expect(client.commands).toHaveLength(0);
   });
 
   it("refuses destructive operations when either resource has mismatched GUID tags", async () => {
@@ -1566,6 +2016,41 @@ function amazonLinuxImage(id: string, architecture: "x86_64" | "arm64", creation
     Architecture: architecture,
     RootDeviceName: "/dev/xvda",
     CreationDate: creationDate,
+  };
+}
+
+function firewallRuleSpec(overrides: Partial<AwsFirewallRuleSpec> = {}): AwsFirewallRuleSpec {
+  return {
+    direction: "ingress",
+    protocol: "tcp",
+    fromPort: 22,
+    toPort: 22,
+    peerType: "ipv4",
+    peer: "192.0.2.10/32",
+    description: "Operator access",
+    ...overrides,
+  };
+}
+
+function describedFirewallRule(
+  id: string,
+  spec: AwsFirewallRuleSpec,
+  tags: readonly Record<string, string>[] = [],
+  overrides: Readonly<Record<string, unknown>> = {},
+) {
+  return {
+    SecurityGroupRuleId: id,
+    GroupId: securityGroupId,
+    IsEgress: spec.direction === "egress",
+    IpProtocol: spec.protocol,
+    ...(spec.fromPort === null ? {} : { FromPort: spec.fromPort, ToPort: spec.toPort }),
+    ...(spec.peerType === "ipv4" ? { CidrIpv4: spec.peer } : {}),
+    ...(spec.peerType === "ipv6" ? { CidrIpv6: spec.peer } : {}),
+    ...(spec.peerType === "prefix-list" ? { PrefixListId: spec.peer } : {}),
+    ...(spec.peerType === "security-group" ? { ReferencedGroupInfo: { GroupId: spec.peer } } : {}),
+    ...(spec.description === null ? {} : { Description: spec.description }),
+    Tags: tags,
+    ...overrides,
   };
 }
 

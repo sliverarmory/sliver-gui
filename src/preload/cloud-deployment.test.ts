@@ -42,6 +42,10 @@ describe("Cloud Deployment preload bridge", () => {
       "createDeployment",
       "runLifecycleAction",
       "updateFirewall",
+      "listFirewallRules",
+      "createFirewallRule",
+      "updateFirewallRule",
+      "deleteFirewallRule",
       "prepareDestroyDeployment",
       "executeDestroyDeployment",
       "onChanged",
@@ -58,7 +62,30 @@ describe("Cloud Deployment preload bridge", () => {
       credentialId: "11111111-1111-4111-8111-111111111111",
       region: "us-west-2",
     });
-    expect(electronMocks.invoke.mock.calls.slice(0, 6)).toEqual([
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const rule = {
+      direction: "ingress" as const,
+      protocol: "tcp",
+      fromPort: 443,
+      toPort: 443,
+      peerType: "ipv4" as const,
+      peer: "203.0.113.0/24",
+      description: "HTTPS",
+    };
+    await api.listFirewallRules({ deploymentId });
+    await api.createFirewallRule({ deploymentId, expectedRevision: 4, rule });
+    await api.updateFirewallRule({
+      deploymentId,
+      expectedRevision: 5,
+      ruleId: "sgr-0123456789abcdef0",
+      rule,
+    });
+    await api.deleteFirewallRule({
+      deploymentId,
+      expectedRevision: 6,
+      ruleId: "sgr-0123456789abcdef0",
+    });
+    expect(electronMocks.invoke.mock.calls.slice(0, 10)).toEqual([
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime],
@@ -67,6 +94,23 @@ describe("Cloud Deployment preload bridge", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAwsOptions, {
         credentialId: "11111111-1111-4111-8111-111111111111",
         region: "us-west-2",
+      }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.listFirewallRules, { deploymentId }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createFirewallRule, {
+        deploymentId,
+        expectedRevision: 4,
+        rule,
+      }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.updateFirewallRule, {
+        deploymentId,
+        expectedRevision: 5,
+        ruleId: "sgr-0123456789abcdef0",
+        rule,
+      }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteFirewallRule, {
+        deploymentId,
+        expectedRevision: 6,
+        ruleId: "sgr-0123456789abcdef0",
       }],
     ]);
   });
