@@ -133,6 +133,32 @@ describe("ConsolePortSession", () => {
     await session.close("operator-close");
   });
 
+  it("releases runtime backpressure when a detachable SSH attachment closes", async () => {
+    const runtime = new FakeRuntime();
+    const port = new FakePort();
+    const session = new ConsolePortSession(runtime.asRuntime(), owner, {
+      closeRuntimeOnSessionClose: false,
+    });
+    session.attach(owner, session.attachmentToken, port);
+    const ready = port.last("ready")!;
+    port.send({
+      v: CONSOLE_PROTOCOL_VERSION,
+      type: "start",
+      streamId: ready.streamId,
+      receiveCreditBytes: CONSOLE_INITIAL_CREDIT_BYTES,
+    });
+
+    runtime.outputBurst(512 * 1_024, 64 * 1_024);
+    expect(runtime.pauseOutput).toHaveBeenCalledOnce();
+    expect(runtime.pendingOutputBytes).toBeGreaterThan(0);
+
+    await session.close("window-closed");
+
+    expect(runtime.resumeOutput).toHaveBeenCalledOnce();
+    expect(runtime.pendingOutputBytes).toBe(0);
+    expect(runtime.close).not.toHaveBeenCalled();
+  });
+
   it("rejects another renderer without consuming the valid owner capability", async () => {
     const runtime = new FakeRuntime();
     const session = new ConsolePortSession(runtime.asRuntime(), owner);

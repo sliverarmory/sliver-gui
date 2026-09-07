@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -52,6 +52,7 @@ import {
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
+import type { ManagedSshTarget, SshHostKeyReview } from "../shared/ssh-contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import type { CloudPermissionEvaluation } from "../shared/cloud-provider-permissions.js";
 import {
@@ -94,6 +95,13 @@ import {
 } from "./cloud/sliver-provisioner.js";
 import { loadTerminalRuntime } from "./terminal-runtime.js";
 import { readBoundedRegularFile, writePrivateFileExclusiveAtomic } from "./secure-file.js";
+import { SshHostKeyStore } from "./ssh-host-key-store.js";
+import type { StartedManagedSshSession } from "./ssh-session-registry.js";
+import {
+  SshTerminalRuntime,
+  SshTerminalStartError,
+  type StartSshTerminalRuntimeOptions,
+} from "./ssh-terminal-runtime.js";
 
 const { utils: sshUtils } = ssh2;
 
@@ -105,6 +113,10 @@ const MAX_PROVISIONING_TRANSCRIPT_CHUNK_BYTES = 16 * 1024;
 const MAX_PROVISIONING_TRANSCRIPT_CHUNKS = 512;
 const MAX_PROVISIONING_TRANSCRIPTS = 8;
 const PROVISIONING_TRANSCRIPT_EMIT_DELAY_MS = 100;
+const SSH_HOST_KEY_REVIEW_TTL_MS = 5 * 60 * 1000;
+const SSH_HOST_KEY_STORE_FILE_NAME = "ssh-host-keys.json";
+const OPAQUE_SSH_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+const SSH_HOST_KEY_PATTERN = /^SHA256:[A-Za-z0-9+/]{43}$/u;
 
 export type CloudDeploymentChangedListener = (scope: CloudDeploymentChangeScope) => void;
 
@@ -116,6 +128,9 @@ export interface CloudPrivateKeyCapabilities {
 
 export type CloudSshKeyGenerator = () => Promise<ResolvedPrivateKey>;
 export type CloudEgressIpv4Detector = () => Promise<CurrentEgressIpv4>;
+export type CloudSshTerminalStarter = (
+  options: StartSshTerminalRuntimeOptions,
+) => Promise<StartedManagedSshSession["runtime"]>;
 
 export interface CloudSliverProvisioner {
   provision(input: ProvisionSliverServerInput): Promise<SliverProvisionResult>;
@@ -202,6 +217,10 @@ export interface CloudDeploymentServiceOptions {
   readonly awsPermissionCheckerFactory?: CloudAwsPermissionCheckerFactory;
   readonly awsProfileSource?: CloudAwsProfileSource;
   readonly proxmoxProviderFactory?: CloudProxmoxProviderFactory;
+  readonly sshHostKeyStore?: SshHostKeyStore;
+  readonly startSshTerminalRuntime?: CloudSshTerminalStarter;
+  /** Generates 32-byte base64url capabilities for explicit host-key reviews. */
+  readonly opaqueIdFactory?: () => string;
   readonly now?: () => number;
   readonly idFactory?: () => string;
 }
@@ -210,6 +229,16 @@ interface DestroyPlanEntry {
   readonly token: string;
   readonly deploymentId: string;
   readonly expectedRevision: number;
+  readonly expiresAt: number;
+  readonly timer: NodeJS.Timeout;
+}
+
+interface SshHostKeyReviewEntry {
+  readonly token: string;
+  readonly deploymentId: string;
+  readonly credentialId: string;
+  readonly target: ManagedSshTarget;
+  readonly fingerprint: string;
   readonly expiresAt: number;
   readonly timer: NodeJS.Timeout;
 }
@@ -240,16 +269,25 @@ export class CloudDeploymentService {
   readonly #awsPermissionCheckerFactory: CloudAwsPermissionCheckerFactory;
   readonly #awsProfiles: CloudAwsProfileSource;
   readonly #proxmoxProviderFactory: CloudProxmoxProviderFactory;
+  readonly #sshHostKeys: SshHostKeyStore;
+  readonly #startSshTerminalRuntime: CloudSshTerminalStarter;
+  readonly #opaqueIdFactory: () => string;
   readonly #now: () => number;
   readonly #idFactory: () => string;
   readonly #listeners = new Set<CloudDeploymentChangedListener>();
   readonly #destroyPlans = new Map<string, DestroyPlanEntry>();
+  readonly #sshHostKeyReviews = new Map<string, SshHostKeyReviewEntry>();
+  readonly #issuedSshHostKeyReviewTokens = new Set<string>();
   readonly #provisioningTranscripts = new Map<string, MutableProvisioningTranscript>();
   #transitionChain: Promise<void> = Promise.resolve();
   #transcriptEmitTimer: NodeJS.Timeout | undefined;
   #disposed = false;
 
-  private constructor(options: CloudDeploymentServiceOptions, store: CloudDeploymentStore) {
+  private constructor(
+    options: CloudDeploymentServiceOptions,
+    store: CloudDeploymentStore,
+    sshHostKeys: SshHostKeyStore,
+  ) {
     assertBoundedAbsoluteDirectory(options.rootDirectory, "cloud deployment root");
     assertBoundedAbsoluteDirectory(options.operatorConfigDirectory, "operator configuration directory");
     this.#operatorConfigDirectory = options.operatorConfigDirectory;
@@ -264,6 +302,11 @@ export class CloudDeploymentService {
     );
     this.#awsProfiles = options.awsProfileSource ?? new AwsSharedProfileSource();
     this.#proxmoxProviderFactory = options.proxmoxProviderFactory ?? ((credentials) => new ProxmoxProvider(credentials));
+    this.#sshHostKeys = sshHostKeys;
+    this.#startSshTerminalRuntime = options.startSshTerminalRuntime ?? (
+      (runtimeOptions) => SshTerminalRuntime.start(runtimeOptions)
+    );
+    this.#opaqueIdFactory = options.opaqueIdFactory ?? (() => randomBytes(32).toString("base64url"));
     this.#now = options.now ?? Date.now;
     this.#idFactory = options.idFactory ?? randomUUID;
     if (options.provisioner) {
@@ -275,8 +318,11 @@ export class CloudDeploymentService {
 
   static async create(options: CloudDeploymentServiceOptions): Promise<CloudDeploymentService> {
     const store = options.store ?? await CloudDeploymentStore.load(options.rootDirectory);
+    const sshHostKeys = options.sshHostKeyStore ?? await SshHostKeyStore.load(
+      join(options.rootDirectory, SSH_HOST_KEY_STORE_FILE_NAME),
+    );
     await recoverInterruptedTransitions(store);
-    return new CloudDeploymentService(options, store);
+    return new CloudDeploymentService(options, store, sshHostKeys);
   }
 
   subscribe(listener: CloudDeploymentChangedListener): () => void {
@@ -337,6 +383,108 @@ export class CloudDeploymentService {
       return { ok: true, value: await loadTerminalRuntime() };
     } catch (error) {
       return failure(error, "The terminal runtime is unavailable");
+    }
+  }
+
+  async listSshTargets(): Promise<OperationResult<readonly ManagedSshTarget[]>> {
+    try {
+      this.#assertActive();
+      const credentials = await this.#vault.list();
+      this.#assertActive();
+      const summaries = new Map(credentials.map((summary) => [summary.id, summary]));
+      const targets = this.#store.getState().deployments.flatMap((deployment) => {
+        const summary = summaries.get(deployment.credentialId);
+        if (!summary || summary.provider !== deployment.provider) return [];
+        return [managedSshTarget(deployment, summary)];
+      });
+      return { ok: true, value: Object.freeze(targets) };
+    } catch (error) {
+      return failure(error, "Managed SSH servers are unavailable");
+    }
+  }
+
+  async startSshSession(
+    deploymentId: string,
+  ): Promise<OperationResult<StartedManagedSshSession | SshHostKeyReview>> {
+    try {
+      this.#assertActive();
+      if (!isUuidV4(deploymentId)) throw new TypeError("Invalid SSH deployment identity");
+      const state = this.#store.getState();
+      const deployment = state.deployments.find(({ id }) => id === deploymentId);
+      if (!deployment) throw new Error("The managed SSH server no longer exists");
+      const credentialId = deployment.credentialId;
+      const value = deployment.provider === "aws"
+        ? await this.#vault.withCredential(credentialId, "aws", async (secret, summary) => {
+            const expectedTarget = managedSshTarget(deployment, summary);
+            const target = this.#requireCurrentSshTarget(
+              deploymentId,
+              credentialId,
+              summary,
+              expectedTarget,
+            );
+            return await this.#startManagedSshSession(target, credentialId, secret);
+          })
+        : await this.#vault.withCredential(credentialId, "proxmox", async (secret, summary) => {
+            const expectedTarget = managedSshTarget(deployment, summary);
+            const target = this.#requireCurrentSshTarget(
+              deploymentId,
+              credentialId,
+              summary,
+              expectedTarget,
+            );
+            return await this.#startManagedSshSession(target, credentialId, secret);
+          });
+      return { ok: true, value };
+    } catch (error) {
+      return failure(error, "The SSH session could not be started");
+    }
+  }
+
+  async approveSshHostKey(
+    token: string,
+  ): Promise<OperationResult<StartedManagedSshSession>> {
+    try {
+      this.#assertActive();
+      if (!OPAQUE_SSH_ID_PATTERN.test(token)) {
+        return { ok: false, error: "The SSH host-key review is invalid or expired" };
+      }
+      const review = this.#sshHostKeyReviews.get(token);
+      if (!review) return { ok: false, error: "The SSH host-key review is invalid or expired" };
+      this.#discardSshHostKeyReview(token);
+      if (review.expiresAt <= this.#now()) {
+        return { ok: false, error: "The SSH host-key review is invalid or expired" };
+      }
+
+      const deployment = this.#store.getState().deployments.find(({ id }) => id === review.deploymentId);
+      if (
+        !deployment ||
+        deployment.provider !== review.target.provider ||
+        deployment.credentialId !== review.credentialId
+      ) throw sshReviewStateChanged();
+      const value = deployment.provider === "aws"
+        ? await this.#vault.withCredential(review.credentialId, "aws", async (secret, summary) => {
+            const target = this.#requireCurrentSshTarget(
+              review.deploymentId,
+              review.credentialId,
+              summary,
+              review.target,
+            );
+            await this.#sshHostKeys.remember(review.deploymentId, review.fingerprint);
+            return await this.#startPinnedSshSession(target, review.credentialId, secret, review.fingerprint);
+          })
+        : await this.#vault.withCredential(review.credentialId, "proxmox", async (secret, summary) => {
+            const target = this.#requireCurrentSshTarget(
+              review.deploymentId,
+              review.credentialId,
+              summary,
+              review.target,
+            );
+            await this.#sshHostKeys.remember(review.deploymentId, review.fingerprint);
+            return await this.#startPinnedSshSession(target, review.credentialId, secret, review.fingerprint);
+          });
+      return { ok: true, value };
+    } catch (error) {
+      return failure(error, "The SSH host key could not be approved");
     }
   }
 
@@ -788,12 +936,158 @@ export class CloudDeploymentService {
     if (this.#transcriptEmitTimer) clearTimeout(this.#transcriptEmitTimer);
     this.#transcriptEmitTimer = undefined;
     for (const token of [...this.#destroyPlans.keys()]) this.#discardDestroyPlan(token);
+    for (const token of [...this.#sshHostKeyReviews.keys()]) this.#discardSshHostKeyReview(token);
+    this.#issuedSshHostKeyReviewTokens.clear();
     this.#listeners.clear();
     for (const deploymentId of [...this.#provisioningTranscripts.keys()]) {
       this.#discardProvisioningTranscript(deploymentId);
     }
     this.#privateKeys.dispose();
     this.#vault.dispose();
+  }
+
+  async #startManagedSshSession(
+    target: ManagedSshTarget,
+    credentialId: string,
+    secret: AwsCredentialSecret | ProxmoxCredentialSecret,
+  ): Promise<StartedManagedSshSession | SshHostKeyReview> {
+    const pinnedFingerprint = this.#sshHostKeys.get(target.deploymentId);
+    if (pinnedFingerprint !== undefined) {
+      return await this.#startPinnedSshSession(target, credentialId, secret, pinnedFingerprint);
+    }
+
+    try {
+      const runtime = await this.#startSshTerminalRuntime({
+        ssh: sshTerminalTarget(target, secret),
+      });
+      // The production runtime cannot authenticate an unpinned target. Treat a
+      // contrary implementation as unsafe instead of silently bypassing TOFU.
+      await runtime.close().catch(() => undefined);
+      throw new Error("The SSH server host key could not be verified");
+    } catch (error) {
+      if (
+        error instanceof SshTerminalStartError &&
+        error.code === "host-key-approval-required" &&
+        error.hostKeySha256 !== undefined &&
+        SSH_HOST_KEY_PATTERN.test(error.hostKeySha256)
+      ) {
+        this.#requireCurrentSshTarget(target.deploymentId, credentialId, undefined, target);
+        return this.#issueSshHostKeyReview(target, credentialId, error.hostKeySha256);
+      }
+      throw new Error(cloudErrorMessage(
+        error,
+        "The SSH server could not be reached or authenticated",
+        credentialValues(secret),
+      ));
+    }
+  }
+
+  async #startPinnedSshSession(
+    target: ManagedSshTarget,
+    credentialId: string,
+    secret: AwsCredentialSecret | ProxmoxCredentialSecret,
+    fingerprint: string,
+  ): Promise<StartedManagedSshSession> {
+    let runtime: StartedManagedSshSession["runtime"] | undefined;
+    try {
+      runtime = await this.#startSshTerminalRuntime({
+        ssh: sshTerminalTarget(target, secret, fingerprint),
+      });
+      this.#assertActive();
+      this.#requireCurrentSshTarget(target.deploymentId, credentialId, undefined, target);
+      return Object.freeze({ target, runtime });
+    } catch (error) {
+      await runtime?.close().catch(() => undefined);
+      throw new Error(cloudErrorMessage(
+        error,
+        "The SSH server could not be reached or authenticated",
+        credentialValues(secret),
+      ));
+    }
+  }
+
+  #requireCurrentSshTarget(
+    deploymentId: string,
+    credentialId: string,
+    summary?: CloudCredentialSummary,
+    expectedTarget?: ManagedSshTarget,
+  ): ManagedSshTarget {
+    this.#assertActive();
+    const state = this.#store.getState();
+    const deployment = state.deployments.find(({ id }) => id === deploymentId);
+    if (!deployment || deployment.credentialId !== credentialId) throw sshReviewStateChanged();
+    let target: ManagedSshTarget;
+    if (summary !== undefined) {
+      if (summary.id !== credentialId || summary.provider !== deployment.provider) {
+        throw sshReviewStateChanged();
+      }
+      target = managedSshTarget(deployment, summary);
+    } else {
+      // The exact credential identity is bound separately from the target.
+      // Reconstructing with the already-resolved non-secret login avoids
+      // keeping a decrypted credential summary outside the vault callback.
+      if (expectedTarget === undefined || expectedTarget.provider !== deployment.provider) {
+        throw sshReviewStateChanged();
+      }
+      target = managedSshTargetWithUsername(deployment, expectedTarget.username);
+    }
+    if (!target.connectable) throw new Error(target.unavailableReason ?? "The managed SSH server is unavailable");
+    if (expectedTarget !== undefined && !sameManagedSshTarget(target, expectedTarget)) throw sshReviewStateChanged();
+    return target;
+  }
+
+  #issueSshHostKeyReview(
+    target: ManagedSshTarget,
+    credentialId: string,
+    fingerprint: string,
+  ): SshHostKeyReview {
+    for (const [token, review] of this.#sshHostKeyReviews) {
+      if (review.deploymentId === target.deploymentId) this.#discardSshHostKeyReview(token);
+    }
+    const token = this.#uniqueSshOpaqueId();
+    const expiresAt = this.#now() + SSH_HOST_KEY_REVIEW_TTL_MS;
+    if (!Number.isFinite(expiresAt)) throw new Error("The SSH host-key review could not be created");
+    const timer = setTimeout(
+      () => this.#discardSshHostKeyReview(token),
+      Math.max(0, expiresAt - this.#now()),
+    );
+    timer.unref?.();
+    this.#sshHostKeyReviews.set(token, {
+      token,
+      deploymentId: target.deploymentId,
+      credentialId,
+      target,
+      fingerprint,
+      expiresAt,
+      timer,
+    });
+    return Object.freeze({
+      token,
+      deploymentId: target.deploymentId,
+      name: target.name,
+      host: target.host,
+      port: target.port,
+      fingerprint,
+      expiresAt: new Date(expiresAt).toISOString(),
+    });
+  }
+
+  #uniqueSshOpaqueId(): string {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const token = this.#opaqueIdFactory();
+      if (OPAQUE_SSH_ID_PATTERN.test(token) && !this.#issuedSshHostKeyReviewTokens.has(token)) {
+        this.#issuedSshHostKeyReviewTokens.add(token);
+        return token;
+      }
+    }
+    throw new Error("SSH host-key review identity generation failed");
+  }
+
+  #discardSshHostKeyReview(token: string): void {
+    const review = this.#sshHostKeyReviews.get(token);
+    if (!review) return;
+    this.#sshHostKeyReviews.delete(token);
+    clearTimeout(review.timer);
   }
 
   async #provisionAws(deployment: AwsCloudDeploymentRecord): Promise<CloudDeploymentRecord> {
@@ -959,6 +1253,10 @@ export class CloudDeploymentService {
     let filePath: string | undefined;
     let createdConfigFile = false;
     try {
+      // Provisioning has already authenticated this exact host key. Persist it
+      // before exposing the deployment as ready so the first interactive shell
+      // never falls back to TOFU for a newly managed server.
+      await this.#sshHostKeys.remember(deploymentId, result.hostKeySha256);
       const parsed = parseConfig(result.operatorConfig);
       if (!Number.isSafeInteger(parsed.lport) || parsed.lport < 1 || parsed.lport > 65_535) {
         throw new Error("Sliver returned an invalid operator configuration");
@@ -1403,6 +1701,84 @@ export class CloudDeploymentService {
       },
     };
   }
+}
+
+function managedSshTarget(
+  deployment: CloudDeploymentRecord,
+  credential: CloudCredentialSummary,
+): ManagedSshTarget {
+  if (credential.id !== deployment.credentialId || credential.provider !== deployment.provider) {
+    throw new Error("The managed SSH credential no longer matches this server");
+  }
+  const username = deployment.provider === "aws"
+    ? deployment.spec.sshUsername ?? credential.sshUsername
+    : credential.sshUsername;
+  return managedSshTargetWithUsername(deployment, username);
+}
+
+function managedSshTargetWithUsername(
+  deployment: CloudDeploymentRecord,
+  username: string,
+): ManagedSshTarget {
+  const host = deployment.provider === "aws"
+    ? deployment.runtime.publicIpAddress ?? deployment.runtime.privateIpAddress ?? deployment.remoteHost ?? ""
+    : deployment.runtime.ipAddress ?? deployment.remoteHost ?? "";
+  const port = deployment.spec.sshPort;
+  const unavailableReason = sshUnavailableReason(deployment.status, host);
+  return Object.freeze({
+    deploymentId: deployment.id,
+    name: deployment.name,
+    provider: deployment.provider,
+    host,
+    port,
+    username,
+    status: deployment.status,
+    connectable: unavailableReason === undefined,
+    ...(unavailableReason === undefined ? {} : { unavailableReason }),
+  });
+}
+
+function sshUnavailableReason(
+  status: CloudDeploymentRecord["status"],
+  host: string,
+): string | undefined {
+  if (status === "running" && host !== "") return undefined;
+  if (status === "running") return "This server does not have an SSH address yet";
+  if (status === "stopped") return "Start this server before opening SSH";
+  if (status === "provisioning") return "This server is still being provisioned";
+  if (status === "deleting") return "This server is being terminated";
+  return "Resolve this server's deployment error before opening SSH";
+}
+
+function sshTerminalTarget(
+  target: ManagedSshTarget,
+  secret: AwsCredentialSecret | ProxmoxCredentialSecret,
+  fingerprint?: string,
+): StartSshTerminalRuntimeOptions["ssh"] {
+  return {
+    host: target.host,
+    port: target.port,
+    username: target.username,
+    privateKey: secret.sshPrivateKey,
+    ...(secret.sshPassphrase === null ? {} : { passphrase: secret.sshPassphrase }),
+    ...(fingerprint === undefined ? {} : { hostKeySha256: fingerprint }),
+  };
+}
+
+function sameManagedSshTarget(left: ManagedSshTarget, right: ManagedSshTarget): boolean {
+  return left.deploymentId === right.deploymentId &&
+    left.name === right.name &&
+    left.provider === right.provider &&
+    left.host === right.host &&
+    left.port === right.port &&
+    left.username === right.username &&
+    left.status === right.status &&
+    left.connectable === right.connectable &&
+    left.unavailableReason === right.unavailableReason;
+}
+
+function sshReviewStateChanged(): Error {
+  return new Error("The managed SSH server changed. Review the latest server details and try again.");
 }
 
 function snapshotTranscript(transcript: MutableProvisioningTranscript): CloudProvisioningTranscript {

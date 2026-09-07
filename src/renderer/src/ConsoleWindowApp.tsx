@@ -9,7 +9,6 @@ import {
 } from "react";
 import {
   Button,
-  Modal,
   Spinner,
   Tabs,
   Tooltip,
@@ -17,7 +16,6 @@ import {
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
-  faGear,
   faPlus,
   faTerminal,
   faTriangleExclamation,
@@ -38,17 +36,12 @@ import {
 } from "./components/GhosttyTerminal";
 import { applicationTerminalAppearance } from "./components/application-terminal-appearance";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
-import {
-  isValidTerminalSettings,
-  TerminalSettingsFields,
-} from "./components/TerminalSettingsFields";
 import { ConsoleTerminalTransport } from "./components/console-terminal-transport";
 import {
-  DEFAULT_CONSOLE_TERMINAL_SETTINGS,
   loadConsoleTerminalSettings,
   saveConsoleTerminalSettings,
-  type ConsoleTerminalSettings,
 } from "./components/console-terminal-settings";
+import { TerminalSettingsModal } from "./components/TerminalSettingsModal";
 
 const EMPTY_CONSOLE_TAB_KEY = "sliver-console-empty";
 
@@ -524,59 +517,6 @@ export function ConsoleWindowApp(): React.JSX.Element {
         }}
       />
     </main>
-  );
-}
-
-function TerminalSettingsModal({
-  draft,
-  isOpen,
-  onDraftChange,
-  onOpenChange,
-  onSave,
-}: {
-  readonly draft: ConsoleTerminalSettings;
-  readonly isOpen: boolean;
-  readonly onDraftChange: (settings: ConsoleTerminalSettings) => void;
-  readonly onOpenChange: (isOpen: boolean) => void;
-  readonly onSave: () => void;
-}): React.JSX.Element {
-  const validSettings = isValidTerminalSettings(draft);
-
-  return (
-    <Modal.Backdrop isOpen={isOpen} variant="blur" onOpenChange={onOpenChange}>
-      <Modal.Container placement="center" size="sm">
-        <Modal.Dialog className="sm:max-w-[460px]">
-          <Modal.CloseTrigger />
-          <Modal.Header className="flex-row items-start pr-10">
-            <Modal.Icon className="bg-accent-soft text-accent-soft-foreground">
-              <FontAwesomeIcon aria-hidden icon={faGear} />
-            </Modal.Icon>
-            <div className="min-w-0">
-              <Modal.Heading>Terminal Settings</Modal.Heading>
-              <p className="mt-1 text-sm leading-5 text-muted">
-                Applied to every console and managed shell window.
-              </p>
-            </div>
-          </Modal.Header>
-          <Modal.Body className="flex flex-col gap-5">
-            <TerminalSettingsFields settings={draft} onChange={onDraftChange} />
-          </Modal.Body>
-          <Modal.Footer className="items-center justify-between gap-3">
-            <Button
-              size="sm"
-              variant="tertiary"
-              onPress={() => onDraftChange(DEFAULT_CONSOLE_TERMINAL_SETTINGS)}
-            >
-              Reset defaults
-            </Button>
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="secondary" onPress={() => onOpenChange(false)}>Cancel</Button>
-              <Button isDisabled={!validSettings} size="sm" onPress={onSave}>Save</Button>
-            </div>
-          </Modal.Footer>
-        </Modal.Dialog>
-      </Modal.Container>
-    </Modal.Backdrop>
   );
 }
 

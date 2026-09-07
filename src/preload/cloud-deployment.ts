@@ -27,6 +27,8 @@ const CHANNELS = Object.freeze({
   deleteFirewallRule: "sliver:cloud-deployment:firewall-rule:delete",
   prepareDestroyDeployment: "sliver:cloud-deployment:destroy:prepare",
   executeDestroyDeployment: "sliver:cloud-deployment:destroy:execute",
+  openSshWindow: "sliver:cloud-deployment:ssh-window:open",
+  approveSshHostKey: "sliver:cloud-deployment:ssh-host-key:approve",
   changed: "sliver:cloud-deployment:changed",
   navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
@@ -73,6 +75,8 @@ const api: CloudDeploymentAPI = {
   deleteFirewallRule: (input) => ipcRenderer.invoke(CHANNELS.deleteFirewallRule, input),
   prepareDestroyDeployment: (input) => ipcRenderer.invoke(CHANNELS.prepareDestroyDeployment, input),
   executeDestroyDeployment: (input) => ipcRenderer.invoke(CHANNELS.executeDestroyDeployment, input),
+  openSshWindow: (input) => ipcRenderer.invoke(CHANNELS.openSshWindow, input),
+  approveSshHostKey: (input) => ipcRenderer.invoke(CHANNELS.approveSshHostKey, input),
   onChanged: (listener) => {
     if (typeof listener !== "function") throw new TypeError("change listener must be a function");
     const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {

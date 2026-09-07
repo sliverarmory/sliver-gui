@@ -9,6 +9,7 @@ import { InteractionWindowApp } from "./InteractionWindowApp";
 import { SessionShellWindowApp } from "./SessionShellWindowApp";
 import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
+import { SshWindowApp } from "./SshWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 import {
@@ -28,6 +29,7 @@ function RendererSurface(): React.JSX.Element {
   if (surface === "console") return <ConsoleWindowApp />;
   if (surface === "managed-shells") return <SessionShellWindowApp />;
   if (surface === "interaction") return <InteractionWindowApp />;
+  if (surface === "ssh") return <SshWindowApp />;
   return <App />;
 }
 
@@ -35,6 +37,12 @@ ReactDOM.createRoot(root).render(
   <React.StrictMode>
     {surface === "cloud-deployment" ? (
       <CloudDeploymentWindowApp />
+    ) : surface === "ssh" ? (
+      window.ssh ? (
+        <ApplicationSettingsProvider api={window.ssh}>
+          <RendererSurface />
+        </ApplicationSettingsProvider>
+      ) : <RendererSurface />
     ) : (
       <ApplicationSettingsProvider>
         <RendererSurface />

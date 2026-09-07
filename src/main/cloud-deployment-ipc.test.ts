@@ -279,6 +279,8 @@ describe("Cloud Deployment IPC boundary", () => {
         expectedRevision: -1,
       }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.executeDestroyDeployment, [{ token: "not-a-uuid" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.openSshWindow, [{ deploymentId: "not-a-uuid" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.approveSshHostKey, [{ token: "short" }]],
     ];
 
     for (const [channel, args] of malformedRequests) {
@@ -286,6 +288,31 @@ describe("Cloud Deployment IPC boundary", () => {
     }
 
     for (const method of Object.values(controller)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it("forwards only validated opaque SSH window capabilities", async () => {
+    const response = {
+      ok: true as const,
+      value: { status: "opened" as const, tabId: "t".repeat(43), created: true },
+    };
+    const open = vi.fn(async () => response);
+    const approveHostKey = vi.fn(async () => response);
+    registerCloudDeploymentIpcHandlers(
+      controllerMock(),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+      { open, approveHostKey },
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openSshWindow, event, {
+      deploymentId: CREDENTIAL_ID,
+    })).resolves.toBe(response);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.approveSshHostKey, event, {
+      token: "r".repeat(43),
+    })).resolves.toBe(response);
+    expect(open).toHaveBeenCalledExactlyOnceWith(CREDENTIAL_ID);
+    expect(approveHostKey).toHaveBeenCalledExactlyOnceWith("r".repeat(43));
   });
 
   it("validates and forwards AWS option discovery", async () => {

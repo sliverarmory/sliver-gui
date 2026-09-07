@@ -40,6 +40,7 @@ export default defineConfig({
         input: {
           index: resolve("src/preload/index.ts"),
           "cloud-deployment": resolve("src/preload/cloud-deployment.ts"),
+          ssh: resolve("src/preload/ssh.ts"),
         },
         output: {
           format: "cjs",

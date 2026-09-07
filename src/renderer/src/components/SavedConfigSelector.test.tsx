@@ -122,7 +122,7 @@ describe("SavedConfigSelector", () => {
     renderSelector({ onChooseFile, onImport, onRefresh });
 
     await user.click(screen.getByRole("button", { name: "Refresh saved configurations" }));
-    await user.click(screen.getByRole("button", { name: "Connect external file" }));
+    await user.click(screen.getByRole("button", { name: "Open file" }));
     await user.click(screen.getByRole("button", { name: "Import a copy" }));
     await user.type(screen.getByRole("textbox", { name: "Local configuration name" }), "  Production west  ");
     await user.click(screen.getByRole("button", { name: "Choose file and import" }));
@@ -141,7 +141,7 @@ describe("SavedConfigSelector", () => {
     const configurationActions = screen.getByRole("group", { name: "Configuration actions" });
     const dialogActions = screen.getByRole("group", { name: "Dialog actions" });
     expect(within(configurationActions).getAllByRole("button").map((button) => button.textContent?.trim()))
-      .toEqual(["Forget", "Import a copy", "Connect external file"]);
+      .toEqual(["Forget", "Import a copy", "Open file"]);
     expect(within(dialogActions).getAllByRole("button").map((button) => button.textContent?.trim()))
       .toEqual(["Cloud Deployment", "Cancel", "Connect"]);
 

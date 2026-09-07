@@ -143,6 +143,29 @@ export function consoleWindowOptions(
 }
 
 /**
+ * A dedicated SSH terminal host. Connections and credentials stay owned by
+ * Electron main; the sandboxed renderer receives only revocable byte streams.
+ */
+export function sshWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1180,
+    height: 780,
+    minWidth: 720,
+    minHeight: 540,
+    show: false,
+    title: "SSH",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: secureWebPreferences(preload),
+  };
+}
+
+/**
  * A native, full-size window for one target interaction workspace. Target
  * identity is never encoded in these options or the renderer URL; Electron
  * main binds the destination window to the source window's exact active target

@@ -20,6 +20,11 @@ import type {
   DiscoverAwsOptionsInput,
 } from "./cloud-provider-inventory.js";
 import type { TerminalRuntimeAsset } from "./stream-contracts.js";
+import type {
+  SshDeploymentInput,
+  SshHostKeyReviewInput,
+  SshOpenTabResult,
+} from "./ssh-contracts.js";
 
 export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   getSnapshot: "sliver:cloud-deployment:snapshot:get",
@@ -40,6 +45,8 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   deleteFirewallRule: "sliver:cloud-deployment:firewall-rule:delete",
   prepareDestroyDeployment: "sliver:cloud-deployment:destroy:prepare",
   executeDestroyDeployment: "sliver:cloud-deployment:destroy:execute",
+  openSshWindow: "sliver:cloud-deployment:ssh-window:open",
+  approveSshHostKey: "sliver:cloud-deployment:ssh-host-key:approve",
 } as const;
 
 export const CLOUD_DEPLOYMENT_IPC_EVENTS = {
@@ -147,6 +154,8 @@ export interface CloudDeploymentAPI {
   executeDestroyDeployment(
     input: ExecuteDestroyCloudDeploymentInput,
   ): Promise<OperationResult<CloudDeploymentState>>;
+  openSshWindow(input: SshDeploymentInput): Promise<OperationResult<SshOpenTabResult>>;
+  approveSshHostKey(input: SshHostKeyReviewInput): Promise<OperationResult<SshOpenTabResult>>;
   onChanged(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
   onNavigationRequested(listener: (request: CloudDeploymentNavigationRequest) => void): () => void;
   onThemeChanged(listener: (dark: boolean) => void): () => void;

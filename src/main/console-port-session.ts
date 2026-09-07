@@ -14,8 +14,6 @@ import {
   type ConsoleCloseReason,
   type ConsoleServerFrame,
 } from "../shared/console-contracts.js";
-import type { SliverConsoleRuntime } from "./console-runtime.js";
-
 type Timer = ReturnType<typeof setTimeout>;
 
 // Pause with one default runtime chunk of headroom. Resume below a lower
@@ -37,12 +35,38 @@ export interface ConsoleAttachmentPort {
   close(): void;
 }
 
+/**
+ * Main-owned byte stream accepted by the bounded terminal port bridge. Keeping
+ * this structural lets native-client PTYs and in-process SSH channels share
+ * the audited renderer transport without sharing their lifecycle ownership.
+ */
+export interface ConsolePortRuntime {
+  subscribe(
+    subscriber: {
+      onOutput(data: Uint8Array): void;
+      onExit(exit: { readonly exitCode: number }): void;
+      onError?(notice: { readonly code: string }): void;
+    },
+    replayLimitBytes?: number,
+  ): () => void;
+  write(data: Uint8Array): void;
+  resize(columns: number, rows: number): void;
+  pauseOutput(): void;
+  resumeOutput(): void;
+  close(): Promise<void>;
+}
+
 export interface ConsolePortSessionOptions {
   readonly attachmentTtlMilliseconds?: number;
   readonly handshakeTimeoutMilliseconds?: number;
   readonly createOpaqueId?: () => string;
   /** Test seam; production always uses CONSOLE_MAX_SESSION_INPUT_BYTES. */
   readonly maxSessionInputBytes?: number;
+  /**
+   * Console tabs own their child process, while detachable SSH renderers do
+   * not own the main-process SSH channel. Defaults to the console behavior.
+   */
+  readonly closeRuntimeOnSessionClose?: boolean;
 }
 
 /**
@@ -71,9 +95,10 @@ export class ConsolePortSession {
   private unsubscribeRuntime: (() => void) | undefined;
   private closePromise: Promise<void> | undefined;
   private readonly maxSessionInputBytes: number;
+  private readonly closeRuntimeOnSessionClose: boolean;
 
   constructor(
-    private readonly runtime: SliverConsoleRuntime,
+    private readonly runtime: ConsolePortRuntime,
     private readonly owner: ConsoleOwnerIdentity,
     options: ConsolePortSessionOptions = {},
   ) {
@@ -90,6 +115,7 @@ export class ConsolePortSession {
     );
     this.handshakeTimeoutMilliseconds = handshakeTimeout;
     this.maxSessionInputBytes = normalizeSessionInputLimit(options.maxSessionInputBytes);
+    this.closeRuntimeOnSessionClose = options.closeRuntimeOnSessionClose ?? true;
     this.attachmentTimer = setTimeout(() => {
       void this.close("handshake-timeout");
     }, attachmentTtl);
@@ -99,6 +125,10 @@ export class ConsolePortSession {
 
   get isClosed(): boolean {
     return this.state === "closed";
+  }
+
+  get isTerminal(): boolean {
+    return this.state === "closing" || this.state === "closed";
   }
 
   attach(owner: ConsoleOwnerIdentity, attachmentToken: string, port: ConsoleAttachmentPort): void {
@@ -154,6 +184,20 @@ export class ConsolePortSession {
     this.removePortClose?.();
     this.removePortClose = undefined;
 
+    // A detachable SSH attachment can disappear while renderer credit has the
+    // underlying channel paused. The runtime survives this attachment, so
+    // release backpressure after unsubscribing or a future attachment would
+    // inherit a permanently paused SSH channel.
+    if (!this.closeRuntimeOnSessionClose && this.runtimeOutputPaused) {
+      this.runtimeOutputPaused = false;
+      try {
+        this.runtime.resumeOutput();
+      } catch {
+        // Detachment must still complete if the independently owned runtime
+        // has already reached its terminal state.
+      }
+    }
+
     const port = this.port;
     if (port) {
       try {
@@ -170,7 +214,7 @@ export class ConsolePortSession {
     }
     this.port = undefined;
     this.clearOutputQueue();
-    this.closePromise = this.runtime.close()
+    this.closePromise = (this.closeRuntimeOnSessionClose ? this.runtime.close() : Promise.resolve())
       .catch(() => undefined)
       .then(() => {
         this.state = "closed";

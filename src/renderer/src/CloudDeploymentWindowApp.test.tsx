@@ -19,6 +19,7 @@ import type {
 } from "../../shared/cloud-deployment-ipc";
 import type { AwsDeploymentOptions, DiscoverAwsOptionsInput } from "../../shared/cloud-provider-inventory";
 import type { OperationResult } from "../../shared/contracts";
+import type { SshHostKeyReview, SshOpenTabResult } from "../../shared/ssh-contracts";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 
 vi.mock("./components/CloudProvisioningTerminal", () => ({
@@ -36,6 +37,7 @@ vi.mock("./components/CloudProvisioningTerminal", () => ({
 const CREDENTIAL_ID = "0f24a4da-28c1-4d94-a66d-eb224892745d";
 const DEPLOYMENT_ID = "a48987b1-7b88-46dc-b72b-7f34dd5e0e92";
 const KEY_TOKEN = "2b1cbf1a-6861-4db8-a39d-ffbdad8087f8";
+const SSH_REVIEW_TOKEN = "r".repeat(43);
 
 let currentSnapshot: CloudDeploymentSnapshot;
 let themeListener: ((dark: boolean) => void) | undefined;
@@ -111,6 +113,16 @@ const runningDeployment: AwsCloudDeploymentRecord = {
     routeTableId: null,
     routeTableAssociationId: null,
   },
+};
+
+const sshHostKeyReview: SshHostKeyReview = {
+  token: SSH_REVIEW_TOKEN,
+  deploymentId: DEPLOYMENT_ID,
+  name: "range-control",
+  host: "198.51.100.24",
+  port: 22,
+  fingerprint: `SHA256:${"A".repeat(43)}`,
+  expiresAt: "2026-09-07T19:00:00.000Z",
 };
 
 const firewallSnapshot: AwsFirewallSnapshot = {
@@ -273,6 +285,14 @@ const api: CloudDeploymentAPI = {
     },
   })),
   executeDestroyDeployment: vi.fn(async () => ({ ok: true as const, value: emptySnapshot.state })),
+  openSshWindow: vi.fn(async (): Promise<OperationResult<SshOpenTabResult>> => ({
+    ok: true,
+    value: { status: "opened", tabId: "t".repeat(43), created: true },
+  })),
+  approveSshHostKey: vi.fn(async (): Promise<OperationResult<SshOpenTabResult>> => ({
+    ok: true,
+    value: { status: "opened", tabId: "t".repeat(43), created: true },
+  })),
   onChanged: vi.fn((listener) => {
     changedListener = listener;
     return unsubscribeChanged;
@@ -351,6 +371,8 @@ beforeEach(() => {
   vi.mocked(api.deleteFirewallRule).mockClear();
   vi.mocked(api.prepareDestroyDeployment).mockClear();
   vi.mocked(api.executeDestroyDeployment).mockClear();
+  vi.mocked(api.openSshWindow).mockClear();
+  vi.mocked(api.approveSshHostKey).mockClear();
   Object.defineProperty(window, "cloudDeployment", { configurable: true, value: Object.freeze(api) });
   document.documentElement.className = "";
   document.documentElement.removeAttribute("data-theme");
@@ -895,6 +917,8 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.queryByRole("heading", { name: "New Deployment" })).not.toBeInTheDocument();
     expect(screen.getAllByText("range-control")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Deployment in progress" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start range-control" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop range-control" })).not.toBeInTheDocument();
     expect(screen.getByText("0/2 checks passed")).toBeInTheDocument();
     expect(screen.getByText("Waiting for SSH")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Terminate range-control" })).toBeDisabled();
@@ -1059,7 +1083,8 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
 
     expect(await screen.findByText("range-control")).toBeInTheDocument();
-    const stopButton = screen.getByRole("button", { name: /Stop/i });
+    const stopButton = screen.getByRole("button", { name: "Stop range-control" });
+    expect(screen.queryByRole("button", { name: "Start range-control" })).not.toBeInTheDocument();
     expect(stopButton.querySelector('svg[data-icon="stop"]')).toBeInTheDocument();
     await user.click(stopButton);
     await waitFor(() => expect(api.runLifecycleAction).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9, action: "stop" }));
@@ -1069,11 +1094,256 @@ describe("CloudDeploymentWindowApp", () => {
     await waitFor(() => expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID }));
     await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
 
-    await user.click(screen.getByRole("button", { name: "Terminate range-control" }));
+    const terminateButton = screen.getByRole("button", { name: "Terminate range-control" });
+    expect(terminateButton).not.toHaveTextContent("Terminate");
+    expect(terminateButton.querySelector('svg[data-icon="trash"]')).toBeInTheDocument();
+    await user.hover(terminateButton);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Terminate");
+    await user.unhover(terminateButton);
+    await user.click(terminateButton);
     expect(await screen.findByRole("alertdialog", { name: "Terminate range-control?" })).toBeInTheDocument();
     expect(api.prepareDestroyDeployment).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9 });
     await user.click(screen.getByRole("button", { name: "Terminate Instance" }));
     await waitFor(() => expect(api.executeDestroyDeployment).toHaveBeenCalledWith({ token: "destroy-token" }));
+  });
+
+  it("opens SSH through the dedicated bridge and requires explicit first-use host-key approval", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const openResult = deferred<OperationResult<SshOpenTabResult>>();
+    vi.mocked(api.openSshWindow).mockImplementationOnce(() => openResult.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    const sshButton = await screen.findByRole("button", { name: "SSH to range-control" });
+    expect(sshButton.querySelector('svg[data-icon="terminal"]')).toBeInTheDocument();
+    await user.click(sshButton);
+    expect(sshButton).toBeDisabled();
+    expect(api.openSshWindow).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID });
+
+    await act(async () => {
+      openResult.resolve({
+        ok: true,
+        value: { status: "host-key-review", review: sshHostKeyReview },
+      });
+      await openResult.promise;
+    });
+
+    const review = await screen.findByRole("alertdialog", { name: "Verify SSH host" });
+    expect(within(review).getByText("range-control")).toBeInTheDocument();
+    expect(within(review).getByText("198.51.100.24:22")).toBeInTheDocument();
+    expect(within(review).getByText(sshHostKeyReview.fingerprint)).toBeInTheDocument();
+    expect(within(review).getByText(/Review expires/u)).toBeInTheDocument();
+
+    await user.click(within(review).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog", { name: "Verify SSH host" })).not.toBeInTheDocument();
+    expect(api.approveSshHostKey).not.toHaveBeenCalled();
+
+    vi.mocked(api.openSshWindow).mockResolvedValueOnce({
+      ok: true,
+      value: { status: "host-key-review", review: sshHostKeyReview },
+    });
+    const approval = deferred<OperationResult<SshOpenTabResult>>();
+    vi.mocked(api.approveSshHostKey).mockImplementationOnce(() => approval.promise);
+    await user.click(sshButton);
+    const secondReview = await screen.findByRole("alertdialog", { name: "Verify SSH host" });
+    const connectButton = within(secondReview).getByRole("button", { name: "Trust & Connect" });
+    await user.click(connectButton);
+    expect(connectButton).toHaveAttribute("aria-disabled", "true");
+    expect(connectButton).toHaveAttribute("data-pending", "true");
+    expect(api.approveSshHostKey).toHaveBeenCalledWith({ token: SSH_REVIEW_TOKEN });
+
+    await act(async () => {
+      approval.resolve({
+        ok: true,
+        value: { status: "opened", tabId: "t".repeat(43), created: true },
+      });
+      await approval.promise;
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "Verify SSH host" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps host-key approval failures in the review and re-probes before another approval", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const refreshedReview: SshHostKeyReview = {
+      ...sshHostKeyReview,
+      token: "s".repeat(43),
+      fingerprint: `SHA256:${"B".repeat(43)}`,
+      expiresAt: "2026-09-07T19:05:00.000Z",
+    };
+    vi.mocked(api.openSshWindow)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { status: "host-key-review", review: sshHostKeyReview },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { status: "host-key-review", review: refreshedReview },
+      });
+    vi.mocked(api.approveSshHostKey).mockResolvedValueOnce({
+      ok: false,
+      error: "The SSH host-key review is invalid or expired.\nTry again.\u0000",
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "SSH to range-control" }));
+    const review = await screen.findByRole("alertdialog", { name: "Verify SSH host" });
+    await user.click(within(review).getByRole("button", { name: "Trust & Connect" }));
+
+    const approvalError = await within(review).findByRole("alert");
+    expect(within(approvalError).getByText("SSH connection failed")).toBeInTheDocument();
+    expect(within(approvalError).getByText(
+      "The SSH host-key review is invalid or expired. Try again.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog", { name: "Verify SSH host" })).toBe(review);
+    expect(api.approveSshHostKey).toHaveBeenCalledTimes(1);
+
+    await user.click(within(review).getByRole("button", { name: "Re-check Host" }));
+
+    await waitFor(() => {
+      expect(within(review).getByText(refreshedReview.fingerprint)).toBeInTheDocument();
+    });
+    expect(within(review).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(review).getByRole("button", { name: "Trust & Connect" })).toBeInTheDocument();
+    expect(api.openSshWindow).toHaveBeenCalledTimes(2);
+    expect(api.openSshWindow).toHaveBeenLastCalledWith({ deploymentId: DEPLOYMENT_ID });
+    expect(api.approveSshHostKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("enables SSH only for a running deployment with its credential and a target address", async () => {
+    const stoppedDeployment: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      id: "c8a6e2b7-1d45-4f92-89cc-1f2c31bc57b8",
+      name: "stopped-server",
+      status: "stopped",
+      phase: "stopped",
+    };
+    const missingCredentialDeployment: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      id: "b0bd8e1d-09cf-468d-a122-bc18ae18a573",
+      name: "missing-key-server",
+      credentialId: "477410eb-f3be-4e79-840c-d87215db28ee",
+    };
+    const missingHostDeployment: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      id: "a6405996-8a87-4e1d-b85c-3eb692b9fc67",
+      name: "missing-host-server",
+      remoteHost: null,
+      runtime: {
+        ...runningDeployment.runtime,
+        publicIpAddress: null,
+        privateIpAddress: null,
+      },
+    };
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: {
+        v: 1,
+        revision: 9,
+        deployments: [runningDeployment, stoppedDeployment, missingCredentialDeployment, missingHostDeployment],
+      },
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    expect(await screen.findByRole("button", { name: "SSH to range-control" })).toBeEnabled();
+    const unavailableButtons = [
+      screen.getByRole("button", { name: "SSH to stopped-server" }),
+      screen.getByRole("button", { name: "SSH to missing-key-server" }),
+      screen.getByRole("button", { name: "SSH to missing-host-server" }),
+    ];
+    for (const button of unavailableButtons) {
+      expect(button).toBeDisabled();
+      await user.click(button);
+    }
+    const stoppedReason = screen.getByLabelText(
+      "SSH action unavailable for stopped-server: Start this server before opening SSH.",
+    );
+    const missingKeyReason = screen.getByLabelText(
+      "SSH action unavailable for missing-key-server: No stored SSH private key is available for this server.",
+    );
+    const missingHostReason = screen.getByLabelText(
+      "SSH action unavailable for missing-host-server: This server does not have an SSH address yet.",
+    );
+    for (const reason of [stoppedReason, missingKeyReason, missingHostReason]) {
+      expect(reason).toHaveAttribute("tabindex", "0");
+    }
+    await user.hover(stoppedReason);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Start this server before opening SSH.");
+    expect(api.openSshWindow).not.toHaveBeenCalled();
+  });
+
+  it("bounds and flattens SSH launch errors before showing them", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.openSshWindow).mockResolvedValueOnce({
+      ok: false,
+      error: `  Connection refused\nretry\u0000later ${"x".repeat(600)}`,
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "SSH to range-control" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("SSH connection failed")).toBeInTheDocument();
+    const detail = within(alert).getByText(/^Connection refused retry later/u);
+    expect(detail.textContent).not.toContain("\n");
+    expect(detail.textContent).not.toContain("\u0000");
+    expect(detail.textContent?.length).toBe(512);
+  });
+
+  it("reuses one lifecycle button across stopped, pending, and running states", async () => {
+    const stoppedDeployment: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      status: "stopped",
+      phase: "stopped",
+      runtime: {
+        ...runningDeployment.runtime,
+        instanceState: "stopped",
+        instanceHealth: "unknown",
+        systemHealth: "unknown",
+      },
+    };
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: { v: 1, revision: 10, deployments: [stoppedDeployment] },
+    };
+    const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
+    vi.mocked(api.runLifecycleAction).mockImplementationOnce(() => lifecycleResult.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    const startButton = await screen.findByRole("button", { name: "Start range-control" });
+    expect(screen.queryByRole("button", { name: "Stop range-control" })).not.toBeInTheDocument();
+    expect(startButton.querySelector('svg[data-icon="play"]')).toBeInTheDocument();
+    expect(startButton).not.toHaveClass("bg-warning-soft");
+
+    await user.click(startButton);
+    expect(startButton).toBeDisabled();
+    expect(api.runLifecycleAction).toHaveBeenCalledWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 10,
+      action: "start",
+    });
+    expect(await screen.findByRole("dialog", { name: "Starting range-control" })).toBeInTheDocument();
+
+    currentSnapshot = runningCloudSnapshot();
+    await act(async () => {
+      lifecycleResult.resolve({ ok: true, value: runningDeployment });
+      await lifecycleResult.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Starting range-control" })).not.toBeInTheDocument());
+    const stopButton = screen.getByRole("button", { name: "Stop range-control" });
+    expect(screen.queryByRole("button", { name: "Start range-control" })).not.toBeInTheDocument();
+    expect(stopButton.querySelector('svg[data-icon="stop"]')).toBeInTheDocument();
+    expect(stopButton).toHaveClass(
+      "bg-warning-soft",
+      "text-warning-soft-foreground",
+      "hover:bg-warning-soft-hover",
+    );
   });
 
   it("handles a native stop request on the deployments tab with a modal for the full pending duration", async () => {

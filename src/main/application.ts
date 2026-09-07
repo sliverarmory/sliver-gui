@@ -40,6 +40,13 @@ import type {
   ApplicationSettingsState,
   ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
+import {
+  SSH_MAX_TABS_PER_WINDOW,
+  type ManagedSshTarget,
+  type SshHostKeyReview,
+  type SshOpenTabResult,
+  type SshWindowLaunchContext,
+} from "../shared/ssh-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
 import type {
   SliverReleaseDownloadEvent,
@@ -90,6 +97,7 @@ import {
   mainWindowOptions,
   nativeWindowBackgroundColor,
   sessionShellWindowOptions,
+  sshWindowOptions,
   titleBarSymbolColor,
 } from "./window-options.js";
 import {
@@ -104,6 +112,15 @@ import {
   SliverConsoleRuntime,
   type NativePtyFactory,
 } from "./console-runtime.js";
+import {
+  registerSshIpcHandlers,
+  SSH_IPC_EVENTS,
+  unregisterSshIpcHandlers,
+} from "./ssh-ipc.js";
+import {
+  SshSessionRegistry,
+  type StartedManagedSshSession,
+} from "./ssh-session-registry.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
@@ -113,13 +130,15 @@ type NativeWindowSurface =
   | "cloud-deployment"
   | "interaction"
   | "managed-shells"
-  | "console";
+  | "console"
+  | "ssh";
 
 export interface StartApplicationOptions {
   registry?: ConnectionRegistry;
   rendererEntryPath?: string;
   preloadPath?: string;
   cloudDeploymentPreloadPath?: string;
+  sshPreloadPath?: string;
   developmentRendererUrl?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
@@ -133,6 +152,11 @@ export interface StartApplicationOptions {
 export interface ApplicationCloudDeploymentController extends CloudDeploymentController {
   subscribe?(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
   dispose?(): void;
+  listSshTargets?(): Promise<OperationResult<readonly ManagedSshTarget[]>>;
+  startSshSession?(
+    deploymentId: string,
+  ): Promise<OperationResult<StartedManagedSshSession | SshHostKeyReview>>;
+  approveSshHostKey?(token: string): Promise<OperationResult<StartedManagedSshSession>>;
 }
 
 export interface ApplicationHandle {
@@ -213,6 +237,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     "../preload/cloud-deployment.cjs",
   );
+  const sshPreloadPath = options.sshPreloadPath ?? join(
+    mainBundleDirectory,
+    "../preload/ssh.cjs",
+  );
   const consoleClientExecutable = options.consoleClientExecutable ?? resolveConsoleClientExecutable(
     app.isPackaged,
     process.resourcesPath,
@@ -232,6 +260,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
   const rendererUrl = developmentRendererUrl ?? pathToFileURL(rendererEntryPath).href;
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
+  const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
@@ -250,6 +279,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
   let cloudDeploymentController = options.cloudDeploymentController;
+  let sshWindow: BrowserWindow | undefined;
+  let sshWindowClaimedBy: TrustedWindowIdentity | undefined;
+  let sshWindowClaimChain: Promise<void> = Promise.resolve();
+  let sshSessions: SshSessionRegistry | undefined;
   let awsCloudMenuDeployments: readonly AwsCloudMenuDeployment[] = [];
   let cloudDeploymentMenuSignature = "[]";
   let cloudDeploymentMenuRefreshSequence = 0;
@@ -307,7 +340,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells",
+    surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "ssh",
   ): Promise<void> {
     if (developmentRendererUrl) {
       const url = new URL(developmentRendererUrl);
@@ -355,7 +388,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     hardenWindow(
       window,
       rendererUrl,
-      surface === "cloud-deployment" ? cloudDeploymentRendererUrl : undefined,
+      surface === "cloud-deployment"
+        ? cloudDeploymentRendererUrl
+        : surface === "ssh"
+          ? sshRendererUrl
+          : undefined,
     );
     installContextMenu(window);
     if (registerWithConnectionRegistry) window.webContents.on("before-input-event", (event, input) => {
@@ -632,6 +669,203 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       return { ok: false, error: "Cloud Deployment can only be opened from a workspace window" };
     }
     return openCloudDeploymentWindow();
+  }
+
+  async function openManagedSshWindow(
+    deploymentId: string,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    if (shutdown.isStopping || !sshSessions) {
+      return { ok: false, error: "SSH sessions are unavailable while the application is closing" };
+    }
+    try {
+      const owner = currentSshWindowOwner();
+      const result = await sshSessions.openTarget(deploymentId, owner);
+      if (shutdown.isStopping) {
+        return { ok: false, error: "SSH sessions are unavailable while the application is closing" };
+      }
+      if (!result.ok || !result.value || result.value.status === "host-key-review") return result;
+      return await presentManagedSshWindow(result.value);
+    } catch (error) {
+      return { ok: false, error: applicationErrorMessage(error, "The SSH session could not be opened") };
+    }
+  }
+
+  async function approveManagedSshHostKey(
+    token: string,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    if (shutdown.isStopping || !sshSessions) {
+      return { ok: false, error: "SSH sessions are unavailable while the application is closing" };
+    }
+    try {
+      const result = await sshSessions.approveHostKey(token, currentSshWindowOwner());
+      if (shutdown.isStopping) {
+        return { ok: false, error: "SSH sessions are unavailable while the application is closing" };
+      }
+      if (!result.ok || !result.value || result.value.status === "host-key-review") return result;
+      return await presentManagedSshWindow(result.value);
+    } catch (error) {
+      return { ok: false, error: applicationErrorMessage(error, "The SSH host key could not be approved") };
+    }
+  }
+
+  async function presentManagedSshWindow(
+    opened: Extract<SshOpenTabResult, { status: "opened" }>,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    if (shutdown.isStopping) {
+      return { ok: false, error: "SSH sessions are unavailable while the application is closing" };
+    }
+    const existing = sshWindow;
+    if (existing && !existing.isDestroyed() && !existing.webContents.isDestroyed()) {
+      if (opened.context) {
+        existing.webContents.send(SSH_IPC_EVENTS.tabOpened, opened.context);
+      } else if (sshWindowClaimedBy && sshSessions) {
+        const index = sshSessions.indexOf(opened.tabId);
+        if (index !== undefined) existing.webContents.send(SSH_IPC_EVENTS.selectTabRequested, index);
+      }
+      if (existing.isMinimized()) existing.restore();
+      existing.show();
+      existing.focus();
+      return { ok: true, value: opened };
+    }
+
+    let window: BrowserWindow | undefined;
+    try {
+      if (shutdown.isStopping) {
+        return { ok: false, error: "SSH sessions are unavailable while the application is closing" };
+      }
+      window = new BrowserWindow(sshWindowOptions(
+        sshPreloadPath,
+        process.platform,
+        runtimeIconPath,
+        nativeTheme.shouldUseDarkColors,
+      ));
+      sshWindow = window;
+      sshWindowClaimedBy = undefined;
+      installSshWindowLifecycle(window);
+      trackWindow(window, undefined, undefined, undefined, undefined, "ssh", false);
+      await loadRenderer(window, "ssh");
+      if (window.isDestroyed() || sshWindow !== window) {
+        throw new Error("The SSH window closed while its renderer was loading");
+      }
+      window.setTitle("SSH");
+      return { ok: true, value: opened };
+    } catch (error) {
+      if (window) retireSshWindow(window, "renderer-gone");
+      return { ok: false, error: applicationErrorMessage(error, "The SSH window could not be opened") };
+    }
+  }
+
+  function installSshWindowLifecycle(window: BrowserWindow): void {
+    let completedInitialLoad = false;
+    window.webContents.once("did-finish-load", () => {
+      completedInitialLoad = true;
+    });
+    window.webContents.on("did-start-navigation", (details) => {
+      if (completedInitialLoad && details.isMainFrame && !details.isSameDocument) {
+        retireSshWindow(window, "navigation");
+      }
+    });
+    window.webContents.on("render-process-gone", () => retireSshWindow(window, "renderer-gone"));
+    window.webContents.on("did-fail-load", (_event, _code, _description, _url, isMainFrame) => {
+      if (isMainFrame) retireSshWindow(window, "renderer-gone");
+    });
+    window.webContents.on("before-input-event", (event, input) => {
+      if (!isCurrentClaimedSshWindow(window)) return;
+      const index = consoleTabShortcutIndexForInput(process.platform, input);
+      const requestsNewTab = isConsoleNewTabShortcutInput(process.platform, input);
+      if (index === undefined && !requestsNewTab) return;
+      event.preventDefault();
+      if (input.isAutoRepeat) return;
+      window.webContents.send(
+        requestsNewTab ? SSH_IPC_EVENTS.newTabRequested : SSH_IPC_EVENTS.selectTabRequested,
+        ...(requestsNewTab ? [] : [index]),
+      );
+    });
+    window.on("closed", () => {
+      if (sshWindow !== window) return;
+      const cleanup = detachSshWindow(window, "window-closed");
+      sshWindow = undefined;
+      trackPendingCleanup(cleanup);
+    });
+  }
+
+  function currentSshWindowOwner(): TrustedWindowIdentity | undefined {
+    const window = sshWindow;
+    const owner = sshWindowClaimedBy;
+    return window && owner && isCurrentClaimedSshWindow(window) ? owner : undefined;
+  }
+
+  function claimManagedSshWindow(
+    owner: TrustedWindowIdentity,
+  ): Promise<OperationResult<SshWindowLaunchContext>> {
+    const operation = sshWindowClaimChain.then(async () => {
+      const window = sshWindow;
+      if (
+        shutdown.isStopping ||
+        !sshSessions ||
+        !window ||
+        window.isDestroyed() ||
+        window.webContents.isDestroyed() ||
+        nativeWindowSurfaces.get(window) !== "ssh" ||
+        !sameWindowIdentity(owner, identityForWindow(window)) ||
+        !isSshSurfaceUrl(window.webContents.getURL(), rendererUrl)
+      ) return { ok: false as const, error: "This window is not authorized to host SSH sessions" };
+
+      const result = await sshSessions.claim(owner);
+      if (!result.ok) return result;
+      if (
+        shutdown.isStopping ||
+        sshWindow !== window ||
+        window.isDestroyed() ||
+        window.webContents.isDestroyed() ||
+        nativeWindowSurfaces.get(window) !== "ssh" ||
+        !sameWindowIdentity(owner, identityForWindow(window)) ||
+        !isSshSurfaceUrl(window.webContents.getURL(), rendererUrl)
+      ) {
+        await sshSessions.detach(owner, "renderer-gone");
+        return { ok: false as const, error: "The SSH window closed while sessions were attaching" };
+      }
+      sshWindowClaimedBy = owner;
+      return result;
+    });
+    sshWindowClaimChain = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  function isCurrentClaimedSshWindow(window: BrowserWindow): boolean {
+    return sshWindow === window &&
+      !window.isDestroyed() &&
+      !window.webContents.isDestroyed() &&
+      nativeWindowSurfaces.get(window) === "ssh" &&
+      sshWindowClaimedBy !== undefined &&
+      sameWindowIdentity(sshWindowClaimedBy, identityForWindow(window)) &&
+      isSshSurfaceUrl(window.webContents.getURL(), rendererUrl);
+  }
+
+  function detachSshWindow(
+    window: BrowserWindow,
+    reason: "window-closed" | "renderer-gone" | "navigation",
+  ): Promise<void> {
+    if (sshWindow !== window) return Promise.resolve();
+    const owner = sshWindowClaimedBy;
+    sshWindowClaimedBy = undefined;
+    return owner && sshSessions ? sshSessions.detach(owner, reason) : Promise.resolve();
+  }
+
+  function retireSshWindow(
+    window: BrowserWindow,
+    reason: "window-closed" | "renderer-gone" | "navigation",
+  ): void {
+    if (sshWindow !== window) return;
+    const cleanup = detachSshWindow(window, reason);
+    sshWindow = undefined;
+    trackPendingCleanup(cleanup);
+    if (!window.isDestroyed()) window.destroy();
+  }
+
+  function trackPendingCleanup(cleanup: Promise<void>): void {
+    pendingWindowCleanup.add(cleanup);
+    void cleanup.finally(() => pendingWindowCleanup.delete(cleanup));
   }
 
   async function openInteractionWindow(source: TrustedWindowIdentity): Promise<OperationResult> {
@@ -1468,6 +1702,30 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   function installMenu(): void {
     if (shutdown.isStopping) return;
     const focusedConsole = focusedConsoleWindow();
+    const focusedSsh = focusedSshWindow();
+    const terminalActions = focusedConsole
+      ? {
+          newTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleNewTabRequested),
+          closeTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleCloseTabRequested),
+          selectTab: (index: number) => sendConsoleTabSelectionEvent(focusedConsole, index),
+          closeWindow: () => {
+            if (focusedConsoleWindow() === focusedConsole && !focusedConsole.window.isDestroyed()) {
+              focusedConsole.window.close();
+            }
+          },
+          showSettings: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleSettingsRequested),
+        }
+      : focusedSsh
+        ? {
+            newTab: () => sendSshMenuEvent(focusedSsh, SSH_IPC_EVENTS.newTabRequested),
+            closeTab: () => sendSshMenuEvent(focusedSsh, SSH_IPC_EVENTS.closeTabRequested),
+            selectTab: (index: number) => sendSshTabSelectionEvent(focusedSsh, index),
+            closeWindow: () => {
+              if (focusedSshWindow() === focusedSsh && !focusedSsh.isDestroyed()) focusedSsh.close();
+            },
+            showSettings: () => sendSshMenuEvent(focusedSsh, SSH_IPC_EVENTS.settingsRequested),
+          }
+        : undefined;
     const template = buildApplicationMenuTemplate(process.platform, APPLICATION_DISPLAY_NAME, {
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
@@ -1479,19 +1737,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       restartToApplyApplicationUpdate: () => {
         void confirmApplicationUpdateRestart();
       },
-    }, releaseCatalog, applicationUpdateState, focusedConsole
-      ? {
-          newTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleNewTabRequested),
-          closeTab: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleCloseTabRequested),
-          selectTab: (index) => sendConsoleTabSelectionEvent(focusedConsole, index),
-          closeWindow: () => {
-            if (focusedConsoleWindow() === focusedConsole && !focusedConsole.window.isDestroyed()) {
-              focusedConsole.window.close();
-            }
-          },
-          showSettings: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleSettingsRequested),
-        }
-      : undefined, awsCloudMenuDeployments);
+    }, releaseCatalog, applicationUpdateState, terminalActions, awsCloudMenuDeployments);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
@@ -1505,6 +1751,27 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       isConsoleSurfaceUrl(focused.webContents.getURL(), rendererUrl)
       ? record
       : undefined;
+  }
+
+  function focusedSshWindow(): BrowserWindow | undefined {
+    const focused = BrowserWindow.getFocusedWindow();
+    return focused && isCurrentClaimedSshWindow(focused) ? focused : undefined;
+  }
+
+  function sendSshMenuEvent(window: BrowserWindow, channel: string): void {
+    if (focusedSshWindow() !== window || window.webContents.isDestroyed()) return;
+    window.webContents.send(channel);
+  }
+
+  function sendSshTabSelectionEvent(window: BrowserWindow, index: number): void {
+    if (
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= SSH_MAX_TABS_PER_WINDOW ||
+      focusedSshWindow() !== window ||
+      window.webContents.isDestroyed()
+    ) return;
+    window.webContents.send(SSH_IPC_EVENTS.selectTabRequested, index);
   }
 
   function isClaimedConsoleWindow(record: ConsoleWindowRecord): boolean {
@@ -1552,7 +1819,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   function beginShutdown(): void {
     if (!shutdown.isStopping) {
-      disposeCloudDeployment();
+      const sshCleanup = sshSessions?.dispose();
+      if (sshCleanup) {
+        const cleanup = sshCleanup.finally(disposeCloudDeployment);
+        trackPendingCleanup(cleanup);
+      } else {
+        disposeCloudDeployment();
+      }
       for (const record of consoleWindowsByContentsId.values()) {
         void closeConsoleWindow(record, "application-shutdown");
       }
@@ -1807,6 +2080,23 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       );
     }
   }
+  const activeCloudDeploymentController = cloudDeploymentController;
+  sshSessions = new SshSessionRegistry({
+    listSshTargets: async () => activeCloudDeploymentController.listSshTargets?.() ?? {
+      ok: false,
+      error: "Managed SSH servers are unavailable",
+    },
+    startSshSession: async (deploymentId) =>
+      activeCloudDeploymentController.startSshSession?.(deploymentId) ?? {
+        ok: false,
+        error: "Managed SSH sessions are unavailable",
+      },
+    approveSshHostKey: async (token) =>
+      activeCloudDeploymentController.approveSshHostKey?.(token) ?? {
+        ok: false,
+        error: "SSH host-key approval is unavailable",
+      },
+  });
   unsubscribeCloudDeployment = cloudDeploymentController.subscribe?.(publishCloudDeploymentChanged);
   void refreshCloudDeploymentMenu();
   applicationUpdater = createApplicationUpdater({
@@ -1864,6 +2154,35 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       cloudDeploymentWindow === window &&
       nativeWindowSurfaces.get(window) === "cloud-deployment" &&
       sameWindowIdentity(identity, identityForWindow(window)),
+    {
+      open: openManagedSshWindow,
+      approveHostKey: approveManagedSshHostKey,
+    },
+  );
+  registerSshIpcHandlers(
+    {
+      sessions: {
+        claim: claimManagedSshWindow,
+        listTargets: (owner) => sshSessions!.listTargets(owner),
+        openTarget: (deploymentId, owner) => sshSessions!.openTarget(deploymentId, owner),
+        reattachTab: (owner, tabId) => sshSessions!.reattachTab(owner, tabId),
+        approveHostKey: (token, owner) => sshSessions!.approveHostKey(token, owner),
+        closeTab: (owner, tabId) => sshSessions!.closeTab(owner, tabId),
+        selectTab: (owner, tabId) => sshSessions!.selectTab(owner, tabId),
+        attach: (owner, attachmentToken, port) =>
+          sshSessions!.attach(owner, attachmentToken, port),
+      },
+      getTerminalRuntime: () => activeCloudDeploymentController.getTerminalRuntime(),
+      applicationSettings: {
+        getState: () => loadedApplicationSettingsStore.getState(),
+        update: updateApplicationSettings,
+      },
+    },
+    sshRendererUrl,
+    (identity, window) =>
+      sshWindow === window &&
+      nativeWindowSurfaces.get(window) === "ssh" &&
+      sameWindowIdentity(identity, identityForWindow(window)),
   );
   installMenu();
   void refreshReleaseMenu();
@@ -1890,6 +2209,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
       nativeTheme.removeListener("updated", onNativeThemeUpdated);
       unregisterCloudDeploymentIpcHandlers();
+      unregisterSshIpcHandlers();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
@@ -1946,7 +2266,7 @@ export function readDevelopmentRendererUrl(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "cloud-deployment" | "console" | "interaction" | "managed-shells",
+  surface: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "ssh",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);
@@ -2029,6 +2349,17 @@ function isConsoleSurfaceUrl(candidateUrl: string, rendererUrl: string): boolean
     const candidate = new URL(candidateUrl);
     return isTrustedRendererUrl(candidate.href, rendererUrl) &&
       candidate.search === "?surface=console" &&
+      candidate.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function isSshSurfaceUrl(candidateUrl: string, rendererUrl: string): boolean {
+  try {
+    const candidate = new URL(candidateUrl);
+    return isTrustedRendererUrl(candidate.href, rendererUrl) &&
+      candidate.search === "?surface=ssh" &&
       candidate.hash === "";
   } catch {
     return false;

@@ -43,6 +43,11 @@ import {
 import type { OperationResult } from "../shared/contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import {
+  parseSshDeploymentInput,
+  parseSshHostKeyReviewInput,
+  type SshOpenTabResult,
+} from "../shared/ssh-contracts.js";
+import {
   parseDiscoverAwsOptionsInput,
   type AwsDeploymentOptions,
   type DiscoverAwsOptionsInput,
@@ -82,10 +87,16 @@ export type CloudWindowAuthorizer = (
   window: BrowserWindow,
 ) => boolean;
 
+export interface CloudSshWindowController {
+  open(deploymentId: string): MaybePromise<OperationResult<SshOpenTabResult>>;
+  approveHostKey(token: string): MaybePromise<OperationResult<SshOpenTabResult>>;
+}
+
 export function registerCloudDeploymentIpcHandlers(
   controller: CloudDeploymentController,
   exactRendererUrl: string,
   authorizeWindow: CloudWindowAuthorizer,
+  sshWindows?: CloudSshWindowController,
 ): void {
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot,
@@ -213,6 +224,26 @@ export function registerCloudDeploymentIpcHandlers(
     authorizeWindow,
     (args) => singleArgument(parseExecuteDestroyInput(requireSingleArgument(args))),
     (_sender, input) => controller.executeDestroyDeployment(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.openSshWindow,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseSshDeploymentInput(requireSingleArgument(args))),
+    (_sender, input) => sshWindows?.open(input.deploymentId) ?? {
+      ok: false,
+      error: "SSH sessions are unavailable",
+    },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.approveSshHostKey,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseSshHostKeyReviewInput(requireSingleArgument(args))),
+    (_sender, input) => sshWindows?.approveHostKey(input.token) ?? {
+      ok: false,
+      error: "SSH sessions are unavailable",
+    },
   );
 }
 

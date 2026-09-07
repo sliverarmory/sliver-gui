@@ -402,7 +402,7 @@ export function SavedConfigSelector({
                   onPress={() => void chooseFile()}
                 >
                   <FontAwesomeIcon aria-hidden icon={faFolderOpen} className="size-3.5" />
-                  Connect external file
+                  Open file
                 </Button>
               </div>
             </div>

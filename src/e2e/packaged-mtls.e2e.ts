@@ -126,7 +126,7 @@ test("packaged production app completes current mTLS read and mutation flows", {
     const savedConfigsDialog = page.getByRole("dialog", { name: /saved configurations/i });
     await savedConfigsDialog.waitFor();
     await savedConfigsDialog.getByRole("option", { name: /unselected-decoy/i }).waitFor();
-    await savedConfigsDialog.getByRole("button", { name: "Connect external file" }).click();
+    await savedConfigsDialog.getByRole("button", { name: "Open file" }).click();
     try {
       await savedConfigsDialog.waitFor({ state: "hidden" });
     } catch (error) {

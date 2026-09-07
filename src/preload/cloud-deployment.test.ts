@@ -48,6 +48,8 @@ describe("Cloud Deployment preload bridge", () => {
       "deleteFirewallRule",
       "prepareDestroyDeployment",
       "executeDestroyDeployment",
+      "openSshWindow",
+      "approveSshHostKey",
       "onChanged",
       "onNavigationRequested",
       "onThemeChanged",
@@ -86,7 +88,9 @@ describe("Cloud Deployment preload bridge", () => {
       expectedRevision: 6,
       ruleId: "sgr-0123456789abcdef0",
     });
-    expect(electronMocks.invoke.mock.calls.slice(0, 10)).toEqual([
+    await api.openSshWindow({ deploymentId });
+    await api.approveSshHostKey({ token: "a".repeat(43) });
+    expect(electronMocks.invoke.mock.calls.slice(0, 12)).toEqual([
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime],
@@ -113,6 +117,8 @@ describe("Cloud Deployment preload bridge", () => {
         expectedRevision: 6,
         ruleId: "sgr-0123456789abcdef0",
       }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.openSshWindow, { deploymentId }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.approveSshHostKey, { token: "a".repeat(43) }],
     ]);
   });
 

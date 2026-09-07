@@ -30,8 +30,12 @@ import {
   type CloudAwsProfileSource,
   type CloudPrivateKeyCapabilities,
   type CloudProxmoxProvider,
+  type CloudSshTerminalStarter,
   type CloudSliverProvisioner,
 } from "./cloud-deployment-service.js";
+import type { ConsolePortRuntime } from "./console-port-session.js";
+import { SshHostKeyStore } from "./ssh-host-key-store.js";
+import { SshTerminalStartError } from "./ssh-terminal-runtime.js";
 import type { AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
 import type { ProxmoxDeploymentResult, ProxmoxResources } from "./cloud/proxmox-provider.js";
 import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
@@ -39,6 +43,7 @@ import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_DEPLOYMENT_ID = "55555555-5555-4555-8555-555555555555";
 const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
+const MISSING_CREDENTIAL_ID = "66666666-6666-4666-8666-666666666666";
 const DESTROY_TOKEN = "33333333-3333-4333-8333-333333333333";
 const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
 const NOW = new Date("2026-09-06T18:00:00.000Z");
@@ -294,6 +299,15 @@ describe("CloudDeploymentService", () => {
       created.ok ? created.value.operatorConfigDigest : undefined,
     );
     if (process.platform !== "win32") expect((await lstat(filePath)).mode & 0o777).toBe(0o600);
+    const pinnedHostKeys = JSON.parse(
+      await readFile(join(rootDirectory, "ssh-host-keys.json"), "utf8"),
+    ) as { readonly fingerprints: Readonly<Record<string, string>> };
+    expect(pinnedHostKeys.fingerprints[DEPLOYMENT_ID]).toBe(
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    if (process.platform !== "win32") {
+      expect((await lstat(join(rootDirectory, "ssh-host-keys.json"))).mode & 0o777).toBe(0o600);
+    }
     expect(changed).toHaveBeenCalled();
 
     const stopped = await service.runLifecycleAction({
@@ -1543,6 +1557,282 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
+  it("lists only managed servers backed by matching SSH credentials", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const unmatched = await store.create({
+      ...proxmoxDeployment(),
+      expectedRevision: store.getState().revision,
+      credentialId: MISSING_CREDENTIAL_ID,
+      name: "Missing SSH key",
+    });
+    if (!unmatched.ok) throw new Error(unmatched.error);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+    });
+
+    const result = await service.listSshTargets();
+
+    expect(result).toEqual({
+      ok: true,
+      value: [{
+        deploymentId: DEPLOYMENT_ID,
+        name: "Sliver AWS",
+        provider: "aws",
+        host: "203.0.113.20",
+        port: 22,
+        username: "ubuntu",
+        status: "running",
+        connectable: true,
+      }],
+    });
+    if (result.ok) expect(Object.isFrozen(result.value)).toBe(true);
+    service.dispose();
+  });
+
+  it("requires one-use TOFU approval, pins the fingerprint, and fails closed on a mismatch", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const approvedFingerprint = `SHA256:${"A".repeat(43)}`;
+    const changedFingerprint = `SHA256:${"B".repeat(43)}`;
+    const runtime = fakeSshTerminalRuntime();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError(
+        "host-key-approval-required",
+        approvedFingerprint,
+      ))
+      .mockResolvedValueOnce(runtime)
+      .mockRejectedValueOnce(new SshTerminalStartError("host-key-mismatch", changedFingerprint));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "r".repeat(43),
+      now: () => NOW.getTime(),
+    });
+
+    const first = await service.startSshSession(DEPLOYMENT_ID);
+    expect(first).toEqual({
+      ok: true,
+      value: {
+        token: "r".repeat(43),
+        deploymentId: DEPLOYMENT_ID,
+        name: "Sliver AWS",
+        host: "203.0.113.20",
+        port: 22,
+        fingerprint: approvedFingerprint,
+        expiresAt: new Date(NOW.getTime() + 5 * 60 * 1000).toISOString(),
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).toMatchObject({
+      host: "203.0.113.20",
+      port: 22,
+      username: "ubuntu",
+      privateKey: expect.stringContaining("PRIVATE KEY"),
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).not.toHaveProperty("hostKeySha256");
+    expect(JSON.stringify(first)).not.toContain("PRIVATE KEY");
+
+    const approved = await service.approveSshHostKey("r".repeat(43));
+    expect(approved).toMatchObject({
+      ok: true,
+      value: {
+        target: { deploymentId: DEPLOYMENT_ID, host: "203.0.113.20" },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[1]?.[0].ssh).toMatchObject({
+      hostKeySha256: approvedFingerprint,
+    });
+    const persisted = JSON.parse(
+      await readFile(join(rootDirectory, "ssh-host-keys.json"), "utf8"),
+    ) as { readonly fingerprints: Readonly<Record<string, string>> };
+    expect(persisted.fingerprints).toEqual({ [DEPLOYMENT_ID]: approvedFingerprint });
+    await expect(service.approveSshHostKey("r".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The SSH host-key review is invalid or expired",
+    });
+
+    const mismatch = await service.startSshSession(DEPLOYMENT_ID);
+    expect(mismatch).toEqual({
+      ok: false,
+      error: "The SSH server host key did not match the trusted fingerprint.",
+    });
+    expect(JSON.stringify(mismatch)).not.toContain("PRIVATE KEY");
+    expect(startSshTerminalRuntime.mock.calls[2]?.[0].ssh).toMatchObject({
+      hostKeySha256: approvedFingerprint,
+    });
+    service.dispose();
+  });
+
+  it("keeps a pinned SSH startup valid when an unrelated deployment changes", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const unrelated = await createUnrelatedAwsDeployment(store);
+    const fingerprint = `SHA256:${"D".repeat(43)}`;
+    const sshHostKeyStore = await SshHostKeyStore.load(join(rootDirectory, "ssh-host-keys.json"));
+    await sshHostKeyStore.remember(DEPLOYMENT_ID, fingerprint);
+    const pendingRuntime = deferred<ConsolePortRuntime>();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>(() => pendingRuntime.promise);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      sshHostKeyStore,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+    });
+
+    const starting = service.startSshSession(DEPLOYMENT_ID);
+    await vi.waitFor(() => expect(startSshTerminalRuntime).toHaveBeenCalledOnce());
+    const changed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...unrelated, name: "Renamed unrelated server" },
+    });
+    if (!changed.ok) throw new Error(changed.error);
+    const runtime = fakeSshTerminalRuntime();
+    pendingRuntime.resolve(runtime);
+
+    await expect(starting).resolves.toMatchObject({
+      ok: true,
+      value: {
+        target: { deploymentId: DEPLOYMENT_ID, name: "Sliver AWS" },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      ssh: expect.objectContaining({ hostKeySha256: fingerprint }),
+    }));
+    service.dispose();
+  });
+
+  it("keeps host-key approval valid when an unrelated deployment changes", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const unrelated = await createUnrelatedAwsDeployment(store);
+    const fingerprint = `SHA256:${"E".repeat(43)}`;
+    const runtime = fakeSshTerminalRuntime();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError("host-key-approval-required", fingerprint))
+      .mockResolvedValueOnce(runtime);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "u".repeat(43),
+      now: () => NOW.getTime(),
+    });
+    await expect(service.startSshSession(DEPLOYMENT_ID)).resolves.toMatchObject({
+      ok: true,
+      value: { token: "u".repeat(43), fingerprint },
+    });
+    const changed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...unrelated, name: "Renamed unrelated server" },
+    });
+    if (!changed.ok) throw new Error(changed.error);
+
+    await expect(service.approveSshHostKey("u".repeat(43))).resolves.toMatchObject({
+      ok: true,
+      value: {
+        target: { deploymentId: DEPLOYMENT_ID, name: "Sliver AWS" },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime).toHaveBeenCalledTimes(2);
+    expect(startSshTerminalRuntime.mock.calls[1]?.[0].ssh).toMatchObject({
+      hostKeySha256: fingerprint,
+    });
+    service.dispose();
+  });
+
+  it("invalidates a host-key review when managed deployment state changes", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError(
+        "host-key-approval-required",
+        `SHA256:${"C".repeat(43)}`,
+      ));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "s".repeat(43),
+      now: () => NOW.getTime(),
+    });
+    await expect(service.startSshSession(DEPLOYMENT_ID)).resolves.toMatchObject({
+      ok: true,
+      value: { token: "s".repeat(43) },
+    });
+    const current = store.getState().deployments[0];
+    if (!current) throw new Error("Expected an SSH deployment fixture");
+    const changed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...current, name: "Renamed managed server" },
+    });
+    if (!changed.ok) throw new Error(changed.error);
+
+    await expect(service.approveSshHostKey("s".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The managed SSH server changed. Review the latest server details and try again.",
+    });
+    expect(startSshTerminalRuntime).toHaveBeenCalledOnce();
+    await expect(lstat(join(rootDirectory, "ssh-host-keys.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    service.dispose();
+  });
+
   it("serializes remote transitions globally before rechecking the shared revision", async () => {
     const safeStorage = new XorSafeStorage();
     const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
@@ -1616,6 +1906,67 @@ async function dependencies() {
     clock: () => NOW,
   });
   return { safeStorage, store, vault };
+}
+
+async function createRunningAwsDeployment(store: CloudDeploymentStore): Promise<void> {
+  const created = await store.create({
+    ...awsDeployment(),
+    expectedRevision: store.getState().revision,
+  });
+  if (!created.ok || created.value.deployment.provider !== "aws") {
+    throw new Error(created.ok ? "Expected an AWS deployment fixture" : created.error);
+  }
+  const updated = await store.update({
+    expectedRevision: store.getState().revision,
+    deployment: {
+      ...created.value.deployment,
+      status: "running",
+      phase: "ready",
+      remoteHost: "203.0.113.20",
+      runtime: {
+        ...created.value.deployment.runtime,
+        instanceId: "i-0123456789abcdef0",
+        instanceState: "running",
+        instanceHealth: "ok",
+        systemHealth: "ok",
+        publicIpAddress: "203.0.113.20",
+        privateIpAddress: "10.0.0.20",
+      },
+    },
+  });
+  if (!updated.ok) throw new Error(updated.error);
+}
+
+async function createUnrelatedAwsDeployment(store: CloudDeploymentStore) {
+  const created = await store.create({
+    ...awsDeployment(),
+    expectedRevision: store.getState().revision,
+    name: "Unrelated AWS server",
+  });
+  if (!created.ok) throw new Error(created.error);
+  return created.value.deployment;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function fakeSshTerminalRuntime(): ConsolePortRuntime & { readonly close: ReturnType<typeof vi.fn> } {
+  return {
+    subscribe: vi.fn(() => () => undefined),
+    write: vi.fn(),
+    resize: vi.fn(),
+    pauseOutput: vi.fn(),
+    resumeOutput: vi.fn(),
+    close: vi.fn(async () => undefined),
+  };
 }
 
 function awsCredential(): ResolvedAwsCloudCredentialInput {

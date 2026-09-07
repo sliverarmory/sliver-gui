@@ -12,6 +12,7 @@ import {
   faServer,
   faShieldHalved,
   faStop,
+  faTerminal,
   faTrash,
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
@@ -65,6 +66,7 @@ import {
   type CreateCloudDeploymentInput,
 } from "../../shared/cloud-deployment-contracts";
 import type { AwsDeploymentOptions } from "../../shared/cloud-provider-inventory";
+import type { SshHostKeyReview } from "../../shared/ssh-contracts";
 import type {
   CloudCredentialTestResult,
   CloudDeploymentAPI,
@@ -613,6 +615,9 @@ function DeploymentsPanel({
           actionRequest={actionRequest?.deploymentId === resumedDeployment.id ? actionRequest : null}
           api={api}
           deployment={resumedDeployment}
+          hasSshCredential={snapshot.credentials.some(({ id, provider }) => (
+            id === resumedDeployment.credentialId && provider === resumedDeployment.provider
+          ))}
           isDeploymentView
           revision={snapshot.state.revision}
           {...(resumedTranscript ? { transcript: resumedTranscript } : {})}
@@ -665,6 +670,9 @@ function DeploymentsPanel({
               actionRequest={actionRequest?.deploymentId === deployment.id ? actionRequest : null}
               api={api}
               deployment={deployment}
+              hasSshCredential={snapshot.credentials.some(({ id, provider }) => (
+                id === deployment.credentialId && provider === deployment.provider
+              ))}
               key={deployment.id}
               revision={snapshot.state.revision}
               onFeedback={onFeedback}
@@ -913,6 +921,9 @@ function DeploymentWizard({
         <DeploymentCard
           api={api}
           deployment={activeDeployment}
+          hasSshCredential={snapshot.credentials.some(({ id, provider: credentialProvider }) => (
+            id === activeDeployment.credentialId && credentialProvider === activeDeployment.provider
+          ))}
           isDeploymentView
           revision={snapshot.state.revision}
           {...(transcript ? { transcript } : {})}
@@ -1455,6 +1466,7 @@ function DeploymentCard({
   actionRequest,
   api,
   deployment,
+  hasSshCredential,
   isDeploymentView = false,
   revision,
   transcript,
@@ -1469,6 +1481,7 @@ function DeploymentCard({
   readonly actionRequest?: CloudDeploymentActionRequest | null;
   readonly api: CloudDeploymentAPI;
   readonly deployment: CloudDeploymentRecord;
+  readonly hasSshCredential: boolean;
   readonly isDeploymentView?: boolean;
   readonly revision: number;
   readonly transcript?: CloudProvisioningTranscript;
@@ -1486,9 +1499,13 @@ function DeploymentCard({
   const [operatorCidrs, setOperatorCidrs] = useState(deployment.spec.operatorCidrs.join("\n"));
   const [firewallError, setFirewallError] = useState<string | null>(null);
   const [destroyPlan, setDestroyPlan] = useState<DestroyCloudDeploymentPlan | null>(null);
+  const [sshHostKeyReview, setSshHostKeyReview] = useState<SshHostKeyReview | null>(null);
+  const [sshHostKeyReviewError, setSshHostKeyReviewError] = useState<string | null>(null);
+  const [isOpeningSsh, setIsOpeningSsh] = useState(false);
   const handledActionRequest = useRef<CloudDeploymentActionRequest | null>(null);
   const actionInFlight = useRef(false);
   const destroyExecutionInFlight = useRef(false);
+  const sshRequestInFlight = useRef(false);
 
   const lifecycle = useCallback(async (action: "start" | "stop" | "reboot"): Promise<void> => {
     if (actionInFlight.current || !onBeginCardAction(deployment.id, action)) return;
@@ -1589,6 +1606,64 @@ function DeploymentCard({
     onFinishCardAction(deployment.id, "terminate");
   };
 
+  const openSsh = async (errorSurface: "page" | "host-key-dialog" = "page"): Promise<void> => {
+    if (sshRequestInFlight.current) return;
+    sshRequestInFlight.current = true;
+    setIsOpeningSsh(true);
+    setSshHostKeyReviewError(null);
+    try {
+      const result = await api.openSshWindow({ deploymentId: deployment.id });
+      if (!result.ok || !result.value) {
+        const detail = safeSshErrorMessage(result.error, "The SSH session could not be opened.");
+        if (errorSurface === "host-key-dialog") setSshHostKeyReviewError(detail);
+        else onFeedback({ tone: "danger", title: "SSH connection failed", detail });
+        return;
+      }
+      if (result.value.status === "host-key-review") {
+        setSshHostKeyReview(result.value.review);
+      } else if (errorSurface === "host-key-dialog") {
+        setSshHostKeyReview(null);
+      }
+    } catch (error) {
+      const detail = safeSshErrorMessage(error, "The SSH session could not be opened.");
+      if (errorSurface === "host-key-dialog") setSshHostKeyReviewError(detail);
+      else onFeedback({ tone: "danger", title: "SSH connection failed", detail });
+    } finally {
+      sshRequestInFlight.current = false;
+      setIsOpeningSsh(false);
+    }
+  };
+
+  const approveSshHostKey = async (): Promise<void> => {
+    if (!sshHostKeyReview || sshRequestInFlight.current) return;
+    sshRequestInFlight.current = true;
+    setIsOpeningSsh(true);
+    setSshHostKeyReviewError(null);
+    try {
+      const result = await api.approveSshHostKey({ token: sshHostKeyReview.token });
+      if (!result.ok || !result.value) {
+        setSshHostKeyReviewError(safeSshErrorMessage(
+          result.error,
+          "The reviewed SSH host could not be connected.",
+        ));
+        return;
+      }
+      if (result.value.status === "host-key-review") {
+        setSshHostKeyReview(result.value.review);
+        return;
+      }
+      setSshHostKeyReview(null);
+    } catch (error) {
+      setSshHostKeyReviewError(safeSshErrorMessage(
+        error,
+        "The reviewed SSH host could not be connected.",
+      ));
+    } finally {
+      sshRequestInFlight.current = false;
+      setIsOpeningSsh(false);
+    }
+  };
+
   useEffect(() => {
     if (
       !actionRequest ||
@@ -1602,6 +1677,18 @@ function DeploymentCard({
   }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, prepareDestroy]);
 
   const progress = phaseProgress(deployment.phase);
+  const lifecycleAction = deployment.status === "running"
+    ? "stop"
+    : deployment.status === "stopped"
+      ? "start"
+      : null;
+  const lifecycleLabel = lifecycleAction === "stop" ? "Stop" : "Start";
+  const sshUnavailableReason = deploymentSshUnavailableReason(deployment, hasSshCredential);
+  const sshActionDisabledReason = isOpeningSsh
+    ? `An SSH session for ${deployment.name} is already opening.`
+    : pendingAction !== null
+      ? `Wait for the current ${deployment.name} server action to finish.`
+      : sshUnavailableReason;
 
   return (
     <Card className={isDeploymentView ? "w-full" : "h-fit"} variant="secondary">
@@ -1661,11 +1748,44 @@ function DeploymentCard({
         ) : null}
       </Card.Content>
       <Card.Footer className="flex flex-wrap gap-2">
-        <Button aria-label={`Start ${deployment.name}`} isDisabled={deployment.status !== "stopped" || pendingAction !== null} size="sm" variant="outline" onPress={() => void lifecycle("start")}>
-          <FontAwesomeIcon aria-hidden icon={faPlay} /> Start
-        </Button>
-        <Button aria-label={`Stop ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("stop")}>
-          <FontAwesomeIcon aria-hidden icon={faStop} /> Stop
+        <Tooltip delay={0}>
+          <Tooltip.Trigger
+            {...(sshActionDisabledReason
+              ? {
+                  "aria-label": `SSH action unavailable for ${deployment.name}: ${sshActionDisabledReason}`,
+                  tabIndex: 0,
+                }
+              : { tabIndex: -1 })}
+            className="inline-flex"
+          >
+            <Button
+              aria-label={`SSH to ${deployment.name}`}
+              isDisabled={sshActionDisabledReason !== undefined}
+              isPending={isOpeningSsh}
+              size="sm"
+              variant="outline"
+              onPress={() => void openSsh()}
+            >
+              <FontAwesomeIcon aria-hidden icon={faTerminal} /> SSH
+            </Button>
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {sshActionDisabledReason ?? `Open an SSH session for ${deployment.name}`}
+          </Tooltip.Content>
+        </Tooltip>
+        <Button
+          aria-label={`${lifecycleLabel} ${deployment.name}`}
+          {...(lifecycleAction === "stop"
+            ? { className: "bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" }
+            : {})}
+          isDisabled={lifecycleAction === null || pendingAction !== null}
+          size="sm"
+          variant={lifecycleAction === "stop" ? "tertiary" : "outline"}
+          onPress={() => {
+            if (lifecycleAction) void lifecycle(lifecycleAction);
+          }}
+        >
+          <FontAwesomeIcon aria-hidden icon={lifecycleAction === "stop" ? faStop : faPlay} /> {lifecycleLabel}
         </Button>
         <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
           <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
@@ -1682,17 +1802,21 @@ function DeploymentCard({
         >
           <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
         </Button>
-        <Button
-          aria-label={`Terminate ${deployment.name}`}
-          className="sm:ml-auto"
-          isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
-          isPending={pendingAction === "prepare-destroy"}
-          size="sm"
-          variant="danger-soft"
-          onPress={() => void prepareDestroy()}
-        >
-          <FontAwesomeIcon aria-hidden icon={faTrash} /> Terminate
-        </Button>
+        <Tooltip delay={0}>
+          <Button
+            aria-label={`Terminate ${deployment.name}`}
+            className="sm:ml-auto"
+            isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
+            isIconOnly
+            isPending={pendingAction === "prepare-destroy"}
+            size="sm"
+            variant="danger-soft"
+            onPress={() => void prepareDestroy()}
+          >
+            <FontAwesomeIcon aria-hidden icon={faTrash} />
+          </Button>
+          <Tooltip.Content>Terminate</Tooltip.Content>
+        </Tooltip>
       </Card.Footer>
 
       <AlertDialog.Backdrop isOpen={destroyPlan !== null} variant="blur" onOpenChange={(open) => { if (!open && pendingAction !== "destroy") cancelDestroyReview(); }}>
@@ -1712,6 +1836,81 @@ function DeploymentCard({
             <AlertDialog.Footer>
               <Button isDisabled={pendingAction === "destroy"} variant="tertiary" onPress={cancelDestroyReview}>Cancel</Button>
               <Button isPending={pendingAction === "destroy"} variant="danger" onPress={() => void executeDestroy()}>Terminate Instance</Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
+
+      <AlertDialog.Backdrop
+        isOpen={sshHostKeyReview !== null}
+        variant="blur"
+        onOpenChange={(open) => {
+          if (!open && !isOpeningSsh) {
+            setSshHostKeyReview(null);
+            setSshHostKeyReviewError(null);
+          }
+        }}
+      >
+        <AlertDialog.Container placement="center" size="sm">
+          <AlertDialog.Dialog className="sm:max-w-[500px]">
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="warning">
+                <FontAwesomeIcon aria-hidden icon={faKey} className="size-5" />
+              </AlertDialog.Icon>
+              <AlertDialog.Heading>Verify SSH host</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              {sshHostKeyReview ? (
+                <div className="space-y-4 text-sm leading-6 text-muted">
+                  <p>
+                    This is the first SSH connection to <span className="font-medium text-foreground">{sshHostKeyReview.name}</span>.
+                    Confirm the host key with a trusted source before connecting.
+                  </p>
+                  <dl className="space-y-3 rounded-2xl bg-surface-secondary p-4">
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-muted">Server</dt>
+                      <dd className="mt-1 break-all font-mono text-foreground">{sshHostKeyReview.host}:{sshHostKeyReview.port}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-muted">SHA-256 fingerprint</dt>
+                      <dd className="mt-1 break-all font-mono text-foreground">{sshHostKeyReview.fingerprint}</dd>
+                    </div>
+                  </dl>
+                  <p>
+                    Connecting pins this key for future sessions. A changed key will be rejected until it is reviewed separately.
+                  </p>
+                  <p className="text-xs">Review expires {new Date(sshHostKeyReview.expiresAt).toLocaleTimeString()}.</p>
+                  {sshHostKeyReviewError ? (
+                    <InlineMessage
+                      tone="danger"
+                      title="SSH connection failed"
+                      detail={sshHostKeyReviewError}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <Button
+                isDisabled={isOpeningSsh}
+                variant="tertiary"
+                onPress={() => {
+                  setSshHostKeyReview(null);
+                  setSshHostKeyReviewError(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                isPending={isOpeningSsh}
+                variant="primary"
+                onPress={() => {
+                  if (sshHostKeyReviewError) void openSsh("host-key-dialog");
+                  else void approveSshHostKey();
+                }}
+              >
+                {sshHostKeyReviewError ? "Re-check Host" : "Trust & Connect"}
+              </Button>
             </AlertDialog.Footer>
           </AlertDialog.Dialog>
         </AlertDialog.Container>
@@ -3943,4 +4142,35 @@ function scrubCredentialInput(input: CreateCloudCredentialInput): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Cloud Deployment encountered an unexpected error.";
+}
+
+function hasDeploymentSshHost(deployment: CloudDeploymentRecord): boolean {
+  const host = deployment.remoteHost ?? (deployment.provider === "aws"
+    ? deployment.runtime.publicIpAddress ?? deployment.runtime.privateIpAddress
+    : deployment.runtime.ipAddress);
+  return Boolean(host?.trim());
+}
+
+function deploymentSshUnavailableReason(
+  deployment: CloudDeploymentRecord,
+  hasSshCredential: boolean,
+): string | undefined {
+  if (deployment.status === "stopped") return "Start this server before opening SSH.";
+  if (deployment.status === "provisioning") return "This server is still being provisioned.";
+  if (deployment.status === "deleting") return "This server is being terminated.";
+  if (deployment.status === "failed") return "Resolve this server's deployment error before opening SSH.";
+  if (!hasSshCredential) return "No stored SSH private key is available for this server.";
+  if (!hasDeploymentSshHost(deployment)) return "This server does not have an SSH address yet.";
+  return undefined;
+}
+
+function safeSshErrorMessage(error: unknown, fallback: string): string {
+  const source = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  let printable = "";
+  for (const character of source) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    printable += codePoint < 32 || codePoint === 127 ? " " : character;
+  }
+  const normalized = printable.replace(/\s+/gu, " ").trim();
+  return normalized ? normalized.slice(0, 512) : fallback;
 }

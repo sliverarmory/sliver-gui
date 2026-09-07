@@ -370,6 +370,7 @@ function buildAwsCloudDeploymentMenu(
         enabled: !busy,
         click: () => requestLifecycle("terminate"),
       },
+      { type: "separator" },
       {
         id: `cloud.aws.${deployment.id}.firewall`,
         label: "Firewall",

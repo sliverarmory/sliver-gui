@@ -254,10 +254,13 @@ describe("application menu templates", () => {
     ]);
 
     const running = nestedMenuItems(aws, "operator-control");
-    expect(running.map(({ label, enabled }) => ({ label, enabled }))).toEqual([
+    expect(running.map((item) => item.type === "separator"
+      ? { type: item.type }
+      : { label: item.label, enabled: item.enabled })).toEqual([
       { label: "Start", enabled: false },
       { label: "Stop", enabled: true },
       { label: "Terminate", enabled: true },
+      { type: "separator" },
       { label: "Firewall", enabled: true },
     ]);
     clickItem(running.find(({ label }) => label === "Stop"));
@@ -265,15 +268,20 @@ describe("application menu templates", () => {
     clickItem(running.find(({ label }) => label === "Firewall"));
 
     const stopped = nestedMenuItems(aws, "i-00000000000000002");
-    expect(stopped.map(({ label, enabled }) => ({ label, enabled }))).toEqual([
+    expect(stopped.map((item) => item.type === "separator"
+      ? { type: item.type }
+      : { label: item.label, enabled: item.enabled })).toEqual([
       { label: "Start", enabled: true },
       { label: "Stop", enabled: false },
       { label: "Terminate", enabled: true },
+      { type: "separator" },
       { label: "Firewall", enabled: false },
     ]);
     clickItem(stopped.find(({ label }) => label === "Start"));
 
-    expect(nestedMenuItems(aws, busyId).every(({ enabled }) => enabled === false)).toBe(true);
+    const busy = nestedMenuItems(aws, busyId);
+    expect(busy.filter(({ type }) => type !== "separator").every(({ enabled }) => enabled === false)).toBe(true);
+    expect(busy.filter(({ type }) => type === "separator")).toHaveLength(1);
     expect(openCloudDeployment.mock.calls).toEqual([
       [{ view: "deployments", deploymentId: runningId, action: "stop" }],
       [{ view: "deployments", deploymentId: runningId, action: "terminate" }],

@@ -16,9 +16,11 @@ import {
   parseApplicationSettingsState,
   parseApplicationSettingsValues,
   type ApplicationSettingsState,
+  type ApplicationSettingsUpdateInput,
   type ApplicationSettingsValues,
   type ApplicationTheme,
 } from "../../../shared/application-settings-contracts";
+import type { OperationResult } from "../../../shared/contracts";
 import {
   CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY,
   loadConsoleTerminalSettings,
@@ -38,6 +40,19 @@ export interface ApplicationSettingsContextValue {
   updateSettings(updater: ApplicationSettingsUpdater): Promise<boolean>;
 }
 
+/**
+ * Least-privilege bridge used by renderer surfaces that only need shared
+ * application appearance. The workspace supplies window.sliver by default;
+ * isolated surfaces can inject their dedicated preload API instead.
+ */
+export interface ApplicationSettingsAPI {
+  getApplicationSettings(): Promise<ApplicationSettingsState>;
+  updateApplicationSettings(
+    input: ApplicationSettingsUpdateInput,
+  ): Promise<OperationResult<ApplicationSettingsState>>;
+  onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;
+}
+
 const ApplicationSettingsContext = createContext<ApplicationSettingsContextValue | undefined>(undefined);
 
 export function initializeRendererTheme(): void {
@@ -49,7 +64,14 @@ export function applyRendererTheme(dark: boolean): void {
   applyDocumentSettings(dark ? "dark" : "light", false);
 }
 
-export function ApplicationSettingsProvider({ children }: { readonly children: ReactNode }): React.JSX.Element {
+export function ApplicationSettingsProvider({
+  api,
+  children,
+}: {
+  readonly api?: ApplicationSettingsAPI;
+  readonly children: ReactNode;
+}): React.JSX.Element {
+  const settingsApi = api ?? window.sliver;
   const [settings, setSettings] = useState<ApplicationSettingsState>(DEFAULT_APPLICATION_SETTINGS_STATE);
   const [isReady, setIsReady] = useState(false);
   const [savingCount, setSavingCount] = useState(0);
@@ -67,12 +89,12 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
 
   useEffect(() => {
     let active = true;
-    const unsubscribe = window.sliver.onApplicationSettingsChanged((next) => {
+    const unsubscribe = settingsApi.onApplicationSettingsChanged((next) => {
       if (active) accept(next);
     });
     void (async () => {
       try {
-        const loaded = parseApplicationSettingsState(await window.sliver.getApplicationSettings());
+        const loaded = parseApplicationSettingsState(await settingsApi.getApplicationSettings());
         if (!active) return;
         accept(loaded);
 
@@ -83,7 +105,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
           legacyTerminal &&
           !sameTerminalSettings(current.terminal, legacyTerminal)
         ) {
-          const migrated = await window.sliver.updateApplicationSettings({
+          const migrated = await settingsApi.updateApplicationSettings({
             expectedRevision: current.revision,
             settings: {
               theme: current.theme,
@@ -94,7 +116,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
           });
           if (!active) return;
           if (migrated.ok && migrated.value) accept(parseApplicationSettingsState(migrated.value));
-          else accept(parseApplicationSettingsState(await window.sliver.getApplicationSettings()));
+          else accept(parseApplicationSettingsState(await settingsApi.getApplicationSettings()));
         }
       } catch (error: unknown) {
         if (!active) return;
@@ -109,7 +131,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
       active = false;
       unsubscribe();
     };
-  }, [accept]);
+  }, [accept, settingsApi]);
 
   useEffect(() => {
     const media = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
@@ -143,7 +165,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
           resolveResult(true);
           return;
         }
-        const response = await window.sliver.updateApplicationSettings({
+        const response = await settingsApi.updateApplicationSettings({
           expectedRevision: current.revision,
           settings: next,
         });
@@ -151,7 +173,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
           toast.danger("Settings not saved", {
             description: response.error ?? "The application settings could not be updated.",
           });
-          const latest = await window.sliver.getApplicationSettings();
+          const latest = await settingsApi.getApplicationSettings();
           accept(parseApplicationSettingsState(latest));
           resolveResult(false);
           return;
@@ -170,7 +192,7 @@ export function ApplicationSettingsProvider({ children }: { readonly children: R
       resolveResult(false);
     });
     return result;
-  }, [accept]);
+  }, [accept, settingsApi]);
 
   const value = useMemo<ApplicationSettingsContextValue>(() => ({
     settings,

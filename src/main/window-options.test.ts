@@ -9,6 +9,7 @@ import {
   interactionWindowOptions,
   mainWindowOptions,
   sessionShellWindowOptions,
+  sshWindowOptions,
 } from "./window-options.js";
 
 describe("main window transparency", () => {
@@ -175,6 +176,38 @@ describe("Sliver console window", () => {
 
   it("uses the resolved application theme for its native background", () => {
     expect(consoleWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
+  });
+});
+
+describe("SSH window", () => {
+  it("uses native chrome and a dedicated hardened preload", () => {
+    const options = sshWindowOptions("/ssh-preload.js", "linux", "/brand.png");
+
+    expect(options).toMatchObject({
+      title: "SSH",
+      width: 1180,
+      height: 780,
+      minWidth: 720,
+      minHeight: 540,
+      show: false,
+      backgroundColor: "#09090b",
+      icon: "/brand.png",
+      webPreferences: {
+        preload: "/ssh-preload.js",
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        nodeIntegrationInSubFrames: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+      },
+    });
+    expect(JSON.stringify(options)).not.toMatch(/privateKey|passphrase|credentialId/u);
+  });
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(sshWindowOptions("/ssh-preload.js", "linux", undefined, false).backgroundColor)
       .toBe("#fafafa");
   });
 });

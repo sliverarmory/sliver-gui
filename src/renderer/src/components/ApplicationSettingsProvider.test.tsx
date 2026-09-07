@@ -10,6 +10,7 @@ import {
 import { CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY } from "./console-terminal-settings";
 import {
   ApplicationSettingsProvider,
+  type ApplicationSettingsAPI,
   useApplicationSettings,
 } from "./ApplicationSettingsProvider";
 
@@ -94,6 +95,29 @@ describe("ApplicationSettingsProvider", () => {
     expect(screen.getByTestId("theme")).toHaveTextContent("dark");
   });
 
+  it("uses an injected least-privilege settings bridge instead of window.sliver", async () => {
+    const workspaceApi = installSettingsAPI();
+    const injectedApi: ApplicationSettingsAPI = {
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({
+        revision: 7,
+        theme: "light",
+      })),
+      updateApplicationSettings: vi.fn().mockResolvedValue({
+        ok: false,
+        error: "Updates are not configured by this test",
+      }),
+      onApplicationSettingsChanged: vi.fn(() => vi.fn()),
+    };
+
+    renderProvider(injectedApi);
+
+    expect(await screen.findByTestId("revision")).toHaveTextContent("7");
+    expect(screen.getByTestId("theme")).toHaveTextContent("light");
+    expect(injectedApi.onApplicationSettingsChanged).toHaveBeenCalledOnce();
+    expect(workspaceApi.getApplicationSettings).not.toHaveBeenCalled();
+    expect(workspaceApi.onApplicationSettingsChanged).not.toHaveBeenCalled();
+  });
+
   it("sends a complete revision-bound update and accepts the persisted response", async () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
@@ -162,9 +186,9 @@ describe("ApplicationSettingsProvider", () => {
   });
 });
 
-function renderProvider(): void {
+function renderProvider(api?: ApplicationSettingsAPI): void {
   render(
-    <ApplicationSettingsProvider>
+    <ApplicationSettingsProvider {...(api ? { api } : {})}>
       <SettingsProbe />
     </ApplicationSettingsProvider>,
   );
