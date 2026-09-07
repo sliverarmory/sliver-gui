@@ -13,8 +13,6 @@ import {
 } from "nice-grpc";
 import { clientpb, rpcpb } from "sliver-script";
 
-import { SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
-
 export const PACKAGED_FIXTURE_TOKEN = "PACKAGED_MTLS_TOKEN_M0_DO_NOT_RENDER";
 export const PACKAGED_FIXTURE_EVENT_SECRET = "PACKAGED_EVENT_SECRET_M0_DO_NOT_RENDER";
 
@@ -101,9 +99,9 @@ export async function startMtlsFixture(repositoryRoot: string): Promise<MtlsFixt
         record("getVersion", context);
         return {
           Major: 1,
-          Minor: 6,
-          Patch: 2,
-          Commit: SLIVER_PROTOCOL_BASELINE_COMMIT,
+          Minor: 7,
+          Patch: 0,
+          Commit: "mtls-e2e-fixture-build",
           Dirty: false,
           CompiledAt: "0",
           OS: process.platform,

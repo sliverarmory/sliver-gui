@@ -8,6 +8,7 @@ import {
   faBolt,
   faBoxOpen,
   faBoxesStacked,
+  faCloudArrowUp,
   faComputer,
   faEllipsisVertical,
   faGear,
@@ -24,7 +25,7 @@ import {
   faTriangleExclamation,
   faWindowRestore,
 } from "@fortawesome/free-solid-svg-icons";
-import { disconnectedSnapshot } from "../../shared/contracts";
+import { disconnectedSnapshot, SLIVER_PROTOCOL_COMPATIBILITY } from "../../shared/contracts";
 import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
 import {
   APPLICATION_SETTINGS_VERSION,
@@ -482,6 +483,15 @@ export function App() {
       keywords: ["reload", "sync"],
       isDisabled: !connected,
       onAction: () => void refreshServer(),
+    },
+    {
+      id: "window-cloud-deployment",
+      group: "Windows",
+      icon: faCloudArrowUp,
+      label: "Cloud Deployment",
+      description: "Open or focus the Cloud Deployment window.",
+      keywords: ["aws", "cloud infrastructure"],
+      onAction: () => void openCloudDeployment(),
     },
     {
       id: "window-same-server",
@@ -951,14 +961,13 @@ function CompatibilityMismatchModal({
   if (capabilities?.compatibility !== "degraded") return null;
 
   const serverVersion = capabilities.serverVersion ?? snapshot.connection.version ?? "Not reported";
-  const baselineCommit = capabilities.baselineCommit.slice(0, 12);
-  const reason = capabilities.reason ?? "This server build has not been verified against the pinned baseline";
+  const reason = capabilities.reason ?? `This server is outside the compatible ${SLIVER_PROTOCOL_COMPATIBILITY.series} version series`;
 
   return (
     <Modal.Backdrop isOpen={isOpen} variant="blur" onOpenChange={onOpenChange}>
       <Modal.Container placement="center" size="sm">
         <Modal.Dialog
-          aria-describedby="server-build-mismatch-description"
+          aria-describedby="server-version-mismatch-description"
           className="sm:max-w-[440px]"
         >
           <Modal.CloseTrigger />
@@ -967,12 +976,12 @@ function CompatibilityMismatchModal({
               <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} className="size-4" />
             </Modal.Icon>
             <div className="min-w-0 flex-1">
-              <Modal.Heading>Server build mismatch</Modal.Heading>
+              <Modal.Heading>Server version mismatch</Modal.Heading>
               <p
                 className="mt-1 text-sm font-normal leading-relaxed text-muted"
-                id="server-build-mismatch-description"
+                id="server-version-mismatch-description"
               >
-                Sliver Desktop connected successfully, but this server does not match the build used to verify this app.
+                Sliver Desktop connected successfully, but this server is outside the version series verified for this app.
               </p>
             </div>
           </Modal.Header>
@@ -983,8 +992,8 @@ function CompatibilityMismatchModal({
                 <dd className="text-right font-medium text-foreground">{serverVersion}</dd>
               </div>
               <div className="flex items-baseline justify-between gap-4">
-                <dt className="text-muted">Verified baseline</dt>
-                <dd className="font-mono text-xs text-foreground">{baselineCommit}</dd>
+                <dt className="text-muted">Compatible series</dt>
+                <dd className="font-mono text-xs text-foreground">{SLIVER_PROTOCOL_COMPATIBILITY.series}</dd>
               </div>
             </dl>
             <p className="rounded-xl bg-warning-soft px-3 py-2.5 text-sm leading-relaxed text-warning-soft-foreground">
@@ -1006,7 +1015,7 @@ function compatibilityNoticeKey(snapshot: SliverSnapshot): string | undefined {
   const connectionIdentity = snapshot.connection.epoch === undefined
     ? `${snapshot.connection.server ?? "unknown"}:${capabilities.serverVersion ?? snapshot.connection.version ?? "unknown"}`
     : String(snapshot.connection.epoch);
-  return `${connectionIdentity}:${capabilities.baselineCommit}`;
+  return `${connectionIdentity}:${SLIVER_PROTOCOL_COMPATIBILITY.series}`;
 }
 
 function isUsableConnection(status: ConnectionStatus): boolean {

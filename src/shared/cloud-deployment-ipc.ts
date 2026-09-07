@@ -44,8 +44,20 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
 
 export const CLOUD_DEPLOYMENT_IPC_EVENTS = {
   changed: "sliver:cloud-deployment:changed",
+  navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
 } as const;
+
+export type CloudDeploymentNavigationRequest =
+  | {
+      readonly view: "deployments";
+      readonly deploymentId: string;
+      readonly action: "start" | "stop" | "terminate";
+    }
+  | {
+      readonly view: "firewall";
+      readonly deploymentId: string;
+    };
 
 export interface CloudDeploymentSnapshot {
   readonly state: CloudDeploymentState;
@@ -136,6 +148,7 @@ export interface CloudDeploymentAPI {
     input: ExecuteDestroyCloudDeploymentInput,
   ): Promise<OperationResult<CloudDeploymentState>>;
   onChanged(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
+  onNavigationRequested(listener: (request: CloudDeploymentNavigationRequest) => void): () => void;
   onThemeChanged(listener: (dark: boolean) => void): () => void;
 }
 

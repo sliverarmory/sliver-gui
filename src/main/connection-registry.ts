@@ -48,6 +48,7 @@ import {
   type StageListenerInput,
   type WindowLaunchContext,
   SLIVER_PROTOCOL_BASELINE_COMMIT,
+  SLIVER_PROTOCOL_COMPATIBILITY,
 } from "../shared/contracts.js";
 import {
   DEFAULT_TARGET_CATALOG_PAGE_SIZE,
@@ -6837,26 +6838,18 @@ export function negotiateServerVersion(version: clientpb.Version): {
   ) {
     return { compatibility: "unsupported", reason: "The server reported an invalid version" };
   }
-  if (typeof version.Commit === "string" && version.Commit.toLowerCase() === SLIVER_PROTOCOL_BASELINE_COMMIT && !version.Dirty) {
+  // Sliver parses its build version as SemVer before returning these numeric
+  // components. Compatibility follows the SemVer major/minor series; patch and
+  // build provenance (Commit/Dirty) do not affect protocol compatibility.
+  if (
+    version.Major === SLIVER_PROTOCOL_COMPATIBILITY.major &&
+    version.Minor === SLIVER_PROTOCOL_COMPATIBILITY.minor
+  ) {
     return { compatibility: "supported" };
-  }
-  if (version.Major !== 1) {
-    return {
-      compatibility: "degraded",
-      reason: `Sliver ${versionText} uses a different protocol major version and may be incompatible with this client`,
-    };
-  }
-  if (version.Minor < 6) {
-    return {
-      compatibility: "degraded",
-      reason: `Sliver ${versionText} predates the verified protocol surface and may be incompatible with this client`,
-    };
   }
   return {
     compatibility: "degraded",
-    reason: version.Dirty
-      ? `Sliver ${versionText} is a modified build and may be incompatible with the pinned baseline`
-      : `Sliver ${versionText} does not match the pinned baseline and may be incompatible; current features remain available in degraded mode`,
+    reason: `Sliver ${versionText} is outside the compatible ${SLIVER_PROTOCOL_COMPATIBILITY.series} version series and may be incompatible with this client`,
   };
 }
 

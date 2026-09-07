@@ -5,6 +5,8 @@ import {
   normalizeCommandPaletteShortcutKey,
 } from "../shared/application-settings-contracts.js";
 import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
+import type { CloudDeploymentStatus } from "../shared/cloud-deployment-contracts.js";
+import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
 
 export type ReleaseMenuCatalog =
@@ -19,12 +21,20 @@ export type ReleaseMenuCatalog =
 export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly duplicateConnectedWindow: () => void;
-  readonly openCloudDeployment: () => void;
+  readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
   readonly openDocumentation: () => void;
   readonly showAboutPanel: () => void;
   readonly downloadRelease: (target: SliverReleaseTarget) => void;
   readonly checkForApplicationUpdates: () => void;
   readonly restartToApplyApplicationUpdate: () => void;
+}
+
+export interface AwsCloudMenuDeployment {
+  readonly id: string;
+  readonly name: string;
+  readonly instanceId: string | null;
+  readonly status: CloudDeploymentStatus;
+  readonly hasFirewall: boolean;
 }
 
 export interface ConsoleApplicationMenuActions {
@@ -141,6 +151,7 @@ export function buildApplicationMenuTemplate(
   releaseCatalog: ReleaseMenuCatalog = { status: "loading" },
   applicationUpdateState?: ApplicationUpdateState,
   consoleActions?: ConsoleApplicationMenuActions,
+  awsDeployments: readonly AwsCloudMenuDeployment[] = [],
 ): MenuItemConstructorOptions[] {
   const updateItems = applicationUpdateState
     ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
@@ -225,8 +236,20 @@ export function buildApplicationMenuTemplate(
         {
           id: "cloud.deployment",
           label: "Deployment",
-          click: actions.openCloudDeployment,
+          click: () => actions.openCloudDeployment(),
         },
+        ...(awsDeployments.length > 0
+          ? [
+              { type: "separator" as const },
+              {
+                id: "cloud.aws",
+                label: "AWS",
+                submenu: awsDeployments.map((deployment) =>
+                  buildAwsCloudDeploymentMenu(deployment, actions.openCloudDeployment)
+                ),
+              },
+            ]
+          : []),
       ],
     },
     ...(consoleActions
@@ -315,6 +338,49 @@ export function buildApplicationMenuTemplate(
       ],
     },
   ];
+}
+
+function buildAwsCloudDeploymentMenu(
+  deployment: AwsCloudMenuDeployment,
+  openCloudDeployment: ApplicationMenuActions["openCloudDeployment"],
+): MenuItemConstructorOptions {
+  const busy = deployment.status === "provisioning" || deployment.status === "deleting";
+  const requestLifecycle = (action: "start" | "stop" | "terminate"): void => {
+    openCloudDeployment({ view: "deployments", deploymentId: deployment.id, action });
+  };
+  return {
+    id: `cloud.aws.${deployment.id}`,
+    label: deployment.name || deployment.instanceId || deployment.id,
+    submenu: [
+      {
+        id: `cloud.aws.${deployment.id}.start`,
+        label: "Start",
+        enabled: deployment.status === "stopped",
+        click: () => requestLifecycle("start"),
+      },
+      {
+        id: `cloud.aws.${deployment.id}.stop`,
+        label: "Stop",
+        enabled: deployment.status === "running",
+        click: () => requestLifecycle("stop"),
+      },
+      {
+        id: `cloud.aws.${deployment.id}.terminate`,
+        label: "Terminate",
+        enabled: !busy,
+        click: () => requestLifecycle("terminate"),
+      },
+      {
+        id: `cloud.aws.${deployment.id}.firewall`,
+        label: "Firewall",
+        enabled: !busy && deployment.hasFirewall,
+        click: () => openCloudDeployment({
+          view: "firewall",
+          deploymentId: deployment.id,
+        }),
+      },
+    ],
+  };
 }
 
 function buildApplicationUpdateMenuItems(

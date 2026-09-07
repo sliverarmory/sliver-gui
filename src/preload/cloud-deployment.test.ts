@@ -49,6 +49,7 @@ describe("Cloud Deployment preload bridge", () => {
       "prepareDestroyDeployment",
       "executeDestroyDeployment",
       "onChanged",
+      "onNavigationRequested",
       "onThemeChanged",
     ]);
     expect(Object.isFrozen(api)).toBe(true);
@@ -153,6 +154,74 @@ describe("Cloud Deployment preload bridge", () => {
     unsubscribe();
     handler({}, true);
     expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("validates and replays a navigation request that arrives before subscription", async () => {
+    const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
+      event: unknown,
+      ...payload: unknown[]
+    ) => void;
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    handler({}, { view: "deployments", deploymentId: "not-a-deployment", action: "stop" });
+    handler({}, { view: "deployments", deploymentId, action: "reboot" });
+    handler({}, { view: "firewall", deploymentId, action: "stop" });
+
+    const api = exposedApi();
+    const listener = vi.fn();
+    handler({}, { view: "deployments", deploymentId, action: "stop" });
+    const unsubscribe = api.onNavigationRequested(listener);
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledExactlyOnceWith({
+      view: "deployments",
+      deploymentId,
+      action: "stop",
+    });
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+
+    handler({}, { view: "firewall", deploymentId });
+    expect(listener).toHaveBeenLastCalledWith({ view: "firewall", deploymentId });
+    unsubscribe();
+  });
+
+  it("retains an early navigation request across a subscribe-cleanup-resubscribe cycle", async () => {
+    const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
+      event: unknown,
+      ...payload: unknown[]
+    ) => void;
+    const deploymentId = "33333333-3333-4333-8333-333333333333";
+    const api = exposedApi();
+    const firstListener = vi.fn();
+    const secondListener = vi.fn();
+
+    handler({}, { view: "firewall", deploymentId });
+    const unsubscribeFirst = api.onNavigationRequested(firstListener);
+    unsubscribeFirst();
+    api.onNavigationRequested(secondListener);
+    await Promise.resolve();
+
+    expect(firstListener).not.toHaveBeenCalled();
+    expect(secondListener).toHaveBeenCalledExactlyOnceWith({ view: "firewall", deploymentId });
+  });
+
+  it("does not replay an older buffered request after a newer live request", async () => {
+    const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
+      event: unknown,
+      ...payload: unknown[]
+    ) => void;
+    const firstDeploymentId = "44444444-4444-4444-8444-444444444444";
+    const secondDeploymentId = "55555555-5555-4555-8555-555555555555";
+    const listener = vi.fn();
+
+    handler({}, { view: "firewall", deploymentId: firstDeploymentId });
+    exposedApi().onNavigationRequested(listener);
+    handler({}, { view: "deployments", deploymentId: secondDeploymentId, action: "start" });
+    await Promise.resolve();
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith({
+      view: "deployments",
+      deploymentId: secondDeploymentId,
+      action: "start",
+    });
   });
 });
 

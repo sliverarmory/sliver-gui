@@ -197,6 +197,91 @@ describe("application menu templates", () => {
     expect(actions.openDocumentation).toHaveBeenCalledOnce();
   });
 
+  it("builds state-aware AWS deployment actions and routes exact navigation requests", () => {
+    const openCloudDeployment = vi.fn();
+    const actions = {
+      newWindow: vi.fn(),
+      duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment,
+      openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
+      downloadRelease: vi.fn(),
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
+    };
+    const runningId = "11111111-1111-4111-8111-111111111111";
+    const stoppedId = "22222222-2222-4222-8222-222222222222";
+    const busyId = "33333333-3333-4333-8333-333333333333";
+    const template = buildApplicationMenuTemplate(
+      "darwin",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      undefined,
+      undefined,
+      [
+        {
+          id: runningId,
+          name: "operator-control",
+          instanceId: "i-00000000000000001",
+          status: "running",
+          hasFirewall: true,
+        },
+        {
+          id: stoppedId,
+          name: "",
+          instanceId: "i-00000000000000002",
+          status: "stopped",
+          hasFirewall: false,
+        },
+        {
+          id: busyId,
+          name: "",
+          instanceId: null,
+          status: "provisioning",
+          hasFirewall: true,
+        },
+      ],
+    );
+
+    const cloud = menuItems(template, "Cloud");
+    expect(itemLabels(cloud)).toEqual(["Deployment", "AWS"]);
+    const aws = nestedMenuItems(cloud, "AWS");
+    expect(aws.map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: `cloud.aws.${runningId}`, label: "operator-control" },
+      { id: `cloud.aws.${stoppedId}`, label: "i-00000000000000002" },
+      { id: `cloud.aws.${busyId}`, label: busyId },
+    ]);
+
+    const running = nestedMenuItems(aws, "operator-control");
+    expect(running.map(({ label, enabled }) => ({ label, enabled }))).toEqual([
+      { label: "Start", enabled: false },
+      { label: "Stop", enabled: true },
+      { label: "Terminate", enabled: true },
+      { label: "Firewall", enabled: true },
+    ]);
+    clickItem(running.find(({ label }) => label === "Stop"));
+    clickItem(running.find(({ label }) => label === "Terminate"));
+    clickItem(running.find(({ label }) => label === "Firewall"));
+
+    const stopped = nestedMenuItems(aws, "i-00000000000000002");
+    expect(stopped.map(({ label, enabled }) => ({ label, enabled }))).toEqual([
+      { label: "Start", enabled: true },
+      { label: "Stop", enabled: false },
+      { label: "Terminate", enabled: true },
+      { label: "Firewall", enabled: false },
+    ]);
+    clickItem(stopped.find(({ label }) => label === "Start"));
+
+    expect(nestedMenuItems(aws, busyId).every(({ enabled }) => enabled === false)).toBe(true);
+    expect(openCloudDeployment.mock.calls).toEqual([
+      [{ view: "deployments", deploymentId: runningId, action: "stop" }],
+      [{ view: "deployments", deploymentId: runningId, action: "terminate" }],
+      [{ view: "firewall", deploymentId: runningId }],
+      [{ view: "deployments", deploymentId: stoppedId, action: "start" }],
+    ]);
+  });
+
   it("uses the conventional non-macOS close and quit placements", () => {
     const showAboutPanel = vi.fn();
     const template = buildApplicationMenuTemplate("win32", "Sliver GUI", {

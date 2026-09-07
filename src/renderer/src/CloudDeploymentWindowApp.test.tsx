@@ -1,5 +1,6 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -7,10 +8,12 @@ import type {
   AwsFirewallSnapshot,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
+  ProxmoxCloudDeploymentRecord,
 } from "../../shared/cloud-deployment-contracts";
 import type {
   CloudDeploymentAPI,
   CloudDeploymentChangeScope,
+  CloudDeploymentNavigationRequest,
   CloudDeploymentSnapshot,
   CurrentEgressIpv4,
 } from "../../shared/cloud-deployment-ipc";
@@ -37,11 +40,13 @@ const KEY_TOKEN = "2b1cbf1a-6861-4db8-a39d-ffbdad8087f8";
 let currentSnapshot: CloudDeploymentSnapshot;
 let themeListener: ((dark: boolean) => void) | undefined;
 let changedListener: ((scope: CloudDeploymentChangeScope) => void) | undefined;
+let navigationListener: ((request: CloudDeploymentNavigationRequest) => void) | undefined;
 let capturedCredential: CreateCloudCredentialInput | undefined;
 let capturedDeployment: CreateCloudDeploymentInput | undefined;
 let currentFirewallSnapshot: AwsFirewallSnapshot;
 const unsubscribeTheme = vi.fn();
 const unsubscribeChanged = vi.fn();
+const unsubscribeNavigation = vi.fn();
 
 const awsCredential = {
   id: CREDENTIAL_ID,
@@ -272,6 +277,10 @@ const api: CloudDeploymentAPI = {
     changedListener = listener;
     return unsubscribeChanged;
   }),
+  onNavigationRequested: vi.fn((listener) => {
+    navigationListener = listener;
+    return unsubscribeNavigation;
+  }),
   onThemeChanged: vi.fn((listener) => {
     themeListener = listener;
     return unsubscribeTheme;
@@ -311,14 +320,17 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  toast.clear();
   currentSnapshot = emptySnapshot;
   themeListener = undefined;
   changedListener = undefined;
+  navigationListener = undefined;
   capturedCredential = undefined;
   capturedDeployment = undefined;
   currentFirewallSnapshot = firewallSnapshot;
   unsubscribeTheme.mockClear();
   unsubscribeChanged.mockClear();
+  unsubscribeNavigation.mockClear();
   vi.mocked(api.getSnapshot).mockClear();
   vi.mocked(api.getProvisioningTranscripts).mockClear();
   vi.mocked(api.chooseSshPrivateKey).mockClear();
@@ -345,6 +357,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  toast.clear();
   cleanup();
   Reflect.deleteProperty(window, "cloudDeployment");
   document.documentElement.className = "";
@@ -352,9 +365,18 @@ afterEach(() => {
   document.documentElement.style.colorScheme = "";
 });
 
+function renderCloudDeploymentApp(): ReturnType<typeof render> {
+  return render(
+    <>
+      <CloudDeploymentWindowApp />
+      <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+    </>,
+  );
+}
+
 describe("CloudDeploymentWindowApp", () => {
   it("loads an accessible standalone dashboard and responds to bounded native events", async () => {
-    const view = render(<CloudDeploymentWindowApp />);
+    const view = renderCloudDeploymentApp();
 
     expect(await screen.findByRole("heading", { name: "Cloud Deployment" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Deployments/i })).toBeInTheDocument();
@@ -375,6 +397,7 @@ describe("CloudDeploymentWindowApp", () => {
     view.unmount();
     expect(unsubscribeTheme).toHaveBeenCalledOnce();
     expect(unsubscribeChanged).toHaveBeenCalledOnce();
+    expect(unsubscribeNavigation).toHaveBeenCalledOnce();
   });
 
   it("coalesces rapid deployment changes into one trailing snapshot refresh", async () => {
@@ -384,7 +407,7 @@ describe("CloudDeploymentWindowApp", () => {
       .mockReturnValueOnce(firstSnapshot.promise)
       .mockReturnValueOnce(trailingSnapshot.promise);
 
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
     await waitFor(() => expect(api.getSnapshot).toHaveBeenCalledOnce());
     act(() => {
       changedListener?.("snapshot");
@@ -409,7 +432,7 @@ describe("CloudDeploymentWindowApp", () => {
   });
 
   it("refreshes only bounded transcript data for transcript change signals", async () => {
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
     expect(await screen.findByText("No Managed Servers")).toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledOnce();
 
@@ -442,7 +465,7 @@ describe("CloudDeploymentWindowApp", () => {
       }],
     };
 
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     expect(await screen.findByRole("heading", { name: "range-control" })).toBeInTheDocument();
     expect(screen.getByText("AWS Status Checks")).toBeInTheDocument();
@@ -455,7 +478,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("creates an AWS credential using only an opaque native-picker key token", async () => {
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     expect(screen.getByRole("heading", { name: "Provider Credentials" })).toBeInTheDocument();
@@ -484,7 +507,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("requests an automatically generated Ed25519 key when no existing key is selected", async () => {
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     expect(screen.getByText(/a new Ed25519 key will be generated automatically/i)).toBeInTheDocument();
@@ -507,7 +530,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("can return to automatic key generation after selecting an existing SSH key", async () => {
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.click(screen.getByRole("button", { name: "Choose Key" }));
@@ -529,7 +552,7 @@ describe("CloudDeploymentWindowApp", () => {
       ],
     };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("profile");
@@ -560,7 +583,7 @@ describe("CloudDeploymentWindowApp", () => {
       awsProfiles: [{ name: "default", region: "us-west-2" }],
     };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     const authentication = screen.getByRole("combobox", { name: "AWS Authentication" });
@@ -586,7 +609,7 @@ describe("CloudDeploymentWindowApp", () => {
       ],
     };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.selectOptions(screen.getByRole("combobox", { name: "AWS CLI Profile" }), "operators");
@@ -615,7 +638,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("supports direct Proxmox API-token credentials without exposing SSH key contents", async () => {
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "proxmox");
@@ -655,7 +678,7 @@ describe("CloudDeploymentWindowApp", () => {
       },
     });
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.click(screen.getByRole("button", { name: "Test connection for Production AWS" }));
@@ -696,7 +719,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await waitFor(() => expect(detectCurrentEgressIpv4).toHaveBeenCalledOnce());
@@ -716,7 +739,7 @@ describe("CloudDeploymentWindowApp", () => {
     detectCurrentEgressIpv4.mockReturnValueOnce(detection.promise);
     currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "preserve-egress");
@@ -746,7 +769,7 @@ describe("CloudDeploymentWindowApp", () => {
     detectCurrentEgressIpv4.mockRejectedValueOnce(new Error("network unavailable"));
     currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "manual-egress");
@@ -762,7 +785,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("collects provider-specific infrastructure and separate firewall CIDRs before deployment", async () => {
     currentSnapshot = { ...emptySnapshot, state: { ...emptySnapshot.state, revision: 7 }, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "range-control");
@@ -855,7 +878,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
 
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "range-control");
     await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -925,7 +948,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("offers the bounded t3/t4g catalog and keeps AMIs aligned with architecture", async () => {
     currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "catalog-test");
@@ -958,7 +981,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("supports managed networking and disables AWS key pairs that do not match the credential", async () => {
     currentSnapshot = { ...emptySnapshot, state: { ...emptySnapshot.state, revision: 4 }, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "managed-network");
@@ -1009,7 +1032,7 @@ describe("CloudDeploymentWindowApp", () => {
     discoverAwsOptions.mockResolvedValueOnce({ ok: false, error: "ec2:DescribeVpcs denied" });
     currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "New Deployment" }));
     await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "retry-discovery");
@@ -1033,7 +1056,7 @@ describe("CloudDeploymentWindowApp", () => {
       provisioningTranscripts: [],
     };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     expect(await screen.findByText("range-control")).toBeInTheDocument();
     const stopButton = screen.getByRole("button", { name: /Stop/i });
@@ -1053,10 +1076,270 @@ describe("CloudDeploymentWindowApp", () => {
     await waitFor(() => expect(api.executeDestroyDeployment).toHaveBeenCalledWith({ token: "destroy-token" }));
   });
 
+  it("handles a native stop request on the deployments tab with a modal for the full pending duration", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
+    vi.mocked(api.runLifecycleAction).mockImplementationOnce(() => lifecycleResult.promise);
+    const successToast = vi.spyOn(toast, "success");
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("tab", { name: /Credentials/u }));
+    expect(screen.getByRole("heading", { name: "Provider Credentials" })).toBeInTheDocument();
+
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "stop",
+    }));
+
+    const progress = await screen.findByRole("dialog", { name: "Stopping range-control" });
+    expect(within(progress).getByText(/provider request is in progress/u)).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Deployments/u, hidden: true })).toHaveAttribute("aria-selected", "true");
+    expect(api.runLifecycleAction).toHaveBeenCalledWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 9,
+      action: "stop",
+    });
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "stop",
+    }));
+    await waitFor(() => expect(api.runLifecycleAction).toHaveBeenCalledOnce());
+    act(() => navigationListener?.({ view: "firewall", deploymentId: DEPLOYMENT_ID }));
+    expect(screen.getByRole("dialog", { name: "Stopping range-control" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Firewall rules" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop range-control", hidden: true })).toHaveClass(
+      "bg-warning-soft",
+      "text-warning-soft-foreground",
+      "hover:bg-warning-soft-hover",
+    );
+    expect(screen.getByRole("button", { name: "Reboot range-control", hidden: true })).toHaveClass(
+      "bg-warning-soft",
+      "text-warning-soft-foreground",
+      "hover:bg-warning-soft-hover",
+    );
+
+    await act(async () => {
+      lifecycleResult.resolve({ ok: true, value: runningDeployment });
+      await lifecycleResult.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Stopping range-control" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
+    expect(successToast).toHaveBeenCalledWith("Stop requested", {
+      description: "range-control was updated by AWS EC2.",
+      timeout: 30_000,
+    });
+    successToast.mockRestore();
+  });
+
+  it("serializes native lifecycle actions across deployment cards", async () => {
+    const secondDeploymentId = "44444444-4444-4444-8444-444444444444";
+    const secondDeployment: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      id: secondDeploymentId,
+      name: "range-secondary",
+      remoteHost: "198.51.100.25",
+      managedAssets: [{ resourceType: "ec2-instance", resourceId: "i-def456", displayName: "range-secondary", tagged: true }],
+      runtime: {
+        ...runningDeployment.runtime,
+        instanceId: "i-def456",
+        publicIpAddress: "198.51.100.25",
+      },
+    };
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: { v: 1, revision: 12, deployments: [runningDeployment, secondDeployment] },
+    };
+    const firstResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
+    const secondResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
+    vi.mocked(api.runLifecycleAction)
+      .mockImplementationOnce(() => firstResult.promise)
+      .mockImplementationOnce(() => secondResult.promise);
+    renderCloudDeploymentApp();
+
+    await screen.findByText("range-secondary");
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "stop",
+    }));
+    expect(await screen.findByRole("dialog", { name: "Stopping range-control" })).toBeInTheDocument();
+
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: secondDeploymentId,
+      action: "stop",
+    }));
+    expect(api.runLifecycleAction).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog", { name: "Stopping range-secondary" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      firstResult.resolve({ ok: true, value: runningDeployment });
+      await firstResult.promise;
+    });
+    await waitFor(() => expect(api.runLifecycleAction).toHaveBeenCalledTimes(2));
+    expect(api.runLifecycleAction).toHaveBeenLastCalledWith({
+      deploymentId: secondDeploymentId,
+      expectedRevision: 12,
+      action: "stop",
+    });
+    expect(await screen.findByRole("dialog", { name: "Stopping range-secondary" })).toBeInTheDocument();
+
+    await act(async () => {
+      secondResult.resolve({ ok: true, value: secondDeployment });
+      await secondResult.promise;
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Stopping range-secondary" })).not.toBeInTheDocument());
+  });
+
+  it("shows the pending modal for a native start request until the provider responds", async () => {
+    const stoppedDeployment: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      status: "stopped",
+      phase: "stopped",
+      runtime: {
+        ...runningDeployment.runtime,
+        instanceState: "stopped",
+        instanceHealth: "unknown",
+        systemHealth: "unknown",
+      },
+    };
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: { v: 1, revision: 10, deployments: [stoppedDeployment] },
+    };
+    const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
+    vi.mocked(api.runLifecycleAction).mockImplementationOnce(() => lifecycleResult.promise);
+    renderCloudDeploymentApp();
+
+    await screen.findByText("range-control");
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "start",
+    }));
+
+    expect(await screen.findByRole("dialog", { name: "Starting range-control" })).toBeInTheDocument();
+    expect(api.runLifecycleAction).toHaveBeenCalledWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 10,
+      action: "start",
+    });
+
+    await act(async () => {
+      lifecycleResult.resolve({ ok: true, value: runningDeployment });
+      await lifecycleResult.promise;
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Starting range-control" })).not.toBeInTheDocument());
+  });
+
+  it("keeps native termination confirmation before showing its pending modal", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const destroyResult = deferred<Awaited<ReturnType<CloudDeploymentAPI["executeDestroyDeployment"]>>>();
+    vi.mocked(api.executeDestroyDeployment).mockImplementationOnce(() => destroyResult.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await screen.findByText("range-control");
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "terminate",
+    }));
+
+    const confirmation = await screen.findByRole("alertdialog", { name: "Terminate range-control?" });
+    expect(screen.queryByRole("dialog", { name: "Terminating range-control" })).not.toBeInTheDocument();
+    await user.click(within(confirmation).getByRole("button", { name: "Terminate Instance" }));
+
+    expect(await screen.findByRole("dialog", { name: "Terminating range-control" })).toBeInTheDocument();
+    expect(api.executeDestroyDeployment).toHaveBeenCalledWith({ token: "destroy-token" });
+
+    await act(async () => {
+      destroyResult.resolve({ ok: true, value: emptySnapshot.state });
+      await destroyResult.promise;
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Terminating range-control" })).not.toBeInTheDocument());
+  });
+
+  it("opens the requested AWS firewall view from native navigation", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    renderCloudDeploymentApp();
+
+    await screen.findByText("range-control");
+    act(() => navigationListener?.({ view: "firewall", deploymentId: DEPLOYMENT_ID }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "range-control" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
+    expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID });
+  });
+
+  it("surfaces persistent errors for stale or unsupported native navigation targets", async () => {
+    const proxmoxDeployment: ProxmoxCloudDeploymentRecord = {
+      id: "c6418f75-e7bd-4e65-b378-b29fea6d63b2",
+      provider: "proxmox",
+      name: "lab-vm",
+      credentialId: CREDENTIAL_ID,
+      status: "running",
+      phase: "ready",
+      createdAt: "2026-09-06T18:00:00.000Z",
+      updatedAt: "2026-09-06T18:05:00.000Z",
+      operatorConfigFileName: "lab-vm.cfg",
+      operatorConfigDigest: "b".repeat(64),
+      remoteHost: "192.0.2.40",
+      lastError: null,
+      managedAssets: [{ resourceType: "proxmox-vm", resourceId: "pve/140", displayName: "lab-vm", tagged: true }],
+      spec: {
+        node: "pve",
+        templateVmId: 9000,
+        vmId: 140,
+        storage: "local-lvm",
+        bridge: "vmbr0",
+        cores: 2,
+        memoryMiB: 4096,
+        diskGiB: 20,
+        operatorName: "operator",
+        sshPort: 22,
+        multiplayerPort: 31337,
+        ipConfig: "ip=dhcp",
+        gateway: null,
+        sshCidrs: ["192.0.2.0/24"],
+        operatorCidrs: ["192.0.2.0/24"],
+      },
+      runtime: { vmId: 140, node: "pve", ipAddress: "192.0.2.40" },
+    };
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: { v: 1, revision: 9, deployments: [proxmoxDeployment] },
+    };
+    const dangerToast = vi.spyOn(toast, "danger");
+    renderCloudDeploymentApp();
+
+    await screen.findByText("lab-vm");
+    act(() => navigationListener?.({ view: "firewall", deploymentId: proxmoxDeployment.id }));
+    const unsupportedAlert = await screen.findByRole("alert");
+    expect(unsupportedAlert).toHaveTextContent("Firewall unavailable");
+    expect(unsupportedAlert).toHaveTextContent("is not an AWS EC2 deployment");
+    expect(dangerToast).not.toHaveBeenCalled();
+
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "start",
+    }));
+    const staleAlert = await screen.findByRole("alert");
+    expect(staleAlert).toHaveTextContent("Cloud action unavailable");
+    expect(staleAlert).toHaveTextContent("is no longer in the managed inventory");
+    expect(dangerToast).not.toHaveBeenCalled();
+    dangerToast.mockRestore();
+  });
+
   it("opens a dedicated AWS instance details view with inbound and outbound rule tables", async () => {
     currentSnapshot = runningCloudSnapshot();
     const user = userEvent.setup();
-    const { container } = render(<CloudDeploymentWindowApp />);
+    const { container } = renderCloudDeploymentApp();
 
     expect(await screen.findByText("range-control")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Edit firewall for range-control" }));
@@ -1118,7 +1401,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("opens rule editing from accessible row actions without bubbling nested delete actions", async () => {
     currentSnapshot = runningCloudSnapshot();
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
     const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
@@ -1145,7 +1428,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("creates an AWS firewall rule from the add-rule sheet and warns about public inbound access", async () => {
     currentSnapshot = runningCloudSnapshot();
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
     await screen.findByRole("grid", { name: "Inbound firewall rules" });
@@ -1181,7 +1464,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("updates an AWS firewall rule while keeping its direction and peer type fixed", async () => {
     currentSnapshot = runningCloudSnapshot();
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
     const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
@@ -1222,7 +1505,7 @@ describe("CloudDeploymentWindowApp", () => {
       value: { ...firewallSnapshot, rules: firewallSnapshot.rules.filter(({ direction }) => direction === "ingress") },
     });
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
     await screen.findByRole("grid", { name: "Inbound firewall rules" });
@@ -1253,7 +1536,7 @@ describe("CloudDeploymentWindowApp", () => {
       provisioningTranscripts: [],
     };
     const user = userEvent.setup();
-    render(<CloudDeploymentWindowApp />);
+    renderCloudDeploymentApp();
 
     expect(await screen.findByText("range-control")).toBeInTheDocument();
     vi.mocked(api.getSnapshot).mockResolvedValueOnce({ ok: false, error: "provider snapshot unavailable" });

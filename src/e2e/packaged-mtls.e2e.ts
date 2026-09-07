@@ -157,7 +157,7 @@ test("packaged production app completes current mTLS read and mutation flows", {
         { cause: error },
       );
     }
-    assert.equal(await page.getByRole("dialog", { name: "Server build mismatch" }).count(), 0);
+    assert.equal(await page.getByRole("dialog", { name: "Server version mismatch" }).count(), 0);
     await page.getByText("#80", { exact: true }).waitFor();
 
     await verifyPackagedSliverConsole({

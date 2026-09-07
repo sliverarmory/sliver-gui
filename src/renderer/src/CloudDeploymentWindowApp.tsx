@@ -17,6 +17,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  Alert,
   AlertDialog,
   Button,
   Card,
@@ -26,15 +27,18 @@ import {
   Input,
   Label,
   ListBox,
+  Modal,
   ProgressBar,
   ScrollShadow,
   Select,
   Skeleton,
+  Spinner,
   Switch,
   Tabs,
   TextArea,
   TextField,
   Tooltip,
+  toast,
 } from "@heroui/react";
 import { DataGrid, type DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
@@ -65,6 +69,7 @@ import type {
   CloudCredentialTestResult,
   CloudDeploymentAPI,
   CloudDeploymentChangeScope,
+  CloudDeploymentNavigationRequest,
   CloudDeploymentSnapshot,
   CloudProvisioningTranscript,
   DestroyCloudDeploymentPlan,
@@ -85,6 +90,16 @@ interface RefreshFailure {
   readonly scope: CloudDeploymentChangeScope;
   readonly message: string;
 }
+
+type CloudDeploymentActionRequest = Extract<CloudDeploymentNavigationRequest, { readonly view: "deployments" }>;
+type CloudDeploymentCardAction = CloudDeploymentActionRequest["action"] | "reboot";
+
+interface ActiveCloudDeploymentCardAction {
+  readonly deploymentId: string;
+  readonly action: CloudDeploymentCardAction;
+}
+
+const FEEDBACK_TOAST_TIMEOUT_MS = 30_000;
 
 type EgressIpv4Detection =
   | { readonly status: "loading" }
@@ -221,11 +236,65 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [selectedTab, setSelectedTab] = useState("deployments");
   const [detailsDeploymentId, setDetailsDeploymentId] = useState<string | null>(null);
+  const [actionRequest, setActionRequest] = useState<CloudDeploymentActionRequest | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshQueued = useRef<CloudDeploymentChangeScope | null>(null);
   const snapshotRef = useRef<CloudDeploymentSnapshot | null>(null);
+  const activeCardAction = useRef<ActiveCloudDeploymentCardAction | null>(null);
+  const queuedNavigationRequest = useRef<CloudDeploymentNavigationRequest | null>(null);
 
   const api = window.cloudDeployment;
+  const showFeedback = useCallback((nextFeedback: Feedback): void => {
+    if (nextFeedback.tone === "danger") {
+      setFeedback(nextFeedback);
+      return;
+    }
+    setFeedback(null);
+    const options = {
+      description: nextFeedback.detail,
+      timeout: FEEDBACK_TOAST_TIMEOUT_MS,
+    };
+    if (nextFeedback.tone === "success") toast.success(nextFeedback.title, options);
+    else if (nextFeedback.tone === "warning") toast.warning(nextFeedback.title, options);
+    else toast.info(nextFeedback.title, options);
+  }, []);
+  const applyNavigationRequest = useCallback((request: CloudDeploymentNavigationRequest): void => {
+    setSelectedTab("deployments");
+    setFeedback(null);
+    if (request.view === "firewall") {
+      setActionRequest(null);
+      setDetailsDeploymentId(request.deploymentId);
+    } else {
+      setDetailsDeploymentId(null);
+      setActionRequest(request);
+    }
+  }, []);
+  const handleNavigationRequest = useCallback((request: CloudDeploymentNavigationRequest): void => {
+    const active = activeCardAction.current;
+    if (active) {
+      if (
+        request.view === "deployments" &&
+        request.deploymentId === active.deploymentId &&
+        request.action === active.action
+      ) return;
+      queuedNavigationRequest.current = request;
+      return;
+    }
+    applyNavigationRequest(request);
+  }, [applyNavigationRequest]);
+  const beginCardAction = useCallback((deploymentId: string, action: CloudDeploymentCardAction): boolean => {
+    if (activeCardAction.current) return false;
+    activeCardAction.current = { deploymentId, action };
+    return true;
+  }, []);
+  const finishCardAction = useCallback((deploymentId: string, action: CloudDeploymentCardAction): void => {
+    const active = activeCardAction.current;
+    if (!active || active.deploymentId !== deploymentId || active.action !== action) return;
+    activeCardAction.current = null;
+    const queued = queuedNavigationRequest.current;
+    queuedNavigationRequest.current = null;
+    if (queued) applyNavigationRequest(queued);
+  }, [applyNavigationRequest]);
   const refresh = useCallback((requestedScope: CloudDeploymentChangeScope = "snapshot"): Promise<void> => {
     const initialScope = snapshotRef.current ? requestedScope : "snapshot";
     if (refreshInFlight.current) {
@@ -307,12 +376,43 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
     document.title = "Cloud Deployment";
     const removeThemeListener = api?.onThemeChanged(applyRendererTheme);
     const removeChangedListener = api?.onChanged((scope) => void refresh(scope));
+    const removeNavigationListener = api?.onNavigationRequested(handleNavigationRequest);
     void refresh();
     return () => {
       removeThemeListener?.();
       removeChangedListener?.();
+      removeNavigationListener?.();
     };
-  }, [api, refresh]);
+  }, [api, handleNavigationRequest, refresh]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    if (actionRequest && !snapshot.state.deployments.some(({ id }) => id === actionRequest.deploymentId)) {
+      setActionRequest(null);
+      setFeedback({
+        tone: "danger",
+        title: "Cloud action unavailable",
+        detail: `The requested deployment (${actionRequest.deploymentId}) is no longer in the managed inventory.`,
+      });
+    }
+    if (!detailsDeploymentId) return;
+    const target = snapshot.state.deployments.find(({ id }) => id === detailsDeploymentId);
+    if (!target) {
+      setDetailsDeploymentId(null);
+      setFeedback({
+        tone: "danger",
+        title: "Deployment unavailable",
+        detail: `The requested deployment (${detailsDeploymentId}) is no longer in the managed inventory.`,
+      });
+    } else if (target.provider !== "aws") {
+      setDetailsDeploymentId(null);
+      setFeedback({
+        tone: "danger",
+        title: "Firewall unavailable",
+        detail: `${target.name} is not an AWS EC2 deployment, so it cannot open the AWS firewall editor.`,
+      });
+    }
+  }, [actionRequest, detailsDeploymentId, snapshot]);
 
   const detailsDeployment = detailsDeploymentId
     ? snapshot?.state.deployments.find(({ id }) => id === detailsDeploymentId)
@@ -386,7 +486,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
             )}
             revision={snapshot.state.revision}
             onBack={() => setDetailsDeploymentId(null)}
-            onFeedback={setFeedback}
+            onFeedback={showFeedback}
             onRefresh={refresh}
           />
         ) : snapshot && api ? (
@@ -412,9 +512,15 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
 
             <Tabs.Panel className="pt-6" id="deployments">
               <DeploymentsPanel
+                actionRequest={actionRequest}
                 api={api}
                 snapshot={snapshot}
-                onFeedback={setFeedback}
+                onActionRequestHandled={(request) => {
+                  setActionRequest((current) => current === request ? null : current);
+                }}
+                onBeginCardAction={beginCardAction}
+                onFinishCardAction={finishCardAction}
+                onFeedback={showFeedback}
                 onOpenAwsDetails={(deploymentId) => {
                   setFeedback(null);
                   setDetailsDeploymentId(deploymentId);
@@ -427,7 +533,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               <CredentialsPanel
                 api={api}
                 snapshot={snapshot}
-                onFeedback={setFeedback}
+                onFeedback={showFeedback}
                 onRefresh={refresh}
               />
             </Tabs.Panel>
@@ -439,15 +545,23 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
 }
 
 function DeploymentsPanel({
+  actionRequest,
   api,
   snapshot,
+  onActionRequestHandled,
+  onBeginCardAction,
+  onFinishCardAction,
   onFeedback,
   onOpenAwsDetails,
   onRefresh,
   onShowCredentials,
 }: {
+  readonly actionRequest: CloudDeploymentActionRequest | null;
   readonly api: CloudDeploymentAPI;
   readonly snapshot: CloudDeploymentSnapshot;
+  readonly onActionRequestHandled: (request: CloudDeploymentActionRequest) => void;
+  readonly onBeginCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => boolean;
+  readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onOpenAwsDetails: (deploymentId: string) => void;
   readonly onRefresh: () => Promise<void>;
@@ -496,12 +610,16 @@ function DeploymentsPanel({
 
       {resumedDeployment ? (
         <DeploymentCard
+          actionRequest={actionRequest?.deploymentId === resumedDeployment.id ? actionRequest : null}
           api={api}
           deployment={resumedDeployment}
           isDeploymentView
           revision={snapshot.state.revision}
           {...(resumedTranscript ? { transcript: resumedTranscript } : {})}
           onFeedback={onFeedback}
+          onActionRequestHandled={onActionRequestHandled}
+          onBeginCardAction={onBeginCardAction}
+          onFinishCardAction={onFinishCardAction}
           onOpenAwsDetails={() => onOpenAwsDetails(resumedDeployment.id)}
           onRefresh={onRefresh}
         />
@@ -513,6 +631,7 @@ function DeploymentsPanel({
           snapshot={snapshot}
           onActiveDeploymentChange={setActiveDeploymentId}
           onActivityChange={setWizardBusy}
+          onBeginCardAction={onBeginCardAction}
           onCancel={closeWizard}
           onCreated={async (name) => {
             closeWizard();
@@ -520,6 +639,7 @@ function DeploymentsPanel({
             await onRefresh();
           }}
           onFeedback={onFeedback}
+          onFinishCardAction={onFinishCardAction}
           onRefresh={onRefresh}
           onShowCredentials={onShowCredentials}
         />
@@ -542,11 +662,15 @@ function DeploymentsPanel({
         <div className="grid gap-4 lg:grid-cols-2">
           {visibleDeployments.map((deployment) => (
             <DeploymentCard
+              actionRequest={actionRequest?.deploymentId === deployment.id ? actionRequest : null}
               api={api}
               deployment={deployment}
               key={deployment.id}
               revision={snapshot.state.revision}
               onFeedback={onFeedback}
+              onActionRequestHandled={onActionRequestHandled}
+              onBeginCardAction={onBeginCardAction}
+              onFinishCardAction={onFinishCardAction}
               onOpenAwsDetails={() => onOpenAwsDetails(deployment.id)}
               onRefresh={onRefresh}
             />
@@ -563,8 +687,10 @@ function DeploymentWizard({
   onCancel,
   onActiveDeploymentChange,
   onActivityChange,
+  onBeginCardAction,
   onCreated,
   onFeedback,
+  onFinishCardAction,
   onRefresh,
   onShowCredentials,
 }: {
@@ -573,8 +699,10 @@ function DeploymentWizard({
   readonly onCancel: () => void;
   readonly onActiveDeploymentChange: (deploymentId: string | null) => void;
   readonly onActivityChange: (active: boolean) => void;
+  readonly onBeginCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => boolean;
   readonly onCreated: (name: string) => Promise<void>;
   readonly onFeedback: (feedback: Feedback) => void;
+  readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onRefresh: () => Promise<void>;
   readonly onShowCredentials: () => void;
 }): React.JSX.Element {
@@ -788,7 +916,9 @@ function DeploymentWizard({
           isDeploymentView
           revision={snapshot.state.revision}
           {...(transcript ? { transcript } : {})}
+          onBeginCardAction={onBeginCardAction}
           onFeedback={onFeedback}
+          onFinishCardAction={onFinishCardAction}
           onRefresh={onRefresh}
           onTerminated={onCancel}
         />
@@ -1322,21 +1452,29 @@ function AwsInfrastructureFields({
 }
 
 function DeploymentCard({
+  actionRequest,
   api,
   deployment,
   isDeploymentView = false,
   revision,
   transcript,
+  onActionRequestHandled,
+  onBeginCardAction,
+  onFinishCardAction,
   onFeedback,
   onOpenAwsDetails,
   onRefresh,
   onTerminated,
 }: {
+  readonly actionRequest?: CloudDeploymentActionRequest | null;
   readonly api: CloudDeploymentAPI;
   readonly deployment: CloudDeploymentRecord;
   readonly isDeploymentView?: boolean;
   readonly revision: number;
   readonly transcript?: CloudProvisioningTranscript;
+  readonly onActionRequestHandled?: (request: CloudDeploymentActionRequest) => void;
+  readonly onBeginCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => boolean;
+  readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onOpenAwsDetails?: () => void;
   readonly onRefresh: () => Promise<void>;
@@ -1348,8 +1486,13 @@ function DeploymentCard({
   const [operatorCidrs, setOperatorCidrs] = useState(deployment.spec.operatorCidrs.join("\n"));
   const [firewallError, setFirewallError] = useState<string | null>(null);
   const [destroyPlan, setDestroyPlan] = useState<DestroyCloudDeploymentPlan | null>(null);
+  const handledActionRequest = useRef<CloudDeploymentActionRequest | null>(null);
+  const actionInFlight = useRef(false);
+  const destroyExecutionInFlight = useRef(false);
 
-  const lifecycle = async (action: "start" | "stop" | "reboot"): Promise<void> => {
+  const lifecycle = useCallback(async (action: "start" | "stop" | "reboot"): Promise<void> => {
+    if (actionInFlight.current || !onBeginCardAction(deployment.id, action)) return;
+    actionInFlight.current = true;
     setPendingAction(action);
     try {
       const result = await api.runLifecycleAction({ deploymentId: deployment.id, expectedRevision: revision, action });
@@ -1362,9 +1505,11 @@ function DeploymentCard({
     } catch (error) {
       onFeedback({ tone: "danger", title: `${titleCase(action)} failed`, detail: errorMessage(error) });
     } finally {
+      actionInFlight.current = false;
       setPendingAction(null);
+      onFinishCardAction(deployment.id, action);
     }
-  };
+  }, [api, deployment.id, deployment.name, deployment.provider, onBeginCardAction, onFeedback, onFinishCardAction, onRefresh, revision]);
 
   const updateFirewall = async (): Promise<void> => {
     const nextSshCidrs = parseCidrs(sshCidrs);
@@ -1391,41 +1536,70 @@ function DeploymentCard({
     }
   };
 
-  const prepareDestroy = async (): Promise<void> => {
+  const prepareDestroy = useCallback(async (): Promise<void> => {
+    if (actionInFlight.current || !onBeginCardAction(deployment.id, "terminate")) return;
+    actionInFlight.current = true;
     setPendingAction("prepare-destroy");
     try {
       const result = await api.prepareDestroyDeployment({ deploymentId: deployment.id, expectedRevision: revision });
       if (!result.ok || !result.value) {
         onFeedback({ tone: "danger", title: "Could not review termination", detail: result.error ?? "The provider assets could not be verified." });
+        actionInFlight.current = false;
+        onFinishCardAction(deployment.id, "terminate");
         return;
       }
       setDestroyPlan(result.value);
     } catch (error) {
+      actionInFlight.current = false;
       onFeedback({ tone: "danger", title: "Could not review termination", detail: errorMessage(error) });
+      onFinishCardAction(deployment.id, "terminate");
     } finally {
       setPendingAction(null);
     }
-  };
+  }, [api, deployment.id, onBeginCardAction, onFeedback, onFinishCardAction, revision]);
 
   const executeDestroy = async (): Promise<void> => {
-    if (!destroyPlan) return;
+    if (!destroyPlan || destroyExecutionInFlight.current) return;
+    destroyExecutionInFlight.current = true;
+    const reviewedPlan = destroyPlan;
+    setDestroyPlan(null);
     setPendingAction("destroy");
     try {
-      const result = await api.executeDestroyDeployment({ token: destroyPlan.token });
+      const result = await api.executeDestroyDeployment({ token: reviewedPlan.token });
       if (!result.ok) {
         onFeedback({ tone: "danger", title: "Termination failed", detail: result.error ?? "The reviewed termination was rejected." });
         return;
       }
-      setDestroyPlan(null);
       onFeedback({ tone: "success", title: "Instance terminated", detail: `${deployment.name} and its verified managed assets were removed.` });
       await onRefresh();
       onTerminated?.();
     } catch (error) {
       onFeedback({ tone: "danger", title: "Termination failed", detail: errorMessage(error) });
     } finally {
+      destroyExecutionInFlight.current = false;
+      actionInFlight.current = false;
       setPendingAction(null);
+      onFinishCardAction(deployment.id, "terminate");
     }
   };
+
+  const cancelDestroyReview = (): void => {
+    setDestroyPlan(null);
+    actionInFlight.current = false;
+    onFinishCardAction(deployment.id, "terminate");
+  };
+
+  useEffect(() => {
+    if (
+      !actionRequest ||
+      actionRequest.deploymentId !== deployment.id ||
+      handledActionRequest.current === actionRequest
+    ) return;
+    handledActionRequest.current = actionRequest;
+    onActionRequestHandled?.(actionRequest);
+    if (actionRequest.action === "terminate") void prepareDestroy();
+    else void lifecycle(actionRequest.action);
+  }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, prepareDestroy]);
 
   const progress = phaseProgress(deployment.phase);
 
@@ -1490,10 +1664,10 @@ function DeploymentCard({
         <Button aria-label={`Start ${deployment.name}`} isDisabled={deployment.status !== "stopped" || pendingAction !== null} size="sm" variant="outline" onPress={() => void lifecycle("start")}>
           <FontAwesomeIcon aria-hidden icon={faPlay} /> Start
         </Button>
-        <Button aria-label={`Stop ${deployment.name}`} isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="outline" onPress={() => void lifecycle("stop")}>
+        <Button aria-label={`Stop ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("stop")}>
           <FontAwesomeIcon aria-hidden icon={faStop} /> Stop
         </Button>
-        <Button aria-label={`Reboot ${deployment.name}`} isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="outline" onPress={() => void lifecycle("reboot")}>
+        <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
           <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
         </Button>
         <Button
@@ -1521,7 +1695,7 @@ function DeploymentCard({
         </Button>
       </Card.Footer>
 
-      <AlertDialog.Backdrop isOpen={destroyPlan !== null} variant="blur" onOpenChange={(open) => { if (!open && pendingAction !== "destroy") setDestroyPlan(null); }}>
+      <AlertDialog.Backdrop isOpen={destroyPlan !== null} variant="blur" onOpenChange={(open) => { if (!open && pendingAction !== "destroy") cancelDestroyReview(); }}>
         <AlertDialog.Container placement="center" size="sm">
           <AlertDialog.Dialog className="sm:max-w-[460px]">
             <AlertDialog.Header>
@@ -1536,12 +1710,14 @@ function DeploymentCard({
               </div>
             </AlertDialog.Body>
             <AlertDialog.Footer>
-              <Button isDisabled={pendingAction === "destroy"} variant="tertiary" onPress={() => setDestroyPlan(null)}>Cancel</Button>
+              <Button isDisabled={pendingAction === "destroy"} variant="tertiary" onPress={cancelDestroyReview}>Cancel</Button>
               <Button isPending={pendingAction === "destroy"} variant="danger" onPress={() => void executeDestroy()}>Terminate Instance</Button>
             </AlertDialog.Footer>
           </AlertDialog.Dialog>
         </AlertDialog.Container>
       </AlertDialog.Backdrop>
+
+      <LifecycleProgressModal action={pendingAction} deploymentName={deployment.name} />
     </Card>
   );
 }
@@ -3200,14 +3376,55 @@ function ReviewGroup({ title, rows }: { readonly title: string; readonly rows: r
 
 function FeedbackBanner({ feedback, onDismiss }: { readonly feedback: Feedback; readonly onDismiss: () => void }): React.JSX.Element {
   return (
-    <div className={`flex items-start gap-3 rounded-2xl px-4 py-3 ${feedbackToneClass(feedback.tone)}`} role={feedback.tone === "danger" ? "alert" : "status"}>
-      <FontAwesomeIcon aria-hidden className="mt-0.5 shrink-0" icon={feedback.tone === "success" ? faCheck : faTriangleExclamation} />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">{feedback.title}</p>
-        <p className="mt-0.5 text-sm leading-5 opacity-80">{feedback.detail}</p>
-      </div>
+    <Alert status="danger" role="alert">
+      <Alert.Indicator />
+      <Alert.Content>
+        <Alert.Title>{feedback.title}</Alert.Title>
+        <Alert.Description>{feedback.detail}</Alert.Description>
+      </Alert.Content>
       <Button size="sm" variant="ghost" onPress={onDismiss}>Dismiss</Button>
-    </div>
+    </Alert>
+  );
+}
+
+function LifecycleProgressModal({
+  action,
+  deploymentName,
+}: {
+  readonly action: string | null;
+  readonly deploymentName: string;
+}): React.JSX.Element {
+  const progressAction = action === "start" || action === "stop" || action === "destroy" ? action : null;
+  const verb = progressAction === "start" ? "Starting" : progressAction === "stop" ? "Stopping" : "Terminating";
+  const color = progressAction === "stop" ? "warning" : progressAction === "destroy" ? "danger" : "accent";
+  return (
+    <Modal.Backdrop
+      isDismissable={false}
+      isKeyboardDismissDisabled
+      isOpen={progressAction !== null}
+      variant="blur"
+    >
+      <Modal.Container placement="center" size="sm">
+        <Modal.Dialog className="sm:max-w-[380px]">
+          <Modal.Header>
+            <Modal.Icon className={progressAction === "stop"
+              ? "bg-warning-soft text-warning-soft-foreground"
+              : progressAction === "destroy"
+                ? "bg-danger-soft text-danger-soft-foreground"
+                : "bg-accent-soft text-accent-soft-foreground"}
+            >
+              <Spinner color={color} size="sm" />
+            </Modal.Icon>
+            <Modal.Heading>{verb} {deploymentName}</Modal.Heading>
+          </Modal.Header>
+          <Modal.Body>
+            <p className="text-sm leading-6 text-muted">
+              The provider request is in progress. Deployment state will refresh when it completes.
+            </p>
+          </Modal.Body>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
   );
 }
 

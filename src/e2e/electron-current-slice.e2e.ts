@@ -18,6 +18,11 @@ import type { SliverReleaseDownloadEvent } from "../shared/release-contracts.js"
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import type { SessionShellResourceList } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
+import {
+  E2E_AWS_DEPLOYMENT,
+  E2E_AWS_DEPLOYMENT_ID,
+  E2E_AWS_DEPLOYMENT_NAME,
+} from "./cloud-deployment-fixture.js";
 
 const PRIVATE_KEY_SECRET = "FAKE_PRIVATE_KEY_M0_DO_NOT_RENDER";
 const TOKEN_SECRET = "FAKE_TOKEN_M0_DO_NOT_RENDER";
@@ -111,7 +116,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await page.getByRole("button", { name: /choose.*file|connect (?:from |external )file/i }).click();
 
     await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
-    assert.equal(await page.getByRole("dialog", { name: "Server build mismatch" }).count(), 0);
+    assert.equal(await page.getByRole("dialog", { name: "Server version mismatch" }).count(), 0);
     await page.getByText("#41", { exact: true }).waitFor();
     await page.getByText("Seeded mTLS listener", { exact: true }).waitFor();
     await assertJobActionColumnSurface(page, 41);
@@ -246,10 +251,27 @@ async function verifyCloudDeploymentWindow(
   assert.ok(Math.abs(cloudBox.y - connectBox.y) < 1, "Cloud Deployment and Connect must share a row");
 
   const initialWindowCount = electronApplication.windows().filter((candidate) => !candidate.isClosed()).length;
+  await invokeApplicationMenuItem(
+    electronApplication,
+    `cloud.aws.${E2E_AWS_DEPLOYMENT_ID}.firewall`,
+  );
+  await waitForWindowCount(electronApplication, initialWindowCount + 1);
+  const coldFirewallPage = await cloudDeploymentPage(electronApplication);
+  await assertAwsFirewallDetails(coldFirewallPage);
+  await coldFirewallPage.close();
+  await waitForWindowCount(electronApplication, initialWindowCount);
+
   await cloudDeployment.click();
   await waitForWindowCount(electronApplication, initialWindowCount + 1);
   const firstCloudPage = await cloudDeploymentPage(electronApplication);
   await assertCloudDeploymentSurface(electronApplication, firstCloudPage);
+  await invokeApplicationMenuItem(
+    electronApplication,
+    `cloud.aws.${E2E_AWS_DEPLOYMENT_ID}.firewall`,
+  );
+  await assertAwsFirewallDetails(firstCloudPage);
+  await firstCloudPage.getByRole("button", { name: "Back to managed servers" }).click();
+  await firstCloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
   await verifyAwsDeploymentWizard(firstCloudPage, artifactDirectory);
   await assertCloudDeploymentThemeSync(electronApplication, workspacePage, firstCloudPage);
   const firstWindowId = await cloudDeploymentWindowId(electronApplication);
@@ -292,6 +314,22 @@ async function verifyCloudDeploymentWindow(
   assert.notEqual(await cloudDeploymentWindowId(electronApplication), reopenedWindowId);
   await recoveredCloudPage.close();
   await waitForWindowCount(electronApplication, initialWindowCount);
+}
+
+async function assertAwsFirewallDetails(cloudPage: Page): Promise<void> {
+  await cloudPage.getByRole("heading", {
+    level: 1,
+    name: E2E_AWS_DEPLOYMENT_NAME,
+    exact: true,
+  }).waitFor();
+  await cloudPage.getByRole("heading", { name: "Instance summary", exact: true }).waitFor();
+  await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
+  await cloudPage.getByRole("grid", { name: "Inbound firewall rules" }).waitFor();
+  assert.equal(
+    await cloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).count(),
+    0,
+    "native Firewall navigation must not stop at the Cloud Deployment dashboard",
+  );
 }
 
 async function verifyAwsDeploymentWizard(
@@ -442,9 +480,8 @@ async function assertCloudDeploymentSurface(
   const newDeploymentButtons = cloudPage.getByRole("button", { name: "New Deployment", exact: true });
   await Promise.all([
     cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor(),
-    cloudPage.getByText("No Managed Servers", { exact: true }).waitFor(),
+    cloudPage.getByRole("heading", { name: E2E_AWS_DEPLOYMENT_NAME, exact: true }).waitFor(),
     newDeploymentButtons.first().waitFor(),
-    cloudPage.getByRole("button", { name: "Manage Credentials", exact: true }).waitFor(),
     cloudPage.getByRole("button", { name: "Refresh cloud deployments", exact: true }).waitFor(),
     cloudPage.getByText("Encrypted credentials", { exact: true }).waitFor(),
   ]);
@@ -480,6 +517,7 @@ async function assertCloudDeploymentSurface(
     keys: [
       ...Object.keys(CLOUD_DEPLOYMENT_IPC_INVOKE),
       "onChanged",
+      "onNavigationRequested",
       "onThemeChanged",
     ].sort(),
   });
@@ -489,7 +527,7 @@ async function assertCloudDeploymentSurface(
   assert.deepEqual(cloudSnapshot, {
     ok: true,
     value: {
-      state: { v: 1, revision: 0, deployments: [] },
+      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT] },
       credentials: [{
         id: "0f24a4da-28c1-4d94-a66d-eb224892745d",
         provider: "aws",
@@ -623,13 +661,18 @@ async function invokeApplicationMenuItem(
   electronApplication: ElectronApplication,
   itemId: string,
 ): Promise<void> {
-  const invoked = await electronApplication.evaluate(({ BrowserWindow, Menu }, id) => {
-    const item = Menu.getApplicationMenu()?.getMenuItemById(id);
-    if (!item || typeof item.click !== "function") return false;
-    Reflect.apply(item.click, item, [item, BrowserWindow.getFocusedWindow(), {}]);
-    return true;
-  }, itemId);
-  if (!invoked) throw new Error(`Expected native application menu item ${itemId}`);
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const invoked = await electronApplication.evaluate(({ BrowserWindow, Menu }, id) => {
+      const item = Menu.getApplicationMenu()?.getMenuItemById(id);
+      if (!item || typeof item.click !== "function") return false;
+      Reflect.apply(item.click, item, [item, BrowserWindow.getFocusedWindow(), {}]);
+      return true;
+    }, itemId);
+    if (invoked) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Expected native application menu item ${itemId}`);
 }
 
 async function assertRendererSecurity(electronApplication: ElectronApplication, page: Page): Promise<void> {
@@ -900,9 +943,10 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    14,
+    15,
     "the connected workspace should expose the bounded app command catalog",
   );
+  await commandPalette.getByRole("menuitem", { name: /Cloud Deployment/u }).waitFor();
   await page.keyboard.press("Escape");
   await commandPalette.waitFor({ state: "hidden" });
 

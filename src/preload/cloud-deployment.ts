@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import type { CloudDeploymentAPI } from "../shared/cloud-deployment-ipc.js";
+import type {
+  CloudDeploymentAPI,
+  CloudDeploymentNavigationRequest,
+} from "../shared/cloud-deployment-ipc.js";
 
 // Keep this sandboxed preload single-file: Electron's sandboxed `require` does
 // not load Rollup chunks. The preload test locks this literal to the shared
@@ -25,16 +28,30 @@ const CHANNELS = Object.freeze({
   prepareDestroyDeployment: "sliver:cloud-deployment:destroy:prepare",
   executeDestroyDeployment: "sliver:cloud-deployment:destroy:execute",
   changed: "sliver:cloud-deployment:changed",
+  navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
 });
 
-const listeners = new Set<(dark: boolean) => void>();
+const themeListeners = new Set<(dark: boolean) => void>();
+const navigationListeners = new Set<(request: CloudDeploymentNavigationRequest) => void>();
 let latestTheme: boolean | undefined;
+let pendingNavigationRequest: CloudDeploymentNavigationRequest | undefined;
 
 ipcRenderer.on(CHANNELS.themeChanged, (_event, ...payload: unknown[]) => {
   if (payload.length !== 1 || typeof payload[0] !== "boolean") return;
   latestTheme = payload[0];
-  for (const listener of listeners) listener(latestTheme);
+  for (const listener of themeListeners) listener(latestTheme);
+});
+
+ipcRenderer.on(CHANNELS.navigationRequested, (_event, ...payload: unknown[]) => {
+  const request = parseNavigationRequest(payload);
+  if (!request) return;
+  if (navigationListeners.size === 0) {
+    pendingNavigationRequest = request;
+    return;
+  }
+  pendingNavigationRequest = undefined;
+  for (const listener of navigationListeners) listener(request);
 });
 
 const api: CloudDeploymentAPI = {
@@ -68,16 +85,76 @@ const api: CloudDeploymentAPI = {
     ipcRenderer.on(CHANNELS.changed, handler);
     return () => ipcRenderer.removeListener(CHANNELS.changed, handler);
   },
-  onThemeChanged: (listener) => {
-    if (typeof listener !== "function") throw new TypeError("theme listener must be a function");
-    listeners.add(listener);
-    if (latestTheme !== undefined) {
+  onNavigationRequested: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("navigation listener must be a function");
+    navigationListeners.add(listener);
+    const pending = pendingNavigationRequest;
+    if (pending) {
       queueMicrotask(() => {
-        if (listeners.has(listener) && latestTheme !== undefined) listener(latestTheme);
+        if (
+          navigationListeners.has(listener) &&
+          pendingNavigationRequest === pending
+        ) {
+          pendingNavigationRequest = undefined;
+          listener(pending);
+        }
       });
     }
-    return () => listeners.delete(listener);
+    return () => navigationListeners.delete(listener);
+  },
+  onThemeChanged: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("theme listener must be a function");
+    themeListeners.add(listener);
+    if (latestTheme !== undefined) {
+      queueMicrotask(() => {
+        if (themeListeners.has(listener) && latestTheme !== undefined) listener(latestTheme);
+      });
+    }
+    return () => themeListeners.delete(listener);
   },
 };
 
 contextBridge.exposeInMainWorld("cloudDeployment", Object.freeze(api));
+
+function parseNavigationRequest(payload: readonly unknown[]): CloudDeploymentNavigationRequest | undefined {
+  if (payload.length !== 1 || !isRecord(payload[0])) return undefined;
+  const request = payload[0];
+  if (!isUuidV4(request["deploymentId"])) return undefined;
+  if (
+    request["view"] === "firewall" &&
+    hasExactKeys(request, ["view", "deploymentId"])
+  ) {
+    return Object.freeze({ view: "firewall", deploymentId: request["deploymentId"] });
+  }
+  if (
+    request["view"] === "deployments" &&
+    hasExactKeys(request, ["view", "deploymentId", "action"]) &&
+    (request["action"] === "start" ||
+      request["action"] === "stop" ||
+      request["action"] === "terminate")
+  ) {
+    return Object.freeze({
+      view: "deployments",
+      deploymentId: request["deploymentId"],
+      action: request["action"],
+    });
+  }
+  return undefined;
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actualKeys = Object.keys(value);
+  return actualKeys.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUuidV4(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}

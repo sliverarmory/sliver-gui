@@ -40,8 +40,8 @@ ReactDOM.createRoot(root).render(
         <RendererSurface />
         <ApplicationUpdateStatus showIdleControl={surface === null} />
         <ReleaseDownloadToasts />
-        <Toast.Provider placement="bottom" maxVisibleToasts={4} />
       </ApplicationSettingsProvider>
     )}
+    <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

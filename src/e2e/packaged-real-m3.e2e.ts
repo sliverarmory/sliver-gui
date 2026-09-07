@@ -916,7 +916,7 @@ async function connectSavedConfig(page: Page): Promise<void> {
   await dialog.getByRole("button", { name: /^connect$/iu }).click();
   await dialog.waitFor({ state: "hidden" });
   await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 30_000 });
-  const mismatch = page.getByRole("dialog", { name: "Server build mismatch" });
+  const mismatch = page.getByRole("dialog", { name: "Server version mismatch" });
   let mismatchVisible = false;
   try {
     await mismatch.waitFor({ state: "visible", timeout: 5_000 });

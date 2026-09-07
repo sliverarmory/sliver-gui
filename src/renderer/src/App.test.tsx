@@ -4,7 +4,7 @@ import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../../shared/contracts";
+import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT, SLIVER_PROTOCOL_COMPATIBILITY } from "../../shared/contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
 import type {
@@ -225,6 +225,31 @@ describe("App startup", () => {
     expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
   });
 
+  it("offers Cloud Deployment by default and opens its window from the command palette", async () => {
+    const user = userEvent.setup();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    vi.mocked(api.openCloudDeploymentWindow).mockResolvedValue({ ok: true });
+    let requestCommandPalette: (() => void) | undefined;
+    vi.mocked(api.onCommandPaletteRequested).mockImplementation((listener) => {
+      requestCommandPalette = listener;
+      return vi.fn();
+    });
+    render(<App />);
+
+    await screen.findByText("No saved configurations");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    act(() => requestCommandPalette?.());
+
+    const cloudDeployment = await screen.findByRole("menuitem", { name: /Cloud Deployment/u });
+    expect(cloudDeployment).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(cloudDeployment);
+
+    await waitFor(() => expect(api.openCloudDeploymentWindow).toHaveBeenCalledOnce());
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+    });
+  });
+
   it("removes stale opaque config IDs when a catalog refresh fails", async () => {
     const config: SavedConfigSummary = {
       id: "46a72a10-a9ad-43ac-9db4-d108a0065e1c",
@@ -324,7 +349,7 @@ describe("App startup", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
-    expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Server version mismatch" })).not.toBeInTheDocument();
     expect(screen.queryByText("Backend degraded")).not.toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
@@ -341,19 +366,19 @@ describe("App startup", () => {
   it("shows a mismatched-server notice once per connection epoch and keeps it dismissed on same-epoch updates", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
-    const mismatchReason = "Sliver 1.7.6 is a modified build and has not been verified against the pinned baseline";
+    const mismatchReason = "Sliver 1.8.0 is outside the compatible 1.7.x version series and may be incompatible with this client";
     snapshot.connection = {
       status: "degraded",
       server: "sliver.example.test:31337",
       operator: "alice",
       configName: "Production",
-      version: "1.7.6 (dirty)",
+      version: "1.8.0",
       epoch: 41,
       error: mismatchReason,
       capabilities: {
         compatibility: "degraded",
         baselineCommit: SLIVER_PROTOCOL_BASELINE_COMMIT,
-        serverVersion: "1.7.6 (dirty)",
+        serverVersion: "1.8.0",
         reason: mismatchReason,
         currentSlice: {
           jobs: true,
@@ -377,10 +402,11 @@ describe("App startup", () => {
     );
     render(<App />);
 
-    const dialog = await screen.findByRole("dialog", { name: "Server build mismatch" });
+    const dialog = await screen.findByRole("dialog", { name: "Server version mismatch" });
     expect(dialog.querySelector('[data-slot="modal-body"]')).toHaveClass("flex", "flex-col", "gap-3");
-    expect(within(dialog).getByText("1.7.6 (dirty)")).toBeInTheDocument();
-    expect(within(dialog).getByText(SLIVER_PROTOCOL_BASELINE_COMMIT.slice(0, 12))).toBeInTheDocument();
+    expect(within(dialog).getByText("1.8.0")).toBeInTheDocument();
+    expect(within(dialog).getByText(SLIVER_PROTOCOL_COMPATIBILITY.series)).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(SLIVER_PROTOCOL_BASELINE_COMMIT.slice(0, 12));
     expect(dialog).toHaveTextContent(mismatchReason);
     expect(dialog).not.toHaveTextContent("Current M0 features remain available");
     const header = document.querySelector<HTMLElement>(".app-header");
@@ -389,7 +415,7 @@ describe("App startup", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "Continue" }));
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Server version mismatch" })).not.toBeInTheDocument();
     });
     expect(screen.queryByRole("button", { name: "Refresh server state" })).not.toBeInTheDocument();
 
@@ -400,7 +426,7 @@ describe("App startup", () => {
         connection: { ...snapshot.connection, status: "reconnecting" },
       });
     });
-    expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Server version mismatch" })).not.toBeInTheDocument();
 
     act(() => {
       emitSnapshot?.({
@@ -408,10 +434,10 @@ describe("App startup", () => {
         connection: { ...snapshot.connection, epoch: 42 },
       });
     });
-    expect(await screen.findByRole("dialog", { name: "Server build mismatch" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Server version mismatch" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Server build mismatch" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Server version mismatch" })).not.toBeInTheDocument();
     });
   });
 

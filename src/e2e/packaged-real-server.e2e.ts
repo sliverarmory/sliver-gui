@@ -19,7 +19,12 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 import { parseConfig, SliverClient, type SliverClientConfig } from "sliver-script";
 
-import { IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import {
+  IPC_INVOKE,
+  SLIVER_PROTOCOL_COMPATIBILITY,
+  type SliverDesktopAPI,
+  type SliverSnapshot,
+} from "../shared/contracts.js";
 
 const OPTED_IN =
   Boolean(process.env["SLIVER_GUI_E2E_CONFIG"]) &&
@@ -141,7 +146,7 @@ test(
         `listener port ${listenerPort} is already represented by a server job`,
       );
 
-      const compatibilityDialog = page.getByRole("dialog", { name: "Server build mismatch" });
+      const compatibilityDialog = page.getByRole("dialog", { name: "Server version mismatch" });
       if (baseline.connection.capabilities?.compatibility === "degraded") {
         await compatibilityDialog.waitFor();
         const compatibilityText = await compatibilityDialog.innerText();
@@ -152,8 +157,8 @@ test(
           "compatibility notice must identify the connected server version",
         );
         assert.ok(
-          compatibilityText.includes(baseline.connection.capabilities.baselineCommit.slice(0, 12)),
-          "compatibility notice must identify the verified baseline",
+          compatibilityText.includes(SLIVER_PROTOCOL_COMPATIBILITY.series),
+          "compatibility notice must identify the compatible semantic-version series",
         );
         assert.ok(
           !compatibilityText.includes("Current M0 features remain available"),

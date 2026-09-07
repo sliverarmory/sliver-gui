@@ -52,6 +52,7 @@ import {
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
   serverRefreshShortcutDispositionForInput,
+  type AwsCloudMenuDeployment,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
 import {
@@ -72,6 +73,7 @@ import { SliverReleaseDownloader } from "./sliver-release-download.js";
 import {
   CLOUD_DEPLOYMENT_IPC_EVENTS,
   type CloudDeploymentChangeScope,
+  type CloudDeploymentNavigationRequest,
 } from "../shared/cloud-deployment-ipc.js";
 import {
   registerCloudDeploymentIpcHandlers,
@@ -239,6 +241,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const consoleWindowsByKey = new Map<string, ConsoleWindowRecord>();
   const consoleWindowsByContentsId = new Map<number, ConsoleWindowRecord>();
   let cloudDeploymentWindow: BrowserWindow | undefined;
+  let cloudDeploymentRendererReady = false;
+  let pendingCloudDeploymentNavigationRequest: CloudDeploymentNavigationRequest | undefined;
   const pendingWindowCleanup = new Set<Promise<void>>();
   let releaseCatalog: ReleaseMenuCatalog = { status: "loading" };
   let releaseDownloader: SliverReleaseDownloader | undefined;
@@ -246,6 +250,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
   let cloudDeploymentController = options.cloudDeploymentController;
+  let awsCloudMenuDeployments: readonly AwsCloudMenuDeployment[] = [];
+  let cloudDeploymentMenuSignature = "[]";
+  let cloudDeploymentMenuRefreshSequence = 0;
   let unsubscribeCloudDeployment: (() => void) | undefined;
   let cloudDeploymentDisposed = false;
   const shutdown = new ApplicationShutdownCoordinator({
@@ -254,9 +261,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   });
 
   function publishCloudDeploymentChanged(scope: CloudDeploymentChangeScope): void {
+    if (shutdown.isStopping) return;
+    if (scope === "snapshot") void refreshCloudDeploymentMenu();
     const window = cloudDeploymentWindow;
     if (
-      shutdown.isStopping ||
       !window ||
       window.isDestroyed() ||
       window.webContents.isDestroyed() ||
@@ -267,6 +275,25 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     } catch {
       // The window may be navigating or closing; it reads a fresh snapshot on
       // the next trusted load.
+    }
+  }
+
+  function flushCloudDeploymentNavigation(window: BrowserWindow): void {
+    const request = pendingCloudDeploymentNavigationRequest;
+    if (
+      !request ||
+      !cloudDeploymentRendererReady ||
+      window !== cloudDeploymentWindow ||
+      window.isDestroyed() ||
+      window.webContents.isDestroyed()
+    ) return;
+    try {
+      window.webContents.send(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested, request);
+      if (pendingCloudDeploymentNavigationRequest === request) {
+        pendingCloudDeploymentNavigationRequest = undefined;
+      }
+    } catch {
+      // Retain the latest request for the next trusted renderer load/focus.
     }
   }
 
@@ -504,32 +531,59 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return window;
   }
 
-  async function openCloudDeploymentWindow(): Promise<OperationResult> {
+  async function openCloudDeploymentWindow(
+    navigationRequest?: CloudDeploymentNavigationRequest,
+  ): Promise<OperationResult> {
     if (shutdown.isStopping) {
       return { ok: false, error: "Cloud Deployment is unavailable while the application is closing" };
     }
+    if (navigationRequest) pendingCloudDeploymentNavigationRequest = navigationRequest;
     let createdWindow: BrowserWindow | undefined;
     try {
       const existing = cloudDeploymentWindow;
-      if (existing && !existing.isDestroyed()) {
+      if (existing && !existing.isDestroyed() && !existing.webContents.isDestroyed()) {
         if (existing.isMinimized()) existing.restore();
         existing.show();
         existing.focus();
+        flushCloudDeploymentNavigation(existing);
         return { ok: true };
       }
 
-      createdWindow = new BrowserWindow(cloudDeploymentWindowOptions(
+      const window = new BrowserWindow(cloudDeploymentWindowOptions(
         cloudDeploymentPreloadPath,
         process.platform,
         runtimeIconPath,
         nativeTheme.shouldUseDarkColors,
       ));
-      cloudDeploymentWindow = createdWindow;
-      createdWindow.on("closed", () => {
-        if (cloudDeploymentWindow === createdWindow) cloudDeploymentWindow = undefined;
+      createdWindow = window;
+      cloudDeploymentWindow = window;
+      cloudDeploymentRendererReady = false;
+      window.on("closed", () => {
+        if (cloudDeploymentWindow === window) {
+          cloudDeploymentWindow = undefined;
+          cloudDeploymentRendererReady = false;
+          pendingCloudDeploymentNavigationRequest = undefined;
+        }
+      });
+      window.webContents.on("did-start-loading", () => {
+        if (cloudDeploymentWindow === window) cloudDeploymentRendererReady = false;
+      });
+      window.webContents.on("did-finish-load", () => {
+        if (
+          cloudDeploymentWindow !== window ||
+          window.isDestroyed() ||
+          window.webContents.isDestroyed()
+        ) return;
+        cloudDeploymentRendererReady = true;
+        window.setTitle("Cloud Deployment");
+        window.webContents.send(
+          CLOUD_DEPLOYMENT_IPC_EVENTS.themeChanged,
+          nativeTheme.shouldUseDarkColors,
+        );
+        flushCloudDeploymentNavigation(window);
       });
       trackWindow(
-        createdWindow,
+        window,
         undefined,
         undefined,
         undefined,
@@ -537,18 +591,26 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         "cloud-deployment",
         false,
       );
-      await loadRenderer(createdWindow, "cloud-deployment");
-      if (createdWindow.isDestroyed()) {
+      await loadRenderer(window, "cloud-deployment");
+      if (window.isDestroyed()) {
         throw new Error("The Cloud Deployment window closed while its renderer was loading");
       }
-      createdWindow.setTitle("Cloud Deployment");
-      createdWindow.webContents.send(
-        CLOUD_DEPLOYMENT_IPC_EVENTS.themeChanged,
-        nativeTheme.shouldUseDarkColors,
-      );
+      if (!cloudDeploymentRendererReady) {
+        cloudDeploymentRendererReady = true;
+        window.setTitle("Cloud Deployment");
+        window.webContents.send(
+          CLOUD_DEPLOYMENT_IPC_EVENTS.themeChanged,
+          nativeTheme.shouldUseDarkColors,
+        );
+      }
+      flushCloudDeploymentNavigation(window);
       return { ok: true };
     } catch (error) {
-      if (cloudDeploymentWindow === createdWindow) cloudDeploymentWindow = undefined;
+      if (cloudDeploymentWindow === createdWindow) {
+        cloudDeploymentWindow = undefined;
+        cloudDeploymentRendererReady = false;
+        pendingCloudDeploymentNavigationRequest = undefined;
+      }
       if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
       return {
         ok: false,
@@ -1409,7 +1471,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const template = buildApplicationMenuTemplate(process.platform, APPLICATION_DISPLAY_NAME, {
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
-      openCloudDeployment: () => void openCloudDeploymentWindow(),
+      openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
       openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
       showAboutPanel: () => app.showAboutPanel(),
       downloadRelease: (target) => startReleaseDownload(target),
@@ -1429,7 +1491,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           },
           showSettings: () => sendConsoleMenuEvent(focusedConsole, IPC.consoleSettingsRequested),
         }
-      : undefined);
+      : undefined, awsCloudMenuDeployments);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
@@ -1639,6 +1701,37 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     installMenu();
   }
 
+  async function refreshCloudDeploymentMenu(): Promise<void> {
+    if (shutdown.isStopping) return;
+    const sequence = cloudDeploymentMenuRefreshSequence + 1;
+    cloudDeploymentMenuRefreshSequence = sequence;
+    let next: readonly AwsCloudMenuDeployment[];
+    try {
+      const result = await cloudDeploymentController?.getSnapshot();
+      if (!result?.ok || !result.value) return;
+      next = result.value.state.deployments.flatMap((deployment): AwsCloudMenuDeployment[] => {
+        if (deployment.provider !== "aws") return [];
+        return [{
+          id: deployment.id,
+          name: deployment.name,
+          instanceId: deployment.runtime.instanceId,
+          status: deployment.status,
+          hasFirewall: deployment.runtime.securityGroupIds.length > 0 ||
+            deployment.managedAssets.some(({ resourceType }) => resourceType === "ec2-security-group"),
+        }];
+      });
+    } catch {
+      // Retain the last known menu while a transient snapshot read is unavailable.
+      return;
+    }
+    if (shutdown.isStopping || sequence !== cloudDeploymentMenuRefreshSequence) return;
+    const nextSignature = JSON.stringify(next);
+    if (nextSignature === cloudDeploymentMenuSignature) return;
+    awsCloudMenuDeployments = next;
+    cloudDeploymentMenuSignature = nextSignature;
+    installMenu();
+  }
+
   function installContextMenu(window: BrowserWindow): void {
     window.webContents.on("context-menu", (_event, params) => {
       if (window.isDestroyed() || window.webContents.isDestroyed()) return;
@@ -1715,6 +1808,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     }
   }
   unsubscribeCloudDeployment = cloudDeploymentController.subscribe?.(publishCloudDeploymentChanged);
+  void refreshCloudDeploymentMenu();
   applicationUpdater = createApplicationUpdater({
     currentVersion: app.getVersion(),
     isPackaged: app.isPackaged,

@@ -6098,22 +6098,43 @@ describe("M3 session shell registry boundary", () => {
 });
 
 describe("server compatibility and event redaction", () => {
-  it("supports the pinned baseline, warns for valid mismatches, and rejects invalid versions", () => {
-    expect(negotiateServerVersion(version({ Commit: SLIVER_PROTOCOL_BASELINE_COMMIT }))).toEqual({
-      compatibility: "supported",
-    });
-    expect(negotiateServerVersion(version({ Commit: "different" }))).toMatchObject({ compatibility: "degraded" });
-    expect(negotiateServerVersion(version({ Major: 2, Commit: "different" }))).toMatchObject({
-      compatibility: "degraded",
-      reason: expect.stringMatching(/may be incompatible/u),
-    });
-    expect(negotiateServerVersion(version({ Minor: 5, Commit: "different" }))).toMatchObject({
-      compatibility: "degraded",
-      reason: expect.stringMatching(/may be incompatible/u),
-    });
-    expect(negotiateServerVersion(version({ Major: -1, Commit: "different" }))).toMatchObject({
-      compatibility: "unsupported",
-    });
+  it("matches the semantic-version major/minor series regardless of patch or build provenance", () => {
+    for (const compatible of [
+      version({ Patch: 0, Commit: "" }),
+      version({ Patch: 7, Commit: "different" }),
+      version({ Patch: 999, Commit: "modified", Dirty: true }),
+    ]) {
+      expect(negotiateServerVersion(compatible)).toEqual({ compatibility: "supported" });
+    }
+  });
+
+  it("warns for valid versions outside the compatible semantic-version series", () => {
+    for (const incompatible of [
+      version({ Major: 0, Minor: 0, Patch: 0 }),
+      version({ Minor: 6 }),
+      version({ Minor: 8 }),
+      version({ Major: 2, Minor: 7 }),
+      version({ Major: 2, Minor: 7, Commit: SLIVER_PROTOCOL_BASELINE_COMMIT }),
+    ]) {
+      expect(negotiateServerVersion(incompatible)).toMatchObject({
+        compatibility: "degraded",
+        reason: expect.stringMatching(/outside the compatible 1\.7\.x version series/u),
+      });
+    }
+  });
+
+  it("rejects invalid semantic-version components", () => {
+    for (const invalid of [
+      version({ Major: -1 }),
+      version({ Minor: 1.5 }),
+      version({ Patch: Number.NaN }),
+      version({ Patch: Number.POSITIVE_INFINITY }),
+    ]) {
+      expect(negotiateServerVersion(invalid)).toEqual({
+        compatibility: "unsupported",
+        reason: "The server reported an invalid version",
+      });
+    }
   });
 
   it("never copies arbitrary Data or Err payloads into event summaries", () => {

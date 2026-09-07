@@ -22,7 +22,11 @@ import {
   type SliverClientAdapter,
 } from "../main/connection-registry.js";
 import { loadTerminalRuntime } from "../main/terminal-runtime.js";
-import { SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
+import {
+  E2E_AWS_CREDENTIAL_ID,
+  E2E_AWS_DEPLOYMENT,
+  E2E_AWS_FIREWALL,
+} from "./cloud-deployment-fixture.js";
 
 interface FakeMainState {
   configFactoryCalls: number;
@@ -98,7 +102,6 @@ declare global {
 
 const repositoryRoot = requiredArgument("--repository-root=");
 const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
-const E2E_AWS_CREDENTIAL_ID = "0f24a4da-28c1-4d94-a66d-eb224892745d";
 const state: FakeMainState = {
   configFactoryCalls: 0,
   dialogCalls: 0,
@@ -164,7 +167,7 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   getSnapshot: () => ({
     ok: true,
     value: {
-      state: { v: 1, revision: 0, deployments: [] },
+      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT] },
       credentials: [{
         id: E2E_AWS_CREDENTIAL_ID,
         provider: "aws",
@@ -238,7 +241,9 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   createDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   runLifecycleAction: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewall: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
-  listFirewallRules: () => ({ ok: false, error: "Cloud inventory is disabled in this E2E fixture" }),
+  listFirewallRules: ({ deploymentId }) => deploymentId === E2E_AWS_DEPLOYMENT.id
+    ? { ok: true, value: E2E_AWS_FIREWALL }
+    : { ok: false, error: "Unknown E2E cloud deployment" },
   createFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   deleteFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
@@ -633,10 +638,10 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       record("getVersion");
       return {
         Major: 1,
-        Minor: 6,
-        Patch: 2,
-        Commit: SLIVER_PROTOCOL_BASELINE_COMMIT,
-        Dirty: false,
+        Minor: 7,
+        Patch: 99,
+        Commit: "e2e-fixture-build",
+        Dirty: true,
         CompiledAt: "2026-08-09T00:00:00Z",
         OS: process.platform,
         Arch: process.arch,
