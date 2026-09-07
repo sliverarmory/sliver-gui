@@ -34,6 +34,7 @@ export interface AwsCloudMenuDeployment {
   readonly name: string;
   readonly instanceId: string | null;
   readonly status: CloudDeploymentStatus;
+  readonly hasSsh: boolean;
   readonly hasFirewall: boolean;
 }
 
@@ -371,6 +372,16 @@ function buildAwsCloudDeploymentMenu(
         click: () => requestLifecycle("terminate"),
       },
       { type: "separator" },
+      {
+        id: `cloud.aws.${deployment.id}.ssh`,
+        label: "SSH",
+        enabled: deployment.status === "running" && deployment.hasSsh,
+        click: () => openCloudDeployment({
+          view: "deployments",
+          deploymentId: deployment.id,
+          action: "ssh",
+        }),
+      },
       {
         id: `cloud.aws.${deployment.id}.firewall`,
         label: "Firewall",

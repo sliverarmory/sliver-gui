@@ -135,7 +135,8 @@ function parseNavigationRequest(payload: readonly unknown[]): CloudDeploymentNav
     hasExactKeys(request, ["view", "deploymentId", "action"]) &&
     (request["action"] === "start" ||
       request["action"] === "stop" ||
-      request["action"] === "terminate")
+      request["action"] === "terminate" ||
+      request["action"] === "ssh")
   ) {
     return Object.freeze({
       view: "deployments",

@@ -212,6 +212,7 @@ describe("application menu templates", () => {
     const runningId = "11111111-1111-4111-8111-111111111111";
     const stoppedId = "22222222-2222-4222-8222-222222222222";
     const busyId = "33333333-3333-4333-8333-333333333333";
+    const missingSshId = "44444444-4444-4444-8444-444444444444";
     const template = buildApplicationMenuTemplate(
       "darwin",
       "Sliver GUI",
@@ -225,6 +226,7 @@ describe("application menu templates", () => {
           name: "operator-control",
           instanceId: "i-00000000000000001",
           status: "running",
+          hasSsh: true,
           hasFirewall: true,
         },
         {
@@ -232,6 +234,7 @@ describe("application menu templates", () => {
           name: "",
           instanceId: "i-00000000000000002",
           status: "stopped",
+          hasSsh: true,
           hasFirewall: false,
         },
         {
@@ -239,6 +242,15 @@ describe("application menu templates", () => {
           name: "",
           instanceId: null,
           status: "provisioning",
+          hasSsh: false,
+          hasFirewall: true,
+        },
+        {
+          id: missingSshId,
+          name: "firewall-only",
+          instanceId: "i-00000000000000004",
+          status: "running",
+          hasSsh: false,
           hasFirewall: true,
         },
       ],
@@ -251,6 +263,7 @@ describe("application menu templates", () => {
       { id: `cloud.aws.${runningId}`, label: "operator-control" },
       { id: `cloud.aws.${stoppedId}`, label: "i-00000000000000002" },
       { id: `cloud.aws.${busyId}`, label: busyId },
+      { id: `cloud.aws.${missingSshId}`, label: "firewall-only" },
     ]);
 
     const running = nestedMenuItems(aws, "operator-control");
@@ -261,10 +274,15 @@ describe("application menu templates", () => {
       { label: "Stop", enabled: true },
       { label: "Terminate", enabled: true },
       { type: "separator" },
+      { label: "SSH", enabled: true },
       { label: "Firewall", enabled: true },
     ]);
+    expect(running.find(({ label }) => label === "SSH")).toMatchObject({
+      id: `cloud.aws.${runningId}.ssh`,
+    });
     clickItem(running.find(({ label }) => label === "Stop"));
     clickItem(running.find(({ label }) => label === "Terminate"));
+    clickItem(running.find(({ label }) => label === "SSH"));
     clickItem(running.find(({ label }) => label === "Firewall"));
 
     const stopped = nestedMenuItems(aws, "i-00000000000000002");
@@ -275,6 +293,7 @@ describe("application menu templates", () => {
       { label: "Stop", enabled: false },
       { label: "Terminate", enabled: true },
       { type: "separator" },
+      { label: "SSH", enabled: false },
       { label: "Firewall", enabled: false },
     ]);
     clickItem(stopped.find(({ label }) => label === "Start"));
@@ -282,9 +301,16 @@ describe("application menu templates", () => {
     const busy = nestedMenuItems(aws, busyId);
     expect(busy.filter(({ type }) => type !== "separator").every(({ enabled }) => enabled === false)).toBe(true);
     expect(busy.filter(({ type }) => type === "separator")).toHaveLength(1);
+    const missingSsh = nestedMenuItems(aws, "firewall-only");
+    expect(missingSsh.find(({ label }) => label === "SSH")).toMatchObject({
+      id: `cloud.aws.${missingSshId}.ssh`,
+      enabled: false,
+    });
+    expect(missingSsh.find(({ label }) => label === "Firewall")).toMatchObject({ enabled: true });
     expect(openCloudDeployment.mock.calls).toEqual([
       [{ view: "deployments", deploymentId: runningId, action: "stop" }],
       [{ view: "deployments", deploymentId: runningId, action: "terminate" }],
+      [{ view: "deployments", deploymentId: runningId, action: "ssh" }],
       [{ view: "firewall", deploymentId: runningId }],
       [{ view: "deployments", deploymentId: stoppedId, action: "start" }],
     ]);

@@ -174,15 +174,18 @@ describe("Cloud Deployment preload bridge", () => {
 
     const api = exposedApi();
     const listener = vi.fn();
-    handler({}, { view: "deployments", deploymentId, action: "stop" });
+    handler({}, { view: "deployments", deploymentId, action: "ssh" });
     const unsubscribe = api.onNavigationRequested(listener);
     await Promise.resolve();
     expect(listener).toHaveBeenCalledExactlyOnceWith({
       view: "deployments",
       deploymentId,
-      action: "stop",
+      action: "ssh",
     });
     expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+
+    handler({}, { view: "deployments", deploymentId, action: "stop" });
+    expect(listener).toHaveBeenLastCalledWith({ view: "deployments", deploymentId, action: "stop" });
 
     handler({}, { view: "firewall", deploymentId });
     expect(listener).toHaveBeenLastCalledWith({ view: "firewall", deploymentId });

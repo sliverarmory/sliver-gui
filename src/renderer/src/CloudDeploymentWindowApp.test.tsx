@@ -1107,6 +1107,34 @@ describe("CloudDeploymentWindowApp", () => {
     await waitFor(() => expect(api.executeDestroyDeployment).toHaveBeenCalledWith({ token: "destroy-token" }));
   });
 
+  it("groups connection actions on the left and lifecycle actions on the right", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    renderCloudDeploymentApp();
+
+    const connectionActions = await screen.findByRole("group", { name: "Connection actions for range-control" });
+    const lifecycleActions = screen.getByRole("group", { name: "Lifecycle actions for range-control" });
+
+    const connectionLabels = within(connectionActions)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label"))
+      .filter((label): label is string => label !== null);
+    const lifecycleLabels = within(lifecycleActions)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label"))
+      .filter((label): label is string => label !== null);
+
+    expect(connectionLabels).toEqual([
+      "SSH to range-control",
+      "Edit firewall for range-control",
+    ]);
+    expect(lifecycleLabels).toEqual([
+      "Stop range-control",
+      "Reboot range-control",
+      "Terminate range-control",
+    ]);
+    expect(lifecycleActions).toHaveClass("ml-auto");
+  });
+
   it("opens SSH through the dedicated bridge and requires explicit first-use host-key approval", async () => {
     currentSnapshot = runningCloudSnapshot();
     const openResult = deferred<OperationResult<SshOpenTabResult>>();
@@ -1504,6 +1532,27 @@ describe("CloudDeploymentWindowApp", () => {
       await lifecycleResult.promise;
     });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Starting range-control" })).not.toBeInTheDocument());
+  });
+
+  it("opens SSH from native navigation and preserves first-use host-key review", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.openSshWindow).mockResolvedValueOnce({
+      ok: true,
+      value: { status: "host-key-review", review: sshHostKeyReview },
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("tab", { name: /Credentials/u }));
+    act(() => navigationListener?.({
+      view: "deployments",
+      deploymentId: DEPLOYMENT_ID,
+      action: "ssh",
+    }));
+
+    expect(await screen.findByRole("alertdialog", { name: "Verify SSH host" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Deployments/u, hidden: true })).toHaveAttribute("aria-selected", "true");
+    expect(api.openSshWindow).toHaveBeenCalledExactlyOnceWith({ deploymentId: DEPLOYMENT_ID });
   });
 
   it("keeps native termination confirmation before showing its pending modal", async () => {

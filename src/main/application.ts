@@ -1984,11 +1984,18 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       if (!result?.ok || !result.value) return;
       next = result.value.state.deployments.flatMap((deployment): AwsCloudMenuDeployment[] => {
         if (deployment.provider !== "aws") return [];
+        const hasSshCredential = result.value.credentials.some(({ id, provider }) => (
+          id === deployment.credentialId && provider === deployment.provider
+        ));
+        const sshHost = deployment.runtime.publicIpAddress ??
+          deployment.runtime.privateIpAddress ??
+          deployment.remoteHost;
         return [{
           id: deployment.id,
           name: deployment.name,
           instanceId: deployment.runtime.instanceId,
           status: deployment.status,
+          hasSsh: hasSshCredential && Boolean(sshHost?.trim()),
           hasFirewall: deployment.runtime.securityGroupIds.length > 0 ||
             deployment.managedAssets.some(({ resourceType }) => resourceType === "ec2-security-group"),
         }];

@@ -94,7 +94,7 @@ interface RefreshFailure {
 }
 
 type CloudDeploymentActionRequest = Extract<CloudDeploymentNavigationRequest, { readonly view: "deployments" }>;
-type CloudDeploymentCardAction = CloudDeploymentActionRequest["action"] | "reboot";
+type CloudDeploymentCardAction = Exclude<CloudDeploymentActionRequest["action"], "ssh"> | "reboot";
 
 interface ActiveCloudDeploymentCardAction {
   readonly deploymentId: string;
@@ -1606,7 +1606,7 @@ function DeploymentCard({
     onFinishCardAction(deployment.id, "terminate");
   };
 
-  const openSsh = async (errorSurface: "page" | "host-key-dialog" = "page"): Promise<void> => {
+  const openSsh = useCallback(async (errorSurface: "page" | "host-key-dialog" = "page"): Promise<void> => {
     if (sshRequestInFlight.current) return;
     sshRequestInFlight.current = true;
     setIsOpeningSsh(true);
@@ -1632,7 +1632,7 @@ function DeploymentCard({
       sshRequestInFlight.current = false;
       setIsOpeningSsh(false);
     }
-  };
+  }, [api, deployment.id, onFeedback]);
 
   const approveSshHostKey = async (): Promise<void> => {
     if (!sshHostKeyReview || sshRequestInFlight.current) return;
@@ -1672,9 +1672,10 @@ function DeploymentCard({
     ) return;
     handledActionRequest.current = actionRequest;
     onActionRequestHandled?.(actionRequest);
-    if (actionRequest.action === "terminate") void prepareDestroy();
+    if (actionRequest.action === "ssh") void openSsh();
+    else if (actionRequest.action === "terminate") void prepareDestroy();
     else void lifecycle(actionRequest.action);
-  }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, prepareDestroy]);
+  }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, openSsh, prepareDestroy]);
 
   const progress = phaseProgress(deployment.phase);
   const lifecycleAction = deployment.status === "running"
@@ -1747,76 +1748,79 @@ function DeploymentCard({
           />
         ) : null}
       </Card.Content>
-      <Card.Footer className="flex flex-wrap gap-2">
-        <Tooltip delay={0}>
-          <Tooltip.Trigger
-            {...(sshActionDisabledReason
-              ? {
-                  "aria-label": `SSH action unavailable for ${deployment.name}: ${sshActionDisabledReason}`,
-                  tabIndex: 0,
-                }
-              : { tabIndex: -1 })}
-            className="inline-flex"
-          >
-            <Button
-              aria-label={`SSH to ${deployment.name}`}
-              isDisabled={sshActionDisabledReason !== undefined}
-              isPending={isOpeningSsh}
-              size="sm"
-              variant="outline"
-              onPress={() => void openSsh()}
+      <Card.Footer className="flex w-full flex-wrap items-center gap-2">
+        <div aria-label={`Connection actions for ${deployment.name}`} className="flex flex-wrap items-center gap-2" role="group">
+          <Tooltip delay={0}>
+            <Tooltip.Trigger
+              {...(sshActionDisabledReason
+                ? {
+                    "aria-label": `SSH action unavailable for ${deployment.name}: ${sshActionDisabledReason}`,
+                    tabIndex: 0,
+                  }
+                : { tabIndex: -1 })}
+              className="inline-flex"
             >
-              <FontAwesomeIcon aria-hidden icon={faTerminal} /> SSH
-            </Button>
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {sshActionDisabledReason ?? `Open an SSH session for ${deployment.name}`}
-          </Tooltip.Content>
-        </Tooltip>
-        <Button
-          aria-label={`${lifecycleLabel} ${deployment.name}`}
-          {...(lifecycleAction === "stop"
-            ? { className: "bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" }
-            : {})}
-          isDisabled={lifecycleAction === null || pendingAction !== null}
-          size="sm"
-          variant={lifecycleAction === "stop" ? "tertiary" : "outline"}
-          onPress={() => {
-            if (lifecycleAction) void lifecycle(lifecycleAction);
-          }}
-        >
-          <FontAwesomeIcon aria-hidden icon={lifecycleAction === "stop" ? faStop : faPlay} /> {lifecycleLabel}
-        </Button>
-        <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
-          <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
-        </Button>
-        <Button
-          aria-label={`Edit firewall for ${deployment.name}`}
-          isDisabled={deployment.managedAssets.length === 0 || deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
-          size="sm"
-          variant="outline"
-          onPress={() => {
-            if (deployment.provider === "aws") onOpenAwsDetails?.();
-            else setEditingFirewall((value) => !value);
-          }}
-        >
-          <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
-        </Button>
-        <Tooltip delay={0}>
+              <Button
+                aria-label={`SSH to ${deployment.name}`}
+                isDisabled={sshActionDisabledReason !== undefined}
+                isPending={isOpeningSsh}
+                size="sm"
+                variant="outline"
+                onPress={() => void openSsh()}
+              >
+                <FontAwesomeIcon aria-hidden icon={faTerminal} /> SSH
+              </Button>
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              {sshActionDisabledReason ?? `Open an SSH session for ${deployment.name}`}
+            </Tooltip.Content>
+          </Tooltip>
           <Button
-            aria-label={`Terminate ${deployment.name}`}
-            className="sm:ml-auto"
-            isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
-            isIconOnly
-            isPending={pendingAction === "prepare-destroy"}
+            aria-label={`Edit firewall for ${deployment.name}`}
+            isDisabled={deployment.managedAssets.length === 0 || deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
             size="sm"
-            variant="danger-soft"
-            onPress={() => void prepareDestroy()}
+            variant="outline"
+            onPress={() => {
+              if (deployment.provider === "aws") onOpenAwsDetails?.();
+              else setEditingFirewall((value) => !value);
+            }}
           >
-            <FontAwesomeIcon aria-hidden icon={faTrash} />
+            <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
           </Button>
-          <Tooltip.Content>Terminate</Tooltip.Content>
-        </Tooltip>
+        </div>
+        <div aria-label={`Lifecycle actions for ${deployment.name}`} className="ml-auto flex flex-wrap items-center justify-end gap-2" role="group">
+          <Button
+            aria-label={`${lifecycleLabel} ${deployment.name}`}
+            {...(lifecycleAction === "stop"
+              ? { className: "bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" }
+              : {})}
+            isDisabled={lifecycleAction === null || pendingAction !== null}
+            size="sm"
+            variant={lifecycleAction === "stop" ? "tertiary" : "outline"}
+            onPress={() => {
+              if (lifecycleAction) void lifecycle(lifecycleAction);
+            }}
+          >
+            <FontAwesomeIcon aria-hidden icon={lifecycleAction === "stop" ? faStop : faPlay} /> {lifecycleLabel}
+          </Button>
+          <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
+            <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
+          </Button>
+          <Tooltip delay={0}>
+            <Button
+              aria-label={`Terminate ${deployment.name}`}
+              isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
+              isIconOnly
+              isPending={pendingAction === "prepare-destroy"}
+              size="sm"
+              variant="danger-soft"
+              onPress={() => void prepareDestroy()}
+            >
+              <FontAwesomeIcon aria-hidden icon={faTrash} />
+            </Button>
+            <Tooltip.Content>Terminate</Tooltip.Content>
+          </Tooltip>
+        </div>
       </Card.Footer>
 
       <AlertDialog.Backdrop isOpen={destroyPlan !== null} variant="blur" onOpenChange={(open) => { if (!open && pendingAction !== "destroy") cancelDestroyReview(); }}>

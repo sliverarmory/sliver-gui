@@ -59,7 +59,7 @@ export type CloudDeploymentNavigationRequest =
   | {
       readonly view: "deployments";
       readonly deploymentId: string;
-      readonly action: "start" | "stop" | "terminate";
+      readonly action: "start" | "stop" | "terminate" | "ssh";
     }
   | {
       readonly view: "firewall";
