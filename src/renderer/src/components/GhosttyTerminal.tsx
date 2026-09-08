@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type RefObject,
@@ -17,6 +18,7 @@ import {
 import { STREAM_MAX_TERMINAL_DIMENSION } from "../../../shared/stream-contracts";
 
 import { TerminalOutputSanitizer } from "./terminal-output-sanitizer";
+import { GhosttyTerminalClipboard } from "./GhosttyTerminalClipboard";
 
 const MIN_TERMINAL_DIMENSION = 1;
 const RESIZE_DEBOUNCE_MS = 100;
@@ -66,6 +68,7 @@ export interface GhosttyTerminalProps {
   ariaLabel?: string;
   className?: string;
   disableInput?: boolean;
+  enableClipboard?: boolean;
   terminalResponseBudgetBytes?: number;
   onClose?: (reason?: string) => void;
   onError?: (error: Error) => void;
@@ -86,6 +89,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       ariaLabel = "Interactive session terminal",
       className,
       disableInput = false,
+      enableClipboard = false,
       onClose,
       onError,
       onReady,
@@ -105,7 +109,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
     const onReadyRef = useLatest(onReady);
     const [terminalState, setTerminalState] = useState<TerminalState>("loading");
 
-    useImperativeHandle(forwardedRef, () => ({
+    const terminalHandle = useMemo<GhosttyTerminalHandle>(() => ({
       focus: () => terminalRef.current?.focus(),
       getSelection: () => boundedText(terminalRef.current?.getSelection() ?? ""),
       paste: (text: string) => {
@@ -117,6 +121,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         terminalRef.current?.paste(text);
       },
     }), []);
+    useImperativeHandle(forwardedRef, () => terminalHandle, [terminalHandle]);
 
     useEffect(() => {
       const host = hostRef.current;
@@ -155,12 +160,30 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         event.preventDefault();
         event.stopImmediatePropagation();
       };
+      const keepApplicationContextMenu = (event: Event): void => {
+        // Ancestor capture listeners have already recorded the trusted target.
+        // Leave Chromium's native context-menu default intact, but skip
+        // Ghostty's canvas handler: it focuses/scrolls a hidden textarea to
+        // offer browser clipboard actions, dismissing our application menu.
+        event.stopImmediatePropagation();
+      };
+      const keepHiddenInputScroll = (event: Event): void => {
+        if (!(event.target instanceof HTMLTextAreaElement) || event.target.parentElement !== host) return;
+        // Ghostty's hidden input scrolls when selection/focus changes. These
+        // internal scrolls must not reach the menu's window-capture dismissal
+        // listener; visible terminal, document, and window scrolling still do.
+        event.stopImmediatePropagation();
+      };
 
       host.addEventListener("click", denyModifiedLink, true);
       host.addEventListener("auxclick", denyModifiedLink, true);
       host.addEventListener("copy", denyNativeTransfer, true);
       host.addEventListener("cut", denyNativeTransfer, true);
       host.addEventListener("paste", denyNativeTransfer, true);
+      if (enableClipboard) {
+        host.addEventListener("contextmenu", keepApplicationContextMenu, true);
+        window.addEventListener("scroll", keepHiddenInputScroll, true);
+      }
 
       const sendTerminalData = (data: string): void => {
         if (disposed || streamClosed) return;
@@ -360,12 +383,15 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         host.removeEventListener("copy", denyNativeTransfer, true);
         host.removeEventListener("cut", denyNativeTransfer, true);
         host.removeEventListener("paste", denyNativeTransfer, true);
+        host.removeEventListener("contextmenu", keepApplicationContextMenu, true);
+        window.removeEventListener("scroll", keepHiddenInputScroll, true);
       };
     }, [
       appearance?.scrollback,
       appearance?.theme,
       ariaLabelRef,
       disableInput,
+      enableClipboard,
       onCloseRef,
       onErrorRef,
       onReadyRef,
@@ -415,7 +441,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       terminalState,
     ]);
 
-    return (
+    const content = (
       <div
         className={["relative h-full min-h-0 w-full overflow-hidden font-mono", className]
           .filter(Boolean)
@@ -443,6 +469,17 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         ) : null}
       </div>
     );
+    return enableClipboard ? (
+      <GhosttyTerminalClipboard
+        canPaste={terminalState === "ready" && !disableInput}
+        getSelection={terminalHandle.getSelection}
+        hostRef={hostRef}
+        paste={terminalHandle.paste}
+        terminal={terminalRef.current}
+      >
+        {content}
+      </GhosttyTerminalClipboard>
+    ) : content;
   },
 );
 

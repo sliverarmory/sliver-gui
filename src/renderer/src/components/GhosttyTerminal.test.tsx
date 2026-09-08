@@ -2,6 +2,8 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from "@
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { renderWithApplicationContextMenu } from "../application-context-menu-test-utils";
+
 const ghosttyMocks = vi.hoisted(() => ({
   fitAddons: [] as Array<{
     fit: ReturnType<typeof vi.fn>;
@@ -92,6 +94,10 @@ vi.mock("ghostty-web", () => {
       }) };
     }
 
+    onSelectionChange(_listener: () => void) {
+      return { dispose: vi.fn() };
+    }
+
     loadAddon(addon: { activate?: (terminal: Terminal) => void }) {
       addon.activate?.(this);
     }
@@ -176,6 +182,89 @@ afterEach(() => {
 });
 
 describe("GhosttyTerminal", () => {
+  it.each([true, false])("preserves native context-menu events with clipboard actions enabled=%s", async (enableClipboard) => {
+    installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const outerCapture = vi.fn();
+    renderWithApplicationContextMenu(
+      <section onContextMenuCapture={outerCapture}>
+        <GhosttyTerminal
+          ariaLabel="Context-menu terminal"
+          enableClipboard={enableClipboard}
+          transport={transport.api}
+          wasmBytes={new Uint8Array([0x00, 0x61, 0x73, 0x6d])}
+        />
+      </section>,
+    );
+    const host = await screen.findByRole("textbox", { name: "Context-menu terminal" });
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    const vendorCanvasContextMenu = vi.fn();
+    canvas.addEventListener("contextmenu", vendorCanvasContextMenu);
+    const event = createEvent.contextMenu(canvas, { bubbles: true, cancelable: true });
+
+    fireEvent(canvas, event);
+
+    expect(outerCapture).toHaveBeenCalledOnce();
+    expect(event.defaultPrevented).toBe(false);
+    expect(vendorCanvasContextMenu).toHaveBeenCalledTimes(enableClipboard ? 0 : 1);
+  });
+
+  it.each([true, false])("filters only the hidden terminal input's scroll events with clipboard actions enabled=%s", async (enableClipboard) => {
+    installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const rendered = renderWithApplicationContextMenu(
+      <GhosttyTerminal
+        ariaLabel="Scroll-filter terminal"
+        enableClipboard={enableClipboard}
+        transport={transport.api}
+        wasmBytes={new Uint8Array([0x00, 0x61, 0x73, 0x6d])}
+      />,
+    );
+    const host = await screen.findByRole("textbox", { name: "Scroll-filter terminal" });
+    const hiddenInput = document.createElement("textarea");
+    const canvas = document.createElement("canvas");
+    const nestedContainer = document.createElement("div");
+    const nestedInput = document.createElement("textarea");
+    nestedContainer.append(nestedInput);
+    host.append(hiddenInput, canvas, nestedContainer);
+    const outsideInput = document.createElement("textarea");
+    document.body.append(outsideInput);
+    const observedEvents: Event[] = [];
+    const observeScroll = (event: Event): void => { observedEvents.push(event); };
+    // A popup registers its window-capture listener after the terminal mounts.
+    window.addEventListener("scroll", observeScroll, true);
+
+    try {
+      fireEvent(hiddenInput, new Event("scroll"));
+      expect(observedEvents.length).toBe(enableClipboard ? 0 : 1);
+      observedEvents.length = 0;
+
+      const visibleScrollEvents: Event[] = [];
+      for (const target of [host, canvas, nestedInput, outsideInput, document, window]) {
+        const event = new Event("scroll");
+        visibleScrollEvents.push(event);
+        target.dispatchEvent(event);
+      }
+      expect(observedEvents.length).toBe(visibleScrollEvents.length);
+      expect(observedEvents.every((event, index) => event === visibleScrollEvents[index])).toBe(true);
+      observedEvents.length = 0;
+
+      rendered.unmount();
+      // Reconnect the old host to prove its former capture filter was removed,
+      // even for a textarea that still has that exact host as its parent.
+      document.body.append(host);
+      const afterUnmount = new Event("scroll");
+      fireEvent(hiddenInput, afterUnmount);
+      expect(observedEvents.length).toBe(1);
+      expect(observedEvents[0] === afterUnmount).toBe(true);
+    } finally {
+      window.removeEventListener("scroll", observeScroll, true);
+      outsideInput.remove();
+      if (!rendered.container.contains(host)) host.remove();
+    }
+  });
+
   it("loads pinned bytes without fetch and blocks hostile output host effects", async () => {
     const { compile, compiledBytes, instantiate } = installWebAssemblyMocks();
     const fetch = vi.fn();

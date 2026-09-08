@@ -556,6 +556,7 @@ async function verifyCloudDeploymentWindow(
   await firstCloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
   await verifyAwsDeploymentWizard(firstCloudPage, artifactDirectory);
   await assertCloudDeploymentThemeSync(electronApplication, workspacePage, firstCloudPage);
+  await verifySshTerminalClipboard(electronApplication, firstCloudPage);
   const firstWindowId = await cloudDeploymentWindowId(electronApplication);
 
   await invokeApplicationMenuItem(electronApplication, "cloud.deployment");
@@ -1172,7 +1173,7 @@ async function sendNativeApplicationShortcut(
   electronApplication: ElectronApplication,
   page: Page,
   key: string,
-  options: { readonly shift?: boolean } = {},
+  options: { readonly shift?: boolean; readonly control?: boolean } = {},
 ): Promise<void> {
   const sent = await electronApplication.evaluate(
     ({ app, BrowserWindow }, input) => {
@@ -1186,7 +1187,7 @@ async function sendNativeApplicationShortcut(
       window.focus();
       window.webContents.focus();
       const modifiers: Array<"meta" | "control" | "shift"> = [
-        process.platform === "darwin" ? "meta" : "control",
+        input.control ? "control" : process.platform === "darwin" ? "meta" : "control",
         ...(input.shift ? ["shift" as const] : []),
       ];
       window.webContents.sendInputEvent({
@@ -1201,7 +1202,7 @@ async function sendNativeApplicationShortcut(
       });
       return true;
     },
-    { key, shift: options.shift ?? false, url: page.url() },
+    { key, shift: options.shift ?? false, control: options.control ?? false, url: page.url() },
   );
   assert.equal(sent, true, `expected a native Electron window for ${page.url()}`);
 }
@@ -1642,6 +1643,15 @@ async function verifySliverConsoleWindow(
     );
     assert.equal(commandState.console.spawns[initialSpawnCount]?.writes.length, firstWritesBefore);
     assert.ok(commandState.console.spawns[initialSpawnCount + 1]?.resizes.length);
+
+    await verifyTerminalClipboard(
+      electronApplication,
+      consolePage,
+      secondTerminal,
+      "Sliver",
+      async () => (await readFakeState(electronApplication)).console.spawns.map(({ writes }) => writes),
+      initialSpawnCount + 1,
+    );
 
     const processStateBeforeRename = await readFakeState(electronApplication);
     const firstTabBeforeRename = consolePage.getByRole("tab", {
@@ -2892,6 +2902,140 @@ async function activateDataGridRow(
     // avoids viewport-dependent clicks landing in a trailing action cell.
     await row.press("Enter");
     await expectedSurface.waitFor();
+  }
+}
+
+async function verifyTerminalClipboard(
+  application: ElectronApplication,
+  page: Page,
+  terminal: Locator,
+  selectedWord: string,
+  readWrites: () => Promise<string[][]>,
+  selectedRuntimeIndex: number,
+): Promise<void> {
+  const clipboardBefore = await application.evaluate(({ clipboard }) => clipboard.readText());
+  const contextMenu = page.getByRole("menu", { name: "Application context menu" });
+  const canvas = terminal.locator("canvas");
+  const initialWrites = await readWrites();
+  const openMenu = async (): Promise<void> => {
+    const bounds = await canvas.boundingBox();
+    assert.ok(bounds);
+    await sendNativeContextMenu(application, page, { x: bounds.x + 12, y: bounds.y + 8 });
+    await contextMenu.waitFor();
+  };
+  const assertClipboard = async (expected: string): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    let actual = "";
+    while (Date.now() < deadline) {
+      actual = await application.evaluate(({ clipboard }) => clipboard.readText());
+      if (actual === expected) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(actual, expected, "explicit terminal Copy must use Ghostty's highlighted text");
+  };
+  const waitForSelectedWrites = async (expected: string[]): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    let latest: string[][] = [];
+    while (Date.now() < deadline) {
+      latest = await readWrites();
+      if (JSON.stringify(latest[selectedRuntimeIndex]) === JSON.stringify(expected)) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.deepEqual(latest[selectedRuntimeIndex], expected,
+      "each explicit paste/control key must reach the selected fake runtime exactly once");
+    for (const [index, writes] of latest.entries()) {
+      if (index !== selectedRuntimeIndex) {
+        assert.deepEqual(writes, initialWrites[index], "clipboard actions must not reach another terminal tab");
+      }
+    }
+  };
+  try {
+    await page.bringToFront();
+    await application.evaluate(({ clipboard }) => clipboard.writeText("before-terminal-selection"));
+    await canvas.dblclick({ position: { x: 12, y: 8 } });
+    await assertClipboard("before-terminal-selection");
+    await openMenu();
+    assert.equal(await contextMenu.getByRole("menuitem").count(), 3);
+    for (const label of ["Copy", "Paste", "Inspect Element"]) {
+      assert.equal(await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(), 1);
+    }
+    const copy = contextMenu.getByRole("menuitem", { name: "Copy", exact: true });
+    assert.notEqual(await copy.getAttribute("aria-disabled"), "true");
+    await copy.click();
+    await contextMenu.waitFor({ state: "hidden" });
+    await assertClipboard(selectedWord);
+    assert.deepEqual(await readWrites(), initialWrites, "selection and Copy must not write to the terminal");
+
+    const pasted = "context-clipboard-marker";
+    await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), pasted);
+    await openMenu();
+    await contextMenu.getByRole("menuitem", { name: "Paste", exact: true }).click();
+    await contextMenu.waitFor({ state: "hidden" });
+    const expectedWrites = [...initialWrites[selectedRuntimeIndex]!, pasted];
+    await waitForSelectedWrites(expectedWrites);
+
+    // The native terminal interrupt remains a terminal byte, even while
+    // clipboard shortcuts are handled by the enclosing application surface.
+    await terminal.focus();
+    await sendNativeApplicationShortcut(application, page, "C", { control: true });
+    expectedWrites.push("\u0003");
+    await waitForSelectedWrites(expectedWrites);
+
+    await application.evaluate(({ clipboard }) => clipboard.writeText("before-terminal-copy-shortcut"));
+    await canvas.dblclick({ position: { x: 12, y: 8 } });
+    await assertClipboard("before-terminal-copy-shortcut");
+    await terminal.focus();
+    await sendNativeApplicationShortcut(application, page, "C", { shift: process.platform !== "darwin" });
+    await assertClipboard(selectedWord);
+    await waitForSelectedWrites(expectedWrites);
+
+    const shortcutPaste = "shortcut-clipboard-marker";
+    await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), shortcutPaste);
+    await terminal.focus();
+    await sendNativeApplicationShortcut(application, page, "V", { shift: process.platform !== "darwin" });
+    expectedWrites.push(shortcutPaste);
+    await waitForSelectedWrites(expectedWrites);
+  } finally {
+    if (!page.isClosed()) {
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await contextMenu.waitFor({ state: "hidden" }).catch(() => undefined);
+    }
+    await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), clipboardBefore);
+  }
+}
+
+async function verifySshTerminalClipboard(application: ElectronApplication, cloudPage: Page): Promise<void> {
+  const windowOpened = application.waitForEvent("window");
+  const opened = await cloudPage.evaluate(async (deploymentId) => (
+    globalThis as unknown as { cloudDeployment: CloudDeploymentAPI }
+  ).cloudDeployment.openSshWindow({ deploymentId }), E2E_AWS_DEPLOYMENT_ID);
+  assert.equal(opened.ok, true);
+  const sshPage = await windowOpened;
+  try {
+    assert.equal(new URL(sshPage.url()).search, "?surface=ssh");
+    await sshPage.locator('[data-terminal-state="ready"]').waitFor();
+    await sshPage.getByRole("button", { name: "New SSH tab", exact: true }).click();
+    await sshPage.getByRole("button", { name: new RegExp(`Open another SSH session to ${E2E_AWS_DEPLOYMENT_NAME}`) }).click();
+    await sshPage.locator('[data-ssh-terminal-tab-id][inert]').waitFor({ state: "attached" });
+    const activeTerminal = sshPage.locator('[data-ssh-terminal-tab-id]:not([inert])')
+      .getByRole("textbox", { name: /^SSH session /u });
+    await activeTerminal.waitFor();
+    await activeTerminal.locator("canvas").waitFor();
+    await verifyTerminalClipboard(
+      application,
+      sshPage,
+      activeTerminal,
+      "Managed",
+      () => application.evaluate(() => structuredClone(globalThis.__SLIVER_GUI_E2E_STATE__.ssh.map(({ writes }) => writes))),
+      1,
+    );
+    await sshPage.getByRole("button", { name: "Close active SSH tab", exact: true }).click();
+    await sshPage.locator('[data-ssh-terminal-tab-id][inert]').waitFor({ state: "detached" });
+    await sshPage.getByRole("button", { name: "Close active SSH tab", exact: true }).click();
+    await sshPage.locator("[data-ssh-terminal-tab-id]").waitFor({ state: "detached" });
+  } finally {
+    await sshPage.close();
+    await cloudPage.bringToFront();
   }
 }
 

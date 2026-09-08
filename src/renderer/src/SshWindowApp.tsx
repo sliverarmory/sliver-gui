@@ -747,6 +747,7 @@ export function SshWindowApp(): React.JSX.Element {
                 >
                   {tab.transport ? (
                     <GhosttyTerminal
+                      enableClipboard
                       ref={tab.terminalRef}
                       appearance={appearance}
                       ariaLabel={`SSH session ${tab.context.label} for ${sshEndpoint(tab.context.target)}`}

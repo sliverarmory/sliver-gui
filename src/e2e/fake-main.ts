@@ -18,6 +18,8 @@ import type {
   NativePtyFactory,
   NativePtySpawnOptions,
 } from "../main/console-runtime.js";
+import type { ConsolePortRuntime } from "../main/console-port-session.js";
+import type { ManagedSshTarget } from "../shared/ssh-contracts.js";
 import {
   ConnectionRegistry,
   type SliverClientAdapter,
@@ -26,6 +28,8 @@ import { loadTerminalRuntime } from "../main/terminal-runtime.js";
 import {
   E2E_AWS_CREDENTIAL_ID,
   E2E_AWS_DEPLOYMENT,
+  E2E_AWS_DEPLOYMENT_ID,
+  E2E_AWS_DEPLOYMENT_NAME,
   E2E_AWS_FIREWALL,
 } from "./cloud-deployment-fixture.js";
 
@@ -34,6 +38,7 @@ interface FakeMainState {
   dialogCalls: number;
   methods: string[];
   disconnects: number;
+  ssh: Array<{ writes: string[]; closed: boolean }>;
   connectedConfig?: {
     operator: string;
     host: string;
@@ -109,6 +114,7 @@ const state: FakeMainState = {
   dialogCalls: 0,
   methods: [],
   disconnects: 0,
+  ssh: [],
   holdNextBeaconTask: false,
   sessionName: "m1-session",
   beaconName: "m1-beacon",
@@ -162,6 +168,34 @@ const registry = new ConnectionRegistry({
 });
 
 const cloudDeploymentController: ApplicationCloudDeploymentController = {
+  listSshTargets: async () => ({ ok: true, value: [fakeSshTarget()] }),
+  startSshSession: async (deploymentId) => {
+    if (deploymentId !== E2E_AWS_DEPLOYMENT_ID) return { ok: false, error: "Unknown local SSH fixture" };
+    const record = { writes: [] as string[], closed: false };
+    state.ssh.push(record);
+    const subscribers = new Set<Parameters<ConsolePortRuntime["subscribe"]>[0]>();
+    const runtime: ConsolePortRuntime = {
+      subscribe(subscriber) {
+        subscribers.add(subscriber);
+        queueMicrotask(() => {
+          if (!record.closed && subscribers.has(subscriber)) {
+            subscriber.onOutput(Buffer.from("Managed SSH E2E ready\r\n"));
+          }
+        });
+        return () => subscribers.delete(subscriber);
+      },
+      write(data) { record.writes.push(Buffer.from(data).toString("utf8")); },
+      resize() {},
+      pauseOutput() {},
+      resumeOutput() {},
+      async close() {
+        if (record.closed) return;
+        record.closed = true;
+        for (const subscriber of subscribers) subscriber.onExit({ exitCode: 0 });
+      },
+    };
+    return { ok: true, value: { target: fakeSshTarget(), runtime } };
+  },
   getTerminalRuntime: async () => ({ ok: true, value: await loadTerminalRuntime() }),
   detectCurrentEgressIpv4: () => ({
     ok: true,
@@ -263,12 +297,26 @@ void startApplication({
   consolePtyFactory: createFakeConsolePtyFactory(state, consoleClientRootDirectory),
   rendererEntryPath: `${repositoryRoot}/dist/renderer/index.html`,
   preloadPath: `${repositoryRoot}/dist/preload/index.cjs`,
+  sshPreloadPath: `${repositoryRoot}/dist/preload/ssh.cjs`,
   cloudDeploymentPreloadPath: `${repositoryRoot}/dist/preload/cloud-deployment.cjs`,
   cloudDeploymentController,
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);
   app.exit(1);
 });
+
+function fakeSshTarget(): ManagedSshTarget {
+  return {
+    deploymentId: E2E_AWS_DEPLOYMENT_ID,
+    name: E2E_AWS_DEPLOYMENT_NAME,
+    provider: "aws",
+    host: "192.0.2.10",
+    port: 22,
+    username: "fixture",
+    status: "running",
+    connectable: true,
+  };
+}
 
 function createFakeConsolePtyFactory(
   testState: FakeMainState,

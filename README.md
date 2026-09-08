@@ -55,6 +55,10 @@ configuration files and their private keys stay in the Electron main process.
   themes, and settings. Electron main stages the selected config and command
   history in a private temporary workspace, disables transcript logging, and
   owns the PTY, process, input/output bounds, and cleanup.
+  SSH and console terminals offer Copy/Paste in the right-click menu for
+  Ghostty's highlighted text. Shortcuts are Cmd+C/Cmd+V on macOS and
+  Ctrl+Shift+C/Ctrl+Shift+V on Windows/Linux; Ctrl+C still interrupts the
+  terminal process. Selecting text alone does not change the clipboard.
 - A target execution workbench for bounded process, assembly, raw-shellcode,
   shared-library, reflective-DLL, migration, Metasploit, psexec, SSH, backdoor,
   DLL-hijack, token, identity, get-system, child-process, and privilege

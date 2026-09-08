@@ -451,6 +451,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
                   inert={isActive ? undefined : true}
                 >
                   <GhosttyTerminal
+                    enableClipboard
                     ref={tab.terminalRef}
                     appearance={appearance}
                     ariaLabel={`Sliver client ${tab.label} using ${context.configName}`}
