@@ -5,7 +5,7 @@ import {
   normalizeCommandPaletteShortcutKey,
 } from "../shared/application-settings-contracts.js";
 import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
-import type { CloudDeploymentStatus } from "../shared/cloud-deployment-contracts.js";
+import type { CloudDeploymentStatus, CloudProvider } from "../shared/cloud-deployment-contracts.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
 
@@ -29,10 +29,11 @@ export interface ApplicationMenuActions {
   readonly restartToApplyApplicationUpdate: () => void;
 }
 
-export interface AwsCloudMenuDeployment {
+export interface CloudMenuDeployment {
   readonly id: string;
+  readonly provider: CloudProvider;
   readonly name: string;
-  readonly instanceId: string | null;
+  readonly resourceId: string | null;
   readonly status: CloudDeploymentStatus;
   readonly hasSsh: boolean;
   readonly hasFirewall: boolean;
@@ -144,7 +145,7 @@ export function buildApplicationMenuTemplate(
   releaseCatalog: ReleaseMenuCatalog = { status: "loading" },
   applicationUpdateState?: ApplicationUpdateState,
   consoleActions?: ConsoleApplicationMenuActions,
-  awsDeployments: readonly AwsCloudMenuDeployment[] = [],
+  cloudDeployments: readonly CloudMenuDeployment[] = [],
 ): MenuItemConstructorOptions[] {
   const updateItems = applicationUpdateState
     ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
@@ -231,16 +232,19 @@ export function buildApplicationMenuTemplate(
           label: "Deployment",
           click: () => actions.openCloudDeployment(),
         },
-        ...(awsDeployments.length > 0
+        ...(cloudDeployments.length > 0
           ? [
               { type: "separator" as const },
-              {
-                id: "cloud.aws",
-                label: "AWS",
-                submenu: awsDeployments.map((deployment) =>
-                  buildAwsCloudDeploymentMenu(deployment, actions.openCloudDeployment)
-                ),
-              },
+              ...(["aws", "azure"] as const).flatMap((provider) => {
+                const deployments = cloudDeployments.filter((deployment) => deployment.provider === provider);
+                return deployments.length === 0 ? [] : [{
+                  id: `cloud.${provider}`,
+                  label: provider === "aws" ? "AWS" : "Azure",
+                  submenu: deployments.map((deployment) =>
+                    buildCloudDeploymentMenu(deployment, actions.openCloudDeployment)
+                  ),
+                }];
+              }),
             ]
           : []),
       ],
@@ -333,8 +337,8 @@ export function buildApplicationMenuTemplate(
   ];
 }
 
-function buildAwsCloudDeploymentMenu(
-  deployment: AwsCloudMenuDeployment,
+function buildCloudDeploymentMenu(
+  deployment: CloudMenuDeployment,
   openCloudDeployment: ApplicationMenuActions["openCloudDeployment"],
 ): MenuItemConstructorOptions {
   const busy = deployment.status === "provisioning" || deployment.status === "deleting";
@@ -342,30 +346,30 @@ function buildAwsCloudDeploymentMenu(
     openCloudDeployment({ view: "deployments", deploymentId: deployment.id, action });
   };
   return {
-    id: `cloud.aws.${deployment.id}`,
-    label: deployment.name || deployment.instanceId || deployment.id,
+    id: `cloud.${deployment.provider}.${deployment.id}`,
+    label: deployment.name || deployment.resourceId || deployment.id,
     submenu: [
       {
-        id: `cloud.aws.${deployment.id}.start`,
+        id: `cloud.${deployment.provider}.${deployment.id}.start`,
         label: "Start",
         enabled: deployment.status === "stopped",
         click: () => requestLifecycle("start"),
       },
       {
-        id: `cloud.aws.${deployment.id}.stop`,
+        id: `cloud.${deployment.provider}.${deployment.id}.stop`,
         label: "Stop",
         enabled: deployment.status === "running",
         click: () => requestLifecycle("stop"),
       },
       {
-        id: `cloud.aws.${deployment.id}.terminate`,
+        id: `cloud.${deployment.provider}.${deployment.id}.terminate`,
         label: "Terminate",
         enabled: !busy,
         click: () => requestLifecycle("terminate"),
       },
       { type: "separator" },
       {
-        id: `cloud.aws.${deployment.id}.ssh`,
+        id: `cloud.${deployment.provider}.${deployment.id}.ssh`,
         label: "SSH",
         enabled: deployment.status === "running" && deployment.hasSsh,
         click: () => openCloudDeployment({
@@ -375,7 +379,7 @@ function buildAwsCloudDeploymentMenu(
         }),
       },
       {
-        id: `cloud.aws.${deployment.id}.firewall`,
+        id: `cloud.${deployment.provider}.${deployment.id}.firewall`,
         label: "Firewall",
         enabled: !busy && deployment.hasFirewall,
         click: () => openCloudDeployment({

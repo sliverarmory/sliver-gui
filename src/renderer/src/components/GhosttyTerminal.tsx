@@ -180,9 +180,9 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       host.addEventListener("copy", denyNativeTransfer, true);
       host.addEventListener("cut", denyNativeTransfer, true);
       host.addEventListener("paste", denyNativeTransfer, true);
+      window.addEventListener("scroll", keepHiddenInputScroll, true);
       if (enableClipboard) {
         host.addEventListener("contextmenu", keepApplicationContextMenu, true);
-        window.addEventListener("scroll", keepHiddenInputScroll, true);
       }
 
       const sendTerminalData = (data: string): void => {

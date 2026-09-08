@@ -27,11 +27,26 @@ const target = {
   status: "running" as const,
   connectable: true,
 };
+const azureTarget = {
+  ...target,
+  name: "azure-control",
+  provider: "azure" as const,
+  host: "203.0.113.42",
+  username: "azureuser",
+};
 
 describe("SSH contracts", () => {
   it("parses exact renderer-safe targets and deployment-only requests", () => {
     expect(parseSshDeploymentInput({ deploymentId })).toEqual({ deploymentId });
     expect(parseManagedSshTarget(target)).toEqual(target);
+    expect(parseManagedSshTarget({ ...target, port: 2_222 })).toMatchObject({
+      provider: "aws",
+      port: 2_222,
+    });
+    expect(parseManagedSshTarget(azureTarget)).toEqual(azureTarget);
+    expect(() => parseManagedSshTarget({ ...azureTarget, port: 2_222 })).toThrow(
+      "managed Azure SSH target port must be 22",
+    );
     expect(() => parseSshDeploymentInput({ deploymentId, host: target.host })).toThrow("invalid shape");
     expect(() => parseManagedSshTarget({ ...target, privateKey: "secret" })).toThrow("invalid shape");
   });

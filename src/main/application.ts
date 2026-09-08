@@ -58,7 +58,7 @@ import {
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
   serverRefreshShortcutDispositionForInput,
-  type AwsCloudMenuDeployment,
+  type CloudMenuDeployment,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
 import { ApplicationContextMenuController } from "./application-context-menu.js";
@@ -296,7 +296,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let sshWindowClaimedBy: TrustedWindowIdentity | undefined;
   let sshWindowClaimChain: Promise<void> = Promise.resolve();
   let sshSessions: SshSessionRegistry | undefined;
-  let awsCloudMenuDeployments: readonly AwsCloudMenuDeployment[] = [];
+  let cloudMenuDeployments: readonly CloudMenuDeployment[] = [];
   let cloudDeploymentMenuSignature = "[]";
   let cloudDeploymentMenuRefreshSequence = 0;
   let unsubscribeCloudDeployment: (() => void) | undefined;
@@ -1746,7 +1746,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       restartToApplyApplicationUpdate: () => {
         void confirmApplicationUpdateRestart();
       },
-    }, releaseCatalog, applicationUpdateState, terminalActions, awsCloudMenuDeployments);
+    }, releaseCatalog, applicationUpdateState, terminalActions, cloudMenuDeployments);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
@@ -1996,27 +1996,38 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (shutdown.isStopping) return;
     const sequence = cloudDeploymentMenuRefreshSequence + 1;
     cloudDeploymentMenuRefreshSequence = sequence;
-    let next: readonly AwsCloudMenuDeployment[];
+    let next: readonly CloudMenuDeployment[];
     try {
       const result = await cloudDeploymentController?.getSnapshot();
       if (!result?.ok || !result.value) return;
-      next = result.value.state.deployments.flatMap((deployment): AwsCloudMenuDeployment[] => {
-        if (deployment.provider !== "aws") return [];
+      next = result.value.state.deployments.map((deployment): CloudMenuDeployment => {
         const hasSshCredential = result.value.credentials.some(({ id, provider }) => (
           id === deployment.credentialId && provider === deployment.provider
         ));
-        const sshHost = deployment.runtime.publicIpAddress ??
-          deployment.runtime.privateIpAddress ??
-          deployment.remoteHost;
-        return [{
+        const sshHost = deployment.provider === "azure"
+          ? deployment.spec.usePublicIp
+            ? deployment.runtime.publicIpAddress
+            : deployment.runtime.privateIpAddress
+          : deployment.runtime.publicIpAddress ??
+            deployment.runtime.privateIpAddress ??
+            deployment.remoteHost;
+        const resourceId = deployment.provider === "aws"
+          ? deployment.runtime.instanceId
+          : deployment.runtime.vmId;
+        const hasFirewall = deployment.provider === "aws"
+          ? deployment.runtime.securityGroupIds.length > 0 ||
+            deployment.managedAssets.some(({ resourceType }) => resourceType === "ec2-security-group")
+          : deployment.runtime.networkSecurityGroupId !== null ||
+            deployment.managedAssets.some(({ resourceType }) => resourceType === "azure-network-security-group");
+        return {
           id: deployment.id,
+          provider: deployment.provider,
           name: deployment.name,
-          instanceId: deployment.runtime.instanceId,
+          resourceId,
           status: deployment.status,
           hasSsh: hasSshCredential && Boolean(sshHost?.trim()),
-          hasFirewall: deployment.runtime.securityGroupIds.length > 0 ||
-            deployment.managedAssets.some(({ resourceType }) => resourceType === "ec2-security-group"),
-        }];
+          hasFirewall,
+        };
       });
     } catch {
       // Retain the last known menu while a transient snapshot read is unavailable.
@@ -2025,7 +2036,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (shutdown.isStopping || sequence !== cloudDeploymentMenuRefreshSequence) return;
     const nextSignature = JSON.stringify(next);
     if (nextSignature === cloudDeploymentMenuSignature) return;
-    awsCloudMenuDeployments = next;
+    cloudMenuDeployments = next;
     cloudDeploymentMenuSignature = nextSignature;
     installMenu();
   }
@@ -2470,6 +2481,8 @@ function unavailableCloudDeploymentController(
     deleteCredential: () => ({ ok: false, error: message }),
     testCredential: () => ({ ok: false, error: message }),
     discoverAwsOptions: () => ({ ok: false, error: message }),
+    discoverAzureAccounts: () => ({ ok: false, error: message }),
+    discoverAzureOptions: () => ({ ok: false, error: message }),
     createDeployment: () => ({ ok: false, error: message }),
     runLifecycleAction: () => ({ ok: false, error: message }),
     updateFirewall: () => ({ ok: false, error: message }),

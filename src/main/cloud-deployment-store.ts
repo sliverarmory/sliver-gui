@@ -18,6 +18,7 @@ import type { OperationResult } from "../shared/contracts.js";
 import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js";
 
 export const CLOUD_DEPLOYMENT_STATE_FILE = "state.json";
+export const RETIRED_PROXMOX_STATE_ARCHIVE_FILE = "state.pre-azure-v1.json";
 export const CLOUD_DEPLOYMENT_STATE_MAX_BYTES = 2 * 1024 * 1024;
 export const STALE_CLOUD_DEPLOYMENT_STATE_ERROR =
   "Cloud deployment state changed in another window. Review the latest state and try again.";
@@ -81,7 +82,23 @@ export class CloudDeploymentStore {
         requirePrivateMode: true,
       });
       try {
-        state = parseCloudDeploymentState(JSON.parse(loaded.data.toString("utf8")) as unknown);
+        const decoded = JSON.parse(loaded.data.toString("utf8")) as unknown;
+        const migrated = parseStateRetiringProxmox(decoded);
+        state = migrated.state;
+        if (migrated.retired) {
+          // Preserve the exact pre-migration state before removing retired
+          // Proxmox records from the active Azure/AWS state.
+          await writePrivateFileAtomic(
+            join(rootDirectory, RETIRED_PROXMOX_STATE_ARCHIVE_FILE),
+            loaded.data,
+          );
+          const active = Buffer.from(JSON.stringify(state), "utf8");
+          try {
+            await writePrivateFileAtomic(filePath, active);
+          } finally {
+            active.fill(0);
+          }
+        }
       } catch (error) {
         throw new Error("Cloud deployment state is corrupt or unsupported", { cause: error });
       } finally {
@@ -276,11 +293,47 @@ function parseNewDeployment(
     revision: 0,
     deployments: [{
       ...common,
-      provider: "proxmox",
+      provider: "azure",
       spec: input.spec,
-      runtime: { vmId: null, node: input.spec.node, ipAddress: null },
+      runtime: {
+        resourceGroupName: null,
+        vmName: null,
+        vmId: null,
+        instanceState: "unknown",
+        provisioningState: null,
+        networkSecurityGroupId: null,
+        networkInterfaceId: null,
+        osDiskId: null,
+        publicIpAddressId: null,
+        publicIpAddress: null,
+        privateIpAddress: null,
+        vnetId: null,
+        subnetId: null,
+      },
     }],
   }).deployments[0]!;
+}
+
+function parseStateRetiringProxmox(value: unknown): {
+  readonly state: CloudDeploymentState;
+  readonly retired: boolean;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { state: parseCloudDeploymentState(value), retired: false };
+  }
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record["deployments"])) {
+    return { state: parseCloudDeploymentState(value), retired: false };
+  }
+  const deployments = record["deployments"];
+  const active = deployments.filter((deployment) =>
+    !deployment || typeof deployment !== "object" || Array.isArray(deployment) ||
+    (deployment as Record<string, unknown>)["provider"] !== "proxmox");
+  const retired = active.length !== deployments.length;
+  return {
+    state: parseCloudDeploymentState(retired ? { ...record, deployments: active } : value),
+    retired,
+  };
 }
 
 function parseCloudDeploymentWithTimestamp(

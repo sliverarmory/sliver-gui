@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ResolvedAwsCloudCredentialInput,
-  ResolvedProxmoxCloudCredentialInput,
+  ResolvedAzureCloudCredentialInput,
 } from "../shared/cloud-deployment-contracts.js";
 import {
   CLOUD_CREDENTIAL_DIRECTORY,
@@ -21,6 +21,8 @@ const CREATED_AT = new Date("2026-09-06T18:00:00.000Z");
 const ACCESS_KEY_ID = "AKIAEXAMPLE00000001";
 const SECRET_ACCESS_KEY = "correct horse battery staple";
 const PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate material\n-----END OPENSSH PRIVATE KEY-----";
+const SUBSCRIPTION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
 let temporaryDirectory = "";
 let vaultRoot = "";
@@ -78,7 +80,7 @@ describe("CloudCredentialVault", () => {
     expect(JSON.stringify(listed)).not.toContain(SECRET_ACCESS_KEY);
     expect(JSON.stringify(listed)).not.toContain(PRIVATE_KEY);
     expect(observed).toEqual({ identity: ACCESS_KEY_ID, label: "Production AWS" });
-    await expect(vault.withCredential(CREDENTIAL_ID, "proxmox", () => undefined)).rejects.toThrow(/provider mismatch/u);
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", () => undefined)).rejects.toThrow(/provider mismatch/u);
   });
 
   it("reopens the pre-profile AWS access-key envelope shape", async () => {
@@ -133,21 +135,42 @@ describe("CloudCredentialVault", () => {
     await expect(vault.list()).rejects.toThrow(/corrupt or unavailable/u);
   });
 
-  it("encrypts Proxmox API, CA, and SSH material while listing only endpoint metadata", async () => {
+  it("encrypts Azure subscription-bound SSH material while listing only non-secret metadata", async () => {
     const vault = createVault(new XorSafeStorage());
 
-    const summary = await vault.create(proxmoxCredential());
-    const usable = await vault.withCredential(CREDENTIAL_ID, "proxmox", (secret) =>
-      secret.tokenId === "root@pam!sliver-gui" && secret.tlsCaCertificate?.includes("CERTIFICATE") === true);
+    const summary = await vault.create(azureCredential());
+    const usable = await vault.withCredential(CREDENTIAL_ID, "azure", (secret) =>
+      secret.subscriptionId === SUBSCRIPTION_ID && secret.tenantId === TENANT_ID);
 
     expect(summary).toMatchObject({
-      provider: "proxmox",
-      endpoint: "https://pve.example.test:8006",
-      sshUsername: "root",
+      provider: "azure",
+      subscriptionId: SUBSCRIPTION_ID,
+      tenantId: TENANT_ID,
+      defaultLocation: "westus2",
+      sshUsername: "azureuser",
       persistence: "secure",
     });
-    expect(JSON.stringify(await vault.list())).not.toContain("pve-secret");
+    expect(JSON.stringify(await vault.list())).not.toContain(PRIVATE_KEY);
     expect(usable).toBe(true);
+  });
+
+  it.each([
+    ["subscriptionId", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
+    ["tenantId", "33333333-3333-3333-3333-333333333333"],
+  ] as const)("rejects an Azure envelope whose summary %s does not match its secret", async (field, value) => {
+    const safeStorage = new XorSafeStorage();
+    const vault = createVault(safeStorage);
+    await vault.create(azureCredential());
+
+    const credentialPath = join(vaultRoot, CLOUD_CREDENTIAL_DIRECTORY, CREDENTIAL_ID);
+    const ciphertext = await readFile(credentialPath);
+    const envelope = JSON.parse(safeStorage.decryptString(ciphertext)) as {
+      summary: { subscriptionId: string; tenantId: string };
+    };
+    envelope.summary[field] = value;
+    await writeFile(credentialPath, safeStorage.encryptString(JSON.stringify(envelope)), { mode: 0o600 });
+
+    await expect(vault.list()).rejects.toThrow(/corrupt or unavailable/u);
   });
 
   it("deletes an exact verified persistent credential without accepting path input", async () => {
@@ -289,16 +312,15 @@ function awsProfileCredential(): ResolvedAwsCloudCredentialInput {
   };
 }
 
-function proxmoxCredential(): ResolvedProxmoxCloudCredentialInput {
+function azureCredential(): ResolvedAzureCloudCredentialInput {
   return {
-    provider: "proxmox",
-    label: "Lab PVE",
-    sshUsername: "root",
+    provider: "azure",
+    label: "Azure CLI",
+    defaultLocation: "westus2",
+    sshUsername: "azureuser",
     secret: {
-      endpoint: "https://pve.example.test:8006",
-      tokenId: "root@pam!sliver-gui",
-      tokenSecret: "pve-secret",
-      tlsCaCertificate: "-----BEGIN CERTIFICATE-----\ncluster ca\n-----END CERTIFICATE-----",
+      subscriptionId: SUBSCRIPTION_ID,
+      tenantId: TENANT_ID,
       sshPrivateKey: PRIVATE_KEY,
       sshPassphrase: null,
     },

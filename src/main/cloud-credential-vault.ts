@@ -5,15 +5,15 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   isUuidV4,
   parseAwsCredentialSecret,
+  parseAzureCliCredentialSecret,
   parseCloudCredentialSummary,
-  parseProxmoxCredentialSecret,
   parseResolvedCloudCredentialInput,
   type AwsCloudCredentialSummary,
   type AwsCredentialSecret,
+  type AzureCliCredentialSecret,
+  type AzureCloudCredentialSummary,
   type CloudCredentialSummary,
   type CloudProvider,
-  type ProxmoxCloudCredentialSummary,
-  type ProxmoxCredentialSecret,
   type ResolvedCloudCredentialInput,
 } from "../shared/cloud-deployment-contracts.js";
 import { readBoundedRegularFile, writePrivateFileExclusiveAtomic } from "./secure-file.js";
@@ -43,20 +43,20 @@ interface AwsCredentialEnvelope {
   readonly secret: AwsCredentialSecret;
 }
 
-interface ProxmoxCredentialEnvelope {
+interface AzureCredentialEnvelope {
   readonly v: typeof CLOUD_CREDENTIAL_ENVELOPE_VERSION;
-  readonly summary: ProxmoxCloudCredentialSummary;
-  readonly secret: ProxmoxCredentialSecret;
+  readonly summary: AzureCloudCredentialSummary;
+  readonly secret: AzureCliCredentialSecret;
 }
 
-type CloudCredentialEnvelope = AwsCredentialEnvelope | ProxmoxCredentialEnvelope;
+type CloudCredentialEnvelope = AwsCredentialEnvelope | AzureCredentialEnvelope;
 type CredentialSecretByProvider = {
   readonly aws: AwsCredentialSecret;
-  readonly proxmox: ProxmoxCredentialSecret;
+  readonly azure: AzureCliCredentialSecret;
 };
 type CredentialSummaryByProvider = {
   readonly aws: AwsCloudCredentialSummary;
-  readonly proxmox: ProxmoxCloudCredentialSummary;
+  readonly azure: AzureCloudCredentialSummary;
 };
 
 interface SessionCredential {
@@ -154,8 +154,14 @@ export class CloudCredentialVault {
       throw new Error("Secure cloud credential storage is unavailable");
     }
     for (const fileName of fileNames) {
-      const envelope = await this.#readPersistentEnvelope(fileName);
-      summaries.push(envelope.summary);
+      try {
+        const envelope = await this.#readPersistentEnvelope(fileName);
+        summaries.push(envelope.summary);
+      } catch (error) {
+        // Proxmox support was retired without deleting encrypted user data.
+        // Legacy envelopes remain on disk but are deliberately unavailable.
+        if (!(error instanceof RetiredProxmoxCredentialError)) throw error;
+      }
     }
     summaries.push(...[...this.#sessionCredentials.values()].map(({ summary }) => summary));
     if (new Set(summaries.map(({ id }) => id)).size !== summaries.length) {
@@ -204,7 +210,7 @@ export class CloudCredentialVault {
   ): Promise<T> {
     this.#assertActive();
     assertCredentialId(id);
-    if (provider !== "aws" && provider !== "proxmox") throw new TypeError("Invalid cloud provider");
+    if (provider !== "aws" && provider !== "azure") throw new TypeError("Invalid cloud provider");
     await this.#mutationChain;
     this.#assertActive();
 
@@ -238,8 +244,13 @@ export class CloudCredentialVault {
     let plaintext: string | undefined;
     try {
       plaintext = this.#safeStorage.decryptString(loaded.data);
-      return parseCredentialEnvelope(JSON.parse(plaintext) as unknown, id, "secure");
+      const parsed = JSON.parse(plaintext) as unknown;
+      if (isRetiredProxmoxEnvelope(parsed, id, "secure")) {
+        throw new RetiredProxmoxCredentialError();
+      }
+      return parseCredentialEnvelope(parsed, id, "secure");
     } catch (error) {
+      if (error instanceof RetiredProxmoxCredentialError) throw error;
       throw new Error("Encrypted cloud credential is corrupt or unavailable", { cause: error });
     } finally {
       plaintext = undefined;
@@ -301,13 +312,15 @@ function createEnvelope(
     v: CLOUD_CREDENTIAL_ENVELOPE_VERSION,
     summary: parseCloudCredentialSummary({
       id,
-      provider: "proxmox",
+      provider: "azure",
       label: input.label,
       persistence,
       createdAt,
-      endpoint: input.secret.endpoint,
+      defaultLocation: input.defaultLocation,
+      subscriptionId: input.secret.subscriptionId,
+      tenantId: input.secret.tenantId,
       sshUsername: input.sshUsername,
-    }) as ProxmoxCloudCredentialSummary,
+    }) as AzureCloudCredentialSummary,
     secret: input.secret,
   });
 }
@@ -354,11 +367,37 @@ function parseCredentialEnvelope(
       secret,
     });
   }
+  const secret = parseAzureCliCredentialSecret(value["secret"]);
+  if (
+    summary.subscriptionId !== secret.subscriptionId ||
+    summary.tenantId !== secret.tenantId
+  ) {
+    throw new TypeError("Invalid Azure CLI cloud credential source");
+  }
   return Object.freeze({
     v: CLOUD_CREDENTIAL_ENVELOPE_VERSION,
     summary,
-    secret: parseProxmoxCredentialSecret(value["secret"]),
+    secret,
   });
+}
+
+class RetiredProxmoxCredentialError extends Error {
+  constructor() {
+    super("This credential belongs to the retired Proxmox provider");
+    this.name = "RetiredProxmoxCredentialError";
+  }
+}
+
+function isRetiredProxmoxEnvelope(
+  value: unknown,
+  expectedId: string,
+  expectedPersistence: "secure" | "session",
+): boolean {
+  if (!hasExactKeys(value, ENVELOPE_KEYS) || value["v"] !== CLOUD_CREDENTIAL_ENVELOPE_VERSION) return false;
+  const summary = value["summary"];
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return false;
+  const record = summary as Record<string, unknown>;
+  return record["provider"] === "proxmox" && record["id"] === expectedId && record["persistence"] === expectedPersistence;
 }
 
 async function listCredentialFileNames(directory: string): Promise<readonly string[]> {

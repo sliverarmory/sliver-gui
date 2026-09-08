@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CLOUD_DEPLOYMENT_STATE_VERSION,
+  parseAzureFirewallRuleSpec,
   parseAwsFirewallRuleSpec,
   parseCloudCredentialSummary,
   parseCloudDeploymentActionInput,
@@ -21,6 +22,8 @@ const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const KEY_TOKEN = "33333333-3333-4333-8333-333333333333";
 const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
+const AZURE_SUBSCRIPTION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const AZURE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
 describe("cloud deployment contracts", () => {
   it("parses a renderer-safe AWS credential with an opaque private-key token", () => {
@@ -55,16 +58,15 @@ describe("cloud deployment contracts", () => {
     expect(() => parseCreateCloudCredentialInput(missingToken)).toThrow(/Invalid/u);
 
     expect(parseCreateCloudCredentialInput({
-      provider: "proxmox",
-      label: "Lab PVE",
-      sshUsername: "root",
+      provider: "azure",
+      label: "Azure CLI",
+      defaultLocation: "westus2",
+      sshUsername: "azureuser",
       sshPrivateKeyToken: null,
-      endpoint: "https://pve.example.test:8006",
-      tokenId: "root@pam!sliver-gui",
-      tokenSecret: "pve-secret",
-      tlsCaCertificate: null,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
       sshPassphrase: null,
-    })).toMatchObject({ provider: "proxmox", sshPrivateKeyToken: null });
+    })).toMatchObject({ provider: "azure", sshPrivateKeyToken: null });
   });
 
   it("accepts an exact AWS CLI profile reference without AWS secret fields", () => {
@@ -128,18 +130,18 @@ describe("cloud deployment contracts", () => {
     })).toThrow(/Invalid/u);
   });
 
-  it("parses resolved Proxmox material with a CA rather than an insecure-TLS flag", () => {
-    const parsed = parseResolvedCloudCredentialInput(proxmoxResolvedCredential());
+  it("parses resolved Azure CLI material without accepting access tokens", () => {
+    const parsed = parseResolvedCloudCredentialInput(azureResolvedCredential());
 
-    expect(parsed.provider).toBe("proxmox");
+    expect(parsed.provider).toBe("azure");
     expect(parsed.secret).toMatchObject({
-      endpoint: "https://pve.example.test:8006",
-      tlsCaCertificate: "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----",
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
     });
     expect(Object.isFrozen(parsed.secret)).toBe(true);
     expect(() => parseResolvedCloudCredentialInput({
-      ...proxmoxResolvedCredential(),
-      secret: { ...proxmoxResolvedCredential().secret, allowUnauthorizedTls: true },
+      ...azureResolvedCredential(),
+      secret: { ...azureResolvedCredential().secret, accessToken: "must-not-be-stored" },
     })).toThrow(/Invalid/u);
   });
 
@@ -174,6 +176,10 @@ describe("cloud deployment contracts", () => {
       multiplayerPort: 31337,
     });
     expect(Object.isFrozen(parsed.spec.sshCidrs)).toBe(true);
+    expect(parseCreateCloudDeploymentInput({
+      ...awsDeploymentInput(),
+      spec: { ...awsDeploymentInput().spec, sshPort: 2_222 },
+    }).spec.sshPort).toBe(2_222);
     expect(() => parseCreateCloudDeploymentInput({
       ...awsDeploymentInput(),
       spec: { ...awsDeploymentInput().spec, sshCidrs: ["192.0.2.10/32", "192.0.2.10/32"] },
@@ -268,22 +274,54 @@ describe("cloud deployment contracts", () => {
     }
   });
 
-  it("parses exact Proxmox deployment specs", () => {
-    const parsed = parseCreateCloudDeploymentInput(proxmoxDeploymentInput());
+  it("parses exact Azure managed-network deployment specs", () => {
+    const parsed = parseCreateCloudDeploymentInput(azureDeploymentInput());
+    const managedImageId = `/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/images/providers/Microsoft.Compute/images/sliver-ubuntu`;
 
     expect(parsed).toMatchObject({
-      provider: "proxmox",
+      provider: "azure",
       spec: {
-        node: "pve1",
-        templateVmId: 9000,
-        ipConfig: "ip=dhcp",
-        gateway: null,
+        location: "westus2",
+        vmSize: "Standard_B2s",
+        networkMode: "managed",
+        managedVnetCidr: "10.42.0.0/16",
+        managedSubnetCidr: "10.42.1.0/24",
       },
     });
     expect(() => parseCreateCloudDeploymentInput({
-      ...proxmoxDeploymentInput(),
-      spec: { ...proxmoxDeploymentInput().spec, multiplayerPort: 22 },
+      ...azureDeploymentInput(),
+      spec: { ...azureDeploymentInput().spec, multiplayerPort: 22 },
     })).toThrow(/Invalid/u);
+    expect(() => parseCreateCloudDeploymentInput({
+      ...azureDeploymentInput(),
+      spec: { ...azureDeploymentInput().spec, sshPort: 2_222 },
+    })).toThrow(/Invalid/u);
+    const managedImage = parseCreateCloudDeploymentInput({
+      ...azureDeploymentInput(),
+      spec: { ...azureDeploymentInput().spec, imageReference: managedImageId },
+    });
+    expect(managedImage.provider).toBe("azure");
+    if (managedImage.provider !== "azure") throw new Error("Expected an Azure deployment input");
+    expect(managedImage.spec.imageReference).toBe(managedImageId);
+    expect(() => parseCreateCloudDeploymentInput({
+      ...azureDeploymentInput(),
+      spec: {
+        ...azureDeploymentInput().spec,
+        imageReference: `/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/images/providers/Microsoft.Compute/galleries/team/images/sliver/versions/1.0.0`,
+      },
+    })).toThrow(/Invalid/u);
+    for (const sshUsername of ["a", "admin", "guest", "support_388945a0", "test", "user5", "video"]) {
+      expect(() => parseCreateCloudDeploymentInput({
+        ...azureDeploymentInput(),
+        spec: { ...azureDeploymentInput().spec, sshUsername },
+      })).toThrow(/Invalid/u);
+    }
+    for (const osDiskSizeGiB of [29, 4_096]) {
+      expect(() => parseCreateCloudDeploymentInput({
+        ...azureDeploymentInput(),
+        spec: { ...azureDeploymentInput().spec, osDiskSizeGiB },
+      })).toThrow(/Invalid/u);
+    }
   });
 
   it("parses and deeply freezes redacted deployment records and state", () => {
@@ -343,7 +381,7 @@ describe("cloud deployment contracts", () => {
     })).toThrow(/Invalid/u);
     expect(() => parseCloudDeploymentRecord({
       ...awsDeploymentRecord(),
-      managedAssets: [{ resourceType: "proxmox-vm", resourceId: "101", displayName: null, tagged: true }],
+      managedAssets: [{ resourceType: "azure-virtual-machine", resourceId: "/subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/resourceGroups/foreign/providers/Microsoft.Compute/virtualMachines/foreign", displayName: null, tagged: true }],
     })).toThrow(/Invalid/u);
   });
 
@@ -474,7 +512,7 @@ describe("cloud deployment contracts", () => {
     expect(() => parseUpdateAwsFirewallRuleInput({
       deploymentId: DEPLOYMENT_ID,
       expectedRevision: 0,
-      ruleId: "sg-0123456789abcdef0",
+      ruleId: "bad rule id!",
       rule: awsFirewallRule(),
     })).toThrow(/Invalid/u);
     expect(() => parseDeleteAwsFirewallRuleInput({
@@ -483,6 +521,37 @@ describe("cloud deployment contracts", () => {
       ruleId: FIREWALL_RULE_ID,
       unexpected: true,
     })).toThrow(/Invalid/u);
+  });
+
+  it("parses Azure NSG rules with priorities, access, service tags, and port ranges", () => {
+    const rule = parseAzureFirewallRuleSpec({
+      name: "allow-sliver-operator",
+      priority: 1_200,
+      direction: "ingress",
+      access: "allow",
+      protocol: "tcp",
+      sourceAddressPrefixes: ["Internet", "203.0.113.0/24"],
+      sourcePortRanges: ["*"],
+      destinationAddressPrefixes: ["*"],
+      destinationPortRanges: ["31337", "8443"],
+      description: "Sliver operator access",
+    });
+    expect(rule).toMatchObject({
+      priority: 1_200,
+      sourceAddressPrefixes: ["Internet", "203.0.113.0/24"],
+      destinationPortRanges: ["31337", "8443"],
+    });
+    expect(Object.isFrozen(rule)).toBe(true);
+    expect(Object.isFrozen(rule.sourceAddressPrefixes)).toBe(true);
+    expect(() => parseAzureFirewallRuleSpec({ ...rule, priority: 99 })).toThrow(/Invalid Azure/u);
+    expect(() => parseAzureFirewallRuleSpec({ ...rule, priority: 1_000 })).toThrow(/Invalid Azure/u);
+    expect(() => parseAzureFirewallRuleSpec({ ...rule, destinationPortRanges: ["65536"] })).toThrow(/Invalid Azure/u);
+    expect(() => parseAzureFirewallRuleSpec({ ...rule, sourceAddressPrefixes: [] })).toThrow(/Invalid Azure/u);
+    expect(() => parseAzureFirewallRuleSpec({
+      ...rule,
+      sourceAddressPrefixes: Array.from({ length: 1_001 }, () => "Internet"),
+    })).toThrow(/Invalid Azure/u);
+    expect(() => parseAzureFirewallRuleSpec({ ...rule, name: "bad rule name" })).toThrow(/Invalid Azure/u);
   });
 });
 
@@ -500,23 +569,22 @@ function awsCredentialInput() {
   };
 }
 
-function proxxxxCredentialSecret() {
+function azureCredentialSecret() {
   return {
-    endpoint: "https://pve.example.test:8006",
-    tokenId: "root@pam!sliver-gui",
-    tokenSecret: "pve-secret",
-    tlsCaCertificate: "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----",
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    tenantId: AZURE_TENANT_ID,
     sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----",
     sshPassphrase: null,
   };
 }
 
-function proxmoxResolvedCredential() {
+function azureResolvedCredential() {
   return {
-    provider: "proxmox" as const,
-    label: "Lab PVE",
-    sshUsername: "root",
-    secret: proxxxxCredentialSecret(),
+    provider: "azure" as const,
+    label: "Azure CLI",
+    defaultLocation: "westus2",
+    sshUsername: "azureuser",
+    secret: azureCredentialSecret(),
   };
 }
 
@@ -544,26 +612,27 @@ function awsDeploymentInput() {
   };
 }
 
-function proxmoxDeploymentInput() {
+function azureDeploymentInput() {
   return {
-    provider: "proxmox" as const,
+    provider: "azure" as const,
     expectedRevision: 0,
     credentialId: CREDENTIAL_ID,
-    name: "Sliver PVE",
+    name: "Sliver Azure",
     spec: {
-      node: "pve1",
-      templateVmId: 9000,
-      vmId: null,
-      storage: "local-lvm",
-      bridge: "vmbr0",
-      cores: 2,
-      memoryMiB: 4096,
-      diskGiB: 32,
+      location: "westus2",
+      imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+      vmSize: "Standard_B2s",
+      networkMode: "managed" as const,
+      vnetId: null,
+      subnetId: null,
+      managedVnetCidr: "10.42.0.0/16",
+      managedSubnetCidr: "10.42.1.0/24",
+      sshUsername: "azureuser",
       operatorName: "operator",
       sshPort: 22,
       multiplayerPort: 31337,
-      ipConfig: "ip=dhcp",
-      gateway: null,
+      osDiskSizeGiB: 32,
+      usePublicIp: true,
       sshCidrs: ["192.0.2.10/32"],
       operatorCidrs: ["198.51.100.0/24"],
     },

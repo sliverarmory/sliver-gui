@@ -64,6 +64,8 @@ describe("Cloud Deployment preload bridge", () => {
       "deleteCredential",
       "testCredential",
       "discoverAwsOptions",
+      "discoverAzureAccounts",
+      "discoverAzureOptions",
       "createDeployment",
       "runLifecycleAction",
       "updateFirewall",
@@ -90,6 +92,11 @@ describe("Cloud Deployment preload bridge", () => {
       credentialId: "11111111-1111-4111-8111-111111111111",
       region: "us-west-2",
     });
+    await api.discoverAzureAccounts();
+    await api.discoverAzureOptions({
+      credentialId: "11111111-1111-4111-8111-111111111111",
+      location: "westus2",
+    });
     const deploymentId = "22222222-2222-4222-8222-222222222222";
     const rule = {
       direction: "ingress" as const,
@@ -115,7 +122,7 @@ describe("Cloud Deployment preload bridge", () => {
     });
     await api.openSshWindow({ deploymentId });
     await api.approveSshHostKey({ token: "a".repeat(43) });
-    expect(electronMocks.invoke.mock.calls.slice(0, 12)).toEqual([
+    expect(electronMocks.invoke.mock.calls.slice(0, 14)).toEqual([
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime],
@@ -124,6 +131,11 @@ describe("Cloud Deployment preload bridge", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAwsOptions, {
         credentialId: "11111111-1111-4111-8111-111111111111",
         region: "us-west-2",
+      }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, {
+        credentialId: "11111111-1111-4111-8111-111111111111",
+        location: "westus2",
       }],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.listFirewallRules, { deploymentId }],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createFirewallRule, {

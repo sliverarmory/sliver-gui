@@ -1,6 +1,7 @@
 appId: io.sliver.client.gui
 productName: Sliver GUI
 asar: true
+npmRebuild: false
 afterPack: scripts/afterPack.mjs
 directories:
   output: release

@@ -63,10 +63,10 @@ const awsTarget: ManagedSshTarget = {
   connectable: true,
 };
 
-const proxmoxTarget: ManagedSshTarget = {
+const azureTarget: ManagedSshTarget = {
   deploymentId: "00000000-0000-4000-8000-000000000002",
-  name: "range-vm",
-  provider: "proxmox",
+  name: "azure-vm",
+  provider: "azure",
   host: "10.0.0.42",
   port: 2222,
   username: "operator",
@@ -77,7 +77,7 @@ const proxmoxTarget: ManagedSshTarget = {
 const stoppedTarget: ManagedSshTarget = {
   deploymentId: "00000000-0000-4000-8000-000000000003",
   name: "offline-vm",
-  provider: "proxmox",
+  provider: "azure",
   host: "10.0.0.43",
   port: 22,
   username: "operator",
@@ -96,8 +96,8 @@ const firstTab: SshTabLaunchContext = {
 const secondTab: SshTabLaunchContext = {
   tabId: "b".repeat(43),
   attachmentToken: "u".repeat(43),
-  label: proxmoxTarget.name,
-  target: proxmoxTarget,
+  label: azureTarget.name,
+  target: azureTarget,
 };
 
 const secondAwsTab: SshTabLaunchContext = {
@@ -205,12 +205,12 @@ describe("SshWindowApp", () => {
       name: "Connect to offline-vm, operator@10.0.0.43:22",
     })).toBeDisabled();
     await user.click(screen.getByRole("button", {
-      name: "Connect to range-vm, operator@10.0.0.42:2222",
+      name: "Connect to azure-vm, operator@10.0.0.42:2222",
     }));
 
-    const secondTabButton = await screen.findByRole("tab", { name: /range-vm.*Connected/u });
+    const secondTabButton = await screen.findByRole("tab", { name: /azure-vm.*Connected/u });
     expect(secondTabButton).toHaveAttribute("aria-selected", "true");
-    expect(api.createSshTab).toHaveBeenCalledExactlyOnceWith({ deploymentId: proxmoxTarget.deploymentId });
+    expect(api.createSshTab).toHaveBeenCalledExactlyOnceWith({ deploymentId: azureTarget.deploymentId });
     expect(openSshTransport).toHaveBeenLastCalledWith({
       api,
       attachmentToken: secondTab.attachmentToken,
@@ -314,10 +314,10 @@ describe("SshWindowApp", () => {
     const firstTabButton = await screen.findByRole("tab", {
       name: /test1.*ubuntu@44\.240\.136\.251:22.*Connected/u,
     });
-    const secondTabButton = screen.getByRole("tab", { name: /range-vm.*Connected/u });
+    const secondTabButton = screen.getByRole("tab", { name: /azure-vm.*Connected/u });
     expect(firstTabButton).toHaveAttribute("aria-selected", "false");
     expect(secondTabButton).toHaveAttribute("aria-selected", "true");
-    expect(document.title).toBe("SSH — range-vm — operator@10.0.0.42:2222");
+    expect(document.title).toBe("SSH — azure-vm — operator@10.0.0.42:2222");
 
     fireEvent.contextMenu(firstTabButton, { clientX: 40, clientY: 24 });
     rendered.contextMenu.emit();
@@ -349,7 +349,7 @@ describe("SshWindowApp", () => {
     expect(document.querySelector(
       '[data-terminal-mock][aria-label="SSH session Primary gateway for ubuntu@44.240.136.251:22"]',
     )).toBeInTheDocument();
-    expect(document.title).toBe("SSH — range-vm — operator@10.0.0.42:2222");
+    expect(document.title).toBe("SSH — azure-vm — operator@10.0.0.42:2222");
     expect(openSshTransport).toHaveBeenCalledTimes(2);
     expect(firstTransport.close).not.toHaveBeenCalled();
     expect(secondTransport.close).not.toHaveBeenCalled();
@@ -374,7 +374,7 @@ describe("SshWindowApp", () => {
     });
     const rendered = renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
-    const secondTabButton = screen.getByRole("tab", { name: /range-vm.*Connected/u });
+    const secondTabButton = screen.getByRole("tab", { name: /azure-vm.*Connected/u });
 
     fireEvent.contextMenu(secondTabButton, { clientX: 40, clientY: 24 });
     rendered.contextMenu.emit();
@@ -384,7 +384,7 @@ describe("SshWindowApp", () => {
     act(() => api.listeners.closeTab?.());
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename tab" })).not.toBeInTheDocument());
-    expect(screen.queryByRole("tab", { name: /range-vm/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /azure-vm/u })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /test1.*Connected/u })).toHaveAttribute("aria-selected", "true");
     expect(document.title).toBe("SSH — test1 — ubuntu@44.240.136.251:22");
     expect(api.closeSshTab).toHaveBeenCalledExactlyOnceWith({ tabId: secondTab.tabId });
@@ -395,10 +395,10 @@ describe("SshWindowApp", () => {
     openSshTransport.mockResolvedValue(fakeTransport());
     const review: SshHostKeyReview = {
       token: "r".repeat(43),
-      deploymentId: proxmoxTarget.deploymentId,
-      name: proxmoxTarget.name,
-      host: proxmoxTarget.host,
-      port: proxmoxTarget.port,
+      deploymentId: azureTarget.deploymentId,
+      name: azureTarget.name,
+      host: azureTarget.host,
+      port: azureTarget.port,
       fingerprint: `SHA256:${"f".repeat(43)}`,
       expiresAt: "2026-09-07T20:00:00.000Z",
     };
@@ -417,7 +417,7 @@ describe("SshWindowApp", () => {
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
     await user.click(await screen.findByRole("button", {
-      name: "Connect to range-vm, operator@10.0.0.42:2222",
+      name: "Connect to azure-vm, operator@10.0.0.42:2222",
     }));
 
     expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
@@ -425,11 +425,11 @@ describe("SshWindowApp", () => {
     expect(screen.getByRole("textbox", { name: /fingerprint.*select to copy/u }))
       .toHaveValue(review.fingerprint);
     expect(screen.getByText(/Approval expires/u)).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /range-vm/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /azure-vm/u })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Trust & Connect" }));
 
-    expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /azure-vm.*Connected/u })).toBeInTheDocument();
     expect(api.approveSshHostKey).toHaveBeenCalledExactlyOnceWith({ token: review.token });
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
@@ -437,10 +437,10 @@ describe("SshWindowApp", () => {
   it("re-checks a consumed host-key approval and continues with the fresh review", async () => {
     const initialReview: SshHostKeyReview = {
       token: "r".repeat(43),
-      deploymentId: proxmoxTarget.deploymentId,
-      name: proxmoxTarget.name,
-      host: proxmoxTarget.host,
-      port: proxmoxTarget.port,
+      deploymentId: azureTarget.deploymentId,
+      name: azureTarget.name,
+      host: azureTarget.host,
+      port: azureTarget.port,
       fingerprint: `SHA256:${"f".repeat(43)}`,
       expiresAt: "2026-09-07T20:00:00.000Z",
     };
@@ -469,7 +469,7 @@ describe("SshWindowApp", () => {
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
     await user.click(await screen.findByRole("button", {
-      name: "Connect to range-vm, operator@10.0.0.42:2222",
+      name: "Connect to azure-vm, operator@10.0.0.42:2222",
     }));
     await user.click(await screen.findByRole("button", { name: "Trust & Connect" }));
 
@@ -491,7 +491,7 @@ describe("SshWindowApp", () => {
 
     await user.click(screen.getByRole("button", { name: "Trust & Connect" }));
 
-    expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /azure-vm.*Connected/u })).toBeInTheDocument();
     expect(approveSshHostKey).toHaveBeenNthCalledWith(2, { token: freshReview.token });
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
@@ -499,10 +499,10 @@ describe("SshWindowApp", () => {
   it("accepts an always-new opened tab directly from a host-key re-check", async () => {
     const review: SshHostKeyReview = {
       token: "r".repeat(43),
-      deploymentId: proxmoxTarget.deploymentId,
-      name: proxmoxTarget.name,
-      host: proxmoxTarget.host,
-      port: proxmoxTarget.port,
+      deploymentId: azureTarget.deploymentId,
+      name: azureTarget.name,
+      host: azureTarget.host,
+      port: azureTarget.port,
       fingerprint: `SHA256:${"f".repeat(43)}`,
       expiresAt: "2026-09-07T20:00:00.000Z",
     };
@@ -526,12 +526,12 @@ describe("SshWindowApp", () => {
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
     await user.click(await screen.findByRole("button", {
-      name: "Connect to range-vm, operator@10.0.0.42:2222",
+      name: "Connect to azure-vm, operator@10.0.0.42:2222",
     }));
     await user.click(await screen.findByRole("button", { name: "Trust & Connect" }));
     await user.click(await screen.findByRole("button", { name: "Re-check Host" }));
 
-    expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /azure-vm.*Connected/u })).toBeInTheDocument();
     expect(createSshTab).toHaveBeenCalledTimes(2);
     expect(createSshTab).toHaveBeenNthCalledWith(2, { deploymentId: review.deploymentId });
     expect(approveSshHostKey).toHaveBeenCalledExactlyOnceWith({ token: review.token });
@@ -550,7 +550,7 @@ describe("SshWindowApp", () => {
     });
 
     act(() => api.listeners.tabOpened?.(secondTab));
-    const secondTabButton = await screen.findByRole("tab", { name: /range-vm.*Connected/u });
+    const secondTabButton = await screen.findByRole("tab", { name: /azure-vm.*Connected/u });
     expect(secondTabButton).toHaveAttribute("aria-selected", "true");
 
     const shortcut = new KeyboardEvent("keydown", {
@@ -567,7 +567,7 @@ describe("SshWindowApp", () => {
     fireEvent.click(secondTabButton);
     fireEvent.click(screen.getByRole("button", { name: "Close active SSH tab" }));
 
-    await waitFor(() => expect(screen.queryByRole("tab", { name: /range-vm/u })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /azure-vm/u })).not.toBeInTheDocument());
     expect(api.closeSshTab).toHaveBeenCalledExactlyOnceWith({ tabId: secondTab.tabId });
     expect(secondTransport.close).toHaveBeenCalledOnce();
     expect(firstTransport.close).not.toHaveBeenCalled();
@@ -702,7 +702,7 @@ describe("SshWindowApp", () => {
 
     renderWithApplicationContextMenu(<SshWindowApp />);
 
-    expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /azure-vm.*Connected/u })).toBeInTheDocument();
     const failedTab = screen.getByRole("tab", { name: /test1.*Failed.*Command\+1/u });
     await user.click(failedTab);
     expect(screen.getByText(/persisted SSH attachment is unavailable/u)).toBeInTheDocument();
@@ -859,7 +859,7 @@ function installAPI(overrides: Partial<SshAPIOverrides> = {}) {
     claimSshWindow: vi.fn(overrides.claimSshWindow ?? (async () => ok(launchContext))),
     listSshTargets: vi.fn(overrides.listSshTargets ?? (async () => ok([
       awsTarget,
-      proxmoxTarget,
+      azureTarget,
       stoppedTarget,
     ]))),
     createSshTab: vi.fn(overrides.createSshTab ?? (async () => ({

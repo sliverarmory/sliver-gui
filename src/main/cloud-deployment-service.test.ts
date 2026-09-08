@@ -12,10 +12,14 @@ import type {
   AwsFirewallRule,
   AwsFirewallRuleSpec,
   AwsFirewallSnapshot,
+  AzureFirewallRule,
+  AzureFirewallRuleSpec,
+  AzureFirewallSnapshot,
+  AzureCliAccountSummary,
   CreateAwsCloudDeploymentInput,
-  CreateProxmoxCloudDeploymentInput,
+  CreateAzureCloudDeploymentInput,
   ResolvedAwsCloudCredentialInput,
-  ResolvedProxmoxCloudCredentialInput,
+  ResolvedAzureCloudCredentialInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { CloudDeploymentChangeScope } from "../shared/cloud-deployment-ipc.js";
 import {
@@ -28,8 +32,9 @@ import {
   CloudDeploymentService,
   type CloudAwsProvider,
   type CloudAwsProfileSource,
+  type CloudAzureAccountSource,
+  type CloudAzureProvider,
   type CloudPrivateKeyCapabilities,
-  type CloudProxmoxProvider,
   type CloudSshTerminalStarter,
   type CloudSliverProvisioner,
 } from "./cloud-deployment-service.js";
@@ -37,7 +42,7 @@ import type { ConsolePortRuntime } from "./console-port-session.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
 import { SshTerminalStartError } from "./ssh-terminal-runtime.js";
 import type { AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
-import type { ProxmoxDeploymentResult, ProxmoxResources } from "./cloud/proxmox-provider.js";
+import type { AzureVmDeploymentResource } from "./cloud/azure-vm-provider.js";
 import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
 
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -46,6 +51,14 @@ const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const MISSING_CREDENTIAL_ID = "66666666-6666-4666-8666-666666666666";
 const DESTROY_TOKEN = "33333333-3333-4333-8333-333333333333";
 const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
+const AZURE_SUBSCRIPTION_ID = "77777777-7777-4777-8777-777777777777";
+const AZURE_TENANT_ID = "88888888-8888-4888-8888-888888888888";
+const AZURE_RESOURCE_GROUP = "sliver-gui-test";
+const AZURE_RESOURCE_GROUP_ID =
+  `/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}`;
+const AZURE_NSG_ID =
+  `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/networkSecurityGroups/sliver-nsg-${DEPLOYMENT_ID}`;
+const AZURE_FIREWALL_RULE_ID = `${AZURE_NSG_ID}/securityRules/operator-api`;
 const NOW = new Date("2026-09-06T18:00:00.000Z");
 
 let temporaryDirectory = "";
@@ -556,14 +569,10 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
-  it("rejects AWS firewall rule management for Proxmox deployments", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { type: "pkcs1", format: "pem" },
-      publicKeyEncoding: { type: "spki", format: "pem" },
-    });
+  it("lists and mutates Azure NSG rules with revision bumps and fresh snapshots", async () => {
     const { store, vault } = await dependencies();
-    await vault.create(proxmoxCredential(privateKey));
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
     const service = await CloudDeploymentService.create({
       rootDirectory,
       operatorConfigDirectory,
@@ -572,23 +581,68 @@ describe("CloudDeploymentService", () => {
       vault,
       privateKeyCapabilities: fakePrivateKeys(),
       provisioner: fakeProvisioner(),
-      proxmoxProviderFactory: () => new FakeProxmoxProvider(),
+      azureProviderFactory: () => provider,
     });
-    const deployed = await service.createDeployment(proxmoxDeployment());
+    const deployed = await service.createDeployment(azureDeployment());
     if (!deployed.ok) throw new Error(deployed.error);
+    const rule = azureFirewallRuleSpec();
 
-    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID })).resolves.toMatchObject({
-      ok: false,
-      error: expect.stringMatching(/only available for AWS/u),
+    const revisionBeforeList = store.getState().revision;
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID })).resolves.toEqual({
+      ok: true,
+      value: azureFirewallSnapshot(),
     });
+    expect(store.getState().revision).toBe(revisionBeforeList);
+
     await expect(service.createFirewallRule({
       deploymentId: DEPLOYMENT_ID,
       expectedRevision: store.getState().revision,
-      rule: awsFirewallRuleSpec(),
+      rule,
+    })).resolves.toEqual({ ok: true, value: azureFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeList + 1);
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID, networkSecurityGroupId: AZURE_NSG_ID }),
+      rule,
+    );
+
+    const updatedRule = { ...rule, destinationPortRanges: ["8444", "9443"], description: "Operator API range" };
+    const revisionBeforeUpdate = store.getState().revision;
+    await expect(service.updateFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeUpdate,
+      ruleId: AZURE_FIREWALL_RULE_ID,
+      rule: updatedRule,
+    })).resolves.toEqual({ ok: true, value: azureFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeUpdate + 1);
+    expect(provider.updateFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "operator-api",
+      updatedRule,
+    );
+
+    const revisionBeforeDelete = store.getState().revision;
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeDelete,
+      ruleId: AZURE_FIREWALL_RULE_ID,
+    })).resolves.toEqual({ ok: true, value: azureFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeDelete + 1);
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "operator-api",
+    );
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(7);
+
+    const createCalls = provider.createFirewallRule.mock.calls.length;
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeDelete,
+      rule,
     })).resolves.toMatchObject({
       ok: false,
-      error: expect.stringMatching(/only available for AWS/u),
+      error: expect.stringMatching(/changed in another window/u),
     });
+    expect(provider.createFirewallRule).toHaveBeenCalledTimes(createCalls);
     service.dispose();
   });
 
@@ -901,15 +955,13 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
-  it("tests Proxmox against its effective provider privileges without a mutation", async () => {
+  it("returns renderer-safe Azure accounts and deployment options for the selected CLI subscription", async () => {
     const { store, vault } = await dependencies();
-    const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { type: "pkcs1", format: "pem" },
-      publicKeyEncoding: { type: "spki", format: "pem" },
-    });
-    await vault.create(proxmoxCredential(privateKey));
-    const provider = new FakeProxmoxProvider();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const azureProviderFactory = vi.fn(() => provider);
+    const accounts = [azureAccount()];
+    const azureAccountSource = fakeAzureAccountSource(accounts);
     const service = await CloudDeploymentService.create({
       rootDirectory,
       operatorConfigDirectory,
@@ -918,7 +970,56 @@ describe("CloudDeploymentService", () => {
       vault,
       privateKeyCapabilities: fakePrivateKeys(),
       provisioner: fakeProvisioner(),
-      proxmoxProviderFactory: () => provider,
+      azureProviderFactory,
+      azureAccountSource,
+    });
+
+    await expect(service.discoverAzureAccounts()).resolves.toEqual({ ok: true, value: accounts });
+    const discovered = await service.discoverAzureOptions({
+      credentialId: CREDENTIAL_ID,
+      location: "eastus",
+    });
+
+    expect(discovered).toEqual({
+      ok: true,
+      value: {
+        location: "eastus",
+        vmSizes: [{ name: "Standard_B2s", vCpuCount: 2, memoryMiB: 4_096 }],
+        images: [{
+          reference: "Canonical:ubuntu-24_04-lts:server:latest",
+          label: "Ubuntu Server 24.04 LTS (x64)",
+          architecture: "x64",
+          sshUsername: "azureuser",
+        }],
+        virtualNetworks: [],
+        subnets: [],
+      },
+    });
+    expect(azureAccountSource.list).toHaveBeenCalledOnce();
+    expect(provider.discover).toHaveBeenCalledOnce();
+    expect(azureProviderFactory).toHaveBeenCalledExactlyOnceWith({
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      location: "eastus",
+      credential: expect.objectContaining({ getToken: expect.any(Function) }),
+    });
+    expect(JSON.stringify(discovered)).not.toMatch(/PRIVATE KEY|secret-cloud-value/u);
+    service.dispose();
+  });
+
+  it("tests Azure against its effective RBAC actions without a mutation", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
     });
 
     const tested = await service.testCredential({ credentialId: CREDENTIAL_ID });
@@ -926,8 +1027,8 @@ describe("CloudDeploymentService", () => {
     expect(tested).toMatchObject({
       ok: true,
       value: {
-        provider: "proxmox",
-        summary: expect.stringMatching(/^Proxmox 8\.4\.0: [0-9]+\/[0-9]+ required privileges verified/u),
+        provider: "azure",
+        summary: expect.stringMatching(/^Azure eastus: [0-9]+\/[0-9]+ required RBAC actions verified/u),
         permissions: { missing: [], unverifiable: [] },
       },
     });
@@ -1045,7 +1146,7 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
-  it("generates an Ed25519 key for Proxmox without contacting Proxmox", async () => {
+  it("validates an Azure CLI subscription and generates an Ed25519 key without contacting Azure", async () => {
     const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
     const safeStorage = new XorSafeStorage();
     const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
@@ -1054,7 +1155,8 @@ describe("CloudDeploymentService", () => {
     });
     const keys = fakePrivateKeys();
     const keyGenerator = vi.fn(generateEd25519SshKeyPair);
-    const proxmoxProviderFactory = vi.fn(() => new FakeProxmoxProvider());
+    const azureProviderFactory = vi.fn(() => new FakeAzureProvider());
+    const azureAccountSource = fakeAzureAccountSource();
     const service = await CloudDeploymentService.create({
       rootDirectory,
       operatorConfigDirectory,
@@ -1064,26 +1166,89 @@ describe("CloudDeploymentService", () => {
       privateKeyCapabilities: keys,
       sshKeyGenerator: keyGenerator,
       provisioner: fakeProvisioner(),
-      proxmoxProviderFactory,
+      azureProviderFactory,
+      azureAccountSource,
     });
 
     await expect(service.createCredential({
-      provider: "proxmox",
-      label: "Generated Proxmox key",
-      sshUsername: "root",
+      provider: "azure",
+      label: "Generated Azure key",
+      defaultLocation: "eastus",
+      sshUsername: "azureuser",
       sshPrivateKeyToken: null,
-      endpoint: "https://pve.example.test:8006",
-      tokenId: "root@pam!sliver-gui",
-      tokenSecret: "pve-secret",
-      tlsCaCertificate: null,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
       sshPassphrase: null,
-    })).resolves.toMatchObject({ ok: true, value: { provider: "proxmox" } });
+    })).resolves.toMatchObject({ ok: true, value: { provider: "azure" } });
 
     expect(keyGenerator).toHaveBeenCalledOnce();
     expect(keys.consume).not.toHaveBeenCalled();
-    expect(proxmoxProviderFactory).not.toHaveBeenCalled();
-    await expect(vault.withCredential(CREDENTIAL_ID, "proxmox", inspectStoredSshKey))
+    expect(azureAccountSource.list).toHaveBeenCalledOnce();
+    expect(azureProviderFactory).not.toHaveBeenCalled();
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", inspectStoredSshKey))
       .resolves.toEqual({ algorithm: "ssh-ed25519", isPrivate: true, passphrase: null });
+    service.dispose();
+  });
+
+  it.each([
+    {
+      condition: "the subscription disappeared",
+      accounts: [] as readonly AzureCliAccountSummary[],
+      error: /subscription is no longer available/u,
+    },
+    {
+      condition: "the tenant changed",
+      accounts: [{
+        ...azureAccount(),
+        tenantId: "99999999-9999-4999-8999-999999999999",
+      }],
+      error: /subscription is no longer available/u,
+    },
+    {
+      condition: "the subscription belongs to a sovereign cloud",
+      accounts: [azureAccount("AzureUSGovernment")],
+      error: /Only AzureCloud subscriptions are currently supported/u,
+    },
+  ])("rejects an Azure CLI credential before consuming its SSH key when $condition", async ({ accounts, error }) => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const keyGenerator = vi.fn(generateEd25519SshKeyPair);
+    const azureProviderFactory = vi.fn(() => new FakeAzureProvider());
+    const azureAccountSource = fakeAzureAccountSource(accounts);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      sshKeyGenerator: keyGenerator,
+      provisioner: fakeProvisioner(),
+      azureProviderFactory,
+      azureAccountSource,
+    });
+
+    await expect(service.createCredential({
+      provider: "azure",
+      label: "Rejected Azure key",
+      defaultLocation: "eastus",
+      sshUsername: "azureuser",
+      sshPrivateKeyToken: null,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      sshPassphrase: null,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(error) });
+
+    expect(azureAccountSource.list).toHaveBeenCalledOnce();
+    expect(keyGenerator).not.toHaveBeenCalled();
+    expect(keys.consume).not.toHaveBeenCalled();
+    expect(azureProviderFactory).not.toHaveBeenCalled();
+    await expect(vault.list()).resolves.toEqual([]);
     service.dispose();
   });
 
@@ -1480,15 +1645,11 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
-  it("provisions and tracks a GUID-tagged Proxmox VM", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { type: "pkcs1", format: "pem" },
-      publicKeyEncoding: { type: "spki", format: "pem" },
-    });
+  it("provisions, operates, and destroys a GUID-tagged Azure VM with baseline firewall policy", async () => {
     const { store, vault } = await dependencies();
-    await vault.create(proxmoxCredential(privateKey));
-    const provider = new FakeProxmoxProvider();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const provisioner = fakeProvisioner();
     const service = await CloudDeploymentService.create({
       rootDirectory,
       operatorConfigDirectory,
@@ -1496,36 +1657,276 @@ describe("CloudDeploymentService", () => {
       store,
       vault,
       privateKeyCapabilities: fakePrivateKeys(),
-      provisioner: fakeProvisioner(),
-      proxmoxProviderFactory: () => provider,
+      provisioner,
+      azureProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
     });
 
-    const result = await service.createDeployment(proxmoxDeployment());
+    const result = await service.createDeployment(azureDeployment());
     if (!result.ok) throw new Error(result.error);
 
     expect(result).toMatchObject({
       ok: true,
       value: {
-        provider: "proxmox",
+        provider: "azure",
         status: "running",
         phase: "ready",
-        runtime: { vmId: 212, node: "pve1", ipAddress: "192.0.2.212" },
-        managedAssets: [{
-          resourceType: "proxmox-vm",
-          resourceId: "212",
-          displayName: "sliver-proxmox",
-          tagged: true,
-        }],
+        remoteHost: "203.0.113.42",
+        runtime: {
+          resourceGroupName: AZURE_RESOURCE_GROUP,
+          vmId: expect.stringContaining("/virtualMachines/"),
+          networkSecurityGroupId: AZURE_NSG_ID,
+          instanceState: "running",
+        },
       },
     });
+    expect(result.value.managedAssets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceType: "azure-resource-group", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-virtual-network", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-subnet", tagged: false }),
+      expect.objectContaining({ resourceType: "azure-network-security-group", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-public-ip", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-network-interface", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-os-disk", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-virtual-machine", tagged: true }),
+    ]));
     expect(provider.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        deploymentId: DEPLOYMENT_ID,
-        node: "pve1",
+        guid: DEPLOYMENT_ID,
+        name: "Sliver Azure",
+        imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+        vmSize: "Standard_B2s",
+        network: {
+          mode: "managed",
+          virtualNetworkCidr: "10.42.0.0/16",
+          subnetCidr: "10.42.1.0/24",
+        },
         sshPublicKey: expect.stringMatching(/^ssh-rsa /u),
+        firewall: {
+          sshPort: 22,
+          sshSourceCidrs: ["192.0.2.10/32"],
+          operatorPort: 31_337,
+          operatorSourceCidrs: ["198.51.100.0/24"],
+        },
+        allocatePublicIp: true,
       }),
       expect.any(Function),
     );
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      deploymentId: DEPLOYMENT_ID,
+      operatorEndpointHost: "203.0.113.42",
+      ssh: expect.objectContaining({ host: "203.0.113.42", username: "azureuser" }),
+    }));
+
+    const firewallRevision = store.getState().revision;
+    await expect(service.updateFirewall({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: firewallRevision,
+      sshCidrs: ["192.0.2.45/32"],
+      operatorCidrs: ["198.51.100.45/32"],
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        provider: "azure",
+        spec: {
+          sshCidrs: ["192.0.2.45/32"],
+          operatorCidrs: ["198.51.100.45/32"],
+        },
+      },
+    });
+    expect(provider.replaceFirewall).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID, networkSecurityGroupId: AZURE_NSG_ID }),
+      {
+        sshPort: 22,
+        sshSourceCidrs: ["192.0.2.45/32"],
+        operatorPort: 31_337,
+        operatorSourceCidrs: ["198.51.100.45/32"],
+      },
+    );
+
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "stop",
+    })).resolves.toMatchObject({ ok: true, value: { status: "stopped", phase: "stopped" } });
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "start",
+    })).resolves.toMatchObject({ ok: true, value: { status: "running", phase: "ready" } });
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "reboot",
+    })).resolves.toMatchObject({ ok: true, value: { status: "running", phase: "ready" } });
+    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.start).toHaveBeenCalledOnce();
+    expect(provider.reboot).toHaveBeenCalledOnce();
+
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+    await expect(service.executeDestroyDeployment({ token: plan.value.token }))
+      .resolves.toMatchObject({ ok: true, value: { deployments: [] } });
+    expect(provider.destroy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      guid: DEPLOYMENT_ID,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      networkSecurityGroupId: AZURE_NSG_ID,
+    }));
+    service.dispose();
+  });
+
+  it("refreshes a requested Azure public IP before using it for SSH and the operator endpoint", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const initial = azureResourceWithoutPublicAddress();
+    provider.create.mockResolvedValue(initial);
+    provider.refresh.mockResolvedValue(azureResource());
+    const provisioner = fakeProvisioner();
+    const refreshDelay = vi.fn(async () => undefined);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+      azurePublicIpRefreshDelay: refreshDelay,
+    });
+
+    await expect(service.createDeployment(azureDeployment())).resolves.toMatchObject({
+      ok: true,
+      value: {
+        remoteHost: "203.0.113.42",
+        runtime: { publicIpAddress: "203.0.113.42", privateIpAddress: "10.42.1.4" },
+      },
+    });
+    expect(provider.refresh).toHaveBeenCalledExactlyOnceWith(initial);
+    expect(refreshDelay).not.toHaveBeenCalled();
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      operatorEndpointHost: "203.0.113.42",
+      ssh: expect.objectContaining({ host: "203.0.113.42" }),
+    }));
+    service.dispose();
+  });
+
+  it("bounds Azure public IP refreshes and refuses to provision through the private fallback", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const missingPublicAddress = azureResourceWithoutPublicAddress();
+    provider.create.mockResolvedValue(missingPublicAddress);
+    provider.refresh.mockResolvedValue(missingPublicAddress);
+    const provisioner = fakeProvisioner();
+    const refreshDelay = vi.fn(async () => undefined);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+      azurePublicIpRefreshDelay: refreshDelay,
+    });
+
+    await expect(service.createDeployment(azureDeployment())).resolves.toEqual({
+      ok: false,
+      error: expect.stringMatching(/after 7 refresh attempts; refusing private-address fallback/u),
+    });
+    expect(provider.refresh).toHaveBeenCalledTimes(7);
+    expect(refreshDelay).toHaveBeenCalledTimes(6);
+    expect(refreshDelay).toHaveBeenCalledWith(5_000);
+    expect(provisioner.provision).not.toHaveBeenCalled();
+    expect(store.getState().deployments[0]).toMatchObject({
+      status: "failed",
+      phase: "failed",
+      remoteHost: null,
+    });
+    service.dispose();
+  });
+
+  it("preserves private-only Azure provisioning without waiting for a public IP", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    provider.create.mockResolvedValue(azurePrivateResource());
+    const provisioner = fakeProvisioner();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+    });
+    const deployment = azureDeployment();
+
+    await expect(service.createDeployment({
+      ...deployment,
+      spec: { ...deployment.spec, usePublicIp: false },
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        remoteHost: "10.42.1.4",
+        runtime: { publicIpAddressId: null, publicIpAddress: null, privateIpAddress: "10.42.1.4" },
+      },
+    });
+    expect(provider.refresh).not.toHaveBeenCalled();
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      operatorEndpointHost: "10.42.1.4",
+      ssh: expect.objectContaining({ host: "10.42.1.4" }),
+    }));
+    service.dispose();
+  });
+
+  it("does not expose a private SSH fallback when a public Azure address disappears on refresh", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const created = await service.createDeployment(azureDeployment());
+    if (!created.ok) throw new Error(created.error);
+    provider.reboot.mockResolvedValue(azureResourceWithoutPublicAddress());
+
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "reboot",
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        remoteHost: null,
+        runtime: { publicIpAddress: null, privateIpAddress: "10.42.1.4" },
+      },
+    });
+    await expect(service.listSshTargets()).resolves.toMatchObject({
+      ok: true,
+      value: [{
+        provider: "azure",
+        host: "",
+        connectable: false,
+        unavailableReason: "This server does not have an SSH address yet",
+      }],
+    });
     service.dispose();
   });
 
@@ -1571,7 +1972,7 @@ describe("CloudDeploymentService", () => {
     await vault.create(awsCredential());
     await createRunningAwsDeployment(store);
     const unmatched = await store.create({
-      ...proxmoxDeployment(),
+      ...azureDeployment(),
       expectedRevision: store.getState().revision,
       credentialId: MISSING_CREDENTIAL_ID,
       name: "Missing SSH key",
@@ -1681,6 +2082,71 @@ describe("CloudDeploymentService", () => {
     expect(JSON.stringify(mismatch)).not.toContain("PRIVATE KEY");
     expect(startSshTerminalRuntime.mock.calls[2]?.[0].ssh).toMatchObject({
       hostKeySha256: approvedFingerprint,
+    });
+    service.dispose();
+  });
+
+  it("uses the Azure deployment SSH identity through one-use TOFU host-key approval", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    await createRunningAzureDeployment(store);
+    const fingerprint = `SHA256:${"Z".repeat(43)}`;
+    const runtime = fakeSshTerminalRuntime();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError(
+        "host-key-approval-required",
+        fingerprint,
+      ))
+      .mockResolvedValueOnce(runtime);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "z".repeat(43),
+      now: () => NOW.getTime(),
+    });
+
+    await expect(service.startSshSession(DEPLOYMENT_ID)).resolves.toEqual({
+      ok: true,
+      value: {
+        token: "z".repeat(43),
+        deploymentId: DEPLOYMENT_ID,
+        name: "Sliver Azure",
+        host: "203.0.113.42",
+        port: 22,
+        fingerprint,
+        expiresAt: new Date(NOW.getTime() + 5 * 60 * 1000).toISOString(),
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).toMatchObject({
+      host: "203.0.113.42",
+      port: 22,
+      username: "azureuser",
+      privateKey: expect.stringContaining("PRIVATE KEY"),
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).not.toHaveProperty("hostKeySha256");
+
+    await expect(service.approveSshHostKey("z".repeat(43))).resolves.toMatchObject({
+      ok: true,
+      value: {
+        target: {
+          deploymentId: DEPLOYMENT_ID,
+          provider: "azure",
+          name: "Sliver Azure",
+          host: "203.0.113.42",
+          username: "azureuser",
+        },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[1]?.[0].ssh).toMatchObject({
+      host: "203.0.113.42",
+      username: "azureuser",
+      hostKeySha256: fingerprint,
     });
     service.dispose();
   });
@@ -1937,6 +2403,42 @@ async function createRunningAwsDeployment(store: CloudDeploymentStore): Promise<
   if (!updated.ok) throw new Error(updated.error);
 }
 
+async function createRunningAzureDeployment(store: CloudDeploymentStore): Promise<void> {
+  const created = await store.create({
+    ...azureDeployment(),
+    expectedRevision: store.getState().revision,
+  });
+  if (!created.ok || created.value.deployment.provider !== "azure") {
+    throw new Error(created.ok ? "Expected an Azure deployment fixture" : created.error);
+  }
+  const resource = azureResource();
+  const updated = await store.update({
+    expectedRevision: store.getState().revision,
+    deployment: {
+      ...created.value.deployment,
+      status: "running",
+      phase: "ready",
+      remoteHost: "203.0.113.42",
+      runtime: {
+        resourceGroupName: AZURE_RESOURCE_GROUP,
+        vmName: `sliver-vm-${DEPLOYMENT_ID}`,
+        vmId: resource.virtualMachineId,
+        instanceState: "running",
+        provisioningState: "Succeeded",
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        networkInterfaceId: resource.networkInterfaceId,
+        osDiskId: resource.osDiskId,
+        publicIpAddressId: resource.publicIpAddressId ?? null,
+        publicIpAddress: "203.0.113.42",
+        privateIpAddress: "10.42.1.4",
+        vnetId: resource.virtualNetworkId,
+        subnetId: resource.subnetId,
+      },
+    },
+  });
+  if (!updated.ok) throw new Error(updated.error);
+}
+
 async function createUnrelatedAwsDeployment(store: CloudDeploymentStore) {
   const created = await store.create({
     ...awsDeployment(),
@@ -1990,16 +2492,20 @@ function awsCredential(): ResolvedAwsCloudCredentialInput {
   };
 }
 
-function proxmoxCredential(privateKey: string): ResolvedProxmoxCloudCredentialInput {
+function azureCredential(): ResolvedAzureCloudCredentialInput {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
   return {
-    provider: "proxmox",
-    label: "Proxmox",
-    sshUsername: "root",
+    provider: "azure",
+    label: "Azure CLI",
+    defaultLocation: "eastus",
+    sshUsername: "azureuser",
     secret: {
-      endpoint: "https://pve.example.test:8006/",
-      tokenId: "root@pam!sliver-gui",
-      tokenSecret: "proxmox-secret",
-      tlsCaCertificate: null,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
       sshPrivateKey: privateKey,
       sshPassphrase: null,
     },
@@ -2036,26 +2542,27 @@ function awsDeployment(useElasticIp = true): CreateAwsCloudDeploymentInput {
   };
 }
 
-function proxmoxDeployment(): CreateProxmoxCloudDeploymentInput {
+function azureDeployment(): CreateAzureCloudDeploymentInput {
   return {
-    provider: "proxmox",
+    provider: "azure",
     expectedRevision: 0,
     credentialId: CREDENTIAL_ID,
-    name: "Sliver Proxmox",
+    name: "Sliver Azure",
     spec: {
-      node: "pve1",
-      templateVmId: 9000,
-      vmId: 212,
-      storage: "local-lvm",
-      bridge: "vmbr0",
-      cores: 2,
-      memoryMiB: 4096,
-      diskGiB: 32,
+      location: "eastus",
+      imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+      vmSize: "Standard_B2s",
+      networkMode: "managed",
+      vnetId: null,
+      subnetId: null,
+      managedVnetCidr: "10.42.0.0/16",
+      managedSubnetCidr: "10.42.1.0/24",
+      sshUsername: "azureuser",
       operatorName: "operator",
       sshPort: 22,
       multiplayerPort: 31_337,
-      ipConfig: "ip=dhcp",
-      gateway: null,
+      osDiskSizeGiB: 30,
+      usePublicIp: true,
       sshCidrs: ["192.0.2.10/32"],
       operatorCidrs: ["198.51.100.0/24"],
     },
@@ -2279,6 +2786,7 @@ function awsFirewallRuleSpec(): AwsFirewallRuleSpec {
 
 function awsFirewallSnapshot(): AwsFirewallSnapshot {
   return {
+    provider: "aws",
     securityGroupId: "sg-0123456789abcdef0",
     securityGroupName: "sliver-gui-managed",
     vpcId: "vpc-0123456789abcdef0",
@@ -2286,35 +2794,225 @@ function awsFirewallSnapshot(): AwsFirewallSnapshot {
   };
 }
 
-class FakeProxmoxProvider implements CloudProxmoxProvider {
-  readonly create = vi.fn(async (_input, onMutation) => {
-    const resources = proxmoxResources();
-    await onMutation?.({ phase: "allocated", resources });
-    await onMutation?.({ phase: "configured", resources });
-    await onMutation?.({ phase: "firewall", resources });
-    await onMutation?.({ phase: "started", resources });
-    return proxmoxResult();
+function azureResource(
+  instanceState: AzureVmDeploymentResource["instanceState"] = "running",
+): AzureVmDeploymentResource {
+  const virtualNetworkId =
+    `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/virtualNetworks/sliver-vnet-${DEPLOYMENT_ID}`;
+  const subnetId = `${virtualNetworkId}/subnets/sliver-subnet-${DEPLOYMENT_ID}`;
+  return {
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    tenantId: AZURE_TENANT_ID,
+    location: "eastus",
+    guid: DEPLOYMENT_ID,
+    name: "Sliver Azure",
+    resourceGroupId: AZURE_RESOURCE_GROUP_ID,
+    virtualNetworkId,
+    subnetId,
+    managedNetwork: { virtualNetworkId, subnetId },
+    networkSecurityGroupId: AZURE_NSG_ID,
+    publicIpAddressId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/publicIPAddresses/sliver-ip-${DEPLOYMENT_ID}`,
+    networkInterfaceId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/networkInterfaces/sliver-nic-${DEPLOYMENT_ID}`,
+    virtualMachineId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Compute/virtualMachines/sliver-vm-${DEPLOYMENT_ID}`,
+    osDiskId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Compute/disks/sliver-os-${DEPLOYMENT_ID}`,
+    instanceState,
+    provisioningState: "Succeeded",
+    privateIpAddress: "10.42.1.4",
+    publicIpAddress: "203.0.113.42",
+  };
+}
+
+function azureResourceWithoutPublicAddress(): AzureVmDeploymentResource {
+  const { publicIpAddress, ...resource } = azureResource();
+  void publicIpAddress;
+  return resource;
+}
+
+function azurePrivateResource(): AzureVmDeploymentResource {
+  const { publicIpAddress, publicIpAddressId, ...resource } = azureResource();
+  void publicIpAddress;
+  void publicIpAddressId;
+  return resource;
+}
+
+function azureFirewallRuleSpec(): AzureFirewallRuleSpec {
+  return {
+    name: "operator-api",
+    priority: 1_200,
+    direction: "ingress",
+    access: "allow",
+    protocol: "tcp",
+    sourceAddressPrefixes: ["203.0.113.0/24"],
+    sourcePortRanges: ["*"],
+    destinationAddressPrefixes: ["*"],
+    destinationPortRanges: ["8443"],
+    description: "Operator API",
+  };
+}
+
+function azureFirewallRule(
+  rule: AzureFirewallRuleSpec = azureFirewallRuleSpec(),
+): AzureFirewallRule {
+  return {
+    id: `${AZURE_NSG_ID}/securityRules/${rule.name}`,
+    ...rule,
+    managed: true,
+    isDefault: false,
+    sourceApplicationSecurityGroupIds: [],
+    destinationApplicationSecurityGroupIds: [],
+    editUnsupportedReason: null,
+  };
+}
+
+function azureFirewallSnapshot(): AzureFirewallSnapshot {
+  return {
+    provider: "azure",
+    networkSecurityGroupId: AZURE_NSG_ID,
+    networkSecurityGroupName: `sliver-nsg-${DEPLOYMENT_ID}`,
+    resourceGroupName: AZURE_RESOURCE_GROUP,
+    rules: [azureFirewallRule()],
+  };
+}
+
+class FakeAzureProvider implements CloudAzureProvider {
+  readonly create = vi.fn(async (
+    _input: Parameters<CloudAzureProvider["create"]>[0],
+    onMutation?: Parameters<CloudAzureProvider["create"]>[1],
+  ) => {
+    const resource = azureResource();
+    const base = { resourceGroupId: resource.resourceGroupId };
+    const managedNetwork = resource.managedNetwork;
+    const publicIpAddressId = resource.publicIpAddressId;
+    await onMutation?.({ phase: "resource-group", resources: base });
+    await onMutation?.({
+      phase: "virtual-network",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+      },
+    });
+    await onMutation?.({
+      phase: "subnet",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+      },
+    });
+    await onMutation?.({
+      phase: "network-security-group",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+      },
+    });
+    await onMutation?.({
+      phase: "firewall",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+      },
+    });
+    await onMutation?.({
+      phase: "public-ip-address",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+      },
+    });
+    await onMutation?.({
+      phase: "network-interface",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+        networkInterfaceId: resource.networkInterfaceId,
+      },
+    });
+    await onMutation?.({
+      phase: "virtual-machine",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+        networkInterfaceId: resource.networkInterfaceId,
+        virtualMachineId: resource.virtualMachineId,
+      },
+    });
+    await onMutation?.({
+      phase: "os-disk",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+        networkInterfaceId: resource.networkInterfaceId,
+        virtualMachineId: resource.virtualMachineId,
+        osDiskId: resource.osDiskId,
+      },
+    });
+    return resource;
   });
-  readonly refresh = vi.fn(async () => proxmoxResult());
-  readonly start = vi.fn(async () => undefined);
-  readonly stop = vi.fn(async () => undefined);
-  readonly reboot = vi.fn(async () => undefined);
-  readonly updateFirewall = vi.fn(async () => undefined);
+  readonly refresh = vi.fn(async () => azureResource());
+  readonly start = vi.fn(async () => azureResource("running"));
+  readonly stop = vi.fn(async () => azureResource("deallocated"));
+  readonly reboot = vi.fn(async () => azureResource("running"));
+  readonly replaceFirewall = vi.fn(async () => azureResource());
+  readonly listFirewallRules = vi.fn(async () => azureFirewallSnapshot());
+  readonly createFirewallRule = vi.fn(async (
+    _resource: AzureVmDeploymentResource,
+    rule: AzureFirewallRuleSpec,
+  ) => azureFirewallRule(rule));
+  readonly updateFirewallRule = vi.fn(async (
+    _resource: AzureVmDeploymentResource,
+    _ruleId: string,
+    rule: AzureFirewallRuleSpec,
+  ) => azureFirewallRule(rule));
+  readonly deleteFirewallRule = vi.fn(async () => undefined);
   readonly destroy = vi.fn(async () => undefined);
 
-  async preflight() {
-    return { version: "8.4.0", nodes: ["pve1"], permissions: ["VM.Allocate"] };
-  }
-
   readonly checkPermissions = vi.fn(async () => {
-    const statuses = new Map(cloudRequiredPermissions("proxmox").map(({ id }) => [id, "verified" as const]));
-    return {
-      version: "8.4.0",
-      nodes: ["pve1"],
-      clusterFirewallEnabled: true,
-      permissions: createCloudPermissionEvaluation("proxmox", statuses),
-    };
+    const statuses = new Map(
+      cloudRequiredPermissions("azure").map(({ id }) => [id, "verified" as const]),
+    );
+    return createCloudPermissionEvaluation("azure", statuses);
   });
+
+  readonly discover = vi.fn(async () => ({
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    tenantId: AZURE_TENANT_ID,
+    location: "eastus",
+    vmSizes: [{
+      name: "Standard_B2s",
+      architecture: "x64" as const,
+      vCpuCount: 2,
+      memoryMiB: 4_096,
+      maxDataDiskCount: 4,
+      osDiskSizeMiB: 1_048_576,
+      premiumIo: true,
+    }],
+    virtualNetworks: [],
+    subnets: [],
+    images: [{
+      id: "Canonical:ubuntu-24_04-lts:server:latest",
+      label: "Ubuntu Server 24.04 LTS (x64)",
+      architecture: "x64" as const,
+      publisher: "Canonical",
+      offer: "ubuntu-24_04-lts",
+      sku: "server",
+      version: "latest" as const,
+      sshUsername: "azureuser" as const,
+    }],
+  }));
 }
 
 function fakeAwsPermissionChecker() {
@@ -2329,12 +3027,23 @@ function fakeAwsPermissionChecker() {
   };
 }
 
-function proxmoxResources(): ProxmoxResources {
-  return { node: "pve1", vmId: 212, vmName: "sliver-proxmox" };
+function azureAccount(cloudName = "AzureCloud"): AzureCliAccountSummary {
+  return {
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    name: "Test Subscription",
+    tenantId: AZURE_TENANT_ID,
+    homeTenantId: AZURE_TENANT_ID,
+    isDefault: true,
+    cloudName,
+  };
 }
 
-function proxmoxResult(): ProxmoxDeploymentResult {
-  return { resources: proxmoxResources(), address: "192.0.2.212", state: "running" };
+function fakeAzureAccountSource(
+  accounts: readonly AzureCliAccountSummary[] = [azureAccount()],
+): CloudAzureAccountSource {
+  return {
+    list: vi.fn(async () => accounts),
+  };
 }
 
 class XorSafeStorage implements CloudSafeStorageAdapter {

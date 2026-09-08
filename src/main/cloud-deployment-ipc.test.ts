@@ -241,6 +241,8 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteCredential, [{ credentialId: "not-a-uuid" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.testCredential, [{ credentialId: CREDENTIAL_ID }, "extra"]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAwsOptions, [{ credentialId: CREDENTIAL_ID, region: "invalid" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts, [null]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, [{ credentialId: CREDENTIAL_ID, location: "West US 2" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createDeployment, [{}]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.runLifecycleAction, [{
         deploymentId: CREDENTIAL_ID,
@@ -265,7 +267,7 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.updateFirewallRule, [{
         deploymentId: CREDENTIAL_ID,
         expectedRevision: 0,
-        ruleId: "not-a-rule-id",
+        ruleId: "not-a-rule-id-",
         rule: validFirewallRule(),
       }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteFirewallRule, [{
@@ -284,7 +286,7 @@ describe("Cloud Deployment IPC boundary", () => {
     ];
 
     for (const [channel, args] of malformedRequests) {
-      await expect(invoke(channel, event, ...args)).resolves.toEqual(REJECTED);
+      expect(await invoke(channel, event, ...args), channel).toEqual(REJECTED);
     }
 
     for (const method of Object.values(controller)) expect(method).not.toHaveBeenCalled();
@@ -335,7 +337,36 @@ describe("Cloud Deployment IPC boundary", () => {
     });
   });
 
-  it("validates and forwards AWS firewall rule operations", async () => {
+  it("forwards Azure account discovery and validated Azure option discovery", async () => {
+    const response = { ok: false as const, error: "Azure inventory probe" };
+    const discoverAzureAccounts = vi.fn<CloudDeploymentController["discoverAzureAccounts"]>(
+      async () => response,
+    );
+    const discoverAzureOptions = vi.fn<CloudDeploymentController["discoverAzureOptions"]>(
+      async () => response,
+    );
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ discoverAzureAccounts, discoverAzureOptions }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts, event))
+      .resolves.toBe(response);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, event, {
+      credentialId: CREDENTIAL_ID,
+      location: "westus2",
+    })).resolves.toBe(response);
+    expect(discoverAzureAccounts).toHaveBeenCalledExactlyOnceWith();
+    expect(discoverAzureOptions).toHaveBeenCalledExactlyOnceWith({
+      credentialId: CREDENTIAL_ID,
+      location: "westus2",
+    });
+    expect(Object.isFrozen(discoverAzureOptions.mock.calls[0]?.[0])).toBe(true);
+  });
+
+  it("validates and forwards cloud firewall rule operations", async () => {
     const response = { ok: false as const, error: "firewall probe" };
     const listFirewallRules = vi.fn<CloudDeploymentController["listFirewallRules"]>(async () => response);
     const createFirewallRule = vi.fn<CloudDeploymentController["createFirewallRule"]>(async () => response);
@@ -505,6 +536,8 @@ function controllerMock(
     deleteCredential: vi.fn(unavailable),
     testCredential: vi.fn(unavailable),
     discoverAwsOptions: vi.fn(unavailable),
+    discoverAzureAccounts: vi.fn(unavailable),
+    discoverAzureOptions: vi.fn(unavailable),
     createDeployment: vi.fn(unavailable),
     runLifecycleAction: vi.fn(unavailable),
     updateFirewall: vi.fn(unavailable),

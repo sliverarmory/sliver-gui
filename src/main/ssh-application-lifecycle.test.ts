@@ -384,13 +384,17 @@ describe("application protocol lifecycle", () => {
 describe("SSH application window lifecycle", () => {
   it("uses a dedicated trusted surface while sessions survive window replacement and close explicitly", async () => {
     const runtimes = new Map<string, ReturnType<typeof fakeRuntime>>();
+    const firstDeploymentId = "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0001";
     const startSshSession = vi.fn(async (deploymentId: string) => {
       const runtime = fakeRuntime();
       runtimes.set(deploymentId, runtime);
       return {
         ok: true as const,
         value: {
-          target: managedTarget(deploymentId),
+          target: managedTarget(
+            deploymentId,
+            deploymentId === firstDeploymentId ? "azure" : "aws",
+          ),
           runtime,
         },
       };
@@ -412,7 +416,6 @@ describe("SSH application window lifecycle", () => {
       sshPreloadPath: "/test/ssh-preload.cjs",
     });
 
-    const firstDeploymentId = "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0001";
     const firstOpen = await harness.cloudSshWindows.open(firstDeploymentId);
     expect(firstOpen).toMatchObject({
       ok: true,
@@ -448,7 +451,7 @@ describe("SSH application window lifecycle", () => {
     const firstClaim = await harness.sshServices.sessions.claim(firstOwner);
     expect(firstClaim).toMatchObject({
       ok: true,
-      value: { tabs: [{ tabId: firstTabId }] },
+      value: { tabs: [{ tabId: firstTabId, target: { provider: "azure" } }] },
     });
     const firstAttachmentToken = firstClaim.value.tabs[0].attachmentToken;
     expect(await harness.sshServices.sessions.renameTab(firstOwner, firstTabId, "Primary gateway")).toEqual({
@@ -690,11 +693,11 @@ describe("SSH application window lifecycle", () => {
   });
 });
 
-function managedTarget(deploymentId: string) {
+function managedTarget(deploymentId: string, provider: "aws" | "azure" = "aws") {
   return {
     deploymentId,
     name: deploymentId.endsWith("1") ? "test1" : "test2",
-    provider: "aws" as const,
+    provider,
     host: "44.240.136.251",
     port: 22,
     username: "ubuntu",

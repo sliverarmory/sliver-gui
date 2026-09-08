@@ -65,6 +65,13 @@ const requiredBuilderPaths = [
   "docs/adr/0001-platform-support.md",
   "docs/rpc-message-budgets.md",
 ];
+const requiredAzureRuntimePackages = Object.freeze([
+  "@azure/arm-compute",
+  "@azure/arm-network",
+  "@azure/arm-resources",
+  "@azure/core-process",
+  "@azure/identity",
+]);
 const requiredPackagedFiles = [
   "LICENSE",
   "LICENSES/Apache-2.0.txt",
@@ -83,6 +90,7 @@ const requiredPackagedFiles = [
   "node_modules/electron-updater/LICENSE",
   "node_modules/electron-updater/package.json",
   "node_modules/electron-updater/out/main.js",
+  ...requiredAzureRuntimePackages.map((packageName) => `node_modules/${packageName}/package.json`),
   "dist/main/index.js",
   "dist/preload/cloud-deployment.cjs",
   "dist/preload/index.cjs",
@@ -342,6 +350,10 @@ if (sliverNoticeTags.length !== 1 || sliverNoticeTags[0][1] !== sliverScriptVers
 }
 
 const builderConfiguration = await readFile(join(rootDir, "electron-builder.yml"), "utf8");
+const disabledNpmRebuildSettings = builderConfiguration.match(/^npmRebuild:[ \t]*false[ \t]*$/gmu) ?? [];
+if (disabledNpmRebuildSettings.length !== 1) {
+  throw new Error("Production packaging must disable Electron Builder dependency rebuilds exactly once");
+}
 for (const requiredPath of requiredBuilderPaths) {
   if (!builderConfiguration.includes(`- ${requiredPath}`)) {
     throw new Error(`Production package allowlist is missing: ${requiredPath}`);
@@ -798,6 +810,7 @@ function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) 
   if (applicationManifest.dependencies?.["sliver-script"] !== sliverClientEvidence.version) {
     throw new Error("Packaged application manifest lost the exact sliver-script dependency version");
   }
+  verifyPackagedAzureRuntime(archivePath, entries, applicationManifest);
   for (const [packagedPath, expected] of sliverClientEvidence.releaseFiles) {
     const entry = entries.find(({ normalizedPath }) => normalizedPath === packagedPath);
     if (!entry || !extractFile(archivePath, entry.lookupPath, false).equals(expected)) {
@@ -815,6 +828,66 @@ function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) 
       `${archivePath}:${entry.normalizedPath}`,
     );
   }
+}
+
+function verifyPackagedAzureRuntime(archivePath, entries, applicationManifest) {
+  for (const packageName of requiredAzureRuntimePackages) {
+    const expectedVersion = applicationPackage.dependencies?.[packageName];
+    if (
+      typeof expectedVersion !== "string"
+      || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(expectedVersion)
+    ) {
+      throw new Error(`Azure runtime dependency must use an exact semantic version: ${packageName}`);
+    }
+    if (applicationManifest.dependencies?.[packageName] !== expectedVersion) {
+      throw new Error(`Packaged application manifest lost the exact ${packageName}@${expectedVersion} dependency`);
+    }
+
+    const manifestPath = `node_modules/${packageName}/package.json`;
+    const manifestEntry = entries.find(({ normalizedPath }) => normalizedPath === manifestPath);
+    if (!manifestEntry) {
+      throw new Error(`Packaged archive is missing Azure runtime manifest: ${manifestPath}`);
+    }
+    let packageManifest;
+    try {
+      packageManifest = JSON.parse(extractFile(archivePath, manifestEntry.lookupPath, false).toString("utf8"));
+    } catch (error) {
+      throw new Error(`Packaged Azure runtime manifest is invalid JSON: ${manifestPath}`, { cause: error });
+    }
+    if (packageManifest.name !== packageName || packageManifest.version !== expectedVersion) {
+      throw new Error(`Packaged Azure runtime version drifted from package.json: ${packageName}@${expectedVersion}`);
+    }
+
+    const importTarget = packageManifest.exports?.["."]?.import?.default;
+    const runtimePath = packagedAzureImportPath(packageName, importTarget);
+    const runtimeEntry = entries.find(({ normalizedPath }) => normalizedPath === runtimePath);
+    if (!runtimeEntry) {
+      throw new Error(`Packaged archive is missing Azure import runtime: ${runtimePath}`);
+    }
+    const runtimeMetadata = statFile(archivePath, runtimeEntry.lookupPath, false);
+    if (!("size" in runtimeMetadata) || runtimeMetadata.size === 0) {
+      throw new Error(`Packaged Azure import runtime is not a non-empty file: ${runtimePath}`);
+    }
+  }
+}
+
+function packagedAzureImportPath(packageName, importTarget) {
+  if (
+    typeof importTarget !== "string"
+    || !importTarget.startsWith("./")
+    || importTarget.includes("\\")
+    || importTarget.includes("\0")
+  ) {
+    throw new Error(`Packaged Azure runtime has no safe ESM import target: ${packageName}`);
+  }
+  const segments = importTarget.slice(2).split("/");
+  if (
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+    || !/\.m?js$/u.test(segments.at(-1) ?? "")
+  ) {
+    throw new Error(`Packaged Azure runtime has an invalid ESM import target: ${packageName}:${importTarget}`);
+  }
+  return `node_modules/${packageName}/${segments.join("/")}`;
 }
 
 async function verifyInstalledSliverClient() {

@@ -22,12 +22,12 @@ import type {
 import {
   isUuidV4,
   parseCloudDeploymentActionInput,
-  parseCreateAwsFirewallRuleInput,
+  parseCreateCloudFirewallRuleInput,
   parseCreateCloudCredentialInput,
   parseCreateCloudDeploymentInput,
-  parseDeleteAwsFirewallRuleInput,
-  parseListAwsFirewallRulesInput,
-  parseUpdateAwsFirewallRuleInput,
+  parseDeleteCloudFirewallRuleInput,
+  parseListCloudFirewallRulesInput,
+  parseUpdateCloudFirewallRuleInput,
   parseUpdateCloudFirewallInput,
   type AwsCloudDeploymentRecord,
   type AwsCliProfileSummary,
@@ -36,19 +36,25 @@ import {
   type AwsFirewallRuleSpec,
   type AwsFirewallSnapshot,
   type AwsManagedAssetType,
+  type AzureCliAccountSummary,
+  type AzureCliCredentialSecret,
+  type AzureCloudDeploymentRecord,
+  type AzureFirewallRule,
+  type AzureFirewallRuleSpec,
+  type AzureFirewallSnapshot,
+  type AzureManagedAssetType,
   type CloudCredentialSummary,
   type CloudDeploymentActionInput,
   type CloudDeploymentPhase,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
-  type CreateAwsFirewallRuleInput,
+  type CloudFirewallSnapshot,
+  type CreateCloudFirewallRuleInput,
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
-  type DeleteAwsFirewallRuleInput,
-  type ListAwsFirewallRulesInput,
-  type ProxmoxCloudDeploymentRecord,
-  type ProxmoxCredentialSecret,
-  type UpdateAwsFirewallRuleInput,
+  type DeleteCloudFirewallRuleInput,
+  type ListCloudFirewallRulesInput,
+  type UpdateCloudFirewallRuleInput,
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
@@ -58,7 +64,10 @@ import type { CloudPermissionEvaluation } from "../shared/cloud-provider-permiss
 import {
   parseDiscoverAwsOptionsInput,
   type AwsDeploymentOptions,
+  type AzureDeploymentOptions,
   type DiscoverAwsOptionsInput,
+  parseDiscoverAzureOptionsInput,
+  type DiscoverAzureOptionsInput,
 } from "../shared/cloud-provider-inventory.js";
 import { CloudCredentialVault, type CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { CloudDeploymentStore } from "./cloud-deployment-store.js";
@@ -76,17 +85,22 @@ import { detectCurrentEgressIpv4 } from "./cloud/current-egress-ipv4.js";
 import { AwsSharedProfileSource } from "./cloud/aws-shared-profiles.js";
 import { AwsEc2PermissionChecker } from "./cloud/aws-permission-checker.js";
 import {
+  AzureCliAccountSource,
+  createAzureCliCredential,
+} from "./cloud/azure-cli-accounts.js";
+import {
   PrivateKeyCapabilities,
   type ResolvedPrivateKey,
 } from "./cloud/private-key-capabilities.js";
 import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
 import {
-  ProxmoxProvider,
-  type ProxmoxApiCredentials,
-  type ProxmoxDeploymentResult,
-  type ProxmoxPermissionCheckResult,
-  type ProxmoxResources,
-} from "./cloud/proxmox-provider.js";
+  AzureVmProvider,
+  type AzureVmCreateMutationEvent,
+  type AzureVmDeploymentResource,
+  type AzureVmDestroyResource,
+  type AzureVmDiscoveryResult,
+  type AzureVmProviderConnection,
+} from "./cloud/azure-vm-provider.js";
 import {
   SliverProvisioner,
   type ProvisionSliverServerInput,
@@ -114,6 +128,8 @@ const MAX_PROVISIONING_TRANSCRIPT_CHUNKS = 512;
 const MAX_PROVISIONING_TRANSCRIPTS = 8;
 const PROVISIONING_TRANSCRIPT_EMIT_DELAY_MS = 100;
 const SSH_HOST_KEY_REVIEW_TTL_MS = 5 * 60 * 1000;
+const AZURE_PUBLIC_IP_REFRESH_ATTEMPTS = 7;
+const AZURE_PUBLIC_IP_REFRESH_DELAY_MS = 5_000;
 const SSH_HOST_KEY_STORE_FILE_NAME = "ssh-host-keys.json";
 const OPAQUE_SSH_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const SSH_HOST_KEY_PATTERN = /^SHA256:[A-Za-z0-9+/]{43}$/u;
@@ -164,27 +180,26 @@ export interface CloudAwsProvider {
   destroy(resource: AwsEc2DestroyResource): Promise<void>;
 }
 
-export interface CloudProxmoxProvider {
-  preflight(): Promise<{
-    readonly version: string;
-    readonly nodes: readonly string[];
-    readonly permissions: readonly string[];
-  }>;
-  checkPermissions(): Promise<ProxmoxPermissionCheckResult>;
+export interface CloudAzureProvider {
+  discover(): Promise<AzureVmDiscoveryResult>;
+  checkPermissions(): Promise<CloudPermissionEvaluation>;
   create(
-    input: Parameters<ProxmoxProvider["create"]>[0],
-    onMutation?: Parameters<ProxmoxProvider["create"]>[1],
-  ): Promise<ProxmoxDeploymentResult>;
-  refresh(resources: ProxmoxResources, deploymentId: string): Promise<ProxmoxDeploymentResult>;
-  start(resources: ProxmoxResources, deploymentId: string): Promise<void>;
-  stop(resources: ProxmoxResources, deploymentId: string): Promise<void>;
-  reboot(resources: ProxmoxResources, deploymentId: string): Promise<void>;
-  updateFirewall(
-    resources: ProxmoxResources,
-    deploymentId: string,
-    policy: Parameters<ProxmoxProvider["updateFirewall"]>[2],
-  ): Promise<void>;
-  destroy(resources: ProxmoxResources, deploymentId: string): Promise<void>;
+    input: Parameters<AzureVmProvider["create"]>[0],
+    onMutation?: Parameters<AzureVmProvider["create"]>[1],
+  ): Promise<AzureVmDeploymentResource>;
+  refresh(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
+  start(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
+  stop(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
+  reboot(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
+  replaceFirewall(
+    resource: AzureVmDeploymentResource,
+    firewall: Parameters<AzureVmProvider["replaceFirewall"]>[1],
+  ): Promise<AzureVmDeploymentResource>;
+  listFirewallRules(resource: AzureVmDeploymentResource): Promise<AzureFirewallSnapshot>;
+  createFirewallRule(resource: AzureVmDeploymentResource, rule: AzureFirewallRuleSpec): Promise<AzureFirewallRule>;
+  updateFirewallRule(resource: AzureVmDeploymentResource, ruleId: string, rule: AzureFirewallRuleSpec): Promise<AzureFirewallRule>;
+  deleteFirewallRule(resource: AzureVmDeploymentResource, ruleId: string): Promise<void>;
+  destroy(resource: AzureVmDestroyResource): Promise<void>;
 }
 
 export type CloudAwsProviderFactory = (connection: AwsEc2ProviderConnection) => CloudAwsProvider;
@@ -194,11 +209,15 @@ export interface CloudAwsPermissionChecker {
 export type CloudAwsPermissionCheckerFactory = (
   connection: AwsEc2ProviderConnection,
 ) => CloudAwsPermissionChecker;
-export type CloudProxmoxProviderFactory = (credentials: ProxmoxApiCredentials) => CloudProxmoxProvider;
+export type CloudAzureProviderFactory = (connection: AzureVmProviderConnection) => CloudAzureProvider;
 
 export interface CloudAwsProfileSource {
   list(): Promise<readonly AwsCliProfileSummary[]>;
   credentialProvider(profileName: string, region?: string): Promise<AwsEc2CredentialProvider>;
+}
+
+export interface CloudAzureAccountSource {
+  list(): Promise<readonly AzureCliAccountSummary[]>;
 }
 
 export interface CloudDeploymentServiceOptions {
@@ -216,7 +235,10 @@ export interface CloudDeploymentServiceOptions {
   readonly awsProviderFactory?: CloudAwsProviderFactory;
   readonly awsPermissionCheckerFactory?: CloudAwsPermissionCheckerFactory;
   readonly awsProfileSource?: CloudAwsProfileSource;
-  readonly proxmoxProviderFactory?: CloudProxmoxProviderFactory;
+  readonly azureProviderFactory?: CloudAzureProviderFactory;
+  readonly azureAccountSource?: CloudAzureAccountSource;
+  /** Test seam for the bounded Azure public-IP propagation wait. */
+  readonly azurePublicIpRefreshDelay?: (milliseconds: number) => Promise<void>;
   readonly sshHostKeyStore?: SshHostKeyStore;
   readonly startSshTerminalRuntime?: CloudSshTerminalStarter;
   /** Generates 32-byte base64url capabilities for explicit host-key reviews. */
@@ -268,7 +290,9 @@ export class CloudDeploymentService {
   readonly #awsProviderFactory: CloudAwsProviderFactory;
   readonly #awsPermissionCheckerFactory: CloudAwsPermissionCheckerFactory;
   readonly #awsProfiles: CloudAwsProfileSource;
-  readonly #proxmoxProviderFactory: CloudProxmoxProviderFactory;
+  readonly #azureProviderFactory: CloudAzureProviderFactory;
+  readonly #azureAccounts: CloudAzureAccountSource;
+  readonly #azurePublicIpRefreshDelay: (milliseconds: number) => Promise<void>;
   readonly #sshHostKeys: SshHostKeyStore;
   readonly #startSshTerminalRuntime: CloudSshTerminalStarter;
   readonly #opaqueIdFactory: () => string;
@@ -301,7 +325,9 @@ export class CloudDeploymentService {
       (connection) => new AwsEc2PermissionChecker(connection)
     );
     this.#awsProfiles = options.awsProfileSource ?? new AwsSharedProfileSource();
-    this.#proxmoxProviderFactory = options.proxmoxProviderFactory ?? ((credentials) => new ProxmoxProvider(credentials));
+    this.#azureProviderFactory = options.azureProviderFactory ?? ((connection) => new AzureVmProvider(connection));
+    this.#azureAccounts = options.azureAccountSource ?? new AzureCliAccountSource();
+    this.#azurePublicIpRefreshDelay = options.azurePublicIpRefreshDelay ?? delay;
     this.#sshHostKeys = sshHostKeys;
     this.#startSshTerminalRuntime = options.startSshTerminalRuntime ?? (
       (runtimeOptions) => SshTerminalRuntime.start(runtimeOptions)
@@ -340,10 +366,17 @@ export class CloudDeploymentService {
       this.#assertActive();
       let awsProfiles: readonly AwsCliProfileSummary[] = [];
       let awsProfileDiscoveryError: string | null = null;
+      let azureAccounts: readonly AzureCliAccountSummary[] = [];
+      let azureAccountDiscoveryError: string | null = null;
       try {
         awsProfiles = await this.#awsProfiles.list();
       } catch (error) {
         awsProfileDiscoveryError = cloudErrorMessage(error, "AWS CLI profiles could not be discovered");
+      }
+      try {
+        azureAccounts = await this.#azureAccounts.list();
+      } catch (error) {
+        azureAccountDiscoveryError = cloudErrorMessage(error, "Azure CLI accounts could not be discovered");
       }
       return {
         ok: true,
@@ -353,6 +386,8 @@ export class CloudDeploymentService {
           secureCredentialStorage: this.#canPersistCredentials(),
           awsProfiles,
           awsProfileDiscoveryError,
+          azureAccounts,
+          azureAccountDiscoveryError,
           provisioningTranscripts: [...this.#provisioningTranscripts.values()].map(snapshotTranscript),
         }),
       };
@@ -424,7 +459,7 @@ export class CloudDeploymentService {
             );
             return await this.#startManagedSshSession(target, credentialId, secret);
           })
-        : await this.#vault.withCredential(credentialId, "proxmox", async (secret, summary) => {
+        : await this.#vault.withCredential(credentialId, "azure", async (secret, summary) => {
             const expectedTarget = managedSshTarget(deployment, summary);
             const target = this.#requireCurrentSshTarget(
               deploymentId,
@@ -472,7 +507,7 @@ export class CloudDeploymentService {
             await this.#sshHostKeys.remember(review.deploymentId, review.fingerprint);
             return await this.#startPinnedSshSession(target, review.credentialId, secret, review.fingerprint);
           })
-        : await this.#vault.withCredential(review.credentialId, "proxmox", async (secret, summary) => {
+        : await this.#vault.withCredential(review.credentialId, "azure", async (secret, summary) => {
             const target = this.#requireCurrentSshTarget(
               review.deploymentId,
               review.credentialId,
@@ -506,6 +541,15 @@ export class CloudDeploymentService {
     }
   }
 
+  async discoverAzureAccounts(): Promise<OperationResult<readonly AzureCliAccountSummary[]>> {
+    try {
+      this.#assertActive();
+      return { ok: true, value: await this.#azureAccounts.list() };
+    } catch (error) {
+      return failure(error, "Azure CLI accounts could not be discovered");
+    }
+  }
+
   async createCredential(
     input: CreateCloudCredentialInput,
   ): Promise<OperationResult<CloudCredentialSummary>> {
@@ -516,6 +560,16 @@ export class CloudDeploymentService {
         const profiles = await this.#awsProfiles.list();
         if (!profiles.some(({ name }) => name === parsed.profileName)) {
           throw new Error("The selected AWS CLI profile is no longer available");
+        }
+      }
+      if (parsed.provider === "azure") {
+        const accounts = await this.#azureAccounts.list();
+        const account = accounts.find(({ subscriptionId }) => subscriptionId === parsed.subscriptionId);
+        if (!account || account.tenantId !== parsed.tenantId) {
+          throw new Error("The selected Azure CLI subscription is no longer available");
+        }
+        if (account.cloudName !== "AzureCloud") {
+          throw new Error("Only AzureCloud subscriptions are currently supported");
         }
       }
       const key = parsed.sshPrivateKeyToken === null
@@ -543,14 +597,13 @@ export class CloudDeploymentService {
                 },
           })
         : await this.#vault.create({
-            provider: "proxmox",
+            provider: "azure",
             label: parsed.label,
+            defaultLocation: parsed.defaultLocation,
             sshUsername: parsed.sshUsername,
             secret: {
-              endpoint: parsed.endpoint,
-              tokenId: parsed.tokenId,
-              tokenSecret: parsed.tokenSecret,
-              tlsCaCertificate: parsed.tlsCaCertificate,
+              subscriptionId: parsed.subscriptionId,
+              tenantId: parsed.tenantId,
               sshPrivateKey: key.privateKey,
               sshPassphrase,
             },
@@ -606,24 +659,26 @@ export class CloudDeploymentService {
           }
         });
       }
-      return await this.#vault.withCredential(summary.id, "proxmox", async (secret) => {
+      return await this.#vault.withCredential(summary.id, "azure", async (secret) => {
         try {
-          const inventory = await this.#proxmoxProviderFactory(proxmoxCredentials(secret)).checkPermissions();
+          const provider = this.#azureProviderFactory(
+            this.#azureConnection(summary.defaultLocation, secret),
+          );
+          const permissions = await provider.checkPermissions();
           return {
             ok: true,
             value: {
-              provider: "proxmox",
+              provider: "azure",
               summary: permissionSummary(
-                `Proxmox ${inventory.version}`,
-                inventory.permissions,
-                "privilege",
-                inventory.clusterFirewallEnabled === false ? "cluster firewall is disabled" : undefined,
+                `Azure ${summary.defaultLocation}`,
+                permissions,
+                "RBAC action",
               ),
-              permissions: inventory.permissions,
+              permissions,
             },
           };
         } catch (error) {
-          return failure(error, "Proxmox rejected the credential", credentialValues(secret));
+          return failure(error, "Azure rejected the CLI credential", credentialValues(secret));
         }
       });
     } catch (error) {
@@ -657,6 +712,32 @@ export class CloudDeploymentService {
     }
   }
 
+  async discoverAzureOptions(
+    input: DiscoverAzureOptionsInput,
+  ): Promise<OperationResult<AzureDeploymentOptions>> {
+    try {
+      this.#assertActive();
+      const parsed = parseDiscoverAzureOptionsInput(input);
+      return await this.#vault.withCredential(parsed.credentialId, "azure", async (secret) => {
+        try {
+          const inventory = await this.#azureProviderFactory(
+            this.#azureConnection(parsed.location, secret),
+          ).discover();
+          if (
+            inventory.subscriptionId !== secret.subscriptionId ||
+            inventory.tenantId !== secret.tenantId ||
+            inventory.location !== parsed.location
+          ) throw new Error("Azure returned inventory for a different subscription, tenant, or location");
+          return { ok: true, value: toAzureDeploymentOptions(inventory) };
+        } catch (error) {
+          return failure(error, "Azure infrastructure options could not be discovered", credentialValues(secret));
+        }
+      });
+    } catch (error) {
+      return failure(error, "The Azure option discovery request was rejected");
+    }
+  }
+
   async createDeployment(
     input: CreateCloudDeploymentInput,
   ): Promise<OperationResult<CloudDeploymentRecord>> {
@@ -672,7 +753,7 @@ export class CloudDeploymentService {
         try {
           const deployment = created.value.deployment.provider === "aws"
             ? await this.#provisionAws(created.value.deployment)
-            : await this.#provisionProxmox(created.value.deployment);
+            : await this.#provisionAzure(created.value.deployment);
           this.#finishProvisioningTranscript(created.value.deployment.id, "complete");
           return { ok: true, value: deployment };
         } catch (error) {
@@ -703,7 +784,7 @@ export class CloudDeploymentService {
           operationStarted = true;
           deployment = deployment.provider === "aws"
             ? await this.#runAwsLifecycle(deployment, parsed.action)
-            : await this.#runProxmoxLifecycle(deployment, parsed.action);
+            : await this.#runAzureLifecycle(deployment, parsed.action);
           return { ok: true, value: deployment };
         } catch (error) {
           const message = cloudErrorMessage(error, "The lifecycle action failed");
@@ -746,7 +827,7 @@ export class CloudDeploymentService {
           operationStarted = true;
           deployment = deployment.provider === "aws"
             ? await this.#updateAwsFirewall(deployment, parsed)
-            : await this.#updateProxmoxFirewall(deployment, parsed);
+            : await this.#updateAzureFirewall(deployment, parsed);
           return { ok: true, value: deployment };
         } catch (error) {
           const message = cloudErrorMessage(error, "The firewall update failed");
@@ -760,94 +841,127 @@ export class CloudDeploymentService {
   }
 
   async listFirewallRules(
-    input: ListAwsFirewallRulesInput,
-  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    input: ListCloudFirewallRulesInput,
+  ): Promise<OperationResult<CloudFirewallSnapshot>> {
     try {
       this.#assertActive();
-      const parsed = parseListAwsFirewallRulesInput(input);
-      const deployment = this.#requireAwsDeployment(parsed.deploymentId);
+      const parsed = parseListCloudFirewallRulesInput(input);
+      const deployment = this.#requireDeployment(parsed.deploymentId);
       if (deployment.status === "provisioning" || deployment.status === "deleting") {
         return { ok: false, error: "The deployment is busy" };
       }
-      return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+      if (deployment.provider === "aws") {
+        return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+          try {
+            const provider = this.#awsProviderFactory(
+              await this.#awsConnection(deployment.spec.region, secret),
+            );
+            return { ok: true, value: await provider.listFirewallRules(awsResourceFromRecord(deployment)) };
+          } catch (error) {
+            return failure(error, "The AWS firewall rules could not be listed", credentialValues(secret));
+          }
+        });
+      }
+      return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
         try {
-          const provider = this.#awsProviderFactory(
-            await this.#awsConnection(deployment.spec.region, secret),
-          );
-          return {
-            ok: true,
-            value: await provider.listFirewallRules(awsResourceFromRecord(deployment)),
-          };
+          const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+          return { ok: true, value: await provider.listFirewallRules(azureResourceFromRecord(deployment, secret)) };
         } catch (error) {
-          return failure(
-            error,
-            "The AWS firewall rules could not be listed",
-            credentialValues(secret),
-          );
+          return failure(error, "The Azure firewall rules could not be listed", credentialValues(secret));
         }
       });
     } catch (error) {
-      return failure(error, "The AWS firewall rule list request was rejected");
+      return failure(error, "The firewall rule list request was rejected");
     }
   }
 
   async createFirewallRule(
-    input: CreateAwsFirewallRuleInput,
-  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    input: CreateCloudFirewallRuleInput,
+  ): Promise<OperationResult<CloudFirewallSnapshot>> {
     try {
       this.#assertActive();
-      const parsed = parseCreateAwsFirewallRuleInput(input);
-      return await this.#mutateAwsFirewall(
-        parsed.deploymentId,
-        parsed.expectedRevision,
-        "The AWS firewall rule could not be created",
-        async (provider, resource, before) => upsertAwsFirewallRule(
-          before,
-          await provider.createFirewallRule(resource, parsed.rule),
+      const parsed = parseCreateCloudFirewallRuleInput(input);
+      const deployment = this.#requireDeployment(parsed.deploymentId);
+      if (deployment.provider === "aws") {
+        if (!("peerType" in parsed.rule)) throw new TypeError("Invalid AWS firewall rule");
+        return await this.#mutateAwsFirewall(
+          parsed.deploymentId, parsed.expectedRevision, "The AWS firewall rule could not be created",
+          async (provider, resource, before) => upsertAwsFirewallRule(
+            before, await provider.createFirewallRule(resource, parsed.rule as AwsFirewallRuleSpec),
+          ),
+        );
+      }
+      if (!("name" in parsed.rule)) throw new TypeError("Invalid Azure firewall rule");
+      return await this.#mutateAzureFirewall(
+        parsed.deploymentId, parsed.expectedRevision, "The Azure firewall rule could not be created",
+        async (provider, resource, before) => upsertAzureFirewallRule(
+          before, await provider.createFirewallRule(resource, parsed.rule as AzureFirewallRuleSpec),
         ),
       );
     } catch (error) {
-      return failure(error, "The AWS firewall rule creation request was rejected");
+      return failure(error, "The firewall rule creation request was rejected");
     }
   }
 
   async updateFirewallRule(
-    input: UpdateAwsFirewallRuleInput,
-  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    input: UpdateCloudFirewallRuleInput,
+  ): Promise<OperationResult<CloudFirewallSnapshot>> {
     try {
       this.#assertActive();
-      const parsed = parseUpdateAwsFirewallRuleInput(input);
-      return await this.#mutateAwsFirewall(
-        parsed.deploymentId,
-        parsed.expectedRevision,
-        "The AWS firewall rule could not be updated",
-        async (provider, resource, before) => upsertAwsFirewallRule(
+      const parsed = parseUpdateCloudFirewallRuleInput(input);
+      const deployment = this.#requireDeployment(parsed.deploymentId);
+      if (deployment.provider === "aws") {
+        if (!("peerType" in parsed.rule)) throw new TypeError("Invalid AWS firewall rule");
+        return await this.#mutateAwsFirewall(
+          parsed.deploymentId, parsed.expectedRevision, "The AWS firewall rule could not be updated",
+          async (provider, resource, before) => upsertAwsFirewallRule(
+            before,
+            await provider.updateFirewallRule(resource, parsed.ruleId, parsed.rule as AwsFirewallRuleSpec),
+          ),
+        );
+      }
+      if (!("name" in parsed.rule)) throw new TypeError("Invalid Azure firewall rule");
+      return await this.#mutateAzureFirewall(
+        parsed.deploymentId, parsed.expectedRevision, "The Azure firewall rule could not be updated",
+        async (provider, resource, before) => upsertAzureFirewallRule(
           before,
-          await provider.updateFirewallRule(resource, parsed.ruleId, parsed.rule),
+          await provider.updateFirewallRule(
+            resource,
+            azureFirewallRuleName(parsed.ruleId),
+            parsed.rule as AzureFirewallRuleSpec,
+          ),
         ),
       );
     } catch (error) {
-      return failure(error, "The AWS firewall rule update request was rejected");
+      return failure(error, "The firewall rule update request was rejected");
     }
   }
 
   async deleteFirewallRule(
-    input: DeleteAwsFirewallRuleInput,
-  ): Promise<OperationResult<AwsFirewallSnapshot>> {
+    input: DeleteCloudFirewallRuleInput,
+  ): Promise<OperationResult<CloudFirewallSnapshot>> {
     try {
       this.#assertActive();
-      const parsed = parseDeleteAwsFirewallRuleInput(input);
-      return await this.#mutateAwsFirewall(
-        parsed.deploymentId,
-        parsed.expectedRevision,
-        "The AWS firewall rule could not be deleted",
+      const parsed = parseDeleteCloudFirewallRuleInput(input);
+      const deployment = this.#requireDeployment(parsed.deploymentId);
+      if (deployment.provider === "aws") {
+        return await this.#mutateAwsFirewall(
+          parsed.deploymentId, parsed.expectedRevision, "The AWS firewall rule could not be deleted",
+          async (provider, resource, before) => {
+            await provider.deleteFirewallRule(resource, parsed.ruleId);
+            return removeAwsFirewallRule(before, parsed.ruleId);
+          },
+        );
+      }
+      return await this.#mutateAzureFirewall(
+        parsed.deploymentId, parsed.expectedRevision, "The Azure firewall rule could not be deleted",
         async (provider, resource, before) => {
-          await provider.deleteFirewallRule(resource, parsed.ruleId);
-          return removeAwsFirewallRule(before, parsed.ruleId);
+          await provider.deleteFirewallRule(resource, azureFirewallRuleName(parsed.ruleId));
+          return removeAzureFirewallRule(before, parsed.ruleId);
         },
       );
     } catch (error) {
-      return failure(error, "The AWS firewall rule deletion request was rejected");
+      return failure(error, "The firewall rule deletion request was rejected");
     }
   }
 
@@ -949,7 +1063,7 @@ export class CloudDeploymentService {
   async #startManagedSshSession(
     target: ManagedSshTarget,
     credentialId: string,
-    secret: AwsCredentialSecret | ProxmoxCredentialSecret,
+    secret: AwsCredentialSecret | AzureCliCredentialSecret,
   ): Promise<StartedManagedSshSession | SshHostKeyReview> {
     const pinnedFingerprint = this.#sshHostKeys.get(target.deploymentId);
     if (pinnedFingerprint !== undefined) {
@@ -985,7 +1099,7 @@ export class CloudDeploymentService {
   async #startPinnedSshSession(
     target: ManagedSshTarget,
     credentialId: string,
-    secret: AwsCredentialSecret | ProxmoxCredentialSecret,
+    secret: AwsCredentialSecret | AzureCliCredentialSecret,
     fingerprint: string,
   ): Promise<StartedManagedSshSession> {
     let runtime: StartedManagedSshSession["runtime"] | undefined;
@@ -1164,70 +1278,76 @@ export class CloudDeploymentService {
     });
   }
 
-  async #provisionProxmox(deployment: ProxmoxCloudDeploymentRecord): Promise<CloudDeploymentRecord> {
-    return await this.#vault.withCredential(deployment.credentialId, "proxmox", async (secret, summary) => {
+  async #provisionAzure(deployment: AzureCloudDeploymentRecord): Promise<CloudDeploymentRecord> {
+    return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        const provider = this.#proxmoxProviderFactory(proxmoxCredentials(secret));
-        await provider.preflight();
+        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
         const publicKey = publicKeyForCredential(secret);
         let current = await this.#persistPhase(deployment.id, "creating-instance");
-        if (current.provider !== "proxmox") throw new Error("Cloud deployment provider changed unexpectedly");
-        const result = await provider.create({
-          deploymentId: current.id,
-          displayName: current.name,
-          node: current.spec.node,
-          templateVmId: current.spec.templateVmId,
-          vmId: current.spec.vmId,
-          storage: current.spec.storage,
-          bridge: current.spec.bridge,
-          cores: current.spec.cores,
-          memoryMiB: current.spec.memoryMiB,
-          diskGiB: current.spec.diskGiB,
-          ipConfig: current.spec.ipConfig,
-          gateway: current.spec.gateway,
-          sshUsername: summary.sshUsername,
+        if (current.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
+        let resource = await provider.create({
+          guid: current.id,
+          name: current.name,
+          imageReference: current.spec.imageReference,
+          vmSize: current.spec.vmSize,
+          network: current.spec.networkMode === "existing"
+            ? {
+                mode: "existing" as const,
+                virtualNetworkId: current.spec.vnetId!,
+                subnetId: current.spec.subnetId!,
+              }
+            : {
+                mode: "managed" as const,
+                virtualNetworkCidr: current.spec.managedVnetCidr!,
+                subnetCidr: current.spec.managedSubnetCidr!,
+              },
+          sshUsername: current.spec.sshUsername,
           sshPublicKey: publicKey,
-          sshPort: current.spec.sshPort,
-          multiplayerPort: current.spec.multiplayerPort,
-          sshCidrs: current.spec.sshCidrs,
-          operatorCidrs: current.spec.operatorCidrs,
+          ...(current.spec.osDiskSizeGiB === null ? {} : { osDiskSizeGiB: current.spec.osDiskSizeGiB }),
+          firewall: azureFirewall(current),
+          allocatePublicIp: current.spec.usePublicIp,
         }, async (event) => {
-          const phase: CloudDeploymentPhase = event.phase === "configured"
+          const phase: CloudDeploymentPhase = event.phase === "network-security-group"
             ? "configuring-firewall"
-            : event.phase === "firewall"
+            : event.phase === "firewall" || event.phase === "public-ip-address" || event.phase === "network-interface"
               ? "starting-instance"
-              : event.phase === "started"
+              : event.phase === "virtual-machine" || event.phase === "os-disk"
                 ? "installing-sliver"
                 : "creating-instance";
           await this.#persistPatch(deployment.id, (latest) => {
-            if (latest.provider !== "proxmox") throw new Error("Cloud deployment provider changed unexpectedly");
-            return {
-              ...latest,
-              phase,
-              runtime: { ...latest.runtime, vmId: event.resources.vmId },
-              managedAssets: [{
-                resourceType: "proxmox-vm",
-                resourceId: String(event.resources.vmId),
-                displayName: event.resources.vmName,
-                tagged: event.phase === "configured" || event.phase === "firewall" || event.phase === "started",
-              }],
-            };
+            if (latest.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
+            return applyAzureCreateMutation(latest, event, phase);
           });
         });
+        if (current.spec.usePublicIp) {
+          resource = await requireAzurePublicIp(
+            provider,
+            resource,
+            this.#azurePublicIpRefreshDelay,
+          );
+        }
+        assertAzureReadyForSsh(resource);
         current = await this.#persistPatch(deployment.id, (latest) => {
-          if (latest.provider !== "proxmox") throw new Error("Cloud deployment provider changed unexpectedly");
-          return applyProxmoxResource(latest, result, "installing-sliver");
+          if (latest.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
+          return applyAzureResource(latest, resource, "installing-sliver");
         });
-        if (current.provider !== "proxmox") throw new Error("Cloud deployment provider changed unexpectedly");
+        if (current.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
+        const sshHost = azureConnectionAddress(current.spec.usePublicIp, resource);
+        if (!sshHost) {
+          throw new Error(current.spec.usePublicIp
+            ? "Azure did not report the requested public IP address for SSH provisioning"
+            : "Azure did not report a private IP address for SSH provisioning");
+        }
+        const operatorHost = sshHost;
         const provisioned = await this.#provisioner.provision({
           deploymentId: current.id,
-          operatorEndpointHost: result.address,
+          operatorEndpointHost: operatorHost,
           multiplayerPort: current.spec.multiplayerPort,
           operatorName: current.spec.operatorName,
           ssh: {
-            host: result.address,
+            host: sshHost,
             port: current.spec.sshPort,
-            username: summary.sshUsername,
+            username: current.spec.sshUsername,
             privateKey: secret.sshPrivateKey,
             ...(secret.sshPassphrase === null ? {} : { passphrase: secret.sshPassphrase }),
           },
@@ -1235,7 +1355,7 @@ export class CloudDeploymentService {
         });
         return await this.#completeProvisioning(current.id, provisioned);
       } catch (error) {
-        throw new Error(cloudErrorMessage(error, "Proxmox deployment failed", credentialValues(secret)));
+        throw new Error(cloudErrorMessage(error, "Azure deployment failed", credentialValues(secret)));
       }
     });
   }
@@ -1308,26 +1428,31 @@ export class CloudDeploymentService {
     });
   }
 
-  async #runProxmoxLifecycle(
-    deployment: ProxmoxCloudDeploymentRecord,
+  async #runAzureLifecycle(
+    deployment: AzureCloudDeploymentRecord,
     action: CloudDeploymentActionInput["action"],
   ): Promise<CloudDeploymentRecord> {
-    return await this.#vault.withCredential(deployment.credentialId, "proxmox", async (secret) => {
+    return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        const provider = this.#proxmoxProviderFactory(proxmoxCredentials(secret));
-        const resources = proxmoxResourcesFromRecord(deployment);
-        await provider[action](resources, deployment.id);
-        const refreshed = await provider.refresh(resources, deployment.id);
+        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+        const resource = azureResourceFromRecord(deployment, secret);
+        const refreshed = action === "start"
+          ? await provider.start(resource)
+          : action === "stop"
+            ? await provider.stop(resource)
+            : await provider.reboot(resource);
         return await this.#persistPatch(deployment.id, (current) => {
-          if (current.provider !== "proxmox") throw new Error("Cloud deployment provider changed unexpectedly");
-          return applyProxmoxResource(
+          if (current.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
+          return applyAzureResource(
             current,
             refreshed,
-            refreshed.state === "stopped" ? "stopped" : "ready",
+            refreshed.instanceState === "deallocated" || refreshed.instanceState === "stopped"
+              ? "stopped"
+              : "ready",
           );
         });
       } catch (error) {
-        throw new Error(cloudErrorMessage(error, "Proxmox lifecycle action failed", credentialValues(secret)));
+        throw new Error(cloudErrorMessage(error, "Azure lifecycle action failed", credentialValues(secret)));
       }
     });
   }
@@ -1359,31 +1484,37 @@ export class CloudDeploymentService {
     });
   }
 
-  async #updateProxmoxFirewall(
-    deployment: ProxmoxCloudDeploymentRecord,
+  async #updateAzureFirewall(
+    deployment: AzureCloudDeploymentRecord,
     input: UpdateCloudFirewallInput,
   ): Promise<CloudDeploymentRecord> {
-    return await this.#vault.withCredential(deployment.credentialId, "proxmox", async (secret) => {
+    return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        const provider = this.#proxmoxProviderFactory(proxmoxCredentials(secret));
-        await provider.updateFirewall(proxmoxResourcesFromRecord(deployment), deployment.id, {
+        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+        const resource = azureResourceFromRecord(deployment, secret);
+        const updated = await provider.replaceFirewall(resource, {
           sshPort: deployment.spec.sshPort,
-          multiplayerPort: deployment.spec.multiplayerPort,
-          sshCidrs: input.sshCidrs,
-          operatorCidrs: input.operatorCidrs,
+          operatorPort: deployment.spec.multiplayerPort,
+          sshSourceCidrs: input.sshCidrs,
+          operatorSourceCidrs: input.operatorCidrs,
         });
         return await this.#persistPatch(deployment.id, (current) => {
-          if (current.provider !== "proxmox") throw new Error("Cloud deployment provider changed unexpectedly");
+          if (current.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
+          const withResource = applyAzureResource(
+            current,
+            updated,
+            updated.instanceState === "deallocated" || updated.instanceState === "stopped"
+              ? "stopped"
+              : "ready",
+          );
           return {
-            ...current,
-            status: current.status === "stopped" ? "stopped" : "running",
-            phase: current.status === "stopped" ? "stopped" : "ready",
+            ...withResource,
             lastError: null,
-            spec: { ...current.spec, sshCidrs: input.sshCidrs, operatorCidrs: input.operatorCidrs },
+            spec: { ...withResource.spec, sshCidrs: input.sshCidrs, operatorCidrs: input.operatorCidrs },
           };
         });
       } catch (error) {
-        throw new Error(cloudErrorMessage(error, "Proxmox firewall update failed", credentialValues(secret)));
+        throw new Error(cloudErrorMessage(error, "Azure firewall update failed", credentialValues(secret)));
       }
     });
   }
@@ -1401,15 +1532,13 @@ export class CloudDeploymentService {
       });
       return;
     }
-    if (deployment.runtime.vmId === null && !deployment.managedAssets.some(({ resourceType }) => resourceType === "proxmox-vm")) {
-      return;
-    }
-    await this.#vault.withCredential(deployment.credentialId, "proxmox", async (secret) => {
+    if (!hasTrackedAzureResources(deployment)) return;
+    await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        await this.#proxmoxProviderFactory(proxmoxCredentials(secret))
-          .destroy(proxmoxResourcesFromRecord(deployment), deployment.id);
+        await this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret))
+          .destroy(azureDestroyResourceFromRecord(deployment, secret));
       } catch (error) {
-        throw new Error(cloudErrorMessage(error, "Proxmox resource termination failed", credentialValues(secret)));
+        throw new Error(cloudErrorMessage(error, "Azure resource termination failed", credentialValues(secret)));
       }
     });
   }
@@ -1497,18 +1626,65 @@ export class CloudDeploymentService {
     });
   }
 
-  #requireAwsDeployment(deploymentId: string): AwsCloudDeploymentRecord {
+  async #mutateAzureFirewall(
+    deploymentId: string,
+    expectedRevision: number,
+    fallback: string,
+    mutate: (
+      provider: CloudAzureProvider,
+      resource: AzureVmDeploymentResource,
+      before: AzureFirewallSnapshot,
+    ) => Promise<AzureFirewallSnapshot>,
+  ): Promise<OperationResult<AzureFirewallSnapshot>> {
+    return await this.#serializeDeployment(deploymentId, async () => {
+      try {
+        const deployment = this.#requireDeploymentAtRevision(deploymentId, expectedRevision);
+        if (deployment.provider !== "azure") throw new Error("Expected an Azure deployment");
+        if (deployment.status === "provisioning" || deployment.status === "deleting") {
+          return { ok: false, error: "The deployment is busy" };
+        }
+        return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
+          try {
+            const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+            const resource = azureResourceFromRecord(deployment, secret);
+            const before = await provider.listFirewallRules(resource);
+            const fallbackSnapshot = await mutate(provider, resource, before);
+            let refreshedResource = resource;
+            try {
+              const updated = await this.#persistPatch(deployment.id, (current) => current);
+              if (updated.provider === "azure") refreshedResource = azureResourceFromRecord(updated, secret);
+            } catch {
+              // The provider mutation is already complete. Preserve the
+              // confirmed result if only the local revision journal failed.
+            }
+            try {
+              return { ok: true, value: await provider.listFirewallRules(refreshedResource) };
+            } catch {
+              return { ok: true, value: fallbackSnapshot };
+            }
+          } catch (error) {
+            return failure(error, fallback, credentialValues(secret));
+          }
+        });
+      } catch (error) {
+        return failure(error, fallback);
+      }
+    });
+  }
+
+  #requireDeployment(deploymentId: string): CloudDeploymentRecord {
     if (!isUuidV4(deploymentId)) throw new TypeError("Invalid cloud deployment identity");
     const deployment = this.#store.getState().deployments.find(({ id }) => id === deploymentId);
     if (!deployment) throw new Error("The cloud deployment no longer exists");
-    if (deployment.provider !== "aws") {
-      throw new Error("Firewall rule management is only available for AWS deployments");
-    }
     return deployment;
   }
 
-  async #requireMatchingCredential(credentialId: string, provider: "aws" | "proxmox"): Promise<void> {
-    await this.#vault.withCredential(credentialId, provider, () => undefined);
+  async #requireMatchingCredential(credentialId: string, provider: "aws" | "azure"): Promise<void> {
+    if (provider === "aws") {
+      await this.#vault.withCredential(credentialId, "aws", () => undefined);
+    } else {
+      await this.#vault.withCredential(credentialId, "azure", () => undefined);
+    }
   }
 
   #requireDeploymentAtRevision(deploymentId: string, expectedRevision: number): CloudDeploymentRecord {
@@ -1701,6 +1877,18 @@ export class CloudDeploymentService {
       },
     };
   }
+
+  #azureConnection(
+    location: string,
+    secret: AzureCliCredentialSecret,
+  ): AzureVmProviderConnection {
+    return {
+      subscriptionId: secret.subscriptionId,
+      tenantId: secret.tenantId,
+      location,
+      credential: createAzureCliCredential(secret),
+    };
+  }
 }
 
 function managedSshTarget(
@@ -1712,7 +1900,7 @@ function managedSshTarget(
   }
   const username = deployment.provider === "aws"
     ? deployment.spec.sshUsername ?? credential.sshUsername
-    : credential.sshUsername;
+    : deployment.spec.sshUsername;
   return managedSshTargetWithUsername(deployment, username);
 }
 
@@ -1720,9 +1908,12 @@ function managedSshTargetWithUsername(
   deployment: CloudDeploymentRecord,
   username: string,
 ): ManagedSshTarget {
-  const host = deployment.provider === "aws"
-    ? deployment.runtime.publicIpAddress ?? deployment.runtime.privateIpAddress ?? deployment.remoteHost ?? ""
-    : deployment.runtime.ipAddress ?? deployment.remoteHost ?? "";
+  const host = deployment.provider === "azure"
+    ? azureConnectionAddress(deployment.spec.usePublicIp, deployment.runtime) ?? ""
+    : deployment.runtime.publicIpAddress ??
+      deployment.runtime.privateIpAddress ??
+      deployment.remoteHost ??
+      "";
   const port = deployment.spec.sshPort;
   const unavailableReason = sshUnavailableReason(deployment.status, host);
   return Object.freeze({
@@ -1752,7 +1943,7 @@ function sshUnavailableReason(
 
 function sshTerminalTarget(
   target: ManagedSshTarget,
-  secret: AwsCredentialSecret | ProxmoxCredentialSecret,
+  secret: AwsCredentialSecret | AzureCliCredentialSecret,
   fingerprint?: string,
 ): StartSshTerminalRuntimeOptions["ssh"] {
   return {
@@ -1793,15 +1984,6 @@ function snapshotTranscript(transcript: MutableProvisioningTranscript): CloudPro
   });
 }
 
-function proxmoxCredentials(secret: ProxmoxCredentialSecret): ProxmoxApiCredentials {
-  return {
-    endpoint: secret.endpoint,
-    tokenId: secret.tokenId,
-    tokenSecret: secret.tokenSecret,
-    tlsCaCertificate: secret.tlsCaCertificate,
-  };
-}
-
 function permissionSummary(
   provider: string,
   permissions: CloudPermissionEvaluation,
@@ -1836,7 +2018,37 @@ function removeAwsFirewallRule(snapshot: AwsFirewallSnapshot, ruleId: string): A
   return { ...snapshot, rules: snapshot.rules.filter(({ id }) => id !== ruleId) };
 }
 
-function publicKeyForCredential(secret: AwsCredentialSecret | ProxmoxCredentialSecret): string {
+function upsertAzureFirewallRule(
+  snapshot: AzureFirewallSnapshot,
+  rule: AzureFirewallRule,
+): AzureFirewallSnapshot {
+  return {
+    ...snapshot,
+    rules: [...snapshot.rules.filter(({ id }) => id !== rule.id), rule]
+      .sort((left, right) => left.priority - right.priority || left.name.localeCompare(right.name)),
+  };
+}
+
+function removeAzureFirewallRule(
+  snapshot: AzureFirewallSnapshot,
+  ruleId: string,
+): AzureFirewallSnapshot {
+  const ruleName = azureFirewallRuleName(ruleId);
+  return {
+    ...snapshot,
+    rules: snapshot.rules.filter(({ id, name }) => id !== ruleId && name !== ruleName),
+  };
+}
+
+function azureFirewallRuleName(ruleId: string): string {
+  const name = ruleId.includes("/") ? ruleId.slice(ruleId.lastIndexOf("/") + 1) : ruleId;
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?$/u.test(name) || name.length > 80) {
+    throw new TypeError("Invalid Azure firewall rule identity");
+  }
+  return name;
+}
+
+function publicKeyForCredential(secret: AwsCredentialSecret | AzureCliCredentialSecret): string {
   const key = sshUtils.parseKey(secret.sshPrivateKey, secret.sshPassphrase ?? undefined);
   if (key instanceof Error || !key.isPrivateKey()) throw new Error("The stored SSH private key is unavailable");
   return `${key.type} ${key.getPublicSSH().toString("base64")} sliver-gui`;
@@ -1869,12 +2081,59 @@ async function resolveAwsNetwork(
   return { vpcId, subnetId: subnet.id };
 }
 
+function toAzureDeploymentOptions(inventory: AzureVmDiscoveryResult): AzureDeploymentOptions {
+  return Object.freeze({
+    location: inventory.location,
+    vmSizes: Object.freeze(inventory.vmSizes.map((size) => Object.freeze({
+      name: size.name,
+      vCpuCount: size.vCpuCount,
+      memoryMiB: size.memoryMiB,
+    }))),
+    images: Object.freeze(inventory.images.map((image) => Object.freeze({
+      reference: image.id,
+      label: image.label,
+      architecture: image.architecture,
+      sshUsername: image.sshUsername,
+    }))),
+    virtualNetworks: Object.freeze(inventory.virtualNetworks.map((network) => Object.freeze({
+      id: network.id,
+      name: network.name,
+      resourceGroupName: network.resourceGroupName,
+      location: network.location,
+      addressPrefixes: Object.freeze([...network.addressPrefixes]),
+    }))),
+    subnets: Object.freeze(inventory.subnets.map((subnet) => Object.freeze({
+      id: subnet.id,
+      name: subnet.name,
+      vnetId: azureVirtualNetworkIdForSubnet(subnet.id),
+      resourceGroupName: subnet.resourceGroupName,
+      addressPrefixes: Object.freeze([...subnet.addressPrefixes]),
+    }))),
+  });
+}
+
+function azureVirtualNetworkIdForSubnet(subnetId: string): string {
+  const marker = "/subnets/";
+  const index = subnetId.toLocaleLowerCase("en-US").lastIndexOf(marker);
+  if (index <= 0) throw new Error("Azure returned an invalid subnet resource identity");
+  return subnetId.slice(0, index);
+}
+
 function awsFirewall(deployment: AwsCloudDeploymentRecord) {
   return {
     sshPort: deployment.spec.sshPort,
     sshSourceCidrs: deployment.spec.sshCidrs,
     multiplayerPort: deployment.spec.multiplayerPort,
     multiplayerSourceCidrs: deployment.spec.operatorCidrs,
+  };
+}
+
+function azureFirewall(deployment: AzureCloudDeploymentRecord) {
+  return {
+    sshPort: deployment.spec.sshPort,
+    sshSourceCidrs: deployment.spec.sshCidrs,
+    operatorPort: deployment.spec.multiplayerPort,
+    operatorSourceCidrs: deployment.spec.operatorCidrs,
   };
 }
 
@@ -1888,6 +2147,45 @@ function assertAwsReadyForSsh(resource: AwsEc2DeploymentResource): void {
     `AWS EC2 status checks did not pass; refusing SSH provisioning ` +
     `(state=${resource.state}, instance=${resource.instanceHealth}, system=${resource.systemHealth})`,
   );
+}
+
+function assertAzureReadyForSsh(resource: AzureVmDeploymentResource): void {
+  if (resource.instanceState === "running") return;
+  throw new Error(
+    `Azure virtual machine did not reach the running state; refusing SSH provisioning ` +
+    `(state=${resource.instanceState}, provisioning=${resource.provisioningState ?? "unknown"})`,
+  );
+}
+
+async function requireAzurePublicIp(
+  provider: CloudAzureProvider,
+  resource: AzureVmDeploymentResource,
+  refreshDelay: (milliseconds: number) => Promise<void>,
+): Promise<AzureVmDeploymentResource> {
+  if (!resource.publicIpAddressId) {
+    throw new Error("Azure did not retain the requested public IP resource identity");
+  }
+  if (resource.publicIpAddress) return resource;
+  let latest = resource;
+  for (let attempt = 0; attempt < AZURE_PUBLIC_IP_REFRESH_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await refreshDelay(AZURE_PUBLIC_IP_REFRESH_DELAY_MS);
+    latest = await provider.refresh(latest);
+    if (latest.publicIpAddress) return latest;
+  }
+  throw new Error(
+    `Azure did not report the requested public IP address after ` +
+    `${AZURE_PUBLIC_IP_REFRESH_ATTEMPTS} refresh attempts; refusing private-address fallback`,
+  );
+}
+
+function azureConnectionAddress(
+  usePublicIp: boolean,
+  resource: Pick<AzureVmDeploymentResource, "publicIpAddress" | "privateIpAddress"> | {
+    readonly publicIpAddress: string | null;
+    readonly privateIpAddress: string | null;
+  },
+): string | undefined {
+  return (usePublicIp ? resource.publicIpAddress : resource.privateIpAddress) ?? undefined;
 }
 
 function applyAwsCreateMutation(
@@ -2354,41 +2652,346 @@ function hasTrackedAwsResources(deployment: AwsCloudDeploymentRecord): boolean {
     deployment.managedAssets.some(({ resourceType }) => resourceType.startsWith("ec2-"));
 }
 
-function applyProxmoxResource(
-  deployment: ProxmoxCloudDeploymentRecord,
-  result: ProxmoxDeploymentResult,
-  phase: "installing-sliver" | "ready" | "stopped",
-): ProxmoxCloudDeploymentRecord {
-  const stopped = result.state === "stopped";
+function hasTrackedAzureResources(deployment: AzureCloudDeploymentRecord): boolean {
+  return deployment.runtime.vmId !== null ||
+    deployment.runtime.networkSecurityGroupId !== null ||
+    deployment.runtime.networkInterfaceId !== null ||
+    deployment.runtime.osDiskId !== null ||
+    deployment.runtime.publicIpAddressId !== null ||
+    deployment.managedAssets.some(({ resourceType }) => resourceType.startsWith("azure-"));
+}
+
+function applyAzureCreateMutation(
+  deployment: AzureCloudDeploymentRecord,
+  event: AzureVmCreateMutationEvent,
+  phase: CloudDeploymentPhase,
+): AzureCloudDeploymentRecord {
+  const { resources } = event;
+  let managedAssets = deployment.managedAssets;
+  if (resources.resourceGroupId) {
+    managedAssets = upsertAzureManagedAsset(
+      managedAssets,
+      "azure-resource-group",
+      resources.resourceGroupId,
+      azureResourceGroupName(resources.resourceGroupId),
+    );
+  }
+  if (resources.managedNetwork) {
+    managedAssets = upsertAzureManagedAsset(
+      managedAssets,
+      "azure-virtual-network",
+      resources.managedNetwork.virtualNetworkId,
+      azureResourceName(resources.managedNetwork.virtualNetworkId),
+    );
+    managedAssets = upsertAzureManagedAsset(
+      managedAssets,
+      "azure-subnet",
+      resources.managedNetwork.subnetId,
+      azureResourceName(resources.managedNetwork.subnetId),
+      false,
+    );
+  }
+  const taggedAssets: ReadonlyArray<readonly [AzureManagedAssetType, string | undefined]> = [
+    ["azure-network-security-group", resources.networkSecurityGroupId],
+    ["azure-public-ip", resources.publicIpAddressId],
+    ["azure-network-interface", resources.networkInterfaceId],
+    ["azure-virtual-machine", resources.virtualMachineId],
+    ["azure-os-disk", resources.osDiskId],
+  ];
+  for (const [resourceType, resourceId] of taggedAssets) {
+    if (resourceId) {
+      managedAssets = upsertAzureManagedAsset(
+        managedAssets,
+        resourceType,
+        resourceId,
+        azureResourceName(resourceId),
+      );
+    }
+  }
   return {
     ...deployment,
-    status: phase === "installing-sliver" ? "provisioning" : stopped ? "stopped" : "running",
-    phase: stopped ? "stopped" : phase,
-    remoteHost: result.address || deployment.remoteHost,
-    lastError: null,
-    managedAssets: [{
-      resourceType: "proxmox-vm",
-      resourceId: String(result.resources.vmId),
-      displayName: result.resources.vmName,
-      tagged: true,
-    }],
+    phase,
+    managedAssets,
     runtime: {
-      vmId: result.resources.vmId,
-      node: result.resources.node,
-      ipAddress: result.address || null,
+      ...deployment.runtime,
+      resourceGroupName: resources.resourceGroupId
+        ? azureResourceGroupName(resources.resourceGroupId)
+        : deployment.runtime.resourceGroupName,
+      vmName: resources.virtualMachineId
+        ? azureResourceName(resources.virtualMachineId)
+        : deployment.runtime.vmName,
+      vmId: resources.virtualMachineId ?? deployment.runtime.vmId,
+      instanceState: resources.virtualMachineId ? "creating" : deployment.runtime.instanceState,
+      networkSecurityGroupId: resources.networkSecurityGroupId ?? deployment.runtime.networkSecurityGroupId,
+      networkInterfaceId: resources.networkInterfaceId ?? deployment.runtime.networkInterfaceId,
+      osDiskId: resources.osDiskId ?? deployment.runtime.osDiskId,
+      publicIpAddressId: resources.publicIpAddressId ?? deployment.runtime.publicIpAddressId,
+      vnetId: resources.managedNetwork?.virtualNetworkId ?? deployment.runtime.vnetId,
+      subnetId: resources.managedNetwork?.subnetId ?? deployment.runtime.subnetId,
     },
   };
 }
 
-function proxmoxResourcesFromRecord(deployment: ProxmoxCloudDeploymentRecord): ProxmoxResources {
-  const vmId = deployment.runtime.vmId;
-  if (vmId === null) throw new Error("The Proxmox deployment resource identity is incomplete");
+function applyAzureResource(
+  deployment: AzureCloudDeploymentRecord,
+  resource: AzureVmDeploymentResource,
+  phase: "installing-sliver" | "ready" | "stopped",
+): AzureCloudDeploymentRecord {
+  const stopped = resource.instanceState === "deallocated" || resource.instanceState === "stopped";
+  const managedAssets: AzureCloudDeploymentRecord["managedAssets"] = [
+    {
+      resourceType: "azure-resource-group",
+      resourceId: resource.resourceGroupId,
+      displayName: azureResourceGroupName(resource.resourceGroupId),
+      tagged: true,
+    },
+    ...(resource.managedNetwork ? [
+      {
+        resourceType: "azure-virtual-network" as const,
+        resourceId: resource.managedNetwork.virtualNetworkId,
+        displayName: azureResourceName(resource.managedNetwork.virtualNetworkId),
+        tagged: true,
+      },
+      {
+        resourceType: "azure-subnet" as const,
+        resourceId: resource.managedNetwork.subnetId,
+        displayName: azureResourceName(resource.managedNetwork.subnetId),
+        tagged: false,
+      },
+    ] : []),
+    {
+      resourceType: "azure-network-security-group",
+      resourceId: resource.networkSecurityGroupId,
+      displayName: azureResourceName(resource.networkSecurityGroupId),
+      tagged: true,
+    },
+    ...(resource.publicIpAddressId ? [{
+      resourceType: "azure-public-ip" as const,
+      resourceId: resource.publicIpAddressId,
+      displayName: azureResourceName(resource.publicIpAddressId),
+      tagged: true,
+    }] : []),
+    {
+      resourceType: "azure-network-interface",
+      resourceId: resource.networkInterfaceId,
+      displayName: azureResourceName(resource.networkInterfaceId),
+      tagged: true,
+    },
+    {
+      resourceType: "azure-os-disk",
+      resourceId: resource.osDiskId,
+      displayName: azureResourceName(resource.osDiskId),
+      tagged: true,
+    },
+    {
+      resourceType: "azure-virtual-machine",
+      resourceId: resource.virtualMachineId,
+      displayName: azureResourceName(resource.virtualMachineId),
+      tagged: true,
+    },
+  ];
   return {
-    node: deployment.runtime.node,
-    vmId,
-    vmName: deployment.managedAssets.find(({ resourceType }) => resourceType === "proxmox-vm")?.displayName ??
-      `sliver-gui-${deployment.id.slice(0, 8)}`,
+    ...deployment,
+    status: phase === "installing-sliver" ? "provisioning" : stopped ? "stopped" : "running",
+    phase: stopped ? "stopped" : phase,
+    remoteHost: azureConnectionAddress(deployment.spec.usePublicIp, resource) ?? null,
+    lastError: null,
+    managedAssets,
+    runtime: {
+      resourceGroupName: azureResourceGroupName(resource.resourceGroupId),
+      vmName: azureResourceName(resource.virtualMachineId),
+      vmId: resource.virtualMachineId,
+      instanceState: resource.instanceState,
+      provisioningState: resource.provisioningState ?? null,
+      networkSecurityGroupId: resource.networkSecurityGroupId,
+      networkInterfaceId: resource.networkInterfaceId,
+      osDiskId: resource.osDiskId,
+      publicIpAddressId: resource.publicIpAddressId ?? null,
+      publicIpAddress: resource.publicIpAddress ?? null,
+      privateIpAddress: resource.privateIpAddress ?? null,
+      vnetId: resource.virtualNetworkId,
+      subnetId: resource.subnetId,
+    },
   };
+}
+
+function upsertAzureManagedAsset(
+  assets: AzureCloudDeploymentRecord["managedAssets"],
+  resourceType: AzureManagedAssetType,
+  resourceId: string,
+  displayName: string | null,
+  tagged = true,
+): AzureCloudDeploymentRecord["managedAssets"] {
+  return [
+    ...assets.filter((asset) => asset.resourceType !== resourceType),
+    { resourceType, resourceId, displayName, tagged },
+  ];
+}
+
+function azureResourceFromRecord(
+  deployment: AzureCloudDeploymentRecord,
+  secret: AzureCliCredentialSecret,
+): AzureVmDeploymentResource {
+  const resourceGroupId = requiredAzureAssetId(deployment, "azure-resource-group");
+  const virtualMachineId = consistentAzureResourceId(
+    deployment.runtime.vmId,
+    azureAssetId(deployment, "azure-virtual-machine"),
+    "virtual machine",
+  );
+  const networkSecurityGroupId = consistentAzureResourceId(
+    deployment.runtime.networkSecurityGroupId,
+    azureAssetId(deployment, "azure-network-security-group"),
+    "network security group",
+  );
+  const networkInterfaceId = consistentAzureResourceId(
+    deployment.runtime.networkInterfaceId,
+    azureAssetId(deployment, "azure-network-interface"),
+    "network interface",
+  );
+  const osDiskId = consistentAzureResourceId(
+    deployment.runtime.osDiskId,
+    azureAssetId(deployment, "azure-os-disk"),
+    "OS disk",
+  );
+  const publicIpAddressId = consistentAzureResourceId(
+    deployment.runtime.publicIpAddressId,
+    azureAssetId(deployment, "azure-public-ip"),
+    "public IP address",
+  );
+  if (!virtualMachineId || !networkSecurityGroupId || !networkInterfaceId || !osDiskId || !deployment.runtime.vnetId || !deployment.runtime.subnetId) {
+    throw new Error("The Azure deployment resource identity is incomplete");
+  }
+  const managedVnetId = azureAssetId(deployment, "azure-virtual-network");
+  const managedSubnetId = azureAssetId(deployment, "azure-subnet");
+  if ((managedVnetId === undefined) !== (managedSubnetId === undefined)) {
+    throw new Error("The Azure managed-network identity is incomplete");
+  }
+  if (managedVnetId && (managedVnetId !== deployment.runtime.vnetId || managedSubnetId !== deployment.runtime.subnetId)) {
+    throw new Error("The tracked Azure managed-network identities do not match");
+  }
+  return {
+    subscriptionId: secret.subscriptionId,
+    tenantId: secret.tenantId,
+    location: deployment.spec.location,
+    guid: deployment.id,
+    name: deployment.name,
+    resourceGroupId,
+    virtualNetworkId: deployment.runtime.vnetId,
+    subnetId: deployment.runtime.subnetId,
+    ...(managedVnetId && managedSubnetId ? {
+      managedNetwork: { virtualNetworkId: managedVnetId, subnetId: managedSubnetId },
+    } : {}),
+    networkSecurityGroupId,
+    ...(publicIpAddressId ? { publicIpAddressId } : {}),
+    networkInterfaceId,
+    virtualMachineId,
+    osDiskId,
+    instanceState: deployment.runtime.instanceState,
+    ...(deployment.runtime.provisioningState ? { provisioningState: deployment.runtime.provisioningState } : {}),
+    ...(deployment.runtime.privateIpAddress ? { privateIpAddress: deployment.runtime.privateIpAddress } : {}),
+    ...(deployment.runtime.publicIpAddress ? { publicIpAddress: deployment.runtime.publicIpAddress } : {}),
+  };
+}
+
+function azureDestroyResourceFromRecord(
+  deployment: AzureCloudDeploymentRecord,
+  secret: AzureCliCredentialSecret,
+): AzureVmDestroyResource {
+  const virtualMachineId = consistentAzureResourceId(
+    deployment.runtime.vmId,
+    azureAssetId(deployment, "azure-virtual-machine"),
+    "virtual machine",
+  );
+  const networkSecurityGroupId = consistentAzureResourceId(
+    deployment.runtime.networkSecurityGroupId,
+    azureAssetId(deployment, "azure-network-security-group"),
+    "network security group",
+  );
+  const networkInterfaceId = consistentAzureResourceId(
+    deployment.runtime.networkInterfaceId,
+    azureAssetId(deployment, "azure-network-interface"),
+    "network interface",
+  );
+  const osDiskId = consistentAzureResourceId(
+    deployment.runtime.osDiskId,
+    azureAssetId(deployment, "azure-os-disk"),
+    "OS disk",
+  );
+  const publicIpAddressId = consistentAzureResourceId(
+    deployment.runtime.publicIpAddressId,
+    azureAssetId(deployment, "azure-public-ip"),
+    "public IP address",
+  );
+  const resourceGroupId = azureAssetId(deployment, "azure-resource-group") ??
+    azureResourceGroupIdFromResourceId(virtualMachineId ?? networkSecurityGroupId ?? networkInterfaceId);
+  const managedVnetId = azureAssetId(deployment, "azure-virtual-network");
+  const managedSubnetId = azureAssetId(deployment, "azure-subnet");
+  if ((managedVnetId === undefined) !== (managedSubnetId === undefined)) {
+    throw new Error("The Azure managed-network identity is incomplete");
+  }
+  return {
+    subscriptionId: secret.subscriptionId,
+    tenantId: secret.tenantId,
+    location: deployment.spec.location,
+    guid: deployment.id,
+    name: deployment.name,
+    ...(resourceGroupId ? { resourceGroupId } : {}),
+    ...(managedVnetId && managedSubnetId ? {
+      managedNetwork: { virtualNetworkId: managedVnetId, subnetId: managedSubnetId },
+    } : {}),
+    ...(networkSecurityGroupId ? { networkSecurityGroupId } : {}),
+    ...(publicIpAddressId ? { publicIpAddressId } : {}),
+    ...(networkInterfaceId ? { networkInterfaceId } : {}),
+    ...(virtualMachineId ? { virtualMachineId } : {}),
+    ...(osDiskId ? { osDiskId } : {}),
+  };
+}
+
+function requiredAzureAssetId(
+  deployment: AzureCloudDeploymentRecord,
+  resourceType: AzureManagedAssetType,
+): string {
+  const resourceId = azureAssetId(deployment, resourceType);
+  if (!resourceId) throw new Error(`The Azure deployment is missing its ${resourceType} identity`);
+  return resourceId;
+}
+
+function azureAssetId(
+  deployment: AzureCloudDeploymentRecord,
+  resourceType: AzureManagedAssetType,
+): string | undefined {
+  const matches = deployment.managedAssets.filter((asset) => asset.resourceType === resourceType);
+  if (matches.length > 1) throw new Error(`The Azure deployment has duplicate tracked ${resourceType} identities`);
+  return matches[0]?.resourceId;
+}
+
+function consistentAzureResourceId(
+  runtimeId: string | null | undefined,
+  assetId: string | undefined,
+  label: string,
+): string | undefined {
+  if (runtimeId && assetId && runtimeId.toLocaleLowerCase("en-US") !== assetId.toLocaleLowerCase("en-US")) {
+    throw new Error(`The tracked Azure ${label} identities do not match`);
+  }
+  return runtimeId ?? assetId;
+}
+
+function azureResourceGroupIdFromResourceId(resourceId: string | undefined): string | undefined {
+  if (!resourceId) return undefined;
+  const match = /^(\/subscriptions\/[^/]+\/resourceGroups\/[^/]+)\/providers\//iu.exec(resourceId);
+  return match?.[1];
+}
+
+function azureResourceGroupName(resourceGroupId: string): string {
+  const match = /^\/subscriptions\/[^/]+\/resourceGroups\/([^/]+)$/iu.exec(resourceGroupId);
+  if (!match?.[1]) throw new Error("Azure returned an invalid resource-group identity");
+  return match[1];
+}
+
+function azureResourceName(resourceId: string): string {
+  const name = resourceId.slice(resourceId.lastIndexOf("/") + 1);
+  if (!name) throw new Error("Azure returned an invalid resource identity");
+  return name;
 }
 
 function operatorConfigFileName(deploymentId: string): string {
@@ -2396,7 +2999,7 @@ function operatorConfigFileName(deploymentId: string): string {
   return `sliver-gui-cloud-${deploymentId}.cfg`;
 }
 
-function credentialValues(secret: AwsCredentialSecret | ProxmoxCredentialSecret): readonly string[] {
+function credentialValues(secret: AwsCredentialSecret | AzureCliCredentialSecret): readonly string[] {
   if ("profileName" in secret) {
     return [secret.sshPrivateKey, secret.sshPassphrase]
       .filter((value): value is string => typeof value === "string" && value.length > 0);
@@ -2427,6 +3030,12 @@ function cloudErrorMessage(
     .replace(/[\0\r\n\t]+/gu, " ")
     .trim();
   return (message || fallback).slice(0, CLOUD_ERROR_MAX_LENGTH);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => {
+    setTimeout(resolveDelay, milliseconds);
+  });
 }
 
 function assertBoundedAbsoluteDirectory(path: string, label: string): void {

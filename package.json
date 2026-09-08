@@ -117,6 +117,11 @@
   "dependencies": {
     "@aws-sdk/client-ec2": "3.1127.0",
     "@aws-sdk/credential-providers": "3.1127.0",
+    "@azure/arm-compute": "25.1.1",
+    "@azure/arm-network": "38.0.0",
+    "@azure/arm-resources": "8.0.0",
+    "@azure/core-process": "1.0.0",
+    "@azure/identity": "4.13.2",
     "electron-updater": "6.8.9",
     "ghostty-web": "0.4.0",
     "node-pty": "1.1.0",

@@ -31,6 +31,13 @@ import {
   E2E_AWS_DEPLOYMENT_ID,
   E2E_AWS_DEPLOYMENT_NAME,
   E2E_AWS_FIREWALL,
+  E2E_AZURE_CREDENTIAL_ID,
+  E2E_AZURE_DEPLOYMENT,
+  E2E_AZURE_DEPLOYMENT_ID,
+  E2E_AZURE_DEPLOYMENT_NAME,
+  E2E_AZURE_FIREWALL,
+  E2E_AZURE_SUBSCRIPTION_ID,
+  E2E_AZURE_TENANT_ID,
 } from "./cloud-deployment-fixture.js";
 
 interface FakeMainState {
@@ -168,9 +175,14 @@ const registry = new ConnectionRegistry({
 });
 
 const cloudDeploymentController: ApplicationCloudDeploymentController = {
-  listSshTargets: async () => ({ ok: true, value: [fakeSshTarget()] }),
+  listSshTargets: async () => ({
+    ok: true,
+    value: [fakeSshTarget(E2E_AWS_DEPLOYMENT_ID), fakeSshTarget(E2E_AZURE_DEPLOYMENT_ID)],
+  }),
   startSshSession: async (deploymentId) => {
-    if (deploymentId !== E2E_AWS_DEPLOYMENT_ID) return { ok: false, error: "Unknown local SSH fixture" };
+    if (deploymentId !== E2E_AWS_DEPLOYMENT_ID && deploymentId !== E2E_AZURE_DEPLOYMENT_ID) {
+      return { ok: false, error: "Unknown local SSH fixture" };
+    }
     const record = { writes: [] as string[], closed: false };
     state.ssh.push(record);
     const subscribers = new Set<Parameters<ConsolePortRuntime["subscribe"]>[0]>();
@@ -194,7 +206,7 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
         for (const subscriber of subscribers) subscriber.onExit({ exitCode: 0 });
       },
     };
-    return { ok: true, value: { target: fakeSshTarget(), runtime } };
+    return { ok: true, value: { target: fakeSshTarget(deploymentId), runtime } };
   },
   getTerminalRuntime: async () => ({ ok: true, value: await loadTerminalRuntime() }),
   detectCurrentEgressIpv4: () => ({
@@ -204,20 +216,46 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   getSnapshot: () => ({
     ok: true,
     value: {
-      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT] },
-      credentials: [{
-        id: E2E_AWS_CREDENTIAL_ID,
-        provider: "aws",
-        label: "E2E AWS profile",
-        persistence: "secure",
-        createdAt: "2026-09-06T18:00:00.000Z",
-        defaultRegion: "us-west-2",
-        sshUsername: "ubuntu",
-        profileName: "default",
-      }],
+      state: {
+        v: 1,
+        revision: 1,
+        deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT],
+      },
+      credentials: [
+        {
+          id: E2E_AWS_CREDENTIAL_ID,
+          provider: "aws",
+          label: "E2E AWS profile",
+          persistence: "secure",
+          createdAt: "2026-09-06T18:00:00.000Z",
+          defaultRegion: "us-west-2",
+          sshUsername: "ubuntu",
+          profileName: "default",
+        },
+        {
+          id: E2E_AZURE_CREDENTIAL_ID,
+          provider: "azure",
+          label: "E2E Azure CLI",
+          persistence: "secure",
+          createdAt: "2026-09-06T18:10:00.000Z",
+          defaultLocation: "eastus",
+          subscriptionId: E2E_AZURE_SUBSCRIPTION_ID,
+          tenantId: E2E_AZURE_TENANT_ID,
+          sshUsername: "azureuser",
+        },
+      ],
       secureCredentialStorage: true,
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
+      azureAccounts: [{
+        subscriptionId: E2E_AZURE_SUBSCRIPTION_ID,
+        name: "E2E Subscription",
+        tenantId: E2E_AZURE_TENANT_ID,
+        homeTenantId: E2E_AZURE_TENANT_ID,
+        isDefault: true,
+        cloudName: "AzureCloud",
+      }],
+      azureAccountDiscoveryError: null,
       provisioningTranscripts: [],
     },
   }),
@@ -275,12 +313,45 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
       },
     };
   },
+  discoverAzureAccounts: () => ({
+    ok: true,
+    value: [{
+      subscriptionId: E2E_AZURE_SUBSCRIPTION_ID,
+      name: "E2E Subscription",
+      tenantId: E2E_AZURE_TENANT_ID,
+      homeTenantId: E2E_AZURE_TENANT_ID,
+      isDefault: true,
+      cloudName: "AzureCloud",
+    }],
+  }),
+  discoverAzureOptions: (input) => {
+    if (input.credentialId !== E2E_AZURE_CREDENTIAL_ID || input.location !== "eastus") {
+      return { ok: false, error: "The E2E Azure discovery request was not renderer-safe" };
+    }
+    return {
+      ok: true,
+      value: {
+        location: "eastus",
+        vmSizes: [{ name: "Standard_B2s", vCpuCount: 2, memoryMiB: 4_096 }],
+        images: [{
+          reference: "Canonical:ubuntu-24_04-lts:server:latest",
+          label: "Ubuntu Server 24.04 LTS",
+          architecture: "x64" as const,
+          sshUsername: "azureuser",
+        }],
+        virtualNetworks: [],
+        subnets: [],
+      },
+    };
+  },
   createDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   runLifecycleAction: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewall: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
-  listFirewallRules: ({ deploymentId }) => deploymentId === E2E_AWS_DEPLOYMENT.id
-    ? { ok: true, value: E2E_AWS_FIREWALL }
-    : { ok: false, error: "Unknown E2E cloud deployment" },
+  listFirewallRules: ({ deploymentId }) => {
+    if (deploymentId === E2E_AWS_DEPLOYMENT.id) return { ok: true, value: E2E_AWS_FIREWALL };
+    if (deploymentId === E2E_AZURE_DEPLOYMENT.id) return { ok: true, value: E2E_AZURE_FIREWALL };
+    return { ok: false, error: "Unknown E2E cloud deployment" };
+  },
   createFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   deleteFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
@@ -305,14 +376,15 @@ void startApplication({
   app.exit(1);
 });
 
-function fakeSshTarget(): ManagedSshTarget {
+function fakeSshTarget(deploymentId: string): ManagedSshTarget {
+  const azure = deploymentId === E2E_AZURE_DEPLOYMENT_ID;
   return {
-    deploymentId: E2E_AWS_DEPLOYMENT_ID,
-    name: E2E_AWS_DEPLOYMENT_NAME,
-    provider: "aws",
-    host: "192.0.2.10",
+    deploymentId,
+    name: azure ? E2E_AZURE_DEPLOYMENT_NAME : E2E_AWS_DEPLOYMENT_NAME,
+    provider: azure ? "azure" : "aws",
+    host: azure ? "203.0.113.42" : "192.0.2.10",
     port: 22,
-    username: "fixture",
+    username: azure ? "azureuser" : "fixture",
     status: "running",
     connectable: true,
   };

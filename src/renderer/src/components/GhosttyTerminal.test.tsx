@@ -237,7 +237,7 @@ describe("GhosttyTerminal", () => {
 
     try {
       fireEvent(hiddenInput, new Event("scroll"));
-      expect(observedEvents.length).toBe(enableClipboard ? 0 : 1);
+      expect(observedEvents.length).toBe(0);
       observedEvents.length = 0;
 
       const visibleScrollEvents: Event[] = [];

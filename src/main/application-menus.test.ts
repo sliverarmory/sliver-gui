@@ -210,6 +210,7 @@ describe("application menu templates", () => {
     const stoppedId = "22222222-2222-4222-8222-222222222222";
     const busyId = "33333333-3333-4333-8333-333333333333";
     const missingSshId = "44444444-4444-4444-8444-444444444444";
+    const azureId = "55555555-5555-4555-8555-555555555555";
     const template = buildApplicationMenuTemplate(
       "darwin",
       "Sliver GUI",
@@ -220,47 +221,71 @@ describe("application menu templates", () => {
       [
         {
           id: runningId,
+          provider: "aws",
           name: "operator-control",
-          instanceId: "i-00000000000000001",
+          resourceId: "i-00000000000000001",
           status: "running",
           hasSsh: true,
           hasFirewall: true,
         },
         {
           id: stoppedId,
+          provider: "aws",
           name: "",
-          instanceId: "i-00000000000000002",
+          resourceId: "i-00000000000000002",
           status: "stopped",
           hasSsh: true,
           hasFirewall: false,
         },
         {
           id: busyId,
+          provider: "aws",
           name: "",
-          instanceId: null,
+          resourceId: null,
           status: "provisioning",
           hasSsh: false,
           hasFirewall: true,
         },
         {
           id: missingSshId,
+          provider: "aws",
           name: "firewall-only",
-          instanceId: "i-00000000000000004",
+          resourceId: "i-00000000000000004",
           status: "running",
           hasSsh: false,
+          hasFirewall: true,
+        },
+        {
+          id: azureId,
+          provider: "azure",
+          name: "azure-control",
+          resourceId: "/subscriptions/example/resourceGroups/sliver/providers/Microsoft.Compute/virtualMachines/azure-control",
+          status: "running",
+          hasSsh: true,
           hasFirewall: true,
         },
       ],
     );
 
     const cloud = menuItems(template, "Cloud");
-    expect(itemLabels(cloud)).toEqual(["Deployment", "AWS"]);
+    expect(itemLabels(cloud)).toEqual(["Deployment", "AWS", "Azure"]);
     const aws = nestedMenuItems(cloud, "AWS");
     expect(aws.map(({ id, label }) => ({ id, label }))).toEqual([
       { id: `cloud.aws.${runningId}`, label: "operator-control" },
       { id: `cloud.aws.${stoppedId}`, label: "i-00000000000000002" },
       { id: `cloud.aws.${busyId}`, label: busyId },
       { id: `cloud.aws.${missingSshId}`, label: "firewall-only" },
+    ]);
+    const azure = nestedMenuItems(cloud, "Azure");
+    expect(azure.map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: `cloud.azure.${azureId}`, label: "azure-control" },
+    ]);
+    expect(nestedMenuItems(azure, "azure-control").map(({ id }) => id).filter(Boolean)).toEqual([
+      `cloud.azure.${azureId}.start`,
+      `cloud.azure.${azureId}.stop`,
+      `cloud.azure.${azureId}.terminate`,
+      `cloud.azure.${azureId}.ssh`,
+      `cloud.azure.${azureId}.firewall`,
     ]);
 
     const running = nestedMenuItems(aws, "operator-control");

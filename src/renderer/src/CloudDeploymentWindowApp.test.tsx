@@ -6,9 +6,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type {
   AwsCloudDeploymentRecord,
   AwsFirewallSnapshot,
+  AzureCloudDeploymentRecord,
+  AzureFirewallSnapshot,
+  CloudFirewallSnapshot,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
-  ProxmoxCloudDeploymentRecord,
 } from "../../shared/cloud-deployment-contracts";
 import type {
   CloudDeploymentAPI,
@@ -17,7 +19,7 @@ import type {
   CloudDeploymentSnapshot,
   CurrentEgressIpv4,
 } from "../../shared/cloud-deployment-ipc";
-import type { AwsDeploymentOptions, DiscoverAwsOptionsInput } from "../../shared/cloud-provider-inventory";
+import type { AwsDeploymentOptions, AzureDeploymentOptions, DiscoverAwsOptionsInput } from "../../shared/cloud-provider-inventory";
 import type { OperationResult } from "../../shared/contracts";
 import type { SshHostKeyReview, SshOpenTabResult } from "../../shared/ssh-contracts";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
@@ -35,7 +37,11 @@ vi.mock("./components/CloudProvisioningTerminal", () => ({
 }));
 
 const CREDENTIAL_ID = "0f24a4da-28c1-4d94-a66d-eb224892745d";
+const AZURE_CREDENTIAL_ID = "a4e47541-6084-4d13-a103-31b9aa879839";
 const DEPLOYMENT_ID = "a48987b1-7b88-46dc-b72b-7f34dd5e0e92";
+const AZURE_DEPLOYMENT_ID = "f208145e-76d9-49a9-8a40-f83b817971fe";
+const AZURE_SUBSCRIPTION_ID = "11111111-2222-3333-4444-555555555555";
+const AZURE_TENANT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const KEY_TOKEN = "2b1cbf1a-6861-4db8-a39d-ffbdad8087f8";
 const SSH_REVIEW_TOKEN = "r".repeat(43);
 
@@ -45,7 +51,7 @@ let changedListener: ((scope: CloudDeploymentChangeScope) => void) | undefined;
 let navigationListener: ((request: CloudDeploymentNavigationRequest) => void) | undefined;
 let capturedCredential: CreateCloudCredentialInput | undefined;
 let capturedDeployment: CreateCloudDeploymentInput | undefined;
-let currentFirewallSnapshot: AwsFirewallSnapshot;
+let currentFirewallSnapshot: CloudFirewallSnapshot;
 const unsubscribeTheme = vi.fn();
 const unsubscribeChanged = vi.fn();
 const unsubscribeNavigation = vi.fn();
@@ -58,6 +64,27 @@ const awsCredential = {
   createdAt: "2026-09-06T18:00:00.000Z",
   defaultRegion: "us-east-1",
   sshUsername: "ubuntu",
+};
+
+const azureAccount = {
+  subscriptionId: AZURE_SUBSCRIPTION_ID,
+  name: "Operator Subscription",
+  tenantId: AZURE_TENANT_ID,
+  homeTenantId: AZURE_TENANT_ID,
+  isDefault: true,
+  cloudName: "AzureCloud",
+};
+
+const azureCredential = {
+  id: AZURE_CREDENTIAL_ID,
+  provider: "azure" as const,
+  label: "Production Azure",
+  persistence: "secure" as const,
+  createdAt: "2026-09-06T18:00:00.000Z",
+  defaultLocation: "eastus",
+  subscriptionId: AZURE_SUBSCRIPTION_ID,
+  tenantId: AZURE_TENANT_ID,
+  sshUsername: "azureuser",
 };
 
 const runningDeployment: AwsCloudDeploymentRecord = {
@@ -126,6 +153,7 @@ const sshHostKeyReview: SshHostKeyReview = {
 };
 
 const firewallSnapshot: AwsFirewallSnapshot = {
+  provider: "aws",
   securityGroupId: "sg-abc123",
   securityGroupName: "sliver-gui-range-control",
   vpcId: "vpc-0123456789abcdef0",
@@ -151,6 +179,123 @@ const firewallSnapshot: AwsFirewallSnapshot = {
       peerType: "ipv4",
       peer: "0.0.0.0/0",
       description: null,
+    },
+  ],
+};
+
+const runningAzureDeployment: AzureCloudDeploymentRecord = {
+  id: AZURE_DEPLOYMENT_ID,
+  provider: "azure",
+  name: "azure-control",
+  credentialId: AZURE_CREDENTIAL_ID,
+  status: "running",
+  phase: "ready",
+  createdAt: "2026-09-06T18:00:00.000Z",
+  updatedAt: "2026-09-06T18:05:00.000Z",
+  operatorConfigFileName: "sliver-gui-cloud-azure.cfg",
+  operatorConfigDigest: "c".repeat(64),
+  remoteHost: "203.0.113.42",
+  lastError: null,
+  managedAssets: [{
+    resourceType: "azure-virtual-machine",
+    resourceId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui/providers/Microsoft.Compute/virtualMachines/azure-control",
+    displayName: "azure-control",
+    tagged: true,
+  }],
+  spec: {
+    location: "eastus",
+    imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+    vmSize: "Standard_B2s",
+    networkMode: "managed",
+    vnetId: null,
+    subnetId: null,
+    managedVnetCidr: "10.0.0.0/16",
+    managedSubnetCidr: "10.0.1.0/24",
+    sshUsername: "azureuser",
+    operatorName: "operator",
+    sshPort: 22,
+    multiplayerPort: 31337,
+    osDiskSizeGiB: 30,
+    usePublicIp: true,
+    sshCidrs: ["203.0.113.8/32"],
+    operatorCidrs: ["203.0.113.8/32"],
+  },
+  runtime: {
+    resourceGroupName: "sliver-gui-azure-control",
+    vmName: "azure-control",
+    vmId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Compute/virtualMachines/azure-control",
+    instanceState: "running",
+    provisioningState: "Succeeded",
+    networkSecurityGroupId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Network/networkSecurityGroups/azure-control-nsg",
+    networkInterfaceId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Network/networkInterfaces/azure-control-nic",
+    osDiskId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Compute/disks/azure-control-os",
+    publicIpAddressId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Network/publicIPAddresses/azure-control-ip",
+    publicIpAddress: "203.0.113.42",
+    privateIpAddress: "10.0.1.4",
+    vnetId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Network/virtualNetworks/azure-control-vnet",
+    subnetId: "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/sliver-gui-azure-control/providers/Microsoft.Network/virtualNetworks/azure-control-vnet/subnets/default",
+  },
+};
+
+const azureFirewallSnapshot: AzureFirewallSnapshot = {
+  provider: "azure",
+  networkSecurityGroupId: runningAzureDeployment.runtime.networkSecurityGroupId!,
+  networkSecurityGroupName: "azure-control-nsg",
+  resourceGroupName: "sliver-gui-azure-control",
+  rules: [
+    {
+      id: `${runningAzureDeployment.runtime.networkSecurityGroupId}/securityRules/allow-admin`,
+      name: "allow-admin",
+      priority: 1_200,
+      direction: "ingress",
+      access: "allow",
+      protocol: "tcp",
+      sourceAddressPrefixes: ["203.0.113.8/32"],
+      sourcePortRanges: ["*"],
+      destinationAddressPrefixes: ["*"],
+      destinationPortRanges: ["22"],
+      description: "Operator SSH",
+      managed: true,
+      isDefault: false,
+      sourceApplicationSecurityGroupIds: [],
+      destinationApplicationSecurityGroupIds: [],
+      editUnsupportedReason: null,
+    },
+    {
+      id: `${runningAzureDeployment.runtime.networkSecurityGroupId}/securityRules/sliver-gui-ssh-001`,
+      name: "sliver-gui-ssh-001",
+      priority: 1_000,
+      direction: "ingress",
+      access: "allow",
+      protocol: "tcp",
+      sourceAddressPrefixes: ["203.0.113.8/32"],
+      sourcePortRanges: ["*"],
+      destinationAddressPrefixes: ["*"],
+      destinationPortRanges: ["22"],
+      description: `sliver-gui:${AZURE_DEPLOYMENT_ID}:baseline:ssh`,
+      managed: true,
+      isDefault: false,
+      sourceApplicationSecurityGroupIds: [],
+      destinationApplicationSecurityGroupIds: [],
+      editUnsupportedReason: null,
+    },
+    {
+      id: `${runningAzureDeployment.runtime.networkSecurityGroupId}/defaultSecurityRules/DenyAllInBound`,
+      name: "DenyAllInBound",
+      priority: 65500,
+      direction: "ingress",
+      access: "deny",
+      protocol: "*",
+      sourceAddressPrefixes: ["*"],
+      sourcePortRanges: ["*"],
+      destinationAddressPrefixes: ["*"],
+      destinationPortRanges: ["*"],
+      description: "Default rule",
+      managed: false,
+      isDefault: true,
+      sourceApplicationSecurityGroupIds: [],
+      destinationApplicationSecurityGroupIds: [],
+      editUnsupportedReason: null,
     },
   ],
 };
@@ -195,12 +340,39 @@ const awsDeploymentOptions: AwsDeploymentOptions = {
   },
 };
 
+const azureDeploymentOptions: AzureDeploymentOptions = {
+  location: "eastus",
+  vmSizes: [{ name: "Standard_B2s", vCpuCount: 2, memoryMiB: 4_096 }],
+  images: [{
+    reference: "Canonical:ubuntu-24_04-lts:server:latest",
+    label: "Ubuntu Server 24.04 LTS",
+    architecture: "x64",
+    sshUsername: "azureuser",
+  }],
+  virtualNetworks: [{
+    id: runningAzureDeployment.runtime.vnetId!,
+    name: "operations",
+    resourceGroupName: "networking",
+    location: "eastus",
+    addressPrefixes: ["10.20.0.0/16"],
+  }],
+  subnets: [{
+    id: runningAzureDeployment.runtime.subnetId!,
+    name: "default",
+    vnetId: runningAzureDeployment.runtime.vnetId!,
+    resourceGroupName: "networking",
+    addressPrefixes: ["10.20.1.0/24"],
+  }],
+};
+
 const emptySnapshot: CloudDeploymentSnapshot = {
   state: { v: 1, revision: 0, deployments: [] },
   credentials: [],
   secureCredentialStorage: true,
   awsProfiles: [],
   awsProfileDiscoveryError: null,
+  azureAccounts: [azureAccount],
+  azureAccountDiscoveryError: null,
   provisioningTranscripts: [],
 };
 
@@ -226,16 +398,18 @@ const api: CloudDeploymentAPI = {
   chooseSshPrivateKey: vi.fn(async () => ({ ok: true as const, value: { token: KEY_TOKEN, fileName: "operator_ed25519" } })),
   createCredential: vi.fn(async (input) => {
     capturedCredential = structuredClone(input);
-    if (input.provider === "proxmox") {
+    if (input.provider === "azure") {
       return {
         ok: true as const,
         value: {
-          id: CREDENTIAL_ID,
-          provider: "proxmox" as const,
+          id: AZURE_CREDENTIAL_ID,
+          provider: "azure" as const,
           label: input.label,
           persistence: "secure" as const,
           createdAt: "2026-09-06T18:00:00.000Z",
-          endpoint: input.endpoint,
+          defaultLocation: input.defaultLocation,
+          subscriptionId: input.subscriptionId,
+          tenantId: input.tenantId,
           sshUsername: input.sshUsername,
         },
       };
@@ -264,9 +438,11 @@ const api: CloudDeploymentAPI = {
     },
   })),
   discoverAwsOptions,
+  discoverAzureAccounts: vi.fn(async () => ({ ok: true as const, value: [azureAccount] })),
+  discoverAzureOptions: vi.fn(async () => ({ ok: true as const, value: azureDeploymentOptions })),
   createDeployment: vi.fn(async (input) => {
     capturedDeployment = structuredClone(input);
-    return { ok: true as const, value: runningDeployment };
+    return { ok: true as const, value: input.provider === "azure" ? runningAzureDeployment : runningDeployment };
   }),
   runLifecycleAction: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
   updateFirewall: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
@@ -362,6 +538,10 @@ beforeEach(() => {
   });
   discoverAwsOptions.mockClear();
   discoverAwsOptions.mockResolvedValue({ ok: true, value: awsDeploymentOptions });
+  vi.mocked(api.discoverAzureAccounts).mockClear();
+  vi.mocked(api.discoverAzureAccounts).mockResolvedValue({ ok: true, value: [azureAccount] });
+  vi.mocked(api.discoverAzureOptions).mockClear();
+  vi.mocked(api.discoverAzureOptions).mockResolvedValue({ ok: true, value: azureDeploymentOptions });
   vi.mocked(api.createDeployment).mockClear();
   vi.mocked(api.runLifecycleAction).mockClear();
   vi.mocked(api.updateFirewall).mockClear();
@@ -658,28 +838,33 @@ describe("CloudDeploymentWindowApp", () => {
     });
   });
 
-  it("supports direct Proxmox API-token credentials without exposing SSH key contents", async () => {
+  it("creates an Azure credential from the discovered CLI subscription without exposing SSH key contents", async () => {
     const user = userEvent.setup();
     renderCloudDeploymentApp();
 
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "proxmox");
-    await user.type(screen.getByRole("textbox", { name: "Label" }), "Lab Proxmox");
-    await user.type(screen.getByRole("textbox", { name: "API Endpoint" }), "https://pve.example.test:8006");
-    await user.type(screen.getByRole("textbox", { name: "API Token ID" }), "root@pam!sliver-gui");
-    await user.type(screen.getByLabelText("API Token Secret"), "proxmox-token-secret");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    await waitFor(() => expect(api.discoverAzureAccounts).toHaveBeenCalledOnce());
+    expect(screen.getByRole("combobox", { name: "Azure CLI Subscription" })).toHaveValue(AZURE_SUBSCRIPTION_ID);
+    expect(screen.getByRole("textbox", { name: "Tenant ID" })).toHaveValue(AZURE_TENANT_ID);
+    expect(screen.getByRole("textbox", { name: "Default Location" })).toHaveValue("eastus");
+    expect(screen.getByRole("textbox", { name: "SSH Username" })).toHaveValue("azureuser");
+
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Production Azure");
     await user.click(screen.getByRole("button", { name: "Choose Key" }));
+    await user.type(screen.getByLabelText("SSH Key Passphrase"), "azure-key-passphrase");
     await user.click(screen.getByRole("button", { name: "Save Credential" }));
 
     await waitFor(() => expect(api.createCredential).toHaveBeenCalledOnce());
-    expect(capturedCredential).toMatchObject({
-      provider: "proxmox",
-      label: "Lab Proxmox",
-      endpoint: "https://pve.example.test:8006",
-      tokenId: "root@pam!sliver-gui",
-      tokenSecret: "proxmox-token-secret",
-      sshUsername: "root",
+    expect(capturedCredential).toEqual({
+      provider: "azure",
+      label: "Production Azure",
+      defaultLocation: "eastus",
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      sshUsername: "azureuser",
       sshPrivateKeyToken: KEY_TOKEN,
+      sshPassphrase: "azure-key-passphrase",
     });
     expect(capturedCredential).not.toHaveProperty("sshPrivateKey");
   });
@@ -824,6 +1009,10 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("button", { name: /SSH Key/i })).toHaveTextContent("Credential key (managed)");
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
+    const sshPort = screen.getByRole("textbox", { name: "SSH Port" });
+    expect(sshPort).not.toHaveAttribute("readonly");
+    await user.clear(sshPort);
+    await user.type(sshPort, "2222");
     await user.type(screen.getByRole("textbox", { name: "SSH Source CIDRs" }), "203.0.113.8/32");
     await user.type(screen.getByRole("textbox", { name: "Operator Source CIDRs" }), "198.51.100.16/32");
     await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -851,10 +1040,82 @@ describe("CloudDeploymentWindowApp", () => {
         sshUsername: "ubuntu",
         keyPairName: "managed-by-sliver-gui",
         operatorName: "operator",
-        sshPort: 22,
+        sshPort: 2222,
         multiplayerPort: 31337,
         volumeSizeGiB: 20,
         useElasticIp: true,
+        sshCidrs: ["203.0.113.8/32"],
+        operatorCidrs: ["198.51.100.16/32"],
+      },
+    });
+    expect(await screen.findByText("Deployment ready")).toBeInTheDocument();
+  });
+
+  it("collects Azure CLI infrastructure, managed networking, and firewall policy before deployment", async () => {
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { ...emptySnapshot.state, revision: 12 },
+      credentials: [azureCredential],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "New Deployment" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    expect(screen.getByRole("combobox", { name: "Credential" })).toHaveValue(AZURE_CREDENTIAL_ID);
+    await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "azure-control");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => expect(api.discoverAzureOptions).toHaveBeenCalledWith({
+      credentialId: AZURE_CREDENTIAL_ID,
+      location: "eastus",
+    }));
+    expect(await screen.findByRole("textbox", { name: "Location" })).toHaveValue("eastus");
+    expect(screen.getByRole("textbox", { name: "VM Size" })).toHaveValue("Standard_B2s");
+    expect(screen.getByRole("textbox", { name: "Image Reference" })).toHaveValue(
+      "Canonical:ubuntu-24_04-lts:server:latest",
+    );
+    const virtualNetwork = screen.getByRole("button", { name: /Virtual Network/u });
+    expect(virtualNetwork).toHaveTextContent("Create a new managed VNet");
+    await user.click(virtualNetwork);
+    await user.click(screen.getByRole("option", { name: /^operations · networking/u }));
+    expect(screen.getByRole("button", { name: /Subnet/u })).toHaveTextContent("default · networking");
+    await user.click(screen.getByRole("button", { name: /Virtual Network/u }));
+    await user.click(screen.getByRole("option", { name: /^Create a new managed VNet/u }));
+    expect(screen.getByRole("textbox", { name: "Managed VNet CIDR" })).toHaveValue("10.0.0.0/16");
+    expect(screen.getByRole("textbox", { name: "Managed Subnet CIDR" })).toHaveValue("10.0.1.0/24");
+    expect(screen.getByRole("switch", { name: /^Public IP/u })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByRole("textbox", { name: "SSH Port" })).toHaveValue("22");
+    expect(screen.getByRole("textbox", { name: "SSH Port" })).toHaveAttribute("readonly");
+    expect(screen.getByText("Azure platform images use the standard SSH port.")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "SSH Source CIDRs" }), "203.0.113.8/32");
+    await user.type(screen.getByRole("textbox", { name: "Operator Source CIDRs" }), "198.51.100.16/32");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Deploy Sliver Server" }));
+
+    await waitFor(() => expect(api.createDeployment).toHaveBeenCalledOnce());
+    expect(capturedDeployment).toEqual({
+      provider: "azure",
+      expectedRevision: 12,
+      credentialId: AZURE_CREDENTIAL_ID,
+      name: "azure-control",
+      spec: {
+        location: "eastus",
+        imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+        vmSize: "Standard_B2s",
+        networkMode: "managed",
+        vnetId: null,
+        subnetId: null,
+        managedVnetCidr: "10.0.0.0/16",
+        managedSubnetCidr: "10.0.1.0/24",
+        sshUsername: "azureuser",
+        operatorName: "operator",
+        sshPort: 22,
+        multiplayerPort: 31_337,
+        osDiskSizeGiB: 30,
+        usePublicIp: true,
         sshCidrs: ["203.0.113.8/32"],
         operatorCidrs: ["198.51.100.16/32"],
       },
@@ -1077,6 +1338,8 @@ describe("CloudDeploymentWindowApp", () => {
       secureCredentialStorage: true,
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
+      azureAccounts: [azureAccount],
+      azureAccountDiscoveryError: null,
       provisioningTranscripts: [],
     };
     const user = userEvent.setup();
@@ -1105,6 +1368,34 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.prepareDestroyDeployment).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9 });
     await user.click(screen.getByRole("button", { name: "Terminate Instance" }));
     await waitFor(() => expect(api.executeDestroyDeployment).toHaveBeenCalledWith({ token: "destroy-token" }));
+  });
+
+  it("warns explicitly before recursively deleting a dedicated Azure resource group", async () => {
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 9, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
+    };
+    vi.mocked(api.prepareDestroyDeployment).mockResolvedValueOnce({
+      ok: true,
+      value: {
+        token: "destroy-token",
+        deploymentId: AZURE_DEPLOYMENT_ID,
+        deploymentName: "azure-control",
+        provider: "azure",
+        expiresAt: "2026-09-06T19:00:00.000Z",
+      },
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Terminate azure-control" }));
+
+    const confirmation = await screen.findByRole("alertdialog", { name: "Terminate azure-control?" });
+    expect(within(confirmation).getByText(/Azure will recursively delete the dedicated resource group/u))
+      .toHaveTextContent("sliver-gui-azure-control");
+    expect(within(confirmation).getByText(/Do not add unrelated resources while termination is running/u))
+      .toBeInTheDocument();
   });
 
   it("groups connection actions on the left and lifecycle actions on the right", async () => {
@@ -1265,13 +1556,31 @@ describe("CloudDeploymentWindowApp", () => {
         privateIpAddress: null,
       },
     };
+    const missingAzurePublicDeployment: AzureCloudDeploymentRecord = {
+      ...runningAzureDeployment,
+      id: "d617c765-93b7-4931-884e-8439db916b9d",
+      name: "missing-azure-public-server",
+      remoteHost: "10.0.1.4",
+      runtime: {
+        ...runningAzureDeployment.runtime,
+        publicIpAddress: null,
+        privateIpAddress: "10.0.1.4",
+      },
+    };
     currentSnapshot = {
       ...runningCloudSnapshot(),
       state: {
         v: 1,
         revision: 9,
-        deployments: [runningDeployment, stoppedDeployment, missingCredentialDeployment, missingHostDeployment],
+        deployments: [
+          runningDeployment,
+          stoppedDeployment,
+          missingCredentialDeployment,
+          missingHostDeployment,
+          missingAzurePublicDeployment,
+        ],
       },
+      credentials: [awsCredential, azureCredential],
     };
     const user = userEvent.setup();
     renderCloudDeploymentApp();
@@ -1281,6 +1590,7 @@ describe("CloudDeploymentWindowApp", () => {
       screen.getByRole("button", { name: "SSH to stopped-server" }),
       screen.getByRole("button", { name: "SSH to missing-key-server" }),
       screen.getByRole("button", { name: "SSH to missing-host-server" }),
+      screen.getByRole("button", { name: "SSH to missing-azure-public-server" }),
     ];
     for (const button of unavailableButtons) {
       expect(button).toBeDisabled();
@@ -1295,7 +1605,10 @@ describe("CloudDeploymentWindowApp", () => {
     const missingHostReason = screen.getByLabelText(
       "SSH action unavailable for missing-host-server: This server does not have an SSH address yet.",
     );
-    for (const reason of [stoppedReason, missingKeyReason, missingHostReason]) {
+    const missingAzurePublicReason = screen.getByLabelText(
+      "SSH action unavailable for missing-azure-public-server: This server does not have an SSH address yet.",
+    );
+    for (const reason of [stoppedReason, missingKeyReason, missingHostReason, missingAzurePublicReason]) {
       expect(reason).toHaveAttribute("tabindex", "0");
     }
     await user.hover(stoppedReason);
@@ -1595,52 +1908,21 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID });
   });
 
-  it("surfaces persistent errors for stale or unsupported native navigation targets", async () => {
-    const proxmoxDeployment: ProxmoxCloudDeploymentRecord = {
-      id: "c6418f75-e7bd-4e65-b378-b29fea6d63b2",
-      provider: "proxmox",
-      name: "lab-vm",
-      credentialId: CREDENTIAL_ID,
-      status: "running",
-      phase: "ready",
-      createdAt: "2026-09-06T18:00:00.000Z",
-      updatedAt: "2026-09-06T18:05:00.000Z",
-      operatorConfigFileName: "lab-vm.cfg",
-      operatorConfigDigest: "b".repeat(64),
-      remoteHost: "192.0.2.40",
-      lastError: null,
-      managedAssets: [{ resourceType: "proxmox-vm", resourceId: "pve/140", displayName: "lab-vm", tagged: true }],
-      spec: {
-        node: "pve",
-        templateVmId: 9000,
-        vmId: 140,
-        storage: "local-lvm",
-        bridge: "vmbr0",
-        cores: 2,
-        memoryMiB: 4096,
-        diskGiB: 20,
-        operatorName: "operator",
-        sshPort: 22,
-        multiplayerPort: 31337,
-        ipConfig: "ip=dhcp",
-        gateway: null,
-        sshCidrs: ["192.0.2.0/24"],
-        operatorCidrs: ["192.0.2.0/24"],
-      },
-      runtime: { vmId: 140, node: "pve", ipAddress: "192.0.2.40" },
-    };
+  it("opens the requested Azure firewall view and surfaces persistent errors for stale native targets", async () => {
     currentSnapshot = {
-      ...runningCloudSnapshot(),
-      state: { v: 1, revision: 9, deployments: [proxmoxDeployment] },
+      ...emptySnapshot,
+      state: { v: 1, revision: 9, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
     };
+    currentFirewallSnapshot = azureFirewallSnapshot;
     const dangerToast = vi.spyOn(toast, "danger");
     renderCloudDeploymentApp();
 
-    await screen.findByText("lab-vm");
-    act(() => navigationListener?.({ view: "firewall", deploymentId: proxmoxDeployment.id }));
-    const unsupportedAlert = await screen.findByRole("alert");
-    expect(unsupportedAlert).toHaveTextContent("Firewall unavailable");
-    expect(unsupportedAlert).toHaveTextContent("is not an AWS EC2 deployment");
+    await screen.findByRole("heading", { name: "azure-control" });
+    act(() => navigationListener?.({ view: "firewall", deploymentId: AZURE_DEPLOYMENT_ID }));
+    expect(await screen.findByRole("heading", { level: 1, name: "azure-control" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
+    expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: AZURE_DEPLOYMENT_ID });
     expect(dangerToast).not.toHaveBeenCalled();
 
     act(() => navigationListener?.({
@@ -1845,6 +2127,101 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByText("Firewall rule deleted")).toBeInTheDocument();
   });
 
+  it("edits Azure NSG rules end to end while keeping baseline and Azure default rules read-only", async () => {
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
+    };
+    currentFirewallSnapshot = azureFirewallSnapshot;
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for azure-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    expect(within(inboundGrid).getByText("allow-admin")).toBeInTheDocument();
+    expect(within(inboundGrid).getByRole("button", { name: "Edit firewall rule sliver-gui-ssh-001" })).toBeDisabled();
+    expect(within(inboundGrid).getByRole("button", { name: "Delete firewall rule sliver-gui-ssh-001" })).toBeDisabled();
+    expect(within(inboundGrid).getByText("DenyAllInBound")).toBeInTheDocument();
+    expect(within(inboundGrid).getByRole("button", { name: "Edit firewall rule DenyAllInBound" })).toBeDisabled();
+    expect(within(inboundGrid).getByRole("button", { name: "Delete firewall rule DenyAllInBound" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Add rule" }));
+    let sheet = await screen.findByRole("dialog", { name: "Add firewall rule" });
+    expect(within(sheet).getByRole("combobox", { name: "Direction" })).toHaveValue("ingress");
+    expect(within(sheet).getByRole("combobox", { name: "Access" })).toHaveValue("allow");
+    expect(within(sheet).getByRole("combobox", { name: "Protocol" })).toHaveValue("tcp");
+    const name = within(sheet).getByRole("textbox", { name: "Name" });
+    const priority = within(sheet).getByRole("textbox", { name: "Priority" });
+    const sourceAddress = within(sheet).getByRole("textbox", { name: "Source Address Prefixes" });
+    const destinationPort = within(sheet).getByRole("textbox", { name: "Destination Port Ranges" });
+    const description = within(sheet).getByRole("textbox", { name: "Description" });
+    await user.clear(name);
+    await user.type(name, "allow-public-test");
+    await user.clear(priority);
+    await user.type(priority, "1200");
+    await user.type(sourceAddress, "0.0.0.0/0{enter}203.0.113.0/24");
+    await user.clear(destinationPort);
+    await user.type(destinationPort, "8443");
+    await user.type(description, "Public test endpoint");
+    expect(within(sheet).getByText("Public inbound access")).toBeInTheDocument();
+    await user.click(within(sheet).getByRole("button", { name: "Add rule" }));
+
+    await waitFor(() => expect(api.createFirewallRule).toHaveBeenCalledWith({
+      deploymentId: AZURE_DEPLOYMENT_ID,
+      expectedRevision: 14,
+      rule: {
+        name: "allow-public-test",
+        priority: 1_200,
+        direction: "ingress",
+        access: "allow",
+        protocol: "tcp",
+        sourceAddressPrefixes: ["0.0.0.0/0", "203.0.113.0/24"],
+        sourcePortRanges: ["*"],
+        destinationAddressPrefixes: ["*"],
+        destinationPortRanges: ["8443"],
+        description: "Public test endpoint",
+      },
+    }));
+
+    await user.click(within(inboundGrid).getByRole("button", { name: "Edit firewall rule allow-admin" }));
+    sheet = await screen.findByRole("dialog", { name: "Edit firewall rule" });
+    expect(within(sheet).getByRole("textbox", { name: "Name" })).toBeDisabled();
+    const editPriority = within(sheet).getByRole("textbox", { name: "Priority" });
+    await user.clear(editPriority);
+    await user.type(editPriority, "1300");
+    await user.selectOptions(within(sheet).getByRole("combobox", { name: "Access" }), "deny");
+    await user.selectOptions(within(sheet).getByRole("combobox", { name: "Protocol" }), "udp");
+    await user.click(within(sheet).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateFirewallRule).toHaveBeenCalledWith({
+      deploymentId: AZURE_DEPLOYMENT_ID,
+      expectedRevision: 14,
+      ruleId: azureFirewallSnapshot.rules[0]?.id,
+      rule: {
+        name: "allow-admin",
+        priority: 1_300,
+        direction: "ingress",
+        access: "deny",
+        protocol: "udp",
+        sourceAddressPrefixes: ["203.0.113.8/32"],
+        sourcePortRanges: ["*"],
+        destinationAddressPrefixes: ["*"],
+        destinationPortRanges: ["22"],
+        description: "Operator SSH",
+      },
+    }));
+
+    await user.click(within(inboundGrid).getByRole("button", { name: "Delete firewall rule allow-admin" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Delete firewall rule?" });
+    await user.click(within(confirmation).getByRole("button", { name: "Delete rule" }));
+    await waitFor(() => expect(api.deleteFirewallRule).toHaveBeenCalledWith({
+      deploymentId: AZURE_DEPLOYMENT_ID,
+      expectedRevision: 14,
+      ruleId: azureFirewallSnapshot.rules[0]?.id,
+    }));
+  });
+
   it("keeps the last good snapshot visible and reports a later refresh failure", async () => {
     currentSnapshot = {
       state: { v: 1, revision: 9, deployments: [runningDeployment] },
@@ -1852,6 +2229,8 @@ describe("CloudDeploymentWindowApp", () => {
       secureCredentialStorage: true,
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
+      azureAccounts: [azureAccount],
+      azureAccountDiscoveryError: null,
       provisioningTranscripts: [],
     };
     const user = userEvent.setup();
@@ -1878,6 +2257,8 @@ function runningCloudSnapshot(): CloudDeploymentSnapshot {
     secureCredentialStorage: true,
     awsProfiles: [{ name: "default", region: "us-west-2" }],
     awsProfileDiscoveryError: null,
+    azureAccounts: [azureAccount],
+    azureAccountDiscoveryError: null,
     provisioningTranscripts: [],
   };
 }

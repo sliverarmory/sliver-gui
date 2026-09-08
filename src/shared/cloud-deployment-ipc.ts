@@ -1,23 +1,27 @@
 import type {
   AwsCliProfileSummary,
-  AwsFirewallSnapshot,
+  AzureCliAccountSummary,
+  CloudFirewallSnapshot,
+  CloudProvider,
   CloudCredentialSummary,
   CloudDeploymentActionInput,
   CloudDeploymentRecord,
   CloudDeploymentState,
-  CreateAwsFirewallRuleInput,
+  CreateCloudFirewallRuleInput,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
-  DeleteAwsFirewallRuleInput,
-  ListAwsFirewallRulesInput,
-  UpdateAwsFirewallRuleInput,
+  DeleteCloudFirewallRuleInput,
+  ListCloudFirewallRulesInput,
+  UpdateCloudFirewallRuleInput,
   UpdateCloudFirewallInput,
 } from "./cloud-deployment-contracts.js";
 import type { OperationResult } from "./contracts.js";
 import type { CloudPermissionEvaluation } from "./cloud-provider-permissions.js";
 import type {
   AwsDeploymentOptions,
+  AzureDeploymentOptions,
   DiscoverAwsOptionsInput,
+  DiscoverAzureOptionsInput,
 } from "./cloud-provider-inventory.js";
 import type { TerminalRuntimeAsset } from "./stream-contracts.js";
 import type {
@@ -36,6 +40,8 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   deleteCredential: "sliver:cloud-deployment:credential:delete",
   testCredential: "sliver:cloud-deployment:credential:test",
   discoverAwsOptions: "sliver:cloud-deployment:aws:options:discover",
+  discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
+  discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
   createDeployment: "sliver:cloud-deployment:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
   updateFirewall: "sliver:cloud-deployment:firewall:update",
@@ -72,6 +78,8 @@ export interface CloudDeploymentSnapshot {
   readonly secureCredentialStorage: boolean;
   readonly awsProfiles: readonly AwsCliProfileSummary[];
   readonly awsProfileDiscoveryError: string | null;
+  readonly azureAccounts: readonly AzureCliAccountSummary[];
+  readonly azureAccountDiscoveryError: string | null;
   /** Session-only, bounded SSH provisioning output. This is never written to disk. */
   readonly provisioningTranscripts: readonly CloudProvisioningTranscript[];
 }
@@ -105,7 +113,7 @@ export interface SshPrivateKeySelection {
 }
 
 export interface CloudCredentialTestResult {
-  readonly provider: "aws" | "proxmox";
+  readonly provider: CloudProvider;
   readonly summary: string;
   readonly permissions: CloudPermissionEvaluation;
 }
@@ -123,7 +131,7 @@ export interface DestroyCloudDeploymentPlan {
   readonly token: string;
   readonly deploymentId: string;
   readonly deploymentName: string;
-  readonly provider: "aws" | "proxmox";
+  readonly provider: CloudProvider;
   readonly expiresAt: string;
 }
 
@@ -141,13 +149,15 @@ export interface CloudDeploymentAPI {
   deleteCredential(input: CloudCredentialIdInput): Promise<OperationResult>;
   testCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialTestResult>>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): Promise<OperationResult<AwsDeploymentOptions>>;
+  discoverAzureAccounts(): Promise<OperationResult<readonly AzureCliAccountSummary[]>>;
+  discoverAzureOptions(input: DiscoverAzureOptionsInput): Promise<OperationResult<AzureDeploymentOptions>>;
   createDeployment(input: CreateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
   runLifecycleAction(input: CloudDeploymentActionInput): Promise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): Promise<OperationResult<CloudDeploymentRecord>>;
-  listFirewallRules(input: ListAwsFirewallRulesInput): Promise<OperationResult<AwsFirewallSnapshot>>;
-  createFirewallRule(input: CreateAwsFirewallRuleInput): Promise<OperationResult<AwsFirewallSnapshot>>;
-  updateFirewallRule(input: UpdateAwsFirewallRuleInput): Promise<OperationResult<AwsFirewallSnapshot>>;
-  deleteFirewallRule(input: DeleteAwsFirewallRuleInput): Promise<OperationResult<AwsFirewallSnapshot>>;
+  listFirewallRules(input: ListCloudFirewallRulesInput): Promise<OperationResult<CloudFirewallSnapshot>>;
+  createFirewallRule(input: CreateCloudFirewallRuleInput): Promise<OperationResult<CloudFirewallSnapshot>>;
+  updateFirewallRule(input: UpdateCloudFirewallRuleInput): Promise<OperationResult<CloudFirewallSnapshot>>;
+  deleteFirewallRule(input: DeleteCloudFirewallRuleInput): Promise<OperationResult<CloudFirewallSnapshot>>;
   prepareDestroyDeployment(
     input: PrepareDestroyCloudDeploymentInput,
   ): Promise<OperationResult<DestroyCloudDeploymentPlan>>;

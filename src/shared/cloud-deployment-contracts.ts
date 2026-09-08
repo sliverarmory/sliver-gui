@@ -28,6 +28,8 @@ export const CLOUD_DEPLOYMENT_PHASES = [
 
 export const CLOUD_CREDENTIAL_LABEL_MAX_LENGTH = 120;
 export const AWS_CLI_PROFILE_NAME_MAX_LENGTH = 256;
+export const AZURE_LOCATION_MAX_LENGTH = 64;
+export const AZURE_SSH_PORT = 22 as const;
 export const AWS_SUPPORTED_INSTANCE_TYPES = [
   "t3.micro",
   "t3.small",
@@ -43,8 +45,9 @@ export const AWS_SUPPORTED_INSTANCE_TYPES = [
 export const CLOUD_DEPLOYMENT_NAME_MAX_LENGTH = 120;
 export const CLOUD_SSH_PRIVATE_KEY_MAX_LENGTH = 1024 * 1024;
 export const CLOUD_INGRESS_CIDR_MAX_ITEMS = 32;
+export const AZURE_FIREWALL_RULE_MAX_VALUES = 1_000;
 
-export type CloudProvider = "aws" | "proxmox";
+export type CloudProvider = "aws" | "azure";
 export type CloudCredentialPersistence = "secure" | "session";
 export type CloudDeploymentAction = (typeof CLOUD_DEPLOYMENT_ACTIONS)[number];
 export type CloudDeploymentStatus = (typeof CLOUD_DEPLOYMENT_STATUSES)[number];
@@ -63,6 +66,20 @@ export type AwsDeploymentInstanceState =
 export type AwsDeploymentHealth = "ok" | "impaired" | "initializing" | "unknown";
 export type AwsFirewallDirection = "ingress" | "egress";
 export type AwsFirewallPeerType = "ipv4" | "ipv6" | "prefix-list" | "security-group";
+export type AzureNetworkMode = "existing" | "managed";
+export type AzureDeploymentInstanceState =
+  | "creating"
+  | "running"
+  | "deallocated"
+  | "deallocating"
+  | "starting"
+  | "stopping"
+  | "stopped"
+  | "failed"
+  | "unknown";
+export type AzureFirewallDirection = "ingress" | "egress";
+export type AzureFirewallAccess = "allow" | "deny";
+export type AzureFirewallProtocol = "*" | "tcp" | "udp" | "icmp" | "ah" | "esp";
 
 export interface AwsAccessKeyCredentialSecret {
   readonly accessKeyId: string;
@@ -80,16 +97,14 @@ export interface AwsProfileCredentialSecret {
 
 export type AwsCredentialSecret = AwsAccessKeyCredentialSecret | AwsProfileCredentialSecret;
 
-export interface ProxmoxCredentialSecret {
-  readonly endpoint: string;
-  readonly tokenId: string;
-  readonly tokenSecret: string;
-  readonly tlsCaCertificate: string | null;
+export interface AzureCliCredentialSecret {
+  readonly subscriptionId: string;
+  readonly tenantId: string;
   readonly sshPrivateKey: string;
   readonly sshPassphrase: string | null;
 }
 
-export type CloudCredentialSecret = AwsCredentialSecret | ProxmoxCredentialSecret;
+export type CloudCredentialSecret = AwsCredentialSecret | AzureCliCredentialSecret;
 
 /** Renderer-safe AWS credential input. A null token requests main-process key generation. */
 export interface CreateAwsAccessKeyCloudCredentialInput {
@@ -119,22 +134,21 @@ export type CreateAwsCloudCredentialInput =
   | CreateAwsAccessKeyCloudCredentialInput
   | CreateAwsProfileCloudCredentialInput;
 
-/** Renderer-safe Proxmox credential input. A null token requests main-process key generation. */
-export interface CreateProxmoxCloudCredentialInput {
-  readonly provider: "proxmox";
+/** Renderer-safe Azure CLI credential input. Tokens remain in the Azure CLI cache. */
+export interface CreateAzureCliCloudCredentialInput {
+  readonly provider: "azure";
   readonly label: string;
+  readonly defaultLocation: string;
   readonly sshUsername: string;
   readonly sshPrivateKeyToken: string | null;
-  readonly endpoint: string;
-  readonly tokenId: string;
-  readonly tokenSecret: string;
-  readonly tlsCaCertificate: string | null;
+  readonly subscriptionId: string;
+  readonly tenantId: string;
   readonly sshPassphrase: string | null;
 }
 
 export type CreateCloudCredentialInput =
   | CreateAwsCloudCredentialInput
-  | CreateProxmoxCloudCredentialInput;
+  | CreateAzureCliCloudCredentialInput;
 
 /** Main-process input after resolving an imported or generated SSH private key. */
 export interface ResolvedAwsCloudCredentialInput {
@@ -146,16 +160,17 @@ export interface ResolvedAwsCloudCredentialInput {
 }
 
 /** Main-process input after resolving an imported or generated SSH private key. */
-export interface ResolvedProxmoxCloudCredentialInput {
-  readonly provider: "proxmox";
+export interface ResolvedAzureCloudCredentialInput {
+  readonly provider: "azure";
   readonly label: string;
+  readonly defaultLocation: string;
   readonly sshUsername: string;
-  readonly secret: ProxmoxCredentialSecret;
+  readonly secret: AzureCliCredentialSecret;
 }
 
 export type ResolvedCloudCredentialInput =
   | ResolvedAwsCloudCredentialInput
-  | ResolvedProxmoxCloudCredentialInput;
+  | ResolvedAzureCloudCredentialInput;
 
 interface AwsCloudCredentialSummaryBase {
   readonly id: string;
@@ -177,22 +192,34 @@ export type AwsCloudCredentialSummary =
   | AwsAccessKeyCloudCredentialSummary
   | AwsProfileCloudCredentialSummary;
 
-export interface ProxmoxCloudCredentialSummary {
+export interface AzureCloudCredentialSummary {
   readonly id: string;
-  readonly provider: "proxmox";
+  readonly provider: "azure";
   readonly label: string;
   readonly persistence: CloudCredentialPersistence;
   readonly createdAt: string;
-  readonly endpoint: string;
+  readonly defaultLocation: string;
+  readonly subscriptionId: string;
+  readonly tenantId: string;
   readonly sshUsername: string;
 }
 
-export type CloudCredentialSummary = AwsCloudCredentialSummary | ProxmoxCloudCredentialSummary;
+export type CloudCredentialSummary = AwsCloudCredentialSummary | AzureCloudCredentialSummary;
 
 /** Non-secret metadata discovered from the local AWS shared configuration files. */
 export interface AwsCliProfileSummary {
   readonly name: string;
   readonly region: string | null;
+}
+
+/** Non-secret subscription metadata discovered from the local Azure CLI. */
+export interface AzureCliAccountSummary {
+  readonly subscriptionId: string;
+  readonly name: string;
+  readonly tenantId: string;
+  readonly homeTenantId: string | null;
+  readonly isDefault: boolean;
+  readonly cloudName: string;
 }
 
 export interface AwsDeploymentSpec {
@@ -221,20 +248,21 @@ export interface AwsDeploymentSpec {
   readonly operatorCidrs: readonly string[];
 }
 
-export interface ProxmoxDeploymentSpec {
-  readonly node: string;
-  readonly templateVmId: number;
-  readonly vmId: number | null;
-  readonly storage: string;
-  readonly bridge: string;
-  readonly cores: number;
-  readonly memoryMiB: number;
-  readonly diskGiB: number;
+export interface AzureDeploymentSpec {
+  readonly location: string;
+  readonly imageReference: string;
+  readonly vmSize: string;
+  readonly networkMode: AzureNetworkMode;
+  readonly vnetId: string | null;
+  readonly subnetId: string | null;
+  readonly managedVnetCidr: string | null;
+  readonly managedSubnetCidr: string | null;
+  readonly sshUsername: string;
   readonly operatorName: string;
-  readonly sshPort: number;
+  readonly sshPort: typeof AZURE_SSH_PORT;
   readonly multiplayerPort: number;
-  readonly ipConfig: string;
-  readonly gateway: string | null;
+  readonly osDiskSizeGiB: number | null;
+  readonly usePublicIp: boolean;
   readonly sshCidrs: readonly string[];
   readonly operatorCidrs: readonly string[];
 }
@@ -247,17 +275,17 @@ export interface CreateAwsCloudDeploymentInput {
   readonly spec: AwsDeploymentSpec;
 }
 
-export interface CreateProxmoxCloudDeploymentInput {
-  readonly provider: "proxmox";
+export interface CreateAzureCloudDeploymentInput {
+  readonly provider: "azure";
   readonly expectedRevision: number;
   readonly credentialId: string;
   readonly name: string;
-  readonly spec: ProxmoxDeploymentSpec;
+  readonly spec: AzureDeploymentSpec;
 }
 
 export type CreateCloudDeploymentInput =
   | CreateAwsCloudDeploymentInput
-  | CreateProxmoxCloudDeploymentInput;
+  | CreateAzureCloudDeploymentInput;
 
 export type AwsManagedAssetType =
   | "ec2-instance"
@@ -271,10 +299,18 @@ export type AwsManagedAssetType =
   | "ec2-internet-gateway"
   | "ec2-route-table"
   | "ec2-route-table-association";
-export type ProxmoxManagedAssetType = "proxmox-vm";
+export type AzureManagedAssetType =
+  | "azure-resource-group"
+  | "azure-virtual-network"
+  | "azure-subnet"
+  | "azure-network-security-group"
+  | "azure-public-ip"
+  | "azure-network-interface"
+  | "azure-os-disk"
+  | "azure-virtual-machine";
 
 export interface CloudManagedAsset {
-  readonly resourceType: AwsManagedAssetType | ProxmoxManagedAssetType;
+  readonly resourceType: AwsManagedAssetType | AzureManagedAssetType;
   readonly resourceId: string;
   readonly displayName: string | null;
   readonly tagged: boolean;
@@ -299,10 +335,20 @@ export interface AwsDeploymentRuntime {
   readonly routeTableAssociationId: string | null;
 }
 
-export interface ProxmoxDeploymentRuntime {
-  readonly vmId: number | null;
-  readonly node: string;
-  readonly ipAddress: string | null;
+export interface AzureDeploymentRuntime {
+  readonly resourceGroupName: string | null;
+  readonly vmName: string | null;
+  readonly vmId: string | null;
+  readonly instanceState: AzureDeploymentInstanceState;
+  readonly provisioningState: string | null;
+  readonly networkSecurityGroupId: string | null;
+  readonly networkInterfaceId: string | null;
+  readonly osDiskId: string | null;
+  readonly publicIpAddressId: string | null;
+  readonly publicIpAddress: string | null;
+  readonly privateIpAddress: string | null;
+  readonly vnetId: string | null;
+  readonly subnetId: string | null;
 }
 
 interface CloudDeploymentRecordBase {
@@ -327,13 +373,13 @@ export interface AwsCloudDeploymentRecord extends CloudDeploymentRecordBase {
   readonly runtime: AwsDeploymentRuntime;
 }
 
-export interface ProxmoxCloudDeploymentRecord extends CloudDeploymentRecordBase {
-  readonly provider: "proxmox";
-  readonly spec: ProxmoxDeploymentSpec;
-  readonly runtime: ProxmoxDeploymentRuntime;
+export interface AzureCloudDeploymentRecord extends CloudDeploymentRecordBase {
+  readonly provider: "azure";
+  readonly spec: AzureDeploymentSpec;
+  readonly runtime: AzureDeploymentRuntime;
 }
 
-export type CloudDeploymentRecord = AwsCloudDeploymentRecord | ProxmoxCloudDeploymentRecord;
+export type CloudDeploymentRecord = AwsCloudDeploymentRecord | AzureCloudDeploymentRecord;
 
 export interface CloudDeploymentState {
   readonly v: typeof CLOUD_DEPLOYMENT_STATE_VERSION;
@@ -380,59 +426,106 @@ export interface AwsFirewallRule extends AwsFirewallRuleSpec {
 }
 
 export interface AwsFirewallSnapshot {
+  readonly provider: "aws";
   readonly securityGroupId: string;
   readonly securityGroupName: string | null;
   readonly vpcId: string | null;
   readonly rules: readonly AwsFirewallRule[];
 }
 
-export interface ListAwsFirewallRulesInput {
+export interface AzureFirewallRuleSpec {
+  readonly name: string;
+  readonly priority: number;
+  readonly direction: AzureFirewallDirection;
+  readonly access: AzureFirewallAccess;
+  readonly protocol: AzureFirewallProtocol;
+  readonly sourceAddressPrefixes: readonly string[];
+  readonly sourcePortRanges: readonly string[];
+  readonly destinationAddressPrefixes: readonly string[];
+  readonly destinationPortRanges: readonly string[];
+  readonly description: string | null;
+}
+
+export interface AzureFirewallRule extends AzureFirewallRuleSpec {
+  readonly id: string;
+  readonly managed: boolean;
+  readonly isDefault: boolean;
+  /** ASG references are preserved for display but are not editable by this client. */
+  readonly sourceApplicationSecurityGroupIds: readonly string[];
+  readonly destinationApplicationSecurityGroupIds: readonly string[];
+  readonly editUnsupportedReason: string | null;
+}
+
+export interface AzureFirewallSnapshot {
+  readonly provider: "azure";
+  readonly networkSecurityGroupId: string;
+  readonly networkSecurityGroupName: string | null;
+  readonly resourceGroupName: string;
+  readonly rules: readonly AzureFirewallRule[];
+}
+
+export type CloudFirewallRuleSpec = AwsFirewallRuleSpec | AzureFirewallRuleSpec;
+export type CloudFirewallRule = AwsFirewallRule | AzureFirewallRule;
+export type CloudFirewallSnapshot = AwsFirewallSnapshot | AzureFirewallSnapshot;
+
+export interface ListCloudFirewallRulesInput {
   readonly deploymentId: string;
 }
 
-export interface CreateAwsFirewallRuleInput {
+export interface CreateCloudFirewallRuleInput {
   readonly deploymentId: string;
   readonly expectedRevision: number;
-  readonly rule: AwsFirewallRuleSpec;
+  readonly rule: CloudFirewallRuleSpec;
 }
 
-export interface UpdateAwsFirewallRuleInput extends CreateAwsFirewallRuleInput {
+export interface UpdateCloudFirewallRuleInput extends CreateCloudFirewallRuleInput {
   readonly ruleId: string;
 }
 
-export interface DeleteAwsFirewallRuleInput {
+export interface DeleteCloudFirewallRuleInput {
   readonly deploymentId: string;
   readonly expectedRevision: number;
   readonly ruleId: string;
 }
+
+/** @deprecated Use the provider-neutral aliases. */
+export type ListAwsFirewallRulesInput = ListCloudFirewallRulesInput;
+/** @deprecated Use the provider-neutral aliases. */
+export type CreateAwsFirewallRuleInput = CreateCloudFirewallRuleInput;
+/** @deprecated Use the provider-neutral aliases. */
+export type UpdateAwsFirewallRuleInput = UpdateCloudFirewallRuleInput;
+/** @deprecated Use the provider-neutral aliases. */
+export type DeleteAwsFirewallRuleInput = DeleteCloudFirewallRuleInput;
 
 const AWS_ACCESS_KEY_SECRET_KEYS = ["accessKeyId", "secretAccessKey", "sessionToken", "sshPrivateKey", "sshPassphrase"] as const;
 const AWS_PROFILE_SECRET_KEYS = ["profileName", "sshPrivateKey", "sshPassphrase"] as const;
-const PROXMOX_SECRET_KEYS = ["endpoint", "tokenId", "tokenSecret", "tlsCaCertificate", "sshPrivateKey", "sshPassphrase"] as const;
+const AZURE_CLI_SECRET_KEYS = ["subscriptionId", "tenantId", "sshPrivateKey", "sshPassphrase"] as const;
 const CREATE_AWS_ACCESS_KEY_CREDENTIAL_KEYS = ["provider", "label", "defaultRegion", "sshUsername", "sshPrivateKeyToken", "accessKeyId", "secretAccessKey", "sessionToken", "sshPassphrase"] as const;
 const CREATE_AWS_PROFILE_CREDENTIAL_KEYS = ["provider", "label", "defaultRegion", "sshUsername", "sshPrivateKeyToken", "profileName", "sshPassphrase"] as const;
-const CREATE_PROXMOX_CREDENTIAL_KEYS = ["provider", "label", "sshUsername", "sshPrivateKeyToken", "endpoint", "tokenId", "tokenSecret", "tlsCaCertificate", "sshPassphrase"] as const;
+const CREATE_AZURE_CLI_CREDENTIAL_KEYS = ["provider", "label", "defaultLocation", "sshUsername", "sshPrivateKeyToken", "subscriptionId", "tenantId", "sshPassphrase"] as const;
 const RESOLVED_CREDENTIAL_KEYS = ["provider", "label", "defaultRegion", "sshUsername", "secret"] as const;
-const RESOLVED_PROXMOX_CREDENTIAL_KEYS = ["provider", "label", "sshUsername", "secret"] as const;
+const RESOLVED_AZURE_CREDENTIAL_KEYS = ["provider", "label", "defaultLocation", "sshUsername", "secret"] as const;
 const AWS_ACCESS_KEY_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "defaultRegion", "sshUsername"] as const;
 const AWS_PROFILE_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "defaultRegion", "sshUsername", "profileName"] as const;
-const PROXMOX_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "endpoint", "sshUsername"] as const;
+const AZURE_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "defaultLocation", "subscriptionId", "tenantId", "sshUsername"] as const;
+const AZURE_CLI_ACCOUNT_KEYS = ["subscriptionId", "name", "tenantId", "homeTenantId", "isDefault", "cloudName"] as const;
 const LEGACY_AWS_SPEC_KEYS = ["region", "imageId", "instanceType", "subnetId", "vpcId", "keyPairName", "operatorName", "sshPort", "multiplayerPort", "volumeSizeGiB", "useElasticIp", "sshCidrs", "operatorCidrs"] as const;
 const AWS_SPEC_KEYS = ["region", "imageId", "instanceType", "subnetId", "vpcId", "networkMode", "managedVpcCidr", "managedSubnetCidr", "sshKeyMode", "existingKeyPairName", "sshUsername", "keyPairName", "operatorName", "sshPort", "multiplayerPort", "volumeSizeGiB", "useElasticIp", "sshCidrs", "operatorCidrs"] as const;
-const PROXMOX_SPEC_KEYS = ["node", "templateVmId", "vmId", "storage", "bridge", "cores", "memoryMiB", "diskGiB", "operatorName", "sshPort", "multiplayerPort", "ipConfig", "gateway", "sshCidrs", "operatorCidrs"] as const;
+const AZURE_SPEC_KEYS = ["location", "imageReference", "vmSize", "networkMode", "vnetId", "subnetId", "managedVnetCidr", "managedSubnetCidr", "sshUsername", "operatorName", "sshPort", "multiplayerPort", "osDiskSizeGiB", "usePublicIp", "sshCidrs", "operatorCidrs"] as const;
 const CREATE_DEPLOYMENT_KEYS = ["provider", "expectedRevision", "credentialId", "name", "spec"] as const;
 const ASSET_KEYS = ["resourceType", "resourceId", "displayName", "tagged"] as const;
 const RECORD_KEYS = ["id", "name", "credentialId", "status", "phase", "createdAt", "updatedAt", "operatorConfigFileName", "operatorConfigDigest", "remoteHost", "lastError", "managedAssets", "provider", "spec", "runtime"] as const;
 const LEGACY_AWS_RUNTIME_KEYS = ["instanceId", "securityGroupIds", "volumeIds", "networkInterfaceIds", "publicIpAddress", "privateIpAddress", "availabilityZone", "elasticIpAllocationId"] as const;
 const AWS_RUNTIME_KEYS = ["instanceId", "securityGroupIds", "volumeIds", "networkInterfaceIds", "publicIpAddress", "privateIpAddress", "availabilityZone", "elasticIpAllocationId", "vpcId", "subnetId", "internetGatewayId", "routeTableId", "routeTableAssociationId"] as const;
 const AWS_RUNTIME_WITH_STATUS_KEYS = [...AWS_RUNTIME_KEYS, "instanceState", "instanceHealth", "systemHealth"] as const;
-const PROXMOX_RUNTIME_KEYS = ["vmId", "node", "ipAddress"] as const;
+const AZURE_RUNTIME_KEYS = ["resourceGroupName", "vmName", "vmId", "instanceState", "provisioningState", "networkSecurityGroupId", "networkInterfaceId", "osDiskId", "publicIpAddressId", "publicIpAddress", "privateIpAddress", "vnetId", "subnetId"] as const;
 const STATE_KEYS = ["v", "revision", "deployments"] as const;
 const UPDATE_KEYS = ["expectedRevision", "deployment"] as const;
 const DELETE_KEYS = ["expectedRevision", "deploymentId"] as const;
 const ACTION_KEYS = ["deploymentId", "expectedRevision", "action"] as const;
 const FIREWALL_KEYS = ["deploymentId", "expectedRevision", "sshCidrs", "operatorCidrs"] as const;
 const AWS_FIREWALL_RULE_KEYS = ["direction", "protocol", "fromPort", "toPort", "peerType", "peer", "description"] as const;
+const AZURE_FIREWALL_RULE_KEYS = ["name", "priority", "direction", "access", "protocol", "sourceAddressPrefixes", "sourcePortRanges", "destinationAddressPrefixes", "destinationPortRanges", "description"] as const;
 const LIST_AWS_FIREWALL_RULES_KEYS = ["deploymentId"] as const;
 const CREATE_AWS_FIREWALL_RULE_KEYS = ["deploymentId", "expectedRevision", "rule"] as const;
 const UPDATE_AWS_FIREWALL_RULE_KEYS = ["deploymentId", "expectedRevision", "rule", "ruleId"] as const;
@@ -446,8 +539,18 @@ const AWS_INSTANCE_STATES = new Set<AwsDeploymentInstanceState>(["pending", "run
 const AWS_HEALTH_VALUES = new Set<AwsDeploymentHealth>(["ok", "impaired", "initializing", "unknown"]);
 const AWS_FIREWALL_DIRECTIONS = new Set<AwsFirewallDirection>(["ingress", "egress"]);
 const AWS_FIREWALL_PEER_TYPES = new Set<AwsFirewallPeerType>(["ipv4", "ipv6", "prefix-list", "security-group"]);
+const AZURE_INSTANCE_STATES = new Set<AzureDeploymentInstanceState>(["creating", "running", "deallocated", "deallocating", "starting", "stopping", "stopped", "failed", "unknown"]);
+const AZURE_FIREWALL_DIRECTIONS = new Set<AzureFirewallDirection>(["ingress", "egress"]);
+const AZURE_FIREWALL_ACCESS = new Set<AzureFirewallAccess>(["allow", "deny"]);
+const AZURE_FIREWALL_PROTOCOLS = new Set<AzureFirewallProtocol>(["*", "tcp", "udp", "icmp", "ah", "esp"]);
+const AZURE_RESERVED_SSH_USERNAMES = new Set([
+  "1", "123", "a", "actuser", "adm", "admin", "admin1", "admin2", "administrator",
+  "aspnet", "backup", "console", "david", "guest", "john", "owner", "root", "server",
+  "sql", "support_388945a0", "support", "sys", "test", "test1", "test2", "test3",
+  "user", "user1", "user2", "user3", "user4", "user5", "video",
+]);
 const AWS_ASSET_TYPES = new Set<AwsManagedAssetType>(["ec2-instance", "ec2-volume", "ec2-network-interface", "ec2-security-group", "ec2-key-pair", "ec2-elastic-ip", "ec2-vpc", "ec2-subnet", "ec2-internet-gateway", "ec2-route-table", "ec2-route-table-association"]);
-const PROXMOX_ASSET_TYPES = new Set<ProxmoxManagedAssetType>(["proxmox-vm"]);
+const AZURE_ASSET_TYPES = new Set<AzureManagedAssetType>(["azure-resource-group", "azure-virtual-network", "azure-subnet", "azure-network-security-group", "azure-public-ip", "azure-network-interface", "azure-os-disk", "azure-virtual-machine"]);
 
 export function parseAwsCredentialSecret(value: unknown): AwsCredentialSecret {
   if (hasExactKeys(value, AWS_PROFILE_SECRET_KEYS)) {
@@ -484,23 +587,18 @@ export function parseAwsCredentialSecret(value: unknown): AwsCredentialSecret {
   throw invalid("AWS credential secret");
 }
 
-export function parseProxmoxCredentialSecret(value: unknown): ProxmoxCredentialSecret {
-  if (!hasExactKeys(value, PROXMOX_SECRET_KEYS)) throw invalid("Proxmox credential secret");
-  const tlsCaCertificate = nullableTlsCaCertificate(value["tlsCaCertificate"]);
+export function parseAzureCliCredentialSecret(value: unknown): AzureCliCredentialSecret {
+  if (!hasExactKeys(value, AZURE_CLI_SECRET_KEYS)) throw invalid("Azure CLI credential secret");
   const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
   if (
-    !isHttpsEndpoint(value["endpoint"]) ||
-    !boundedSecret(value["tokenId"], 3, 512) ||
-    !boundedSecret(value["tokenSecret"], 1, 16_384) ||
-    tlsCaCertificate === undefined ||
+    !isUuid(value["subscriptionId"]) ||
+    !isUuid(value["tenantId"]) ||
     !isSshPrivateKey(value["sshPrivateKey"]) ||
     sshPassphrase === undefined
-  ) throw invalid("Proxmox credential secret");
+  ) throw invalid("Azure CLI credential secret");
   return Object.freeze({
-    endpoint: value["endpoint"],
-    tokenId: value["tokenId"],
-    tokenSecret: value["tokenSecret"],
-    tlsCaCertificate,
+    subscriptionId: value["subscriptionId"],
+    tenantId: value["tenantId"],
     sshPrivateKey: value["sshPrivateKey"],
     sshPassphrase,
   });
@@ -522,12 +620,11 @@ export function parseCreateCloudCredentialInput(value: unknown): CreateCloudCred
     }
     throw invalid("AWS cloud credential");
   }
-  if (value["provider"] === "proxmox") {
-    if (!hasExactKeys(value, CREATE_PROXMOX_CREDENTIAL_KEYS)) throw invalid("Proxmox cloud credential");
+  if (value["provider"] === "azure") {
+    if (!hasExactKeys(value, CREATE_AZURE_CLI_CREDENTIAL_KEYS)) throw invalid("Azure CLI cloud credential");
     const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
-    const tlsCaCertificate = nullableTlsCaCertificate(value["tlsCaCertificate"]);
-    if (!boundedLabel(value["label"]) || !isSshUsername(value["sshUsername"]) || !isNullableSshPrivateKeyToken(value["sshPrivateKeyToken"]) || !isHttpsEndpoint(value["endpoint"]) || !boundedSecret(value["tokenId"], 3, 512) || !boundedSecret(value["tokenSecret"], 1, 16_384) || tlsCaCertificate === undefined || sshPassphrase === undefined || (value["sshPrivateKeyToken"] === null && sshPassphrase !== null)) throw invalid("Proxmox cloud credential");
-    return Object.freeze({ provider: "proxmox", label: value["label"], sshUsername: value["sshUsername"], sshPrivateKeyToken: value["sshPrivateKeyToken"], endpoint: value["endpoint"], tokenId: value["tokenId"], tokenSecret: value["tokenSecret"], tlsCaCertificate, sshPassphrase });
+    if (!boundedLabel(value["label"]) || !isAzureLocation(value["defaultLocation"]) || !isAzureSshUsername(value["sshUsername"]) || !isNullableSshPrivateKeyToken(value["sshPrivateKeyToken"]) || !isUuid(value["subscriptionId"]) || !isUuid(value["tenantId"]) || sshPassphrase === undefined || (value["sshPrivateKeyToken"] === null && sshPassphrase !== null)) throw invalid("Azure CLI cloud credential");
+    return Object.freeze({ provider: "azure", label: value["label"], defaultLocation: value["defaultLocation"], sshUsername: value["sshUsername"], sshPrivateKeyToken: value["sshPrivateKeyToken"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshPassphrase });
   }
   throw invalid("cloud credential");
 }
@@ -538,9 +635,9 @@ export function parseResolvedCloudCredentialInput(value: unknown): ResolvedCloud
     if (!hasExactKeys(value, RESOLVED_CREDENTIAL_KEYS) || !boundedLabel(value["label"]) || !isAwsRegion(value["defaultRegion"]) || !isSshUsername(value["sshUsername"])) throw invalid("resolved AWS cloud credential");
     return Object.freeze({ provider: "aws", label: value["label"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], secret: parseAwsCredentialSecret(value["secret"]) });
   }
-  if (value["provider"] === "proxmox") {
-    if (!hasExactKeys(value, RESOLVED_PROXMOX_CREDENTIAL_KEYS) || !boundedLabel(value["label"]) || !isSshUsername(value["sshUsername"])) throw invalid("resolved Proxmox cloud credential");
-    return Object.freeze({ provider: "proxmox", label: value["label"], sshUsername: value["sshUsername"], secret: parseProxmoxCredentialSecret(value["secret"]) });
+  if (value["provider"] === "azure") {
+    if (!hasExactKeys(value, RESOLVED_AZURE_CREDENTIAL_KEYS) || !boundedLabel(value["label"]) || !isAzureLocation(value["defaultLocation"]) || !isAzureSshUsername(value["sshUsername"])) throw invalid("resolved Azure CLI cloud credential");
+    return Object.freeze({ provider: "azure", label: value["label"], defaultLocation: value["defaultLocation"], sshUsername: value["sshUsername"], secret: parseAzureCliCredentialSecret(value["secret"]) });
   }
   throw invalid("resolved cloud credential");
 }
@@ -556,11 +653,16 @@ export function parseCloudCredentialSummary(value: unknown): CloudCredentialSumm
     }
     throw invalid("AWS cloud credential summary");
   }
-  if (value["provider"] === "proxmox") {
-    if (!hasExactKeys(value, PROXMOX_SUMMARY_KEYS) || !isUuidV4(value["id"]) || !boundedLabel(value["label"]) || !isCredentialPersistence(value["persistence"]) || !isIsoTimestamp(value["createdAt"]) || !isHttpsEndpoint(value["endpoint"]) || !isSshUsername(value["sshUsername"])) throw invalid("Proxmox cloud credential summary");
-    return Object.freeze({ id: value["id"], provider: "proxmox", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], endpoint: value["endpoint"], sshUsername: value["sshUsername"] });
+  if (value["provider"] === "azure") {
+    if (!hasExactKeys(value, AZURE_SUMMARY_KEYS) || !isUuidV4(value["id"]) || !boundedLabel(value["label"]) || !isCredentialPersistence(value["persistence"]) || !isIsoTimestamp(value["createdAt"]) || !isAzureLocation(value["defaultLocation"]) || !isUuid(value["subscriptionId"]) || !isUuid(value["tenantId"]) || !isAzureSshUsername(value["sshUsername"])) throw invalid("Azure CLI cloud credential summary");
+    return Object.freeze({ id: value["id"], provider: "azure", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultLocation: value["defaultLocation"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshUsername: value["sshUsername"] });
   }
   throw invalid("cloud credential summary");
+}
+
+export function parseAzureCliAccountSummary(value: unknown): AzureCliAccountSummary {
+  if (!hasExactKeys(value, AZURE_CLI_ACCOUNT_KEYS) || !isUuid(value["subscriptionId"]) || !boundedPlain(value["name"], 1, 256) || !isUuid(value["tenantId"]) || (value["homeTenantId"] !== null && !isUuid(value["homeTenantId"])) || typeof value["isDefault"] !== "boolean" || !boundedIdentifier(value["cloudName"], 1, 128)) throw invalid("Azure CLI account summary");
+  return Object.freeze({ subscriptionId: value["subscriptionId"], name: value["name"], tenantId: value["tenantId"], homeTenantId: value["homeTenantId"], isDefault: value["isDefault"], cloudName: value["cloudName"] });
 }
 
 export function parseAwsDeploymentSpec(value: unknown): AwsDeploymentSpec {
@@ -613,13 +715,40 @@ export function parseAwsDeploymentSpec(value: unknown): AwsDeploymentSpec {
   });
 }
 
-export function parseProxmoxDeploymentSpec(value: unknown): ProxmoxDeploymentSpec {
-  if (!hasExactKeys(value, PROXMOX_SPEC_KEYS)) throw invalid("Proxmox deployment specification");
+export function parseAzureDeploymentSpec(value: unknown): AzureDeploymentSpec {
+  if (!hasExactKeys(value, AZURE_SPEC_KEYS)) throw invalid("Azure deployment specification");
   const sshCidrs = parseIngressCidrs(value["sshCidrs"]);
   const operatorCidrs = parseIngressCidrs(value["operatorCidrs"]);
-  const vmId = nullableInteger(value["vmId"], 100, 999_999_999);
-  if (!boundedIdentifier(value["node"], 1, 128) || !boundedInteger(value["templateVmId"], 100, 999_999_999) || vmId === undefined || !boundedIdentifier(value["storage"], 1, 128) || !boundedIdentifier(value["bridge"], 1, 128) || !boundedInteger(value["cores"], 1, 256) || !boundedInteger(value["memoryMiB"], 512, 1_048_576) || !boundedInteger(value["diskGiB"], 8, 16_384) || !isOperatorName(value["operatorName"]) || !isPort(value["sshPort"]) || !isPort(value["multiplayerPort"]) || value["sshPort"] === value["multiplayerPort"] || !isProxmoxIpv4Config(value["ipConfig"]) || !isNullableIpv4Address(value["gateway"]) || (value["ipConfig"] === "ip=dhcp" && value["gateway"] !== null) || (typeof value["ipConfig"] === "string" && value["ipConfig"].includes(",gw=") && value["gateway"] !== null)) throw invalid("Proxmox deployment specification");
-  return Object.freeze({ node: value["node"], templateVmId: value["templateVmId"], vmId, storage: value["storage"], bridge: value["bridge"], cores: value["cores"], memoryMiB: value["memoryMiB"], diskGiB: value["diskGiB"], operatorName: value["operatorName"], sshPort: value["sshPort"], multiplayerPort: value["multiplayerPort"], ipConfig: value["ipConfig"], gateway: value["gateway"], sshCidrs, operatorCidrs });
+  const networkMode = value["networkMode"];
+  const managedVnetCidr = nullableIpv4NetworkCidr(value["managedVnetCidr"], 8, 29);
+  const managedSubnetCidr = nullableIpv4NetworkCidr(value["managedSubnetCidr"], 8, 29);
+  const osDiskSizeGiB = nullableInteger(value["osDiskSizeGiB"], 30, 4_095);
+  if (
+    !isAzureLocation(value["location"]) ||
+    !isAzureImageReference(value["imageReference"]) ||
+    !boundedPattern(value["vmSize"], 2, 128, /^[A-Za-z0-9][A-Za-z0-9_-]+$/u) ||
+    (networkMode !== "existing" && networkMode !== "managed") ||
+    !nullableAzureResourceId(value["vnetId"]) ||
+    !nullableAzureResourceId(value["subnetId"]) ||
+    managedVnetCidr === undefined ||
+    managedSubnetCidr === undefined ||
+    !isAzureSshUsername(value["sshUsername"]) ||
+    !isOperatorName(value["operatorName"]) ||
+    value["sshPort"] !== AZURE_SSH_PORT ||
+    !isPort(value["multiplayerPort"]) ||
+    value["sshPort"] === value["multiplayerPort"] ||
+    osDiskSizeGiB === undefined ||
+    typeof value["usePublicIp"] !== "boolean" ||
+    (networkMode === "existing" && (value["vnetId"] === null || value["subnetId"] === null || managedVnetCidr !== null || managedSubnetCidr !== null || !azureSubnetBelongsToVnet(value["vnetId"], value["subnetId"]))) ||
+    (networkMode === "managed" && (value["vnetId"] !== null || value["subnetId"] !== null || managedVnetCidr === null || managedSubnetCidr === null || !ipv4CidrContains(managedVnetCidr, managedSubnetCidr)))
+  ) throw invalid("Azure deployment specification");
+  return Object.freeze({
+    location: value["location"], imageReference: value["imageReference"], vmSize: value["vmSize"],
+    networkMode, vnetId: value["vnetId"], subnetId: value["subnetId"], managedVnetCidr,
+    managedSubnetCidr, sshUsername: value["sshUsername"], operatorName: value["operatorName"],
+    sshPort: value["sshPort"], multiplayerPort: value["multiplayerPort"], osDiskSizeGiB,
+    usePublicIp: value["usePublicIp"], sshCidrs, operatorCidrs,
+  });
 }
 
 export function parseCreateCloudDeploymentInput(value: unknown): CreateCloudDeploymentInput {
@@ -634,7 +763,7 @@ export function parseCreateCloudDeploymentInput(value: unknown): CreateCloudDepl
     }
     return Object.freeze({ provider: "aws", expectedRevision: value["expectedRevision"], credentialId: value["credentialId"], name: value["name"], spec });
   }
-  if (value["provider"] === "proxmox") return Object.freeze({ provider: "proxmox", expectedRevision: value["expectedRevision"], credentialId: value["credentialId"], name: value["name"], spec: parseProxmoxDeploymentSpec(value["spec"]) });
+  if (value["provider"] === "azure") return Object.freeze({ provider: "azure", expectedRevision: value["expectedRevision"], credentialId: value["credentialId"], name: value["name"], spec: parseAzureDeploymentSpec(value["spec"]) });
   throw invalid("cloud deployment request");
 }
 
@@ -646,9 +775,9 @@ export function parseCloudDeploymentRecord(value: unknown): CloudDeploymentRecor
     if (!hasOnlyAssetTypes(managedAssets, AWS_ASSET_TYPES)) throw invalid("AWS cloud deployment record");
     return Object.freeze({ id: value["id"], provider: "aws", name: value["name"], credentialId: value["credentialId"], status: value["status"], phase: value["phase"], createdAt: value["createdAt"], updatedAt: value["updatedAt"], operatorConfigFileName: value["operatorConfigFileName"], operatorConfigDigest: value["operatorConfigDigest"], remoteHost: value["remoteHost"], lastError: value["lastError"], managedAssets, spec: parseAwsDeploymentSpec(value["spec"]), runtime: parseAwsDeploymentRuntime(value["runtime"]) });
   }
-  if (value["provider"] === "proxmox") {
-    if (!hasOnlyAssetTypes(managedAssets, PROXMOX_ASSET_TYPES)) throw invalid("Proxmox cloud deployment record");
-    return Object.freeze({ id: value["id"], provider: "proxmox", name: value["name"], credentialId: value["credentialId"], status: value["status"], phase: value["phase"], createdAt: value["createdAt"], updatedAt: value["updatedAt"], operatorConfigFileName: value["operatorConfigFileName"], operatorConfigDigest: value["operatorConfigDigest"], remoteHost: value["remoteHost"], lastError: value["lastError"], managedAssets, spec: parseProxmoxDeploymentSpec(value["spec"]), runtime: parseProxmoxDeploymentRuntime(value["runtime"]) });
+  if (value["provider"] === "azure") {
+    if (!hasOnlyAssetTypes(managedAssets, AZURE_ASSET_TYPES)) throw invalid("Azure cloud deployment record");
+    return Object.freeze({ id: value["id"], provider: "azure", name: value["name"], credentialId: value["credentialId"], status: value["status"], phase: value["phase"], createdAt: value["createdAt"], updatedAt: value["updatedAt"], operatorConfigFileName: value["operatorConfigFileName"], operatorConfigDigest: value["operatorConfigDigest"], remoteHost: value["remoteHost"], lastError: value["lastError"], managedAssets, spec: parseAzureDeploymentSpec(value["spec"]), runtime: parseAzureDeploymentRuntime(value["runtime"]) });
   }
   throw invalid("cloud deployment record");
 }
@@ -703,48 +832,85 @@ export function parseAwsFirewallRuleSpec(value: unknown): AwsFirewallRuleSpec {
   });
 }
 
-export function parseListAwsFirewallRulesInput(value: unknown): ListAwsFirewallRulesInput {
+export function parseAzureFirewallRuleSpec(value: unknown): AzureFirewallRuleSpec {
+  if (
+    !hasExactKeys(value, AZURE_FIREWALL_RULE_KEYS) ||
+    !isAzureSecurityRuleName(value["name"]) ||
+    !boundedInteger(value["priority"], 100, 4_096) ||
+    (value["priority"] >= 1_000 && value["priority"] <= 1_199) ||
+    typeof value["direction"] !== "string" ||
+    !AZURE_FIREWALL_DIRECTIONS.has(value["direction"] as AzureFirewallDirection) ||
+    typeof value["access"] !== "string" ||
+    !AZURE_FIREWALL_ACCESS.has(value["access"] as AzureFirewallAccess) ||
+    typeof value["protocol"] !== "string" ||
+    !AZURE_FIREWALL_PROTOCOLS.has(value["protocol"] as AzureFirewallProtocol) ||
+    !isAzureRuleValueList(value["sourceAddressPrefixes"], isAzureAddressPrefix) ||
+    !isAzureRuleValueList(value["sourcePortRanges"], isAzurePortRange) ||
+    !isAzureRuleValueList(value["destinationAddressPrefixes"], isAzureAddressPrefix) ||
+    !isAzureRuleValueList(value["destinationPortRanges"], isAzurePortRange) ||
+    !isAzureFirewallDescription(value["description"])
+  ) throw invalid("Azure firewall rule");
+  return Object.freeze({
+    name: value["name"], priority: value["priority"],
+    direction: value["direction"] as AzureFirewallDirection,
+    access: value["access"] as AzureFirewallAccess,
+    protocol: value["protocol"] as AzureFirewallProtocol,
+    sourceAddressPrefixes: Object.freeze([...value["sourceAddressPrefixes"]]),
+    sourcePortRanges: Object.freeze([...value["sourcePortRanges"]]),
+    destinationAddressPrefixes: Object.freeze([...value["destinationAddressPrefixes"]]),
+    destinationPortRanges: Object.freeze([...value["destinationPortRanges"]]),
+    description: value["description"],
+  });
+}
+
+export function parseCloudFirewallRuleSpec(value: unknown): CloudFirewallRuleSpec {
+  if (hasExactKeys(value, AWS_FIREWALL_RULE_KEYS)) return parseAwsFirewallRuleSpec(value);
+  if (hasExactKeys(value, AZURE_FIREWALL_RULE_KEYS)) return parseAzureFirewallRuleSpec(value);
+  throw invalid("cloud firewall rule");
+}
+
+export function parseListCloudFirewallRulesInput(value: unknown): ListCloudFirewallRulesInput {
   if (!hasExactKeys(value, LIST_AWS_FIREWALL_RULES_KEYS) || !isUuidV4(value["deploymentId"])) {
-    throw invalid("AWS firewall rule list request");
+    throw invalid("cloud firewall rule list request");
   }
   return Object.freeze({ deploymentId: value["deploymentId"] });
 }
 
-export function parseCreateAwsFirewallRuleInput(value: unknown): CreateAwsFirewallRuleInput {
+export function parseCreateCloudFirewallRuleInput(value: unknown): CreateCloudFirewallRuleInput {
   if (
     !hasExactKeys(value, CREATE_AWS_FIREWALL_RULE_KEYS) ||
     !isUuidV4(value["deploymentId"]) ||
     !isRevision(value["expectedRevision"])
-  ) throw invalid("AWS firewall rule creation");
+  ) throw invalid("cloud firewall rule creation");
   return Object.freeze({
     deploymentId: value["deploymentId"],
     expectedRevision: value["expectedRevision"],
-    rule: parseAwsFirewallRuleSpec(value["rule"]),
+    rule: parseCloudFirewallRuleSpec(value["rule"]),
   });
 }
 
-export function parseUpdateAwsFirewallRuleInput(value: unknown): UpdateAwsFirewallRuleInput {
+export function parseUpdateCloudFirewallRuleInput(value: unknown): UpdateCloudFirewallRuleInput {
   if (
     !hasExactKeys(value, UPDATE_AWS_FIREWALL_RULE_KEYS) ||
     !isUuidV4(value["deploymentId"]) ||
     !isRevision(value["expectedRevision"]) ||
-    !isAwsSecurityGroupRuleId(value["ruleId"])
-  ) throw invalid("AWS firewall rule update");
+    !isCloudFirewallRuleId(value["ruleId"])
+  ) throw invalid("cloud firewall rule update");
   return Object.freeze({
     deploymentId: value["deploymentId"],
     expectedRevision: value["expectedRevision"],
-    rule: parseAwsFirewallRuleSpec(value["rule"]),
+    rule: parseCloudFirewallRuleSpec(value["rule"]),
     ruleId: value["ruleId"],
   });
 }
 
-export function parseDeleteAwsFirewallRuleInput(value: unknown): DeleteAwsFirewallRuleInput {
+export function parseDeleteCloudFirewallRuleInput(value: unknown): DeleteCloudFirewallRuleInput {
   if (
     !hasExactKeys(value, DELETE_AWS_FIREWALL_RULE_KEYS) ||
     !isUuidV4(value["deploymentId"]) ||
     !isRevision(value["expectedRevision"]) ||
-    !isAwsSecurityGroupRuleId(value["ruleId"])
-  ) throw invalid("AWS firewall rule deletion");
+    !isCloudFirewallRuleId(value["ruleId"])
+  ) throw invalid("cloud firewall rule deletion");
   return Object.freeze({
     deploymentId: value["deploymentId"],
     expectedRevision: value["expectedRevision"],
@@ -752,8 +918,21 @@ export function parseDeleteAwsFirewallRuleInput(value: unknown): DeleteAwsFirewa
   });
 }
 
+/** @deprecated Use parseListCloudFirewallRulesInput. */
+export const parseListAwsFirewallRulesInput = parseListCloudFirewallRulesInput;
+/** @deprecated Use parseCreateCloudFirewallRuleInput. */
+export const parseCreateAwsFirewallRuleInput = parseCreateCloudFirewallRuleInput;
+/** @deprecated Use parseUpdateCloudFirewallRuleInput. */
+export const parseUpdateAwsFirewallRuleInput = parseUpdateCloudFirewallRuleInput;
+/** @deprecated Use parseDeleteCloudFirewallRuleInput. */
+export const parseDeleteAwsFirewallRuleInput = parseDeleteCloudFirewallRuleInput;
+
 export function isUuidV4(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+export function isUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
 }
 
 function isNullableSshPrivateKeyToken(value: unknown): value is string | null {
@@ -803,14 +982,36 @@ function isAwsDeploymentHealth(value: unknown): value is AwsDeploymentHealth {
   return typeof value === "string" && AWS_HEALTH_VALUES.has(value as AwsDeploymentHealth);
 }
 
-function parseProxmoxDeploymentRuntime(value: unknown): ProxmoxDeploymentRuntime {
-  const vmId = isRecord(value) ? nullableInteger(value["vmId"], 100, 999_999_999) : undefined;
-  if (!hasExactKeys(value, PROXMOX_RUNTIME_KEYS) || vmId === undefined || !boundedIdentifier(value["node"], 1, 128) || !nullableBoundedPlain(value["ipAddress"], 1, 255)) throw invalid("Proxmox deployment runtime");
-  return Object.freeze({ vmId, node: value["node"], ipAddress: value["ipAddress"] });
+function parseAzureDeploymentRuntime(value: unknown): AzureDeploymentRuntime {
+  if (
+    !hasExactKeys(value, AZURE_RUNTIME_KEYS) ||
+    !nullableAzureResourceGroupName(value["resourceGroupName"]) ||
+    !nullableAzureResourceName(value["vmName"]) ||
+    !nullableAzureResourceId(value["vmId"]) ||
+    typeof value["instanceState"] !== "string" ||
+    !AZURE_INSTANCE_STATES.has(value["instanceState"] as AzureDeploymentInstanceState) ||
+    !nullableBoundedPlain(value["provisioningState"], 1, 128) ||
+    !nullableAzureResourceId(value["networkSecurityGroupId"]) ||
+    !nullableAzureResourceId(value["networkInterfaceId"]) ||
+    !nullableAzureResourceId(value["osDiskId"]) ||
+    !nullableAzureResourceId(value["publicIpAddressId"]) ||
+    !nullableBoundedPlain(value["publicIpAddress"], 1, 255) ||
+    !nullableBoundedPlain(value["privateIpAddress"], 1, 255) ||
+    !nullableAzureResourceId(value["vnetId"]) ||
+    !nullableAzureResourceId(value["subnetId"])
+  ) throw invalid("Azure deployment runtime");
+  return Object.freeze({
+    resourceGroupName: value["resourceGroupName"], vmName: value["vmName"], vmId: value["vmId"],
+    instanceState: value["instanceState"] as AzureDeploymentInstanceState,
+    provisioningState: value["provisioningState"], networkSecurityGroupId: value["networkSecurityGroupId"],
+    networkInterfaceId: value["networkInterfaceId"], osDiskId: value["osDiskId"],
+    publicIpAddressId: value["publicIpAddressId"], publicIpAddress: value["publicIpAddress"],
+    privateIpAddress: value["privateIpAddress"], vnetId: value["vnetId"], subnetId: value["subnetId"],
+  });
 }
 
 function parseCloudManagedAsset(value: unknown): CloudManagedAsset {
-  if (!hasExactKeys(value, ASSET_KEYS) || typeof value["resourceType"] !== "string" || (!AWS_ASSET_TYPES.has(value["resourceType"] as AwsManagedAssetType) && !PROXMOX_ASSET_TYPES.has(value["resourceType"] as ProxmoxManagedAssetType)) || !boundedPlain(value["resourceId"], 1, 512) || !nullableBoundedPlain(value["displayName"], 1, 255) || typeof value["tagged"] !== "boolean") throw invalid("cloud managed asset");
+  if (!hasExactKeys(value, ASSET_KEYS) || typeof value["resourceType"] !== "string" || (!AWS_ASSET_TYPES.has(value["resourceType"] as AwsManagedAssetType) && !AZURE_ASSET_TYPES.has(value["resourceType"] as AzureManagedAssetType)) || !boundedPlain(value["resourceId"], 1, 2_048) || !nullableBoundedPlain(value["displayName"], 1, 255) || typeof value["tagged"] !== "boolean") throw invalid("cloud managed asset");
   return Object.freeze({ resourceType: value["resourceType"] as CloudManagedAsset["resourceType"], resourceId: value["resourceId"], displayName: value["displayName"], tagged: value["tagged"] });
 }
 
@@ -866,7 +1067,7 @@ function isAwsFirewallPeer(type: AwsFirewallPeerType, value: unknown): value is 
   return boundedPattern(value, 4, 128, /^sg-[0-9a-f]+$/u);
 }
 
-function isAwsFirewallCidr(value: unknown, ipv6: boolean): value is string {
+function isAwsFirewallCidr(value: unknown, ipv6: boolean): boolean {
   if (
     typeof value !== "string" ||
     value.length < 3 ||
@@ -897,6 +1098,48 @@ function isAwsSecurityGroupRuleId(value: unknown): value is string {
   return boundedPattern(value, 5, 128, /^sgr-[0-9a-f]+$/u);
 }
 
+function isCloudFirewallRuleId(value: unknown): value is string {
+  return isAwsSecurityGroupRuleId(value) || isAzureSecurityRuleName(value) || (
+    isAzureResourceId(value) && /\/securityRules\/[^/]+$/iu.test(value)
+  );
+}
+
+function isAzureSecurityRuleName(value: unknown): value is string {
+  return boundedPattern(value, 1, 80, /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?$/u);
+}
+
+function isAzureAddressPrefix(value: unknown): value is string {
+  if (value === "*") return true;
+  if (typeof value !== "string" || value.length > 128 || value.trim() !== value || /[\s\0]/u.test(value)) return false;
+  if (isIpv4Address(value) || isIpv6Address(value)) return true;
+  if (isAwsFirewallCidr(value, value.includes(":"))) return true;
+  return /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+
+function isAzurePortRange(value: unknown): value is string {
+  if (value === "*") return true;
+  if (typeof value !== "string") return false;
+  const match = /^(0|[1-9]\d{0,4})(?:-(0|[1-9]\d{0,4}))?$/u.exec(value);
+  if (!match) return false;
+  const start = Number(match[1]);
+  const end = Number(match[2] ?? match[1]);
+  return start <= 65_535 && end <= 65_535 && start <= end;
+}
+
+function isAzureRuleValueList<T extends string>(
+  value: unknown,
+  predicate: (candidate: unknown) => candidate is T,
+): value is readonly T[] {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= AZURE_FIREWALL_RULE_MAX_VALUES &&
+    value.every(predicate);
+}
+
+function isAzureFirewallDescription(value: unknown): value is string | null {
+  return value === null || boundedPlain(value, 1, 140);
+}
+
 function isIpv6Address(value: string): boolean {
   if (!value.includes(":") || value.includes("%") || !/^[0-9a-f:.]+$/iu.test(value)) return false;
   const compressed = value.split("::");
@@ -923,19 +1166,7 @@ function isIpv6Address(value: string): boolean {
   return compressed.length === 2 ? left + right < 8 : left + right === 8;
 }
 
-function isProxmoxIpv4Config(value: unknown): value is string {
-  if (value === "ip=dhcp") return true;
-  if (typeof value !== "string") return false;
-  const match = /^ip=([^/]+)\/(\d{1,2})(?:,gw=([^,]+))?$/u.exec(value);
-  if (!match || !isIpv4Address(match[1]) || Number(match[2]) > 32) return false;
-  return match[3] === undefined || isIpv4Address(match[3]);
-}
-
-function isNullableIpv4Address(value: unknown): value is string | null {
-  return value === null || isIpv4Address(value);
-}
-
-function isIpv4Address(value: unknown): value is string {
+function isIpv4Address(value: unknown): boolean {
   if (typeof value !== "string" || value.trim() !== value) return false;
   const octets = value.split(".");
   return octets.length === 4 && octets.every((octet) =>
@@ -949,7 +1180,7 @@ function nullableIpv4NetworkCidr(value: unknown, minPrefix: number, maxPrefix: n
   if (!match || !isIpv4Address(match[1])) return undefined;
   const prefix = Number(match[2]);
   if (prefix < minPrefix || prefix > maxPrefix) return undefined;
-  const address = ipv4AddressNumber(match[1]);
+  const address = ipv4AddressNumber(match[1]!);
   const mask = (0xffff_ffff << (32 - prefix)) >>> 0;
   return (address & mask) >>> 0 === address ? value : undefined;
 }
@@ -970,16 +1201,6 @@ function ipv4AddressNumber(value: string): number {
   return value.split(".").reduce((result, octet) => ((result << 8) | Number(octet)) >>> 0, 0);
 }
 
-function isHttpsEndpoint(value: unknown): value is string {
-  if (typeof value !== "string" || value.length > 2_048 || value.trim() !== value) return false;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:" && parsed.username === "" && parsed.password === "" && parsed.hash === "" && parsed.search === "" && parsed.hostname !== "";
-  } catch {
-    return false;
-  }
-}
-
 function isOperatorConfigFileName(value: unknown): value is string | null {
   return value === null || boundedPattern(value, 5, 255, /^(?!\.{1,2}$)[A-Za-z0-9._-]+\.cfg$/u);
 }
@@ -996,8 +1217,54 @@ export function isAwsRegion(value: unknown): value is string {
   return boundedPattern(value, 3, 64, /^[a-z]{2,8}(?:-[a-z0-9]{1,16}){1,3}-[1-9]\d?$/u);
 }
 
+export function isAzureLocation(value: unknown): value is string {
+  return boundedPattern(value, 2, AZURE_LOCATION_MAX_LENGTH, /^[a-z0-9]+$/u);
+}
+
+function isAzureImageReference(value: unknown): value is string {
+  if (isAzureManagedImageResourceId(value)) return true;
+  if (typeof value !== "string" || value.length > 512 || value.trim() !== value) return false;
+  const parts = value.split(":");
+  return parts.length === 4 && parts.every((part) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(part));
+}
+
+function isAzureManagedImageResourceId(value: unknown): value is string {
+  return isAzureResourceId(value) &&
+    /^\/subscriptions\/[^/]+\/resourceGroups\/[^/]+\/providers\/Microsoft\.Compute\/images\/[^/]+$/iu.test(value);
+}
+
+function isAzureResourceId(value: unknown): value is string {
+  if (!boundedPlain(value, 16, 2_048)) return false;
+  const match = /^\/subscriptions\/([^/]+)\/resourceGroups\/[^/]+\/providers\/[^/]+\/[^/]+\/[^/]+(?:\/[^/]+\/[^/]+)*$/iu.exec(value);
+  return match !== null && isUuid(match[1]);
+}
+
+function nullableAzureResourceId(value: unknown): value is string | null {
+  return value === null || isAzureResourceId(value);
+}
+
+function nullableAzureResourceGroupName(value: unknown): value is string | null {
+  return value === null || (
+    boundedPattern(value, 1, 90, /^[\p{L}\p{N}_\-.()]+$/u) && !value.endsWith(".")
+  );
+}
+
+function nullableAzureResourceName(value: unknown): value is string | null {
+  return value === null || boundedPattern(value, 1, 80, /^[A-Za-z0-9][A-Za-z0-9_.-]*$/u);
+}
+
+function azureSubnetBelongsToVnet(vnetId: unknown, subnetId: unknown): boolean {
+  return typeof vnetId === "string" && typeof subnetId === "string" &&
+    subnetId.toLocaleLowerCase("en-US").startsWith(`${vnetId.toLocaleLowerCase("en-US")}/subnets/`);
+}
+
 function isSshUsername(value: unknown): value is string {
   return boundedPattern(value, 1, 64, /^[a-z_][a-z0-9_-]*[$]?$/u);
+}
+
+export function isAzureSshUsername(value: unknown): value is string {
+  return boundedPattern(value, 1, 32, /^[a-z_][a-z0-9_-]*$/u) &&
+    !AZURE_RESERVED_SSH_USERNAMES.has(value);
 }
 
 function isOperatorName(value: unknown): value is string {
@@ -1032,14 +1299,6 @@ function isSshPrivateKey(value: unknown): value is string {
   return boundedSecret(value, 32, CLOUD_SSH_PRIVATE_KEY_MAX_LENGTH) &&
     (/^-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----/u.test(value) ||
       /^PuTTY-User-Key-File-\d+:/u.test(value));
-}
-
-function nullableTlsCaCertificate(value: unknown): string | null | undefined {
-  return value === null
-    ? null
-    : boundedSecret(value, 32, 256 * 1024) && /^-----BEGIN CERTIFICATE-----/u.test(value)
-      ? value
-      : undefined;
 }
 
 function nullableBoundedPlain(value: unknown, min: number, max: number): value is string | null {

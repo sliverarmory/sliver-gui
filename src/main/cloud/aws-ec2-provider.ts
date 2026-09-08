@@ -941,6 +941,7 @@ export class AwsEc2Provider {
       resource.guid,
     );
     return {
+      provider: "aws",
       securityGroupId: resource.securityGroupId,
       securityGroupName: normalizeOptionalAwsString(group.GroupName, "security group name", 255),
       vpcId: group.VpcId === undefined

@@ -19,25 +19,26 @@ import {
 } from "../shared/cloud-deployment-ipc.js";
 import {
   isUuidV4,
-  parseCreateAwsFirewallRuleInput,
+  parseCreateCloudFirewallRuleInput,
   parseCloudDeploymentActionInput,
   parseCreateCloudCredentialInput,
   parseCreateCloudDeploymentInput,
-  parseDeleteAwsFirewallRuleInput,
-  parseListAwsFirewallRulesInput,
-  parseUpdateAwsFirewallRuleInput,
+  parseDeleteCloudFirewallRuleInput,
+  parseListCloudFirewallRulesInput,
+  parseUpdateCloudFirewallRuleInput,
   parseUpdateCloudFirewallInput,
-  type AwsFirewallSnapshot,
+  type AzureCliAccountSummary,
+  type CloudFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentActionInput,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
-  type CreateAwsFirewallRuleInput,
+  type CreateCloudFirewallRuleInput,
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
-  type DeleteAwsFirewallRuleInput,
-  type ListAwsFirewallRulesInput,
-  type UpdateAwsFirewallRuleInput,
+  type DeleteCloudFirewallRuleInput,
+  type ListCloudFirewallRulesInput,
+  type UpdateCloudFirewallRuleInput,
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
@@ -49,8 +50,11 @@ import {
 } from "../shared/ssh-contracts.js";
 import {
   parseDiscoverAwsOptionsInput,
+  parseDiscoverAzureOptionsInput,
   type AwsDeploymentOptions,
+  type AzureDeploymentOptions,
   type DiscoverAwsOptionsInput,
+  type DiscoverAzureOptionsInput,
 } from "../shared/cloud-provider-inventory.js";
 import { isSameRendererDocument } from "./security.js";
 import type { TrustedWindowIdentity } from "./ipc.js";
@@ -67,13 +71,15 @@ export interface CloudDeploymentController {
   deleteCredential(input: CloudCredentialIdInput): MaybePromise<OperationResult>;
   testCredential(input: CloudCredentialIdInput): MaybePromise<OperationResult<CloudCredentialTestResult>>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): MaybePromise<OperationResult<AwsDeploymentOptions>>;
+  discoverAzureAccounts(): MaybePromise<OperationResult<readonly AzureCliAccountSummary[]>>;
+  discoverAzureOptions(input: DiscoverAzureOptionsInput): MaybePromise<OperationResult<AzureDeploymentOptions>>;
   createDeployment(input: CreateCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   runLifecycleAction(input: CloudDeploymentActionInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
-  listFirewallRules(input: ListAwsFirewallRulesInput): MaybePromise<OperationResult<AwsFirewallSnapshot>>;
-  createFirewallRule(input: CreateAwsFirewallRuleInput): MaybePromise<OperationResult<AwsFirewallSnapshot>>;
-  updateFirewallRule(input: UpdateAwsFirewallRuleInput): MaybePromise<OperationResult<AwsFirewallSnapshot>>;
-  deleteFirewallRule(input: DeleteAwsFirewallRuleInput): MaybePromise<OperationResult<AwsFirewallSnapshot>>;
+  listFirewallRules(input: ListCloudFirewallRulesInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
+  createFirewallRule(input: CreateCloudFirewallRuleInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
+  updateFirewallRule(input: UpdateCloudFirewallRuleInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
+  deleteFirewallRule(input: DeleteCloudFirewallRuleInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
   prepareDestroyDeployment(
     input: PrepareDestroyCloudDeploymentInput,
   ): MaybePromise<OperationResult<DestroyCloudDeploymentPlan>>;
@@ -163,6 +169,20 @@ export function registerCloudDeploymentIpcHandlers(
     (_sender, input) => controller.discoverAwsOptions(input),
   );
   handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    () => controller.discoverAzureAccounts(),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseDiscoverAzureOptionsInput(requireSingleArgument(args))),
+    (_sender, input) => controller.discoverAzureOptions(input),
+  );
+  handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.createDeployment,
     exactRendererUrl,
     authorizeWindow,
@@ -187,28 +207,28 @@ export function registerCloudDeploymentIpcHandlers(
     CLOUD_DEPLOYMENT_IPC_INVOKE.listFirewallRules,
     exactRendererUrl,
     authorizeWindow,
-    (args) => singleArgument(parseListAwsFirewallRulesInput(requireSingleArgument(args))),
+    (args) => singleArgument(parseListCloudFirewallRulesInput(requireSingleArgument(args))),
     (_sender, input) => controller.listFirewallRules(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.createFirewallRule,
     exactRendererUrl,
     authorizeWindow,
-    (args) => singleArgument(parseCreateAwsFirewallRuleInput(requireSingleArgument(args))),
+    (args) => singleArgument(parseCreateCloudFirewallRuleInput(requireSingleArgument(args))),
     (_sender, input) => controller.createFirewallRule(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.updateFirewallRule,
     exactRendererUrl,
     authorizeWindow,
-    (args) => singleArgument(parseUpdateAwsFirewallRuleInput(requireSingleArgument(args))),
+    (args) => singleArgument(parseUpdateCloudFirewallRuleInput(requireSingleArgument(args))),
     (_sender, input) => controller.updateFirewallRule(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.deleteFirewallRule,
     exactRendererUrl,
     authorizeWindow,
-    (args) => singleArgument(parseDeleteAwsFirewallRuleInput(requireSingleArgument(args))),
+    (args) => singleArgument(parseDeleteCloudFirewallRuleInput(requireSingleArgument(args))),
     (_sender, input) => controller.deleteFirewallRule(input),
   );
   handleCloud(

@@ -22,6 +22,12 @@ import {
   E2E_AWS_DEPLOYMENT,
   E2E_AWS_DEPLOYMENT_ID,
   E2E_AWS_DEPLOYMENT_NAME,
+  E2E_AZURE_CREDENTIAL_ID,
+  E2E_AZURE_DEPLOYMENT,
+  E2E_AZURE_DEPLOYMENT_ID,
+  E2E_AZURE_DEPLOYMENT_NAME,
+  E2E_AZURE_SUBSCRIPTION_ID,
+  E2E_AZURE_TENANT_ID,
 } from "./cloud-deployment-fixture.js";
 
 const PRIVATE_KEY_SECRET = "FAKE_PRIVATE_KEY_M0_DO_NOT_RENDER";
@@ -535,6 +541,16 @@ async function verifyCloudDeploymentWindow(
   const initialWindowCount = electronApplication.windows().filter((candidate) => !candidate.isClosed()).length;
   await invokeApplicationMenuItem(
     electronApplication,
+    `cloud.azure.${E2E_AZURE_DEPLOYMENT_ID}.firewall`,
+  );
+  await waitForWindowCount(electronApplication, initialWindowCount + 1);
+  const coldAzureFirewallPage = await cloudDeploymentPage(electronApplication);
+  await assertAzureFirewallDetails(coldAzureFirewallPage);
+  await coldAzureFirewallPage.close();
+  await waitForWindowCount(electronApplication, initialWindowCount);
+
+  await invokeApplicationMenuItem(
+    electronApplication,
     `cloud.aws.${E2E_AWS_DEPLOYMENT_ID}.firewall`,
   );
   await waitForWindowCount(electronApplication, initialWindowCount + 1);
@@ -613,6 +629,18 @@ async function assertAwsFirewallDetails(cloudPage: Page): Promise<void> {
     0,
     "native Firewall navigation must not stop at the Cloud Deployment dashboard",
   );
+}
+
+async function assertAzureFirewallDetails(cloudPage: Page): Promise<void> {
+  await cloudPage.getByRole("heading", {
+    level: 1,
+    name: E2E_AZURE_DEPLOYMENT_NAME,
+    exact: true,
+  }).waitFor();
+  await cloudPage.getByRole("heading", { name: "Virtual machine summary", exact: true }).waitFor();
+  await cloudPage.getByText("Microsoft Azure", { exact: false }).first().waitFor();
+  await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
+  await cloudPage.getByRole("grid", { name: "Inbound firewall rules" }).waitFor();
 }
 
 async function verifyAwsDeploymentWizard(
@@ -764,6 +792,7 @@ async function assertCloudDeploymentSurface(
   await Promise.all([
     cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor(),
     cloudPage.getByRole("heading", { name: E2E_AWS_DEPLOYMENT_NAME, exact: true }).waitFor(),
+    cloudPage.getByRole("heading", { name: E2E_AZURE_DEPLOYMENT_NAME, exact: true }).waitFor(),
     newDeploymentButtons.first().waitFor(),
     cloudPage.getByRole("button", { name: "Refresh cloud deployments", exact: true }).waitFor(),
     cloudPage.getByText("Encrypted credentials", { exact: true }).waitFor(),
@@ -810,21 +839,82 @@ async function assertCloudDeploymentSurface(
   assert.deepEqual(cloudSnapshot, {
     ok: true,
     value: {
-      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT] },
-      credentials: [{
-        id: "0f24a4da-28c1-4d94-a66d-eb224892745d",
-        provider: "aws",
-        label: "E2E AWS profile",
-        persistence: "secure",
-        createdAt: "2026-09-06T18:00:00.000Z",
-        defaultRegion: "us-west-2",
-        sshUsername: "ubuntu",
-        profileName: "default",
-      }],
+      state: {
+        v: 1,
+        revision: 1,
+        deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT],
+      },
+      credentials: [
+        {
+          id: "0f24a4da-28c1-4d94-a66d-eb224892745d",
+          provider: "aws",
+          label: "E2E AWS profile",
+          persistence: "secure",
+          createdAt: "2026-09-06T18:00:00.000Z",
+          defaultRegion: "us-west-2",
+          sshUsername: "ubuntu",
+          profileName: "default",
+        },
+        {
+          id: E2E_AZURE_CREDENTIAL_ID,
+          provider: "azure",
+          label: "E2E Azure CLI",
+          persistence: "secure",
+          createdAt: "2026-09-06T18:10:00.000Z",
+          defaultLocation: "eastus",
+          subscriptionId: E2E_AZURE_SUBSCRIPTION_ID,
+          tenantId: E2E_AZURE_TENANT_ID,
+          sshUsername: "azureuser",
+        },
+      ],
       secureCredentialStorage: true,
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
+      azureAccounts: [{
+        subscriptionId: E2E_AZURE_SUBSCRIPTION_ID,
+        name: "E2E Subscription",
+        tenantId: E2E_AZURE_TENANT_ID,
+        homeTenantId: E2E_AZURE_TENANT_ID,
+        isDefault: true,
+        cloudName: "AzureCloud",
+      }],
+      azureAccountDiscoveryError: null,
       provisioningTranscripts: [],
+    },
+  });
+  const azureDiscovery = await cloudPage.evaluate(async ({ credentialId, location }) => {
+    const api = (globalThis as unknown as { cloudDeployment: CloudDeploymentAPI }).cloudDeployment;
+    return {
+      accounts: await api.discoverAzureAccounts(),
+      options: await api.discoverAzureOptions({ credentialId, location }),
+    };
+  }, { credentialId: E2E_AZURE_CREDENTIAL_ID, location: "eastus" });
+  assert.deepEqual(azureDiscovery, {
+    accounts: {
+      ok: true,
+      value: [{
+        subscriptionId: E2E_AZURE_SUBSCRIPTION_ID,
+        name: "E2E Subscription",
+        tenantId: E2E_AZURE_TENANT_ID,
+        homeTenantId: E2E_AZURE_TENANT_ID,
+        isDefault: true,
+        cloudName: "AzureCloud",
+      }],
+    },
+    options: {
+      ok: true,
+      value: {
+        location: "eastus",
+        vmSizes: [{ name: "Standard_B2s", vCpuCount: 2, memoryMiB: 4_096 }],
+        images: [{
+          reference: "Canonical:ubuntu-24_04-lts:server:latest",
+          label: "Ubuntu Server 24.04 LTS",
+          architecture: "x64",
+          sshUsername: "azureuser",
+        }],
+        virtualNetworks: [],
+        subnets: [],
+      },
     },
   });
   const clipboardState = await cloudPage.evaluate(async () => {
@@ -3015,7 +3105,9 @@ async function verifySshTerminalClipboard(application: ElectronApplication, clou
     assert.equal(new URL(sshPage.url()).search, "?surface=ssh");
     await sshPage.locator('[data-terminal-state="ready"]').waitFor();
     await sshPage.getByRole("button", { name: "New SSH tab", exact: true }).click();
-    await sshPage.getByRole("button", { name: new RegExp(`Open another SSH session to ${E2E_AWS_DEPLOYMENT_NAME}`) }).click();
+    await sshPage.getByRole("button", {
+      name: new RegExp(`Connect to ${E2E_AZURE_DEPLOYMENT_NAME}`),
+    }).click();
     await sshPage.locator('[data-ssh-terminal-tab-id][inert]').waitFor({ state: "attached" });
     const activeTerminal = sshPage.locator('[data-ssh-terminal-tab-id]:not([inert])')
       .getByRole("textbox", { name: /^SSH session /u });
@@ -3631,6 +3723,11 @@ async function verifyM3ManagedShellPopout(
     }, popoutUrl);
     await popoutClosed;
     popout = undefined;
+    // BrowserWindow.close() does not synchronously guarantee which surviving
+    // Electron window receives the next native pointer sequence. Re-activate
+    // the source before exercising the re-docked shell so React Aria does not
+    // discard the first press as background-window activation.
+    await sourcePage.bringToFront();
     const redockedInventory = await waitForSessionShellInventory(sourcePage, 1);
     assert.deepEqual(redockedInventory.resources.map((resource) => resource.resourceId), [resourceId]);
     assert.equal(

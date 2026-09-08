@@ -1,4 +1,9 @@
-import { isUuidV4, type CloudDeploymentStatus, type CloudProvider } from "./cloud-deployment-contracts.js";
+import {
+  AZURE_SSH_PORT,
+  isUuidV4,
+  type CloudDeploymentStatus,
+  type CloudProvider,
+} from "./cloud-deployment-contracts.js";
 import type {
   ApplicationSettingsState,
   ApplicationSettingsUpdateInput,
@@ -222,7 +227,11 @@ export function parseManagedSshTarget(value: unknown): ManagedSshTarget {
   );
   if (!isUuidV4(record["deploymentId"])) invalid("managed SSH target deployment identity is invalid");
   const provider = record["provider"];
-  if (provider !== "aws" && provider !== "proxmox") invalid("managed SSH target provider is invalid");
+  if (provider !== "aws" && provider !== "azure") invalid("managed SSH target provider is invalid");
+  const port = requireInteger(record["port"], "managed SSH target port", 1, 65_535);
+  if (provider === "azure" && port !== AZURE_SSH_PORT) {
+    invalid(`managed Azure SSH target port must be ${AZURE_SSH_PORT}`);
+  }
   const status = record["status"];
   if (!isCloudDeploymentStatus(status)) invalid("managed SSH target status is invalid");
   if (typeof record["connectable"] !== "boolean") invalid("managed SSH target availability is invalid");
@@ -239,7 +248,7 @@ export function parseManagedSshTarget(value: unknown): ManagedSshTarget {
     name: requireTerminalTabLabel(record["name"], "managed SSH target name"),
     provider,
     host: requirePlainString(record["host"], "managed SSH target host", 0, MAX_HOST_LENGTH),
-    port: requireInteger(record["port"], "managed SSH target port", 1, 65_535),
+    port,
     username: requirePlainString(record["username"], "managed SSH target username", 1, MAX_USERNAME_LENGTH),
     status,
     connectable: record["connectable"],

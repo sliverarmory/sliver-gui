@@ -9,10 +9,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
   AwsCloudDeploymentRecord,
   CreateAwsCloudDeploymentInput,
+  CreateAzureCloudDeploymentInput,
 } from "../shared/cloud-deployment-contracts.js";
 import {
   CLOUD_DEPLOYMENT_STATE_FILE,
   CloudDeploymentStore,
+  RETIRED_PROXMOX_STATE_ARCHIVE_FILE,
   STALE_CLOUD_DEPLOYMENT_STATE_ERROR,
 } from "./cloud-deployment-store.js";
 
@@ -76,6 +78,49 @@ describe("CloudDeploymentStore", () => {
     expect(second).toEqual({ ok: false, error: STALE_CLOUD_DEPLOYMENT_STATE_ERROR });
     expect(store.getState()).toMatchObject({ revision: 1 });
     expect(store.getState().deployments).toHaveLength(1);
+  });
+
+  it("creates an Azure deployment with empty provider runtime identities", async () => {
+    const store = await createStore();
+    const result = await store.create(azureCreateInput());
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        deployment: {
+          provider: "azure",
+          spec: { location: "westus2", networkMode: "managed" },
+          runtime: {
+            resourceGroupName: null,
+            vmId: null,
+            networkSecurityGroupId: null,
+            instanceState: "unknown",
+          },
+        },
+      },
+    });
+  });
+
+  it("archives exact legacy Proxmox state before removing it from active state", async () => {
+    await mkdir(stateRoot, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") await chmod(stateRoot, 0o700);
+    const legacy = {
+      v: 1,
+      revision: 7,
+      deployments: [{ provider: "proxmox", id: DEPLOYMENT_ID, opaqueLegacyFields: true }],
+    };
+    const statePath = join(stateRoot, CLOUD_DEPLOYMENT_STATE_FILE);
+    await writeFile(statePath, JSON.stringify(legacy), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(statePath, 0o600);
+
+    const store = await CloudDeploymentStore.load(stateRoot);
+
+    expect(store.getState()).toEqual({ v: 1, revision: 7, deployments: [] });
+    expect(JSON.parse(await readFile(
+      join(stateRoot, RETIRED_PROXMOX_STATE_ARCHIVE_FILE),
+      "utf8",
+    ))).toEqual(legacy);
+    expect(JSON.parse(await readFile(statePath, "utf8"))).toEqual(store.getState());
   });
 
   it("updates only an existing immutable identity and stamps updatedAt in main", async () => {
@@ -209,6 +254,33 @@ function awsCreateInput(): CreateAwsCloudDeploymentInput {
       multiplayerPort: 31_337,
       volumeSizeGiB: 16,
       useElasticIp: true,
+      sshCidrs: ["192.0.2.10/32"],
+      operatorCidrs: ["198.51.100.0/24"],
+    },
+  };
+}
+
+function azureCreateInput(): CreateAzureCloudDeploymentInput {
+  return {
+    provider: "azure",
+    expectedRevision: 0,
+    credentialId: CREDENTIAL_ID,
+    name: "Sliver Azure",
+    spec: {
+      location: "westus2",
+      imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+      vmSize: "Standard_B2s",
+      networkMode: "managed",
+      vnetId: null,
+      subnetId: null,
+      managedVnetCidr: "10.42.0.0/16",
+      managedSubnetCidr: "10.42.1.0/24",
+      sshUsername: "azureuser",
+      operatorName: "operator",
+      sshPort: 22,
+      multiplayerPort: 31_337,
+      osDiskSizeGiB: 32,
+      usePublicIp: true,
       sshCidrs: ["192.0.2.10/32"],
       operatorCidrs: ["198.51.100.0/24"],
     },

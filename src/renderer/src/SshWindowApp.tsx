@@ -17,12 +17,11 @@ import {
   Tooltip,
 } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
-import { faAmazon } from "@fortawesome/free-brands-svg-icons";
+import { faAmazon, faMicrosoft } from "@fortawesome/free-brands-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faKey,
   faPlus,
-  faServer,
   faTerminal,
   faTriangleExclamation,
   faXmark,
@@ -1006,7 +1005,7 @@ function SshTargetPicker({
                         onPress={() => onChoose(target.deploymentId)}
                       >
                         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-surface-tertiary text-muted">
-                          <FontAwesomeIcon aria-hidden icon={target.provider === "aws" ? faAmazon : faServer} />
+                          <FontAwesomeIcon aria-hidden icon={target.provider === "aws" ? faAmazon : faMicrosoft} />
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium text-foreground">{target.name}</span>

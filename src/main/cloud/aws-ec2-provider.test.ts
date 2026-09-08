@@ -1117,6 +1117,7 @@ describe("AWS EC2 owned lifecycle and firewall operations", () => {
     const provider = providerFor(client);
 
     await expect(provider.listFirewallRules(resource())).resolves.toEqual({
+      provider: "aws",
       securityGroupId,
       securityGroupName: "sliver-gui-managed",
       vpcId,

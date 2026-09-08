@@ -1,4 +1,4 @@
-import { faAmazon } from "@fortawesome/free-brands-svg-icons";
+import { faAmazon, faMicrosoft } from "@fortawesome/free-brands-svg-icons";
 import {
   faArrowLeft,
   faArrowsRotate,
@@ -49,8 +49,11 @@ import { Stepper } from "@heroui-pro/react/stepper";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  AZURE_FIREWALL_RULE_MAX_VALUES,
+  AZURE_SSH_PORT,
   AWS_SUPPORTED_INSTANCE_TYPES,
   isAwsRegion,
+  isAzureSshUsername,
   type AwsCloudDeploymentRecord,
   type AwsCliProfileSummary,
   type AwsFirewallPeerType,
@@ -58,6 +61,14 @@ import {
   type AwsFirewallDirection,
   type AwsFirewallRuleSpec,
   type AwsFirewallSnapshot,
+  type AzureCliAccountSummary,
+  type AzureCloudDeploymentRecord,
+  type AzureFirewallAccess,
+  type AzureFirewallDirection,
+  type AzureFirewallProtocol,
+  type AzureFirewallRule,
+  type AzureFirewallRuleSpec,
+  type AzureFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentRecord,
   type CloudDeploymentStatus,
@@ -65,7 +76,7 @@ import {
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
 } from "../../shared/cloud-deployment-contracts";
-import type { AwsDeploymentOptions } from "../../shared/cloud-provider-inventory";
+import type { AwsDeploymentOptions, AzureDeploymentOptions } from "../../shared/cloud-provider-inventory";
 import type { SshHostKeyReview } from "../../shared/ssh-contracts";
 import type {
   CloudCredentialTestResult,
@@ -124,17 +135,16 @@ interface AwsDeploymentDraft {
   readonly volumeSizeGiB: string;
 }
 
-interface ProxmoxDeploymentDraft {
-  readonly node: string;
-  readonly templateVmId: string;
-  readonly vmId: string;
-  readonly storage: string;
-  readonly bridge: string;
-  readonly cores: string;
-  readonly memoryMiB: string;
-  readonly diskGiB: string;
-  readonly ipConfig: string;
-  readonly gateway: string;
+interface AzureDeploymentDraft {
+  readonly imageReference: string;
+  readonly vmSize: string;
+  readonly networkMode: "existing" | "managed";
+  readonly vnetId: string;
+  readonly subnetId: string;
+  readonly managedVnetCidr: string;
+  readonly managedSubnetCidr: string;
+  readonly sshUsername: string;
+  readonly osDiskSizeGiB: string;
 }
 
 type AwsFirewallPresetId =
@@ -175,6 +185,23 @@ interface AwsFirewallPreset {
   readonly toPort: number | null;
 }
 
+interface AzureFirewallRuleDraft {
+  readonly name: string;
+  readonly priority: string;
+  readonly direction: AzureFirewallDirection;
+  readonly access: AzureFirewallAccess;
+  readonly protocol: AzureFirewallProtocol;
+  readonly sourceAddressPrefixes: string;
+  readonly sourcePortRanges: string;
+  readonly destinationAddressPrefixes: string;
+  readonly destinationPortRanges: string;
+  readonly description: string;
+}
+
+type AzureFirewallEditorState =
+  | { readonly mode: "create"; readonly draft: AzureFirewallRuleDraft }
+  | { readonly mode: "edit"; readonly ruleId: string; readonly draft: AzureFirewallRuleDraft };
+
 const AWS_FIREWALL_PRESETS: readonly AwsFirewallPreset[] = [
   { id: "ssh", label: "SSH", description: "TCP port 22", protocol: "tcp", fromPort: 22, toPort: 22 },
   { id: "http", label: "HTTP", description: "TCP port 80", protocol: "tcp", fromPort: 80, toPort: 80 },
@@ -207,6 +234,7 @@ const INITIAL_AWS_DEPLOYMENT: AwsDeploymentDraft = {
 };
 
 const MANAGED_VPC_OPTION = "__sliver_managed_vpc__";
+const MANAGED_AZURE_VNET_OPTION = "__sliver_managed_vnet__";
 // AWS key-pair names are strings, so a numeric collection key cannot collide
 // with any real key pair returned by EC2.
 const MANAGED_KEY_OPTION = -1;
@@ -218,17 +246,16 @@ function strongerRefreshScope(
   return queued === "snapshot" || requested === "snapshot" ? "snapshot" : "transcripts";
 }
 
-const INITIAL_PROXMOX_DEPLOYMENT: ProxmoxDeploymentDraft = {
-  node: "",
-  templateVmId: "",
-  vmId: "",
-  storage: "local-lvm",
-  bridge: "vmbr0",
-  cores: "2",
-  memoryMiB: "4096",
-  diskGiB: "20",
-  ipConfig: "ip=dhcp",
-  gateway: "",
+const INITIAL_AZURE_DEPLOYMENT: AzureDeploymentDraft = {
+  imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+  vmSize: "Standard_B2s",
+  networkMode: "managed",
+  vnetId: "",
+  subnetId: "",
+  managedVnetCidr: "10.0.0.0/16",
+  managedSubnetCidr: "10.0.1.0/24",
+  sshUsername: "azureuser",
+  osDiskSizeGiB: "30",
 };
 
 export function CloudDeploymentWindowApp(): React.JSX.Element {
@@ -406,25 +433,18 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
         title: "Deployment unavailable",
         detail: `The requested deployment (${detailsDeploymentId}) is no longer in the managed inventory.`,
       });
-    } else if (target.provider !== "aws") {
-      setDetailsDeploymentId(null);
-      setFeedback({
-        tone: "danger",
-        title: "Firewall unavailable",
-        detail: `${target.name} is not an AWS EC2 deployment, so it cannot open the AWS firewall editor.`,
-      });
     }
   }, [actionRequest, detailsDeploymentId, snapshot]);
 
   const detailsDeployment = detailsDeploymentId
     ? snapshot?.state.deployments.find(({ id }) => id === detailsDeploymentId)
     : undefined;
-  const awsDetailsDeployment = detailsDeployment?.provider === "aws" ? detailsDeployment : undefined;
+  const showingDetails = detailsDeployment !== undefined;
 
   return (
-    <main className={`h-screen bg-background text-foreground ${awsDetailsDeployment ? "overflow-hidden" : "overflow-y-auto"}`}>
-      <div className={`mx-auto flex w-full max-w-7xl flex-col px-6 pt-8 lg:px-8 ${awsDetailsDeployment ? "h-full min-h-0" : "gap-6 pb-12"}`}>
-        {!awsDetailsDeployment ? (
+    <main className={`h-screen bg-background text-foreground ${showingDetails ? "overflow-hidden" : "overflow-y-auto"}`}>
+      <div className={`mx-auto flex w-full max-w-7xl flex-col px-6 pt-8 lg:px-8 ${showingDetails ? "h-full min-h-0" : "gap-6 pb-12"}`}>
+        {!showingDetails ? (
           <header className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
             <div className="flex items-start gap-3">
               <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
@@ -433,7 +453,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               <div>
                 <h1 className="text-2xl font-semibold tracking-tight">Cloud Deployment</h1>
                 <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
-                  Provision and operate tagged Sliver multiplayer servers on AWS EC2 or Proxmox.
+                  Provision and operate tagged Sliver multiplayer servers on AWS EC2 or Microsoft Azure.
                 </p>
               </div>
             </div>
@@ -459,10 +479,10 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           </header>
         ) : null}
 
-        {!awsDetailsDeployment && feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
+        {!showingDetails && feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
         {isLoading && !snapshot ? <LoadingSurface /> : null}
         {loadError && !snapshot ? <LoadError message={loadError.message} onRetry={() => void refresh()} /> : null}
-        {!awsDetailsDeployment && loadError && snapshot ? (
+        {!showingDetails && loadError && snapshot ? (
           <InlineMessage
             tone="warning"
             title="Refresh failed"
@@ -470,27 +490,50 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           />
         ) : null}
 
-        {snapshot && api && awsDetailsDeployment ? (
-          <AwsInstanceDetails
-            api={api}
-            deployment={awsDetailsDeployment}
-            notices={(
-              <>
-                {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
-                {loadError ? (
-                  <InlineMessage
-                    tone="warning"
-                    title="Refresh failed"
-                    detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
-                  />
-                ) : null}
-              </>
-            )}
-            revision={snapshot.state.revision}
-            onBack={() => setDetailsDeploymentId(null)}
-            onFeedback={showFeedback}
-            onRefresh={refresh}
-          />
+        {snapshot && api && detailsDeployment ? (
+          detailsDeployment.provider === "aws" ? (
+            <AwsInstanceDetails
+              api={api}
+              deployment={detailsDeployment}
+              notices={(
+                <>
+                  {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
+                  {loadError ? (
+                    <InlineMessage
+                      tone="warning"
+                      title="Refresh failed"
+                      detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
+                    />
+                  ) : null}
+                </>
+              )}
+              revision={snapshot.state.revision}
+              onBack={() => setDetailsDeploymentId(null)}
+              onFeedback={showFeedback}
+              onRefresh={refresh}
+            />
+          ) : (
+            <AzureInstanceDetails
+              api={api}
+              deployment={detailsDeployment}
+              notices={(
+                <>
+                  {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
+                  {loadError ? (
+                    <InlineMessage
+                      tone="warning"
+                      title="Refresh failed"
+                      detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
+                    />
+                  ) : null}
+                </>
+              )}
+              revision={snapshot.state.revision}
+              onBack={() => setDetailsDeploymentId(null)}
+              onFeedback={showFeedback}
+              onRefresh={refresh}
+            />
+          )
         ) : snapshot && api ? (
           <Tabs
             selectedKey={selectedTab}
@@ -523,7 +566,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                 onBeginCardAction={beginCardAction}
                 onFinishCardAction={finishCardAction}
                 onFeedback={showFeedback}
-                onOpenAwsDetails={(deploymentId) => {
+                onOpenDetails={(deploymentId) => {
                   setFeedback(null);
                   setDetailsDeploymentId(deploymentId);
                 }}
@@ -554,7 +597,7 @@ function DeploymentsPanel({
   onBeginCardAction,
   onFinishCardAction,
   onFeedback,
-  onOpenAwsDetails,
+  onOpenDetails,
   onRefresh,
   onShowCredentials,
 }: {
@@ -565,7 +608,7 @@ function DeploymentsPanel({
   readonly onBeginCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => boolean;
   readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
-  readonly onOpenAwsDetails: (deploymentId: string) => void;
+  readonly onOpenDetails: (deploymentId: string) => void;
   readonly onRefresh: () => Promise<void>;
   readonly onShowCredentials: () => void;
 }): React.JSX.Element {
@@ -625,7 +668,7 @@ function DeploymentsPanel({
           onActionRequestHandled={onActionRequestHandled}
           onBeginCardAction={onBeginCardAction}
           onFinishCardAction={onFinishCardAction}
-          onOpenAwsDetails={() => onOpenAwsDetails(resumedDeployment.id)}
+          onOpenDetails={() => onOpenDetails(resumedDeployment.id)}
           onRefresh={onRefresh}
         />
       ) : null}
@@ -679,7 +722,7 @@ function DeploymentsPanel({
               onActionRequestHandled={onActionRequestHandled}
               onBeginCardAction={onBeginCardAction}
               onFinishCardAction={onFinishCardAction}
-              onOpenAwsDetails={() => onOpenAwsDetails(deployment.id)}
+              onOpenDetails={() => onOpenDetails(deployment.id)}
               onRefresh={onRefresh}
             />
           ))}
@@ -725,24 +768,32 @@ function DeploymentWizard({
   const [operatorCidrs, setOperatorCidrs] = useState("");
   const [egressIpv4Detection, setEgressIpv4Detection] = useState<EgressIpv4Detection>({ status: "loading" });
   const [useElasticIp, setUseElasticIp] = useState(true);
+  const [usePublicIp, setUsePublicIp] = useState(true);
   const [aws, setAws] = useState<AwsDeploymentDraft>(INITIAL_AWS_DEPLOYMENT);
   const [awsOptions, setAwsOptions] = useState<AwsDeploymentOptions | null>(null);
   const [awsOptionsError, setAwsOptionsError] = useState<string | null>(null);
   const [isLoadingAwsOptions, setIsLoadingAwsOptions] = useState(false);
   const [awsDiscoveryAttempt, setAwsDiscoveryAttempt] = useState(0);
-  const [proxmox, setProxmox] = useState<ProxmoxDeploymentDraft>(INITIAL_PROXMOX_DEPLOYMENT);
+  const [azure, setAzure] = useState<AzureDeploymentDraft>(INITIAL_AZURE_DEPLOYMENT);
+  const [azureOptions, setAzureOptions] = useState<AzureDeploymentOptions | null>(null);
+  const [azureOptionsError, setAzureOptionsError] = useState<string | null>(null);
+  const [isLoadingAzureOptions, setIsLoadingAzureOptions] = useState(false);
+  const [azureDiscoveryAttempt, setAzureDiscoveryAttempt] = useState(0);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [deploymentStarted, setDeploymentStarted] = useState(false);
   const [activeDeploymentId, setActiveDeploymentId] = useState<string | null>(null);
   const deploymentBaseline = useRef<ReadonlySet<string>>(new Set());
   const awsDiscoverySequence = useRef(0);
+  const azureOptionsDiscoverySequence = useRef(0);
   const sshCidrsTouched = useRef(false);
   const operatorCidrsTouched = useRef(false);
 
   const credentials = snapshot.credentials.filter((credential) => credential.provider === provider);
   const chosenCredential = snapshot.credentials.find((credential) => credential.id === credentialId);
   const region = awsRegion(chosenCredential);
+  const location = azureLocation(chosenCredential);
+  const effectiveSshPort = provider === "azure" ? String(AZURE_SSH_PORT) : sshPort;
   const transcript = activeDeploymentId
     ? snapshot.provisioningTranscripts.find(({ deploymentId }) => deploymentId === activeDeploymentId)
     : undefined;
@@ -837,6 +888,31 @@ function DeploymentWizard({
     };
   }, [api, awsDiscoveryAttempt, credentialId, provider, region, step]);
 
+  useEffect(() => {
+    if (step !== 1 || provider !== "azure" || !credentialId || !location) return;
+    const sequence = azureOptionsDiscoverySequence.current + 1;
+    azureOptionsDiscoverySequence.current = sequence;
+    setAzureOptions(null);
+    setAzureOptionsError(null);
+    setIsLoadingAzureOptions(true);
+    void api.discoverAzureOptions({ credentialId, location }).then((result) => {
+      if (azureOptionsDiscoverySequence.current !== sequence) return;
+      if (!result.ok || !result.value) {
+        setAzureOptionsError(result.error ?? "Azure infrastructure options could not be loaded.");
+        return;
+      }
+      setAzureOptions(result.value);
+      setAzure((current) => reconcileAzureDraft(current, result.value));
+    }).catch((error: unknown) => {
+      if (azureOptionsDiscoverySequence.current === sequence) setAzureOptionsError(errorMessage(error));
+    }).finally(() => {
+      if (azureOptionsDiscoverySequence.current === sequence) setIsLoadingAzureOptions(false);
+    });
+    return () => {
+      if (azureOptionsDiscoverySequence.current === sequence) azureOptionsDiscoverySequence.current += 1;
+    };
+  }, [api, azureDiscoveryAttempt, credentialId, location, provider, step]);
+
   const changeProvider = (nextProvider: CloudProvider): void => {
     setProvider(nextProvider);
     setCredentialId(firstCredentialId(snapshot.credentials, nextProvider));
@@ -848,13 +924,15 @@ function DeploymentWizard({
     credentialId,
     name,
     operatorName,
-    sshPort,
+    sshPort: effectiveSshPort,
     multiplayerPort,
     sshCidrs,
     operatorCidrs,
     aws,
     awsOptions,
-    proxmox,
+    azure,
+    azureOptions,
+    location,
   };
 
   const next = (): void => {
@@ -882,13 +960,15 @@ function DeploymentWizard({
       name: name.trim(),
       operatorName: operatorName.trim(),
       region,
-      sshPort: Number(sshPort),
+      location,
+      sshPort: Number(effectiveSshPort),
       multiplayerPort: Number(multiplayerPort),
       sshCidrs: parseCidrs(sshCidrs),
       operatorCidrs: parseCidrs(operatorCidrs),
       useElasticIp,
+      usePublicIp,
       aws,
-      proxmox,
+      azure,
     });
 
     deploymentBaseline.current = new Set(snapshot.state.deployments.map(({ id }) => id));
@@ -970,10 +1050,10 @@ function DeploymentWizard({
               value={provider}
               options={[
                 { value: "aws", label: "AWS EC2" },
-                { value: "proxmox", label: "Proxmox VE" },
+                { value: "azure", label: "Microsoft Azure" },
               ]}
               onChange={(value) => {
-                if (value === "aws" || value === "proxmox") changeProvider(value);
+                if (value === "aws" || value === "azure") changeProvider(value);
               }}
             />
             <CloudNativeSelect
@@ -1014,22 +1094,18 @@ function DeploymentWizard({
           />
         ) : null}
 
-        {step === 1 && provider === "proxmox" ? (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            <CloudTextField label="Node" placeholder="pve" value={proxmox.node} onChange={(value) => setProxmox({ ...proxmox, node: value })} />
-            <CloudTextField inputMode="numeric" label="Template VM ID" placeholder="9000" value={proxmox.templateVmId} onChange={(value) => setProxmox({ ...proxmox, templateVmId: value })} />
-            <CloudTextField description="Leave blank to allocate the next VM ID." inputMode="numeric" label="VM ID" placeholder="Automatic" value={proxmox.vmId} onChange={(value) => setProxmox({ ...proxmox, vmId: value })} />
-            <CloudTextField label="Storage" placeholder="local-lvm" value={proxmox.storage} onChange={(value) => setProxmox({ ...proxmox, storage: value })} />
-            <CloudTextField label="Network Bridge" placeholder="vmbr0" value={proxmox.bridge} onChange={(value) => setProxmox({ ...proxmox, bridge: value })} />
-            <CloudTextField label="Cloud-init IP Config" placeholder="ip=dhcp" value={proxmox.ipConfig} onChange={(value) => setProxmox({ ...proxmox, ipConfig: value })} />
-            <CloudTextField inputMode="numeric" label="CPU Cores" value={proxmox.cores} onChange={(value) => setProxmox({ ...proxmox, cores: value })} />
-            <CloudTextField inputMode="numeric" label="Memory (MiB)" value={proxmox.memoryMiB} onChange={(value) => setProxmox({ ...proxmox, memoryMiB: value })} />
-            <CloudTextField inputMode="numeric" label="Disk (GiB)" value={proxmox.diskGiB} onChange={(value) => setProxmox({ ...proxmox, diskGiB: value })} />
-            <CloudTextField description="Optional for static addressing." label="Gateway" placeholder="10.0.0.1" value={proxmox.gateway} onChange={(value) => setProxmox({ ...proxmox, gateway: value })} />
-            <p className="self-center text-sm leading-6 text-muted md:col-span-2">
-              The template must support cloud-init and run QEMU Guest Agent so its address can be verified before Sliver is installed.
-            </p>
-          </div>
+        {step === 1 && provider === "azure" ? (
+          <AzureInfrastructureFields
+            draft={azure}
+            error={azureOptionsError}
+            isLoading={isLoadingAzureOptions}
+            location={location}
+            options={azureOptions}
+            usePublicIp={usePublicIp}
+            onChange={setAzure}
+            onPublicIpChange={setUsePublicIp}
+            onRetry={() => setAzureDiscoveryAttempt((value) => value + 1)}
+          />
         ) : null}
 
         {step === 2 ? (
@@ -1057,7 +1133,14 @@ function DeploymentWizard({
                 />
               ) : null}
             </div>
-            <CloudTextField inputMode="numeric" label="SSH Port" value={sshPort} onChange={setSshPort} />
+            <CloudTextField
+              description={provider === "azure" ? "Azure platform images use the standard SSH port." : undefined}
+              inputMode="numeric"
+              isReadOnly={provider === "azure"}
+              label="SSH Port"
+              value={effectiveSshPort}
+              onChange={setSshPort}
+            />
             <CloudTextField inputMode="numeric" label="Sliver Multiplayer Port" value={multiplayerPort} onChange={setMultiplayerPort} />
             <CloudTextArea
               description="One IPv4 or IPv6 CIDR per line. Internet-wide /0 access is not created automatically."
@@ -1091,9 +1174,11 @@ function DeploymentWizard({
               ["Operator", operatorName.trim()],
             ]} />
             <ReviewGroup title="Network Policy" rows={[
-              ["SSH", `TCP ${sshPort} · ${parseCidrs(sshCidrs).length} source${parseCidrs(sshCidrs).length === 1 ? "" : "s"}`],
+              ["SSH", `TCP ${effectiveSshPort} · ${parseCidrs(sshCidrs).length} source${parseCidrs(sshCidrs).length === 1 ? "" : "s"}`],
               ["Multiplayer", `TCP ${multiplayerPort} · ${parseCidrs(operatorCidrs).length} source${parseCidrs(operatorCidrs).length === 1 ? "" : "s"}`],
-              ["Stable Address", provider === "aws" ? (useElasticIp ? "Elastic IP" : "Private instance address") : "Guest address"],
+              ["Stable Address", provider === "aws"
+                ? (useElasticIp ? "Elastic IP" : "Private instance address")
+                : (usePublicIp ? "Azure public IP" : "Private VM address")],
             ]} />
             <div className="md:col-span-2">
               <InlineMessage
@@ -1113,7 +1198,8 @@ function DeploymentWizard({
           <Button
             isDisabled={
               (step === 0 && credentials.length === 0) ||
-              (step === 1 && provider === "aws" && (isLoadingAwsOptions || Boolean(awsOptionsError) || !awsOptions))
+              (step === 1 && provider === "aws" && (isLoadingAwsOptions || Boolean(awsOptionsError) || !awsOptions)) ||
+              (step === 1 && provider === "azure" && (isLoadingAzureOptions || Boolean(azureOptionsError) || !azureOptions))
             }
             variant="primary"
             onPress={next}
@@ -1174,7 +1260,7 @@ function PendingDeploymentCard({
     <Card>
       <Card.Header className="flex-row items-start gap-3">
         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-surface-tertiary text-muted">
-          <FontAwesomeIcon aria-hidden icon={provider === "aws" ? faAmazon : faServer} />
+          <FontAwesomeIcon aria-hidden icon={providerIcon(provider)} />
         </span>
         <div className="min-w-0 flex-1">
           <Card.Title className="truncate">{name}</Card.Title>
@@ -1462,6 +1548,177 @@ function AwsInfrastructureFields({
   );
 }
 
+function AzureInfrastructureFields({
+  draft,
+  error,
+  isLoading,
+  location,
+  options,
+  usePublicIp,
+  onChange,
+  onPublicIpChange,
+  onRetry,
+}: {
+  readonly draft: AzureDeploymentDraft;
+  readonly error: string | null;
+  readonly isLoading: boolean;
+  readonly location: string;
+  readonly options: AzureDeploymentOptions | null;
+  readonly usePublicIp: boolean;
+  readonly onChange: (draft: AzureDeploymentDraft) => void;
+  readonly onPublicIpChange: (value: boolean) => void;
+  readonly onRetry: () => void;
+}): React.JSX.Element {
+  if (isLoading) {
+    return (
+      <div aria-live="polite" className="grid gap-4 md:grid-cols-2">
+        <p className="sr-only">Loading Azure infrastructure options</p>
+        {Array.from({ length: 8 }, (_, index) => (
+          <div className="space-y-2" key={index}>
+            <Skeleton className="h-3 w-28 rounded-lg" />
+            <Skeleton className="h-11 w-full rounded-xl" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-3">
+        <InlineMessage tone="danger" title="Azure discovery failed" detail={error} />
+        <Button variant="outline" onPress={onRetry}>Try Again</Button>
+      </div>
+    );
+  }
+
+  if (!options) return <div />;
+
+  const selectedVnetValue = draft.networkMode === "managed" ? MANAGED_AZURE_VNET_OPTION : draft.vnetId;
+  const selectedVnet = options.virtualNetworks.find(({ id }) => id === draft.vnetId);
+  const subnets = options.subnets.filter(({ vnetId }) => vnetId === draft.vnetId);
+  const selectedSubnet = subnets.find(({ id }) => id === draft.subnetId);
+
+  const selectVnet = (value: string): void => {
+    if (value === MANAGED_AZURE_VNET_OPTION) {
+      onChange({ ...draft, networkMode: "managed", vnetId: "", subnetId: "" });
+      return;
+    }
+    const nextSubnets = options.subnets.filter(({ vnetId }) => vnetId === value);
+    onChange({
+      ...draft,
+      networkMode: "existing",
+      vnetId: value,
+      subnetId: nextSubnets.some(({ id }) => id === draft.subnetId)
+        ? draft.subnetId
+        : nextSubnets[0]?.id ?? "",
+    });
+  };
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <CloudTextField
+        description="Inherited from the selected Azure CLI credential."
+        isReadOnly
+        label="Location"
+        value={location}
+        onChange={() => undefined}
+      />
+      <CloudTextField
+        description="Azure VM size available in the selected subscription and location."
+        label="VM Size"
+        placeholder="Standard_B2s"
+        value={draft.vmSize}
+        onChange={(vmSize) => onChange({ ...draft, vmSize })}
+      />
+      <CloudTextField
+        description="Publisher:offer:sku:version or a managed-image resource ID."
+        label="Image Reference"
+        placeholder="Canonical:ubuntu-24_04-lts:server:latest"
+        value={draft.imageReference}
+        onChange={(imageReference) => onChange({ ...draft, imageReference })}
+      />
+      <CloudTextField
+        description="Linux account provisioned with the selected or generated SSH public key."
+        label="Linux SSH Username"
+        placeholder="azureuser"
+        value={draft.sshUsername}
+        onChange={(sshUsername) => onChange({ ...draft, sshUsername })}
+      />
+      <CloudRichSelect
+        description="Choose a discovered VNet or create a tagged isolated network."
+        label="Virtual Network"
+        value={selectedVnetValue}
+        options={[
+          {
+            value: MANAGED_AZURE_VNET_OPTION,
+            label: "Create a new managed VNet",
+            description: "Cloud Deployment creates and tags an isolated VNet and subnet.",
+          },
+          ...options.virtualNetworks.map((vnet) => ({
+            value: vnet.id,
+            label: `${vnet.name} · ${vnet.resourceGroupName}`,
+            description: vnet.addressPrefixes.join(", ") || vnet.location,
+          })),
+        ]}
+        selectedDescription={draft.networkMode === "managed"
+          ? "A new GUID-tagged Azure virtual network"
+          : selectedVnet?.addressPrefixes.join(", ")}
+        onChange={selectVnet}
+      />
+      <CloudTextField
+        description="30 to 4095 GiB."
+        inputMode="numeric"
+        label="OS Disk (GiB)"
+        value={draft.osDiskSizeGiB}
+        onChange={(osDiskSizeGiB) => onChange({ ...draft, osDiskSizeGiB })}
+      />
+      {draft.networkMode === "managed" ? (
+        <>
+          <CloudTextField
+            description="Canonical private IPv4 CIDR between /16 and /28."
+            label="Managed VNet CIDR"
+            placeholder="10.0.0.0/16"
+            value={draft.managedVnetCidr}
+            onChange={(managedVnetCidr) => onChange({ ...draft, managedVnetCidr })}
+          />
+          <CloudTextField
+            description="Must be contained by the managed VNet CIDR."
+            label="Managed Subnet CIDR"
+            placeholder="10.0.1.0/24"
+            value={draft.managedSubnetCidr}
+            onChange={(managedSubnetCidr) => onChange({ ...draft, managedSubnetCidr })}
+          />
+        </>
+      ) : (
+        <CloudRichSelect
+          description="Only subnets from the selected VNet are shown."
+          isDisabled={!draft.vnetId || subnets.length === 0}
+          label="Subnet"
+          options={subnets.map((subnet) => ({
+            value: subnet.id,
+            label: `${subnet.name} · ${subnet.resourceGroupName}`,
+            description: subnet.addressPrefixes.join(", ") || subnet.id,
+          }))}
+          placeholder={draft.vnetId && subnets.length === 0 ? "No subnets available" : "Choose a subnet"}
+          selectedDescription={selectedSubnet?.addressPrefixes.join(", ")}
+          value={draft.subnetId}
+          onChange={(subnetId) => onChange({ ...draft, subnetId })}
+        />
+      )}
+      <div className="flex min-h-16 items-center rounded-2xl bg-surface-secondary px-4 py-3 md:col-span-2">
+        <Switch className="w-full justify-between" isSelected={usePublicIp} onChange={onPublicIpChange}>
+          <Switch.Content>
+            <Label>Public IP</Label>
+            <Description>Attach a tagged Standard public IP for SSH and the Sliver operator endpoint. Turn this off only when this computer can reach the VNet private address.</Description>
+          </Switch.Content>
+          <Switch.Control><Switch.Thumb /></Switch.Control>
+        </Switch>
+      </div>
+    </div>
+  );
+}
+
 function DeploymentCard({
   actionRequest,
   api,
@@ -1474,7 +1731,7 @@ function DeploymentCard({
   onBeginCardAction,
   onFinishCardAction,
   onFeedback,
-  onOpenAwsDetails,
+  onOpenDetails,
   onRefresh,
   onTerminated,
 }: {
@@ -1489,15 +1746,11 @@ function DeploymentCard({
   readonly onBeginCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => boolean;
   readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
-  readonly onOpenAwsDetails?: () => void;
+  readonly onOpenDetails?: () => void;
   readonly onRefresh: () => Promise<void>;
   readonly onTerminated?: () => void;
 }): React.JSX.Element {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const [editingFirewall, setEditingFirewall] = useState(false);
-  const [sshCidrs, setSshCidrs] = useState(deployment.spec.sshCidrs.join("\n"));
-  const [operatorCidrs, setOperatorCidrs] = useState(deployment.spec.operatorCidrs.join("\n"));
-  const [firewallError, setFirewallError] = useState<string | null>(null);
   const [destroyPlan, setDestroyPlan] = useState<DestroyCloudDeploymentPlan | null>(null);
   const [sshHostKeyReview, setSshHostKeyReview] = useState<SshHostKeyReview | null>(null);
   const [sshHostKeyReviewError, setSshHostKeyReviewError] = useState<string | null>(null);
@@ -1527,31 +1780,6 @@ function DeploymentCard({
       onFinishCardAction(deployment.id, action);
     }
   }, [api, deployment.id, deployment.name, deployment.provider, onBeginCardAction, onFeedback, onFinishCardAction, onRefresh, revision]);
-
-  const updateFirewall = async (): Promise<void> => {
-    const nextSshCidrs = parseCidrs(sshCidrs);
-    const nextOperatorCidrs = parseCidrs(operatorCidrs);
-    if (!validCidrList(nextSshCidrs) || !validCidrList(nextOperatorCidrs)) {
-      setFirewallError("Both services require at least one valid source CIDR.");
-      return;
-    }
-    setPendingAction("firewall");
-    setFirewallError(null);
-    try {
-      const result = await api.updateFirewall({ deploymentId: deployment.id, expectedRevision: revision, sshCidrs: nextSshCidrs, operatorCidrs: nextOperatorCidrs });
-      if (!result.ok) {
-        setFirewallError(result.error ?? "The firewall policy was rejected.");
-        return;
-      }
-      setEditingFirewall(false);
-      onFeedback({ tone: "success", title: "Firewall updated", detail: `${deployment.name} now uses the reviewed source ranges.` });
-      await onRefresh();
-    } catch (error) {
-      setFirewallError(errorMessage(error));
-    } finally {
-      setPendingAction(null);
-    }
-  };
 
   const prepareDestroy = useCallback(async (): Promise<void> => {
     if (actionInFlight.current || !onBeginCardAction(deployment.id, "terminate")) return;
@@ -1695,7 +1923,7 @@ function DeploymentCard({
     <Card className={isDeploymentView ? "w-full" : "h-fit"} variant="secondary">
       <Card.Header className="flex-row items-start gap-3">
         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-surface-tertiary text-muted">
-          <FontAwesomeIcon aria-hidden icon={deployment.provider === "aws" ? faAmazon : faServer} />
+          <FontAwesomeIcon aria-hidden icon={providerIcon(deployment.provider)} />
         </span>
         <div className="min-w-0 flex-1">
           <Card.Title className="truncate">{deployment.name}</Card.Title>
@@ -1725,21 +1953,6 @@ function DeploymentCard({
           <DeploymentDetail label="Managed Assets" value={String(deployment.managedAssets.length)} />
         </dl>
 
-        {editingFirewall && deployment.provider === "proxmox" ? (
-          <div className="space-y-4 rounded-2xl bg-surface p-4">
-            <div>
-              <h3 className="text-sm font-semibold">Firewall Sources</h3>
-              <p className="mt-1 text-xs leading-5 text-muted">Only the rules owned by this deployment are changed.</p>
-            </div>
-            {firewallError ? <InlineMessage tone="danger" title="Firewall update failed" detail={firewallError} /> : null}
-            <CloudTextArea label="SSH Source CIDRs" value={sshCidrs} onChange={setSshCidrs} />
-            <CloudTextArea label="Operator Source CIDRs" value={operatorCidrs} onChange={setOperatorCidrs} />
-            <div className="flex justify-end gap-2">
-              <Button isDisabled={pendingAction === "firewall"} variant="tertiary" onPress={() => setEditingFirewall(false)}>Cancel</Button>
-              <Button isPending={pendingAction === "firewall"} variant="primary" onPress={() => void updateFirewall()}>Save Firewall</Button>
-            </div>
-          </div>
-        ) : null}
         {isDeploymentView ? (
           <CloudProvisioningTerminal
             api={api}
@@ -1777,13 +1990,10 @@ function DeploymentCard({
           </Tooltip>
           <Button
             aria-label={`Edit firewall for ${deployment.name}`}
-            isDisabled={deployment.managedAssets.length === 0 || deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
+            isDisabled={!onOpenDetails || deployment.managedAssets.length === 0 || deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
             size="sm"
             variant="outline"
-            onPress={() => {
-              if (deployment.provider === "aws") onOpenAwsDetails?.();
-              else setEditingFirewall((value) => !value);
-            }}
+            onPress={() => onOpenDetails?.()}
           >
             <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
           </Button>
@@ -1834,6 +2044,11 @@ function DeploymentCard({
               <div className="space-y-3 text-sm leading-6 text-muted">
                 <p>The provider assets were re-checked against this deployment’s management ID.</p>
                 <p>This terminates the server and removes its verified managed infrastructure. The local operator configuration is no longer managed afterward.</p>
+                {deployment.provider === "azure" && deployment.runtime.resourceGroupName ? (
+                  <p className="text-warning">
+                    Azure will recursively delete the dedicated resource group <span className="font-mono">{deployment.runtime.resourceGroupName}</span> after confirming it is empty. Do not add unrelated resources while termination is running.
+                  </p>
+                ) : null}
                 {destroyPlan ? <p className="text-xs">Review expires {new Date(destroyPlan.expiresAt).toLocaleTimeString()}.</p> : null}
               </div>
             </AlertDialog.Body>
@@ -1960,7 +2175,7 @@ function AwsInstanceDetails({
     try {
       const result = await api.listFirewallRules({ deploymentId: deployment.id });
       if (generation !== loadGeneration.current) return;
-      if (!result.ok || !result.value) {
+      if (!result.ok || !result.value || result.value.provider !== "aws") {
         setRulesError(result.error ?? "AWS EC2 firewall rules could not be loaded.");
         return;
       }
@@ -2003,7 +2218,7 @@ function AwsInstanceDetails({
       const result = editor.mode === "create"
         ? await api.createFirewallRule({ deploymentId: deployment.id, expectedRevision: revision, rule: parsed.value })
         : await api.updateFirewallRule({ deploymentId: deployment.id, expectedRevision: revision, ruleId: editor.ruleId, rule: parsed.value });
-      if (!result.ok || !result.value) {
+      if (!result.ok || !result.value || result.value.provider !== "aws") {
         setEditorError(result.error ?? `The firewall rule could not be ${action === "create" ? "created" : "updated"}.`);
         return;
       }
@@ -2033,7 +2248,7 @@ function AwsInstanceDetails({
         expectedRevision: revision,
         ruleId: deleteRule.id,
       });
-      if (!result.ok || !result.value) {
+      if (!result.ok || !result.value || result.value.provider !== "aws") {
         setDeleteError(result.error ?? "The firewall rule could not be deleted.");
         return;
       }
@@ -2272,6 +2487,817 @@ function AwsInstanceDetails({
       </AlertDialog.Backdrop>
     </div>
   );
+}
+
+function AzureInstanceDetails({
+  api,
+  deployment,
+  notices,
+  revision,
+  onBack,
+  onFeedback,
+  onRefresh,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly deployment: AzureCloudDeploymentRecord;
+  readonly notices: React.JSX.Element;
+  readonly revision: number;
+  readonly onBack: () => void;
+  readonly onFeedback: (feedback: Feedback) => void;
+  readonly onRefresh: () => Promise<void>;
+}): React.JSX.Element {
+  const [firewall, setFirewall] = useState<AzureFirewallSnapshot | null>(null);
+  const [selectedDirection, setSelectedDirection] = useState<AzureFirewallDirection>("ingress");
+  const [isLoadingRules, setIsLoadingRules] = useState(true);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [editor, setEditor] = useState<AzureFirewallEditorState | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
+  const [deleteRule, setDeleteRule] = useState<AzureFirewallRule | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | null>(null);
+  const loadGeneration = useRef(0);
+
+  const loadRules = useCallback(async (): Promise<void> => {
+    const generation = ++loadGeneration.current;
+    setIsLoadingRules(true);
+    setRulesError(null);
+    try {
+      const result = await api.listFirewallRules({ deploymentId: deployment.id });
+      if (generation !== loadGeneration.current) return;
+      if (!result.ok || !result.value || result.value.provider !== "azure") {
+        setRulesError(result.error ?? "Azure network security group rules could not be loaded.");
+        return;
+      }
+      setFirewall(result.value);
+    } catch (error) {
+      if (generation === loadGeneration.current) setRulesError(errorMessage(error));
+    } finally {
+      if (generation === loadGeneration.current) setIsLoadingRules(false);
+    }
+  }, [api, deployment.id]);
+
+  useEffect(() => {
+    void loadRules();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [loadRules]);
+
+  const openCreateRule = (): void => {
+    setEditorError(null);
+    setEditor({ mode: "create", draft: initialAzureFirewallRuleDraft(selectedDirection) });
+  };
+
+  const openEditRule = (rule: AzureFirewallRule): void => {
+    if (azureFirewallRuleEditUnsupportedReason(rule, deployment.id)) return;
+    setEditorError(null);
+    setEditor({ mode: "edit", ruleId: rule.id, draft: azureFirewallRuleDraft(rule) });
+  };
+
+  const saveRule = async (): Promise<void> => {
+    if (!editor) return;
+    const parsed = parseAzureFirewallRuleDraft(editor.draft);
+    if (!parsed.ok) {
+      setEditorError(parsed.error);
+      return;
+    }
+    const action = editor.mode === "create" ? "create" : "update";
+    setPendingMutation(action);
+    setEditorError(null);
+    try {
+      const result = editor.mode === "create"
+        ? await api.createFirewallRule({ deploymentId: deployment.id, expectedRevision: revision, rule: parsed.value })
+        : await api.updateFirewallRule({ deploymentId: deployment.id, expectedRevision: revision, ruleId: editor.ruleId, rule: parsed.value });
+      if (!result.ok || !result.value || result.value.provider !== "azure") {
+        setEditorError(result.error ?? `The network security rule could not be ${action === "create" ? "created" : "updated"}.`);
+        return;
+      }
+      setFirewall(result.value);
+      setSelectedDirection(parsed.value.direction);
+      setEditor(null);
+      onFeedback({
+        tone: "success",
+        title: action === "create" ? "Firewall rule added" : "Firewall rule updated",
+        detail: `${deployment.name} now uses the updated ${directionLabel(parsed.value.direction).toLowerCase()} policy.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setEditorError(errorMessage(error));
+    } finally {
+      setPendingMutation(null);
+    }
+  };
+
+  const removeRule = async (): Promise<void> => {
+    if (!deleteRule || azureFirewallRuleProtectionReason(deleteRule, deployment.id)) return;
+    setPendingMutation("delete");
+    setDeleteError(null);
+    try {
+      const result = await api.deleteFirewallRule({
+        deploymentId: deployment.id,
+        expectedRevision: revision,
+        ruleId: deleteRule.id,
+      });
+      if (!result.ok || !result.value || result.value.provider !== "azure") {
+        setDeleteError(result.error ?? "The network security rule could not be deleted.");
+        return;
+      }
+      setFirewall(result.value);
+      setDeleteRule(null);
+      onFeedback({
+        tone: "success",
+        title: "Firewall rule deleted",
+        detail: `${deleteRule.name} was removed from ${deployment.name}.`,
+      });
+      await onRefresh();
+    } catch (error) {
+      setDeleteError(errorMessage(error));
+    } finally {
+      setPendingMutation(null);
+    }
+  };
+
+  const ingressRules = firewall?.rules.filter(({ direction }) => direction === "ingress") ?? [];
+  const egressRules = firewall?.rules.filter(({ direction }) => direction === "egress") ?? [];
+  const nsgId = firewall?.networkSecurityGroupId ?? deployment.runtime.networkSecurityGroupId ?? "Pending";
+  const nsgName = firewall?.networkSecurityGroupName ?? "Managed network security group";
+  const columns = azureFirewallColumns({
+    deploymentId: deployment.id,
+    direction: selectedDirection,
+    isPending: pendingMutation !== null,
+    onDelete: (rule) => {
+      if (azureFirewallRuleProtectionReason(rule, deployment.id)) return;
+      setDeleteError(null);
+      setDeleteRule(rule);
+    },
+    onEdit: openEditRule,
+  });
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header
+        aria-label="Virtual machine details header"
+        className="sticky top-0 z-20 shrink-0 space-y-6 bg-background pb-6"
+        data-testid="azure-instance-sticky-header"
+      >
+        <div>
+          <Button aria-label="Back to managed servers" size="sm" variant="ghost" onPress={onBack}>
+            <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+            Managed Servers
+          </Button>
+        </div>
+        <section aria-labelledby="azure-instance-heading" className="space-y-4">
+          <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-surface-secondary text-muted">
+                <FontAwesomeIcon aria-hidden icon={faMicrosoft} className="size-5" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted">Virtual machine details</p>
+                <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight" id="azure-instance-heading">{deployment.name}</h1>
+                <p className="mt-1 truncate text-sm text-muted">Microsoft Azure · {deployment.runtime.vmName ?? "VM pending"}</p>
+              </div>
+            </div>
+            <Chip color={statusColor(deployment.status)} size="sm" variant="soft">
+              {deployment.status === "deleting" ? "Terminating" : titleCase(deployment.status)}
+            </Chip>
+          </div>
+        </section>
+      </header>
+
+      <ScrollShadow
+        aria-label="Virtual machine details content"
+        className="min-h-0 flex-1 overflow-y-auto pb-12"
+        orientation="vertical"
+        role="region"
+        size={48}
+      >
+        <div className="space-y-6">
+          {notices}
+          <Card variant="secondary">
+            <Card.Header>
+              <Card.Title>Virtual machine summary</Card.Title>
+              <Card.Description>Compute and network identifiers for this tagged managed server.</Card.Description>
+            </Card.Header>
+            <Card.Content>
+              <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
+                <DeploymentDetail label="VM name" value={deployment.runtime.vmName ?? "Pending"} mono />
+                <DeploymentDetail label="VM size" value={deployment.spec.vmSize} mono />
+                <DeploymentDetail label="Location" value={deployment.spec.location} mono />
+                <DeploymentDetail label="Resource group" value={firewall?.resourceGroupName ?? deployment.runtime.resourceGroupName ?? "Pending"} mono />
+                <DeploymentDetail label="Public IP" value={deployment.runtime.publicIpAddress ?? "None"} mono />
+                <DeploymentDetail label="Private IP" value={deployment.runtime.privateIpAddress ?? "Pending"} mono />
+                <DeploymentDetail label="VNet" value={deployment.runtime.vnetId ?? deployment.spec.vnetId ?? "Pending"} mono />
+                <DeploymentDetail label="Subnet" value={deployment.runtime.subnetId ?? deployment.spec.subnetId ?? "Pending"} mono />
+                <DeploymentDetail label="Network security group" value={nsgId} mono />
+                <DeploymentDetail label="Network interface" value={deployment.runtime.networkInterfaceId ?? "Pending"} mono />
+                <DeploymentDetail label="OS disk" value={deployment.runtime.osDiskId ?? "Pending"} mono />
+                <DeploymentDetail label="Provisioning" value={deployment.runtime.provisioningState ?? "Pending"} />
+              </dl>
+            </Card.Content>
+          </Card>
+
+          <Card variant="secondary">
+            <Card.Header className="flex-col items-stretch gap-4 sm:flex-row sm:items-start">
+              <div className="min-w-0 flex-1">
+                <Card.Title>Firewall rules</Card.Title>
+                <Card.Description>{nsgName} · {nsgId}</Card.Description>
+              </div>
+              <div className="flex items-center gap-2 self-end sm:self-auto">
+                <Tooltip delay={0}>
+                  <Button
+                    aria-label="Refresh firewall rules"
+                    isDisabled={isLoadingRules || pendingMutation !== null}
+                    isIconOnly
+                    size="sm"
+                    variant="outline"
+                    onPress={() => void loadRules()}
+                  >
+                    <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoadingRules ? "animate-spin" : ""} />
+                  </Button>
+                  <Tooltip.Content>Refresh firewall rules</Tooltip.Content>
+                </Tooltip>
+                <Button
+                  isDisabled={!firewall || isLoadingRules || pendingMutation !== null}
+                  size="sm"
+                  variant="primary"
+                  onPress={openCreateRule}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faPlus} /> Add rule
+                </Button>
+              </div>
+            </Card.Header>
+            <Card.Content className="space-y-4">
+              <Tabs
+                selectedKey={selectedDirection}
+                variant="secondary"
+                onSelectionChange={(key) => {
+                  if (key === "ingress" || key === "egress") setSelectedDirection(key);
+                }}
+              >
+                <Tabs.ListContainer className="w-fit max-w-full">
+                  <Tabs.List aria-label="Firewall rule direction" className="w-fit whitespace-nowrap">
+                    <Tabs.Tab className="min-w-28 whitespace-nowrap" id="ingress">
+                      Inbound <Chip className="ml-1" size="sm" variant="soft">{ingressRules.length}</Chip>
+                      <Tabs.Indicator />
+                    </Tabs.Tab>
+                    <Tabs.Tab className="min-w-28 whitespace-nowrap" id="egress">
+                      Outbound <Chip className="ml-1" size="sm" variant="soft">{egressRules.length}</Chip>
+                      <Tabs.Indicator />
+                    </Tabs.Tab>
+                  </Tabs.List>
+                </Tabs.ListContainer>
+                {(["ingress", "egress"] as const).map((direction) => (
+                  <Tabs.Panel className="pt-4" id={direction} key={direction}>
+                    <AzureFirewallRulesContent
+                      columns={columns}
+                      deploymentId={deployment.id}
+                      direction={direction}
+                      firewall={firewall}
+                      isLoading={isLoadingRules}
+                      isPending={pendingMutation !== null}
+                      rules={direction === "ingress" ? ingressRules : egressRules}
+                      rulesError={rulesError}
+                      onEdit={openEditRule}
+                      onRetry={() => void loadRules()}
+                    />
+                  </Tabs.Panel>
+                ))}
+              </Tabs>
+            </Card.Content>
+          </Card>
+        </div>
+      </ScrollShadow>
+
+      <AzureFirewallRuleSheet
+        editor={editor}
+        error={editorError}
+        isPending={pendingMutation === "create" || pendingMutation === "update"}
+        onChange={setEditor}
+        onClose={() => {
+          if (pendingMutation === null) {
+            setEditor(null);
+            setEditorError(null);
+          }
+        }}
+        onSave={() => void saveRule()}
+      />
+
+      <AlertDialog.Backdrop
+        isOpen={deleteRule !== null}
+        variant="blur"
+        onOpenChange={(open) => {
+          if (!open && pendingMutation !== "delete") {
+            setDeleteRule(null);
+            setDeleteError(null);
+          }
+        }}
+      >
+        <AlertDialog.Container placement="center" size="sm">
+          <AlertDialog.Dialog className="sm:max-w-[460px]">
+            <AlertDialog.Header>
+              <AlertDialog.Icon status="danger"><FontAwesomeIcon aria-hidden icon={faTriangleExclamation} className="size-5" /></AlertDialog.Icon>
+              <AlertDialog.Heading>Delete firewall rule?</AlertDialog.Heading>
+            </AlertDialog.Header>
+            <AlertDialog.Body>
+              <div className="space-y-3 text-sm leading-6 text-muted">
+                <p>{deleteRule ? `${deleteRule.name} will be removed from ${directionLabel(deleteRule.direction).toLowerCase()}.` : "This network security rule will be removed."}</p>
+                <p>This change takes effect immediately in Microsoft Azure.</p>
+                {deleteError ? <InlineMessage tone="danger" title="Rule deletion failed" detail={deleteError} /> : null}
+              </div>
+            </AlertDialog.Body>
+            <AlertDialog.Footer>
+              <Button isDisabled={pendingMutation === "delete"} variant="tertiary" onPress={() => setDeleteRule(null)}>Cancel</Button>
+              <Button isPending={pendingMutation === "delete"} variant="danger" onPress={() => void removeRule()}>Delete rule</Button>
+            </AlertDialog.Footer>
+          </AlertDialog.Dialog>
+        </AlertDialog.Container>
+      </AlertDialog.Backdrop>
+    </div>
+  );
+}
+
+function AzureFirewallRulesContent({
+  columns,
+  deploymentId,
+  direction,
+  firewall,
+  isLoading,
+  isPending,
+  rules,
+  rulesError,
+  onEdit,
+  onRetry,
+}: {
+  readonly columns: DataGridColumn<AzureFirewallRule>[];
+  readonly deploymentId: string;
+  readonly direction: AzureFirewallDirection;
+  readonly firewall: AzureFirewallSnapshot | null;
+  readonly isLoading: boolean;
+  readonly isPending: boolean;
+  readonly rules: readonly AzureFirewallRule[];
+  readonly rulesError: string | null;
+  readonly onEdit: (rule: AzureFirewallRule) => void;
+  readonly onRetry: () => void;
+}): React.JSX.Element {
+  if (isLoading && !firewall) {
+    return (
+      <div aria-label={`Loading ${directionLabel(direction).toLowerCase()} rules`} className="space-y-2 py-2">
+        <Skeleton className="h-10 w-full rounded-xl" />
+        <Skeleton className="h-12 w-full rounded-xl" />
+        <Skeleton className="h-12 w-full rounded-xl" />
+      </div>
+    );
+  }
+  if (rulesError && !firewall) {
+    return (
+      <div className="space-y-3">
+        <InlineMessage tone="danger" title="Firewall rules unavailable" detail={rulesError} />
+        <Button size="sm" variant="outline" onPress={onRetry}>Try again</Button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {rulesError ? <InlineMessage tone="warning" title="Refresh failed" detail={`${rulesError} The last loaded rules remain visible.`} /> : null}
+      <DataGrid
+        aria-label={`${directionLabel(direction)} firewall rules`}
+        className="[&_tbody_tr]:cursor-[var(--cursor-interactive)]"
+        columns={columns}
+        contentClassName="min-w-[1050px]"
+        data={[...rules]}
+        disabledKeys={rules.filter((rule) => isPending || azureFirewallRuleEditUnsupportedReason(rule, deploymentId)).map(({ id }) => id)}
+        getRowId={(rule) => rule.id}
+        onRowAction={(key) => {
+          const rule = rules.find(({ id }) => id === String(key));
+          if (rule && !isPending && !azureFirewallRuleEditUnsupportedReason(rule, deploymentId)) onEdit(rule);
+        }}
+        renderEmptyState={() => (
+          <div className="py-8 text-center">
+            <p className="text-sm font-medium">No {directionLabel(direction).toLowerCase()} rules</p>
+            <p className="mt-1 text-xs text-muted">Add a network security rule for the traffic this server needs.</p>
+          </div>
+        )}
+        verticalAlign="top"
+        variant="secondary"
+      />
+    </div>
+  );
+}
+
+function AzureFirewallRuleSheet({
+  editor,
+  error,
+  isPending,
+  onChange,
+  onClose,
+  onSave,
+}: {
+  readonly editor: AzureFirewallEditorState | null;
+  readonly error: string | null;
+  readonly isPending: boolean;
+  readonly onChange: (editor: AzureFirewallEditorState) => void;
+  readonly onClose: () => void;
+  readonly onSave: () => void;
+}): React.JSX.Element {
+  const draft = editor?.draft;
+  const isEdit = editor?.mode === "edit";
+  const publicIngress = Boolean(
+    draft?.direction === "ingress" &&
+    draft.access === "allow" &&
+    azureFirewallDraftValues(draft.sourceAddressPrefixes).some((prefix) => (
+      ["*", "0.0.0.0/0", "::/0", "internet"].includes(prefix.toLowerCase())
+    )),
+  );
+  const updateDraft = (nextDraft: AzureFirewallRuleDraft): void => {
+    if (!editor) return;
+    onChange(editor.mode === "edit"
+      ? { mode: "edit", ruleId: editor.ruleId, draft: nextDraft }
+      : { mode: "create", draft: nextDraft });
+  };
+
+  return (
+    <Sheet
+      isDismissable={!isPending}
+      isOpen={editor !== null}
+      placement="right"
+      shouldAutoFocus
+      onOpenChange={(open) => { if (!open) onClose(); }}
+    >
+      <Sheet.Backdrop variant="blur">
+        <Sheet.Content className="h-full w-full max-w-[540px]">
+          <Sheet.Dialog className="h-full">
+            <Sheet.CloseTrigger aria-label="Close firewall rule editor" isDisabled={isPending} />
+            <Sheet.Header>
+              <Sheet.Heading>{isEdit ? "Edit firewall rule" : "Add firewall rule"}</Sheet.Heading>
+              <p className="text-sm leading-6 text-muted">
+                {isEdit ? "Update this Azure network security rule. Its resource name stays fixed." : "Create one rule in the deployment network security group."}
+              </p>
+            </Sheet.Header>
+            <Sheet.Body className="min-h-0 space-y-5 overflow-auto">
+              {draft ? (
+                <>
+                  {error ? <InlineMessage tone="danger" title="Firewall rule invalid" detail={error} /> : null}
+                  {publicIngress ? (
+                    <InlineMessage tone="warning" title="Public inbound access" detail="This allow rule accepts inbound traffic from the public Internet. Review the source and destination ports before saving." />
+                  ) : null}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <CloudTextField
+                      description={isEdit ? "Rule names cannot be changed after creation." : "Unique within this network security group."}
+                      isDisabled={isEdit || isPending}
+                      label="Name"
+                      placeholder="allow-operator-ssh"
+                      value={draft.name}
+                      onChange={(name) => updateDraft({ ...draft, name })}
+                    />
+                    <CloudTextField
+                      description="100–4096; lower numbers run first."
+                      inputMode="numeric"
+                      isDisabled={isPending}
+                      label="Priority"
+                      value={draft.priority}
+                      onChange={(priority) => updateDraft({ ...draft, priority })}
+                    />
+                    <CloudNativeSelect
+                      isDisabled={isPending}
+                      label="Direction"
+                      options={[{ value: "ingress", label: "Inbound" }, { value: "egress", label: "Outbound" }]}
+                      value={draft.direction}
+                      onChange={(direction) => {
+                        if (direction === "ingress" || direction === "egress") updateDraft({ ...draft, direction });
+                      }}
+                    />
+                    <CloudNativeSelect
+                      isDisabled={isPending}
+                      label="Access"
+                      options={[{ value: "allow", label: "Allow" }, { value: "deny", label: "Deny" }]}
+                      value={draft.access}
+                      onChange={(access) => {
+                        if (access === "allow" || access === "deny") updateDraft({ ...draft, access });
+                      }}
+                    />
+                    <CloudNativeSelect
+                      isDisabled={isPending}
+                      label="Protocol"
+                      options={[
+                        { value: "*", label: "Any" },
+                        { value: "tcp", label: "TCP" },
+                        { value: "udp", label: "UDP" },
+                        { value: "icmp", label: "ICMP" },
+                        { value: "ah", label: "AH" },
+                        { value: "esp", label: "ESP" },
+                      ]}
+                      value={draft.protocol}
+                      onChange={(protocol) => {
+                        if (isAzureFirewallProtocol(protocol)) updateDraft({ ...draft, protocol });
+                      }}
+                    />
+                    <CloudTextArea
+                      description="One port, ordered range, or * per line. Multiple values use Azure augmented-rule semantics."
+                      isDisabled={isPending}
+                      label="Source Port Ranges"
+                      value={draft.sourcePortRanges}
+                      onChange={(sourcePortRanges) => updateDraft({ ...draft, sourcePortRanges })}
+                    />
+                    <CloudTextArea
+                      description="One CIDR, IP address, *, or Azure service tag per line."
+                      isDisabled={isPending}
+                      label="Source Address Prefixes"
+                      value={draft.sourceAddressPrefixes}
+                      onChange={(sourceAddressPrefixes) => updateDraft({ ...draft, sourceAddressPrefixes })}
+                    />
+                    <CloudTextArea
+                      description="One port, ordered range, or * per line. Multiple values use Azure augmented-rule semantics."
+                      isDisabled={isPending}
+                      label="Destination Port Ranges"
+                      value={draft.destinationPortRanges}
+                      onChange={(destinationPortRanges) => updateDraft({ ...draft, destinationPortRanges })}
+                    />
+                    <CloudTextArea
+                      description="One CIDR, IP address, *, or Azure service tag per line."
+                      isDisabled={isPending}
+                      label="Destination Address Prefixes"
+                      value={draft.destinationAddressPrefixes}
+                      onChange={(destinationAddressPrefixes) => updateDraft({ ...draft, destinationAddressPrefixes })}
+                    />
+                  </div>
+                  <CloudTextField
+                    description="Optional Azure network security rule description (140 characters maximum)."
+                    isDisabled={isPending}
+                    label="Description"
+                    placeholder="Why this access is needed"
+                    value={draft.description}
+                    onChange={(description) => updateDraft({ ...draft, description })}
+                  />
+                </>
+              ) : null}
+            </Sheet.Body>
+            <Sheet.Footer>
+              <Button isDisabled={isPending} variant="tertiary" onPress={onClose}>Cancel</Button>
+              <Button isPending={isPending} variant="primary" onPress={onSave}>{isEdit ? "Save changes" : "Add rule"}</Button>
+            </Sheet.Footer>
+          </Sheet.Dialog>
+        </Sheet.Content>
+      </Sheet.Backdrop>
+    </Sheet>
+  );
+}
+
+function azureFirewallColumns({
+  deploymentId,
+  direction,
+  isPending,
+  onDelete,
+  onEdit,
+}: {
+  readonly deploymentId: string;
+  readonly direction: AzureFirewallDirection;
+  readonly isPending: boolean;
+  readonly onDelete: (rule: AzureFirewallRule) => void;
+  readonly onEdit: (rule: AzureFirewallRule) => void;
+}): DataGridColumn<AzureFirewallRule>[] {
+  return [
+    {
+      id: "name",
+      header: "Name",
+      isRowHeader: true,
+      minWidth: 190,
+      cell: (rule) => (
+        <div className="flex min-w-0 flex-col items-start gap-1">
+          <span className="max-w-48 truncate font-mono text-xs" title={rule.name}>{rule.name}</span>
+          <div className="flex flex-wrap gap-1">
+            <Chip size="sm" variant="soft">{rule.isDefault ? "Azure default" : azureFirewallRuleProtectionReason(rule, deploymentId) ? "Sliver GUI baseline" : rule.managed ? "Sliver GUI" : "Azure"}</Chip>
+            {rule.editUnsupportedReason ? (
+              <Chip color="warning" size="sm" title={rule.editUnsupportedReason} variant="soft">Edit unavailable</Chip>
+            ) : null}
+          </div>
+        </div>
+      ),
+    },
+    { id: "priority", header: "Priority", minWidth: 90, accessorKey: "priority" },
+    { id: "access", header: "Access", minWidth: 90, cell: (rule) => titleCase(rule.access) },
+    { id: "protocol", header: "Protocol", minWidth: 90, cell: (rule) => rule.protocol === "*" ? "Any" : rule.protocol.toUpperCase() },
+    {
+      id: "source",
+      header: direction === "ingress" ? "Source" : "Source address",
+      minWidth: 170,
+      cell: (rule) => (
+        <AzureFirewallEndpoint
+          addressPrefixes={rule.sourceAddressPrefixes}
+          applicationSecurityGroupIds={rule.sourceApplicationSecurityGroupIds}
+          portRanges={rule.sourcePortRanges}
+        />
+      ),
+    },
+    {
+      id: "destination",
+      header: direction === "egress" ? "Destination" : "Destination address",
+      minWidth: 190,
+      cell: (rule) => (
+        <AzureFirewallEndpoint
+          addressPrefixes={rule.destinationAddressPrefixes}
+          applicationSecurityGroupIds={rule.destinationApplicationSecurityGroupIds}
+          portRanges={rule.destinationPortRanges}
+        />
+      ),
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      align: "end",
+      minWidth: 104,
+      cell: (rule) => (
+        <div
+          className="flex justify-end gap-1"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <Tooltip delay={0}>
+            <Button
+              aria-label={`Edit firewall rule ${rule.name}`}
+              isDisabled={isPending || Boolean(azureFirewallRuleEditUnsupportedReason(rule, deploymentId))}
+              isIconOnly
+              size="sm"
+              variant="ghost"
+              onPress={() => onEdit(rule)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faPen} />
+            </Button>
+            <Tooltip.Content>{azureFirewallRuleEditUnsupportedReason(rule, deploymentId) ?? "Edit rule"}</Tooltip.Content>
+          </Tooltip>
+          <Tooltip delay={0}>
+            <Button
+              aria-label={`Delete firewall rule ${rule.name}`}
+              isDisabled={isPending || Boolean(azureFirewallRuleProtectionReason(rule, deploymentId))}
+              isIconOnly
+              size="sm"
+              variant="danger-soft"
+              onPress={() => onDelete(rule)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faTrash} />
+            </Button>
+            <Tooltip.Content>{azureFirewallRuleProtectionReason(rule, deploymentId) ?? "Delete rule"}</Tooltip.Content>
+          </Tooltip>
+        </div>
+      ),
+    },
+  ];
+}
+
+function AzureFirewallEndpoint({
+  addressPrefixes,
+  applicationSecurityGroupIds,
+  portRanges,
+}: {
+  readonly addressPrefixes: readonly string[];
+  readonly applicationSecurityGroupIds: readonly string[];
+  readonly portRanges: readonly string[];
+}): React.JSX.Element {
+  return (
+    <div className="flex min-w-0 flex-col gap-1 font-mono text-xs">
+      {addressPrefixes.map((prefix, index) => <span key={`prefix-${index}-${prefix}`}>{prefix}</span>)}
+      {applicationSecurityGroupIds.map((id, index) => (
+        <span className="max-w-72 truncate" key={`asg-${index}-${id}`} title={id}>ASG · {id}</span>
+      ))}
+      <span className="text-muted">Ports · {portRanges.join(", ")}</span>
+    </div>
+  );
+}
+
+function azureFirewallRuleProtectionReason(rule: AzureFirewallRule, deploymentId: string): string | null {
+  if (rule.isDefault) return "Azure default rules are read-only here.";
+  const baselineKind = rule.name.startsWith("sliver-gui-ssh-")
+    ? "ssh"
+    : rule.name.startsWith("sliver-gui-operator-")
+      ? "operator"
+      : null;
+  return baselineKind !== null && rule.description === `sliver-gui:${deploymentId}:baseline:${baselineKind}`
+    ? "Sliver GUI baseline rules are managed through the deployment access settings."
+    : null;
+}
+
+function azureFirewallRuleEditUnsupportedReason(rule: AzureFirewallRule, deploymentId: string): string | null {
+  return azureFirewallRuleProtectionReason(rule, deploymentId) ?? rule.editUnsupportedReason;
+}
+
+function initialAzureFirewallRuleDraft(direction: AzureFirewallDirection): AzureFirewallRuleDraft {
+  return {
+    name: "allow-operator-ssh",
+    priority: "1200",
+    direction,
+    access: "allow",
+    protocol: "tcp",
+    sourceAddressPrefixes: "",
+    sourcePortRanges: "*",
+    destinationAddressPrefixes: "*",
+    destinationPortRanges: "22",
+    description: "",
+  };
+}
+
+function azureFirewallRuleDraft(rule: AzureFirewallRule): AzureFirewallRuleDraft {
+  return {
+    name: rule.name,
+    priority: String(rule.priority),
+    direction: rule.direction,
+    access: rule.access,
+    protocol: rule.protocol,
+    sourceAddressPrefixes: rule.sourceAddressPrefixes.join("\n"),
+    sourcePortRanges: rule.sourcePortRanges.join("\n"),
+    destinationAddressPrefixes: rule.destinationAddressPrefixes.join("\n"),
+    destinationPortRanges: rule.destinationPortRanges.join("\n"),
+    description: rule.description ?? "",
+  };
+}
+
+function parseAzureFirewallRuleDraft(
+  draft: AzureFirewallRuleDraft,
+): { readonly ok: true; readonly value: AzureFirewallRuleSpec } | { readonly ok: false; readonly error: string } {
+  const name = draft.name.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u.test(name)) {
+    return { ok: false, error: "Name must be 1–80 characters and use letters, numbers, dot, dash, or underscore." };
+  }
+  const priority = strictInteger(draft.priority);
+  if (priority === null || priority < 100 || priority > 4_096) {
+    return { ok: false, error: "Priority must be an integer from 100 to 4096." };
+  }
+  if (priority >= 1_000 && priority <= 1_199) {
+    return { ok: false, error: "Priorities 1000 through 1199 are reserved for baseline access." };
+  }
+  const sourceAddressPrefixes = parseAzureFirewallDraftValues(
+    draft.sourceAddressPrefixes,
+    validAzureAddressPrefix,
+  );
+  const destinationAddressPrefixes = parseAzureFirewallDraftValues(
+    draft.destinationAddressPrefixes,
+    validAzureAddressPrefix,
+  );
+  if (!sourceAddressPrefixes.ok || !destinationAddressPrefixes.ok) {
+    return { ok: false, error: "Enter one source and destination CIDR, IP address, *, or Azure service tag per line." };
+  }
+  const sourcePortRanges = parseAzureFirewallDraftValues(
+    draft.sourcePortRanges,
+    validAzurePortRange,
+  );
+  const destinationPortRanges = parseAzureFirewallDraftValues(
+    draft.destinationPortRanges,
+    validAzurePortRange,
+  );
+  if (!sourcePortRanges.ok || !destinationPortRanges.ok) {
+    return { ok: false, error: "Enter one port per line as *, a value from 0 to 65535, or an ordered range such as 8000-8100." };
+  }
+  const description = draft.description.trim();
+  if (description.length > 140 || /[\u0000-\u001f\u007f]/u.test(description)) {
+    return { ok: false, error: "Description must be 140 printable characters or fewer." };
+  }
+  return {
+    ok: true,
+    value: {
+      name,
+      priority,
+      direction: draft.direction,
+      access: draft.access,
+      protocol: draft.protocol,
+      sourceAddressPrefixes: sourceAddressPrefixes.value,
+      sourcePortRanges: sourcePortRanges.value,
+      destinationAddressPrefixes: destinationAddressPrefixes.value,
+      destinationPortRanges: destinationPortRanges.value,
+      description: description || null,
+    },
+  };
+}
+
+function azureFirewallDraftValues(value: string): readonly string[] {
+  return value.split(/\r?\n/u).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function parseAzureFirewallDraftValues(
+  value: string,
+  validate: (entry: string) => boolean,
+): { readonly ok: true; readonly value: readonly string[] } | { readonly ok: false } {
+  const values = azureFirewallDraftValues(value);
+  if (values.length === 0 || values.length > AZURE_FIREWALL_RULE_MAX_VALUES || !values.every(validate)) {
+    return { ok: false };
+  }
+  return { ok: true, value: values };
+}
+
+function isAzureFirewallProtocol(value: string): value is AzureFirewallProtocol {
+  return ["*", "tcp", "udp", "icmp", "ah", "esp"].includes(value);
+}
+
+function validAzureAddressPrefix(value: string): boolean {
+  return value.length > 0 && value.length <= 128 && !/[\s\u0000-\u001f\u007f]/u.test(value);
+}
+
+function validAzurePortRange(value: string): boolean {
+  if (value === "*") return true;
+  const match = /^(\d{1,5})(?:-(\d{1,5}))?$/u.exec(value);
+  if (!match) return false;
+  const start = Number(match[1]);
+  const end = Number(match[2] ?? match[1]);
+  return start <= end && end <= 65_535;
 }
 
 function AwsFirewallRulesContent({
@@ -2847,7 +3873,7 @@ function CredentialsPanel({
           <EmptyState.Header>
             <EmptyState.Media variant="icon"><FontAwesomeIcon aria-hidden icon={faKey} className="size-5 text-accent" /></EmptyState.Media>
             <EmptyState.Title>No Provider Credentials</EmptyState.Title>
-            <EmptyState.Description>Add an AWS or Proxmox credential to start deploying.</EmptyState.Description>
+            <EmptyState.Description>Add an AWS or Azure credential to start deploying.</EmptyState.Description>
           </EmptyState.Header>
           <EmptyState.Content><Button onPress={() => setShowForm(true)}>Add Credential</Button></EmptyState.Content>
         </EmptyState>
@@ -2887,15 +3913,18 @@ function CredentialForm({
   const [accessKeyId, setAccessKeyId] = useState("");
   const [secretAccessKey, setSecretAccessKey] = useState("");
   const [sessionToken, setSessionToken] = useState("");
-  const [endpoint, setEndpoint] = useState("");
-  const [tokenId, setTokenId] = useState("");
-  const [tokenSecret, setTokenSecret] = useState("");
-  const [tlsCaCertificate, setTlsCaCertificate] = useState("");
+  const [azureAccounts, setAzureAccounts] = useState<readonly AzureCliAccountSummary[]>([]);
+  const [azureSubscriptionId, setAzureSubscriptionId] = useState("");
+  const [azureTenantId, setAzureTenantId] = useState("");
+  const [defaultLocation, setDefaultLocation] = useState("eastus");
+  const [azureDiscoveryError, setAzureDiscoveryError] = useState<string | null>(null);
+  const [isDiscoveringAzure, setIsDiscoveringAzure] = useState(false);
   const [sshPassphrase, setSshPassphrase] = useState("");
   const [keySelection, setKeySelection] = useState<SshPrivateKeySelection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPicking, setIsPicking] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const azureDiscoverySequence = useRef(0);
 
   useEffect(() => {
     if (awsAuthentication !== "profile") return;
@@ -2911,6 +3940,39 @@ function CredentialForm({
     setAwsProfileName(profile.name);
     if (profile.region) setDefaultRegion(profile.region);
   }, [awsAuthentication, awsProfileName, awsProfiles]);
+
+  useEffect(() => {
+    if (provider !== "azure") return;
+    const sequence = azureDiscoverySequence.current + 1;
+    azureDiscoverySequence.current = sequence;
+    setIsDiscoveringAzure(true);
+    setAzureDiscoveryError(null);
+    void api.discoverAzureAccounts().then((result) => {
+      if (azureDiscoverySequence.current !== sequence) return;
+      if (!result.ok || !result.value) {
+        setAzureAccounts([]);
+        setAzureSubscriptionId("");
+        setAzureTenantId("");
+        setAzureDiscoveryError(result.error ?? "Azure CLI accounts could not be discovered.");
+        return;
+      }
+      setAzureAccounts(result.value);
+      const preferred = preferredAzureAccount(result.value);
+      setAzureSubscriptionId(preferred?.subscriptionId ?? "");
+      setAzureTenantId(preferred?.tenantId ?? "");
+    }).catch((caught: unknown) => {
+      if (azureDiscoverySequence.current !== sequence) return;
+      setAzureAccounts([]);
+      setAzureSubscriptionId("");
+      setAzureTenantId("");
+      setAzureDiscoveryError(errorMessage(caught));
+    }).finally(() => {
+      if (azureDiscoverySequence.current === sequence) setIsDiscoveringAzure(false);
+    });
+    return () => {
+      if (azureDiscoverySequence.current === sequence) azureDiscoverySequence.current += 1;
+    };
+  }, [api, provider]);
 
   const pickKey = async (): Promise<void> => {
     setIsPicking(true);
@@ -2940,9 +4002,10 @@ function CredentialForm({
       awsProfiles,
       accessKeyId,
       secretAccessKey,
-      endpoint,
-      tokenId,
-      tokenSecret,
+      azureAccounts,
+      azureSubscriptionId,
+      azureTenantId,
+      defaultLocation,
     });
     if (validation) {
       setError(validation);
@@ -2973,14 +4036,13 @@ function CredentialForm({
           sshPassphrase: nullable(sshPassphrase),
         }
       : {
-          provider: "proxmox",
+          provider: "azure",
           label: label.trim(),
+          defaultLocation: defaultLocation.trim(),
           sshUsername: sshUsername.trim(),
           sshPrivateKeyToken,
-          endpoint: endpoint.trim(),
-          tokenId: tokenId.trim(),
-          tokenSecret,
-          tlsCaCertificate: nullable(tlsCaCertificate),
+          subscriptionId: azureSubscriptionId,
+          tenantId: azureTenantId,
           sshPassphrase: nullable(sshPassphrase),
         };
 
@@ -2994,9 +4056,7 @@ function CredentialForm({
       }
       setSecretAccessKey("");
       setSessionToken("");
-      setTokenSecret("");
       setSshPassphrase("");
-      setTlsCaCertificate("");
       setKeySelection(null);
       await onCreated(result.value.label);
     } catch (caught) {
@@ -3006,7 +4066,6 @@ function CredentialForm({
       setAccessKeyId("");
       setSecretAccessKey("");
       setSessionToken("");
-      setTokenSecret("");
       setSshPassphrase("");
       setKeySelection(null);
       setIsSaving(false);
@@ -3025,11 +4084,11 @@ function CredentialForm({
           <CloudNativeSelect
             label="Provider"
             value={provider}
-            options={[{ value: "aws", label: "AWS" }, { value: "proxmox", label: "Proxmox VE" }]}
+            options={[{ value: "aws", label: "AWS" }, { value: "azure", label: "Microsoft Azure" }]}
             onChange={(value) => {
-              if (value === "aws" || value === "proxmox") {
+              if (value === "aws" || value === "azure") {
                 setProvider(value);
-                setSshUsername(value === "aws" ? "ubuntu" : "root");
+                setSshUsername(value === "aws" ? "ubuntu" : "azureuser");
                 if (value === "aws") {
                   const profile = preferredAwsProfile(awsProfiles);
                   setAwsAuthentication(profile ? "profile" : "access-keys");
@@ -3039,14 +4098,12 @@ function CredentialForm({
                 setAccessKeyId("");
                 setSecretAccessKey("");
                 setSessionToken("");
-                setTokenId("");
-                setTokenSecret("");
                 setError(null);
               }
             }}
           />
-          <CloudTextField label="Label" placeholder={provider === "aws" ? "Production AWS" : "Lab Proxmox"} value={label} onChange={setLabel} />
-          <CloudTextField label="SSH Username" placeholder={provider === "aws" ? "ubuntu" : "root"} value={sshUsername} onChange={setSshUsername} />
+          <CloudTextField label="Label" placeholder={provider === "aws" ? "Production AWS" : "Production Azure"} value={label} onChange={setLabel} />
+          <CloudTextField label="SSH Username" placeholder={provider === "aws" ? "ubuntu" : "azureuser"} value={sshUsername} onChange={setSshUsername} />
           <div className="flex min-h-16 items-end gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">SSH Private Key <span className="font-normal text-muted">(optional)</span></p>
@@ -3140,10 +4197,49 @@ function CredentialForm({
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
-            <CloudTextField description="HTTPS API origin, for example https://pve.example.test:8006" label="API Endpoint" placeholder="https://pve.example.test:8006" value={endpoint} onChange={setEndpoint} />
-            <CloudTextField autoComplete="off" label="API Token ID" placeholder="user@realm!token" value={tokenId} onChange={setTokenId} />
-            <CloudTextField autoComplete="new-password" label="API Token Secret" type="password" value={tokenSecret} onChange={setTokenSecret} />
-            <CloudTextArea description="Optional PEM CA certificate for a private PKI." label="TLS CA Certificate" value={tlsCaCertificate} onChange={setTlsCaCertificate} />
+            <CloudNativeSelect
+              description="Only the selected subscription and tenant IDs are stored. Access tokens remain in the local Azure CLI cache."
+              isDisabled={isDiscoveringAzure || azureAccounts.length === 0}
+              label="Azure CLI Subscription"
+              value={azureSubscriptionId}
+              options={azureAccounts.map((account) => ({
+                value: account.subscriptionId,
+                label: `${account.name} · ${account.subscriptionId} · ${account.cloudName}`,
+              }))}
+              placeholder={isDiscoveringAzure ? "Discovering Azure CLI accounts…" : "Choose a subscription"}
+              onChange={(subscriptionId) => {
+                const account = azureAccounts.find((candidate) => candidate.subscriptionId === subscriptionId);
+                setAzureSubscriptionId(subscriptionId);
+                setAzureTenantId(account?.tenantId ?? "");
+                setError(null);
+              }}
+            />
+            <CloudTextField
+              description="Tenant associated with the selected Azure CLI subscription."
+              isReadOnly
+              label="Tenant ID"
+              value={azureTenantId}
+              onChange={() => undefined}
+            />
+            <CloudTextField
+              description="Azure region used for new managed resources."
+              label="Default Location"
+              placeholder="eastus"
+              value={defaultLocation}
+              onChange={setDefaultLocation}
+            />
+            <div className="self-end rounded-2xl bg-surface-secondary px-4 py-3 text-sm leading-6 text-muted">
+              Sign in or refresh the selected account with <span className="font-mono text-xs">az login</span>. Cloud Deployment resolves that account at use time and never reads an access token into this window.
+            </div>
+            {azureDiscoveryError ? (
+              <div className="md:col-span-2">
+                <InlineMessage tone="warning" title="Azure CLI accounts unavailable" detail={azureDiscoveryError} />
+              </div>
+            ) : !isDiscoveringAzure && azureAccounts.length === 0 ? (
+              <div className="md:col-span-2">
+                <InlineMessage tone="info" title="No Azure CLI subscriptions found" detail="Run az login, then reopen this form to discover local Azure subscriptions." />
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -3215,14 +4311,14 @@ function CredentialCard({
     <Card variant="secondary">
       <Card.Header className="flex-row items-start gap-3">
         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-surface-tertiary text-muted">
-          <FontAwesomeIcon aria-hidden icon={credential.provider === "aws" ? faAmazon : faServer} />
+          <FontAwesomeIcon aria-hidden icon={providerIcon(credential.provider)} />
         </span>
         <div className="min-w-0 flex-1">
           <Card.Title className="truncate">{credential.label}</Card.Title>
           <Card.Description>
             {credential.provider === "aws"
               ? `${"profileName" in credential ? `AWS CLI · ${credential.profileName}` : "Access keys"} · ${credential.defaultRegion}`
-              : credential.endpoint}
+              : `Azure CLI · ${credential.defaultLocation}`}
           </Card.Description>
         </div>
         <Chip color={credential.persistence === "secure" ? "success" : "warning"} size="sm" variant="soft">
@@ -3237,7 +4333,9 @@ function CredentialCard({
               label="Authentication"
               value={"profileName" in credential ? `CLI profile: ${credential.profileName}` : "Stored access keys"}
             />
-          ) : null}
+          ) : (
+            <DeploymentDetail label="Subscription" value={credential.subscriptionId} mono />
+          )}
           <DeploymentDetail label="SSH User" value={credential.sshUsername} mono />
           <DeploymentDetail label="Added" value={new Date(credential.createdAt).toLocaleDateString()} />
           <DeploymentDetail label="Credential ID" value={credential.id} mono />
@@ -3361,15 +4459,17 @@ function CloudTextArea({
   onChange,
   description,
   placeholder,
+  isDisabled = false,
 }: {
   readonly label: string;
   readonly value: string;
   readonly onChange: (value: string) => void;
   readonly description?: string | undefined;
   readonly placeholder?: string | undefined;
+  readonly isDisabled?: boolean | undefined;
 }): React.JSX.Element {
   return (
-    <TextField fullWidth value={value} variant="secondary" onChange={onChange}>
+    <TextField fullWidth isDisabled={isDisabled} value={value} variant="secondary" onChange={onChange}>
       <Label>{label}</Label>
       <TextArea {...(placeholder ? { placeholder } : {})} className="min-h-24 font-mono text-xs" spellCheck={false} />
       {description ? <Description>{description}</Description> : null}
@@ -3747,6 +4847,42 @@ function reconcileAwsDraft(draft: AwsDeploymentDraft, options: AwsDeploymentOpti
   };
 }
 
+function reconcileAzureDraft(draft: AzureDeploymentDraft, options: AzureDeploymentOptions): AzureDeploymentDraft {
+  const vmSize = options.vmSizes.some(({ name }) => name === draft.vmSize)
+    ? draft.vmSize
+    : options.vmSizes.find(({ name }) => name === INITIAL_AZURE_DEPLOYMENT.vmSize)?.name ??
+      options.vmSizes[0]?.name ?? draft.vmSize;
+  const retainedImage = options.images.find(({ reference }) => reference === draft.imageReference);
+  const selectedImage = retainedImage ?? (!validAzureImageReference(draft.imageReference)
+    ? options.images.find(({ reference }) => reference === INITIAL_AZURE_DEPLOYMENT.imageReference) ?? options.images[0]
+    : undefined);
+  if (draft.networkMode !== "existing") {
+    return {
+      ...draft,
+      vmSize,
+      ...(selectedImage
+        ? { imageReference: selectedImage.reference, sshUsername: selectedImage.sshUsername }
+        : {}),
+    };
+  }
+  const vnetId = options.virtualNetworks.some(({ id }) => id === draft.vnetId)
+    ? draft.vnetId
+    : options.virtualNetworks[0]?.id ?? "";
+  const subnets = options.subnets.filter(({ vnetId: candidateVnetId }) => candidateVnetId === vnetId);
+  const subnetId = subnets.some(({ id }) => id === draft.subnetId)
+    ? draft.subnetId
+    : subnets[0]?.id ?? "";
+  return {
+    ...draft,
+    vmSize,
+    vnetId,
+    subnetId,
+    ...(selectedImage
+      ? { imageReference: selectedImage.reference, sshUsername: selectedImage.sshUsername }
+      : {}),
+  };
+}
+
 function architectureLabel(architecture: "x86_64" | "arm64"): string {
   return architecture === "arm64" ? "Arm64" : "x86-64";
 }
@@ -3784,13 +4920,15 @@ function deploymentInput(input: {
   readonly name: string;
   readonly operatorName: string;
   readonly region: string;
+  readonly location: string;
   readonly sshPort: number;
   readonly multiplayerPort: number;
   readonly sshCidrs: readonly string[];
   readonly operatorCidrs: readonly string[];
   readonly useElasticIp: boolean;
+  readonly usePublicIp: boolean;
   readonly aws: AwsDeploymentDraft;
-  readonly proxmox: ProxmoxDeploymentDraft;
+  readonly azure: AzureDeploymentDraft;
 }): CreateCloudDeploymentInput {
   if (input.provider === "aws") {
     return {
@@ -3826,24 +4964,25 @@ function deploymentInput(input: {
     };
   }
   return {
-    provider: "proxmox",
+    provider: "azure",
     expectedRevision: input.expectedRevision,
     credentialId: input.credentialId,
     name: input.name,
     spec: {
-      node: input.proxmox.node.trim(),
-      templateVmId: Number(input.proxmox.templateVmId),
-      vmId: nullableInteger(input.proxmox.vmId),
-      storage: input.proxmox.storage.trim(),
-      bridge: input.proxmox.bridge.trim(),
-      cores: Number(input.proxmox.cores),
-      memoryMiB: Number(input.proxmox.memoryMiB),
-      diskGiB: Number(input.proxmox.diskGiB),
+      location: input.location,
+      imageReference: input.azure.imageReference.trim(),
+      vmSize: input.azure.vmSize.trim(),
+      networkMode: input.azure.networkMode,
+      vnetId: input.azure.networkMode === "existing" ? nullable(input.azure.vnetId) : null,
+      subnetId: input.azure.networkMode === "existing" ? nullable(input.azure.subnetId) : null,
+      managedVnetCidr: input.azure.networkMode === "managed" ? input.azure.managedVnetCidr.trim() : null,
+      managedSubnetCidr: input.azure.networkMode === "managed" ? input.azure.managedSubnetCidr.trim() : null,
+      sshUsername: input.azure.sshUsername.trim(),
       operatorName: input.operatorName,
-      sshPort: input.sshPort,
+      sshPort: AZURE_SSH_PORT,
       multiplayerPort: input.multiplayerPort,
-      ipConfig: input.proxmox.ipConfig.trim(),
-      gateway: nullable(input.proxmox.gateway),
+      osDiskSizeGiB: nullableInteger(input.azure.osDiskSizeGiB),
+      usePublicIp: input.usePublicIp,
       sshCidrs: input.sshCidrs,
       operatorCidrs: input.operatorCidrs,
     },
@@ -3863,7 +5002,9 @@ function validateDeploymentStep(
     readonly operatorCidrs: string;
     readonly aws: AwsDeploymentDraft;
     readonly awsOptions: AwsDeploymentOptions | null;
-    readonly proxmox: ProxmoxDeploymentDraft;
+    readonly azure: AzureDeploymentDraft;
+    readonly azureOptions: AzureDeploymentOptions | null;
+    readonly location: string;
   },
 ): string | null {
   if (step === 0) {
@@ -3904,16 +5045,41 @@ function validateDeploymentStep(
     }
     if (!validInteger(values.aws.volumeSizeGiB, 8)) return "Root volume must be at least 8 GiB.";
   }
-  if (step === 1 && values.provider === "proxmox") {
-    if (!values.proxmox.node.trim() || !values.proxmox.storage.trim() || !values.proxmox.bridge.trim()) return "Enter the Proxmox node, storage, and network bridge.";
-    if (!validInteger(values.proxmox.templateVmId, 100) || !validInteger(values.proxmox.cores, 1) || !validInteger(values.proxmox.memoryMiB, 512) || !validInteger(values.proxmox.diskGiB, 8)) return "Enter valid Proxmox compute values.";
-    if (values.proxmox.vmId && !validInteger(values.proxmox.vmId, 100)) return "VM ID must be at least 100 or left blank.";
-    if (!validProxmoxIpConfig(values.proxmox.ipConfig.trim())) return "Enter an IPv4 cloud-init configuration such as ip=dhcp or ip=10.0.0.20/24.";
-    if (values.proxmox.gateway && !validIpv4Address(values.proxmox.gateway.trim())) return "Enter a valid IPv4 gateway or leave it blank.";
-    if (values.proxmox.ipConfig.trim() === "ip=dhcp" && values.proxmox.gateway.trim()) return "A static gateway cannot be used with DHCP.";
-    if (values.proxmox.ipConfig.includes(",gw=") && values.proxmox.gateway.trim()) return "Specify the gateway in only one field.";
+  if (step === 1 && values.provider === "azure") {
+    if (!values.azureOptions) return "Load Azure infrastructure options before continuing.";
+    if (!validAzureLocation(values.location)) return "Choose an Azure credential with a valid default location.";
+    if (!validAzureImageReference(values.azure.imageReference)) {
+      return "Enter an Azure image as publisher:offer:sku:version or a full managed-image resource ID.";
+    }
+    if (!/^[A-Za-z0-9_-]{2,80}$/u.test(values.azure.vmSize.trim())) return "Enter a valid Azure VM size.";
+    if (!isAzureSshUsername(values.azure.sshUsername.trim())) {
+      return "Enter a valid Linux SSH username for the Azure image.";
+    }
+    if (values.azure.networkMode === "existing") {
+      if (!values.azureOptions.virtualNetworks.some(({ id }) => id === values.azure.vnetId)) {
+        return "Choose an existing Azure VNet or create a new one.";
+      }
+      if (!values.azureOptions.subnets.some(({ id, vnetId }) => id === values.azure.subnetId && vnetId === values.azure.vnetId)) {
+        return "Choose a subnet in the selected Azure VNet.";
+      }
+    } else {
+      const vnetCidr = parseManagedIpv4Cidr(values.azure.managedVnetCidr);
+      const subnetCidr = parseManagedIpv4Cidr(values.azure.managedSubnetCidr);
+      if (!vnetCidr || !subnetCidr) {
+        return "Enter canonical IPv4 network CIDRs between /16 and /28 for the managed VNet and subnet.";
+      }
+      if (!managedIpv4CidrContains(vnetCidr, subnetCidr)) {
+        return "The managed subnet CIDR must be contained by the managed VNet CIDR.";
+      }
+    }
+    if (!validInteger(values.azure.osDiskSizeGiB, 30, 4_095)) {
+      return "Azure OS disk must be between 30 and 4095 GiB.";
+    }
   }
   if (step === 2) {
+    if (values.provider === "azure" && Number(values.sshPort) !== AZURE_SSH_PORT) {
+      return `Azure deployments require SSH port ${AZURE_SSH_PORT}.`;
+    }
     if (!validPort(values.sshPort) || !validPort(values.multiplayerPort) || Number(values.sshPort) === Number(values.multiplayerPort)) return "Enter two different valid TCP ports.";
     const parsedSshCidrs = parseCidrs(values.sshCidrs);
     const parsedOperatorCidrs = parseCidrs(values.operatorCidrs);
@@ -3932,9 +5098,10 @@ function validateCredential(values: {
   readonly awsProfiles: readonly AwsCliProfileSummary[];
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
-  readonly endpoint: string;
-  readonly tokenId: string;
-  readonly tokenSecret: string;
+  readonly azureAccounts: readonly AzureCliAccountSummary[];
+  readonly azureSubscriptionId: string;
+  readonly azureTenantId: string;
+  readonly defaultLocation: string;
 }): string | null {
   if (!values.label.trim()) return "Enter a credential label.";
   if (!values.sshUsername.trim()) return "Enter the Linux SSH username.";
@@ -3948,8 +5115,13 @@ function validateCredential(values: {
       return "Enter the AWS access key ID and secret access key.";
     }
   } else {
-    if (!values.endpoint.startsWith("https://")) return "Enter an HTTPS Proxmox API endpoint.";
-    if (!values.tokenId.trim() || !values.tokenSecret) return "Enter the Proxmox API token ID and secret.";
+    if (!isAzureSshUsername(values.sshUsername.trim())) {
+      return "Enter a valid, non-reserved Azure Linux SSH username.";
+    }
+    const account = values.azureAccounts.find(({ subscriptionId }) => subscriptionId === values.azureSubscriptionId);
+    if (!account || account.tenantId !== values.azureTenantId) return "Choose an available Azure CLI subscription.";
+    if (account.cloudName !== "AzureCloud") return "Only AzureCloud subscriptions are currently supported.";
+    if (!validAzureLocation(values.defaultLocation)) return "Enter a valid Azure location such as eastus.";
   }
   return null;
 }
@@ -4025,15 +5197,17 @@ function managedIpv4CidrContains(parent: ManagedIpv4Cidr, child: ManagedIpv4Cidr
   return child.prefix >= parent.prefix && (parent.address & mask) === (child.address & mask);
 }
 
-function validProxmoxIpConfig(value: string): boolean {
-  if (value === "ip=dhcp") return true;
-  const match = /^ip=([^/]+)\/(\d{1,2})(?:,gw=([^,]+))?$/u.exec(value);
-  return Boolean(
-    match &&
-    validIpv4Address(match[1] ?? "") &&
-    Number(match[2]) <= 32 &&
-    (match[3] === undefined || validIpv4Address(match[3])),
-  );
+function validAzureLocation(value: string): boolean {
+  return /^[a-z0-9]{2,64}$/u.test(value.trim());
+}
+
+function validAzureImageReference(value: string): boolean {
+  const trimmed = value.trim();
+  if (/^\/subscriptions\/[^/]+\/resourceGroups\/[^/]+\/providers\/Microsoft\.Compute\/images\/[^/]+$/iu.test(trimmed)) {
+    return trimmed.length <= 2_048;
+  }
+  const parts = trimmed.split(":");
+  return parts.length === 4 && parts.every((part) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(part));
 }
 
 function nullable(value: string): string | null {
@@ -4046,9 +5220,9 @@ function nullableInteger(value: string): number | null {
   return trimmed ? Number(trimmed) : null;
 }
 
-function validInteger(value: string, minimum: number): boolean {
+function validInteger(value: string, minimum: number, maximum = Number.MAX_SAFE_INTEGER): boolean {
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= minimum;
+  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum;
 }
 
 function validPort(value: string): boolean {
@@ -4064,17 +5238,29 @@ function preferredAwsProfile(profiles: readonly AwsCliProfileSummary[]): AwsCliP
   return profiles.find(({ name }) => name === "default") ?? profiles[0];
 }
 
+function preferredAzureAccount(accounts: readonly AzureCliAccountSummary[]): AzureCliAccountSummary | undefined {
+  return accounts.find(({ isDefault }) => isDefault) ?? accounts[0];
+}
+
 function awsRegion(credential: CloudCredentialSummary | undefined): string {
   return credential?.provider === "aws" ? credential.defaultRegion : "";
 }
 
+function azureLocation(credential: CloudCredentialSummary | undefined): string {
+  return credential?.provider === "azure" ? credential.defaultLocation : "";
+}
+
 function providerLabel(provider: CloudProvider): string {
-  return provider === "aws" ? "AWS EC2" : "Proxmox VE";
+  return provider === "aws" ? "AWS EC2" : "Microsoft Azure";
+}
+
+function providerIcon(provider: CloudProvider) {
+  return provider === "aws" ? faAmazon : faMicrosoft;
 }
 
 function runtimeId(deployment: CloudDeploymentRecord): string {
   if (deployment.provider === "aws") return deployment.runtime.instanceId ?? "Pending";
-  return deployment.runtime.vmId === null ? "Pending" : `${deployment.runtime.node}/${deployment.runtime.vmId}`;
+  return deployment.runtime.vmName ?? deployment.runtime.vmId ?? "Pending";
 }
 
 function statusColor(status: CloudDeploymentStatus): "default" | "success" | "warning" | "danger" {
@@ -4111,8 +5297,8 @@ function phaseLabel(phase: CloudDeploymentRecord["phase"]): string {
     "creating-instance": "Creating compute instance",
     "configuring-firewall": "Configuring firewall",
     "starting-instance": "Starting instance",
-    "waiting-instance-status": "Waiting for EC2 instance status check",
-    "waiting-system-status": "Waiting for EC2 system status check",
+    "waiting-instance-status": "Waiting for compute health checks",
+    "waiting-system-status": "Waiting for platform health checks",
     "finalizing-network": "Finalizing instance networking",
     "installing-sliver": "Installing Sliver",
     "configuring-daemon": "Configuring Linux daemon",
@@ -4139,7 +5325,7 @@ function feedbackToneClass(tone: FeedbackTone): string {
 
 function scrubCredentialInput(input: CreateCloudCredentialInput): void {
   const mutable = input as unknown as Record<string, unknown>;
-  for (const key of ["accessKeyId", "secretAccessKey", "sessionToken", "tokenId", "tokenSecret", "tlsCaCertificate", "sshPassphrase", "sshPrivateKeyToken"]) {
+  for (const key of ["accessKeyId", "secretAccessKey", "sessionToken", "sshPassphrase", "sshPrivateKeyToken"]) {
     if (Object.hasOwn(mutable, key)) mutable[key] = null;
   }
 }
@@ -4149,9 +5335,11 @@ function errorMessage(error: unknown): string {
 }
 
 function hasDeploymentSshHost(deployment: CloudDeploymentRecord): boolean {
-  const host = deployment.remoteHost ?? (deployment.provider === "aws"
-    ? deployment.runtime.publicIpAddress ?? deployment.runtime.privateIpAddress
-    : deployment.runtime.ipAddress);
+  const host = deployment.provider === "azure"
+    ? deployment.spec.usePublicIp
+      ? deployment.runtime.publicIpAddress
+      : deployment.runtime.privateIpAddress
+    : deployment.remoteHost ?? deployment.runtime.publicIpAddress ?? deployment.runtime.privateIpAddress;
   return Boolean(host?.trim());
 }
 

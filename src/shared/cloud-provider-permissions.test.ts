@@ -25,17 +25,24 @@ describe("cloud provider permission manifests", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("tracks Proxmox privileges using provider-native names", () => {
-    const ids = cloudRequiredPermissions("proxmox").map(({ id }) => id);
+  it("tracks Azure resource-provider actions for inventory through cleanup", () => {
+    const ids = cloudRequiredPermissions("azure").map(({ id }) => id);
 
     expect(ids).toEqual(expect.arrayContaining([
-      "VM.Allocate",
-      "VM.Clone",
-      "VM.Config.Cloudinit",
-      "VM.Config.Network",
-      "VM.PowerMgmt",
-      "Datastore.AllocateSpace",
-      "SDN.Use",
+      "Microsoft.Resources/subscriptions/resourcegroups/resources/read",
+      "Microsoft.Resources/subscriptions/resourceGroups/write",
+      "Microsoft.Compute/skus/read",
+      "Microsoft.Compute/images/read",
+      "Microsoft.Compute/virtualMachines/write",
+      "Microsoft.Compute/virtualMachines/instanceView/read",
+      "Microsoft.Compute/virtualMachines/deallocate/action",
+      "Microsoft.Network/virtualNetworks/write",
+      "Microsoft.Network/virtualNetworks/subnets/join/action",
+      "Microsoft.Network/networkSecurityGroups/join/action",
+      "Microsoft.Network/networkSecurityGroups/securityRules/write",
+      "Microsoft.Network/networkInterfaces/delete",
+      "Microsoft.Network/networkInterfaces/join/action",
+      "Microsoft.Network/publicIPAddresses/join/action",
     ]));
     expect(new Set(ids).size).toBe(ids.length);
   });

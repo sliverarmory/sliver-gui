@@ -567,7 +567,7 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
     "managed SSH target",
   );
   if (!UUID_V4_PATTERN.test(stringValue(target["deploymentId"]))) throw new TypeError("Invalid SSH deployment identity");
-  if (target["provider"] !== "aws" && target["provider"] !== "proxmox") throw new TypeError("Invalid SSH provider");
+  if (target["provider"] !== "aws" && target["provider"] !== "azure") throw new TypeError("Invalid SSH provider");
   if (!new Set(["provisioning", "running", "stopped", "deleting", "failed"]).has(stringValue(target["status"]))) {
     throw new TypeError("Invalid SSH target status");
   }
