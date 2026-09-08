@@ -65,17 +65,17 @@ type MaybePromise<T> = T | Promise<T>;
 export interface SshSessionController {
   claim(owner: ConsoleOwnerIdentity): MaybePromise<OperationResult<SshWindowLaunchContext>>;
   listTargets(owner: ConsoleOwnerIdentity): MaybePromise<OperationResult<readonly ManagedSshTarget[]>>;
-  openTarget(
+  createTarget(
     deploymentId: string,
-    owner?: ConsoleOwnerIdentity,
+    owner: ConsoleOwnerIdentity,
   ): MaybePromise<OperationResult<SshOpenTabResult>>;
   reattachTab(
     owner: ConsoleOwnerIdentity,
     tabId: string,
   ): MaybePromise<OperationResult<SshTabLaunchContext>>;
-  approveHostKey(
+  approveNewHostKey(
     token: string,
-    owner?: ConsoleOwnerIdentity,
+    owner: ConsoleOwnerIdentity,
   ): MaybePromise<OperationResult<SshOpenTabResult>>;
   closeTab(
     owner: ConsoleOwnerIdentity,
@@ -140,7 +140,7 @@ export function registerSshIpcHandlers(
     exactRendererUrl,
     authorizeWindow,
     (args) => singleArgument(parseSshDeploymentInput(requireSingleArgument(args))),
-    ({ identity }, input) => services.sessions.openTarget(input.deploymentId, identity),
+    ({ identity }, input) => services.sessions.createTarget(input.deploymentId, identity),
   );
   handleSsh(
     SSH_IPC_INVOKE.reattachSshTab,
@@ -154,7 +154,7 @@ export function registerSshIpcHandlers(
     exactRendererUrl,
     authorizeWindow,
     (args) => singleArgument(parseSshHostKeyReviewInput(requireSingleArgument(args))),
-    ({ identity }, input) => services.sessions.approveHostKey(input.token, identity),
+    ({ identity }, input) => services.sessions.approveNewHostKey(input.token, identity),
   );
   handleSsh(
     SSH_IPC_INVOKE.closeSshTab,

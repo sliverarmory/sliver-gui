@@ -7,6 +7,13 @@ import {
   type SliverDesktopInvokeAPI,
   type SliverSnapshot,
 } from "../shared/contracts.js";
+import {
+  APPLICATION_CONTEXT_MENU_IPC,
+  parseApplicationContextMenuActionRequest,
+  parseApplicationContextMenuRequest,
+  parseApplicationContextMenuVisibilityRequest,
+  type ApplicationContextMenuAPI,
+} from "../shared/application-context-menu-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
 import { parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
@@ -24,9 +31,27 @@ import {
 } from "../shared/console-contracts.js";
 
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const RESTRICTED_CONTEXT_MENU_ATTRIBUTE = "data-application-context-menu-policy" as const;
+const RESTRICTED_CONTEXT_MENU_VALUE = "inspect-only" as const;
+const RESTRICTED_CONTEXT_MENU_SELECTOR =
+  '[data-application-context-menu-policy="inspect-only"]' as const;
 
 interface RendererWindowBridge {
   postMessage(message: unknown, targetOrigin: string, transfer: MessagePort[]): void;
+}
+
+interface RestrictedMutationRecord {
+  readonly type: string;
+  readonly target: unknown;
+  readonly attributeName?: string | null;
+  readonly oldValue?: string | null;
+  readonly addedNodes: ArrayLike<unknown>;
+}
+
+interface RestrictedMutationObserverConstructor {
+  new(callback: (records: readonly RestrictedMutationRecord[]) => void): {
+    observe(target: object, options: Record<string, unknown>): void;
+  };
 }
 
 function openStream(attachmentToken: string, correlationId: string): void {
@@ -200,7 +225,159 @@ const api: SliverDesktopAPI = {
   onConsoleSettingsRequested: (listener) => onFixedEvent(IPC.consoleSettingsRequested, listener),
 };
 
+installRestrictedTargetContextMenuSignal();
+
 contextBridge.exposeInMainWorld("sliver", Object.freeze(api));
+contextBridge.exposeInMainWorld("applicationContextMenu", Object.freeze({
+  onMenuRequested: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("context-menu listener must be a function");
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length !== 1) return;
+      try {
+        listener(parseApplicationContextMenuRequest(payload[0]));
+      } catch {
+        // Drop malformed main-to-renderer events instead of widening the bridge.
+      }
+    };
+    ipcRenderer.on(APPLICATION_CONTEXT_MENU_IPC.menuRequested, handler);
+    return () => ipcRenderer.removeListener(APPLICATION_CONTEXT_MENU_IPC.menuRequested, handler);
+  },
+  executeAction: (request) => ipcRenderer.invoke(
+    APPLICATION_CONTEXT_MENU_IPC.executeAction,
+    parseApplicationContextMenuActionRequest(request),
+  ),
+  setOpen: (request) => ipcRenderer.invoke(
+    APPLICATION_CONTEXT_MENU_IPC.setOpen,
+    parseApplicationContextMenuVisibilityRequest(request),
+  ),
+} satisfies ApplicationContextMenuAPI));
+
+function installRestrictedTargetContextMenuSignal(): void {
+  const preloadDocument = (globalThis as {
+    document?: {
+      addEventListener: (
+        type: "contextmenu",
+        listener: (event: Event) => void,
+        useCapture: boolean,
+      ) => void;
+      querySelectorAll?: (selector: string) => ArrayLike<unknown>;
+    };
+  }).document;
+  if (!preloadDocument || typeof preloadDocument.addEventListener !== "function") return;
+
+  const restrictedNodes = new WeakSet<object>();
+  const markSubtree = (value: unknown): void => {
+    const node = objectNode(value);
+    if (!node) return;
+    restrictedNodes.add(node);
+    const children = childNodesOf(node);
+    for (let index = 0; index < children.length; index += 1) {
+      markSubtree(children[index]);
+    }
+  };
+  const markDeclaredRoots = (value: unknown): void => {
+    const node = objectNode(value);
+    if (!node) return;
+    if (contextMenuPolicyOf(node) === RESTRICTED_CONTEXT_MENU_VALUE) {
+      markSubtree(node);
+      return;
+    }
+    const children = childNodesOf(node);
+    for (let index = 0; index < children.length; index += 1) {
+      markDeclaredRoots(children[index]);
+    }
+  };
+
+  if (typeof preloadDocument.querySelectorAll === "function") {
+    const roots = preloadDocument.querySelectorAll(RESTRICTED_CONTEXT_MENU_SELECTOR);
+    for (let index = 0; index < roots.length; index += 1) markSubtree(roots[index]);
+  }
+
+  const MutationObserverConstructor = (globalThis as {
+    MutationObserver?: RestrictedMutationObserverConstructor;
+  }).MutationObserver;
+  if (typeof MutationObserverConstructor === "function") {
+    const observer = new MutationObserverConstructor((records) => {
+      for (const record of records) {
+        const target = objectNode(record.target);
+        if (record.type === "attributes") {
+          if (
+            record.attributeName === RESTRICTED_CONTEXT_MENU_ATTRIBUTE &&
+            target &&
+            (record.oldValue === RESTRICTED_CONTEXT_MENU_VALUE ||
+              contextMenuPolicyOf(target) === RESTRICTED_CONTEXT_MENU_VALUE)
+          ) markSubtree(target);
+          continue;
+        }
+        if (record.type !== "childList") continue;
+        for (let index = 0; index < record.addedNodes.length; index += 1) {
+          const addedNode = record.addedNodes[index];
+          if (target && restrictedNodes.has(target)) markSubtree(addedNode);
+          markDeclaredRoots(addedNode);
+        }
+      }
+    });
+    observer.observe(preloadDocument, {
+      attributeFilter: [RESTRICTED_CONTEXT_MENU_ATTRIBUTE],
+      attributeOldValue: true,
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  preloadDocument.addEventListener("contextmenu", (event) => {
+    if (event.isTrusted && isRestrictedContextMenuTarget(event.target, restrictedNodes)) {
+      ipcRenderer.send(APPLICATION_CONTEXT_MENU_IPC.restrictedTarget);
+    }
+  }, true);
+}
+
+function isRestrictedContextMenuTarget(
+  target: EventTarget | null,
+  restrictedNodes: WeakSet<object>,
+): boolean {
+  let node = objectNode(target);
+  const visited = new Set<object>();
+  while (node && !visited.has(node)) {
+    if (restrictedNodes.has(node)) return true;
+    visited.add(node);
+    node = parentNodeOf(node);
+  }
+  return false;
+}
+
+function objectNode(value: unknown): object | undefined {
+  return typeof value === "object" && value !== null ? value : undefined;
+}
+
+function childNodesOf(node: object): ArrayLike<unknown> {
+  if (!("childNodes" in node)) return [];
+  const children = node.childNodes;
+  return typeof children === "object" && children !== null && "length" in children &&
+      typeof children.length === "number"
+    ? children as ArrayLike<unknown>
+    : [];
+}
+
+function parentNodeOf(node: object): object | undefined {
+  const record = node as Record<PropertyKey, unknown>;
+  for (const key of ["parentNode", "parentElement", "host"] as const) {
+    if (!(key in record)) continue;
+    const parent = objectNode(record[key]);
+    if (parent) return parent;
+  }
+  return undefined;
+}
+
+function contextMenuPolicyOf(node: object): unknown {
+  if (!("getAttribute" in node) || typeof node.getAttribute !== "function") return undefined;
+  try {
+    return node.getAttribute(RESTRICTED_CONTEXT_MENU_ATTRIBUTE);
+  } catch {
+    return undefined;
+  }
+}
 
 function onFixedEvent(channel: string, listener: () => void): () => void {
   const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {

@@ -8,7 +8,6 @@ import {
   app,
   autoUpdater as nativeAutoUpdater,
   BrowserWindow,
-  clipboard,
   dialog,
   Menu,
   net,
@@ -54,7 +53,6 @@ import type {
 } from "../shared/release-contracts.js";
 import {
   buildApplicationMenuTemplate,
-  buildContextMenuTemplate,
   commandPaletteShortcutDispositionForInput,
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
@@ -62,6 +60,7 @@ import {
   type AwsCloudMenuDeployment,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
+import { ApplicationContextMenuController } from "./application-context-menu.js";
 import {
   createApplicationUpdater,
   type ApplicationUpdater,
@@ -278,6 +277,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let applicationUpdater: ApplicationUpdater | undefined;
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
+  let applicationContextMenus: ApplicationContextMenuController | undefined;
   let cloudDeploymentController = options.cloudDeploymentController;
   let sshWindow: BrowserWindow | undefined;
   let sshWindowClaimedBy: TrustedWindowIdentity | undefined;
@@ -394,7 +394,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           ? sshRendererUrl
           : undefined,
     );
-    installContextMenu(window);
+    if (!applicationContextMenus) throw new Error("Application context menus are not initialized");
+    applicationContextMenus.install(window.webContents);
     if (registerWithConnectionRegistry) window.webContents.on("before-input-event", (event, input) => {
       const commandPaletteDisposition = applicationSettingsStore
         ? commandPaletteShortcutDispositionForInput(
@@ -2012,20 +2013,6 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     installMenu();
   }
 
-  function installContextMenu(window: BrowserWindow): void {
-    window.webContents.on("context-menu", (_event, params) => {
-      if (window.isDestroyed() || window.webContents.isDestroyed()) return;
-      const template = buildContextMenuTemplate(params, {
-        copyImageAt: (x, y) => window.webContents.copyImageAt(x, y),
-        copyText: (text) => clipboard.writeText(text),
-        inspectElement: (x, y) => window.webContents.inspectElement(x, y),
-        openExternal: (url) => void shell.openExternal(url),
-        replaceMisspelling: (text) => window.webContents.replaceMisspelling(text),
-      });
-      Menu.buildFromTemplate(template).popup({ window });
-    });
-  }
-
   const onActivate = (): void => {
     if (windows.size === 0) createWindow();
   };
@@ -2048,6 +2035,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const onNativeThemeUpdated = (): void => applyNativeWindowTheme();
 
   await app.whenReady();
+  applicationContextMenus = new ApplicationContextMenuController();
   const loadedApplicationSettingsStore = await ApplicationSettingsStore.load(
     join(app.getPath("userData"), APPLICATION_SETTINGS_FILE_NAME),
   );
@@ -2171,9 +2159,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       sessions: {
         claim: claimManagedSshWindow,
         listTargets: (owner) => sshSessions!.listTargets(owner),
-        openTarget: (deploymentId, owner) => sshSessions!.openTarget(deploymentId, owner),
+        createTarget: (deploymentId, owner) => sshSessions!.createTarget(deploymentId, owner),
         reattachTab: (owner, tabId) => sshSessions!.reattachTab(owner, tabId),
-        approveHostKey: (token, owner) => sshSessions!.approveHostKey(token, owner),
+        approveNewHostKey: (token, owner) => sshSessions!.approveNewHostKey(token, owner),
         closeTab: (owner, tabId) => sshSessions!.closeTab(owner, tabId),
         selectTab: (owner, tabId) => sshSessions!.selectTab(owner, tabId),
         attach: (owner, attachmentToken, port) =>
@@ -2215,6 +2203,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("before-quit", onBeforeQuit);
       nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
       nativeTheme.removeListener("updated", onNativeThemeUpdated);
+      applicationContextMenus?.dispose();
+      applicationContextMenus = undefined;
       unregisterCloudDeploymentIpcHandlers();
       unregisterSshIpcHandlers();
       unregisterIpcHandlers();

@@ -191,6 +191,10 @@ vi.mock("electron", () => {
       showMessageBox: vi.fn(async () => ({ response: 0 })),
       showOpenDialog: vi.fn(async () => ({ canceled: true, filePaths: [] })),
     },
+    ipcMain: Object.assign(new FakeEmitter(), {
+      handle: vi.fn(),
+      removeHandler: vi.fn(),
+    }),
     Menu: {
       buildFromTemplate: vi.fn(() => ({ popup: vi.fn() })),
       setApplicationMenu: vi.fn(),

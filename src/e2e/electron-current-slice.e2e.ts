@@ -103,6 +103,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     await verifyCloudDeploymentWindow(electronApplication, page, artifactDirectory);
     await verifyReleaseDownloadToast(electronApplication, page);
+    await verifyApplicationContextMenu(electronApplication, page);
 
     // Replace the native chooser from outside the app immediately before the
     // production renderer invokes it. No production switch or debug IPC is
@@ -113,7 +114,9 @@ test("real renderer reaches an injected fake only through frozen preload and tru
         return { canceled: false, filePaths: [configPath] };
       };
     }, selectedConfigPath);
-    await page.getByRole("button", { name: /choose.*file|connect (?:from |external )file/i }).click();
+    await page.getByRole("button", {
+      name: /choose.*file|open file|connect (?:from |external )file/i,
+    }).click();
 
     await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
     assert.equal(await page.getByRole("dialog", { name: "Server version mismatch" }).count(), 0);
@@ -225,6 +228,268 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function verifyApplicationContextMenu(
+  electronApplication: ElectronApplication,
+  page: Page,
+): Promise<void> {
+  const dialog = page.getByRole("dialog", { name: "Saved configurations" });
+  await dialog.getByRole("button", { name: "Import a copy" }).click();
+  const input = dialog.getByRole("textbox", { name: "Local configuration name" });
+  const value = "context menu selection";
+  const menu = page.getByRole("menu", { name: "Application context menu" });
+  const readSelection = () => input.evaluate((element) => {
+    const control = element as typeof element & {
+      selectionStart: number | null;
+      selectionEnd: number | null;
+    };
+    const browserDocument = (globalThis as unknown as {
+      document: { activeElement: unknown };
+    }).document;
+    return {
+      focused: browserDocument.activeElement === control,
+      start: control.selectionStart,
+      end: control.selectionEnd,
+    };
+  });
+  const originalClipboardText = await electronApplication.evaluate(
+    ({ clipboard }) => clipboard.readText(),
+  );
+
+  try {
+    await input.fill(value);
+    await input.evaluate((element) => {
+      const control = element as typeof element & {
+        focus(): void;
+        setSelectionRange(start: number, end: number): void;
+      };
+      control.focus();
+      control.setSelectionRange(4, 4);
+    });
+
+    await input.click({ button: "right", position: { x: 8, y: 8 } });
+    await menu.waitFor();
+    for (const label of [
+      "Undo",
+      "Redo",
+      "Cut",
+      "Copy",
+      "Paste",
+      "Paste and Match Style",
+      "Delete",
+      "Select All",
+      "Inspect Element",
+    ]) {
+      assert.equal(
+        await menu.getByRole("menuitem", { name: label, exact: true }).count(),
+        1,
+        `expected the HeroUI context menu to expose ${label}`,
+      );
+    }
+
+    const selectAll = menu.getByRole("menuitem", { name: "Select All", exact: true });
+    assert.notEqual(await selectAll.getAttribute("aria-disabled"), "true");
+    await selectAll.click();
+    await menu.waitFor({ state: "hidden" });
+    const selectionDeadline = Date.now() + 5_000;
+    let selection = await readSelection();
+    while (
+      Date.now() < selectionDeadline &&
+      (!selection.focused || selection.start !== 0 || selection.end !== value.length)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      selection = await readSelection();
+    }
+    assert.deepEqual(selection, { focused: true, start: 0, end: value.length });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    assert.deepEqual(await readSelection(), {
+      focused: false,
+      start: 0,
+      end: value.length,
+    });
+    const copy = menu.getByRole("menuitem", { name: "Copy", exact: true });
+    assert.notEqual(await copy.getAttribute("aria-disabled"), "true");
+    await copy.click();
+    await menu.waitFor({ state: "hidden" });
+    const copyDeadline = Date.now() + 5_000;
+    let copied = false;
+    while (Date.now() < copyDeadline && !copied) {
+      copied = await electronApplication.evaluate(
+        ({ clipboard }, expected) => clipboard.readText() === expected,
+        value,
+      );
+      if (!copied) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(copied, true, "context-menu Copy should reach the native clipboard");
+
+    const pastedValue = "context menu pasted value";
+    await electronApplication.evaluate(
+      ({ clipboard }, text) => clipboard.writeText(text),
+      pastedValue,
+    );
+    await input.evaluate((element) => {
+      const control = element as typeof element & {
+        focus(): void;
+        select(): void;
+      };
+      control.focus();
+      control.select();
+    });
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    const paste = menu.getByRole("menuitem", { name: "Paste", exact: true });
+    assert.notEqual(await paste.getAttribute("aria-disabled"), "true");
+    await paste.click();
+    await menu.waitFor({ state: "hidden" });
+    const pasteDeadline = Date.now() + 5_000;
+    let pasted = false;
+    while (Date.now() < pasteDeadline && !pasted) {
+      pasted = await input.inputValue() === pastedValue;
+      if (!pasted) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(pasted, true, "context-menu Paste should replace the selected input value");
+
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    const undo = menu.getByRole("menuitem", { name: "Undo", exact: true });
+    assert.notEqual(await undo.getAttribute("aria-disabled"), "true");
+    await undo.click();
+    await menu.waitFor({ state: "hidden" });
+    const undoDeadline = Date.now() + 5_000;
+    let undone = false;
+    while (Date.now() < undoDeadline && !undone) {
+      undone = await input.inputValue() === value;
+      if (!undone) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(undone, true, "context-menu Undo should restore the previous input value");
+
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    const redo = menu.getByRole("menuitem", { name: "Redo", exact: true });
+    assert.notEqual(await redo.getAttribute("aria-disabled"), "true");
+    await redo.click();
+    await menu.waitFor({ state: "hidden" });
+    const redoDeadline = Date.now() + 5_000;
+    let redone = false;
+    while (Date.now() < redoDeadline && !redone) {
+      redone = await input.inputValue() === pastedValue;
+      if (!redone) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(redone, true, "context-menu Redo should restore the pasted input value");
+
+    await electronApplication.evaluate(
+      ({ clipboard }) => clipboard.writeText("clipboard-before-context-menu-cut"),
+    );
+    await input.evaluate((element) => {
+      const control = element as typeof element & {
+        focus(): void;
+        select(): void;
+      };
+      control.focus();
+      control.select();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await readSelection(), {
+      focused: true,
+      start: 0,
+      end: pastedValue.length,
+    });
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    assert.deepEqual(await readSelection(), {
+      focused: false,
+      start: 0,
+      end: pastedValue.length,
+    });
+    const cut = menu.getByRole("menuitem", { name: "Cut", exact: true });
+    assert.notEqual(await cut.getAttribute("aria-disabled"), "true");
+    await cut.click();
+    await menu.waitFor({ state: "hidden" });
+    const cutDeadline = Date.now() + 5_000;
+    let cutInputCleared = false;
+    let cutCopied = false;
+    while (Date.now() < cutDeadline && (!cutInputCleared || !cutCopied)) {
+      cutInputCleared = await input.inputValue() === "";
+      cutCopied = await electronApplication.evaluate(
+        ({ clipboard }, expected) => clipboard.readText() === expected,
+        pastedValue,
+      );
+      if (!cutInputCleared || !cutCopied) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(cutCopied, true, "context-menu Cut should copy the selection");
+    assert.equal(cutInputCleared, true, "context-menu Cut should remove the selection");
+
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    const undoCut = menu.getByRole("menuitem", { name: "Undo", exact: true });
+    assert.notEqual(await undoCut.getAttribute("aria-disabled"), "true");
+    await undoCut.click();
+    await menu.waitFor({ state: "hidden" });
+    const undoCutDeadline = Date.now() + 5_000;
+    let cutUndone = false;
+    while (Date.now() < undoCutDeadline && !cutUndone) {
+      cutUndone = await input.inputValue() === pastedValue;
+      if (!cutUndone) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(cutUndone, true, "context-menu Cut should remain in Chromium's undo history");
+
+    const unicodeValue = "A😀B";
+    await input.fill(unicodeValue);
+    await input.evaluate((element) => {
+      const control = element as typeof element & {
+        focus(): void;
+        setSelectionRange(start: number, end: number): void;
+      };
+      control.focus();
+      control.select();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    const deleteSelection = menu.getByRole("menuitem", { name: "Delete", exact: true });
+    assert.notEqual(await deleteSelection.getAttribute("aria-disabled"), "true");
+    await deleteSelection.click();
+    await menu.waitFor({ state: "hidden" });
+    const deleteDeadline = Date.now() + 5_000;
+    let unicodeDeleted = false;
+    while (Date.now() < deleteDeadline && !unicodeDeleted) {
+      unicodeDeleted = await input.inputValue() === "";
+      if (!unicodeDeleted) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(
+      unicodeDeleted,
+      true,
+      `context-menu Delete should remove selected Unicode text; observed ${JSON.stringify({
+        selection: await readSelection(),
+        value: await input.inputValue(),
+      })}`,
+    );
+
+    await input.click({ button: "right", position: { x: 24, y: 8 } });
+    await menu.waitFor();
+    const undoDelete = menu.getByRole("menuitem", { name: "Undo", exact: true });
+    assert.notEqual(await undoDelete.getAttribute("aria-disabled"), "true");
+    await undoDelete.click();
+    await menu.waitFor({ state: "hidden" });
+    const undoDeleteDeadline = Date.now() + 5_000;
+    let deleteUndone = false;
+    while (Date.now() < undoDeleteDeadline && !deleteUndone) {
+      deleteUndone = await input.inputValue() === unicodeValue;
+      if (!deleteUndone) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(deleteUndone, true, "context-menu Delete should remain in Chromium's undo history");
+  } finally {
+    await electronApplication.evaluate(
+      ({ clipboard }, text) => clipboard.writeText(text),
+      originalClipboardText,
+    );
+  }
+
+  await dialog.getByRole("button", { name: "Cancel import" }).click();
+}
 
 async function verifyCloudDeploymentWindow(
   electronApplication: ElectronApplication,
@@ -695,6 +960,7 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
+      applicationContextMenu: object;
       sliver: object;
       process?: unknown;
       require?: unknown;
@@ -706,6 +972,8 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
       externalFetchBlocked = true;
     }
     return {
+      contextMenuApiFrozen: Object.isFrozen(browserGlobal.applicationContextMenu),
+      contextMenuApiKeys: Object.keys(browserGlobal.applicationContextMenu).sort(),
       apiFrozen: Object.isFrozen(browserGlobal.sliver),
       apiKeys: Object.keys(browserGlobal.sliver).sort(),
       externalFetchBlocked,
@@ -714,6 +982,8 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
     };
   });
   assert.deepEqual(rendererState.apiKeys, expectedApiKeys);
+  assert.deepEqual(rendererState.contextMenuApiKeys, ["executeAction", "onMenuRequested", "setOpen"]);
+  assert.equal(rendererState.contextMenuApiFrozen, true);
   assert.equal(rendererState.apiFrozen, true);
   assert.equal(rendererState.externalFetchBlocked, true);
   assert.equal(rendererState.nodeProcessType, "undefined");
@@ -914,6 +1184,37 @@ async function sendNativeApplicationShortcut(
       return true;
     },
     { key, shift: options.shift ?? false, url: page.url() },
+  );
+  assert.equal(sent, true, `expected a native Electron window for ${page.url()}`);
+}
+
+async function sendNativeContextMenu(
+  electronApplication: ElectronApplication,
+  page: Page,
+  point: { readonly x: number; readonly y: number },
+): Promise<void> {
+  const sent = await electronApplication.evaluate(
+    ({ app, BrowserWindow }, input) => {
+      const window = BrowserWindow.getAllWindows().find(
+        (candidate) => candidate.webContents.getURL() === input.url,
+      );
+      if (!window) return false;
+
+      app.focus({ steal: true });
+      window.show();
+      window.focus();
+      window.webContents.focus();
+      const event = {
+        x: Math.max(0, Math.round(input.x)),
+        y: Math.max(0, Math.round(input.y)),
+        button: "right" as const,
+        clickCount: 1,
+      };
+      window.webContents.sendInputEvent({ type: "mouseDown", ...event });
+      window.webContents.sendInputEvent({ type: "mouseUp", ...event });
+      return true;
+    },
+    { ...point, url: page.url() },
   );
   assert.equal(sent, true, `expected a native Electron window for ${page.url()}`);
 }
@@ -2586,6 +2887,180 @@ async function verifyM3SessionTerminal(
       /^(?:rgba\(0, 0, 0, 0\)|transparent)$/u,
       "Chromium's native contenteditable caret must be transparent",
     );
+
+    const contextMenu = page.getByRole("menu", { name: "Application context menu" });
+    const terminalClipboardText = await electronApplication.evaluate(
+      ({ clipboard }) => clipboard.readText(),
+    );
+    const shellWritesBeforeContextMenu = fakeMethodCount(
+      await readFakeState(electronApplication),
+      "shell.write",
+    );
+    await page.evaluate(() => {
+      const testWindow = globalThis as unknown as {
+        applicationContextMenu: {
+          onMenuRequested(listener: (request: {
+            items: readonly ({ type: "separator" } | { type: "action"; kind: string })[];
+          }) => void): () => void;
+        };
+        __disposeTerminalContextMenuProbe?: () => void;
+        __terminalContextMenuKinds?: readonly string[];
+      };
+      testWindow.__disposeTerminalContextMenuProbe?.();
+      delete testWindow.__terminalContextMenuKinds;
+      testWindow.__disposeTerminalContextMenuProbe =
+        testWindow.applicationContextMenu.onMenuRequested((request) => {
+          testWindow.__terminalContextMenuKinds = request.items.flatMap((item) =>
+            item.type === "action" ? [item.kind] : []
+          );
+        });
+    });
+    try {
+      await contextMenu.waitFor({ state: "hidden" });
+      const terminalCanvasBounds = await terminal.locator("canvas").boundingBox();
+      assert.ok(terminalCanvasBounds, "the Ghostty canvas must have native input bounds");
+      await sendNativeContextMenu(electronApplication, page, {
+        x: terminalCanvasBounds.x + 8,
+        y: terminalCanvasBounds.y + 8,
+      });
+      await page.waitForFunction(() => Array.isArray(
+        (globalThis as unknown as { __terminalContextMenuKinds?: unknown })
+          .__terminalContextMenuKinds,
+      ));
+      assert.deepEqual(
+        await page.evaluate(() => (
+          globalThis as unknown as { __terminalContextMenuKinds?: readonly string[] }
+        ).__terminalContextMenuKinds),
+        ["inspect"],
+        "the main process must mint only Inspect for the actual Ghostty canvas",
+      );
+      await contextMenu.waitFor();
+      const inspectTerminalCanvas = contextMenu.getByRole(
+        "menuitem",
+        { name: "Inspect Element", exact: true },
+      );
+      await inspectTerminalCanvas.waitFor();
+      assert.equal(
+        await inspectTerminalCanvas.count(),
+        1,
+        "the terminal context menu must retain Inspect Element",
+      );
+      for (const label of ["Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All"]) {
+        assert.equal(
+          await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
+          0,
+          `the terminal context menu must not expose ${label}`,
+        );
+      }
+      await page.keyboard.press("Escape");
+      await contextMenu.waitFor({ state: "hidden" });
+
+      await page.evaluate(() => {
+        delete (globalThis as unknown as { __terminalContextMenuKinds?: readonly string[] })
+          .__terminalContextMenuKinds;
+      });
+      // The preload's isolated-world classifier must remain authoritative after
+      // renderer DOM tampering; renderer-side filtering is presentation only.
+      await terminal.evaluate((host) => {
+        host.removeAttribute("data-application-context-menu-policy");
+      });
+      const terminalTextarea = terminal.locator("textarea");
+      const platformSupportsContextMenuKey = await electronApplication.evaluate(
+        () => process.platform !== "darwin",
+      );
+      let originalTerminalTextareaStyle: string | undefined;
+      if (platformSupportsContextMenuKey) {
+        await terminalTextarea.evaluate((element) => element.focus());
+        await page.keyboard.press("Shift+F10");
+      } else {
+        originalTerminalTextareaStyle = await terminalTextarea.evaluate((element) => {
+          const originalStyle = element.style.cssText;
+          const bounds = element.parentElement?.getBoundingClientRect();
+          element.style.position = "fixed";
+          element.style.left = `${(bounds?.left ?? 0) + 8}px`;
+          element.style.top = `${(bounds?.top ?? 0) + 8}px`;
+          element.style.width = "8px";
+          element.style.height = "8px";
+          element.style.clipPath = "none";
+          element.style.pointerEvents = "auto";
+          element.style.zIndex = "2147483647";
+          element.focus();
+          return originalStyle;
+        });
+        const terminalTextareaBounds = await terminalTextarea.boundingBox();
+        assert.ok(terminalTextareaBounds, "the Ghostty textarea must have native input bounds");
+        await sendNativeContextMenu(electronApplication, page, {
+          x: terminalTextareaBounds.x + terminalTextareaBounds.width / 2,
+          y: terminalTextareaBounds.y + terminalTextareaBounds.height / 2,
+        });
+      }
+      await page.waitForFunction(() => Array.isArray(
+        (globalThis as unknown as { __terminalContextMenuKinds?: unknown })
+          .__terminalContextMenuKinds,
+      ));
+      assert.deepEqual(
+        await page.evaluate(() => (
+          globalThis as unknown as { __terminalContextMenuKinds?: readonly string[] }
+        ).__terminalContextMenuKinds),
+        ["inspect"],
+        "the main process must mint only Inspect after the renderer policy marker is removed",
+      );
+      await contextMenu.waitFor();
+      const inspectTerminalTextarea = contextMenu.getByRole(
+        "menuitem",
+        { name: "Inspect Element", exact: true },
+      );
+      await inspectTerminalTextarea.waitFor();
+      assert.equal(
+        await inspectTerminalTextarea.count(),
+        1,
+        "the textarea-targeted terminal context menu must retain Inspect Element",
+      );
+      for (const label of ["Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All"]) {
+        assert.equal(
+          await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
+          0,
+          `the textarea-targeted terminal context menu must not expose ${label}`,
+        );
+      }
+      await page.keyboard.press("Escape");
+      await contextMenu.waitFor({ state: "hidden" });
+      if (originalTerminalTextareaStyle !== undefined) {
+        await terminalTextarea.evaluate((element, originalStyle) => {
+          element.style.cssText = originalStyle;
+        }, originalTerminalTextareaStyle);
+      }
+      assert.equal(
+        await electronApplication.evaluate(
+          ({ clipboard }, expected) => clipboard.readText() === expected,
+          terminalClipboardText,
+        ),
+        true,
+        "opening and dismissing the terminal context menu must not change the clipboard",
+      );
+      assert.equal(
+        fakeMethodCount(await readFakeState(electronApplication), "shell.write"),
+        shellWritesBeforeContextMenu,
+        "opening and dismissing the terminal context menu must not write to the PTY",
+      );
+    } finally {
+      await page.evaluate(() => {
+        const testWindow = globalThis as unknown as {
+          __disposeTerminalContextMenuProbe?: () => void;
+          __terminalContextMenuKinds?: readonly string[];
+        };
+        testWindow.__disposeTerminalContextMenuProbe?.();
+        delete testWindow.__disposeTerminalContextMenuProbe;
+        delete testWindow.__terminalContextMenuKinds;
+      });
+      await terminal.evaluate((host) => {
+        host.setAttribute("data-application-context-menu-policy", "inspect-only");
+      });
+      await electronApplication.evaluate(
+        ({ clipboard }, text) => clipboard.writeText(text),
+        terminalClipboardText,
+      );
+    }
     await waitForNonZeroTerminalMetric(page, "Bytes in");
 
     const mountedManagedShells = page.locator("#session-shells-heading");

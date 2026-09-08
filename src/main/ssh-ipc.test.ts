@@ -140,9 +140,9 @@ describe("SSH IPC boundary", () => {
     };
     expect(services.sessions.claim).toHaveBeenCalledExactlyOnceWith(owner);
     expect(services.sessions.listTargets).toHaveBeenCalledExactlyOnceWith(owner);
-    expect(services.sessions.openTarget).toHaveBeenCalledExactlyOnceWith(DEPLOYMENT_ID, owner);
+    expect(services.sessions.createTarget).toHaveBeenCalledExactlyOnceWith(DEPLOYMENT_ID, owner);
     expect(services.sessions.reattachTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
-    expect(services.sessions.approveHostKey).toHaveBeenCalledExactlyOnceWith(REVIEW_TOKEN, owner);
+    expect(services.sessions.approveNewHostKey).toHaveBeenCalledExactlyOnceWith(REVIEW_TOKEN, owner);
     expect(services.sessions.closeTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
     expect(services.sessions.selectTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
     expect(services.getTerminalRuntime).toHaveBeenCalledExactlyOnceWith();
@@ -209,9 +209,9 @@ describe("SSH IPC boundary", () => {
     }
     expect(services.sessions.claim).not.toHaveBeenCalled();
     expect(services.sessions.listTargets).not.toHaveBeenCalled();
-    expect(services.sessions.openTarget).not.toHaveBeenCalled();
+    expect(services.sessions.createTarget).not.toHaveBeenCalled();
     expect(services.sessions.reattachTab).not.toHaveBeenCalled();
-    expect(services.sessions.approveHostKey).not.toHaveBeenCalled();
+    expect(services.sessions.approveNewHostKey).not.toHaveBeenCalled();
     expect(services.sessions.closeTab).not.toHaveBeenCalled();
     expect(services.sessions.selectTab).not.toHaveBeenCalled();
     expect(services.getTerminalRuntime).not.toHaveBeenCalled();
@@ -339,12 +339,12 @@ function servicesMock(overrides: Partial<SshSessionController> = {}): SshIpcServ
       value: { kind: "ssh" as const, shortcutModifier: "Command" as const, tabs: [context], activeTabId: TAB_ID },
     })),
     listTargets: vi.fn(async () => ({ ok: true as const, value: [TARGET] })),
-    openTarget: vi.fn(async () => ({
+    createTarget: vi.fn(async () => ({
       ok: true as const,
       value: { status: "opened" as const, tabId: TAB_ID, created: true, context },
     })),
     reattachTab: vi.fn(async () => ({ ok: true as const, value: context })),
-    approveHostKey: vi.fn(async () => ({
+    approveNewHostKey: vi.fn(async () => ({
       ok: true as const,
       value: { status: "opened" as const, tabId: TAB_ID, created: true, context },
     })),

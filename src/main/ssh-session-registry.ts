@@ -112,9 +112,38 @@ export class SshSessionRegistry {
     deploymentId: string,
     owner?: ConsoleOwnerIdentity,
   ): Promise<OperationResult<SshOpenTabResult>> {
-    return this.#serialize(async () => {
-      this.#assertActive();
-      if (owner) this.#assertOwner(owner);
+    return this.#serialize(() => this.#startTarget(deploymentId, owner, true));
+  }
+
+  createTarget(
+    deploymentId: string,
+    owner: ConsoleOwnerIdentity,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    return this.#serialize(() => this.#startTarget(deploymentId, owner, false));
+  }
+
+  approveHostKey(
+    token: string,
+    owner?: ConsoleOwnerIdentity,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    return this.#serialize(() => this.#approveHostKey(token, owner, true));
+  }
+
+  approveNewHostKey(
+    token: string,
+    owner: ConsoleOwnerIdentity,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    return this.#serialize(() => this.#approveHostKey(token, owner, false));
+  }
+
+  async #startTarget(
+    deploymentId: string,
+    owner: ConsoleOwnerIdentity | undefined,
+    reuseExisting: boolean,
+  ): Promise<OperationResult<SshOpenTabResult>> {
+    this.#assertActive();
+    if (owner) this.#assertOwner(owner);
+    if (reuseExisting) {
       const existing = [...this.#sessions.values()].find(
         ({ target }) => target.deploymentId === deploymentId,
       );
@@ -138,37 +167,38 @@ export class SshSessionRegistry {
           }),
         };
       }
-      if (this.#sessions.size >= SSH_MAX_TABS_PER_WINDOW) {
-        return { ok: false, error: `SSH windows support up to ${SSH_MAX_TABS_PER_WINDOW} sessions` };
-      }
-      const started = await this.#source.startSshSession(deploymentId);
-      if (!started.ok || !started.value) {
-        return { ok: false, error: started.error ?? "The SSH session could not be started" };
-      }
-      if (isHostKeyReview(started.value)) {
-        return {
-          ok: true,
-          value: Object.freeze({ status: "host-key-review", review: started.value }),
-        };
-      }
-      return await this.#adoptStartedSession(started.value, owner ?? this.#owner);
-    });
+    }
+    if (this.#sessions.size >= SSH_MAX_TABS_PER_WINDOW) {
+      return { ok: false, error: `SSH windows support up to ${SSH_MAX_TABS_PER_WINDOW} sessions` };
+    }
+    const started = await this.#source.startSshSession(deploymentId);
+    if (!started.ok || !started.value) {
+      return { ok: false, error: started.error ?? "The SSH session could not be started" };
+    }
+    if (isHostKeyReview(started.value)) {
+      return {
+        ok: true,
+        value: Object.freeze({ status: "host-key-review", review: started.value }),
+      };
+    }
+    return await this.#adoptStartedSession(started.value, owner ?? this.#owner);
   }
 
-  approveHostKey(
+  async #approveHostKey(
     token: string,
-    owner?: ConsoleOwnerIdentity,
+    owner: ConsoleOwnerIdentity | undefined,
+    reuseExisting: boolean,
   ): Promise<OperationResult<SshOpenTabResult>> {
-    return this.#serialize(async () => {
-      this.#assertActive();
-      if (owner) this.#assertOwner(owner);
-      if (this.#sessions.size >= SSH_MAX_TABS_PER_WINDOW) {
-        return { ok: false, error: `SSH windows support up to ${SSH_MAX_TABS_PER_WINDOW} sessions` };
-      }
-      const started = await this.#source.approveSshHostKey(token);
-      if (!started.ok || !started.value) {
-        return { ok: false, error: started.error ?? "The SSH host key could not be approved" };
-      }
+    this.#assertActive();
+    if (owner) this.#assertOwner(owner);
+    if (this.#sessions.size >= SSH_MAX_TABS_PER_WINDOW) {
+      return { ok: false, error: `SSH windows support up to ${SSH_MAX_TABS_PER_WINDOW} sessions` };
+    }
+    const started = await this.#source.approveSshHostKey(token);
+    if (!started.ok || !started.value) {
+      return { ok: false, error: started.error ?? "The SSH host key could not be approved" };
+    }
+    if (reuseExisting) {
       const existing = [...this.#sessions.values()].find(
         ({ target }) => target.deploymentId === started.value!.target.deploymentId,
       );
@@ -180,8 +210,8 @@ export class SshSessionRegistry {
           value: Object.freeze({ status: "opened", tabId: existing.tabId, created: false }),
         };
       }
-      return await this.#adoptStartedSession(started.value, owner ?? this.#owner);
-    });
+    }
+    return await this.#adoptStartedSession(started.value, owner ?? this.#owner);
   }
 
   async #adoptStartedSession(

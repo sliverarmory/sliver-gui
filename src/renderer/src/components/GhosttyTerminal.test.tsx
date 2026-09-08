@@ -256,7 +256,8 @@ describe("GhosttyTerminal", () => {
     expect(paste.defaultPrevented).toBe(true);
     const contextMenu = createEvent.contextMenu(host);
     fireEvent(host, contextMenu);
-    expect(contextMenu.defaultPrevented).toBe(true);
+    expect(contextMenu.defaultPrevented).toBe(false);
+    expect(host).toHaveAttribute("data-application-context-menu-policy", "inspect-only");
   });
 
   it("classifies synchronous terminal replies separately and enforces a response budget", async () => {

@@ -1,17 +1,14 @@
 // @vitest-environment node
 
-import type { ContextMenuParams, MenuItem, MenuItemConstructorOptions } from "electron";
+import type { MenuItem, MenuItemConstructorOptions } from "electron";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   buildApplicationMenuTemplate,
-  buildContextMenuTemplate,
   commandPaletteShortcutDispositionForInput,
   consoleTabShortcutIndexForInput,
   isConsoleNewTabShortcutInput,
-  isSafeExternalWebUrl,
   serverRefreshShortcutDispositionForInput,
-  type ContextMenuActions,
 } from "./application-menus.js";
 
 const shortcutInput = (overrides: Partial<Parameters<typeof consoleTabShortcutIndexForInput>[1]> = {}) => ({
@@ -573,94 +570,6 @@ describe("application menu templates", () => {
   });
 });
 
-describe("context menu templates", () => {
-  it("offers enabled editing actions, spelling suggestions, and inspection", () => {
-    const actions = contextActions();
-    const template = buildContextMenuTemplate(contextParams({
-      isEditable: true,
-      misspelledWord: "teh",
-      dictionarySuggestions: ["the", "tech"],
-      editFlags: editFlags({
-        canUndo: true,
-        canCopy: true,
-        canPaste: true,
-        canSelectAll: true,
-      }),
-      x: 12,
-      y: 34,
-    }), actions);
-
-    expect(itemLabels(template)).toEqual([
-      "the",
-      "tech",
-      "undo",
-      "redo",
-      "cut",
-      "copy",
-      "paste",
-      "pasteAndMatchStyle",
-      "delete",
-      "selectAll",
-      "Inspect Element",
-    ]);
-    expect(template.find((item) => item.role === "undo")?.enabled).toBe(true);
-    expect(template.find((item) => item.role === "redo")?.enabled).toBe(false);
-    clickItem(template.find((item) => item.label === "the"));
-    clickItem(template.find((item) => item.label === "Inspect Element"));
-    expect(actions.replaceMisspelling).toHaveBeenCalledWith("the");
-    expect(actions.inspectElement).toHaveBeenCalledWith(12, 34);
-  });
-
-  it("adds selection, safe-link, image, and inspect actions contextually", () => {
-    const actions = contextActions();
-    const template = buildContextMenuTemplate(contextParams({
-      selectionText: "selected",
-      linkURL: "https://sliver.sh/docs",
-      mediaType: "image",
-      hasImageContents: true,
-      editFlags: editFlags({ canCopy: true, canSelectAll: true }),
-      x: 8,
-      y: 9,
-    }), actions);
-
-    expect(itemLabels(template)).toEqual([
-      "copy",
-      "selectAll",
-      "Open Link in Browser",
-      "Copy Link Address",
-      "Copy Image",
-      "Inspect Element",
-    ]);
-    clickItem(template.find((item) => item.label === "Open Link in Browser"));
-    clickItem(template.find((item) => item.label === "Copy Link Address"));
-    clickItem(template.find((item) => item.label === "Copy Image"));
-    expect(actions.openExternal).toHaveBeenCalledWith("https://sliver.sh/docs");
-    expect(actions.copyText).toHaveBeenCalledWith("https://sliver.sh/docs");
-    expect(actions.copyImageAt).toHaveBeenCalledWith(8, 9);
-  });
-
-  it("never opens unsafe link schemes but still permits copying their address", () => {
-    const actions = contextActions();
-    const template = buildContextMenuTemplate(contextParams({ linkURL: "javascript:alert(1)" }), actions);
-
-    expect(itemLabels(template)).toEqual(["selectAll", "Copy Link Address", "Inspect Element"]);
-    expect(template).not.toContainEqual(expect.objectContaining({ label: "Open Link in Browser" }));
-  });
-});
-
-describe("external context-menu URLs", () => {
-  it.each([
-    ["https://sliver.sh/docs", true],
-    ["http://127.0.0.1:8080/", true],
-    ["https://user:secret@example.com/", false],
-    ["file:///etc/passwd", false],
-    ["javascript:alert(1)", false],
-    ["not a url", false],
-  ])("classifies %s", (value, expected) => {
-    expect(isSafeExternalWebUrl(value)).toBe(expected);
-  });
-});
-
 function menuItems(
   template: readonly MenuItemConstructorOptions[],
   label: string,
@@ -694,74 +603,4 @@ function itemLabels(template: readonly MenuItemConstructorOptions[]): string[] {
 function clickItem(item: MenuItemConstructorOptions | undefined): void {
   if (!item?.click) throw new Error("Expected a clickable menu item");
   item.click({} as MenuItem, undefined, {} as Electron.KeyboardEvent);
-}
-
-function contextActions() {
-  return {
-    copyImageAt: vi.fn<(x: number, y: number) => void>(),
-    copyText: vi.fn<(text: string) => void>(),
-    inspectElement: vi.fn<(x: number, y: number) => void>(),
-    openExternal: vi.fn<(url: string) => void>(),
-    replaceMisspelling: vi.fn<(text: string) => void>(),
-  } satisfies ContextMenuActions;
-}
-
-function contextParams(overrides: Partial<ContextMenuParams> = {}): ContextMenuParams {
-  return {
-    x: 0,
-    y: 0,
-    frame: null,
-    linkURL: "",
-    linkText: "",
-    pageURL: "file:///renderer/index.html",
-    frameURL: "file:///renderer/index.html",
-    srcURL: "",
-    mediaType: "none",
-    hasImageContents: false,
-    isEditable: false,
-    selectionText: "",
-    titleText: "",
-    altText: "",
-    suggestedFilename: "",
-    selectionRect: { x: 0, y: 0, width: 0, height: 0 },
-    selectionStartOffset: 0,
-    referrerPolicy: { policy: "default", url: "" },
-    misspelledWord: "",
-    dictionarySuggestions: [],
-    frameCharset: "UTF-8",
-    formControlType: "none",
-    spellcheckEnabled: false,
-    menuSourceType: "mouse",
-    mediaFlags: {
-      inError: false,
-      isPaused: false,
-      isMuted: false,
-      hasAudio: false,
-      isLooping: false,
-      isControlsVisible: false,
-      canToggleControls: false,
-      canPrint: false,
-      canSave: false,
-      canShowPictureInPicture: false,
-      isShowingPictureInPicture: false,
-      canRotate: false,
-      canLoop: false,
-    },
-    editFlags: editFlags(),
-    ...overrides,
-  };
-}
-
-function editFlags(overrides: Partial<ContextMenuParams["editFlags"]> = {}): ContextMenuParams["editFlags"] {
-  return {
-    canUndo: false,
-    canRedo: false,
-    canCut: false,
-    canCopy: false,
-    canPaste: false,
-    canDelete: false,
-    canSelectAll: false,
-    canEditRichly: false,
-    ...overrides,
-  };
 }

@@ -1,4 +1,4 @@
-import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
+import type { MenuItemConstructorOptions } from "electron";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import {
   isCommandPaletteShortcut,
@@ -101,14 +101,6 @@ export function serverRefreshShortcutDispositionForInput(
     input.meta
   ) return undefined;
   return input.isAutoRepeat ? "suppress" : "refresh";
-}
-
-export interface ContextMenuActions {
-  readonly copyImageAt: (x: number, y: number) => void;
-  readonly copyText: (text: string) => void;
-  readonly inspectElement: (x: number, y: number) => void;
-  readonly openExternal: (url: string) => void;
-  readonly replaceMisspelling: (text: string) => void;
 }
 
 export function consoleTabShortcutIndexForInput(
@@ -481,87 +473,4 @@ function architectureLabel(value: string): string {
 
 function architectureOrder(value: string): number {
   return ["amd64", "arm64", "386"].indexOf(value) + 1 || 100;
-}
-
-export function buildContextMenuTemplate(
-  params: ContextMenuParams,
-  actions: ContextMenuActions,
-): MenuItemConstructorOptions[] {
-  const groups: MenuItemConstructorOptions[][] = [];
-
-  if (params.isEditable && params.misspelledWord) {
-    const suggestions = params.dictionarySuggestions.slice(0, 5);
-    groups.push(suggestions.length > 0
-      ? suggestions.map((suggestion) => ({
-          label: suggestion,
-          click: () => actions.replaceMisspelling(suggestion),
-        }))
-      : [{ label: "No Spelling Suggestions", enabled: false }]);
-  }
-
-  if (params.isEditable) {
-    groups.push([
-      { role: "undo", enabled: params.editFlags.canUndo },
-      { role: "redo", enabled: params.editFlags.canRedo },
-      { type: "separator" },
-      { role: "cut", enabled: params.editFlags.canCut },
-      { role: "copy", enabled: params.editFlags.canCopy },
-      { role: "paste", enabled: params.editFlags.canPaste },
-      { role: "pasteAndMatchStyle", enabled: params.editFlags.canPaste },
-      { role: "delete", enabled: params.editFlags.canDelete },
-      { type: "separator" },
-      { role: "selectAll", enabled: params.editFlags.canSelectAll },
-    ]);
-  } else if (params.selectionText.length > 0) {
-    groups.push([
-      { role: "copy", enabled: params.editFlags.canCopy },
-      { role: "selectAll", enabled: params.editFlags.canSelectAll },
-    ]);
-  } else {
-    groups.push([{ role: "selectAll", enabled: params.editFlags.canSelectAll }]);
-  }
-
-  if (params.linkURL) {
-    groups.push([
-      ...(isSafeExternalWebUrl(params.linkURL)
-        ? [{ label: "Open Link in Browser", click: () => actions.openExternal(params.linkURL) }]
-        : []),
-      { label: "Copy Link Address", click: () => actions.copyText(params.linkURL) },
-    ]);
-  }
-
-  if (params.mediaType === "image" && params.hasImageContents) {
-    groups.push([{
-      label: "Copy Image",
-      click: () => actions.copyImageAt(params.x, params.y),
-    }]);
-  }
-
-  groups.push([{
-    label: "Inspect Element",
-    click: () => actions.inspectElement(params.x, params.y),
-  }]);
-
-  return joinMenuGroups(groups);
-}
-
-export function isSafeExternalWebUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (url.protocol === "https:" || url.protocol === "http:") &&
-      url.username === "" &&
-      url.password === "";
-  } catch {
-    return false;
-  }
-}
-
-function joinMenuGroups(groups: readonly MenuItemConstructorOptions[][]): MenuItemConstructorOptions[] {
-  const template: MenuItemConstructorOptions[] = [];
-  for (const group of groups) {
-    if (group.length === 0) continue;
-    if (template.length > 0) template.push({ type: "separator" });
-    template.push(...group);
-  }
-  return template;
 }

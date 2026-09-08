@@ -10,6 +10,10 @@ import {
 } from "../shared/contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
+import {
+  APPLICATION_CONTEXT_MENU_IPC,
+  type ApplicationContextMenuAPI,
+} from "../shared/application-context-menu-contracts.js";
 
 type InvokeArgumentsByMethod = {
   [Method in keyof typeof IPC_INVOKE]: IpcInvokeArgs<(typeof IPC_INVOKE)[Method]>;
@@ -122,6 +126,7 @@ const invokeArguments = {
 const electronMocks = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn<(name: string, api: SliverDesktopAPI) => void>(),
   invoke: vi.fn((channel: string, ...args: unknown[]) => ({ channel, args })),
+  send: vi.fn(),
   postMessage: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
@@ -131,6 +136,7 @@ vi.mock("electron", () => ({
   contextBridge: { exposeInMainWorld: electronMocks.exposeInMainWorld },
   ipcRenderer: {
     invoke: electronMocks.invoke,
+    send: electronMocks.send,
     postMessage: electronMocks.postMessage,
     on: electronMocks.on,
     removeListener: electronMocks.removeListener,
@@ -149,14 +155,32 @@ class TestMessageChannel {
 }
 
 const windowPostMessage = vi.fn();
+const documentAddEventListener = vi.fn();
+const documentQuerySelectorAll = vi.fn(() => []);
+const mutationObserverCallbacks: Array<(records: readonly Record<string, unknown>[]) => void> = [];
+const mutationObserverObserve = vi.fn();
+class TestMutationObserver {
+  public constructor(callback: (records: readonly Record<string, unknown>[]) => void) {
+    mutationObserverCallbacks.push(callback);
+  }
+
+  public observe(target: unknown, options: unknown): void {
+    mutationObserverObserve(target, options);
+  }
+}
 vi.stubGlobal("MessageChannel", TestMessageChannel);
+vi.stubGlobal("MutationObserver", TestMutationObserver);
 vi.stubGlobal("window", { postMessage: windowPostMessage });
+vi.stubGlobal("document", {
+  addEventListener: documentAddEventListener,
+  querySelectorAll: documentQuerySelectorAll,
+});
 
 await import("./index.js");
 
 describe("sandboxed preload bridge", () => {
   it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
-    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledOnce();
+    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(2);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];
     expect(call).toBeDefined();
     if (!call) throw new Error("Expected the preload API to be exposed");
@@ -172,6 +196,112 @@ describe("sandboxed preload bridge", () => {
       2,
       IPC.connectSavedConfig,
       "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2",
+    );
+  });
+
+  it("exposes a frozen capability-only application context-menu bridge", async () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => (
+      name === "applicationContextMenu"
+    ));
+    if (!call) throw new Error("Expected the context-menu bridge to be exposed");
+    const exposed = call[1] as unknown as ApplicationContextMenuAPI;
+    expect(Object.keys(exposed)).toEqual(["onMenuRequested", "executeAction", "setOpen"]);
+    expect(Object.isFrozen(exposed)).toBe(true);
+
+    const requestId = "00000000-0000-4000-8000-000000000001";
+    const actionId = "00000000-0000-4000-8000-000000000002";
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+    const unsubscribe = exposed.onMenuRequested(listener);
+    const registration = electronMocks.on.mock.calls.find(([channel]) => (
+      channel === APPLICATION_CONTEXT_MENU_IPC.menuRequested
+    ));
+    if (!registration) throw new Error("Expected the context-menu event subscription");
+    const handler = registration[1] as (event: unknown, ...payload: unknown[]) => void;
+    handler({}, { v: 1, requestId, x: 12, y: 34, items: [{
+      type: "action",
+      actionId,
+      kind: "inspect",
+      label: "Inspect Element",
+      enabled: true,
+    }] });
+    handler({}, { v: 1, requestId, x: -1, y: 34, items: [] });
+    expect(listener).toHaveBeenCalledOnce();
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+
+    electronMocks.invoke.mockClear();
+    await exposed.executeAction({ requestId, actionId });
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
+      APPLICATION_CONTEXT_MENU_IPC.executeAction,
+      { requestId, actionId },
+    );
+    expect(() => exposed.executeAction({ requestId, actionId: "copy" })).toThrow(
+      /Invalid application context menu action request/u,
+    );
+
+    electronMocks.invoke.mockClear();
+    await exposed.setOpen({ requestId, open: true });
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
+      APPLICATION_CONTEXT_MENU_IPC.setOpen,
+      { requestId, open: true },
+    );
+    expect(() => exposed.setOpen({ requestId, open: 1 as unknown as boolean })).toThrow(
+      /Invalid application context menu visibility request/u,
+    );
+
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
+      APPLICATION_CONTEXT_MENU_IPC.menuRequested,
+      handler,
+    );
+  });
+
+  it("sticks restricted classification across attribute removal and descendant moves", () => {
+    const registration = documentAddEventListener.mock.calls.find(([type]) => type === "contextmenu");
+    if (!registration) throw new Error("Expected the restricted-target capture listener");
+    expect(registration[2]).toBe(true);
+    expect(mutationObserverObserve).toHaveBeenCalledWith(
+      (globalThis as { document?: unknown }).document,
+      expect.objectContaining({ attributes: true, childList: true, subtree: true }),
+    );
+    const handler = registration[1] as (event: { isTrusted: boolean; target: unknown }) => void;
+    const observe = mutationObserverCallbacks[0];
+    if (!observe) throw new Error("Expected the restricted-target mutation observer");
+    let rootPolicy: string | null = "inspect-only";
+    const root = {
+      childNodes: [] as unknown[],
+      getAttribute: () => rootPolicy,
+      parentNode: null,
+    };
+    const textarea = { childNodes: [], parentNode: root as object | null };
+
+    observe([{
+      addedNodes: [],
+      attributeName: "data-application-context-menu-policy",
+      oldValue: null,
+      target: root,
+      type: "attributes",
+    }]);
+    root.childNodes.push(textarea);
+    observe([{ addedNodes: [textarea], target: root, type: "childList" }]);
+    rootPolicy = null;
+    textarea.parentNode = {};
+
+    electronMocks.send.mockClear();
+    handler({ isTrusted: true, target: root });
+    handler({ isTrusted: true, target: textarea });
+    handler({ isTrusted: false, target: textarea });
+    handler({ isTrusted: true, target: {} });
+
+    expect(electronMocks.send).toHaveBeenCalledTimes(2);
+    expect(electronMocks.send).toHaveBeenNthCalledWith(
+      1,
+      APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
+    );
+    expect(electronMocks.send).toHaveBeenNthCalledWith(
+      2,
+      APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
     );
   });
 

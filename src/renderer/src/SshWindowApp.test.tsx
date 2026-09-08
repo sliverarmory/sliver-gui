@@ -97,6 +97,12 @@ const secondTab: SshTabLaunchContext = {
   target: proxmoxTarget,
 };
 
+const secondAwsTab: SshTabLaunchContext = {
+  tabId: "c".repeat(43),
+  attachmentToken: "v".repeat(43),
+  target: awsTarget,
+};
+
 const launchContext: SshWindowLaunchContext = {
   kind: "ssh",
   shortcutModifier: "Command",
@@ -186,9 +192,11 @@ describe("SshWindowApp", () => {
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
     expect(await screen.findByRole("heading", { name: "New SSH Session" })).toBeInTheDocument();
-    expect(screen.getByRole("button", {
-      name: "Switch to test1, ubuntu@44.240.136.251:22",
-    })).toBeEnabled();
+    const existingServerAction = screen.getByRole("button", {
+      name: /Open another SSH session.*test1, ubuntu@44\.240\.136\.251:22/u,
+    });
+    expect(existingServerAction).toBeEnabled();
+    expect(existingServerAction).toHaveTextContent("Open another SSH session");
     expect(screen.getByRole("button", {
       name: "Connect to offline-vm, operator@10.0.0.43:22",
     })).toBeDisabled();
@@ -212,6 +220,76 @@ describe("SshWindowApp", () => {
     expect(firstPanel).toHaveAttribute("inert");
     expect(secondPanel).toHaveAttribute("aria-hidden", "false");
     expect(secondPanel).not.toHaveAttribute("inert");
+    expect(firstTransport.close).not.toHaveBeenCalled();
+    expect(secondTransport.close).not.toHaveBeenCalled();
+  });
+
+  it("opens a second independent tab for a server that already has an SSH session", async () => {
+    const firstTransport = fakeTransport();
+    const secondTransport = fakeTransport();
+    openSshTransport.mockResolvedValueOnce(firstTransport).mockResolvedValueOnce(secondTransport);
+    const api = installAPI({
+      createSshTab: vi.fn(async () => ok<SshOpenTabResult>({
+        status: "opened",
+        tabId: secondAwsTab.tabId,
+        created: true,
+        context: secondAwsTab,
+      })),
+    });
+    const user = userEvent.setup();
+    render(<SshWindowApp />);
+    await screen.findByRole("tab", {
+      name: "test1, ubuntu@44.240.136.251:22, Connected, shortcut Command+1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "New SSH tab" }));
+    const stoppedServerAction = await screen.findByRole("button", {
+      name: "Connect to offline-vm, operator@10.0.0.43:22",
+    });
+    expect(stoppedServerAction).toBeDisabled();
+    await user.click(stoppedServerAction);
+    expect(api.createSshTab).not.toHaveBeenCalled();
+
+    const anotherSessionAction = screen.getByRole("button", {
+      name: /Open another SSH session.*test1, ubuntu@44\.240\.136\.251:22/u,
+    });
+    expect(anotherSessionAction).toBeEnabled();
+    expect(anotherSessionAction).toHaveTextContent("Open another SSH session");
+    await user.click(anotherSessionAction);
+
+    const secondTabButton = await screen.findByRole("tab", {
+      name: "test1, ubuntu@44.240.136.251:22, Connected, shortcut Command+2",
+    });
+    const firstTabButton = screen.getByRole("tab", {
+      name: "test1, ubuntu@44.240.136.251:22, Connected, shortcut Command+1",
+    });
+    expect(firstTabButton).toHaveAttribute("aria-selected", "false");
+    expect(secondTabButton).toHaveAttribute("aria-selected", "true");
+    expect(api.createSshTab).toHaveBeenCalledExactlyOnceWith({ deploymentId: awsTarget.deploymentId });
+    expect(openSshTransport).toHaveBeenNthCalledWith(1, {
+      api,
+      attachmentToken: firstTab.attachmentToken,
+      streamKind: "ssh",
+    });
+    expect(openSshTransport).toHaveBeenNthCalledWith(2, {
+      api,
+      attachmentToken: secondAwsTab.attachmentToken,
+      streamKind: "ssh",
+    });
+    expect(document.querySelectorAll("[data-terminal-mock]")).toHaveLength(2);
+
+    const firstPanel = document.querySelector(`[data-ssh-terminal-tab-id="${firstTab.tabId}"]`);
+    const secondPanel = document.querySelector(`[data-ssh-terminal-tab-id="${secondAwsTab.tabId}"]`);
+    expect(firstPanel).toHaveAttribute("aria-hidden", "true");
+    expect(firstPanel).toHaveAttribute("inert");
+    expect(secondPanel).toHaveAttribute("aria-hidden", "false");
+    expect(secondPanel).not.toHaveAttribute("inert");
+
+    await user.click(firstTabButton);
+    await waitFor(() => expect(firstPanel).toHaveAttribute("aria-hidden", "false"));
+    expect(firstPanel).not.toHaveAttribute("inert");
+    expect(secondPanel).toHaveAttribute("aria-hidden", "true");
+    expect(secondPanel).toHaveAttribute("inert");
     expect(firstTransport.close).not.toHaveBeenCalled();
     expect(secondTransport.close).not.toHaveBeenCalled();
   });
@@ -259,6 +337,111 @@ describe("SshWindowApp", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
+  it("re-checks a consumed host-key approval and continues with the fresh review", async () => {
+    const initialReview: SshHostKeyReview = {
+      token: "r".repeat(43),
+      deploymentId: proxmoxTarget.deploymentId,
+      name: proxmoxTarget.name,
+      host: proxmoxTarget.host,
+      port: proxmoxTarget.port,
+      fingerprint: `SHA256:${"f".repeat(43)}`,
+      expiresAt: "2026-09-07T20:00:00.000Z",
+    };
+    const freshReview: SshHostKeyReview = {
+      ...initialReview,
+      token: "s".repeat(43),
+      fingerprint: `SHA256:${"g".repeat(43)}`,
+      expiresAt: "2026-09-07T20:05:00.000Z",
+    };
+    openSshTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    const createSshTab = vi.fn()
+      .mockResolvedValueOnce(ok<SshOpenTabResult>({ status: "host-key-review", review: initialReview }))
+      .mockResolvedValueOnce(ok<SshOpenTabResult>({ status: "host-key-review", review: freshReview }));
+    const approveSshHostKey = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "The SSH host-key approval expired" })
+      .mockResolvedValueOnce(ok<SshOpenTabResult>({
+        status: "opened",
+        tabId: secondTab.tabId,
+        created: true,
+        context: secondTab,
+      }));
+    installAPI({ createSshTab, approveSshHostKey });
+    const user = userEvent.setup();
+    render(<SshWindowApp />);
+    await screen.findByRole("tab", { name: /test1.*Connected/u });
+
+    await user.click(screen.getByRole("button", { name: "New SSH tab" }));
+    await user.click(await screen.findByRole("button", {
+      name: "Connect to range-vm, operator@10.0.0.42:2222",
+    }));
+    await user.click(await screen.findByRole("button", { name: "Trust & Connect" }));
+
+    const reviewDialog = await screen.findByRole("alertdialog");
+    expect(reviewDialog).toHaveTextContent("The SSH host-key approval expired");
+    expect(screen.getByRole("button", { name: "Re-check Host" })).toBeEnabled();
+    expect(approveSshHostKey).toHaveBeenCalledExactlyOnceWith({ token: initialReview.token });
+
+    await user.click(screen.getByRole("button", { name: "Re-check Host" }));
+
+    await waitFor(() => expect(screen.getByRole("textbox", {
+      name: /fingerprint.*select to copy/u,
+    })).toHaveValue(freshReview.fingerprint));
+    expect(screen.queryByText("The SSH host-key approval expired")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Trust & Connect" })).toBeEnabled();
+    expect(createSshTab).toHaveBeenCalledTimes(2);
+    expect(createSshTab).toHaveBeenNthCalledWith(1, { deploymentId: initialReview.deploymentId });
+    expect(createSshTab).toHaveBeenNthCalledWith(2, { deploymentId: initialReview.deploymentId });
+
+    await user.click(screen.getByRole("button", { name: "Trust & Connect" }));
+
+    expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
+    expect(approveSshHostKey).toHaveBeenNthCalledWith(2, { token: freshReview.token });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("accepts an always-new opened tab directly from a host-key re-check", async () => {
+    const review: SshHostKeyReview = {
+      token: "r".repeat(43),
+      deploymentId: proxmoxTarget.deploymentId,
+      name: proxmoxTarget.name,
+      host: proxmoxTarget.host,
+      port: proxmoxTarget.port,
+      fingerprint: `SHA256:${"f".repeat(43)}`,
+      expiresAt: "2026-09-07T20:00:00.000Z",
+    };
+    openSshTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    const createSshTab = vi.fn()
+      .mockResolvedValueOnce(ok<SshOpenTabResult>({ status: "host-key-review", review }))
+      .mockResolvedValueOnce(ok<SshOpenTabResult>({
+        status: "opened",
+        tabId: secondTab.tabId,
+        created: true,
+        context: secondTab,
+      }));
+    const approveSshHostKey = vi.fn(async () => ({
+      ok: false as const,
+      error: "The SSH host-key approval expired",
+    }));
+    installAPI({ createSshTab, approveSshHostKey });
+    const user = userEvent.setup();
+    render(<SshWindowApp />);
+    await screen.findByRole("tab", { name: /test1.*Connected/u });
+
+    await user.click(screen.getByRole("button", { name: "New SSH tab" }));
+    await user.click(await screen.findByRole("button", {
+      name: "Connect to range-vm, operator@10.0.0.42:2222",
+    }));
+    await user.click(await screen.findByRole("button", { name: "Trust & Connect" }));
+    await user.click(await screen.findByRole("button", { name: "Re-check Host" }));
+
+    expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
+    expect(createSshTab).toHaveBeenCalledTimes(2);
+    expect(createSshTab).toHaveBeenNthCalledWith(2, { deploymentId: review.deploymentId });
+    expect(approveSshHostKey).toHaveBeenCalledExactlyOnceWith({ token: review.token });
+    expect(document.querySelectorAll("[data-terminal-mock]")).toHaveLength(2);
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
   it("adopts main-opened tabs, handles shortcuts, and explicitly closes only the selected session", async () => {
     const firstTransport = fakeTransport();
     const secondTransport = fakeTransport();
@@ -291,6 +474,56 @@ describe("SshWindowApp", () => {
     expect(api.closeSshTab).toHaveBeenCalledExactlyOnceWith({ tabId: secondTab.tabId });
     expect(secondTransport.close).toHaveBeenCalledOnce();
     expect(firstTransport.close).not.toHaveBeenCalled();
+  });
+
+  it("replaces a reused tab attachment only after the fresh transport opens", async () => {
+    const originalTransport = fakeTransport();
+    const replacementTransport = fakeTransport();
+    const replacementOpen = deferred<ReturnType<typeof fakeTransport>>();
+    const replacementContext: SshTabLaunchContext = {
+      ...firstTab,
+      attachmentToken: "z".repeat(43),
+    };
+    openSshTransport
+      .mockResolvedValueOnce(originalTransport)
+      .mockImplementationOnce(() => replacementOpen.promise);
+    const api = installAPI();
+    render(<SshWindowApp />);
+    await screen.findByRole("tab", { name: /test1.*Connected/u });
+
+    act(() => api.listeners.tabOpened?.(replacementContext));
+
+    await waitFor(() => expect(openSshTransport).toHaveBeenCalledTimes(2));
+    expect(openSshTransport).toHaveBeenLastCalledWith({
+      api,
+      attachmentToken: replacementContext.attachmentToken,
+      streamKind: "ssh",
+    });
+    expect(originalTransport.close).not.toHaveBeenCalled();
+
+    await act(async () => {
+      replacementOpen.resolve(replacementTransport);
+      await replacementOpen.promise;
+    });
+
+    await waitFor(() => expect(originalTransport.close).toHaveBeenCalledOnce());
+    expect(replacementTransport.close).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+    const tab = screen.getByRole("tab", {
+      name: "test1, ubuntu@44.240.136.251:22, Connected, shortcut Command+1",
+    });
+    expect(tab).toHaveAttribute("aria-selected", "true");
+
+    const shortcut = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Digit1",
+      key: "1",
+      metaKey: true,
+    });
+    act(() => expect(tab.dispatchEvent(shortcut)).toBe(false));
+    expect(api.selectSshTab).toHaveBeenLastCalledWith({ tabId: firstTab.tabId });
+    expect(tab).toHaveAttribute("aria-selected", "true");
   });
 
   it("opens shared terminal settings from the SSH native menu and applies saved settings", async () => {
@@ -346,33 +579,25 @@ describe("SshWindowApp", () => {
     expect(api.closeSshTab).not.toHaveBeenCalled();
   });
 
-  it("keeps healthy restored tabs usable and can recover a failed persisted attachment", async () => {
+  it("keeps a failed claimed session recoverable and restores that same tab with reattach", async () => {
     const failedOriginal = { ...firstTab, attachmentToken: "v".repeat(43) };
-    const failedRetry = { ...firstTab, attachmentToken: "w".repeat(43) };
     const recovered = { ...firstTab, attachmentToken: "x".repeat(43) };
     const healthyTransport = fakeTransport();
     const recoveredTransport = fakeTransport();
     openSshTransport.mockImplementation(({ attachmentToken }: { attachmentToken: string }) => {
-      if (attachmentToken === failedOriginal.attachmentToken || attachmentToken === failedRetry.attachmentToken) {
-        return Promise.reject(new Error("attachment unavailable"));
-      }
+      if (attachmentToken === failedOriginal.attachmentToken) return Promise.reject(new Error("attachment unavailable"));
       if (attachmentToken === secondTab.attachmentToken) return Promise.resolve(healthyTransport);
       if (attachmentToken === recovered.attachmentToken) return Promise.resolve(recoveredTransport);
       return Promise.reject(new Error("unexpected attachment"));
     });
     const reattachSshTab = vi.fn()
-      .mockResolvedValueOnce(ok(failedRetry))
+      .mockResolvedValueOnce({ ok: false as const, error: "The persisted SSH attachment is unavailable" })
       .mockResolvedValueOnce(ok(recovered));
     const api = installAPI({
       claimSshWindow: vi.fn(async () => ok({
         ...launchContext,
         tabs: [failedOriginal, secondTab],
         activeTabId: failedOriginal.tabId,
-      })),
-      createSshTab: vi.fn(async () => ok<SshOpenTabResult>({
-        status: "opened",
-        tabId: failedOriginal.tabId,
-        created: false,
       })),
       reattachSshTab,
     });
@@ -381,20 +606,58 @@ describe("SshWindowApp", () => {
     render(<SshWindowApp />);
 
     expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /test1/u })).not.toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("1 SSH session could not be restored");
+    const failedTab = screen.getByRole("tab", { name: /test1.*Failed.*Command\+1/u });
+    await user.click(failedTab);
+    expect(screen.getByText(/persisted SSH attachment is unavailable/u)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/u })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Close active SSH tab" })).toBeEnabled();
+    expect(reattachSshTab).toHaveBeenCalledExactlyOnceWith({ tabId: failedOriginal.tabId });
+    expect(api.createSshTab).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "New SSH tab" }));
-    await user.click(await screen.findByRole("button", {
-      name: "Connect to test1, ubuntu@44.240.136.251:22",
-    }));
+    await user.click(screen.getByRole("button", { name: /Retry/u }));
 
-    expect(await screen.findByRole("tab", { name: /test1.*Connected/u })).toBeInTheDocument();
-    expect(api.createSshTab).toHaveBeenCalledWith({ deploymentId: awsTarget.deploymentId });
+    expect(await screen.findByRole("tab", { name: /test1.*Connected.*Command\+1/u })).toBeInTheDocument();
     expect(reattachSshTab).toHaveBeenCalledTimes(2);
-    expect(screen.queryByText(/could not be restored/u)).not.toBeInTheDocument();
+    expect(reattachSshTab).toHaveBeenLastCalledWith({ tabId: failedOriginal.tabId });
+    expect(api.createSshTab).not.toHaveBeenCalled();
+    expect(openSshTransport).toHaveBeenCalledWith({
+      api,
+      attachmentToken: recovered.attachmentToken,
+      streamKind: "ssh",
+    });
+    expect(document.querySelectorAll("[data-terminal-mock]")).toHaveLength(2);
     expect(healthyTransport.close).not.toHaveBeenCalled();
     expect(recoveredTransport.close).not.toHaveBeenCalled();
+  });
+
+  it("explicitly closes a failed claimed session without creating a replacement", async () => {
+    const failedOriginal = { ...firstTab, attachmentToken: "v".repeat(43) };
+    openSshTransport.mockRejectedValue(new Error("attachment unavailable"));
+    const api = installAPI({
+      claimSshWindow: vi.fn(async () => ok({
+        ...launchContext,
+        tabs: [failedOriginal],
+        activeTabId: failedOriginal.tabId,
+      })),
+      reattachSshTab: vi.fn(async () => ({
+        ok: false as const,
+        error: "The persisted SSH attachment is unavailable",
+      })),
+      closeSshTab: vi.fn(async () => ok({ remainingTabs: 0 })),
+    });
+    const user = userEvent.setup();
+
+    render(<SshWindowApp />);
+
+    expect(await screen.findByRole("tab", { name: /test1.*Failed/u })).toBeInTheDocument();
+    const closeButton = screen.getByRole("button", { name: "Close active SSH tab" });
+    expect(closeButton).toBeEnabled();
+    await user.click(closeButton);
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /test1/u })).not.toBeInTheDocument());
+    expect(screen.getByText("No SSH sessions")).toBeInTheDocument();
+    expect(api.closeSshTab).toHaveBeenCalledExactlyOnceWith({ tabId: failedOriginal.tabId });
+    expect(api.createSshTab).not.toHaveBeenCalled();
   });
 
   it("detaches every claimed session if the Ghostty runtime cannot start", async () => {
@@ -450,6 +713,14 @@ function fakeTransport() {
     subscribe: vi.fn(() => vi.fn()),
     subscribeState: vi.fn(() => vi.fn()),
   };
+}
+
+function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((onResolve) => {
+    resolve = onResolve;
+  });
+  return { promise, resolve };
 }
 
 function memoryStorage(): Storage {

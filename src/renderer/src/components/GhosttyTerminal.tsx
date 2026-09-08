@@ -157,7 +157,6 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
 
       host.addEventListener("click", denyModifiedLink, true);
       host.addEventListener("auxclick", denyModifiedLink, true);
-      host.addEventListener("contextmenu", denyNativeTransfer, true);
       host.addEventListener("copy", denyNativeTransfer, true);
       host.addEventListener("cut", denyNativeTransfer, true);
       host.addEventListener("paste", denyNativeTransfer, true);
@@ -357,7 +356,6 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         pendingOutputBytes = 0;
         host.removeEventListener("click", denyModifiedLink, true);
         host.removeEventListener("auxclick", denyModifiedLink, true);
-        host.removeEventListener("contextmenu", denyNativeTransfer, true);
         host.removeEventListener("copy", denyNativeTransfer, true);
         host.removeEventListener("cut", denyNativeTransfer, true);
         host.removeEventListener("paste", denyNativeTransfer, true);
@@ -427,6 +425,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
           aria-busy={terminalState === "loading"}
           aria-label={ariaLabel}
           className="h-full min-h-0 w-full overflow-hidden"
+          data-application-context-menu-policy="inspect-only"
           style={{
             backgroundColor: appearance?.theme?.background ?? "#1e1e1e",
             caretColor: "transparent",

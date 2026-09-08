@@ -56,13 +56,18 @@ const EMPTY_SSH_TAB_KEY = "sliver-ssh-empty";
 
 type SshWindowPhase = "claiming" | "starting" | "ready";
 
-interface ReadySshTab {
+interface SshTab {
   readonly context: SshTabLaunchContext;
-  readonly transport: ConsoleTerminalTransport;
+  readonly transport: ConsoleTerminalTransport | undefined;
   readonly terminalRef: RefObject<GhosttyTerminalHandle | null>;
+  readonly attachmentError: string | undefined;
   readonly exitMessage: string | undefined;
   readonly terminalError: string | undefined;
   readonly actionError: string | undefined;
+}
+
+interface AttachedSshTab extends SshTab {
+  readonly transport: ConsoleTerminalTransport;
 }
 
 let pendingSshLaunchContext: Promise<OperationResult<SshWindowLaunchContext>> | undefined;
@@ -75,11 +80,12 @@ export function SshWindowApp(): React.JSX.Element {
   const [phase, setPhase] = useState<SshWindowPhase>("claiming");
   const [context, setContext] = useState<SshWindowLaunchContext>();
   const [runtime, setRuntime] = useState<TerminalRuntimeAsset>();
-  const [tabs, setTabs] = useState<readonly ReadySshTab[]>([]);
+  const [tabs, setTabs] = useState<readonly SshTab[]>([]);
   const [activeTabId, setActiveTabIdState] = useState<string>();
   const [fatalError, setFatalError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   const [closingTabId, setClosingTabId] = useState<string>();
+  const [retryingTabId, setRetryingTabId] = useState<string>();
   const [openingDeploymentId, setOpeningDeploymentId] = useState<string>();
   const [targets, setTargets] = useState<readonly ManagedSshTarget[]>([]);
   const [isTargetPickerOpen, setIsTargetPickerOpen] = useState(false);
@@ -92,7 +98,7 @@ export function SshWindowApp(): React.JSX.Element {
   const settings = applicationSettings?.settings.terminal ?? localSettings;
   const [settingsDraft, setSettingsDraft] = useState(settings);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const tabsRef = useRef<readonly ReadySshTab[]>([]);
+  const tabsRef = useRef<readonly SshTab[]>([]);
   const activeTabIdRef = useRef<string | undefined>(undefined);
   const settingsRef = useRef(settings);
   const mountedRef = useRef(false);
@@ -102,6 +108,7 @@ export function SshWindowApp(): React.JSX.Element {
   const pendingActiveTabIdRef = useRef<string | undefined>(undefined);
   const pendingPickerRequestRef = useRef(false);
   const closingTabRef = useRef(false);
+  const retryingTabRef = useRef<string | undefined>(undefined);
   const openingTargetRef = useRef(false);
   const approvingHostKeyRef = useRef(false);
 
@@ -111,7 +118,7 @@ export function SshWindowApp(): React.JSX.Element {
   }, []);
 
   const replaceTabs = useCallback(
-    (update: (current: readonly ReadySshTab[]) => readonly ReadySshTab[]): void => {
+    (update: (current: readonly SshTab[]) => readonly SshTab[]): void => {
       setTabs((current) => {
         const next = update(current);
         tabsRef.current = next;
@@ -121,7 +128,7 @@ export function SshWindowApp(): React.JSX.Element {
     [],
   );
 
-  const updateTab = useCallback((tabId: string, update: Partial<ReadySshTab>): void => {
+  const updateTab = useCallback((tabId: string, update: Partial<SshTab>): void => {
     replaceTabs((current) => current.map((tab) => tab.context.tabId === tabId
       ? { ...tab, ...update }
       : tab));
@@ -155,15 +162,15 @@ export function SshWindowApp(): React.JSX.Element {
   const adoptTabContext = useCallback(async (
     tabContext: SshTabLaunchContext,
     makeActive = true,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const existing = tabsRef.current.find(({ context: current }) => current.tabId === tabContext.tabId);
-    if (existing) {
+    if (existing?.context.attachmentToken === tabContext.attachmentToken) {
       if (makeActive) selectTab(tabContext.tabId, false);
-      return;
+      return true;
     }
     if (!api || openingTabIdsRef.current.has(tabContext.tabId)) {
       if (makeActive) pendingActiveTabIdRef.current = tabContext.tabId;
-      return;
+      return false;
     }
 
     openingTabIdsRef.current.add(tabContext.tabId);
@@ -171,24 +178,49 @@ export function SshWindowApp(): React.JSX.Element {
       const tab = await openSshTabWithRecovery(api, tabContext);
       if (!mountedRef.current) {
         tab.transport.close();
-        return;
+        return false;
       }
-      replaceTabs((current) => current.some(({ context: candidate }) =>
-        candidate.tabId === tabContext.tabId) ? current : [...current, tab]);
+      const currentExisting = tabsRef.current.find(({ context: current }) =>
+        current.tabId === tabContext.tabId);
+      if (existing && !currentExisting) {
+        tab.transport.close();
+        return false;
+      }
+      if (currentExisting) {
+        replaceTabs((current) => current.map((candidate) =>
+          candidate.context.tabId === tabContext.tabId ? tab : candidate));
+        currentExisting.transport?.close();
+      } else {
+        replaceTabs((current) => current.some(({ context: candidate }) =>
+          candidate.tabId === tabContext.tabId) ? current : [...current, tab]);
+      }
       setActionError(undefined);
       if (makeActive || pendingActiveTabIdRef.current === tabContext.tabId) {
         pendingActiveTabIdRef.current = undefined;
         setActiveTabId(tabContext.tabId);
         queueMicrotask(() => tab.terminalRef.current?.focus());
       }
+      return true;
     } catch (caught: unknown) {
       if (mountedRef.current) {
-        setActionError(`Could not attach ${tabContext.target.name}: ${errorMessage(caught)}`);
+        const message = errorMessage(caught);
+        const currentExisting = tabsRef.current.some(({ context: current }) =>
+          current.tabId === tabContext.tabId);
+        if (existing && currentExisting) {
+          updateTab(tabContext.tabId, { context: tabContext, attachmentError: message });
+        } else if (!existing) {
+          replaceTabs((current) => current.some(({ context: candidate }) =>
+            candidate.tabId === tabContext.tabId)
+            ? current
+            : [...current, failedSshTab(tabContext, message)]);
+        }
+        if (makeActive && (!existing || currentExisting)) setActiveTabId(tabContext.tabId);
       }
+      return false;
     } finally {
       openingTabIdsRef.current.delete(tabContext.tabId);
     }
-  }, [api, replaceTabs, selectTab, setActiveTabId]);
+  }, [api, replaceTabs, selectTab, setActiveTabId, updateTab]);
 
   const acceptOpenResult = useCallback(async (result: SshOpenTabResult): Promise<void> => {
     if (result.status === "host-key-review") {
@@ -264,14 +296,6 @@ export function SshWindowApp(): React.JSX.Element {
 
   const requestTarget = useCallback(async (deploymentId: string): Promise<void> => {
     if (!api || openingTargetRef.current) return;
-    const existing = tabsRef.current.find(({ context: tabContext }) =>
-      tabContext.target.deploymentId === deploymentId);
-    if (existing) {
-      setIsTargetPickerOpen(false);
-      selectTab(existing.context.tabId);
-      return;
-    }
-
     openingTargetRef.current = true;
     setOpeningDeploymentId(deploymentId);
     setTargetPickerError(undefined);
@@ -290,7 +314,7 @@ export function SshWindowApp(): React.JSX.Element {
       openingTargetRef.current = false;
       if (mountedRef.current) setOpeningDeploymentId(undefined);
     }
-  }, [acceptOpenResult, api, selectTab]);
+  }, [acceptOpenResult, api]);
 
   const approveHostKey = useCallback(async (): Promise<void> => {
     if (!api || !hostKeyReview || approvingHostKeyRef.current) return;
@@ -313,6 +337,52 @@ export function SshWindowApp(): React.JSX.Element {
     }
   }, [acceptOpenResult, api, hostKeyReview]);
 
+  const recheckHostKey = useCallback(async (): Promise<void> => {
+    if (!api || !hostKeyReview || approvingHostKeyRef.current) return;
+    approvingHostKeyRef.current = true;
+    setIsApprovingHostKey(true);
+    setHostKeyReviewError(undefined);
+    try {
+      const result = await api.createSshTab({ deploymentId: hostKeyReview.deploymentId });
+      if (!result.ok || !result.value) {
+        throw new Error(result.error ?? "The SSH host could not be checked again");
+      }
+      if (!mountedRef.current) return;
+      await acceptOpenResult(result.value);
+      if (result.value.status === "opened") setHostKeyReview(undefined);
+    } catch (caught: unknown) {
+      if (mountedRef.current) setHostKeyReviewError(errorMessage(caught));
+    } finally {
+      approvingHostKeyRef.current = false;
+      if (mountedRef.current) setIsApprovingHostKey(false);
+    }
+  }, [acceptOpenResult, api, hostKeyReview]);
+
+  const retryTabAttachment = useCallback(async (tabId: string): Promise<void> => {
+    if (!api || retryingTabRef.current || openingTabIdsRef.current.has(tabId)) return;
+    const tab = tabsRef.current.find(({ context: candidate }) => candidate.tabId === tabId);
+    if (!tab?.attachmentError) return;
+
+    retryingTabRef.current = tabId;
+    setRetryingTabId(tabId);
+    setActionError(undefined);
+    try {
+      const result = await api.reattachSshTab({ tabId });
+      if (!result.ok || !result.value) {
+        throw new Error(result.error ?? "The SSH session could not be reattached");
+      }
+      if (result.value.tabId !== tabId) {
+        throw new Error("The SSH tab identity changed while it was reattaching");
+      }
+      await adoptTabContext(result.value);
+    } catch (caught: unknown) {
+      if (mountedRef.current) updateTab(tabId, { attachmentError: errorMessage(caught) });
+    } finally {
+      retryingTabRef.current = undefined;
+      if (mountedRef.current) setRetryingTabId(undefined);
+    }
+  }, [adoptTabContext, api, updateTab]);
+
   const closeActiveTab = useCallback(async (): Promise<void> => {
     if (!api || closingTabRef.current) return;
     const tabId = activeTabIdRef.current;
@@ -328,7 +398,7 @@ export function SshWindowApp(): React.JSX.Element {
     try {
       const result = await api.closeSshTab({ tabId: tab.context.tabId });
       if (!result.ok) throw new Error(result.error ?? "The SSH tab could not be closed");
-      tab.transport.close();
+      tab.transport?.close();
       const remaining = tabsRef.current.filter(({ context: tabContext }) =>
         tabContext.tabId !== tab.context.tabId);
       tabsRef.current = remaining;
@@ -388,10 +458,11 @@ export function SshWindowApp(): React.JSX.Element {
     }
 
     let mounted = true;
-    let initialTabPromises: readonly Promise<ReadySshTab>[] = [];
+    let initialTabPromises: readonly Promise<AttachedSshTab>[] = [];
     let adoptedInitialTabs = false;
     const detachedTransports = new Set<ConsoleTerminalTransport>();
-    const detachTab = (tab: ReadySshTab): void => {
+    const detachTab = (tab: SshTab): void => {
+      if (!tab.transport) return;
       if (detachedTransports.has(tab.transport)) return;
       detachedTransports.add(tab.transport);
       tab.transport.close();
@@ -415,9 +486,9 @@ export function SshWindowApp(): React.JSX.Element {
           loadSshTerminalRuntime(api),
           Promise.allSettled(initialTabPromises),
         ]);
-        const initialTabs = settledInitialTabs.flatMap((result) =>
-          result.status === "fulfilled" ? [result.value] : []);
-        const failedAttachmentCount = settledInitialTabs.length - initialTabs.length;
+        const initialTabs = settledInitialTabs.map((result, index) => result.status === "fulfilled"
+          ? result.value
+          : failedSshTab(launchContext.tabs[index]!, errorMessage(result.reason)));
         if (!mounted) {
           for (const tab of initialTabs) detachTab(tab);
           return;
@@ -435,11 +506,6 @@ export function SshWindowApp(): React.JSX.Element {
         tabHostReadyRef.current = true;
         setPhase("ready");
         setFatalError(undefined);
-        if (failedAttachmentCount > 0) {
-          setActionError(
-            `${failedAttachmentCount} SSH ${failedAttachmentCount === 1 ? "session" : "sessions"} could not be restored. Choose the server again to retry.`,
-          );
-        }
 
         const pendingContexts = pendingOpenedContextsRef.current.splice(0);
         for (const tabContext of pendingContexts) void adoptTabContext(tabContext);
@@ -594,7 +660,7 @@ export function SshWindowApp(): React.JSX.Element {
             <Tooltip delay={250}>
               <Button
                 aria-label="Close active SSH tab"
-                isDisabled={!activeTab}
+                isDisabled={!activeTab || retryingTabId === activeTabId}
                 isIconOnly
                 isPending={closingTabId === activeTabId}
                 size="sm"
@@ -626,22 +692,48 @@ export function SshWindowApp(): React.JSX.Element {
                   data-ssh-terminal-tab-id={tab.context.tabId}
                   inert={isActive ? undefined : true}
                 >
-                  <GhosttyTerminal
-                    ref={tab.terminalRef}
-                    appearance={appearance}
-                    ariaLabel={`SSH session for ${sshEndpoint(tab.context.target)}`}
-                    className="h-full min-h-0"
-                    transport={tab.transport}
-                    wasmBytes={runtime.bytes}
-                    onClose={(reason) => updateTab(tab.context.tabId, {
-                      exitMessage: reason ?? "SSH session exited",
-                    })}
-                    onError={(terminalError) => {
-                      tab.transport.close();
-                      updateTab(tab.context.tabId, { terminalError: terminalError.message });
-                    }}
-                  />
-                  {message ? (
+                  {tab.transport ? (
+                    <GhosttyTerminal
+                      ref={tab.terminalRef}
+                      appearance={appearance}
+                      ariaLabel={`SSH session for ${sshEndpoint(tab.context.target)}`}
+                      className="h-full min-h-0"
+                      transport={tab.transport}
+                      wasmBytes={runtime.bytes}
+                      onClose={(reason) => {
+                        const current = tabsRef.current.find(({ context: candidate }) =>
+                          candidate.tabId === tab.context.tabId);
+                        if (current?.transport !== tab.transport) return;
+                        updateTab(tab.context.tabId, {
+                          exitMessage: reason ?? "SSH session exited",
+                        });
+                      }}
+                      onError={(terminalError) => {
+                        const current = tabsRef.current.find(({ context: candidate }) =>
+                          candidate.tabId === tab.context.tabId);
+                        if (current?.transport !== tab.transport) return;
+                        tab.transport?.close();
+                        updateTab(tab.context.tabId, { terminalError: terminalError.message });
+                      }}
+                    />
+                  ) : null}
+                  {tab.attachmentError ? (
+                    <SshTabNotice
+                      action={(
+                        <Button
+                          isDisabled={closingTabId === tab.context.tabId}
+                          isPending={retryingTabId === tab.context.tabId}
+                          size="sm"
+                          variant="secondary"
+                          onPress={() => void retryTabAttachment(tab.context.tabId)}
+                        >
+                          Retry
+                        </Button>
+                      )}
+                      message={tab.attachmentError}
+                      title="SSH session could not be restored"
+                    />
+                  ) : message ? (
                     <SshTabNotice
                       message={message}
                       title={tab.terminalError
@@ -699,7 +791,8 @@ export function SshWindowApp(): React.JSX.Element {
       </Tabs>
 
       <SshTargetPicker
-        activeDeploymentIds={new Set(tabs.map(({ context: tabContext }) => tabContext.target.deploymentId))}
+        activeDeploymentIds={new Set(tabs.map(({ context: tabContext }) =>
+          tabContext.target.deploymentId))}
         error={targetPickerError}
         isLoading={isLoadingTargets}
         isOpen={isTargetPickerOpen}
@@ -723,6 +816,7 @@ export function SshWindowApp(): React.JSX.Element {
           setHostKeyReviewError(undefined);
           focusActiveTerminal();
         }}
+        onRecheck={() => void recheckHostKey()}
       />
 
       <TerminalSettingsModal
@@ -819,19 +913,19 @@ function SshTargetPicker({
             ) : (
               <div aria-label="Managed SSH servers" className="flex max-h-96 flex-col gap-2 overflow-y-auto" role="list">
                 {targets.map((target) => {
-                  const active = activeDeploymentIds.has(target.deploymentId);
-                  const detail = active
-                    ? "Switch"
-                    : target.connectable
-                      ? titleCase(target.status)
-                      : target.unavailableReason ?? "Unavailable";
+                  const hasOpenSession = activeDeploymentIds.has(target.deploymentId);
+                  const detail = !target.connectable
+                    ? target.unavailableReason ?? "Unavailable"
+                    : hasOpenSession
+                      ? "Open another SSH session"
+                      : titleCase(target.status);
                   return (
                     <div key={target.deploymentId} role="listitem">
                       <Button
-                        aria-label={`${active ? "Switch to" : "Connect to"} ${target.name}, ${sshEndpoint(target)}`}
+                        aria-label={`${hasOpenSession ? "Open another SSH session to" : "Connect to"} ${target.name}, ${sshEndpoint(target)}`}
                         className="h-auto min-h-16 justify-start px-3 py-2 text-start"
                         fullWidth
-                        isDisabled={!active && !target.connectable}
+                        isDisabled={!target.connectable}
                         isPending={openingDeploymentId === target.deploymentId}
                         variant="secondary"
                         onPress={() => onChoose(target.deploymentId)}
@@ -844,7 +938,7 @@ function SshTargetPicker({
                           <span className="block truncate font-mono text-xs text-muted">{sshEndpoint(target)}</span>
                         </span>
                         <Chip
-                          color={active ? "accent" : sshTargetColor(target)}
+                          color={hasOpenSession ? "accent" : sshTargetColor(target)}
                           size="sm"
                           variant="soft"
                         >
@@ -872,12 +966,14 @@ function SshHostKeyReviewDialog({
   review,
   onApprove,
   onCancel,
+  onRecheck,
 }: {
   readonly error: string | undefined;
   readonly isApproving: boolean;
   readonly review: SshHostKeyReview | undefined;
   readonly onApprove: () => void;
   readonly onCancel: () => void;
+  readonly onRecheck: () => void;
 }): React.JSX.Element {
   return (
     <AlertDialog.Backdrop
@@ -932,7 +1028,13 @@ function SshHostKeyReviewDialog({
           </AlertDialog.Body>
           <AlertDialog.Footer>
             <Button isDisabled={isApproving} variant="secondary" onPress={onCancel}>Cancel</Button>
-            <Button isPending={isApproving} variant="primary" onPress={onApprove}>Trust &amp; Connect</Button>
+            <Button
+              isPending={isApproving}
+              variant="primary"
+              onPress={error ? onRecheck : onApprove}
+            >
+              {error ? "Re-check Host" : "Trust & Connect"}
+            </Button>
           </AlertDialog.Footer>
         </AlertDialog.Dialog>
       </AlertDialog.Container>
@@ -940,7 +1042,15 @@ function SshHostKeyReviewDialog({
   );
 }
 
-function SshTabNotice({ title, message }: { readonly title: string; readonly message: string }): React.JSX.Element {
+function SshTabNotice({
+  action,
+  title,
+  message,
+}: {
+  readonly action?: React.JSX.Element;
+  readonly title: string;
+  readonly message: string;
+}): React.JSX.Element {
   return (
     <div
       aria-atomic="true"
@@ -950,10 +1060,11 @@ function SshTabNotice({ title, message }: { readonly title: string; readonly mes
       <span className="grid size-8 flex-none place-items-center rounded-lg bg-warning text-warning-foreground shadow-sm">
         <FontAwesomeIcon aria-hidden icon={faTriangleExclamation} />
       </span>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <p className="text-sm font-semibold">{title}</p>
         <p className="mt-1 break-words text-xs leading-relaxed text-overlay-foreground">{message}</p>
       </div>
+      {action}
     </div>
   );
 }
@@ -984,8 +1095,8 @@ function SshWindowState({
 
 type SshTabState = "connected" | "exited" | "failed";
 
-function sshTabState(tab: ReadySshTab): SshTabState {
-  if (tab.terminalError || tab.actionError) return "failed";
+function sshTabState(tab: SshTab): SshTabState {
+  if (tab.attachmentError || tab.terminalError || tab.actionError) return "failed";
   if (tab.exitMessage) return "exited";
   return "connected";
 }
@@ -1038,7 +1149,7 @@ function claimSshLaunchContext(api: SshWindowAPI) {
   return pendingSshLaunchContext;
 }
 
-async function openSshTab(api: SshWindowAPI, context: SshTabLaunchContext): Promise<ReadySshTab> {
+async function openSshTab(api: SshWindowAPI, context: SshTabLaunchContext): Promise<AttachedSshTab> {
   return {
     context,
     transport: await ConsoleTerminalTransport.open({
@@ -1047,6 +1158,7 @@ async function openSshTab(api: SshWindowAPI, context: SshTabLaunchContext): Prom
       streamKind: "ssh",
     }),
     terminalRef: createRef<GhosttyTerminalHandle>(),
+    attachmentError: undefined,
     exitMessage: undefined,
     terminalError: undefined,
     actionError: undefined,
@@ -1056,7 +1168,7 @@ async function openSshTab(api: SshWindowAPI, context: SshTabLaunchContext): Prom
 async function openSshTabWithRecovery(
   api: SshWindowAPI,
   context: SshTabLaunchContext,
-): Promise<ReadySshTab> {
+): Promise<AttachedSshTab> {
   try {
     return await openSshTab(api, context);
   } catch (initialError) {
@@ -1071,6 +1183,18 @@ async function openSshTabWithRecovery(
     }
     return await openSshTab(api, replacement.value);
   }
+}
+
+function failedSshTab(context: SshTabLaunchContext, attachmentError: string): SshTab {
+  return {
+    context,
+    transport: undefined,
+    terminalRef: createRef<GhosttyTerminalHandle>(),
+    attachmentError,
+    exitMessage: undefined,
+    terminalError: undefined,
+    actionError: undefined,
+  };
 }
 
 async function loadSshTerminalRuntime(api: SshWindowAPI): Promise<TerminalRuntimeAsset> {

@@ -12,6 +12,7 @@ import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
+import { ApplicationContextMenu } from "./components/ApplicationContextMenu";
 import {
   ApplicationSettingsProvider,
   initializeRendererTheme,
@@ -35,21 +36,23 @@ function RendererSurface(): React.JSX.Element {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    {surface === "cloud-deployment" ? (
-      <CloudDeploymentWindowApp />
-    ) : surface === "ssh" ? (
-      window.ssh ? (
-        <ApplicationSettingsProvider api={window.ssh}>
+    <ApplicationContextMenu>
+      {surface === "cloud-deployment" ? (
+        <CloudDeploymentWindowApp />
+      ) : surface === "ssh" ? (
+        window.ssh ? (
+          <ApplicationSettingsProvider api={window.ssh}>
+            <RendererSurface />
+          </ApplicationSettingsProvider>
+        ) : <RendererSurface />
+      ) : (
+        <ApplicationSettingsProvider>
           <RendererSurface />
+          <ApplicationUpdateStatus showIdleControl={surface === null} />
+          <ReleaseDownloadToasts />
         </ApplicationSettingsProvider>
-      ) : <RendererSurface />
-    ) : (
-      <ApplicationSettingsProvider>
-        <RendererSurface />
-        <ApplicationUpdateStatus showIdleControl={surface === null} />
-        <ReleaseDownloadToasts />
-      </ApplicationSettingsProvider>
-    )}
-    <Toast.Provider placement="bottom" maxVisibleToasts={4} />
+      )}
+      <Toast.Provider placement="bottom" maxVisibleToasts={4} />
+    </ApplicationContextMenu>
   </React.StrictMode>,
 );
