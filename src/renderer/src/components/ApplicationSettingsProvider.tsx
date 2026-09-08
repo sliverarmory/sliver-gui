@@ -109,6 +109,7 @@ export function ApplicationSettingsProvider({
             expectedRevision: current.revision,
             settings: {
               theme: current.theme,
+              appIcon: current.appIcon,
               reduceMotion: current.reduceMotion,
               commandPaletteShortcut: current.commandPaletteShortcut,
               terminal: legacyTerminal,
@@ -216,6 +217,7 @@ export function useApplicationSettings(): ApplicationSettingsContextValue | unde
 function settingsValues(state: ApplicationSettingsState): ApplicationSettingsValues {
   return Object.freeze({
     theme: state.theme,
+    appIcon: state.appIcon,
     reduceMotion: state.reduceMotion,
     commandPaletteShortcut: state.commandPaletteShortcut,
     terminal: state.terminal,
@@ -224,6 +226,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
 
 function sameSettings(left: ApplicationSettingsValues, right: ApplicationSettingsValues): boolean {
   return left.theme === right.theme &&
+    left.appIcon === right.appIcon &&
     left.reduceMotion === right.reduceMotion &&
     left.commandPaletteShortcut === right.commandPaletteShortcut &&
     left.terminal.fontId === right.terminal.fontId &&

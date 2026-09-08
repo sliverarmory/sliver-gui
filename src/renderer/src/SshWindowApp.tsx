@@ -51,6 +51,8 @@ import {
   saveConsoleTerminalSettings,
 } from "./components/console-terminal-settings";
 import { TerminalSettingsModal } from "./components/TerminalSettingsModal";
+import { RenamableTab } from "./components/RenamableTab";
+import { RenameTabDialog } from "./components/RenameTabDialog";
 
 const EMPTY_SSH_TAB_KEY = "sliver-ssh-empty";
 
@@ -86,6 +88,10 @@ export function SshWindowApp(): React.JSX.Element {
   const [actionError, setActionError] = useState<string>();
   const [closingTabId, setClosingTabId] = useState<string>();
   const [retryingTabId, setRetryingTabId] = useState<string>();
+  const [renameTabId, setRenameTabId] = useState<string>();
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState<string>();
+  const [isRenamingTab, setIsRenamingTab] = useState(false);
   const [openingDeploymentId, setOpeningDeploymentId] = useState<string>();
   const [targets, setTargets] = useState<readonly ManagedSshTarget[]>([]);
   const [isTargetPickerOpen, setIsTargetPickerOpen] = useState(false);
@@ -111,6 +117,7 @@ export function SshWindowApp(): React.JSX.Element {
   const retryingTabRef = useRef<string | undefined>(undefined);
   const openingTargetRef = useRef(false);
   const approvingHostKeyRef = useRef(false);
+  const renamingTabRef = useRef(false);
 
   const setActiveTabId = useCallback((tabId: string | undefined): void => {
     activeTabIdRef.current = tabId;
@@ -422,6 +429,44 @@ export function SshWindowApp(): React.JSX.Element {
     setIsSettingsOpen(true);
   }, []);
 
+  const openRenameTab = useCallback((tabId: string): void => {
+    const tab = tabsRef.current.find(({ context: tabContext }) => tabContext.tabId === tabId);
+    if (!tab) return;
+    setRenameTabId(tabId);
+    setRenameName(tab.context.label);
+    setRenameError(undefined);
+  }, []);
+
+  const renameTab = useCallback(async (label: string): Promise<void> => {
+    if (!api || !renameTabId || renamingTabRef.current) return;
+    const tabId = renameTabId;
+    if (!tabsRef.current.some(({ context }) => context.tabId === tabId)) return;
+    renamingTabRef.current = true;
+    setIsRenamingTab(true);
+    setRenameError(undefined);
+    try {
+      const result = await api.renameSshTab({ tabId, label });
+      if (!result.ok || !result.value) {
+        throw new Error(result.error ?? "The SSH tab could not be renamed");
+      }
+      if (result.value.tabId !== tabId) {
+        throw new Error("The SSH tab identity changed while it was being renamed");
+      }
+      if (!mountedRef.current) return;
+      replaceTabs((current) => current.map((tab) => tab.context.tabId === tabId
+        ? { ...tab, context: { ...tab.context, label: result.value!.label } }
+        : tab));
+      setRenameTabId(undefined);
+      setRenameName("");
+      focusActiveTerminal();
+    } catch (caught: unknown) {
+      if (mountedRef.current) setRenameError(errorMessage(caught));
+    } finally {
+      renamingTabRef.current = false;
+      if (mountedRef.current) setIsRenamingTab(false);
+    }
+  }, [api, focusActiveTerminal, renameTabId, replaceTabs]);
+
   const selectTabByShortcut = useCallback((index: number): void => {
     const tab = tabsRef.current[index];
     if (tab) selectTab(tab.context.tabId);
@@ -555,10 +600,17 @@ export function SshWindowApp(): React.JSX.Element {
     if (!isSettingsOpen) setSettingsDraft(settings);
   }, [isSettingsOpen, settings]);
 
+  useEffect(() => {
+    if (!renameTabId || tabs.some(({ context: tabContext }) => tabContext.tabId === renameTabId)) return;
+    setRenameTabId(undefined);
+    setRenameName("");
+    setRenameError(undefined);
+  }, [renameTabId, tabs]);
+
   const activeTab = tabs.find(({ context: tabContext }) => tabContext.tabId === activeTabId);
   useEffect(() => {
     document.title = activeTab
-      ? `SSH — ${activeTab.context.target.name} — ${sshEndpoint(activeTab.context.target)}`
+      ? `SSH — ${activeTab.context.label} — ${sshEndpoint(activeTab.context.target)}`
       : "Managed SSH";
   }, [activeTab]);
 
@@ -618,14 +670,15 @@ export function SshWindowApp(): React.JSX.Element {
                 const state = sshTabState(tab);
                 const shortcutDigit = sshTabShortcutDigit(index);
                 return (
-                  <Tabs.Tab
-                    aria-label={`${tab.context.target.name}, ${sshEndpoint(tab.context.target)}, ${tabStateLabel(state)}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
+                  <RenamableTab
+                    ariaLabel={`${tab.context.label}, ${sshEndpoint(tab.context.target)}, ${tabStateLabel(state)}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
                     className="max-w-64 min-w-32 gap-2 rounded-none px-3 data-[selected=true]:text-foreground"
                     id={tab.context.tabId}
                     key={tab.context.tabId}
+                    onRename={openRenameTab}
                   >
                     <span aria-hidden className={`size-2 shrink-0 rounded-full ${tabStateColor(state)}`} />
-                    <span className="truncate">{tab.context.target.name}</span>
+                    <span className="truncate">{tab.context.label}</span>
                     <kbd
                       aria-hidden
                       className="flex-none rounded-md bg-surface-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted tabular-nums"
@@ -634,7 +687,7 @@ export function SshWindowApp(): React.JSX.Element {
                     </kbd>
                     <span className="sr-only"> {tabStateLabel(state)}</span>
                     <Tabs.Indicator className="top-auto bottom-0 h-0.5 rounded-none bg-accent shadow-none" />
-                  </Tabs.Tab>
+                  </RenamableTab>
                 );
               })}
             </Tabs.List>
@@ -696,7 +749,7 @@ export function SshWindowApp(): React.JSX.Element {
                     <GhosttyTerminal
                       ref={tab.terminalRef}
                       appearance={appearance}
-                      ariaLabel={`SSH session for ${sshEndpoint(tab.context.target)}`}
+                      ariaLabel={`SSH session ${tab.context.label} for ${sshEndpoint(tab.context.target)}`}
                       className="h-full min-h-0"
                       transport={tab.transport}
                       wasmBytes={runtime.bytes}
@@ -848,6 +901,27 @@ export function SshWindowApp(): React.JSX.Element {
           setIsSettingsOpen(false);
           focusActiveTerminal();
         }}
+      />
+
+      <RenameTabDialog
+        description="The managed server name and connection details stay unchanged."
+        error={renameError}
+        isOpen={renameTabId !== undefined}
+        isPending={isRenamingTab}
+        name={renameName}
+        originalName={tabs.find(({ context: tabContext }) => tabContext.tabId === renameTabId)?.context.label ?? ""}
+        onNameChange={(name) => {
+          setRenameName(name);
+          if (renameError) setRenameError(undefined);
+        }}
+        onOpenChange={(isOpen) => {
+          if (isOpen || isRenamingTab) return;
+          setRenameTabId(undefined);
+          setRenameName("");
+          setRenameError(undefined);
+          focusActiveTerminal();
+        }}
+        onRename={(name) => void renameTab(name)}
       />
     </main>
   );

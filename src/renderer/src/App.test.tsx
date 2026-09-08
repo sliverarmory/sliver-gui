@@ -711,6 +711,12 @@ describe("Current server menu", () => {
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
+    const icons = within(screen.getByRole("radiogroup", { name: "App icon" }));
+    await user.click(icons.getByRole("radio", { name: "Passion" }));
+    await user.click(within(screen.getByRole("radiogroup", { name: "Color theme" }))
+      .getByRole("radio", { name: "Light" }));
+
+    expect(icons.getByRole("radio", { name: "Passion" })).toHaveAttribute("aria-checked", "true");
   });
 
   it("opens from the server summary and orders application and server actions nearest the trigger", async () => {

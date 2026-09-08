@@ -373,6 +373,7 @@ export function App() {
       revision: current.revision + 1,
       ...updater({
         theme: current.theme,
+        appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
         commandPaletteShortcut: current.commandPaletteShortcut,
         terminal: current.terminal,
@@ -620,6 +621,10 @@ export function App() {
                 ? !applicationSettings.isReady || applicationSettings.isSaving
                 : false}
               settings={settings}
+              onAppIconChange={(appIcon) => updateSettings((current) => ({
+                ...current,
+                appIcon,
+              }))}
               onCommandPaletteShortcutChange={(commandPaletteShortcut) => updateSettings((current) => ({
                 ...current,
                 commandPaletteShortcut,

@@ -913,6 +913,7 @@ async function setApplicationTheme(
       expectedRevision: current.revision,
       settings: {
         theme: nextTheme,
+        appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
         commandPaletteShortcut: current.commandPaletteShortcut,
         terminal: current.terminal,
@@ -1229,7 +1230,7 @@ async function verifyApplicationSettings(
   await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
   assert.equal(await page.getByRole("tab", { name: "General" }).getAttribute("aria-selected"), "true");
 
-  await page.getByRole("radio", { name: "Light" }).click();
+  await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: "Light" }).click();
   await page.locator("html.light[data-theme='light']").waitFor();
   await page.getByText("Reduce motion", { exact: true }).click();
   await page.locator("html[data-reduce-motion='true']").waitFor();
@@ -1625,6 +1626,63 @@ async function verifySliverConsoleWindow(
     assert.equal(commandState.console.spawns[initialSpawnCount]?.writes.length, firstWritesBefore);
     assert.ok(commandState.console.spawns[initialSpawnCount + 1]?.resizes.length);
 
+    const processStateBeforeRename = await readFakeState(electronApplication);
+    const firstTabBeforeRename = consolePage.getByRole("tab", {
+      name: new RegExp(`Console 1.*shortcut ${shortcutModifier}\\+1`, "iu"),
+    });
+    const secondTabBeforeRename = consolePage.getByRole("tab", {
+      name: new RegExp(`Console 2.*shortcut ${shortcutModifier}\\+2`, "iu"),
+    });
+    const contextMenu = consolePage.getByRole("menu", { name: "Application context menu" });
+    await firstTabBeforeRename.click({ button: "right" });
+    await contextMenu.waitFor();
+    assert.equal(
+      await contextMenu.getByRole("menuitem", { name: "Rename", exact: true }).count(),
+      1,
+      "a console tab context menu must expose its scoped Rename action",
+    );
+    assert.equal(
+      await contextMenu.getByRole("menuitem", { name: "Inspect Element", exact: true }).count(),
+      1,
+      "a console tab context menu must retain Inspect Element",
+    );
+    await contextMenu.getByRole("menuitem", { name: "Rename", exact: true }).click();
+    await contextMenu.waitFor({ state: "hidden" });
+
+    const renameDialog = consolePage.getByRole("dialog", { name: "Rename tab", exact: true });
+    await renameDialog.waitFor();
+    const renameInput = renameDialog.getByRole("textbox", { name: /Tab name/iu });
+    assert.equal(await renameInput.inputValue(), "Console 1");
+    await renameInput.fill("Primary console");
+    await renameInput.press("Enter");
+    await renameDialog.waitFor({ state: "hidden" });
+
+    const renamedFirstTab = consolePage.getByRole("tab", {
+      name: new RegExp(`Primary console.*shortcut ${shortcutModifier}\\+1`, "iu"),
+    });
+    await renamedFirstTab.waitFor();
+    assert.equal(await renamedFirstTab.getAttribute("aria-selected"), "false");
+    assert.equal(await secondTabBeforeRename.getAttribute("aria-selected"), "true");
+    assert.equal(
+      await consolePage.title(),
+      "Sliver console — chosen-m0-operator.cfg — Console 2",
+      "renaming a background tab must not select it",
+    );
+    const processStateAfterRename = await readFakeState(electronApplication);
+    assert.equal(processStateAfterRename.console.spawns.length, processStateBeforeRename.console.spawns.length);
+    assert.equal(processStateAfterRename.console.kills, processStateBeforeRename.console.kills);
+    assert.deepEqual(
+      processStateAfterRename.console.spawns.map(({ writes }) => writes),
+      processStateBeforeRename.console.spawns.map(({ writes }) => writes),
+      "renaming a tab must not write to or restart a console PTY",
+    );
+
+    await renamedFirstTab.click();
+    await waitForSelectedConsoleTab(consolePage, /Primary console/iu);
+    assert.equal(await consolePage.title(), "Sliver console — chosen-m0-operator.cfg — Primary console");
+    await secondTabBeforeRename.click();
+    await waitForSelectedConsoleTab(consolePage, /Console 2/iu);
+
     await consolePage.screenshot({
       animations: "disabled",
       path: join(artifactDirectory, "console-tabs.png"),
@@ -1642,7 +1700,7 @@ async function verifySliverConsoleWindow(
     await settingsDialog.getByRole("button", { name: "Cancel" }).click();
 
     await consolePage.getByRole("button", { name: "Close active console tab" }).click();
-    await consolePage.getByRole("tab", { name: /Console 1.*Connected/iu }).waitFor();
+    await consolePage.getByRole("tab", { name: /Primary console.*Connected/iu }).waitFor();
     const oneTabState = await waitForConsoleState(
       electronApplication,
       (state) => state.console.kills === initialKillCount + 1,

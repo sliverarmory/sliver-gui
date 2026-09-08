@@ -431,6 +431,42 @@ describe("GhosttyTerminal", () => {
     expect(fitAddon?.fit.mock.calls.length).toBeGreaterThan(initialFitCalls);
   });
 
+  it("updates its accessible label without recreating or clearing the terminal", async () => {
+    const { instantiate } = installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const wasmBytes = new Uint8Array([0x00]);
+    const rendered = render(
+      <GhosttyTerminal
+        ariaLabel="SSH session test1"
+        transport={transport.api}
+        wasmBytes={wasmBytes}
+      />,
+    );
+    await screen.findByRole("textbox", { name: "SSH session test1" });
+    const terminal = requireTerminal();
+    act(() => transport.emitOutput(encoder.encode("existing scrollback")));
+    expect(decoder.decode(terminal.write.mock.calls[0]?.[0] as Uint8Array)).toBe("existing scrollback");
+
+    rendered.rerender(
+      <GhosttyTerminal
+        ariaLabel="SSH session Primary gateway"
+        transport={transport.api}
+        wasmBytes={wasmBytes}
+      />,
+    );
+
+    await screen.findByRole("textbox", { name: "SSH session Primary gateway" });
+    expect(ghosttyMocks.terminals).toEqual([terminal]);
+    expect(instantiate).toHaveBeenCalledOnce();
+    expect(transport.unsubscribe).not.toHaveBeenCalled();
+    expect(terminal.dispose).not.toHaveBeenCalled();
+
+    act(() => transport.emitOutput(encoder.encode(" after rename")));
+    expect(terminal.write).toHaveBeenCalledTimes(2);
+    expect(decoder.decode(terminal.write.mock.calls[0]?.[0] as Uint8Array)).toBe("existing scrollback");
+    expect(decoder.decode(terminal.write.mock.calls[1]?.[0] as Uint8Array)).toBe(" after rename");
+  });
+
   it("applies the latest appearance when settings change during async font loading", async () => {
     installWebAssemblyMocks();
     const initialFontLoad = deferred<unknown[]>();

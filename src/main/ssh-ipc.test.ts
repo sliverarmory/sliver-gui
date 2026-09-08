@@ -46,6 +46,7 @@ const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const TAB_ID = "T".repeat(43);
 const TOKEN = "A".repeat(43);
 const REVIEW_TOKEN = "R".repeat(43);
+const RENAMED_LABEL = "Production shell";
 const CURRENT_WINDOW = { marker: "current-ssh-window" } as unknown as BrowserWindow;
 const OTHER_WINDOW = { marker: "other-window" } as unknown as BrowserWindow;
 const REJECTED = { ok: false, error: "The SSH request was rejected" };
@@ -121,12 +122,14 @@ describe("SSH IPC boundary", () => {
     await invoke(SSH_IPC_INVOKE.approveSshHostKey, event, { token: REVIEW_TOKEN });
     await invoke(SSH_IPC_INVOKE.closeSshTab, event, { tabId: TAB_ID });
     await invoke(SSH_IPC_INVOKE.selectSshTab, event, { tabId: TAB_ID });
+    await invoke(SSH_IPC_INVOKE.renameSshTab, event, { tabId: TAB_ID, label: RENAMED_LABEL });
     await invoke(SSH_IPC_INVOKE.getTerminalRuntime, event);
     await invoke(SSH_IPC_INVOKE.getApplicationSettings, event);
     await invoke(SSH_IPC_INVOKE.updateApplicationSettings, event, {
       expectedRevision: 0,
       settings: {
         theme: "dark",
+        appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: true,
         commandPaletteShortcut: "mod+shift+k",
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
@@ -145,6 +148,7 @@ describe("SSH IPC boundary", () => {
     expect(services.sessions.approveNewHostKey).toHaveBeenCalledExactlyOnceWith(REVIEW_TOKEN, owner);
     expect(services.sessions.closeTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
     expect(services.sessions.selectTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
+    expect(services.sessions.renameTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID, RENAMED_LABEL);
     expect(services.getTerminalRuntime).toHaveBeenCalledExactlyOnceWith();
     expect(services.applicationSettings.getState).toHaveBeenCalledExactlyOnceWith();
     expect(services.applicationSettings.update).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -200,6 +204,8 @@ describe("SSH IPC boundary", () => {
       [SSH_IPC_INVOKE.approveSshHostKey, [{ token: "short" }]],
       [SSH_IPC_INVOKE.closeSshTab, [TAB_ID]],
       [SSH_IPC_INVOKE.selectSshTab, [{ tabId: TAB_ID }, "extra"]],
+      [SSH_IPC_INVOKE.renameSshTab, [{ tabId: TAB_ID, label: " padded " }]],
+      [SSH_IPC_INVOKE.renameSshTab, [{ tabId: TAB_ID, label: RENAMED_LABEL, extra: true }]],
       [SSH_IPC_INVOKE.getTerminalRuntime, ["ghostty-vt.wasm"]],
       [SSH_IPC_INVOKE.updateApplicationSettings, [{ expectedRevision: -1, settings: {} }]],
     ];
@@ -214,6 +220,7 @@ describe("SSH IPC boundary", () => {
     expect(services.sessions.approveNewHostKey).not.toHaveBeenCalled();
     expect(services.sessions.closeTab).not.toHaveBeenCalled();
     expect(services.sessions.selectTab).not.toHaveBeenCalled();
+    expect(services.sessions.renameTab).not.toHaveBeenCalled();
     expect(services.getTerminalRuntime).not.toHaveBeenCalled();
     expect(services.applicationSettings.update).not.toHaveBeenCalled();
   });
@@ -332,7 +339,12 @@ class TestPort {
 }
 
 function servicesMock(overrides: Partial<SshSessionController> = {}): SshIpcServices {
-  const context = Object.freeze({ tabId: TAB_ID, attachmentToken: TOKEN, target: TARGET });
+  const context = Object.freeze({
+    tabId: TAB_ID,
+    attachmentToken: TOKEN,
+    label: TARGET.name,
+    target: TARGET,
+  });
   const sessions: SshSessionController = {
     claim: vi.fn(async () => ({
       ok: true as const,
@@ -350,6 +362,10 @@ function servicesMock(overrides: Partial<SshSessionController> = {}): SshIpcServ
     })),
     closeTab: vi.fn(async () => ({ ok: true as const, value: { remainingTabs: 0 } })),
     selectTab: vi.fn(async () => ({ ok: true as const })),
+    renameTab: vi.fn(async (_owner, tabId, label) => ({
+      ok: true as const,
+      value: { tabId, label },
+    })),
     attach: vi.fn(),
     ...overrides,
   };

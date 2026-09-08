@@ -99,6 +99,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
     const terminalRef = useRef<Terminal | undefined>(undefined);
     const fitAddonRef = useRef<FitAddon | undefined>(undefined);
     const appearanceRef = useLatest(appearance);
+    const ariaLabelRef = useLatest(ariaLabel);
     const onCloseRef = useLatest(onClose);
     const onErrorRef = useLatest(onError);
     const onReadyRef = useLatest(onReady);
@@ -308,7 +309,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         terminal.loadAddon(fitAddon);
         terminal.open(host);
         disablePinnedGhosttyAutoCopy(terminal);
-        host.setAttribute("aria-label", ariaLabel);
+        host.setAttribute("aria-label", ariaLabelRef.current);
         if (disableInput) host.setAttribute("aria-readonly", "true");
         // Terminal.open focuses its contenteditable host. Return focus to the
         // workspace tab/trigger until the operator explicitly focuses here.
@@ -363,7 +364,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
     }, [
       appearance?.scrollback,
       appearance?.theme,
-      ariaLabel,
+      ariaLabelRef,
       disableInput,
       onCloseRef,
       onErrorRef,
@@ -372,6 +373,10 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       transport,
       wasmBytes,
     ]);
+
+    useEffect(() => {
+      hostRef.current?.setAttribute("aria-label", ariaLabel);
+    }, [ariaLabel]);
 
     useEffect(() => {
       const terminal = terminalRef.current;

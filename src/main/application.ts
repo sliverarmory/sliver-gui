@@ -15,6 +15,7 @@ import {
   safeStorage,
   session,
   shell,
+  systemPreferences,
   type MessageEvent as ElectronMessageEvent,
   type MessagePortMain,
 } from "electron";
@@ -67,6 +68,8 @@ import {
 } from "./application-updater.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
+import { ApplicationIconController } from "./application-icon.js";
+import { createSystemIconAppearance } from "./system-icon-appearance.js";
 import { ConnectionRegistry } from "./connection-registry.js";
 import { resolveDownloadsDirectory } from "./download-directory.js";
 import {
@@ -229,7 +232,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const runtimeIconPath = app.isPackaged
     ? join(process.resourcesPath, "sliver-desktop.png")
     : join(applicationAssetsDirectory, "about-icon.png");
-  const developmentDockIconPath = join(applicationAssetsDirectory, "icon.png");
+  const applicationIcons = new ApplicationIconController({
+    platform: process.platform,
+    assetsDirectory: app.isPackaged ? join(process.resourcesPath, "app-icons") : applicationAssetsDirectory,
+    ...(process.platform === "darwin" ? { setDockIcon: (path: string) => app.dock?.setIcon(path) } : {}),
+  });
+  const systemIconAppearance = createSystemIconAppearance({ nativeTheme, systemPreferences });
   const rendererEntryPath = options.rendererEntryPath ?? join(mainBundleDirectory, "../renderer/index.html");
   const preloadPath = options.preloadPath ?? join(mainBundleDirectory, "../preload/index.cjs");
   const cloudDeploymentPreloadPath = options.cloudDeploymentPreloadPath ?? join(
@@ -561,7 +569,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const window = new BrowserWindow(mainWindowOptions(
       preloadPath,
       process.platform,
-      runtimeIconPath,
+      applicationIcons.getIconPath(),
       nativeTheme.shouldUseDarkColors,
     ));
     trackWindow(window, inheritFromContentsId);
@@ -590,7 +598,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const window = new BrowserWindow(cloudDeploymentWindowOptions(
         cloudDeploymentPreloadPath,
         process.platform,
-        runtimeIconPath,
+        applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
       ));
       createdWindow = window;
@@ -737,7 +745,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       window = new BrowserWindow(sshWindowOptions(
         sshPreloadPath,
         process.platform,
-        runtimeIconPath,
+        applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
       ));
       sshWindow = window;
@@ -890,7 +898,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       window = new BrowserWindow(interactionWindowOptions(
         preloadPath,
         process.platform,
-        runtimeIconPath,
+        applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
       ));
       interactionRecord = {
@@ -1142,7 +1150,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const window = new BrowserWindow(sessionShellWindowOptions(
         preloadPath,
         process.platform,
-        runtimeIconPath,
+        applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
       ));
       const record: SessionShellWindowRecord = {
@@ -1307,7 +1315,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const window = new BrowserWindow(consoleWindowOptions(
         preloadPath,
         process.platform,
-        runtimeIconPath,
+        applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
       ));
       candidateWindow = window;
@@ -1819,6 +1827,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function beginShutdown(): void {
+    systemIconAppearance.dispose();
     if (!shutdown.isStopping) {
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
@@ -1839,6 +1848,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     surface: NativeWindowSurface,
   ): void {
     if (window.isDestroyed()) return;
+    applicationIcons.applyToWindow(window);
     const dark = nativeTheme.shouldUseDarkColors;
     try {
       if (surface === "workspace") {
@@ -1877,6 +1887,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     }
   }
 
+  function applyApplicationIcon(): void {
+    if (shutdown.isStopping) return;
+    applicationIcons.update(applicationSettingsStore?.getState().appIcon ?? "auto", systemIconAppearance.isDark());
+    for (const window of nativeWindowSurfaces.keys()) applicationIcons.applyToWindow(window);
+  }
+
   function publishApplicationSettingsState(state: ApplicationSettingsState): void {
     if (shutdown.isStopping) return;
     for (const window of windows) {
@@ -1899,6 +1915,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const result = await applicationSettingsStore.update(input);
     if (!result.ok || !result.value) return result;
     nativeTheme.themeSource = result.value.theme;
+    applyApplicationIcon();
     applyNativeWindowTheme();
     publishApplicationSettingsState(result.value);
     return result;
@@ -2040,6 +2057,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     join(app.getPath("userData"), APPLICATION_SETTINGS_FILE_NAME),
   );
   applicationSettingsStore = loadedApplicationSettingsStore;
+  systemIconAppearance.start(applyApplicationIcon);
+  applyApplicationIcon();
   nativeTheme.themeSource = loadedApplicationSettingsStore.getState().theme;
   nativeTheme.on("updated", onNativeThemeUpdated);
   app.setAboutPanelOptions({
@@ -2052,9 +2071,6 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     website: "https://github.com/sliverarmory/sliver-gui",
     iconPath: runtimeIconPath,
   });
-  if (process.platform === "darwin" && !app.isPackaged && app.dock) {
-    app.dock.setIcon(developmentDockIconPath);
-  }
   releaseDownloader = new SliverReleaseDownloader({
     downloadsDirectory: resolveDownloadsDirectory((name) => app.getPath(name)),
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
@@ -2164,6 +2180,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         approveNewHostKey: (token, owner) => sshSessions!.approveNewHostKey(token, owner),
         closeTab: (owner, tabId) => sshSessions!.closeTab(owner, tabId),
         selectTab: (owner, tabId) => sshSessions!.selectTab(owner, tabId),
+        renameTab: (owner, tabId, label) => sshSessions!.renameTab(owner, tabId, label),
         attach: (owner, attachmentToken, port) =>
           sshSessions!.attach(owner, attachmentToken, port),
       },
@@ -2203,6 +2220,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("before-quit", onBeforeQuit);
       nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
       nativeTheme.removeListener("updated", onNativeThemeUpdated);
+      systemIconAppearance.dispose();
       applicationContextMenus?.dispose();
       applicationContextMenus = undefined;
       unregisterCloudDeploymentIpcHandlers();

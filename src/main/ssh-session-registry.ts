@@ -7,6 +7,7 @@ import {
   type SshHostKeyReview,
   type SshTabCloseResult,
   type SshTabLaunchContext,
+  type SshTabRenameResult,
   type SshOpenTabResult,
   type SshWindowLaunchContext,
 } from "../shared/ssh-contracts.js";
@@ -17,6 +18,7 @@ import {
   type ConsolePortRuntime,
 } from "./console-port-session.js";
 import type { ConsoleCloseReason } from "../shared/console-contracts.js";
+import { isTerminalTabLabel } from "../shared/terminal-tab-label.js";
 
 export interface StartedManagedSshSession {
   readonly target: ManagedSshTarget;
@@ -38,6 +40,7 @@ export interface SshSessionRegistryOptions {
 
 interface SshSessionRecord {
   readonly tabId: string;
+  label: string;
   readonly target: ManagedSshTarget;
   readonly runtime: ConsolePortRuntime;
   attachment: ConsolePortSession | undefined;
@@ -218,32 +221,37 @@ export class SshSessionRegistry {
     started: StartedManagedSshSession,
     owner?: ConsoleOwnerIdentity,
   ): Promise<OperationResult<SshOpenTabResult>> {
-      const tabId = this.#uniqueOpaqueId();
-      const record: SshSessionRecord = {
-        tabId,
-        target: started.target,
-        runtime: started.runtime,
-        attachment: undefined,
+    if (!isTerminalTabLabel(started.target.name)) {
+      await started.runtime.close().catch(() => undefined);
+      return { ok: false, error: "The managed SSH target name cannot be used as a tab label" };
+    }
+    const tabId = this.#uniqueOpaqueId();
+    const record: SshSessionRecord = {
+      tabId,
+      label: started.target.name,
+      target: started.target,
+      runtime: started.runtime,
+      attachment: undefined,
+    };
+    this.#sessions.set(tabId, record);
+    this.#activeTabId = tabId;
+    try {
+      const context = owner ? this.#attachRecord(record, owner) : undefined;
+      return {
+        ok: true,
+        value: Object.freeze({
+          status: "opened",
+          tabId,
+          created: true,
+          ...(context === undefined ? {} : { context }),
+        }),
       };
-      this.#sessions.set(tabId, record);
-      this.#activeTabId = tabId;
-      try {
-        const context = owner ? this.#attachRecord(record, owner) : undefined;
-        return {
-          ok: true,
-          value: Object.freeze({
-            status: "opened",
-            tabId,
-            created: true,
-            ...(context === undefined ? {} : { context }),
-          }),
-        };
-      } catch {
-        this.#sessions.delete(tabId);
-        this.#activeTabId = this.#sessions.keys().next().value as string | undefined;
-        await started.runtime.close().catch(() => undefined);
-        return { ok: false, error: "The SSH session could not be attached to this window" };
-      }
+    } catch {
+      this.#sessions.delete(tabId);
+      this.#activeTabId = this.#sessions.keys().next().value as string | undefined;
+      await started.runtime.close().catch(() => undefined);
+      return { ok: false, error: "The SSH session could not be attached to this window" };
+    }
   }
 
   closeTab(
@@ -271,6 +279,21 @@ export class SshSessionRegistry {
       if (!this.#sessions.has(tabId)) return { ok: false, error: "The SSH tab is unavailable" };
       this.#activeTabId = tabId;
       return { ok: true };
+    });
+  }
+
+  renameTab(
+    owner: ConsoleOwnerIdentity,
+    tabId: string,
+    label: string,
+  ): Promise<OperationResult<SshTabRenameResult>> {
+    return this.#serialize(async () => {
+      this.#assertOwner(owner);
+      const record = this.#sessions.get(tabId);
+      if (!record) return { ok: false, error: "The SSH tab is unavailable" };
+      if (!isTerminalTabLabel(label)) return { ok: false, error: "The SSH tab label is invalid" };
+      record.label = label;
+      return { ok: true, value: Object.freeze({ tabId, label }) };
     });
   }
 
@@ -331,6 +354,7 @@ export class SshSessionRegistry {
     return Object.freeze({
       tabId: record.tabId,
       attachmentToken: attachment.attachmentToken,
+      label: record.label,
       target: record.target,
     });
   }

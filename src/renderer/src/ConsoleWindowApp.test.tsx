@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ import type { TerminalRuntimeAsset } from "../../shared/stream-contracts";
 import type { GhosttyTerminalAppearance } from "./components/GhosttyTerminal";
 import { CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY } from "./components/console-terminal-settings";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
+import { renderWithApplicationContextMenu } from "./application-context-menu-test-utils";
 
 const openConsoleTransport = vi.fn();
 
@@ -104,7 +105,7 @@ describe("ConsoleWindowApp", () => {
     openConsoleTransport.mockResolvedValue(transport);
     const api = installAPI();
 
-    render(
+    renderWithApplicationContextMenu(
       <StrictMode>
         <ConsoleWindowApp />
       </StrictMode>,
@@ -166,7 +167,7 @@ describe("ConsoleWindowApp", () => {
       },
     });
 
-    render(
+    renderWithApplicationContextMenu(
       <ApplicationSettingsProvider>
         <ConsoleWindowApp />
       </ApplicationSettingsProvider>,
@@ -204,7 +205,7 @@ describe("ConsoleWindowApp", () => {
     const api = installAPI({
       createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
     });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
 
     fireEvent.click(screen.getByRole("button", { name: "New console tab" }));
@@ -231,10 +232,78 @@ describe("ConsoleWindowApp", () => {
     expect(secondTransport.close).not.toHaveBeenCalled();
   });
 
+  it("renames the exact background tab from its scoped context menu without changing selection", async () => {
+    const user = userEvent.setup();
+    openConsoleTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    const api = installAPI({ createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)) });
+    const rendered = renderWithApplicationContextMenu(<ConsoleWindowApp />);
+    const firstTabButton = await screen.findByRole("tab", { name: /Console 1 Connected/u });
+
+    await user.click(screen.getByRole("button", { name: "New console tab" }));
+    const secondTabButton = await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    expect(secondTabButton).toHaveAttribute("aria-selected", "true");
+    expect(document.title).toBe("Sliver console — Production operator — Console 2");
+
+    fireEvent.contextMenu(firstTabButton, { clientX: 40, clientY: 24 });
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Rename",
+      "Inspect Element",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "Rename" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename tab" });
+    const input = within(dialog).getByRole("textbox", { name: "Tab name" });
+    expect(input).toHaveValue("Console 1");
+    await user.clear(input);
+    await user.type(input, "  Primary  {Enter}");
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename tab" })).not.toBeInTheDocument());
+    const renamedTab = screen.getByRole("tab", { name: /Primary Connected/u });
+    expect(renamedTab).toHaveAttribute("aria-selected", "false");
+    expect(secondTabButton).toHaveAttribute("aria-selected", "true");
+    expect(document.querySelector(
+      '[data-terminal-mock][aria-label="Sliver client Primary using Production operator"]',
+    )).toBeInTheDocument();
+    expect(document.title).toBe("Sliver console — Production operator — Console 2");
+    expect(api.createConsoleTab).toHaveBeenCalledOnce();
+    expect(api.closeConsoleTab).not.toHaveBeenCalled();
+
+    await user.click(renamedTab);
+    await waitFor(() => expect(document.title).toBe("Sliver console — Production operator — Primary"));
+  });
+
+  it("dismisses Rename when the native close command removes its active tab", async () => {
+    const user = userEvent.setup();
+    openConsoleTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    const api = installAPI({
+      createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
+      closeConsoleTab: vi.fn().mockResolvedValue(ok<ConsoleTabCloseResult>({ remainingTabs: 1 })),
+    });
+    const rendered = renderWithApplicationContextMenu(<ConsoleWindowApp />);
+    await screen.findByRole("tab", { name: /Console 1 Connected/u });
+
+    await user.click(screen.getByRole("button", { name: "New console tab" }));
+    const secondTabButton = await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    fireEvent.contextMenu(secondTabButton, { clientX: 40, clientY: 24 });
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    expect(await screen.findByRole("dialog", { name: "Rename tab" })).toBeInTheDocument();
+
+    act(() => api.listeners.closeTab?.());
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename tab" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("tab", { name: /Console 2/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute("aria-selected", "true");
+    expect(document.title).toBe("Sliver console — Production operator — Console 1");
+    expect(api.closeConsoleTab).toHaveBeenCalledWith(secondTab.tabId);
+  });
+
   it("captures Command shortcuts before a focused Ghostty terminal can consume them", async () => {
     openConsoleTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
     const api = installAPI({ createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)) });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
 
     const firstTerminal = screen.getByRole("region", {
@@ -298,7 +367,7 @@ describe("ConsoleWindowApp", () => {
       createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
       closeConsoleTab,
     });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
     fireEvent.click(screen.getByRole("button", { name: "New console tab" }));
     await screen.findByRole("tab", { name: /Console 2 Connected/u });
@@ -318,7 +387,7 @@ describe("ConsoleWindowApp", () => {
       createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
       closeConsoleTab: vi.fn().mockResolvedValue(ok<ConsoleTabCloseResult>({ remainingTabs: 1 })),
     });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
     fireEvent.click(screen.getByRole("button", { name: "New console tab" }));
     await screen.findByRole("tab", { name: /Console 2 Connected/u });
@@ -339,7 +408,7 @@ describe("ConsoleWindowApp", () => {
       closeConsoleTab: vi.fn().mockResolvedValue(ok<ConsoleTabCloseResult>({ remainingTabs: 0 })),
       createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
     });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
 
     fireEvent.click(screen.getByRole("button", { name: "Close active console tab" }));
@@ -365,7 +434,7 @@ describe("ConsoleWindowApp", () => {
       .mockResolvedValueOnce({ ok: false, error: "Console cleanup is still pending" })
       .mockResolvedValueOnce(ok<ConsoleTabCloseResult>({ remainingTabs: 0 }));
     installAPI({ closeConsoleTab });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
 
     fireEvent.click(screen.getByRole("button", { name: "Close active console tab" }));
@@ -384,7 +453,7 @@ describe("ConsoleWindowApp", () => {
   it("scopes exit notices and terminal failures to their exact tab", async () => {
     openConsoleTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
     installAPI({ createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)) });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
     fireEvent.click(screen.getByRole("button", { name: "New console tab" }));
     await screen.findByRole("tab", { name: /Console 2 Connected/u });
@@ -409,7 +478,7 @@ describe("ConsoleWindowApp", () => {
     const user = userEvent.setup();
     openConsoleTransport.mockResolvedValue(fakeTransport());
     const api = installAPI();
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     const terminal = await screen.findByRole("region", {
       name: "Sliver client Console 1 using Production operator",
     });
@@ -442,7 +511,7 @@ describe("ConsoleWindowApp", () => {
       createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
       closeConsoleTab: vi.fn().mockResolvedValue(ok<ConsoleTabCloseResult>({ remainingTabs: 1 })),
     });
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
 
     act(() => api.listeners.newTab?.());
@@ -468,7 +537,7 @@ describe("ConsoleWindowApp", () => {
       }),
     });
 
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
 
     expect(await screen.findByText("Sliver console unavailable")).toBeInTheDocument();
     expect(screen.getByText("This window has no console capability")).toBeInTheDocument();
@@ -486,7 +555,7 @@ describe("ConsoleWindowApp", () => {
       }),
     });
 
-    render(<ConsoleWindowApp />);
+    renderWithApplicationContextMenu(<ConsoleWindowApp />);
 
     expect(await screen.findByText("Sliver console unavailable")).toBeInTheDocument();
     expect(screen.getByText("Ghostty runtime failed integrity verification")).toBeInTheDocument();
@@ -501,7 +570,7 @@ describe("ConsoleWindowApp", () => {
     const secondTransport = fakeTransport();
     openConsoleTransport.mockResolvedValueOnce(firstTransport).mockResolvedValueOnce(secondTransport);
     installAPI({ createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)) });
-    const rendered = render(<ConsoleWindowApp />);
+    const rendered = renderWithApplicationContextMenu(<ConsoleWindowApp />);
     await screen.findByRole("tab", { name: /Console 1 Connected/u });
     fireEvent.click(screen.getByRole("button", { name: "New console tab" }));
     await screen.findByRole("tab", { name: /Console 2 Connected/u });

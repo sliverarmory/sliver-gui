@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import {
+  APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   type ApplicationSettingsState,
 } from "../../../shared/application-settings-contracts";
@@ -124,10 +125,14 @@ describe("ApplicationSettingsProvider", () => {
       value: applicationSettings({
         revision: input.expectedRevision + 1,
         theme: input.settings.theme,
+        appIcon: input.settings.appIcon,
         reduceMotion: input.settings.reduceMotion,
       }),
     }));
-    installSettingsAPI({ updateApplicationSettings });
+    installSettingsAPI({
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ appIcon: "passion" })),
+      updateApplicationSettings,
+    });
     const user = userEvent.setup();
     renderProvider();
     await screen.findByText("ready");
@@ -139,11 +144,42 @@ describe("ApplicationSettingsProvider", () => {
       expectedRevision: 0,
       settings: {
         theme: "light",
+        appIcon: "passion",
         reduceMotion: false,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     });
+    expect(screen.getByTestId("app-icon")).toHaveTextContent("passion");
+  });
+
+  it("persists an icon-only update without changing the app theme", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: applicationSettings({
+        revision: input.expectedRevision + 1,
+        ...input.settings,
+      }),
+    }));
+    installSettingsAPI({ updateApplicationSettings });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+
+    await user.click(screen.getByRole("button", { name: "Use Passion icon" }));
+
+    await waitFor(() => expect(screen.getByTestId("app-icon")).toHaveTextContent("passion"));
+    expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
+      expectedRevision: 0,
+      settings: {
+        theme: "system",
+        appIcon: "passion",
+        reduceMotion: false,
+        commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+      },
+    });
+    expect(document.documentElement).toHaveClass("dark");
   });
 
   it("migrates a non-default legacy terminal preference once", async () => {
@@ -158,7 +194,7 @@ describe("ApplicationSettingsProvider", () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
       value: {
-        v: 2 as const,
+        v: APPLICATION_SETTINGS_VERSION,
         revision: 1,
         ...input.settings,
       },
@@ -171,6 +207,7 @@ describe("ApplicationSettingsProvider", () => {
       expectedRevision: 0,
       settings: {
         theme: "system",
+        appIcon: "auto",
         reduceMotion: false,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: {
@@ -202,11 +239,18 @@ function SettingsProbe(): React.JSX.Element {
       <span>{context.isReady ? "ready" : "loading"}</span>
       <span data-testid="revision">{context.settings.revision}</span>
       <span data-testid="theme">{context.settings.theme}</span>
+      <span data-testid="app-icon">{context.settings.appIcon}</span>
       <button
         type="button"
         onClick={() => void context.updateSettings((current) => ({ ...current, theme: "light" }))}
       >
         Use light theme
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, appIcon: "passion" }))}
+      >
+        Use Passion icon
       </button>
     </div>
   );
@@ -235,7 +279,7 @@ function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
 }
 
 function applicationSettings(
-  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "reduceMotion">>,
+  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion">>,
 ): ApplicationSettingsState {
   return {
     ...DEFAULT_APPLICATION_SETTINGS_STATE,

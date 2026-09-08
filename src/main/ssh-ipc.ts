@@ -20,10 +20,12 @@ import {
   parseSshDeploymentInput,
   parseSshHostKeyReviewInput,
   parseSshTabInput,
+  parseSshTabRenameInput,
   type ManagedSshTarget,
   type SshOpenTabResult,
   type SshTabCloseResult,
   type SshTabLaunchContext,
+  type SshTabRenameResult,
   type SshWindowLaunchContext,
 } from "../shared/ssh-contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
@@ -42,6 +44,7 @@ export const SSH_IPC_INVOKE = {
   approveSshHostKey: "sliver:ssh:host-key:approve",
   closeSshTab: "sliver:ssh:tab:close",
   selectSshTab: "sliver:ssh:tab:select",
+  renameSshTab: "sliver:ssh:tab:rename",
   getTerminalRuntime: "sliver:ssh:terminal-runtime:get",
   getApplicationSettings: "sliver:ssh:application-settings:get",
   updateApplicationSettings: "sliver:ssh:application-settings:update",
@@ -82,6 +85,11 @@ export interface SshSessionController {
     tabId: string,
   ): MaybePromise<OperationResult<SshTabCloseResult>>;
   selectTab(owner: ConsoleOwnerIdentity, tabId: string): MaybePromise<OperationResult>;
+  renameTab(
+    owner: ConsoleOwnerIdentity,
+    tabId: string,
+    label: string,
+  ): MaybePromise<OperationResult<SshTabRenameResult>>;
   attach(owner: ConsoleOwnerIdentity, attachmentToken: string, port: ConsoleAttachmentPort): MaybePromise<void>;
 }
 
@@ -169,6 +177,13 @@ export function registerSshIpcHandlers(
     authorizeWindow,
     (args) => singleArgument(parseSshTabInput(requireSingleArgument(args))),
     ({ identity }, input) => services.sessions.selectTab(identity, input.tabId),
+  );
+  handleSsh(
+    SSH_IPC_INVOKE.renameSshTab,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseSshTabRenameInput(requireSingleArgument(args))),
+    ({ identity }, input) => services.sessions.renameTab(identity, input.tabId, input.label),
   );
   handleSsh(
     SSH_IPC_INVOKE.getTerminalRuntime,

@@ -350,6 +350,10 @@ for (const requiredPath of requiredBuilderPaths) {
 for (const requiredSetting of [
   "from: build/about-icon.png",
   "to: sliver-desktop.png",
+  "to: app-icons",
+  "- icon1a-dark.png",
+  "- icon1a-light.png",
+  "- passion.png",
   "from: LICENSES",
   "to: licenses",
   "from: THIRD_PARTY_NOTICES.md",
@@ -361,7 +365,7 @@ for (const requiredSetting of [
     throw new Error(`Production package branding is missing: ${requiredSetting}`);
   }
 }
-const configuredPlatformIcons = builderConfiguration.match(/^\s+icon: build\/icon\.png$/gmu) ?? [];
+const configuredPlatformIcons = builderConfiguration.match(/^\s+icon: build\/icon1a-dark\.png$/gmu) ?? [];
 if (configuredPlatformIcons.length !== 3) {
   throw new Error("Production package branding must configure the app icon for macOS, Windows, and Linux");
 }
@@ -652,6 +656,14 @@ async function verifyExternalBrandAsset(archivePath) {
   const packaged = await readFile(packagedPath).catch(() => undefined);
   if (!packaged || sha256(packaged) !== sha256(expected)) {
     throw new Error(`Packaged application is missing the approved About/window icon: ${packagedPath}`);
+  }
+  for (const name of ["icon1a-dark.png", "icon1a-light.png", "passion.png"]) {
+    const source = await readFile(join(rootDir, "build", name));
+    const resourcePath = join(dirname(archivePath), "app-icons", name);
+    const resource = await readFile(resourcePath).catch(() => undefined);
+    if (!resource || sha256(resource) !== sha256(source)) {
+      throw new Error(`Packaged application is missing an approved app icon: ${resourcePath}`);
+    }
   }
 }
 

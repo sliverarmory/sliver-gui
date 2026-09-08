@@ -42,6 +42,8 @@ import {
   saveConsoleTerminalSettings,
 } from "./components/console-terminal-settings";
 import { TerminalSettingsModal } from "./components/TerminalSettingsModal";
+import { RenamableTab } from "./components/RenamableTab";
+import { RenameTabDialog } from "./components/RenameTabDialog";
 
 const EMPTY_CONSOLE_TAB_KEY = "sliver-console-empty";
 
@@ -49,6 +51,7 @@ type ConsoleWindowPhase = "claiming" | "starting" | "ready";
 
 interface ReadyConsoleTab {
   readonly context: ConsoleTabLaunchContext;
+  readonly label: string;
   readonly transport: ConsoleTerminalTransport;
   readonly terminalRef: RefObject<GhosttyTerminalHandle | null>;
   readonly exitMessage: string | undefined;
@@ -82,6 +85,8 @@ export function ConsoleWindowApp(): React.JSX.Element {
   const [actionError, setActionError] = useState<string>();
   const [isCreatingTab, setIsCreatingTab] = useState(false);
   const [closingTabId, setClosingTabId] = useState<string>();
+  const [renameTabId, setRenameTabId] = useState<string>();
+  const [renameName, setRenameName] = useState("");
   const [localSettings, setLocalSettings] = useState(loadConsoleTerminalSettings);
   const settings = applicationSettings?.settings.terminal ?? localSettings;
   const [settingsDraft, setSettingsDraft] = useState(settings);
@@ -125,6 +130,21 @@ export function ConsoleWindowApp(): React.JSX.Element {
     setSettingsDraft(settingsRef.current);
     setIsSettingsOpen(true);
   }, []);
+
+  const openRenameTab = useCallback((tabId: string): void => {
+    const tab = tabsRef.current.find(({ context: tabContext }) => tabContext.tabId === tabId);
+    if (!tab) return;
+    setRenameName(tab.label);
+    setRenameTabId(tabId);
+  }, []);
+
+  const renameTab = useCallback((name: string): void => {
+    if (!renameTabId || !tabsRef.current.some(({ context }) => context.tabId === renameTabId)) return;
+    updateTab(renameTabId, { label: name });
+    setRenameTabId(undefined);
+    setRenameName("");
+    focusActiveTerminal();
+  }, [focusActiveTerminal, renameTabId, updateTab]);
 
   const selectTabByShortcut = useCallback((index: number): void => {
     const tab = tabsRef.current[index];
@@ -282,11 +302,17 @@ export function ConsoleWindowApp(): React.JSX.Element {
     if (!isSettingsOpen) setSettingsDraft(settings);
   }, [isSettingsOpen, settings]);
 
+  useEffect(() => {
+    if (!renameTabId || tabs.some(({ context: tabContext }) => tabContext.tabId === renameTabId)) return;
+    setRenameTabId(undefined);
+    setRenameName("");
+  }, [renameTabId, tabs]);
+
   const activeTab = tabs.find(({ context: tabContext }) => tabContext.tabId === activeTabId);
   useEffect(() => {
     if (!context) return;
     document.title = activeTab
-      ? `Sliver console — ${context.configName} — ${activeTab.context.label}`
+      ? `Sliver console — ${context.configName} — ${activeTab.label}`
       : `Sliver console — ${context.configName}`;
   }, [activeTab, context]);
 
@@ -344,17 +370,18 @@ export function ConsoleWindowApp(): React.JSX.Element {
                 const state = consoleTabState(tab);
                 const shortcutDigit = consoleTabShortcutDigit(index);
                 return (
-                  <Tabs.Tab
-                    aria-label={`${tab.context.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
+                  <RenamableTab
+                    ariaLabel={`${tab.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
                     key={tab.context.tabId}
                     className="max-w-56 min-w-28 gap-2 rounded-none px-3 data-[selected=true]:text-foreground"
                     id={tab.context.tabId}
+                    onRename={openRenameTab}
                   >
                     <span
                       aria-hidden
                       className={`size-2 shrink-0 rounded-full ${state === "connected" ? "bg-success" : "bg-warning"}`}
                     />
-                    <span className="truncate">{tab.context.label}</span>
+                    <span className="truncate">{tab.label}</span>
                     <kbd
                       aria-hidden
                       className="flex-none rounded-md bg-surface-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted tabular-nums"
@@ -363,7 +390,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
                     </kbd>
                     <span className="sr-only"> {state === "connected" ? "Connected" : "Exited"}</span>
                     <Tabs.Indicator className="top-auto bottom-0 h-0.5 rounded-none bg-accent shadow-none" />
-                  </Tabs.Tab>
+                  </RenamableTab>
                 );
               })}
             </Tabs.List>
@@ -426,7 +453,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
                   <GhosttyTerminal
                     ref={tab.terminalRef}
                     appearance={appearance}
-                    ariaLabel={`Sliver client ${tab.context.label} using ${context.configName}`}
+                    ariaLabel={`Sliver client ${tab.label} using ${context.configName}`}
                     className="h-full min-h-0"
                     transport={tab.transport}
                     wasmBytes={runtime.bytes}
@@ -516,6 +543,21 @@ export function ConsoleWindowApp(): React.JSX.Element {
           focusActiveTerminal();
         }}
       />
+
+      <RenameTabDialog
+        description="This name applies to this console window."
+        isOpen={renameTabId !== undefined}
+        name={renameName}
+        originalName={tabs.find(({ context: tabContext }) => tabContext.tabId === renameTabId)?.label ?? ""}
+        onNameChange={setRenameName}
+        onOpenChange={(isOpen) => {
+          if (isOpen) return;
+          setRenameTabId(undefined);
+          setRenameName("");
+          focusActiveTerminal();
+        }}
+        onRename={renameTab}
+      />
     </main>
   );
 }
@@ -581,6 +623,7 @@ function claimConsoleLaunchContext(): Promise<OperationResult<ConsoleWindowLaunc
 async function openConsoleTab(context: ConsoleTabLaunchContext): Promise<ReadyConsoleTab> {
   return {
     context,
+    label: context.label,
     transport: await ConsoleTerminalTransport.open({ attachmentToken: context.attachmentToken }),
     terminalRef: createRef<GhosttyTerminalHandle>(),
     exitMessage: undefined,

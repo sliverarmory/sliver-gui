@@ -5,12 +5,16 @@ import type {
 } from "./application-settings-contracts.js";
 import type { OperationResult } from "./contracts.js";
 import type { TerminalRuntimeAsset } from "./stream-contracts.js";
+import {
+  TERMINAL_TAB_LABEL_MAX_LENGTH,
+  isTerminalTabLabel,
+} from "./terminal-tab-label.js";
 
 export const SSH_PROTOCOL_VERSION = 1 as const;
 export const SSH_MAX_TABS_PER_WINDOW = 10 as const;
+export const SSH_TAB_LABEL_MAX_LENGTH = TERMINAL_TAB_LABEL_MAX_LENGTH;
 
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
-const MAX_LABEL_LENGTH = 128;
 const MAX_HOST_LENGTH = 255;
 const MAX_USERNAME_LENGTH = 128;
 
@@ -29,6 +33,7 @@ export interface ManagedSshTarget {
 export interface SshTabLaunchContext {
   readonly tabId: string;
   readonly attachmentToken: string;
+  readonly label: string;
   readonly target: ManagedSshTarget;
 }
 
@@ -45,6 +50,15 @@ export interface SshDeploymentInput {
 
 export interface SshTabInput {
   readonly tabId: string;
+}
+
+export interface SshTabRenameInput extends SshTabInput {
+  readonly label: string;
+}
+
+export interface SshTabRenameResult {
+  readonly tabId: string;
+  readonly label: string;
 }
 
 export interface SshTabCloseResult {
@@ -90,6 +104,7 @@ export interface SshWindowAPI {
   approveSshHostKey(input: SshHostKeyReviewInput): Promise<OperationResult<SshOpenTabResult>>;
   closeSshTab(input: SshTabInput): Promise<OperationResult<SshTabCloseResult>>;
   selectSshTab(input: SshTabInput): Promise<OperationResult>;
+  renameSshTab(input: SshTabRenameInput): Promise<OperationResult<SshTabRenameResult>>;
   getTerminalRuntime(): Promise<OperationResult<TerminalRuntimeAsset>>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   updateApplicationSettings(input: ApplicationSettingsUpdateInput): Promise<OperationResult<ApplicationSettingsState>>;
@@ -117,6 +132,22 @@ export function parseSshTabInput(value: unknown): SshTabInput {
   return Object.freeze({ tabId: requireOpaqueId(record["tabId"], "SSH tab identity") });
 }
 
+export function parseSshTabRenameInput(value: unknown): SshTabRenameInput {
+  const record = requireExactRecord(value, ["tabId", "label"], "SSH tab rename request");
+  return Object.freeze({
+    tabId: requireOpaqueId(record["tabId"], "SSH tab identity"),
+    label: requireTerminalTabLabel(record["label"], "SSH tab label"),
+  });
+}
+
+export function parseSshTabRenameResult(value: unknown): SshTabRenameResult {
+  const record = requireExactRecord(value, ["tabId", "label"], "SSH tab rename result");
+  return Object.freeze({
+    tabId: requireOpaqueId(record["tabId"], "SSH tab identity"),
+    label: requireTerminalTabLabel(record["label"], "SSH tab label"),
+  });
+}
+
 export function parseSshTabId(value: unknown): string {
   return requireOpaqueId(value, "SSH tab identity");
 }
@@ -142,7 +173,7 @@ export function parseSshHostKeyReview(value: unknown): SshHostKeyReview {
   return Object.freeze({
     token: requireOpaqueId(record["token"], "SSH host-key review token"),
     deploymentId: record["deploymentId"],
-    name: requirePlainString(record["name"], "SSH host-key review name", 1, MAX_LABEL_LENGTH),
+    name: requirePlainString(record["name"], "SSH host-key review name", 1, SSH_TAB_LABEL_MAX_LENGTH),
     host: requirePlainString(record["host"], "SSH host-key review host", 1, MAX_HOST_LENGTH),
     port: requireInteger(record["port"], "SSH host-key review port", 1, 65_535),
     fingerprint: record["fingerprint"],
@@ -205,7 +236,7 @@ export function parseManagedSshTarget(value: unknown): ManagedSshTarget {
     : undefined;
   return Object.freeze({
     deploymentId: record["deploymentId"],
-    name: requirePlainString(record["name"], "managed SSH target name", 1, MAX_LABEL_LENGTH),
+    name: requireTerminalTabLabel(record["name"], "managed SSH target name"),
     provider,
     host: requirePlainString(record["host"], "managed SSH target host", 0, MAX_HOST_LENGTH),
     port: requireInteger(record["port"], "managed SSH target port", 1, 65_535),
@@ -217,10 +248,15 @@ export function parseManagedSshTarget(value: unknown): ManagedSshTarget {
 }
 
 export function parseSshTabLaunchContext(value: unknown): SshTabLaunchContext {
-  const record = requireExactRecord(value, ["tabId", "attachmentToken", "target"], "SSH tab launch context");
+  const record = requireExactRecord(
+    value,
+    ["tabId", "attachmentToken", "label", "target"],
+    "SSH tab launch context",
+  );
   return Object.freeze({
     tabId: requireOpaqueId(record["tabId"], "SSH tab identity"),
     attachmentToken: requireOpaqueId(record["attachmentToken"], "SSH attachment token"),
+    label: requireTerminalTabLabel(record["label"], "SSH tab label"),
     target: parseManagedSshTarget(record["target"]),
   });
 }
@@ -290,6 +326,11 @@ function requireInteger(value: unknown, label: string, minimum: number, maximum:
 
 function requirePlainString(value: unknown, label: string, minimum: number, maximum: number): string {
   if (!boundedPlainString(value, minimum, maximum)) invalid(`${label} is invalid`);
+  return value;
+}
+
+function requireTerminalTabLabel(value: unknown, label: string): string {
+  if (!isTerminalTabLabel(value)) invalid(`${label} is invalid`);
   return value;
 }
 

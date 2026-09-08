@@ -24,9 +24,10 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn(() => ({
-      v: 2,
+      v: 3,
       revision: 0,
       theme: "dark",
+      appIcon: "auto",
       reduceMotion: false,
       commandPaletteShortcut: "mod+k",
       terminal: {
@@ -119,6 +120,7 @@ vi.mock("electron", () => {
     });
     readonly restore = vi.fn();
     readonly setTitle = vi.fn();
+    readonly setIcon = vi.fn();
     readonly setBackgroundColor = vi.fn();
     readonly setTitleBarOverlay = vi.fn();
     destroyed = false;
@@ -200,6 +202,11 @@ vi.mock("electron", () => {
       setApplicationMenu: vi.fn(),
     },
     nativeTheme: theme,
+    systemPreferences: {
+      getUserDefault: vi.fn(() => "Dark"),
+      subscribeNotification: vi.fn(() => 1),
+      unsubscribeNotification: vi.fn(),
+    },
     net: { fetch: vi.fn() },
     safeStorage: {},
     session: { defaultSession: {}, fromPartition: vi.fn(() => ({})) },
@@ -364,6 +371,10 @@ describe("SSH application window lifecycle", () => {
       value: { tabs: [{ tabId: firstTabId }] },
     });
     const firstAttachmentToken = firstClaim.value.tabs[0].attachmentToken;
+    expect(await harness.sshServices.sessions.renameTab(firstOwner, firstTabId, "Primary gateway")).toEqual({
+      ok: true,
+      value: { tabId: firstTabId, label: "Primary gateway" },
+    });
 
     firstSshWindow.close();
     await settleLifecycle();
@@ -382,7 +393,7 @@ describe("SSH application window lifecycle", () => {
     const secondClaim = await harness.sshServices.sessions.claim(secondOwner);
     expect(secondClaim).toMatchObject({
       ok: true,
-      value: { tabs: [{ tabId: firstTabId }] },
+      value: { tabs: [{ tabId: firstTabId, label: "Primary gateway" }] },
     });
     expect(secondClaim.value.tabs[0].attachmentToken).not.toBe(firstAttachmentToken);
 

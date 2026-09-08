@@ -54,6 +54,12 @@ files:
 asarUnpack:
   - node_modules/node-pty/build/Release/**
 extraResources:
+  - from: build
+    to: app-icons
+    filter:
+      - icon1a-dark.png
+      - icon1a-light.png
+      - passion.png
   - from: build/about-icon.png
     to: sliver-desktop.png
   - from: LICENSES
@@ -82,13 +88,13 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
   notarize: true
-  icon: build/icon.png
+  icon: build/icon1a-dark.png
   artifactName: sliver-gui-${version}-macos-${arch}.${ext}
   target:
     - dmg
     - zip
 win:
-  icon: build/icon.png
+  icon: build/icon1a-dark.png
   artifactName: sliver-gui-${version}-windows-${arch}.${ext}
   target:
     - nsis
@@ -96,7 +102,7 @@ win:
 linux:
   category: Development
   maintainer: Sliver Armory <sliverarmory@users.noreply.github.com>
-  icon: build/icon.png
+  icon: build/icon1a-dark.png
   artifactName: sliver-gui-${version}-linux-${arch}.${ext}
   target:
     - AppImage

@@ -30,6 +30,7 @@ const CHANNELS = Object.freeze({
   approveSshHostKey: "sliver:ssh:host-key:approve",
   closeSshTab: "sliver:ssh:tab:close",
   selectSshTab: "sliver:ssh:tab:select",
+  renameSshTab: "sliver:ssh:tab:rename",
   getTerminalRuntime: "sliver:ssh:terminal-runtime:get",
   getApplicationSettings: "sliver:ssh:application-settings:get",
   updateApplicationSettings: "sliver:ssh:application-settings:update",
@@ -59,6 +60,7 @@ const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}
 const TERMINAL_FONT_IDS = new Set(["fira-code", "jetbrains-mono", "cascadia-mono", "source-code-pro"]);
 const TERMINAL_CURSOR_STYLES = new Set(["block", "underline", "bar"]);
 const APPLICATION_THEMES = new Set(["system", "light", "dark"]);
+const APPLICATION_ICONS = new Set(["auto", "light", "dark", "passion"]);
 const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
   "alt+f4",
   "mod+0",
@@ -100,6 +102,10 @@ const CONTEXT_MENU_VARIANTS = new Set<ApplicationContextMenuItemVariant>(["defau
 const CONTEXT_MENU_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CONTEXT_MENU_FORBIDDEN_LABEL_PATTERN = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+const TAB_LABEL_CONTROL_OR_LINE_SEPARATOR_PATTERN = /[\p{Cc}\p{Zl}\p{Zp}]/u;
+const TAB_LABEL_FORMAT_CHARACTER_PATTERN = /\p{Cf}/gu;
+const TAB_LABEL_VISIBLE_CHARACTER_PATTERN = /[\p{L}\p{N}\p{P}\p{S}]/u;
+const TAB_LABEL_ALLOWED_JOINERS = new Set(["\u200c", "\u200d"]);
 
 interface RendererWindowBridge {
   postMessage(message: unknown, targetOrigin: string, transfer: MessagePort[]): void;
@@ -196,6 +202,7 @@ const api: SshWindowAPI = {
   approveSshHostKey: (input) => ipcRenderer.invoke(CHANNELS.approveSshHostKey, input),
   closeSshTab: (input) => ipcRenderer.invoke(CHANNELS.closeSshTab, input),
   selectSshTab: (input) => ipcRenderer.invoke(CHANNELS.selectSshTab, input),
+  renameSshTab: (input) => ipcRenderer.invoke(CHANNELS.renameSshTab, input),
   getTerminalRuntime: () => ipcRenderer.invoke(CHANNELS.getTerminalRuntime),
   getApplicationSettings: () => ipcRenderer.invoke(CHANNELS.getApplicationSettings),
   updateApplicationSettings: (input) => ipcRenderer.invoke(CHANNELS.updateApplicationSettings, input),
@@ -538,10 +545,15 @@ function closePort(port: MessagePort): void {
 }
 
 function parseTabLaunchContext(value: unknown): SshTabLaunchContext {
-  const context = exactRecord(value, ["tabId", "attachmentToken", "target"], "SSH tab context");
+  const context = exactRecord(
+    value,
+    ["tabId", "attachmentToken", "label", "target"],
+    "SSH tab context",
+  );
   return Object.freeze({
     tabId: opaqueId(context["tabId"], "SSH tab identity"),
     attachmentToken: opaqueId(context["attachmentToken"], "SSH attachment token"),
+    label: terminalTabLabel(context["label"], "SSH tab label"),
     target: parseManagedTarget(context["target"]),
   });
 }
@@ -574,7 +586,7 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
   }
   return Object.freeze({
     deploymentId: target["deploymentId"] as string,
-    name: plainString(target["name"], 1, 128, "SSH target name"),
+    name: terminalTabLabel(target["name"], "SSH target name"),
     provider: target["provider"],
     host: plainString(target["host"], 1, 255, "SSH target host"),
     port: port as number,
@@ -588,13 +600,14 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
 function parseApplicationSettingsState(value: unknown): ApplicationSettingsState {
   const state = exactRecord(
     value,
-    ["v", "revision", "theme", "reduceMotion", "commandPaletteShortcut", "terminal"],
+    ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"],
     "application settings",
   );
-  if (state["v"] !== 2 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 3 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
+  if (!APPLICATION_ICONS.has(stringValue(state["appIcon"]))) throw new TypeError("Invalid application icon");
   if (typeof state["reduceMotion"] !== "boolean") throw new TypeError("Invalid reduced-motion setting");
   const shortcut = stringValue(state["commandPaletteShortcut"]);
   if (!isCommandPaletteShortcut(shortcut)) throw new TypeError("Invalid command-palette shortcut");
@@ -614,9 +627,10 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
     throw new TypeError("Invalid terminal behavior");
   }
   return Object.freeze({
-    v: 2,
+    v: 3,
     revision: state["revision"] as number,
     theme: state["theme"] as ApplicationSettingsState["theme"],
+    appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
     reduceMotion: state["reduceMotion"],
     commandPaletteShortcut: shortcut,
     terminal: Object.freeze({
@@ -667,6 +681,23 @@ function opaqueId(value: unknown, label: string): string {
 
 function plainString(value: unknown, minimum: number, maximum: number, label: string): string {
   if (!isPlainString(value, minimum, maximum)) throw new TypeError(`Invalid ${label}`);
+  return value;
+}
+
+// This preload intentionally stays single-file for Electron's sandbox. Keep
+// this mirror aligned with shared/terminal-tab-label.ts.
+function terminalTabLabel(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 128 || value.trim() !== value) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  if (
+    TAB_LABEL_CONTROL_OR_LINE_SEPARATOR_PATTERN.test(value) ||
+    !TAB_LABEL_VISIBLE_CHARACTER_PATTERN.test(value)
+  ) throw new TypeError(`Invalid ${label}`);
+  const formatCharacters = value.match(TAB_LABEL_FORMAT_CHARACTER_PATTERN) ?? [];
+  if (!formatCharacters.every((character) => TAB_LABEL_ALLOWED_JOINERS.has(character))) {
+    throw new TypeError(`Invalid ${label}`);
+  }
   return value;
 }
 

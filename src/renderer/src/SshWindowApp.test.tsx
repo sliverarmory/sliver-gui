@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,7 @@ import type {
 import type { TerminalRuntimeAsset } from "../../shared/stream-contracts";
 import type { GhosttyTerminalAppearance } from "./components/GhosttyTerminal";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
+import { renderWithApplicationContextMenu } from "./application-context-menu-test-utils";
 
 const openSshTransport = vi.fn();
 
@@ -88,18 +89,21 @@ const stoppedTarget: ManagedSshTarget = {
 const firstTab: SshTabLaunchContext = {
   tabId: "a".repeat(43),
   attachmentToken: "t".repeat(43),
+  label: awsTarget.name,
   target: awsTarget,
 };
 
 const secondTab: SshTabLaunchContext = {
   tabId: "b".repeat(43),
   attachmentToken: "u".repeat(43),
+  label: proxmoxTarget.name,
   target: proxmoxTarget,
 };
 
 const secondAwsTab: SshTabLaunchContext = {
   tabId: "c".repeat(43),
   attachmentToken: "v".repeat(43),
+  label: awsTarget.name,
   target: awsTarget,
 };
 
@@ -144,7 +148,7 @@ describe("SshWindowApp", () => {
     openSshTransport.mockResolvedValue(transport);
     const api = installAPI();
 
-    render(
+    renderWithApplicationContextMenu(
       <ApplicationSettingsProvider api={api}>
         <SshWindowApp />
       </ApplicationSettingsProvider>,
@@ -160,7 +164,7 @@ describe("SshWindowApp", () => {
     expect(tab).toHaveTextContent("⌘1");
 
     const terminal = screen.getByRole("region", {
-      name: "SSH session for ubuntu@44.240.136.251:22",
+      name: "SSH session test1 for ubuntu@44.240.136.251:22",
     });
     expect(terminal).toHaveAttribute("data-font-family", '"Fira Code", monospace');
     expect(terminal).toHaveAttribute("data-font-size", "13");
@@ -187,7 +191,7 @@ describe("SshWindowApp", () => {
       })),
     });
     const user = userEvent.setup();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
@@ -237,7 +241,7 @@ describe("SshWindowApp", () => {
       })),
     });
     const user = userEvent.setup();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", {
       name: "test1, ubuntu@44.240.136.251:22, Connected, shortcut Command+1",
     });
@@ -294,6 +298,99 @@ describe("SshWindowApp", () => {
     expect(secondTransport.close).not.toHaveBeenCalled();
   });
 
+  it("renames the exact background SSH tab without selecting it or changing its server identity", async () => {
+    const user = userEvent.setup();
+    const firstTransport = fakeTransport();
+    const secondTransport = fakeTransport();
+    openSshTransport.mockResolvedValueOnce(firstTransport).mockResolvedValueOnce(secondTransport);
+    const api = installAPI({
+      claimSshWindow: vi.fn(async () => ok({
+        ...launchContext,
+        tabs: [firstTab, secondTab],
+        activeTabId: secondTab.tabId,
+      })),
+    });
+    const rendered = renderWithApplicationContextMenu(<SshWindowApp />);
+    const firstTabButton = await screen.findByRole("tab", {
+      name: /test1.*ubuntu@44\.240\.136\.251:22.*Connected/u,
+    });
+    const secondTabButton = screen.getByRole("tab", { name: /range-vm.*Connected/u });
+    expect(firstTabButton).toHaveAttribute("aria-selected", "false");
+    expect(secondTabButton).toHaveAttribute("aria-selected", "true");
+    expect(document.title).toBe("SSH — range-vm — operator@10.0.0.42:2222");
+
+    fireEvent.contextMenu(firstTabButton, { clientX: 40, clientY: 24 });
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Rename",
+      "Inspect Element",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "Rename" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename tab" });
+    expect(within(dialog).getByText(
+      "The managed server name and connection details stay unchanged.",
+    )).toBeInTheDocument();
+    const input = within(dialog).getByRole("textbox", { name: "Tab name" });
+    expect(input).toHaveValue("test1");
+    await user.clear(input);
+    await user.type(input, "  Primary gateway  {Enter}");
+
+    await waitFor(() => expect(api.renameSshTab).toHaveBeenCalledWith({
+      tabId: firstTab.tabId,
+      label: "Primary gateway",
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename tab" })).not.toBeInTheDocument());
+    const renamedTab = screen.getByRole("tab", { name: /Primary gateway.*Connected/u });
+    expect(renamedTab).toHaveAttribute("aria-selected", "false");
+    expect(secondTabButton).toHaveAttribute("aria-selected", "true");
+    expect(api.selectSshTab).not.toHaveBeenCalled();
+    expect(document.querySelector(
+      '[data-terminal-mock][aria-label="SSH session Primary gateway for ubuntu@44.240.136.251:22"]',
+    )).toBeInTheDocument();
+    expect(document.title).toBe("SSH — range-vm — operator@10.0.0.42:2222");
+    expect(openSshTransport).toHaveBeenCalledTimes(2);
+    expect(firstTransport.close).not.toHaveBeenCalled();
+    expect(secondTransport.close).not.toHaveBeenCalled();
+
+    await user.click(renamedTab);
+    await waitFor(() => expect(api.selectSshTab).toHaveBeenCalledWith({ tabId: firstTab.tabId }));
+    await waitFor(() => expect(document.title).toBe(
+      "SSH — Primary gateway — ubuntu@44.240.136.251:22",
+    ));
+  });
+
+  it("dismisses Rename when the native close command removes its active SSH tab", async () => {
+    const user = userEvent.setup();
+    openSshTransport.mockResolvedValueOnce(fakeTransport()).mockResolvedValueOnce(fakeTransport());
+    const api = installAPI({
+      claimSshWindow: vi.fn(async () => ok({
+        ...launchContext,
+        tabs: [firstTab, secondTab],
+        activeTabId: secondTab.tabId,
+      })),
+      closeSshTab: vi.fn(async () => ok({ remainingTabs: 1 })),
+    });
+    const rendered = renderWithApplicationContextMenu(<SshWindowApp />);
+    await screen.findByRole("tab", { name: /test1.*Connected/u });
+    const secondTabButton = screen.getByRole("tab", { name: /range-vm.*Connected/u });
+
+    fireEvent.contextMenu(secondTabButton, { clientX: 40, clientY: 24 });
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    expect(await screen.findByRole("dialog", { name: "Rename tab" })).toBeInTheDocument();
+
+    act(() => api.listeners.closeTab?.());
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename tab" })).not.toBeInTheDocument());
+    expect(screen.queryByRole("tab", { name: /range-vm/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /test1.*Connected/u })).toHaveAttribute("aria-selected", "true");
+    expect(document.title).toBe("SSH — test1 — ubuntu@44.240.136.251:22");
+    expect(api.closeSshTab).toHaveBeenCalledExactlyOnceWith({ tabId: secondTab.tabId });
+    expect(api.selectSshTab).toHaveBeenLastCalledWith({ tabId: firstTab.tabId });
+  });
+
   it("requires an explicit fingerprint review before trusting an unknown SSH host key", async () => {
     openSshTransport.mockResolvedValue(fakeTransport());
     const review: SshHostKeyReview = {
@@ -315,7 +412,7 @@ describe("SshWindowApp", () => {
       })),
     });
     const user = userEvent.setup();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
@@ -367,7 +464,7 @@ describe("SshWindowApp", () => {
       }));
     installAPI({ createSshTab, approveSshHostKey });
     const user = userEvent.setup();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
@@ -424,7 +521,7 @@ describe("SshWindowApp", () => {
     }));
     installAPI({ createSshTab, approveSshHostKey });
     const user = userEvent.setup();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
 
     await user.click(screen.getByRole("button", { name: "New SSH tab" }));
@@ -447,9 +544,9 @@ describe("SshWindowApp", () => {
     const secondTransport = fakeTransport();
     openSshTransport.mockResolvedValueOnce(firstTransport).mockResolvedValueOnce(secondTransport);
     const api = installAPI();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     const firstTerminal = await screen.findByRole("region", {
-      name: "SSH session for ubuntu@44.240.136.251:22",
+      name: "SSH session test1 for ubuntu@44.240.136.251:22",
     });
 
     act(() => api.listeners.tabOpened?.(secondTab));
@@ -488,7 +585,7 @@ describe("SshWindowApp", () => {
       .mockResolvedValueOnce(originalTransport)
       .mockImplementationOnce(() => replacementOpen.promise);
     const api = installAPI();
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
 
     act(() => api.listeners.tabOpened?.(replacementContext));
@@ -540,13 +637,13 @@ describe("SshWindowApp", () => {
       updateApplicationSettings: vi.fn(async () => ok(updatedSettings)),
     });
     const user = userEvent.setup();
-    render(
+    renderWithApplicationContextMenu(
       <ApplicationSettingsProvider api={api}>
         <SshWindowApp />
       </ApplicationSettingsProvider>,
     );
     const terminal = await screen.findByRole("region", {
-      name: "SSH session for ubuntu@44.240.136.251:22",
+      name: "SSH session test1 for ubuntu@44.240.136.251:22",
     });
 
     act(() => api.listeners.settings?.());
@@ -570,7 +667,7 @@ describe("SshWindowApp", () => {
     const transport = fakeTransport();
     openSshTransport.mockResolvedValue(transport);
     const api = installAPI();
-    const rendered = render(<SshWindowApp />);
+    const rendered = renderWithApplicationContextMenu(<SshWindowApp />);
     await screen.findByRole("tab", { name: /test1.*Connected/u });
 
     rendered.unmount();
@@ -603,7 +700,7 @@ describe("SshWindowApp", () => {
     });
     const user = userEvent.setup();
 
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
 
     expect(await screen.findByRole("tab", { name: /range-vm.*Connected/u })).toBeInTheDocument();
     const failedTab = screen.getByRole("tab", { name: /test1.*Failed.*Command\+1/u });
@@ -647,7 +744,7 @@ describe("SshWindowApp", () => {
     });
     const user = userEvent.setup();
 
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
 
     expect(await screen.findByRole("tab", { name: /test1.*Failed/u })).toBeInTheDocument();
     const closeButton = screen.getByRole("button", { name: "Close active SSH tab" });
@@ -669,7 +766,7 @@ describe("SshWindowApp", () => {
         error: "Ghostty runtime failed integrity verification",
       })),
     });
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
 
     expect(await screen.findByText("Managed SSH unavailable")).toBeInTheDocument();
     expect(screen.getByText("Ghostty runtime failed integrity verification")).toBeInTheDocument();
@@ -683,7 +780,7 @@ describe("SshWindowApp", () => {
         error: "This window has no SSH capability",
       })),
     });
-    render(<SshWindowApp />);
+    renderWithApplicationContextMenu(<SshWindowApp />);
 
     expect(await screen.findByText("Managed SSH unavailable")).toBeInTheDocument();
     expect(screen.getByText("This window has no SSH capability")).toBeInTheDocument();
@@ -751,6 +848,7 @@ interface SshAPIOverrides {
   readonly reattachSshTab: SshWindowAPI["reattachSshTab"];
   readonly approveSshHostKey: (input: { readonly token: string }) => Promise<OperationResult<SshOpenTabResult>>;
   readonly closeSshTab: (input: { readonly tabId: string }) => Promise<OperationResult<SshTabCloseResult>>;
+  readonly renameSshTab: SshWindowAPI["renameSshTab"];
   readonly getTerminalRuntime: () => Promise<OperationResult<TerminalRuntimeAsset>>;
   readonly updateApplicationSettings: SshWindowAPI["updateApplicationSettings"];
 }
@@ -779,6 +877,7 @@ function installAPI(overrides: Partial<SshAPIOverrides> = {}) {
       error: "No host-key approval fixture",
     }))),
     closeSshTab: vi.fn(overrides.closeSshTab ?? (async () => ok({ remainingTabs: 0 }))),
+    renameSshTab: vi.fn(overrides.renameSshTab ?? (async ({ tabId, label }) => ok({ tabId, label }))),
     selectSshTab: vi.fn(async () => ({ ok: true as const })),
     getTerminalRuntime: vi.fn(overrides.getTerminalRuntime ?? (async () => ok(runtime()))),
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),

@@ -19,7 +19,7 @@ import {
 import type { PrepareExecutionActionInput } from "../shared/execution-contracts.js";
 import type { AddCredentialInput } from "../shared/operator-data-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
-import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
+import { APPLICATION_SETTINGS_VERSION, DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
@@ -174,7 +174,7 @@ describe("trusted Electron IPC boundary", () => {
     const update = vi.fn(async (input) => ({
       ok: true as const,
       value: {
-        v: 2 as const,
+        v: APPLICATION_SETTINGS_VERSION,
         revision: input.expectedRevision + 1,
         ...input.settings,
       },
@@ -195,6 +195,7 @@ describe("trusted Electron IPC boundary", () => {
       expectedRevision: 0,
       settings: {
         theme: "light" as const,
+        appIcon: "passion" as const,
         reduceMotion: true,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
@@ -204,7 +205,7 @@ describe("trusted Electron IPC boundary", () => {
     expect(electronMocks.handlers.get(IPC.getApplicationSettings)?.(event))
       .toBe(DEFAULT_APPLICATION_SETTINGS_STATE);
     await expect(electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, input))
-      .resolves.toMatchObject({ ok: true, value: { revision: 1, theme: "light" } });
+      .resolves.toMatchObject({ ok: true, value: { revision: 1, theme: "light", appIcon: "passion" } });
     expect(update).toHaveBeenCalledOnce();
     expect(update.mock.calls[0]?.[0]).toEqual(input);
     expect(Object.isFrozen(update.mock.calls[0]?.[0])).toBe(true);
@@ -212,6 +213,10 @@ describe("trusted Electron IPC boundary", () => {
     expect(() => electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, {
       ...input,
       settings: { ...input.settings, theme: "sepia" },
+    })).toThrow(/invalid application settings update/);
+    expect(() => electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, {
+      ...input,
+      settings: { ...input.settings, appIcon: "system" },
     })).toThrow(/invalid application settings update/);
     expect(() => electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, {
       ...input,

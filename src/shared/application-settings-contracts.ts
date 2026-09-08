@@ -1,4 +1,5 @@
-export const APPLICATION_SETTINGS_VERSION = 2 as const;
+export const APPLICATION_SETTINGS_VERSION = 3 as const;
+const PREVIOUS_APPLICATION_SETTINGS_VERSION = 2 as const;
 const LEGACY_APPLICATION_SETTINGS_VERSION = 1 as const;
 
 export const CONSOLE_TERMINAL_FONT_SIZE_MIN = 8;
@@ -13,6 +14,7 @@ export const CONSOLE_TERMINAL_FONTS = [
 ] as const;
 
 export type ApplicationTheme = "system" | "light" | "dark";
+export type ApplicationIcon = "auto" | "light" | "dark" | "passion";
 export type ConsoleTerminalFontId = (typeof CONSOLE_TERMINAL_FONTS)[number]["id"];
 export type ConsoleTerminalCursorStyle = "block" | "underline" | "bar";
 
@@ -28,6 +30,7 @@ export interface ApplicationTerminalSettings {
 
 export interface ApplicationSettingsValues {
   readonly theme: ApplicationTheme;
+  readonly appIcon: ApplicationIcon;
   readonly reduceMotion: boolean;
   readonly commandPaletteShortcut: string;
   readonly terminal: ApplicationTerminalSettings;
@@ -53,6 +56,7 @@ export const DEFAULT_APPLICATION_TERMINAL_SETTINGS: ApplicationTerminalSettings 
 
 export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Object.freeze({
   theme: "system",
+  appIcon: "auto",
   reduceMotion: false,
   commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
   terminal: DEFAULT_APPLICATION_TERMINAL_SETTINGS,
@@ -65,6 +69,7 @@ export const DEFAULT_APPLICATION_SETTINGS_STATE: ApplicationSettingsState = Obje
 });
 
 const APPLICATION_THEMES = new Set<ApplicationTheme>(["system", "light", "dark"]);
+const APPLICATION_ICONS = new Set<ApplicationIcon>(["auto", "light", "dark", "passion"]);
 const CURSOR_STYLES = new Set<ConsoleTerminalCursorStyle>(["block", "underline", "bar"]);
 const FONT_IDS = new Set<ConsoleTerminalFontId>(CONSOLE_TERMINAL_FONTS.map(({ id }) => id));
 const TERMINAL_KEYS = [
@@ -74,8 +79,9 @@ const TERMINAL_KEYS = [
   "cursorBlink",
   "smoothScrolling",
 ] as const;
-const SETTINGS_VALUE_KEYS = ["theme", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
+const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
 const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
+const PREVIOUS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
 const LEGACY_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "terminal"] as const;
 const UPDATE_INPUT_KEYS = ["expectedRevision", "settings"] as const;
 const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
@@ -111,6 +117,10 @@ const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
 
 export function isApplicationTheme(value: unknown): value is ApplicationTheme {
   return typeof value === "string" && APPLICATION_THEMES.has(value as ApplicationTheme);
+}
+
+export function isApplicationIcon(value: unknown): value is ApplicationIcon {
+  return typeof value === "string" && APPLICATION_ICONS.has(value as ApplicationIcon);
 }
 
 export function isConsoleTerminalFontId(value: unknown): value is ConsoleTerminalFontId {
@@ -149,6 +159,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
   }
   if (
     !isApplicationTheme(value["theme"]) ||
+    !isApplicationIcon(value["appIcon"]) ||
     typeof value["reduceMotion"] !== "boolean" ||
     !isCommandPaletteShortcut(value["commandPaletteShortcut"])
   ) {
@@ -162,6 +173,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
   }
   return Object.freeze({
     theme: value["theme"],
+    appIcon: value["appIcon"],
     reduceMotion: value["reduceMotion"],
     commandPaletteShortcut: value["commandPaletteShortcut"],
     terminal,
@@ -180,6 +192,7 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
   try {
     settings = parseApplicationSettingsValues({
       theme: value["theme"],
+      appIcon: value["appIcon"],
       reduceMotion: value["reduceMotion"],
       commandPaletteShortcut: value["commandPaletteShortcut"],
       terminal: value["terminal"],
@@ -198,20 +211,26 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
   try {
     return parseApplicationSettingsState(value);
   } catch {
-    if (
-      !hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) ||
-      value["v"] !== LEGACY_APPLICATION_SETTINGS_VERSION ||
-      !isRevision(value["revision"])
-    ) throw new TypeError("Invalid persisted application settings state");
     try {
-      return parseApplicationSettingsState({
-        ...value,
-        v: APPLICATION_SETTINGS_VERSION,
-        commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
-      });
+      if (hasExactKeys(value, PREVIOUS_SETTINGS_STATE_KEYS) && value["v"] === PREVIOUS_APPLICATION_SETTINGS_VERSION) {
+        return parseApplicationSettingsState({
+          ...value,
+          v: APPLICATION_SETTINGS_VERSION,
+          appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
+        });
+      }
+      if (hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) && value["v"] === LEGACY_APPLICATION_SETTINGS_VERSION) {
+        return parseApplicationSettingsState({
+          ...value,
+          v: APPLICATION_SETTINGS_VERSION,
+          appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
+          commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
+        });
+      }
     } catch {
       throw new TypeError("Invalid persisted application settings state");
     }
+    throw new TypeError("Invalid persisted application settings state");
   }
 }
 

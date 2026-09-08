@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -43,6 +43,7 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Accessibility" })).toBeInTheDocument();
     expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: "App icon" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Reduce motion" })).toBeInTheDocument();
 
     const commandPaletteTab = screen.getByRole("tab", { name: "Command Palette" });
@@ -84,11 +85,48 @@ describe("SettingsPage", () => {
     const system = screen.getByRole("radio", { name: "System" });
     expect(system).toHaveAttribute("aria-checked", "true");
 
-    await user.click(screen.getByRole("radio", { name: "Light" }));
+    await user.click(within(screen.getByRole("radiogroup", { name: "Color theme" }))
+      .getByRole("radio", { name: "Light" }));
     await user.click(screen.getByRole("switch", { name: "Reduce motion" }));
 
     expect(onThemeChange).toHaveBeenCalledExactlyOnceWith("light");
     expect(onReduceMotionChange).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it.each(["Light", "Dark", "Passion"])("selects the %s app icon independently of the color theme", async (label) => {
+    const user = userEvent.setup();
+    const onAppIconChange = vi.fn();
+    const onThemeChange = vi.fn();
+    renderSettings({
+      settings: { ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "light" },
+      onAppIconChange,
+      onThemeChange,
+    });
+
+    const icons = within(screen.getByRole("radiogroup", { name: "App icon" }));
+    expect(icons.getByRole("radio", { name: "Auto" })).toHaveAttribute("aria-checked", "true");
+    await user.click(icons.getByRole("radio", { name: label }));
+
+    expect(onAppIconChange).toHaveBeenCalledExactlyOnceWith(label.toLowerCase());
+    expect(onThemeChange).not.toHaveBeenCalled();
+  });
+
+  it("returns to Auto from a manually selected icon and disables changes while saving", async () => {
+    const user = userEvent.setup();
+    const onAppIconChange = vi.fn();
+    const props = settingsProps({
+      settings: { ...DEFAULT_APPLICATION_SETTINGS_STATE, appIcon: "passion" },
+      onAppIconChange,
+    });
+    const { rerender } = render(<SettingsPage {...props} />);
+
+    const icons = within(screen.getByRole("radiogroup", { name: "App icon" }));
+    expect(icons.getByRole("radio", { name: "Passion" })).toHaveAttribute("aria-checked", "true");
+    await user.click(icons.getByRole("radio", { name: "Auto" }));
+    expect(onAppIconChange).toHaveBeenCalledExactlyOnceWith("auto");
+
+    rerender(<SettingsPage {...props} isSaving />);
+    for (const radio of icons.getAllByRole("radio")) expect(radio).toBeDisabled();
   });
 
   it("keeps terminal edits local until Save", async () => {
@@ -175,6 +213,7 @@ function renderSettings(overrides: Partial<SettingsPageProps> = {}): void {
 function settingsProps(overrides: Partial<SettingsPageProps> = {}): SettingsPageProps {
   return {
     settings: DEFAULT_APPLICATION_SETTINGS_STATE,
+    onAppIconChange: vi.fn(),
     onThemeChange: vi.fn(),
     onReduceMotionChange: vi.fn(),
     onCommandPaletteShortcutChange: vi.fn(),

@@ -31,6 +31,7 @@
     "pretest": "npm run prepare:node-pty",
     "test": "vitest run",
     "test:e2e:electron": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/electron-current-slice.e2e.js",
+    "test:e2e:icons": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/application-icon.e2e.js",
     "test:e2e:m1": "npm run test:e2e:electron",
     "test:e2e:packaged": "node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json && npm run verify:packaged-content && node --test .e2e-dist/src/e2e/packaged-mtls.e2e.js",
     "test:e2e:packaged-update": "node ./scripts/cleanE2EOutput.mjs && tsc -p tsconfig.e2e.json && node --test .e2e-dist/src/e2e/packaged-application-update.e2e.js",

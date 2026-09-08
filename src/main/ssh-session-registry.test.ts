@@ -53,8 +53,18 @@ describe("SshSessionRegistry", () => {
       ok: true,
       value: {
         shortcutModifier: "Command",
-        tabs: [{ tabId: "a".repeat(43), attachmentToken: "b".repeat(43), target }],
+        tabs: [{
+          tabId: "a".repeat(43),
+          attachmentToken: "b".repeat(43),
+          label: target.name,
+          target,
+        }],
       },
+    });
+
+    expect(await registry.renameTab(ownerOne, "a".repeat(43), "Production shell")).toEqual({
+      ok: true,
+      value: { tabId: "a".repeat(43), label: "Production shell" },
     });
 
     await registry.detach(ownerOne, "window-closed");
@@ -64,7 +74,12 @@ describe("SshSessionRegistry", () => {
     expect(secondClaim).toMatchObject({
       ok: true,
       value: {
-        tabs: [{ tabId: "a".repeat(43), attachmentToken: "d".repeat(43) }],
+        tabs: [{
+          tabId: "a".repeat(43),
+          attachmentToken: "d".repeat(43),
+          label: "Production shell",
+          target,
+        }],
         activeTabId: "a".repeat(43),
       },
     });
@@ -430,7 +445,34 @@ describe("SshSessionRegistry", () => {
 
     await expect(registry.listTargets(ownerTwo)).rejects.toThrow("not authorized");
     await expect(registry.closeTab(ownerTwo, "a".repeat(43))).rejects.toThrow("not authorized");
+    await expect(registry.renameTab(ownerTwo, "a".repeat(43), "Unauthorized"))
+      .rejects.toThrow("not authorized");
+    expect(await registry.renameTab(ownerOne, "z".repeat(43), "Missing tab")).toEqual({
+      ok: false,
+      error: "The SSH tab is unavailable",
+    });
+    expect(await registry.renameTab(ownerOne, "a".repeat(43), "\u200b")).toEqual({
+      ok: false,
+      error: "The SSH tab label is invalid",
+    });
     expect(runtime.close).not.toHaveBeenCalled();
+    await registry.dispose();
+  });
+
+  it("rejects and retires a session whose source name cannot form a visible tab label", async () => {
+    const runtime = fakeRuntime();
+    const unsafeTarget = { ...target, name: "\u200b" };
+    const registry = new SshSessionRegistry(
+      fakeSource({ target: unsafeTarget, runtime }),
+      { createOpaqueId: () => "a".repeat(43) },
+    );
+
+    expect(await registry.openTarget(target.deploymentId)).toEqual({
+      ok: false,
+      error: "The managed SSH target name cannot be used as a tab label",
+    });
+    expect(registry.size).toBe(0);
+    expect(runtime.close).toHaveBeenCalledOnce();
     await registry.dispose();
   });
 });

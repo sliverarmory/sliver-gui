@@ -88,6 +88,7 @@ describe("SSH preload bridge", () => {
       "approveSshHostKey",
       "closeSshTab",
       "selectSshTab",
+      "renameSshTab",
       "getTerminalRuntime",
       "getApplicationSettings",
       "updateApplicationSettings",
@@ -207,10 +208,12 @@ describe("SSH preload bridge", () => {
     const deploymentInput = { deploymentId: DEPLOYMENT_ID };
     const reviewInput = { token: REVIEW_TOKEN };
     const tabInput = { tabId: TAB_ID };
+    const renameInput = { tabId: TAB_ID, label: "Production shell" };
     const settingsInput = {
       expectedRevision: 0,
       settings: {
         theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
+        appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
@@ -224,6 +227,7 @@ describe("SSH preload bridge", () => {
     await api.approveSshHostKey(reviewInput);
     await api.closeSshTab(tabInput);
     await api.selectSshTab(tabInput);
+    await api.renameSshTab(renameInput);
     await api.getTerminalRuntime();
     await api.getApplicationSettings();
     await api.updateApplicationSettings(settingsInput);
@@ -236,6 +240,7 @@ describe("SSH preload bridge", () => {
       [SSH_IPC_INVOKE.approveSshHostKey, reviewInput],
       [SSH_IPC_INVOKE.closeSshTab, tabInput],
       [SSH_IPC_INVOKE.selectSshTab, tabInput],
+      [SSH_IPC_INVOKE.renameSshTab, renameInput],
       [SSH_IPC_INVOKE.getTerminalRuntime],
       [SSH_IPC_INVOKE.getApplicationSettings],
       [SSH_IPC_INVOKE.updateApplicationSettings, settingsInput],
@@ -348,6 +353,10 @@ describe("SSH preload bridge", () => {
     ) => void;
     const context = validTabContext();
     handler({}, { ...context, privateKey: "must-not-cross" });
+    handler({}, { ...context, label: "bad\nlabel" });
+    handler({}, { ...context, label: "\u200b" });
+    handler({}, { ...context, label: "left\u200eright" });
+    handler({}, { ...context, target: { ...context.target, name: "left\u061cright" } });
     handler({}, { ...context, target: { ...context.target, host: "bad\nvalue" } });
     handler({}, context);
 
@@ -374,9 +383,11 @@ describe("SSH preload bridge", () => {
       ...DEFAULT_APPLICATION_SETTINGS_STATE,
       revision: 4,
       theme: "light" as const,
+      appIcon: "passion" as const,
     };
     handler({}, { ...valid, rendererPath: "/tmp/private" });
     handler({}, { ...valid, terminal: { ...valid.terminal, fontSize: 100 } });
+    handler({}, { ...valid, appIcon: "system" });
     handler({}, valid);
 
     const listener = vi.fn();
@@ -401,6 +412,7 @@ function validTabContext() {
   return Object.freeze({
     tabId: TAB_ID,
     attachmentToken: TOKEN,
+    label: "test1",
     target: Object.freeze({
       deploymentId: DEPLOYMENT_ID,
       name: "test1",

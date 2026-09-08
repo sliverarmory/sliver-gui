@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
+  type ApplicationIcon,
   type ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
 import {
@@ -37,11 +38,12 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-two file", async () => {
+  it("loads an exact private version-three file", async () => {
     const persisted = {
-      v: 2,
+      v: 3,
       revision: 9,
       theme: "dark",
+      appIcon: "passion",
       reduceMotion: true,
       commandPaletteShortcut: "mod+shift+p",
       terminal: {
@@ -60,6 +62,39 @@ describe("ApplicationSettingsStore", () => {
     expect(store.getState()).toEqual(persisted);
     expect(Object.isFrozen(store.getState())).toBe(true);
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
+  });
+
+  it("migrates version-two preferences and saves version three on the next update", async () => {
+    const previous = {
+      v: 2,
+      revision: 9,
+      theme: "light",
+      reduceMotion: true,
+      commandPaletteShortcut: "mod+alt+shift+p",
+      terminal: {
+        fontId: "cascadia-mono",
+        fontSize: 19,
+        cursorStyle: "bar",
+        cursorBlink: false,
+        smoothScrolling: true,
+      },
+    };
+    await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(settingsPath, 0o600);
+
+    const store = await ApplicationSettingsStore.load(settingsPath);
+    expect(store.getState()).toEqual({ ...previous, v: 3, appIcon: "auto" });
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
+
+    const { v: _version, revision, ...settings } = store.getState();
+    const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
+    expect(result).toEqual({
+      ok: true,
+      value: { ...previous, v: 3, revision: 10, appIcon: "passion" },
+    });
+    const reloaded = await ApplicationSettingsStore.load(settingsPath);
+    expect(reloaded.getState()).toEqual(result.value);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
   });
 
   it("migrates an exact private version-one file without discarding preferences", async () => {
@@ -81,9 +116,10 @@ describe("ApplicationSettingsStore", () => {
     const store = await ApplicationSettingsStore.load(settingsPath);
 
     expect(store.getState()).toEqual({
-      v: 2,
+      v: 3,
       revision: 9,
       theme: "dark",
+      appIcon: "auto",
       reduceMotion: true,
       commandPaletteShortcut: "mod+k",
       terminal: {
@@ -98,9 +134,10 @@ describe("ApplicationSettingsStore", () => {
 
   it.each([
     "not-json",
-    JSON.stringify({ v: 3 }),
+    JSON.stringify({ v: 4 }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, extra: true }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "sepia" }),
+    JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, appIcon: "system" }),
   ])("falls back to defaults for corrupt or unsupported state %#", async (contents) => {
     await writeFile(settingsPath, contents, { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
@@ -145,6 +182,16 @@ describe("ApplicationSettingsStore", () => {
     expect(await readdir(temporaryDirectory)).toEqual([basename(settingsPath)]);
   });
 
+  it.each<ApplicationIcon>(["auto", "light", "dark", "passion"])("persists and reloads the %s icon choice", async (appIcon) => {
+    const store = await ApplicationSettingsStore.load(settingsPath);
+
+    const result = await store.update(updateInput(0, { appIcon }));
+
+    expect(result.ok).toBe(true);
+    const reloaded = await ApplicationSettingsStore.load(settingsPath);
+    expect(reloaded.getState()).toMatchObject({ v: 3, revision: 1, appIcon, theme: "system" });
+  });
+
   it("rejects stale revisions without changing memory or disk", async () => {
     const store = await ApplicationSettingsStore.load(settingsPath);
     const first = await store.update(updateInput(0, { theme: "dark" }));
@@ -179,6 +226,7 @@ describe("ApplicationSettingsStore", () => {
       expectedRevision: 0,
       settings: {
         theme: "dark",
+        appIcon: "auto",
         reduceMotion: false,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         terminal: { ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal, fontSize: 100 },
@@ -202,12 +250,13 @@ describe("ApplicationSettingsStore", () => {
 
 function updateInput(
   expectedRevision: number,
-  overrides: Partial<Pick<ApplicationSettingsUpdateInput["settings"], "theme" | "reduceMotion">>,
+  overrides: Partial<Pick<ApplicationSettingsUpdateInput["settings"], "theme" | "appIcon" | "reduceMotion">>,
 ): ApplicationSettingsUpdateInput {
   return {
     expectedRevision,
     settings: {
       theme: overrides.theme ?? DEFAULT_APPLICATION_SETTINGS_STATE.theme,
+      appIcon: overrides.appIcon ?? DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: overrides.reduceMotion ?? DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,

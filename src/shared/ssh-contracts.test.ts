@@ -6,8 +6,11 @@ import {
   parseSshDeploymentInput,
   parseSshHostKeyReview,
   parseSshOpenTabResult,
+  parseSshTabRenameInput,
+  parseSshTabRenameResult,
   parseSshWindowLaunchContext,
   SSH_PROTOCOL_VERSION,
+  SSH_TAB_LABEL_MAX_LENGTH,
 } from "./ssh-contracts.js";
 
 const deploymentId = "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0001";
@@ -57,14 +60,38 @@ describe("SSH contracts", () => {
     const context = {
       kind: "ssh" as const,
       shortcutModifier: "Command" as const,
-      tabs: [{ tabId, attachmentToken, target }],
+      tabs: [{ tabId, attachmentToken, label: target.name, target }],
       activeTabId: tabId,
     };
     expect(parseSshWindowLaunchContext(context)).toEqual(context);
+    expect(() => parseSshWindowLaunchContext({
+      ...context,
+      tabs: [{ ...context.tabs[0], label: "\u200b" }],
+    })).toThrow("label");
     expect(() => parseSshWindowLaunchContext({ ...context, activeTabId: "z".repeat(43) }))
       .toThrow("unavailable");
     expect(() => parseSshWindowLaunchContext({ ...context, tabs: [...context.tabs, ...context.tabs] }))
       .toThrow("duplicated");
+  });
+
+  it("parses exact bounded tab rename requests and results", () => {
+    const input = { tabId, label: "Production shell" };
+    expect(parseSshTabRenameInput(input)).toEqual(input);
+    expect(parseSshTabRenameResult(input)).toEqual(input);
+
+    expect(() => parseSshTabRenameInput({ ...input, target: "unexpected" })).toThrow("invalid shape");
+    expect(() => parseSshTabRenameInput({ ...input, label: " padded " })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "bad\nlabel" })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "\u200b" })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "left\u061cright" })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "left\u200eright" })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "left\u200fright" })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "left\u202eright" })).toThrow("label");
+    expect(() => parseSshTabRenameInput({ ...input, label: "x".repeat(SSH_TAB_LABEL_MAX_LENGTH + 1) }))
+      .toThrow("label");
+    expect(() => parseSshTabRenameResult({ tabId, label: "" })).toThrow("label");
+    expect(() => parseSshTabRenameResult({ ...input, target: "unexpected" })).toThrow("invalid shape");
+    expect(() => parseManagedSshTarget({ ...target, name: "\u200b" })).toThrow("name");
   });
 
   it("parses explicit host-key reviews without accepting arbitrary fingerprints", () => {

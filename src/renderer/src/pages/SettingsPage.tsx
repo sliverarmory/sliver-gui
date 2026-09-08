@@ -3,6 +3,7 @@ import { Button, Card, Tabs } from "@heroui/react";
 import { Segment } from "@heroui-pro/react/segment";
 
 import type {
+  ApplicationIcon,
   ApplicationSettingsState,
   ApplicationTheme,
 } from "../../../shared/application-settings-contracts";
@@ -20,6 +21,7 @@ import {
 export interface SettingsPageProps {
   readonly settings: ApplicationSettingsState;
   readonly isSaving?: boolean;
+  readonly onAppIconChange: (appIcon: ApplicationIcon) => void;
   readonly onThemeChange: (theme: ApplicationTheme) => void;
   readonly onReduceMotionChange: (value: boolean) => void;
   readonly onCommandPaletteShortcutChange: (shortcut: string) => void;
@@ -29,6 +31,7 @@ export interface SettingsPageProps {
 export function SettingsPage({
   settings,
   isSaving = false,
+  onAppIconChange,
   onThemeChange,
   onReduceMotionChange,
   onCommandPaletteShortcutChange,
@@ -72,10 +75,10 @@ export function SettingsPage({
             <Card.Header>
               <div>
                 <Card.Title>Appearance</Card.Title>
-                <Card.Description>Choose how application surfaces appear across every window.</Card.Description>
+                <Card.Description>Choose how the app and its icon appear.</Card.Description>
               </div>
             </Card.Header>
-            <Card.Content>
+            <Card.Content className="space-y-6">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-foreground">Color theme</p>
@@ -96,6 +99,29 @@ export function SettingsPage({
                   <Segment.Item id="system">System</Segment.Item>
                   <Segment.Item id="light">Light</Segment.Item>
                   <Segment.Item id="dark">Dark</Segment.Item>
+                </Segment>
+              </div>
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">App icon</p>
+                  <p className="mt-1 text-xs leading-5 text-muted">
+                    Auto follows the system appearance. Some launchers always use the dark icon.
+                  </p>
+                </div>
+                <Segment
+                  aria-label="App icon"
+                  className="w-fit shrink-0"
+                  isDisabled={isSaving}
+                  selectedKey={settings.appIcon}
+                  onSelectionChange={(key) => {
+                    const appIcon = applicationIconFromKey(key);
+                    if (appIcon) onAppIconChange(appIcon);
+                  }}
+                >
+                  <Segment.Item id="auto">Auto</Segment.Item>
+                  <Segment.Item id="light">Light</Segment.Item>
+                  <Segment.Item id="dark">Dark</Segment.Item>
+                  <Segment.Item id="passion">Passion</Segment.Item>
                 </Segment>
               </div>
             </Card.Content>
@@ -197,6 +223,13 @@ export function SettingsPage({
 function applicationThemeFromKey(key: React.Key): ApplicationTheme | undefined {
   const value = String(key);
   return value === "system" || value === "light" || value === "dark" ? value : undefined;
+}
+
+function applicationIconFromKey(key: React.Key): ApplicationIcon | undefined {
+  const value = String(key);
+  return value === "auto" || value === "light" || value === "dark" || value === "passion"
+    ? value
+    : undefined;
 }
 
 function copyTerminalSettings(settings: ConsoleTerminalSettings): ConsoleTerminalSettings {
