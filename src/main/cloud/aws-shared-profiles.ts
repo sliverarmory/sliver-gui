@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 
 import { fromIni } from "@aws-sdk/credential-providers";
 
-import { isAwsRegion } from "../../shared/cloud-deployment-contracts.js";
+import { isAwsRegion, isAwsLoginSessionArn } from "../../shared/cloud-deployment-contracts.js";
 import { readBoundedRegularFile } from "../secure-file.js";
 
 export const AWS_SHARED_PROFILE_MAX_FILE_BYTES = 1024 * 1024;
@@ -85,6 +85,7 @@ export interface AwsSharedProfileSourceOptions {
   readonly maxFileBytes?: number;
   /** Test seam; production defaults to the official AWS SDK v3 INI provider. */
   readonly credentialResolver?: AwsSharedProfileCredentialResolver;
+  readonly now?: () => number;
 }
 
 /**
@@ -96,6 +97,7 @@ export class AwsSharedProfileSource {
 
   readonly #maxFileBytes: number;
   readonly #credentialResolver: AwsSharedProfileCredentialResolver;
+  readonly #now: () => number;
 
   constructor(options: AwsSharedProfileSourceOptions = {}) {
     this.paths = Object.freeze(options.paths
@@ -106,6 +108,7 @@ export class AwsSharedProfileSource {
         }));
     this.#maxFileBytes = validateFileLimit(options.maxFileBytes ?? AWS_SHARED_PROFILE_MAX_FILE_BYTES);
     this.#credentialResolver = options.credentialResolver ?? resolveWithOfficialIniProvider;
+    this.#now = options.now ?? Date.now;
   }
 
   async list(): Promise<readonly AwsSharedProfileSummary[]> {
@@ -134,6 +137,41 @@ export class AwsSharedProfileSource {
     } finally {
       credentialsData?.fill(0);
       configData?.fill(0);
+    }
+  }
+
+  /** Reads only the console-login identity needed to bind native reauthentication. */
+  async loginSessionArn(profileName: string): Promise<string | null> {
+    const selectedName = validateProfileName(profileName);
+    let data: Buffer | undefined;
+    try {
+      data = await readOptionalProfileFile(this.paths.configFilePath, "AWS shared config file", this.#maxFileBytes);
+      if (!data) return null;
+      let currentProfile: string | null = null;
+      let loginSessionArn: string | null = null;
+      forEachBoundedLine(data, (line) => {
+        const header = parseIniHeader(line);
+        if (header) {
+          currentProfile = profileNameFromConfigHeader(header);
+          return;
+        }
+        if (currentProfile !== selectedName) return;
+        const [start, end] = iniContentBounds(line);
+        const equals = line.indexOf(0x3d, start);
+        if (equals < start || equals >= end) return;
+        if (line.subarray(start, equals).toString("ascii").trim().toLowerCase() !== "login_session") return;
+        const valueBytes = line.subarray(equals + 1, end);
+        if (!isUtf8(valueBytes)) throw new Error("invalid login identity");
+        const value = valueBytes.toString("utf8").trim();
+        if (!isAwsLoginSessionArn(value)) throw new Error("invalid login identity");
+        if (loginSessionArn !== null && loginSessionArn !== value) throw new Error("ambiguous login identity");
+        loginSessionArn = value;
+      });
+      return loginSessionArn;
+    } catch {
+      throw new AwsSharedProfileError("profile-files-unavailable", "The selected AWS profile login identity could not be read safely.");
+    } finally {
+      data?.fill(0);
     }
   }
 
@@ -180,12 +218,14 @@ export class AwsSharedProfileSource {
       } catch {
         throw new AwsSharedProfileError(
           "credential-resolution-failed",
-          "Could not resolve the selected AWS profile. Refresh its AWS CLI sign-in and try again.",
+          "Could not resolve the selected AWS profile. Use AWS Login or refresh its AWS CLI sign-in and try again.",
         );
       }
 
       try {
-        return validateResolvedIdentity(identity);
+        const credentials = validateResolvedIdentity(identity);
+        if (credentials.expiration && credentials.expiration.getTime() <= this.#now()) throw new Error("credentials expired");
+        return credentials;
       } catch {
         throw new AwsSharedProfileError(
           "credential-resolution-failed",

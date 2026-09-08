@@ -71,6 +71,7 @@ const requiredAzureRuntimePackages = Object.freeze([
   "@azure/arm-resources",
   "@azure/core-process",
   "@azure/identity",
+  "@azure/msal-node",
 ]);
 const requiredPackagedFiles = [
   "LICENSE",

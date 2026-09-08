@@ -265,6 +265,10 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   }),
   chooseSshPrivateKey: () => ({ ok: false, error: "The E2E key picker is unavailable" }),
   createCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  loginAwsCredential: () => ({ ok: false, error: "AWS login is disabled in this E2E fixture" }),
+  beginAzureLogin: () => ({ ok: false, error: "Azure login is disabled in this E2E fixture" }),
+  loginAzureCredential: () => ({ ok: false, error: "Azure login is disabled in this E2E fixture" }),
+  cancelAzureLogin: () => undefined,
   deleteCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   testCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   discoverAwsOptions: (input) => {

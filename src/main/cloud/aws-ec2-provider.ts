@@ -2613,9 +2613,9 @@ function sanitizeAwsError(operation: string, error: unknown): AwsEc2ProviderErro
   const record = typeof error === "object" && error !== null ? error as Record<string, unknown> : undefined;
   const rawCode = record?.["name"] ?? record?.["Code"] ?? record?.["code"];
   const code = typeof rawCode === "string" && /^[A-Za-z0-9_.-]{1,80}$/u.test(rawCode) ? rawCode : undefined;
-  if (code === "AwsSharedProfileError") {
+  if (code === "AwsSharedProfileError" || code === "AwsConsoleLoginError" || code === "ExpiredToken" || code === "ExpiredTokenException") {
     return new AwsEc2ProviderError(
-      `AWS EC2 could not ${operation}. Refresh the selected AWS CLI profile with \`aws login\` and try again.`,
+      `AWS EC2 could not ${operation}. Use AWS Login to renew this credential, or refresh its AWS CLI sign-in, and try again.`,
     );
   }
   const metadata = record?.["$metadata"];

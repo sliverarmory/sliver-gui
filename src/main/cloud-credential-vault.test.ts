@@ -8,8 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ResolvedAwsCloudCredentialInput,
+  AwsConsoleLoginSession,
+  AzureBrowserLoginSession,
   ResolvedAzureCloudCredentialInput,
 } from "../shared/cloud-deployment-contracts.js";
+import * as secureFiles from "./secure-file.js";
 import {
   CLOUD_CREDENTIAL_DIRECTORY,
   CloudCredentialVault,
@@ -37,6 +40,91 @@ afterEach(async () => {
 });
 
 describe("CloudCredentialVault", () => {
+  it.each([true, false])("updates Azure session caches without changing CLI origin or credential metadata (secure=%s)", async (secure) => {
+    const storage = new XorSafeStorage(secure);
+    const vault = createVault(storage);
+    const originalInput = azureCredential();
+    const original = await vault.create(originalInput);
+    const session = azureLoginSessionFixture("first-refresh");
+    const updated = await vault.updateAzureLoginSession(CREDENTIAL_ID, originalInput.secret, session);
+    expect(updated).toEqual({ ...original, loginAccountId: session.homeAccountId });
+    expect(updated).not.toHaveProperty("authentication");
+    expect(JSON.stringify(await vault.list())).not.toContain("first-refresh");
+    await expect(vault.updateAzureLoginSession(CREDENTIAL_ID, originalInput.secret, azureLoginSessionFixture("stale"))).rejects.toThrow(/changed/u);
+    if (secure) {
+      const reopened = new CloudCredentialVault(vaultRoot, storage);
+      await expect(reopened.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(session.cache);
+      reopened.dispose();
+    }
+    await vault.delete(CREDENTIAL_ID);
+    await expect(vault.updateAzureLoginSession(CREDENTIAL_ID, { ...originalInput.secret, loginSession: session }, azureLoginSessionFixture("deleted"))).rejects.toThrow();
+    expect(await vault.list()).toEqual([]);
+  });
+
+  it("checks cancellation at the atomic credential create commit after filesystem preparation", async () => {
+    const storage = new XorSafeStorage();
+    const vault = createVault(storage);
+    const controller = new AbortController();
+    const write = secureFiles.writePrivateFileExclusiveAtomic;
+    const spy = vi.spyOn(secureFiles, "writePrivateFileExclusiveAtomic").mockImplementation((path, data, beforeCommit) =>
+      write(path, data, () => { controller.abort(); beforeCommit?.(); }));
+    try {
+      await expect(vault.create(azureCredential(), controller.signal)).rejects.toThrow();
+      expect(await vault.list()).toEqual([]);
+      expect(await readdir(join(vaultRoot, CLOUD_CREDENTIAL_DIRECTORY))).toEqual([]);
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each(["aws", "azure"] as const)("checks cancellation before atomically replacing %s login credentials", async (provider) => {
+    const storage = new XorSafeStorage();
+    const vault = createVault(storage);
+    const input = provider === "aws" ? awsProfileCredential() : azureCredential();
+    const original = await vault.create(input);
+    const controller = new AbortController();
+    storage.encryptString.mockImplementationOnce((plaintext) => {
+      queueMicrotask(() => controller.abort());
+      return xor(Buffer.from(plaintext, "utf8"));
+    });
+    const updating = input.provider === "aws"
+      ? vault.updateAwsLoginSession(CREDENTIAL_ID, input.secret, loginSessionFixture("cancelled"), controller.signal)
+      : vault.updateAzureLoginSession(CREDENTIAL_ID, input.secret, azureLoginSessionFixture("cancelled"), controller.signal);
+    await expect(updating).rejects.toThrow();
+    expect(await vault.list()).toEqual([original]);
+    expect(await readdir(join(vaultRoot, CLOUD_CREDENTIAL_DIRECTORY))).toEqual([CREDENTIAL_ID]);
+  });
+
+  it.each([true, false])("updates native login sessions in place and rejects stale or deleted snapshots (secure=%s)", async (secure) => {
+    const storage = new XorSafeStorage(secure);
+    const vault = createVault(storage);
+    const profile = awsProfileCredential();
+    const original = await vault.create(profile);
+    const first = loginSessionFixture("first-refresh-token");
+    const updated = await vault.updateAwsLoginSession(CREDENTIAL_ID, profile.secret, first);
+    expect(updated).toEqual({ ...original, loginSessionArn: first.loginSessionArn });
+    expect(JSON.stringify(await vault.list())).not.toContain(first.refreshToken);
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, profile.secret, loginSessionFixture("stale"))).rejects.toThrow(/changed/u);
+    if (secure) {
+      const ciphertext = await readFile(join(vaultRoot, CLOUD_CREDENTIAL_DIRECTORY, CREDENTIAL_ID));
+      expect(ciphertext.toString()).not.toContain(first.refreshToken);
+      const reopened = new CloudCredentialVault(vaultRoot, storage);
+      await expect(reopened.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(first.refreshToken);
+      reopened.dispose();
+    }
+    await vault.delete(CREDENTIAL_ID);
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, { ...profile.secret, loginSession: first }, loginSessionFixture("resurrect"))).rejects.toThrow();
+    expect(await vault.list()).toEqual([]);
+  });
+
+  it("rejects cancelled session updates before modifying the encrypted credential", async () => {
+    const vault = createVault(new XorSafeStorage());
+    const profile = awsProfileCredential();
+    const original = await vault.create(profile);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, profile.secret, loginSessionFixture("cancelled"), controller.signal)).rejects.toThrow();
+    expect(await vault.list()).toEqual([original]);
+  });
+
   it("persists only safeStorage ciphertext in a private UUID-named file", async () => {
     const safeStorage = new XorSafeStorage();
     const vault = createVault(safeStorage, "linux");
@@ -347,4 +435,15 @@ class XorSafeStorage implements CloudSafeStorageAdapter {
 
 function xor(input: Buffer): Buffer {
   return Buffer.from(input.map((byte) => byte ^ 0xa5));
+}
+
+function loginSessionFixture(refreshToken: string): AwsConsoleLoginSession {
+  return { loginSessionArn: "arn:aws:iam::123456789012:root", region: "us-west-2",
+    accessKeyId: "ASIAEXAMPLE00000001", secretAccessKey: "native-secret", sessionToken: "native-session", refreshToken,
+    privateKey: "-----BEGIN EC PRIVATE KEY-----\nproof-key\n-----END EC PRIVATE KEY-----", expiresAt: "2026-09-08T20:00:00.000Z" };
+}
+
+function azureLoginSessionFixture(token: string): AzureBrowserLoginSession {
+  return { clientId: SUBSCRIPTION_ID, tenantId: TENANT_ID, homeAccountId: "home-account", localAccountId: "local-account",
+    username: "operator@example.com", cache: JSON.stringify({ RefreshToken: { value: { secret: token } } }) };
 }

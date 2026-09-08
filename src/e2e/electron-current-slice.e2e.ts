@@ -563,6 +563,7 @@ async function verifyCloudDeploymentWindow(
   await waitForWindowCount(electronApplication, initialWindowCount + 1);
   const firstCloudPage = await cloudDeploymentPage(electronApplication);
   await assertCloudDeploymentSurface(electronApplication, firstCloudPage);
+  await verifyAzureLoginForm(firstCloudPage, artifactDirectory);
   await invokeApplicationMenuItem(
     electronApplication,
     `cloud.aws.${E2E_AWS_DEPLOYMENT_ID}.firewall`,
@@ -613,6 +614,25 @@ async function verifyCloudDeploymentWindow(
   assert.notEqual(await cloudDeploymentWindowId(electronApplication), reopenedWindowId);
   await recoveredCloudPage.close();
   await waitForWindowCount(electronApplication, initialWindowCount);
+}
+
+async function verifyAzureLoginForm(cloudPage: Page, artifactDirectory: string): Promise<void> {
+  await cloudPage.getByRole("tab", { name: /^Credentials/u }).click();
+  await cloudPage.getByRole("button", { name: "Add Credential", exact: true }).click();
+  await cloudPage.getByRole("combobox", { name: "Provider", exact: true }).selectOption("azure");
+  await cloudPage.getByRole("combobox", { name: "Azure Authentication", exact: true }).selectOption("login");
+  await cloudPage.getByRole("textbox", { name: "Directory (Tenant) ID", exact: true }).waitFor();
+  await cloudPage.getByRole("textbox", { name: "Application (Client) ID", exact: true }).waitFor();
+  assert.equal(await cloudPage.getByRole("button", { name: "Save Credential", exact: true }).isDisabled(), true);
+
+  // The fixture refuses real authentication. This still exercises the native
+  // renderer -> preload -> trusted main handler and its error recovery.
+  await cloudPage.getByRole("button", { name: "Sign In to Azure", exact: true }).click();
+  await cloudPage.getByText("Azure login is disabled in this E2E fixture", { exact: true }).waitFor();
+  assert.equal(await cloudPage.getByRole("combobox", { name: "Azure Authentication", exact: true }).isEnabled(), true);
+  await cloudPage.screenshot({ path: join(artifactDirectory, "azure-login-form.png"), fullPage: true });
+  await cloudPage.getByRole("button", { name: "Close Form", exact: true }).click();
+  await cloudPage.getByRole("tab", { name: /^Deployments/u }).click();
 }
 
 async function assertAwsFirewallDetails(cloudPage: Page): Promise<void> {

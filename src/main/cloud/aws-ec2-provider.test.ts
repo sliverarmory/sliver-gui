@@ -140,12 +140,12 @@ describe("AWS EC2 provider authentication and discovery", () => {
     expect(String(error)).not.toContain("do not expose");
   });
 
-  it("turns an unavailable AWS CLI login profile into actionable safe guidance", async () => {
+  it.each(["AwsSharedProfileError", "AwsConsoleLoginError", "ExpiredToken", "ExpiredTokenException"])("turns %s into actionable safe login guidance", async (name) => {
     const client = new RecordingEc2Client({
       DescribeAvailabilityZonesCommand: () => {
         throw Object.assign(
           new Error(`do not expose ${credentials.secretAccessKey}`),
-          { name: "AwsSharedProfileError" },
+          { name },
         );
       },
     });
@@ -154,8 +154,8 @@ describe("AWS EC2 provider authentication and discovery", () => {
     const error = await provider.preflight().catch((failure: unknown) => failure);
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain("Refresh the selected AWS CLI profile with `aws login` and try again.");
-    expect(String(error)).not.toContain("AwsSharedProfileError");
+    expect(String(error)).toContain("Use AWS Login to renew this credential");
+    expect(String(error)).not.toContain(name);
     expect(String(error)).not.toContain(credentials.secretAccessKey);
     expect(String(error)).not.toContain("do not expose");
   });

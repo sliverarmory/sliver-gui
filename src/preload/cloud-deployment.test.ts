@@ -61,6 +61,11 @@ describe("Cloud Deployment preload bridge", () => {
       "detectCurrentEgressIpv4",
       "chooseSshPrivateKey",
       "createCredential",
+      "loginAwsCredential",
+      "cancelAwsLogin",
+      "beginAzureLogin",
+      "loginAzureCredential",
+      "cancelAzureLogin",
       "deleteCredential",
       "testCredential",
       "discoverAwsOptions",
@@ -157,6 +162,27 @@ describe("Cloud Deployment preload bridge", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.openSshWindow, { deploymentId }],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.approveSshHostKey, { token: "a".repeat(43) }],
     ]);
+  });
+
+  it("keeps AWS sign-in and cancellation on fixed credential-scoped channels", async () => {
+    const api = exposedApi();
+    const input = { credentialId: "11111111-1111-4111-8111-111111111111" };
+    await api.loginAwsCredential(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, input);
+    await api.cancelAwsLogin();
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin);
+  });
+
+  it("exposes only fixed Azure login and subscription-selection channels", async () => {
+    const api = exposedApi();
+    const input = { tenantId: null, clientId: null };
+    await api.beginAzureLogin(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin, input);
+    const credential = { credentialId: "11111111-1111-4111-8111-111111111111" };
+    await api.loginAzureCredential(credential);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential, credential);
+    await api.cancelAzureLogin();
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin);
   });
 
   it("also exposes the frozen validated application context-menu bridge", async () => {

@@ -122,6 +122,7 @@
     "@azure/arm-resources": "8.0.0",
     "@azure/core-process": "1.0.0",
     "@azure/identity": "4.13.2",
+    "@azure/msal-node": "5.6.0",
     "electron-updater": "6.8.9",
     "ghostty-web": "0.4.0",
     "node-pty": "1.1.0",

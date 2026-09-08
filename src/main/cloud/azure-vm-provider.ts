@@ -3065,6 +3065,9 @@ function sanitizeAzureError(operation: string, error: unknown): AzureVmProviderE
     readonly name?: unknown;
     readonly statusCode?: unknown;
   };
+  if (candidate.name === "AzureBrowserLoginError" || candidate.name === "CredentialUnavailableError" || candidate.name === "AuthenticationRequiredError") {
+    return new AzureVmProviderError(`Azure could not ${operation}. Use Azure Login to renew this credential, or refresh its Azure CLI sign-in, and try again.`);
+  }
   const code = typeof candidate.code === "string" && /^[A-Za-z0-9_.\-]{1,128}$/u.test(candidate.code)
     ? candidate.code
     : typeof candidate.name === "string" && /^[A-Za-z0-9_.\-]{1,128}$/u.test(candidate.name)

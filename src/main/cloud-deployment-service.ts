@@ -3,6 +3,7 @@ import { unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { BrowserWindow } from "electron";
+import type { TokenCredential } from "@azure/identity";
 import { parseConfig } from "sliver-script";
 import ssh2 from "ssh2";
 
@@ -24,6 +25,14 @@ import {
   parseCloudDeploymentActionInput,
   parseCreateCloudFirewallRuleInput,
   parseCreateCloudCredentialInput,
+  parseAwsConsoleLoginSession,
+  parseAzureBrowserLoginSession,
+  parseAzureCliAccountSummary,
+  parseBeginAzureLoginInput,
+  type AzureBrowserLoginSession,
+  type BeginAzureLoginInput,
+  type AzureLoginSelection,
+  type AwsConsoleLoginSession,
   parseCreateCloudDeploymentInput,
   parseDeleteCloudFirewallRuleInput,
   parseListCloudFirewallRulesInput,
@@ -74,6 +83,7 @@ import { CloudDeploymentStore } from "./cloud-deployment-store.js";
 import {
   AwsEc2Provider,
   type AwsEc2CredentialProvider,
+  type AwsEc2Credentials,
   type AwsEc2CreateMutationEvent,
   type AwsEc2DestroyResource,
   type AwsEc2DeploymentResource,
@@ -83,6 +93,8 @@ import {
 import { toAwsDeploymentOptions } from "./cloud/aws-inventory.js";
 import { detectCurrentEgressIpv4 } from "./cloud/current-egress-ipv4.js";
 import { AwsSharedProfileSource } from "./cloud/aws-shared-profiles.js";
+import { AwsConsoleLogin, AwsConsoleLoginError } from "./cloud/aws-console-login.js";
+import { AzureBrowserLogin, AzureBrowserLoginError } from "./cloud/azure-browser-login.js";
 import { AwsEc2PermissionChecker } from "./cloud/aws-permission-checker.js";
 import {
   AzureCliAccountSource,
@@ -214,6 +226,34 @@ export type CloudAzureProviderFactory = (connection: AzureVmProviderConnection) 
 export interface CloudAwsProfileSource {
   list(): Promise<readonly AwsCliProfileSummary[]>;
   credentialProvider(profileName: string, region?: string): Promise<AwsEc2CredentialProvider>;
+  loginSessionArn?(profileName: string): Promise<string | null>;
+}
+
+export interface CloudAwsConsoleLogin {
+  login(region: string, signal?: AbortSignal): Promise<AwsConsoleLoginSession>;
+  refresh(session: AwsConsoleLoginSession, signal?: AbortSignal): Promise<AwsConsoleLoginSession>;
+}
+
+export interface CloudAzureBrowserLogin {
+  login(tenantId: string | null, clientId: string | null, signal?: AbortSignal): Promise<{
+    readonly session: AzureBrowserLoginSession;
+    readonly subscriptions: readonly AzureCliAccountSummary[];
+  }>;
+  getToken(session: AzureBrowserLoginSession, signal?: AbortSignal): Promise<{
+    readonly session: AzureBrowserLoginSession;
+    readonly token: string;
+    readonly expiresOnTimestamp: number;
+  }>;
+}
+
+type AzureAccessToken = NonNullable<Awaited<ReturnType<TokenCredential["getToken"]>>>;
+
+interface StagedAzureLogin {
+  readonly ownerId: number;
+  readonly session: Buffer;
+  readonly subscriptions: readonly AzureCliAccountSummary[];
+  readonly expiresAt: number;
+  readonly timer: NodeJS.Timeout;
 }
 
 export interface CloudAzureAccountSource {
@@ -235,8 +275,12 @@ export interface CloudDeploymentServiceOptions {
   readonly awsProviderFactory?: CloudAwsProviderFactory;
   readonly awsPermissionCheckerFactory?: CloudAwsPermissionCheckerFactory;
   readonly awsProfileSource?: CloudAwsProfileSource;
+  readonly awsConsoleLogin?: CloudAwsConsoleLogin;
+  readonly openExternal?: (url: string) => Promise<unknown>;
   readonly azureProviderFactory?: CloudAzureProviderFactory;
   readonly azureAccountSource?: CloudAzureAccountSource;
+  readonly azureBrowserLogin?: CloudAzureBrowserLogin;
+  readonly azureCliCredentialFactory?: (secret: AzureCliCredentialSecret) => TokenCredential;
   /** Test seam for the bounded Azure public-IP propagation wait. */
   readonly azurePublicIpRefreshDelay?: (milliseconds: number) => Promise<void>;
   readonly sshHostKeyStore?: SshHostKeyStore;
@@ -290,8 +334,16 @@ export class CloudDeploymentService {
   readonly #awsProviderFactory: CloudAwsProviderFactory;
   readonly #awsPermissionCheckerFactory: CloudAwsPermissionCheckerFactory;
   readonly #awsProfiles: CloudAwsProfileSource;
+  readonly #awsConsoleLogin: CloudAwsConsoleLogin;
+  readonly #awsRefreshes = new Map<string, Promise<void>>();
+  readonly #authLifetime = new AbortController();
   readonly #azureProviderFactory: CloudAzureProviderFactory;
   readonly #azureAccounts: CloudAzureAccountSource;
+  readonly #azureBrowserLogin: CloudAzureBrowserLogin;
+  readonly #azureCliCredentialFactory: (secret: AzureCliCredentialSecret) => TokenCredential;
+  readonly #azureRefreshes = new Map<string, Promise<AzureAccessToken>>();
+  readonly #stagedAzureLogins = new Map<string, StagedAzureLogin>();
+  readonly #azureLoginGenerations = new Map<number, number>();
   readonly #azurePublicIpRefreshDelay: (milliseconds: number) => Promise<void>;
   readonly #sshHostKeys: SshHostKeyStore;
   readonly #startSshTerminalRuntime: CloudSshTerminalStarter;
@@ -325,8 +377,21 @@ export class CloudDeploymentService {
       (connection) => new AwsEc2PermissionChecker(connection)
     );
     this.#awsProfiles = options.awsProfileSource ?? new AwsSharedProfileSource();
+    this.#awsConsoleLogin = options.awsConsoleLogin ?? new AwsConsoleLogin({
+      openExternal: async (url) => {
+        if (!options.openExternal) throw new Error("AWS browser login is unavailable");
+        await options.openExternal(url);
+      },
+    });
     this.#azureProviderFactory = options.azureProviderFactory ?? ((connection) => new AzureVmProvider(connection));
     this.#azureAccounts = options.azureAccountSource ?? new AzureCliAccountSource();
+    this.#azureCliCredentialFactory = options.azureCliCredentialFactory ?? createAzureCliCredential;
+    this.#azureBrowserLogin = options.azureBrowserLogin ?? new AzureBrowserLogin({
+      openExternal: async (url) => {
+        if (!options.openExternal) throw new Error("Azure browser login is unavailable");
+        await options.openExternal(url);
+      },
+    });
     this.#azurePublicIpRefreshDelay = options.azurePublicIpRefreshDelay ?? delay;
     this.#sshHostKeys = sshHostKeys;
     this.#startSshTerminalRuntime = options.startSshTerminalRuntime ?? (
@@ -552,17 +617,30 @@ export class CloudDeploymentService {
 
   async createCredential(
     input: CreateCloudCredentialInput,
+    signal?: AbortSignal,
+    ownerId = 0,
   ): Promise<OperationResult<CloudCredentialSummary>> {
     try {
       this.#assertActive();
+      const authSignal = signal ? AbortSignal.any([signal, this.#authLifetime.signal]) : this.#authLifetime.signal;
+      authSignal.throwIfAborted();
       const parsed = parseCreateCloudCredentialInput(input);
+      const azureLoginSession = parsed.provider === "azure" && "authentication" in parsed
+        ? this.#consumeAzureLogin(parsed.loginToken, ownerId, parsed.subscriptionId, parsed.tenantId)
+        : undefined;
+      const loginSession = parsed.provider === "aws" && "authentication" in parsed
+        ? parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(parsed.defaultRegion, authSignal))
+        : undefined;
+      this.#assertActive();
+      authSignal.throwIfAborted();
+      if (loginSession && parsed.provider === "aws" && loginSession.region !== parsed.defaultRegion) throw new Error("AWS Login returned a different region");
       if (parsed.provider === "aws" && "profileName" in parsed) {
         const profiles = await this.#awsProfiles.list();
         if (!profiles.some(({ name }) => name === parsed.profileName)) {
           throw new Error("The selected AWS CLI profile is no longer available");
         }
       }
-      if (parsed.provider === "azure") {
+      if (parsed.provider === "azure" && !azureLoginSession) {
         const accounts = await this.#azureAccounts.list();
         const account = accounts.find(({ subscriptionId }) => subscriptionId === parsed.subscriptionId);
         if (!account || account.tenantId !== parsed.tenantId) {
@@ -575,6 +653,8 @@ export class CloudDeploymentService {
       const key = parsed.sshPrivateKeyToken === null
         ? await this.#sshKeyGenerator()
         : this.#privateKeys.consume(parsed.sshPrivateKeyToken, parsed.sshPassphrase);
+      this.#assertActive();
+      authSignal.throwIfAborted();
       const sshPassphrase = parsed.sshPrivateKeyToken === null ? null : parsed.sshPassphrase;
       const summary = parsed.provider === "aws"
         ? await this.#vault.create({
@@ -582,20 +662,22 @@ export class CloudDeploymentService {
             label: parsed.label,
             defaultRegion: parsed.defaultRegion,
             sshUsername: parsed.sshUsername,
-            secret: "profileName" in parsed
+            secret: loginSession
+              ? { loginSession, sshPrivateKey: key.privateKey, sshPassphrase }
+              : "profileName" in parsed
               ? {
                   profileName: parsed.profileName,
                   sshPrivateKey: key.privateKey,
                   sshPassphrase,
                 }
-              : {
+              : "accessKeyId" in parsed ? {
                   accessKeyId: parsed.accessKeyId,
                   secretAccessKey: parsed.secretAccessKey,
                   sessionToken: parsed.sessionToken,
                   sshPrivateKey: key.privateKey,
                   sshPassphrase,
-                },
-          })
+                } : (() => { throw new Error("AWS login did not return a session"); })(),
+          }, authSignal)
         : await this.#vault.create({
             provider: "azure",
             label: parsed.label,
@@ -604,15 +686,146 @@ export class CloudDeploymentService {
             secret: {
               subscriptionId: parsed.subscriptionId,
               tenantId: parsed.tenantId,
+              ...(azureLoginSession ? { authentication: "login" as const, loginSession: azureLoginSession } : {}),
               sshPrivateKey: key.privateKey,
               sshPassphrase,
             },
-          });
+          }, authSignal);
       this.#emitChanged();
       return { ok: true, value: summary };
     } catch (error) {
+      if (input && typeof input === "object" && "authentication" in input) {
+        if (input.provider === "aws") return awsLoginFailure(error);
+        if (input.provider === "azure") return azureLoginFailure(error);
+      }
       return failure(error, "The cloud credential could not be saved");
     }
+  }
+
+  async loginAwsCredential(
+    input: CloudCredentialIdInput,
+    signal?: AbortSignal,
+  ): Promise<OperationResult<CloudCredentialSummary>> {
+    try {
+      this.#assertActive();
+      if (!isUuidV4(input.credentialId)) throw new TypeError("Invalid cloud credential identity");
+      const authSignal = signal ? AbortSignal.any([signal, this.#authLifetime.signal]) : this.#authLifetime.signal;
+      return await this.#vault.withCredential(input.credentialId, "aws", async (secret, summary) => {
+        if ("accessKeyId" in secret) return { ok: false, error: "Access-key credentials cannot use AWS Login. Add a new AWS Login credential instead." };
+        authSignal.throwIfAborted();
+        const configuredArn = "profileName" in secret
+          ? await this.#awsProfiles.loginSessionArn?.(secret.profileName)
+          : undefined;
+        const expectedArn = secret.loginSession?.loginSessionArn ?? configuredArn;
+        if (!expectedArn) return { ok: false, error: "This profile does not contain an AWS console login identity. Add a new AWS Login credential, or refresh this profile with its existing sign-in method." };
+        if (configuredArn && configuredArn !== expectedArn) return { ok: false, error: "The AWS profile login identity changed. Restore the original profile or add a new credential." };
+        this.#assertActive();
+        authSignal.throwIfAborted();
+        const loginSession = parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(summary.defaultRegion, authSignal));
+        this.#assertActive();
+        authSignal.throwIfAborted();
+        if (loginSession.region !== summary.defaultRegion) throw new Error("AWS Login returned a different region");
+        if (loginSession.loginSessionArn !== expectedArn) return { ok: false, error: "AWS Login used a different identity. Sign in with the original AWS identity and try again." };
+        const updated = await this.#vault.updateAwsLoginSession(summary.id, secret, loginSession, authSignal);
+        this.#emitChanged();
+        return { ok: true, value: updated };
+      });
+    } catch (error) {
+      return awsLoginFailure(error);
+    }
+  }
+
+  async beginAzureLogin(
+    input: BeginAzureLoginInput,
+    signal?: AbortSignal,
+    ownerId = 0,
+  ): Promise<OperationResult<AzureLoginSelection>> {
+    try {
+      this.#assertActive();
+      assertAzureLoginOwner(ownerId);
+      const parsed = parseBeginAzureLoginInput(input);
+      this.cancelAzureLogin(ownerId);
+      const generation = this.#azureLoginGenerations.get(ownerId);
+      const authSignal = signal ? AbortSignal.any([signal, this.#authLifetime.signal]) : this.#authLifetime.signal;
+      authSignal.throwIfAborted();
+      const result = await this.#azureBrowserLogin.login(parsed.tenantId, parsed.clientId, authSignal);
+      this.#assertActive();
+      authSignal.throwIfAborted();
+      if (this.#azureLoginGenerations.get(ownerId) !== generation) throw new Error("Azure Login was cancelled");
+      const session = parseAzureBrowserLoginSession(result.session);
+      if (parsed.tenantId && !sameAzureGuid(parsed.tenantId, session.tenantId)) throw new Error("Azure Login used a different tenant");
+      if (parsed.clientId && !sameAzureGuid(parsed.clientId, session.clientId)) throw new Error("Azure Login used a different application");
+      const subscriptions = validateAzureLoginSubscriptions(result.subscriptions, session);
+      if (this.#stagedAzureLogins.size >= 32) throw new Error("Too many pending Azure logins");
+      const token = randomUUID();
+      const expiresAt = this.#now() + 10 * 60_000;
+      const timer = setTimeout(() => this.#discardAzureLogin(token), 10 * 60_000);
+      timer.unref();
+      this.#stagedAzureLogins.set(token, { ownerId, session: Buffer.from(JSON.stringify(session), "utf8"), subscriptions, expiresAt, timer });
+      return { ok: true, value: { token, expiresAt: new Date(expiresAt).toISOString(), subscriptions } };
+    } catch (error) {
+      return azureLoginFailure(error);
+    }
+  }
+
+  cancelAzureLogin(ownerId = 0): void {
+    assertAzureLoginOwner(ownerId);
+    this.#azureLoginGenerations.set(ownerId, (this.#azureLoginGenerations.get(ownerId) ?? 0) + 1);
+    for (const [token, staged] of this.#stagedAzureLogins) {
+      if (staged.ownerId === ownerId) this.#discardAzureLogin(token);
+    }
+  }
+
+  async loginAzureCredential(
+    input: CloudCredentialIdInput,
+    signal?: AbortSignal,
+  ): Promise<OperationResult<CloudCredentialSummary>> {
+    try {
+      this.#assertActive();
+      if (!isUuidV4(input.credentialId)) throw new TypeError("Invalid cloud credential identity");
+      const authSignal = signal ? AbortSignal.any([signal, this.#authLifetime.signal]) : this.#authLifetime.signal;
+      return await this.#vault.withCredential(input.credentialId, "azure", async (secret, summary) => {
+        authSignal.throwIfAborted();
+        const result = await this.#azureBrowserLogin.login(secret.tenantId, secret.loginSession?.clientId ?? null, authSignal);
+        this.#assertActive();
+        authSignal.throwIfAborted();
+        const session = parseAzureBrowserLoginSession(result.session);
+        const subscriptions = validateAzureLoginSubscriptions(result.subscriptions, session);
+        if (!sameAzureGuid(session.tenantId, secret.tenantId) || !subscriptions.some((account) => sameAzureGuid(account.subscriptionId, secret.subscriptionId))) {
+          return { ok: false, error: "Azure Login does not include this credential's tenant and subscription. Sign in with the original Azure account." };
+        }
+        if (secret.loginSession && !sameAzureLoginIdentity(secret.loginSession, session)) {
+          return { ok: false, error: "Azure Login used a different account. Sign in with the original Azure account and try again." };
+        }
+        const updated = await this.#vault.updateAzureLoginSession(summary.id, secret, session, authSignal);
+        this.#emitChanged();
+        return { ok: true, value: updated };
+      });
+    } catch (error) {
+      return azureLoginFailure(error);
+    }
+  }
+
+  #consumeAzureLogin(token: string, ownerId: number, subscriptionId: string, tenantId: string): AzureBrowserLoginSession {
+    assertAzureLoginOwner(ownerId);
+    const staged = this.#stagedAzureLogins.get(token);
+    if (!staged || staged.ownerId !== ownerId) throw new AzureBrowserLoginError("login-required", "Your Azure login selection expired or is invalid. Sign in again.");
+    try {
+      if (staged.expiresAt <= this.#now() || !staged.subscriptions.some((account) => sameAzureGuid(account.subscriptionId, subscriptionId) && sameAzureGuid(account.tenantId, tenantId))) {
+        throw new AzureBrowserLoginError("login-required", "Your Azure login selection expired or is invalid. Sign in again.");
+      }
+      return parseAzureBrowserLoginSession(JSON.parse(staged.session.toString("utf8")) as unknown);
+    } finally {
+      this.#discardAzureLogin(token);
+    }
+  }
+
+  #discardAzureLogin(token: string): void {
+    const staged = this.#stagedAzureLogins.get(token);
+    if (!staged) return;
+    this.#stagedAzureLogins.delete(token);
+    clearTimeout(staged.timer);
+    staged.session.fill(0);
   }
 
   async deleteCredential(input: CloudCredentialIdInput): Promise<OperationResult> {
@@ -644,7 +857,7 @@ export class CloudDeploymentService {
         return await this.#vault.withCredential(summary.id, "aws", async (secret) => {
           try {
             const permissions = await this.#awsPermissionCheckerFactory(
-              await this.#awsConnection(summary.defaultRegion, secret),
+              await this.#awsConnection(summary.defaultRegion, secret, summary.id),
             ).check();
             return {
               ok: true,
@@ -662,7 +875,7 @@ export class CloudDeploymentService {
       return await this.#vault.withCredential(summary.id, "azure", async (secret) => {
         try {
           const provider = this.#azureProviderFactory(
-            this.#azureConnection(summary.defaultLocation, secret),
+            this.#azureConnection(summary.defaultLocation, secret, summary.id),
           );
           const permissions = await provider.checkPermissions();
           return {
@@ -694,7 +907,7 @@ export class CloudDeploymentService {
       const parsed = parseDiscoverAwsOptionsInput(input);
       return await this.#vault.withCredential(parsed.credentialId, "aws", async (secret) => {
         try {
-          const provider = this.#awsProviderFactory(await this.#awsConnection(parsed.region, secret));
+          const provider = this.#awsProviderFactory(await this.#awsConnection(parsed.region, secret, parsed.credentialId));
           const inventory = await provider.discover();
           if (inventory.region !== parsed.region) {
             throw new Error("AWS returned inventory for a different region");
@@ -721,7 +934,7 @@ export class CloudDeploymentService {
       return await this.#vault.withCredential(parsed.credentialId, "azure", async (secret) => {
         try {
           const inventory = await this.#azureProviderFactory(
-            this.#azureConnection(parsed.location, secret),
+            this.#azureConnection(parsed.location, secret, parsed.credentialId),
           ).discover();
           if (
             inventory.subscriptionId !== secret.subscriptionId ||
@@ -854,7 +1067,7 @@ export class CloudDeploymentService {
         return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
           try {
             const provider = this.#awsProviderFactory(
-              await this.#awsConnection(deployment.spec.region, secret),
+              await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId),
             );
             return { ok: true, value: await provider.listFirewallRules(awsResourceFromRecord(deployment)) };
           } catch (error) {
@@ -864,7 +1077,7 @@ export class CloudDeploymentService {
       }
       return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
         try {
-          const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+          const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId));
           return { ok: true, value: await provider.listFirewallRules(azureResourceFromRecord(deployment, secret)) };
         } catch (error) {
           return failure(error, "The Azure firewall rules could not be listed", credentialValues(secret));
@@ -1047,6 +1260,9 @@ export class CloudDeploymentService {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#authLifetime.abort();
+    for (const token of this.#stagedAzureLogins.keys()) this.#discardAzureLogin(token);
+    this.#azureLoginGenerations.clear();
     if (this.#transcriptEmitTimer) clearTimeout(this.#transcriptEmitTimer);
     this.#transcriptEmitTimer = undefined;
     for (const token of [...this.#destroyPlans.keys()]) this.#discardDestroyPlan(token);
@@ -1207,7 +1423,7 @@ export class CloudDeploymentService {
   async #provisionAws(deployment: AwsCloudDeploymentRecord): Promise<CloudDeploymentRecord> {
     return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret, summary) => {
       try {
-        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret));
+        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
         await provider.preflight();
         const publicKey = publicKeyForCredential(secret);
         let current = await this.#persistPhase(deployment.id, "creating-instance");
@@ -1281,7 +1497,7 @@ export class CloudDeploymentService {
   async #provisionAzure(deployment: AzureCloudDeploymentRecord): Promise<CloudDeploymentRecord> {
     return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId));
         const publicKey = publicKeyForCredential(secret);
         let current = await this.#persistPhase(deployment.id, "creating-instance");
         if (current.provider !== "azure") throw new Error("Cloud deployment provider changed unexpectedly");
@@ -1407,7 +1623,7 @@ export class CloudDeploymentService {
   ): Promise<CloudDeploymentRecord> {
     return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
       try {
-        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret));
+        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
         const resource = awsResourceFromRecord(deployment);
         const updated = action === "start"
           ? await provider.start(resource)
@@ -1434,7 +1650,7 @@ export class CloudDeploymentService {
   ): Promise<CloudDeploymentRecord> {
     return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId));
         const resource = azureResourceFromRecord(deployment, secret);
         const refreshed = action === "start"
           ? await provider.start(resource)
@@ -1463,7 +1679,7 @@ export class CloudDeploymentService {
   ): Promise<CloudDeploymentRecord> {
     return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
       try {
-        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret));
+        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
         const updated = await provider.replaceFirewall(awsResourceFromRecord(deployment), {
           sshPort: deployment.spec.sshPort,
           sshSourceCidrs: input.sshCidrs,
@@ -1490,7 +1706,7 @@ export class CloudDeploymentService {
   ): Promise<CloudDeploymentRecord> {
     return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+        const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId));
         const resource = azureResourceFromRecord(deployment, secret);
         const updated = await provider.replaceFirewall(resource, {
           sshPort: deployment.spec.sshPort,
@@ -1524,7 +1740,7 @@ export class CloudDeploymentService {
       if (!hasTrackedAwsResources(deployment)) return;
       await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
         try {
-          await this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret))
+          await this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId))
             .destroy(awsDestroyResourceFromRecord(deployment));
         } catch (error) {
           throw new Error(cloudErrorMessage(error, "AWS resource termination failed", credentialValues(secret)));
@@ -1535,7 +1751,7 @@ export class CloudDeploymentService {
     if (!hasTrackedAzureResources(deployment)) return;
     await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
       try {
-        await this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret))
+        await this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId))
           .destroy(azureDestroyResourceFromRecord(deployment, secret));
       } catch (error) {
         throw new Error(cloudErrorMessage(error, "Azure resource termination failed", credentialValues(secret)));
@@ -1592,7 +1808,7 @@ export class CloudDeploymentService {
         return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
           try {
             const provider = this.#awsProviderFactory(
-              await this.#awsConnection(deployment.spec.region, secret),
+              await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId),
             );
             const resource = awsResourceFromRecord(deployment);
             const before = await provider.listFirewallRules(resource);
@@ -1645,7 +1861,7 @@ export class CloudDeploymentService {
         }
         return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
           try {
-            const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret));
+            const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId));
             const resource = azureResourceFromRecord(deployment, secret);
             const before = await provider.listFirewallRules(resource);
             const fallbackSnapshot = await mutate(provider, resource, before);
@@ -1861,12 +2077,13 @@ export class CloudDeploymentService {
   async #awsConnection(
     region: string,
     secret: AwsCredentialSecret,
+    credentialId: string,
   ): Promise<AwsEc2ProviderConnection> {
-    if ("profileName" in secret) {
-      return {
-        region,
-        credentials: await this.#awsProfiles.credentialProvider(secret.profileName, region),
-      };
+    if ("profileName" in secret && !secret.loginSession) {
+      return { region, credentials: await this.#awsProfiles.credentialProvider(secret.profileName, region) };
+    }
+    if (!("accessKeyId" in secret)) {
+      return { region, credentials: () => this.#resolveAwsCredentials(credentialId, region) };
     }
     return {
       region,
@@ -1878,17 +2095,128 @@ export class CloudDeploymentService {
     };
   }
 
+  async #resolveAwsCredentials(credentialId: string, region: string): Promise<AwsEc2Credentials> {
+    this.#assertActive();
+    return this.#vault.withCredential(credentialId, "aws", async (secret) => {
+      if ("accessKeyId" in secret) throw new Error("The AWS credential source changed. Try again.");
+      if ("profileName" in secret) {
+        try {
+          const credentials = await (await this.#awsProfiles.credentialProvider(secret.profileName, region))();
+          if (credentials.expiration && credentials.expiration.getTime() <= this.#now()) {
+            throw new Error("The AWS shared profile credentials expired");
+          }
+          return credentials;
+        } catch (error) {
+          if (!secret.loginSession) throw error;
+        }
+      }
+      if (!secret.loginSession) throw new Error("Use AWS Login to sign in again.");
+      if (Date.parse(secret.loginSession.expiresAt) > this.#now() + 60_000) return awsSessionCredentials(secret.loginSession);
+      let refreshing = this.#awsRefreshes.get(credentialId);
+      if (!refreshing) {
+        refreshing = (async () => {
+          try {
+            const refreshed = parseAwsConsoleLoginSession(await this.#awsConsoleLogin.refresh(secret.loginSession!, this.#authLifetime.signal));
+            this.#assertActive();
+            this.#authLifetime.signal.throwIfAborted();
+            if (refreshed.loginSessionArn !== secret.loginSession!.loginSessionArn || refreshed.region !== secret.loginSession!.region) {
+              throw new Error("AWS login refresh returned a different identity");
+            }
+            await this.#vault.updateAwsLoginSession(credentialId, secret, refreshed, this.#authLifetime.signal);
+          } catch {
+            throw new AwsConsoleLoginError("login-required", "AWS login could not be refreshed. Use AWS Login to sign in again.");
+          }
+        })();
+        this.#awsRefreshes.set(credentialId, refreshing);
+        void refreshing.finally(() => {
+          if (this.#awsRefreshes.get(credentialId) === refreshing) this.#awsRefreshes.delete(credentialId);
+        }).catch(() => undefined);
+      }
+      await refreshing;
+      return this.#vault.withCredential(credentialId, "aws", (current) => {
+        if (!("loginSession" in current) || !current.loginSession) throw new Error("Use AWS Login to sign in again.");
+        return awsSessionCredentials(current.loginSession);
+      });
+    });
+  }
+
   #azureConnection(
     location: string,
     secret: AzureCliCredentialSecret,
+    credentialId: string,
   ): AzureVmProviderConnection {
     return {
       subscriptionId: secret.subscriptionId,
       tenantId: secret.tenantId,
       location,
-      credential: createAzureCliCredential(secret),
+      credential: secret.loginSession ? {
+        getToken: (scopes, options) => this.#resolveAzureToken(credentialId, scopes, options),
+      } : this.#azureCliCredentialFactory(secret),
     };
   }
+
+  async #resolveAzureToken(
+    credentialId: string,
+    scopes: Parameters<TokenCredential["getToken"]>[0],
+    options: Parameters<TokenCredential["getToken"]>[1],
+  ): Promise<AzureAccessToken> {
+    this.#assertActive();
+    const requested = typeof scopes === "string" ? [scopes] : scopes;
+    if (requested.length !== 1 || requested[0] !== "https://management.azure.com/.default") {
+      throw new AzureBrowserLoginError("invalid-input", "Azure Login supports Azure Resource Manager access only.");
+    }
+    return this.#vault.withCredential(credentialId, "azure", async (secret) => {
+      if (options?.tenantId && !sameAzureGuid(options.tenantId, secret.tenantId)) {
+        throw new AzureBrowserLoginError("invalid-input", "Azure Login cannot access a different tenant.");
+      }
+      if (options?.abortSignal?.aborted) throw new AzureBrowserLoginError("cancelled", "Azure token request was cancelled.");
+      if (secret.authentication !== "login") {
+        try {
+          const token = await this.#azureCliCredentialFactory(secret).getToken(scopes, options);
+          if (!token || !Number.isFinite(token.expiresOnTimestamp) || token.expiresOnTimestamp <= this.#now()) throw new Error("Azure CLI token expired");
+          return token;
+        } catch (error) {
+          if (!secret.loginSession) throw error;
+        }
+      }
+      if (options?.claims) {
+        throw new AzureBrowserLoginError("login-required", "Azure requires interactive authentication. Use Azure Login to sign in again.");
+      }
+      const session = secret.loginSession;
+      if (!session) throw new AzureBrowserLoginError("login-required", "Use Azure Login to sign in again.");
+      let refreshing = this.#azureRefreshes.get(credentialId);
+      if (!refreshing) {
+        refreshing = (async () => {
+          try {
+            const result = await this.#azureBrowserLogin.getToken(session, this.#authLifetime.signal);
+            const refreshed = parseAzureBrowserLoginSession(result.session);
+            this.#assertActive();
+            this.#authLifetime.signal.throwIfAborted();
+            if (!sameAzureLoginIdentity(session, refreshed) || typeof result.token !== "string" || result.token.length < 1 || result.token.length > 64 * 1024 || !Number.isFinite(result.expiresOnTimestamp) || result.expiresOnTimestamp <= this.#now()) {
+              throw new Error("Azure Login returned an invalid token or account");
+            }
+            if (JSON.stringify(refreshed) !== JSON.stringify(session)) {
+              await this.#vault.updateAzureLoginSession(credentialId, secret, refreshed, this.#authLifetime.signal);
+            }
+            return await this.#vault.withCredential(credentialId, "azure", (current) => {
+              if (!current.loginSession || JSON.stringify(current.loginSession) !== JSON.stringify(refreshed)) throw new Error("Azure Login changed during token refresh");
+              return { token: result.token, expiresOnTimestamp: result.expiresOnTimestamp };
+            });
+          } catch {
+            throw new AzureBrowserLoginError("login-required", "Azure login could not be refreshed. Use Azure Login to sign in again.");
+          }
+        })();
+        this.#azureRefreshes.set(credentialId, refreshing);
+        void refreshing.finally(() => {
+          if (this.#azureRefreshes.get(credentialId) === refreshing) this.#azureRefreshes.delete(credentialId);
+        }).catch(() => undefined);
+      }
+      const token = await refreshing;
+      if (options?.abortSignal?.aborted) throw new AzureBrowserLoginError("cancelled", "Azure token request was cancelled.");
+      return token;
+    });
+  }
+
 }
 
 function managedSshTarget(
@@ -3000,11 +3328,54 @@ function operatorConfigFileName(deploymentId: string): string {
 }
 
 function credentialValues(secret: AwsCredentialSecret | AzureCliCredentialSecret): readonly string[] {
-  if ("profileName" in secret) {
-    return [secret.sshPrivateKey, secret.sshPassphrase]
-      .filter((value): value is string => typeof value === "string" && value.length > 0);
+  const values = Object.entries(secret).filter(([key]) => key !== "authentication").map(([, value]) => value).filter((value): value is string => typeof value === "string" && value.length > 0);
+  if ("loginSession" in secret && secret.loginSession) values.push(...Object.values(secret.loginSession));
+  return values;
+}
+
+function awsSessionCredentials(session: AwsConsoleLoginSession): AwsEc2Credentials {
+  return {
+    accessKeyId: session.accessKeyId, secretAccessKey: session.secretAccessKey,
+    sessionToken: session.sessionToken, expiration: new Date(session.expiresAt),
+  };
+}
+
+function awsLoginFailure(error: unknown): { readonly ok: false; readonly error: string } {
+  if (error instanceof AwsConsoleLoginError) return { ok: false, error: error.message };
+  if (error instanceof Error && error.name === "AbortError") return { ok: false, error: "AWS Login was cancelled." };
+  return { ok: false, error: "AWS Login could not be completed. Try again." };
+}
+
+function azureLoginFailure(error: unknown): { readonly ok: false; readonly error: string } {
+  if (error instanceof AzureBrowserLoginError) return { ok: false, error: error.message };
+  if (error instanceof Error && error.name === "AbortError") return { ok: false, error: "Azure Login was cancelled." };
+  return { ok: false, error: "Azure Login could not be completed. Try again." };
+}
+
+function assertAzureLoginOwner(ownerId: number): void {
+  if (!Number.isSafeInteger(ownerId) || ownerId < 0) throw new TypeError("Invalid Azure login owner");
+}
+
+function sameAzureGuid(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function sameAzureLoginIdentity(left: AzureBrowserLoginSession, right: AzureBrowserLoginSession): boolean {
+  return sameAzureGuid(left.clientId, right.clientId) && sameAzureGuid(left.tenantId, right.tenantId) &&
+    left.homeAccountId === right.homeAccountId && left.localAccountId === right.localAccountId;
+}
+
+function validateAzureLoginSubscriptions(
+  value: readonly AzureCliAccountSummary[],
+  session: AzureBrowserLoginSession,
+): readonly AzureCliAccountSummary[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 512) throw new Error("Azure Login returned an invalid subscription list");
+  const subscriptions = value.map(parseAzureCliAccountSummary);
+  if (subscriptions.some((account) => !sameAzureGuid(account.tenantId, session.tenantId) || account.cloudName !== "AzureCloud") ||
+    new Set(subscriptions.map(({ subscriptionId }) => subscriptionId.toLowerCase())).size !== subscriptions.length) {
+    throw new Error("Azure Login returned an invalid subscription list");
   }
-  return Object.values(secret).filter((value): value is string => typeof value === "string" && value.length > 0);
+  return Object.freeze(subscriptions);
 }
 
 function failure<T = never>(

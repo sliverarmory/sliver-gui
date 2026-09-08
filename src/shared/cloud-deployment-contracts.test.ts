@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   CLOUD_DEPLOYMENT_STATE_VERSION,
   parseAzureFirewallRuleSpec,
+  parseAzureBrowserLoginSession,
+  parseAzureCliCredentialSecret,
+  parseBeginAzureLoginInput,
+  parseAwsConsoleLoginSession,
   parseAwsFirewallRuleSpec,
   parseCloudCredentialSummary,
   parseCloudDeploymentActionInput,
@@ -26,6 +30,44 @@ const AZURE_SUBSCRIPTION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const AZURE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
 describe("cloud deployment contracts", () => {
+  it("accepts only native Azure login capabilities and bounded main-process session caches", () => {
+    expect(parseBeginAzureLoginInput({ tenantId: null, clientId: null })).toEqual({ tenantId: null, clientId: null });
+    expect(() => parseBeginAzureLoginInput({ tenantId: "common", clientId: null })).toThrow(/Invalid/u);
+    const input = { provider: "azure", authentication: "login", loginToken: KEY_TOKEN, label: "Azure Login", defaultLocation: "eastus",
+      subscriptionId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, sshUsername: "azureuser", sshPrivateKeyToken: null, sshPassphrase: null };
+    expect(parseCreateCloudCredentialInput(input)).toEqual(input);
+    expect(() => parseCreateCloudCredentialInput({ ...input, cache: "secret" })).toThrow(/Invalid/u);
+    expect(() => parseCreateCloudCredentialInput({ ...input, loginToken: "not-a-capability" })).toThrow(/Invalid/u);
+    const session = { clientId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, homeAccountId: "home", localAccountId: "local", username: "", cache: "{}" };
+    expect(parseAzureBrowserLoginSession(session)).toEqual(session);
+    for (const cache of ["[]", "null", "not-json", "x".repeat(1024 * 1024 + 1)]) {
+      expect(() => parseAzureBrowserLoginSession({ ...session, cache })).toThrow(/Invalid/u);
+    }
+    const secret = { subscriptionId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, authentication: "login", loginSession: session,
+      sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-key\n-----END OPENSSH PRIVATE KEY-----", sshPassphrase: null };
+    expect(parseAzureCliCredentialSecret(secret)).toEqual(secret);
+    expect(() => parseAzureCliCredentialSecret({ ...secret, tenantId: AZURE_SUBSCRIPTION_ID })).toThrow(/tenant/u);
+    const { loginSession: _session, ...missingSession } = secret;
+    expect(() => parseAzureCliCredentialSecret(missingSession)).toThrow(/Invalid/u);
+  });
+
+  it("accepts an explicit browser login request while rejecting session secrets and mixed sources at IPC", () => {
+    const input = { provider: "aws", authentication: "login", label: "AWS Login", defaultRegion: "us-west-2",
+      sshUsername: "ubuntu", sshPrivateKeyToken: null, sshPassphrase: null };
+    expect(parseCreateCloudCredentialInput(input)).toEqual(input);
+    for (const addition of [{ refreshToken: "secret" }, { loginSession: {} }, { profileName: "default" }, { authentication: "sso" }]) {
+      expect(() => parseCreateCloudCredentialInput({ ...input, ...addition })).toThrow(/Invalid/u);
+    }
+    const session = { loginSessionArn: "arn:aws:iam::123456789012:root", region: "us-west-2",
+      accessKeyId: "ASIAEXAMPLE00000001", secretAccessKey: "secret", sessionToken: "session", refreshToken: "refresh",
+      privateKey: "-----BEGIN EC PRIVATE KEY-----\nproof-key\n-----END EC PRIVATE KEY-----", expiresAt: "2026-09-08T20:00:00.000Z" };
+    expect(parseAwsConsoleLoginSession(session)).toEqual(session);
+    expect(() => parseAwsConsoleLoginSession({ ...session, expiresAt: "tomorrow" })).toThrow(/Invalid/u);
+    expect(() => parseAwsConsoleLoginSession({ ...session, loginSessionArn: "https://example.com" })).toThrow(/Invalid/u);
+    expect(() => parseCloudCredentialSummary({ id: CREDENTIAL_ID, provider: "aws", label: "AWS Login", persistence: "secure",
+      createdAt: "2026-09-08T20:00:00.000Z", defaultRegion: "us-west-2", sshUsername: "ubuntu", ...session })).toThrow(/Invalid/u);
+  });
+
   it("parses a renderer-safe AWS credential with an opaque private-key token", () => {
     const parsed = parseCreateCloudCredentialInput(awsCredentialInput());
 

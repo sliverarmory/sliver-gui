@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import { EventEmitter } from "node:events";
+
 import type {
   BrowserWindow,
   IpcMainInvokeEvent,
@@ -57,6 +59,137 @@ beforeEach(() => {
 afterEach(() => unregisterCloudDeploymentIpcHandlers());
 
 describe("Cloud Deployment IPC boundary", () => {
+  it("binds Azure subscription selection to its window until saved or discarded", async () => {
+    const selection = { token: PRIVATE_KEY_TOKEN, expiresAt: "2026-09-09T00:00:00.000Z", subscriptions: [] };
+    const beginAzureLogin = vi.fn<CloudDeploymentController["beginAzureLogin"]>(async () => ({ ok: true, value: selection }));
+    const cancelAzureLogin = vi.fn();
+    registerCloudDeploymentIpcHandlers(controllerMock({ beginAzureLogin, cancelAzureLogin }), CLOUD_RENDERER_URL, () => true);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const other = invokeEvent(CLOUD_RENDERER_URL, 78);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin, owner.event, { tenantId: null, clientId: null }))
+      .resolves.toEqual({ ok: true, value: selection });
+    expect(beginAzureLogin).toHaveBeenCalledWith({ tenantId: null, clientId: null }, expect.any(AbortSignal), 77);
+    expect(owner.sender.listenerCount("destroyed")).toBe(1);
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin, other.event);
+    expect(cancelAzureLogin).not.toHaveBeenCalledWith(77);
+    owner.sender.emit("did-start-navigation", { isMainFrame: false });
+    expect(cancelAzureLogin).not.toHaveBeenCalledWith(77);
+    owner.sender.emit("did-start-navigation", { isMainFrame: true });
+    expect(cancelAzureLogin).toHaveBeenCalledWith(77);
+    expect(owner.sender.listenerCount("destroyed")).toBe(0);
+  });
+
+  it("passes only the trusted owner ID when saving an Azure login selection", async () => {
+    const beginAzureLogin = vi.fn<CloudDeploymentController["beginAzureLogin"]>(async () => ({
+      ok: true, value: { token: PRIVATE_KEY_TOKEN, expiresAt: "2026-09-09T00:00:00.000Z", subscriptions: [] },
+    }));
+    const createCredential = vi.fn<CloudDeploymentController["createCredential"]>(async () => ({ ok: false, error: "selection probe" }));
+    const cancelAzureLogin = vi.fn();
+    registerCloudDeploymentIpcHandlers(controllerMock({ beginAzureLogin, createCredential, cancelAzureLogin }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin, owner.event, { tenantId: null, clientId: null });
+    const input = { provider: "azure", authentication: "login", label: "Browser Azure", defaultLocation: "eastus",
+      sshUsername: "azureuser", sshPrivateKeyToken: null, sshPassphrase: null, loginToken: PRIVATE_KEY_TOKEN,
+      subscriptionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", tenantId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" };
+    const expected = { ...input };
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createCredential, owner.event, input))
+      .resolves.toEqual({ ok: false, error: "selection probe" });
+    expect(createCredential).toHaveBeenCalledWith(expected, expect.any(AbortSignal), 77);
+    expect(cancelAzureLogin).toHaveBeenCalledWith(77);
+    expect(owner.sender.listenerCount("destroyed")).toBe(0);
+  });
+
+  it("keeps Azure and AWS cancellation separate while rejecting overlapping logins", async () => {
+    let signal: AbortSignal | undefined;
+    const loginAzureCredential = vi.fn<CloudDeploymentController["loginAzureCredential"]>(async (_input, pendingSignal) => {
+      signal = pendingSignal;
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { ok: false, error: "cancelled" };
+    });
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async () => ({ ok: false, error: "unused" }));
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAzureCredential, loginAwsCredential }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const login = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, owner.event);
+    expect(signal?.aborted).toBe(false);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringContaining("already in progress") });
+    expect(loginAwsCredential).not.toHaveBeenCalled();
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin, owner.event);
+    await expect(login).resolves.toEqual({ ok: false, error: "cancelled" });
+  });
+
+  it("starts native credential creation with only a validated request and revocable signal", async () => {
+    const input = {
+      provider: "aws" as const, authentication: "login" as const, label: "Browser account",
+      defaultRegion: "us-east-1", sshUsername: "ubuntu", sshPrivateKeyToken: null, sshPassphrase: null,
+    };
+    let loginSignal: AbortSignal | undefined;
+    const createCredential = vi.fn<CloudDeploymentController["createCredential"]>(async (parsed, signal) => {
+      expect(parsed).toEqual(input);
+      loginSignal = signal;
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { ok: false, error: "cancelled" };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ createCredential }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const request = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createCredential, owner.event, input);
+    expect(loginSignal?.aborted).toBe(false);
+    owner.sender.emit("did-start-navigation", { isMainFrame: false });
+    expect(loginSignal?.aborted).toBe(false);
+    owner.sender.emit("did-start-navigation", { isMainFrame: true });
+    await expect(request).resolves.toEqual({ ok: false, error: "cancelled" });
+    expect(loginSignal?.aborted).toBe(true);
+  });
+
+  it("scopes login cancellation to the initiating window and rejects a concurrent flow", async () => {
+    let loginSignal: AbortSignal | undefined;
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, signal) => {
+      loginSignal = signal;
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { ok: false, error: "AWS login was cancelled." };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, () => true);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const other = invokeEvent(CLOUD_RENDERER_URL, 78);
+    const login = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    expect(loginSignal?.aborted).toBe(false);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringContaining("already in progress") });
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, other.event);
+    expect(loginSignal?.aborted).toBe(false);
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, owner.event);
+    await expect(login).resolves.toEqual({ ok: false, error: "AWS login was cancelled." });
+    expect(loginSignal?.aborted).toBe(true);
+    expect(owner.sender.listenerCount("destroyed")).toBe(0);
+    expect(owner.sender.listenerCount("did-start-navigation")).toBe(0);
+  });
+
+  it.each(["destroyed", "render-process-gone", "did-start-navigation", "unregister"])(
+    "revokes pending login on %s", async (eventName) => {
+      const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, signal) => {
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        return { ok: false, error: "cancelled" };
+      });
+      registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+      const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+      const login = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+      if (eventName === "unregister") unregisterCloudDeploymentIpcHandlers();
+      else owner.sender.emit(eventName, { isMainFrame: true });
+      await expect(login).resolves.toEqual({ ok: false, error: "cancelled" });
+      expect(owner.sender.listenerCount("destroyed")).toBe(0);
+    },
+  );
+
+  it("does not launch login for an untrusted document", async () => {
+    const controller = controllerMock();
+    registerCloudDeploymentIpcHandlers(controller, CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential,
+      invokeEvent("sliver://app/index.html", 77).event, { credentialId: CREDENTIAL_ID }))
+      .resolves.toEqual(REJECTED);
+    expect(controller.loginAwsCredential).not.toHaveBeenCalled();
+  });
+
   it("registers and unregisters exactly the isolated Cloud Deployment channels", () => {
     registerCloudDeploymentIpcHandlers(controllerMock(), CLOUD_RENDERER_URL, authorizeCurrentWindow);
 
@@ -238,6 +371,11 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.detectCurrentEgressIpv4, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.chooseSshPrivateKey, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createCredential, [null]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, [{ credentialId: CREDENTIAL_ID, url: "https://example.test" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, [CREDENTIAL_ID]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin, [{ tenantId: "https://example.test", clientId: null }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential, [{ credentialId: CREDENTIAL_ID, url: "https://example.test" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin, [CREDENTIAL_ID]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteCredential, [{ credentialId: "not-a-uuid" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.testCredential, [{ credentialId: CREDENTIAL_ID }, "extra"]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAwsOptions, [{ credentialId: CREDENTIAL_ID, region: "invalid" }]],
@@ -533,6 +671,10 @@ function controllerMock(
     detectCurrentEgressIpv4: vi.fn(unavailable),
     chooseSshPrivateKey: vi.fn(unavailable),
     createCredential: vi.fn(unavailable),
+    loginAwsCredential: vi.fn(unavailable),
+    beginAzureLogin: vi.fn(unavailable),
+    loginAzureCredential: vi.fn(unavailable),
+    cancelAzureLogin: vi.fn(),
     deleteCredential: vi.fn(unavailable),
     testCredential: vi.fn(unavailable),
     discoverAwsOptions: vi.fn(unavailable),
@@ -582,12 +724,12 @@ function invokeEvent(url: string, contentsId: number): {
     url,
     isDestroyed: () => false,
   } as WebFrameMain;
-  const sender = {
+  const sender = Object.assign(new EventEmitter(), {
     id: contentsId,
     mainFrame,
     getURL: () => url,
     isDestroyed: () => false,
-  } as unknown as WebContents;
+  }) as unknown as WebContents;
   return {
     event: { sender, senderFrame: mainFrame } as IpcMainInvokeEvent,
     mainFrame,

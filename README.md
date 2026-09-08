@@ -123,6 +123,9 @@ operator checklist.
 
 ## Development
 
+For browser authentication and existing CLI credential support in Cloud
+Deployment, see [AWS Login](docs/aws-login.md) and [Azure Login](docs/azure-login.md).
+
 The TypeScript gRPC client used by Electron main is the exact npm dependency
 `sliver-script@2.0.0-rc.2`. The lockfile pins its registry tarball integrity, and
 `protocol/sliver-script-provenance.json` verifies the installed package and its

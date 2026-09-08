@@ -22,12 +22,15 @@ import {
   parseCreateCloudFirewallRuleInput,
   parseCloudDeploymentActionInput,
   parseCreateCloudCredentialInput,
+  parseBeginAzureLoginInput,
   parseCreateCloudDeploymentInput,
   parseDeleteCloudFirewallRuleInput,
   parseListCloudFirewallRulesInput,
   parseUpdateCloudFirewallRuleInput,
   parseUpdateCloudFirewallInput,
   type AzureCliAccountSummary,
+  type BeginAzureLoginInput,
+  type AzureLoginSelection,
   type CloudFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentActionInput,
@@ -67,7 +70,11 @@ export interface CloudDeploymentController {
   getTerminalRuntime(): MaybePromise<OperationResult<TerminalRuntimeAsset>>;
   detectCurrentEgressIpv4(): MaybePromise<OperationResult<CurrentEgressIpv4>>;
   chooseSshPrivateKey(owner: BrowserWindow): MaybePromise<OperationResult<SshPrivateKeySelection>>;
-  createCredential(input: CreateCloudCredentialInput): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  createCredential(input: CreateCloudCredentialInput, signal?: AbortSignal, ownerId?: number): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  loginAwsCredential(input: CloudCredentialIdInput, signal?: AbortSignal): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  beginAzureLogin(input: BeginAzureLoginInput, signal?: AbortSignal, ownerId?: number): MaybePromise<OperationResult<AzureLoginSelection>>;
+  loginAzureCredential(input: CloudCredentialIdInput, signal?: AbortSignal): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  cancelAzureLogin(ownerId?: number): void;
   deleteCredential(input: CloudCredentialIdInput): MaybePromise<OperationResult>;
   testCredential(input: CloudCredentialIdInput): MaybePromise<OperationResult<CloudCredentialTestResult>>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): MaybePromise<OperationResult<AwsDeploymentOptions>>;
@@ -144,8 +151,75 @@ export function registerCloudDeploymentIpcHandlers(
     exactRendererUrl,
     authorizeWindow,
     (args) => singleArgument(parseCreateCloudCredentialInput(requireSingleArgument(args))),
-    (_sender, input) => controller.createCredential(input),
+    ({ sender }, input) => {
+      if (!("authentication" in input) || input.authentication !== "login") return controller.createCredential(input);
+      return withCloudLogin(sender, input.provider, async (signal) => {
+        if (input.provider === "aws") return controller.createCredential(input, signal);
+        try {
+          return await controller.createCredential(input, signal, sender.id);
+        } finally {
+          stagedAzureLogins.get(sender)?.();
+        }
+      });
+    },
     scrubCredentialArguments,
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCredentialIdInput(requireSingleArgument(args))),
+    ({ sender }, input) => withCloudLogin(sender, "aws", (signal) => controller.loginAwsCredential(input, signal)),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    ({ sender }) => {
+      const pending = pendingCloudLogins.get(sender);
+      if (pending?.provider === "aws") pending.controller.abort();
+      return { ok: true };
+    },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseBeginAzureLoginInput(requireSingleArgument(args))),
+    ({ sender }, input) => withCloudLogin(sender, "azure", async (signal) => {
+      stagedAzureLogins.get(sender)?.();
+      const discard = trackAzureLoginSelection(sender, () => controller.cancelAzureLogin(sender.id));
+      try {
+        const result = await controller.beginAzureLogin(input, signal, sender.id);
+        if (!result.ok || signal.aborted) discard();
+        return result;
+      } catch (error) {
+        discard();
+        throw error;
+      }
+    }),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCredentialIdInput(requireSingleArgument(args))),
+    ({ sender }, input) => withCloudLogin(sender, "azure", (signal) => controller.loginAzureCredential(input, signal)),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    ({ sender }) => {
+      const pending = pendingCloudLogins.get(sender);
+      if (pending?.provider === "azure") pending.controller.abort();
+      const discard = stagedAzureLogins.get(sender);
+      if (discard) discard();
+      else controller.cancelAzureLogin(sender.id);
+      return { ok: true };
+    },
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.deleteCredential,
@@ -268,7 +342,66 @@ export function registerCloudDeploymentIpcHandlers(
 }
 
 export function unregisterCloudDeploymentIpcHandlers(): void {
+  for (const { controller } of pendingCloudLogins.values()) controller.abort();
+  for (const discard of stagedAzureLogins.values()) discard();
   for (const channel of Object.values(CLOUD_DEPLOYMENT_IPC_INVOKE)) ipcMain.removeHandler(channel);
+}
+
+// Only the initiating renderer may cancel its flow. Closing or replacing that
+// document also revokes authorization before the service can save a session.
+const pendingCloudLogins = new Map<WebContents, { provider: "aws" | "azure"; controller: AbortController }>();
+const stagedAzureLogins = new Map<WebContents, () => void>();
+
+async function withCloudLogin<T>(
+  sender: WebContents,
+  provider: "aws" | "azure",
+  operation: (signal: AbortSignal) => MaybePromise<OperationResult<T>>,
+): Promise<OperationResult<T>> {
+  if (pendingCloudLogins.has(sender) || pendingCloudLogins.size >= 4) {
+    return { ok: false, error: "A cloud login is already in progress. Complete or cancel it first." };
+  }
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  const navigation = (event: { readonly isMainFrame: boolean }): void => {
+    if (event.isMainFrame) abort();
+  };
+  pendingCloudLogins.set(sender, { provider, controller });
+  sender.once("destroyed", abort);
+  sender.once("render-process-gone", abort);
+  sender.on("did-start-navigation", navigation);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    sender.removeListener("destroyed", abort);
+    sender.removeListener("render-process-gone", abort);
+    sender.removeListener("did-start-navigation", navigation);
+    pendingCloudLogins.delete(sender);
+  }
+}
+
+/** Retains revocation until the signed-in subscription is saved or discarded. */
+function trackAzureLoginSelection(sender: WebContents, discardSession: () => void): () => void {
+  const navigation = (event: { readonly isMainFrame: boolean }): void => {
+    if (event.isMainFrame) discard();
+  };
+  const discard = (): void => {
+    if (stagedAzureLogins.get(sender) !== discard) return;
+    stagedAzureLogins.delete(sender);
+    clearTimeout(timer);
+    sender.removeListener("destroyed", discard);
+    sender.removeListener("render-process-gone", discard);
+    sender.removeListener("did-start-navigation", navigation);
+    discardSession();
+  };
+  // Bound these listeners across the browser deadline plus the selection's
+  // own ten-minute lifetime; the service enforces the exact token expiry.
+  const timer = setTimeout(discard, 20 * 60_000);
+  timer.unref();
+  stagedAzureLogins.set(sender, discard);
+  sender.once("destroyed", discard);
+  sender.once("render-process-gone", discard);
+  sender.on("did-start-navigation", navigation);
+  return discard;
 }
 
 interface CloudSender {
@@ -381,7 +514,7 @@ function scrubCredentialArguments(args: readonly unknown[]): void {
   const value = args[0];
   if (typeof value !== "object" || value === null || Array.isArray(value)) return;
   const record = value as Record<string, unknown>;
-  for (const key of ["accessKeyId", "secretAccessKey", "sessionToken", "tokenId", "tokenSecret", "tlsCaCertificate", "sshPassphrase"]) {
+  for (const key of ["accessKeyId", "secretAccessKey", "sessionToken", "tokenId", "tokenSecret", "tlsCaCertificate", "sshPassphrase", "loginToken"]) {
     if (Object.hasOwn(record, key)) {
       try {
         record[key] = "";

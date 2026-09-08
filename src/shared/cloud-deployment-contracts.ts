@@ -89,19 +89,55 @@ export interface AwsAccessKeyCredentialSecret {
   readonly sshPassphrase: string | null;
 }
 
-export interface AwsProfileCredentialSecret {
-  readonly profileName: string;
+/** Main-process session material. Never include this object in renderer messages. */
+export interface AwsConsoleLoginSession {
+  readonly loginSessionArn: string;
+  readonly region: string;
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken: string;
+  readonly expiresAt: string;
+  readonly refreshToken: string;
+  readonly privateKey: string;
+}
+
+export interface AwsLoginCredentialSecret {
+  readonly loginSession: AwsConsoleLoginSession;
   readonly sshPrivateKey: string;
   readonly sshPassphrase: string | null;
 }
 
-export type AwsCredentialSecret = AwsAccessKeyCredentialSecret | AwsProfileCredentialSecret;
+export interface AwsProfileCredentialSecret {
+  readonly profileName: string;
+  readonly loginSession?: AwsConsoleLoginSession;
+  readonly sshPrivateKey: string;
+  readonly sshPassphrase: string | null;
+}
+
+export type AwsCredentialSecret = AwsAccessKeyCredentialSecret | AwsProfileCredentialSecret | AwsLoginCredentialSecret;
+
+/** Main-process MSAL cache and pinned account identity. Never expose this through IPC. */
+export interface AzureBrowserLoginSession {
+  readonly clientId: string;
+  readonly homeAccountId: string;
+  readonly localAccountId: string;
+  readonly tenantId: string;
+  readonly username: string;
+  readonly cache: string;
+}
 
 export interface AzureCliCredentialSecret {
+  readonly authentication?: "login";
+  readonly loginSession?: AzureBrowserLoginSession;
   readonly subscriptionId: string;
   readonly tenantId: string;
   readonly sshPrivateKey: string;
   readonly sshPassphrase: string | null;
+}
+
+export interface AzureLoginCredentialSecret extends AzureCliCredentialSecret {
+  readonly authentication: "login";
+  readonly loginSession: AzureBrowserLoginSession;
 }
 
 export type CloudCredentialSecret = AwsCredentialSecret | AzureCliCredentialSecret;
@@ -130,9 +166,21 @@ export interface CreateAwsProfileCloudCredentialInput {
   readonly sshPassphrase: string | null;
 }
 
+/** Renderer-safe request to authenticate through the AWS console in a browser. */
+export interface CreateAwsLoginCloudCredentialInput {
+  readonly provider: "aws";
+  readonly authentication: "login";
+  readonly label: string;
+  readonly defaultRegion: string;
+  readonly sshUsername: string;
+  readonly sshPrivateKeyToken: string | null;
+  readonly sshPassphrase: string | null;
+}
+
 export type CreateAwsCloudCredentialInput =
   | CreateAwsAccessKeyCloudCredentialInput
-  | CreateAwsProfileCloudCredentialInput;
+  | CreateAwsProfileCloudCredentialInput
+  | CreateAwsLoginCloudCredentialInput;
 
 /** Renderer-safe Azure CLI credential input. Tokens remain in the Azure CLI cache. */
 export interface CreateAzureCliCloudCredentialInput {
@@ -146,9 +194,27 @@ export interface CreateAzureCliCloudCredentialInput {
   readonly sshPassphrase: string | null;
 }
 
+export interface CreateAzureLoginCloudCredentialInput extends CreateAzureCliCloudCredentialInput {
+  readonly authentication: "login";
+  readonly loginToken: string;
+}
+
+export type CreateAzureCloudCredentialInput = CreateAzureCliCloudCredentialInput | CreateAzureLoginCloudCredentialInput;
+
+export interface BeginAzureLoginInput {
+  readonly tenantId: string | null;
+  readonly clientId: string | null;
+}
+
+export interface AzureLoginSelection {
+  readonly token: string;
+  readonly expiresAt: string;
+  readonly subscriptions: readonly AzureCliAccountSummary[];
+}
+
 export type CreateCloudCredentialInput =
   | CreateAwsCloudCredentialInput
-  | CreateAzureCliCloudCredentialInput;
+  | CreateAzureCloudCredentialInput;
 
 /** Main-process input after resolving an imported or generated SSH private key. */
 export interface ResolvedAwsCloudCredentialInput {
@@ -186,13 +252,21 @@ export interface AwsAccessKeyCloudCredentialSummary extends AwsCloudCredentialSu
 
 export interface AwsProfileCloudCredentialSummary extends AwsCloudCredentialSummaryBase {
   readonly profileName: string;
+  readonly loginSessionArn?: string;
+}
+
+export interface AwsLoginCloudCredentialSummary extends AwsCloudCredentialSummaryBase {
+  readonly loginSessionArn: string;
 }
 
 export type AwsCloudCredentialSummary =
   | AwsAccessKeyCloudCredentialSummary
-  | AwsProfileCloudCredentialSummary;
+  | AwsProfileCloudCredentialSummary
+  | AwsLoginCloudCredentialSummary;
 
 export interface AzureCloudCredentialSummary {
+  readonly authentication?: "login";
+  readonly loginAccountId?: string;
   readonly id: string;
   readonly provider: "azure";
   readonly label: string;
@@ -499,15 +573,28 @@ export type DeleteAwsFirewallRuleInput = DeleteCloudFirewallRuleInput;
 
 const AWS_ACCESS_KEY_SECRET_KEYS = ["accessKeyId", "secretAccessKey", "sessionToken", "sshPrivateKey", "sshPassphrase"] as const;
 const AWS_PROFILE_SECRET_KEYS = ["profileName", "sshPrivateKey", "sshPassphrase"] as const;
+const AWS_PROFILE_LOGIN_SECRET_KEYS = [...AWS_PROFILE_SECRET_KEYS, "loginSession"] as const;
+const AWS_LOGIN_SECRET_KEYS = ["loginSession", "sshPrivateKey", "sshPassphrase"] as const;
+const AWS_LOGIN_SESSION_KEYS = ["loginSessionArn", "region", "accessKeyId", "secretAccessKey", "sessionToken", "expiresAt", "refreshToken", "privateKey"] as const;
 const AZURE_CLI_SECRET_KEYS = ["subscriptionId", "tenantId", "sshPrivateKey", "sshPassphrase"] as const;
+const AZURE_CLI_LOGIN_SECRET_KEYS = [...AZURE_CLI_SECRET_KEYS, "loginSession"] as const;
+const AZURE_LOGIN_SECRET_KEYS = [...AZURE_CLI_LOGIN_SECRET_KEYS, "authentication"] as const;
+const AZURE_LOGIN_SESSION_KEYS = ["clientId", "homeAccountId", "localAccountId", "tenantId", "username", "cache"] as const;
+const BEGIN_AZURE_LOGIN_KEYS = ["tenantId", "clientId"] as const;
 const CREATE_AWS_ACCESS_KEY_CREDENTIAL_KEYS = ["provider", "label", "defaultRegion", "sshUsername", "sshPrivateKeyToken", "accessKeyId", "secretAccessKey", "sessionToken", "sshPassphrase"] as const;
+const CREATE_AWS_LOGIN_CREDENTIAL_KEYS = ["provider", "authentication", "label", "defaultRegion", "sshUsername", "sshPrivateKeyToken", "sshPassphrase"] as const;
 const CREATE_AWS_PROFILE_CREDENTIAL_KEYS = ["provider", "label", "defaultRegion", "sshUsername", "sshPrivateKeyToken", "profileName", "sshPassphrase"] as const;
 const CREATE_AZURE_CLI_CREDENTIAL_KEYS = ["provider", "label", "defaultLocation", "sshUsername", "sshPrivateKeyToken", "subscriptionId", "tenantId", "sshPassphrase"] as const;
+const CREATE_AZURE_LOGIN_CREDENTIAL_KEYS = [...CREATE_AZURE_CLI_CREDENTIAL_KEYS, "authentication", "loginToken"] as const;
 const RESOLVED_CREDENTIAL_KEYS = ["provider", "label", "defaultRegion", "sshUsername", "secret"] as const;
 const RESOLVED_AZURE_CREDENTIAL_KEYS = ["provider", "label", "defaultLocation", "sshUsername", "secret"] as const;
 const AWS_ACCESS_KEY_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "defaultRegion", "sshUsername"] as const;
 const AWS_PROFILE_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "defaultRegion", "sshUsername", "profileName"] as const;
+const AWS_PROFILE_LOGIN_SUMMARY_KEYS = [...AWS_PROFILE_SUMMARY_KEYS, "loginSessionArn"] as const;
+const AWS_LOGIN_SUMMARY_KEYS = [...AWS_ACCESS_KEY_SUMMARY_KEYS, "loginSessionArn"] as const;
 const AZURE_SUMMARY_KEYS = ["id", "provider", "label", "persistence", "createdAt", "defaultLocation", "subscriptionId", "tenantId", "sshUsername"] as const;
+const AZURE_CLI_LOGIN_SUMMARY_KEYS = [...AZURE_SUMMARY_KEYS, "loginAccountId"] as const;
+const AZURE_LOGIN_SUMMARY_KEYS = [...AZURE_CLI_LOGIN_SUMMARY_KEYS, "authentication"] as const;
 const AZURE_CLI_ACCOUNT_KEYS = ["subscriptionId", "name", "tenantId", "homeTenantId", "isDefault", "cloudName"] as const;
 const LEGACY_AWS_SPEC_KEYS = ["region", "imageId", "instanceType", "subnetId", "vpcId", "keyPairName", "operatorName", "sshPort", "multiplayerPort", "volumeSizeGiB", "useElasticIp", "sshCidrs", "operatorCidrs"] as const;
 const AWS_SPEC_KEYS = ["region", "imageId", "instanceType", "subnetId", "vpcId", "networkMode", "managedVpcCidr", "managedSubnetCidr", "sshKeyMode", "existingKeyPairName", "sshUsername", "keyPairName", "operatorName", "sshPort", "multiplayerPort", "volumeSizeGiB", "useElasticIp", "sshCidrs", "operatorCidrs"] as const;
@@ -552,8 +639,25 @@ const AZURE_RESERVED_SSH_USERNAMES = new Set([
 const AWS_ASSET_TYPES = new Set<AwsManagedAssetType>(["ec2-instance", "ec2-volume", "ec2-network-interface", "ec2-security-group", "ec2-key-pair", "ec2-elastic-ip", "ec2-vpc", "ec2-subnet", "ec2-internet-gateway", "ec2-route-table", "ec2-route-table-association"]);
 const AZURE_ASSET_TYPES = new Set<AzureManagedAssetType>(["azure-resource-group", "azure-virtual-network", "azure-subnet", "azure-network-security-group", "azure-public-ip", "azure-network-interface", "azure-os-disk", "azure-virtual-machine"]);
 
+export function isAwsLoginSessionArn(value: unknown): value is string {
+  return boundedPattern(value, 20, 2_048, /^arn:(aws|aws-cn|aws-us-gov):(iam|sts)::[0-9]{12}:[A-Za-z0-9_+=,.@:/-]+$/u);
+}
+
+export function parseAwsConsoleLoginSession(value: unknown): AwsConsoleLoginSession {
+  if (!hasExactKeys(value, AWS_LOGIN_SESSION_KEYS) ||
+    !isAwsLoginSessionArn(value["loginSessionArn"]) || !isAwsRegion(value["region"]) ||
+    !boundedSecret(value["accessKeyId"], 16, 256) || !boundedSecret(value["secretAccessKey"], 1, 16_384) ||
+    !boundedSecret(value["sessionToken"], 1, 32_768) || !isIsoTimestamp(value["expiresAt"]) ||
+    !boundedSecret(value["refreshToken"], 1, 2_048) || !boundedSecret(value["privateKey"], 32, 8_192) || !/^-----BEGIN (?:EC )?PRIVATE KEY-----/u.test(value["privateKey"])) {
+    throw invalid("AWS login session");
+  }
+  return Object.freeze({ loginSessionArn: value["loginSessionArn"], region: value["region"],
+    accessKeyId: value["accessKeyId"], secretAccessKey: value["secretAccessKey"], sessionToken: value["sessionToken"],
+    expiresAt: value["expiresAt"], refreshToken: value["refreshToken"], privateKey: value["privateKey"] });
+}
+
 export function parseAwsCredentialSecret(value: unknown): AwsCredentialSecret {
-  if (hasExactKeys(value, AWS_PROFILE_SECRET_KEYS)) {
+  if (hasExactKeys(value, AWS_PROFILE_SECRET_KEYS) || hasExactKeys(value, AWS_PROFILE_LOGIN_SECRET_KEYS)) {
     const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
     if (
       !isAwsProfileName(value["profileName"]) ||
@@ -562,9 +666,15 @@ export function parseAwsCredentialSecret(value: unknown): AwsCredentialSecret {
     ) throw invalid("AWS profile credential secret");
     return Object.freeze({
       profileName: value["profileName"],
+      ...("loginSession" in value ? { loginSession: parseAwsConsoleLoginSession(value["loginSession"]) } : {}),
       sshPrivateKey: value["sshPrivateKey"],
       sshPassphrase,
     });
+  }
+  if (hasExactKeys(value, AWS_LOGIN_SECRET_KEYS)) {
+    const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
+    if (!isSshPrivateKey(value["sshPrivateKey"]) || sshPassphrase === undefined) throw invalid("AWS login credential secret");
+    return Object.freeze({ loginSession: parseAwsConsoleLoginSession(value["loginSession"]), sshPrivateKey: value["sshPrivateKey"], sshPassphrase });
   }
   if (hasExactKeys(value, AWS_ACCESS_KEY_SECRET_KEYS)) {
     const sessionToken = nullableSecret(value["sessionToken"], 16_384);
@@ -587,8 +697,29 @@ export function parseAwsCredentialSecret(value: unknown): AwsCredentialSecret {
   throw invalid("AWS credential secret");
 }
 
+export function parseAzureBrowserLoginSession(value: unknown): AzureBrowserLoginSession {
+  if (!hasExactKeys(value, AZURE_LOGIN_SESSION_KEYS) || !isUuid(value["clientId"]) || !isUuid(value["tenantId"]) ||
+    !boundedPlain(value["homeAccountId"], 1, 1_024) || !boundedPlain(value["localAccountId"], 1, 1_024) ||
+    !boundedPlain(value["username"], 0, 512) || !boundedSecret(value["cache"], 2, 1024 * 1024)) throw invalid("Azure login session");
+  try {
+    if (!isRecord(JSON.parse(value["cache"]) as unknown)) throw invalid("Azure login cache");
+  } catch { throw invalid("Azure login cache"); }
+  return Object.freeze({ clientId: value["clientId"], homeAccountId: value["homeAccountId"], localAccountId: value["localAccountId"],
+    tenantId: value["tenantId"], username: value["username"], cache: value["cache"] });
+}
+
+export function parseBeginAzureLoginInput(value: unknown): BeginAzureLoginInput {
+  if (!hasExactKeys(value, BEGIN_AZURE_LOGIN_KEYS) || (value["tenantId"] !== null && !isUuid(value["tenantId"])) ||
+    (value["clientId"] !== null && !isUuid(value["clientId"]))) throw invalid("Azure login request");
+  return Object.freeze({ tenantId: value["tenantId"], clientId: value["clientId"] });
+}
+
 export function parseAzureCliCredentialSecret(value: unknown): AzureCliCredentialSecret {
-  if (!hasExactKeys(value, AZURE_CLI_SECRET_KEYS)) throw invalid("Azure CLI credential secret");
+  if (!hasExactKeys(value, AZURE_CLI_SECRET_KEYS) && !hasExactKeys(value, AZURE_CLI_LOGIN_SECRET_KEYS) &&
+    !hasExactKeys(value, AZURE_LOGIN_SECRET_KEYS)) throw invalid("Azure credential secret");
+  if ("authentication" in value && value["authentication"] !== "login") throw invalid("Azure credential authentication");
+  const loginSession = "loginSession" in value ? parseAzureBrowserLoginSession(value["loginSession"]) : undefined;
+  if (loginSession && loginSession.tenantId.toLowerCase() !== String(value["tenantId"]).toLowerCase()) throw invalid("Azure credential login tenant");
   const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
   if (
     !isUuid(value["subscriptionId"]) ||
@@ -599,6 +730,8 @@ export function parseAzureCliCredentialSecret(value: unknown): AzureCliCredentia
   return Object.freeze({
     subscriptionId: value["subscriptionId"],
     tenantId: value["tenantId"],
+    ...("authentication" in value ? { authentication: "login" as const } : {}),
+    ...(loginSession ? { loginSession } : {}),
     sshPrivateKey: value["sshPrivateKey"],
     sshPassphrase,
   });
@@ -607,6 +740,11 @@ export function parseAzureCliCredentialSecret(value: unknown): AzureCliCredentia
 export function parseCreateCloudCredentialInput(value: unknown): CreateCloudCredentialInput {
   if (!isRecord(value)) throw invalid("cloud credential");
   if (value["provider"] === "aws") {
+    if (hasExactKeys(value, CREATE_AWS_LOGIN_CREDENTIAL_KEYS)) {
+      const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
+      if (value["authentication"] !== "login" || !boundedLabel(value["label"]) || !isAwsRegion(value["defaultRegion"]) || !isSshUsername(value["sshUsername"]) || !isNullableSshPrivateKeyToken(value["sshPrivateKeyToken"]) || sshPassphrase === undefined || (value["sshPrivateKeyToken"] === null && sshPassphrase !== null)) throw invalid("AWS login cloud credential");
+      return Object.freeze({ provider: "aws", authentication: "login", label: value["label"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], sshPrivateKeyToken: value["sshPrivateKeyToken"], sshPassphrase });
+    }
     if (hasExactKeys(value, CREATE_AWS_PROFILE_CREDENTIAL_KEYS)) {
       const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
       if (!boundedLabel(value["label"]) || !isAwsRegion(value["defaultRegion"]) || !isSshUsername(value["sshUsername"]) || !isNullableSshPrivateKeyToken(value["sshPrivateKeyToken"]) || !isAwsProfileName(value["profileName"]) || sshPassphrase === undefined || (value["sshPrivateKeyToken"] === null && sshPassphrase !== null)) throw invalid("AWS profile cloud credential");
@@ -621,10 +759,11 @@ export function parseCreateCloudCredentialInput(value: unknown): CreateCloudCred
     throw invalid("AWS cloud credential");
   }
   if (value["provider"] === "azure") {
-    if (!hasExactKeys(value, CREATE_AZURE_CLI_CREDENTIAL_KEYS)) throw invalid("Azure CLI cloud credential");
+    if (!hasExactKeys(value, CREATE_AZURE_CLI_CREDENTIAL_KEYS) && !hasExactKeys(value, CREATE_AZURE_LOGIN_CREDENTIAL_KEYS)) throw invalid("Azure cloud credential");
+    if ("authentication" in value && (value["authentication"] !== "login" || !isUuidV4(value["loginToken"]))) throw invalid("Azure login credential");
     const sshPassphrase = nullableSecret(value["sshPassphrase"], 4_096);
     if (!boundedLabel(value["label"]) || !isAzureLocation(value["defaultLocation"]) || !isAzureSshUsername(value["sshUsername"]) || !isNullableSshPrivateKeyToken(value["sshPrivateKeyToken"]) || !isUuid(value["subscriptionId"]) || !isUuid(value["tenantId"]) || sshPassphrase === undefined || (value["sshPrivateKeyToken"] === null && sshPassphrase !== null)) throw invalid("Azure CLI cloud credential");
-    return Object.freeze({ provider: "azure", label: value["label"], defaultLocation: value["defaultLocation"], sshUsername: value["sshUsername"], sshPrivateKeyToken: value["sshPrivateKeyToken"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshPassphrase });
+    return Object.freeze({ provider: "azure", label: value["label"], defaultLocation: value["defaultLocation"], sshUsername: value["sshUsername"], sshPrivateKeyToken: value["sshPrivateKeyToken"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshPassphrase, ...("authentication" in value ? { authentication: "login" as const, loginToken: value["loginToken"] as string } : {}) });
   }
   throw invalid("cloud credential");
 }
@@ -645,17 +784,17 @@ export function parseResolvedCloudCredentialInput(value: unknown): ResolvedCloud
 export function parseCloudCredentialSummary(value: unknown): CloudCredentialSummary {
   if (!isRecord(value)) throw invalid("cloud credential summary");
   if (value["provider"] === "aws") {
-    if (hasExactKeys(value, AWS_PROFILE_SUMMARY_KEYS) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"]) && isAwsProfileName(value["profileName"])) {
-      return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], profileName: value["profileName"] });
+    if ((hasExactKeys(value, AWS_PROFILE_SUMMARY_KEYS) || hasExactKeys(value, AWS_PROFILE_LOGIN_SUMMARY_KEYS)) && (!("loginSessionArn" in value) || isAwsLoginSessionArn(value["loginSessionArn"])) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"]) && isAwsProfileName(value["profileName"])) {
+      return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], profileName: value["profileName"], ...("loginSessionArn" in value ? { loginSessionArn: value["loginSessionArn"] as string } : {}) });
     }
-    if (hasExactKeys(value, AWS_ACCESS_KEY_SUMMARY_KEYS) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"])) {
-      return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"] });
+    if ((hasExactKeys(value, AWS_ACCESS_KEY_SUMMARY_KEYS) || hasExactKeys(value, AWS_LOGIN_SUMMARY_KEYS)) && (!("loginSessionArn" in value) || isAwsLoginSessionArn(value["loginSessionArn"])) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"])) {
+      return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], ...("loginSessionArn" in value ? { loginSessionArn: value["loginSessionArn"] as string } : {}) });
     }
     throw invalid("AWS cloud credential summary");
   }
   if (value["provider"] === "azure") {
-    if (!hasExactKeys(value, AZURE_SUMMARY_KEYS) || !isUuidV4(value["id"]) || !boundedLabel(value["label"]) || !isCredentialPersistence(value["persistence"]) || !isIsoTimestamp(value["createdAt"]) || !isAzureLocation(value["defaultLocation"]) || !isUuid(value["subscriptionId"]) || !isUuid(value["tenantId"]) || !isAzureSshUsername(value["sshUsername"])) throw invalid("Azure CLI cloud credential summary");
-    return Object.freeze({ id: value["id"], provider: "azure", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultLocation: value["defaultLocation"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshUsername: value["sshUsername"] });
+    if ((!hasExactKeys(value, AZURE_SUMMARY_KEYS) && !hasExactKeys(value, AZURE_CLI_LOGIN_SUMMARY_KEYS) && !hasExactKeys(value, AZURE_LOGIN_SUMMARY_KEYS)) || ("authentication" in value && value["authentication"] !== "login") || ("loginAccountId" in value && !boundedPlain(value["loginAccountId"], 1, 1_024)) || !isUuidV4(value["id"]) || !boundedLabel(value["label"]) || !isCredentialPersistence(value["persistence"]) || !isIsoTimestamp(value["createdAt"]) || !isAzureLocation(value["defaultLocation"]) || !isUuid(value["subscriptionId"]) || !isUuid(value["tenantId"]) || !isAzureSshUsername(value["sshUsername"])) throw invalid("Azure CLI cloud credential summary");
+    return Object.freeze({ id: value["id"], provider: "azure", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultLocation: value["defaultLocation"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshUsername: value["sshUsername"], ...("authentication" in value ? { authentication: "login" as const } : {}), ...("loginAccountId" in value ? { loginAccountId: value["loginAccountId"] as string } : {}) });
   }
   throw invalid("cloud credential summary");
 }

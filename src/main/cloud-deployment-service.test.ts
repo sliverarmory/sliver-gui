@@ -9,9 +9,11 @@ import ssh2 from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AwsConsoleLoginSession,
   AwsFirewallRule,
   AwsFirewallRuleSpec,
   AwsFirewallSnapshot,
+  AzureBrowserLoginSession,
   AzureFirewallRule,
   AzureFirewallRuleSpec,
   AzureFirewallSnapshot,
@@ -31,8 +33,10 @@ import { CloudDeploymentStore } from "./cloud-deployment-store.js";
 import {
   CloudDeploymentService,
   type CloudAwsProvider,
+  type CloudAwsConsoleLogin,
   type CloudAwsProfileSource,
   type CloudAzureAccountSource,
+  type CloudAzureBrowserLogin,
   type CloudAzureProvider,
   type CloudPrivateKeyCapabilities,
   type CloudSshTerminalStarter,
@@ -41,8 +45,8 @@ import {
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
 import { SshTerminalStartError } from "./ssh-terminal-runtime.js";
-import type { AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
-import type { AzureVmDeploymentResource } from "./cloud/azure-vm-provider.js";
+import type { AwsEc2Credentials, AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
+import type { AzureVmDeploymentResource, AzureVmProviderConnection } from "./cloud/azure-vm-provider.js";
 import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
 
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
@@ -76,6 +80,273 @@ afterEach(async () => {
 });
 
 describe("CloudDeploymentService", () => {
+  it("stages native Azure subscriptions and saves only an owner-bound selected credential", async () => {
+    const session = azureAuthSession("initial");
+    const login = vi.fn(async () => ({ session, subscriptions: [azureAccount()] }));
+    const getToken = vi.fn(async () => ({ session, token: "native-arm-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+    const { service, vault, azureAccounts, cliGetToken, connections } = await azureAuthService({ login, getToken });
+    const staged = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 42);
+    if (!staged.ok) throw new Error(staged.error);
+    expect(JSON.stringify(staged)).not.toMatch(/initial-refresh|cache|home-account/u);
+    expect(await vault.list()).toEqual([]);
+    await expect(service.createCredential(azureNativeInput(staged.value.token), undefined, 99)).resolves.toMatchObject({ ok: false });
+    const created = await service.createCredential(azureNativeInput(staged.value.token), undefined, 42);
+    expect(created).toMatchObject({ ok: true, value: { authentication: "login", loginAccountId: session.homeAccountId } });
+    await expect(service.createCredential(azureNativeInput(staged.value.token), undefined, 42)).resolves.toMatchObject({ ok: false });
+    expect(azureAccounts.list).not.toHaveBeenCalled();
+    const key = await vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.sshPrivateKey);
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(cliGetToken).not.toHaveBeenCalled();
+    const connection = connections[0];
+    if (!connection) throw new Error("Missing credential connection");
+    await expect(connection.credential.getToken("https://graph.microsoft.com/.default")).rejects.toThrow(/Resource Manager/u);
+    await expect(connection.credential.getToken("https://management.azure.com/.default", { tenantId: AZURE_SUBSCRIPTION_ID })).rejects.toThrow(/different tenant/u);
+    expect(getToken).toHaveBeenCalledOnce();
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toEqual(created);
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.sshPrivateKey)).resolves.toBe(key);
+    expect(login).toHaveBeenLastCalledWith(AZURE_TENANT_ID, session.clientId, expect.any(AbortSignal));
+    service.dispose();
+  });
+
+  it("requires interactive sign-in for native Azure claims challenges while allowing valid CLI tokens", async () => {
+    const session = azureAuthSession("cached");
+    const getToken = vi.fn(async () => ({ session, token: "cached-native-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+    const { service, vault, connections, cliGetToken } = await azureAuthService({ login: vi.fn(), getToken });
+    const input = azureCredential();
+    await vault.create({ ...input, secret: { ...input.secret, authentication: "login", loginSession: session } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    const connection = connections[0];
+    if (!connection) throw new Error("Missing credential connection");
+    getToken.mockClear();
+    const scopes = "https://management.azure.com/.default";
+    const options = { claims: JSON.stringify({ access_token: { nbf: { essential: true } } }) };
+    await expect(connection.credential.getToken(scopes, options)).rejects.toMatchObject({
+      code: "login-required", message: "Azure requires interactive authentication. Use Azure Login to sign in again.",
+    });
+    expect(getToken).not.toHaveBeenCalled();
+    await vault.delete(CREDENTIAL_ID);
+    await vault.create({ ...input, secret: { ...input.secret, loginSession: session } });
+    await expect(connection.credential.getToken(scopes, options)).resolves.toMatchObject({ token: "cli-token" });
+    expect(cliGetToken).toHaveBeenCalledWith(scopes, options);
+    expect(getToken).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("expires Azure login selections, cancels staged capabilities, and verifies subscription membership", async () => {
+    let now = NOW.getTime();
+    const session = azureAuthSession("staged");
+    const { service, vault } = await azureAuthService({ login: async () => ({ session, subscriptions: [azureAccount()] }), getToken: vi.fn() }, { now: () => now });
+    const first = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 3);
+    if (!first.ok) throw new Error(first.error);
+    now += 10 * 60_000;
+    await expect(service.createCredential(azureNativeInput(first.value.token), undefined, 3)).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Sign in again/u) });
+    const cancelled = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 3);
+    if (!cancelled.ok) throw new Error(cancelled.error);
+    service.cancelAzureLogin(3);
+    await expect(service.createCredential(azureNativeInput(cancelled.value.token), undefined, 3)).resolves.toMatchObject({ ok: false });
+    const invalid = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 3);
+    if (!invalid.ok) throw new Error(invalid.error);
+    await expect(service.createCredential({ ...azureNativeInput(invalid.value.token), subscriptionId: CREDENTIAL_ID }, undefined, 3)).resolves.toMatchObject({ ok: false });
+    await expect(service.createCredential(azureNativeInput(invalid.value.token), undefined, 3)).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("discards a late Azure browser result after owner cancellation", async () => {
+    const pending = authDeferred<{ session: AzureBrowserLoginSession; subscriptions: readonly AzureCliAccountSummary[] }>();
+    const login = vi.fn(() => pending.promise);
+    const { service, vault } = await azureAuthService({ login, getToken: vi.fn() });
+    const beginning = service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 4);
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    service.cancelAzureLogin(4);
+    pending.resolve({ session: azureAuthSession("late"), subscriptions: [azureAccount()] });
+    await expect(beginning).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("prefers a valid Azure CLI token and persists one native cache rotation when CLI access expires", async () => {
+    const original = azureAuthSession("old");
+    const rotated = azureAuthSession("rotated");
+    const getToken = vi.fn(async () => ({ session: rotated, token: "native-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+    const { service, vault, safeStorage, cliGetToken } = await azureAuthService({ login: vi.fn(), getToken });
+    const input = azureCredential();
+    await vault.create({ ...input, secret: { ...input.secret, loginSession: original } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(cliGetToken).toHaveBeenCalledOnce();
+    expect(getToken).not.toHaveBeenCalled();
+    cliGetToken.mockResolvedValue({ token: "expired-cli-token", expiresOnTimestamp: NOW.getTime() - 1 });
+    const results = await Promise.all([service.testCredential({ credentialId: CREDENTIAL_ID }), service.testCredential({ credentialId: CREDENTIAL_ID })]);
+    expect(results.every(({ ok }) => ok)).toBe(true);
+    expect(getToken).toHaveBeenCalledOnce();
+    const reopened = new CloudCredentialVault(rootDirectory, safeStorage);
+    await expect(reopened.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(rotated.cache);
+    expect((await reopened.list())[0]).not.toHaveProperty("authentication");
+    reopened.dispose();
+    service.dispose();
+  });
+
+  it("binds Azure CLI reauthentication to tenant and subscription, then pins the browser account", async () => {
+    const original = azureAuthSession("original");
+    const login = vi.fn(async () => ({ session: original, subscriptions: [azureAccount()] }));
+    const { service, vault } = await azureAuthService({ login, getToken: vi.fn() });
+    await vault.create(azureCredential());
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true, value: { loginAccountId: original.homeAccountId } });
+    expect((await vault.list())[0]).not.toHaveProperty("authentication");
+    login.mockResolvedValueOnce({ session: { ...original, homeAccountId: "different-user" }, subscriptions: [azureAccount()] });
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/different account/u) });
+    login.mockResolvedValueOnce({ session: original, subscriptions: [{ ...azureAccount(), subscriptionId: CREDENTIAL_ID }] });
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/tenant and subscription/u) });
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.homeAccountId)).resolves.toBe(original.homeAccountId);
+    service.dispose();
+  });
+
+  it("rejects stale Azure refresh writes after reauthentication and does not expose cache tokens", async () => {
+    const pending = authDeferred<{ session: AzureBrowserLoginSession; token: string; expiresOnTimestamp: number }>();
+    const original = azureAuthSession("old");
+    const current = azureAuthSession("current");
+    const getToken = vi.fn(() => pending.promise);
+    const { service, vault } = await azureAuthService({ login: async () => ({ session: current, subscriptions: [azureAccount()] }), getToken });
+    const input = azureCredential();
+    await vault.create({ ...input, secret: { ...input.secret, authentication: "login", loginSession: original } });
+    const testing = service.testCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(getToken).toHaveBeenCalledOnce());
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    pending.resolve({ session: azureAuthSession("stale"), token: "must-not-expose-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 });
+    const result = await testing;
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/Azure Login/u) });
+    expect(JSON.stringify(result)).not.toMatch(/must-not-expose-token|stale-refresh|current-refresh/u);
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(current.cache);
+    service.dispose();
+  });
+
+  it("does not recreate Azure credentials deleted while reauthentication is pending", async () => {
+    const pending = authDeferred<{ session: AzureBrowserLoginSession; subscriptions: readonly AzureCliAccountSummary[] }>();
+    const login = vi.fn(() => pending.promise);
+    const { service, vault } = await azureAuthService({ login, getToken: vi.fn() });
+    await vault.create(azureCredential());
+    const signingIn = service.loginAzureCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    await service.deleteCredential({ credentialId: CREDENTIAL_ID });
+    pending.resolve({ session: azureAuthSession("late"), subscriptions: [azureAccount()] });
+    await expect(signingIn).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("creates native AWS Login without CLI profiles and reauthenticates in place", async () => {
+    const originalSession = authSession("original");
+    const nextSession = authSession("reauthenticated");
+    const login = vi.fn().mockResolvedValueOnce(originalSession).mockResolvedValueOnce(nextSession);
+    const { service, vault, store, seen } = await authService({ login, refresh: vi.fn() });
+    const created = await service.createCredential(nativeAuthInput());
+    expect(created).toMatchObject({ ok: true, value: { id: CREDENTIAL_ID, loginSessionArn: originalSession.loginSessionArn } });
+    expect(login).toHaveBeenCalledWith("us-west-2", expect.any(AbortSignal));
+    expect(JSON.stringify(await service.getSnapshot())).not.toMatch(/original-secret|original-refresh|BEGIN EC PRIVATE KEY/u);
+    const sshKey = await vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret.sshPrivateKey);
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(seen[0]?.secretAccessKey).toBe(originalSession.secretAccessKey);
+    const relogged = await service.loginAwsCredential({ credentialId: CREDENTIAL_ID });
+    expect(relogged).toEqual(created);
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => ({
+      key: secret.sshPrivateKey, refresh: "loginSession" in secret ? secret.loginSession?.refreshToken : undefined,
+    }))).resolves.toEqual({ key: sshKey, refresh: nextSession.refreshToken });
+    expect(store.getState().deployments).toEqual([]);
+    service.dispose();
+  });
+
+  it("prefers valid CLI credentials and refreshes one encrypted native fallback for concurrent expired-profile requests", async () => {
+    let expired = false;
+    const fallback = authSession("old", NOW.getTime() - 1);
+    const fresh = authSession("fresh");
+    const refresh = vi.fn(async () => fresh);
+    const profileSource: CloudAwsProfileSource = {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => ({ accessKeyId: "ASIAEXAMPLE00000001", secretAccessKey: "cli-secret",
+        expiration: new Date(expired ? NOW.getTime() - 1 : NOW.getTime() + 10_000) }),
+      loginSessionArn: async () => fallback.loginSessionArn,
+    };
+    const { service, vault, safeStorage, seen } = await authService({ login: vi.fn(), refresh }, profileSource);
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", loginSession: fallback,
+      sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(seen.map(({ secretAccessKey }) => secretAccessKey)).toEqual(["cli-secret"]);
+    expect(refresh).not.toHaveBeenCalled();
+    expired = true;
+    const results = await Promise.all([service.testCredential({ credentialId: CREDENTIAL_ID }), service.testCredential({ credentialId: CREDENTIAL_ID })]);
+    expect(results.every(({ ok }) => ok)).toBe(true);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(seen.slice(1).map(({ secretAccessKey }) => secretAccessKey)).toEqual([fresh.secretAccessKey, fresh.secretAccessKey]);
+    const reopened = new CloudCredentialVault(rootDirectory, safeStorage);
+    await expect(reopened.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(fresh.refreshToken);
+    reopened.dispose();
+    service.dispose();
+  });
+
+  it("binds profile reauthentication to its configured identity and refuses account changes", async () => {
+    const expected = authSession("expected");
+    const login = vi.fn(async () => ({ ...expected, loginSessionArn: "arn:aws:iam::999999999999:root" }));
+    const { service, vault } = await authService({ login, refresh: vi.fn() }, {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => { throw new Error("expired CLI"); },
+      loginSessionArn: async () => expected.loginSessionArn,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/different identity/u) });
+    expect((await vault.list())[0]).not.toHaveProperty("loginSessionArn");
+    service.dispose();
+  });
+
+  it("refuses static-key and unbound-profile reauthentication before opening a browser", async () => {
+    const login = vi.fn();
+    const { service, vault } = await authService({ login, refresh: vi.fn() });
+    await vault.create(awsCredential());
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Access-key/u) });
+    await vault.delete(CREDENTIAL_ID);
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/does not contain/u) });
+    expect(login).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("does not save a cancelled native login or recreate a credential deleted during reauthentication", async () => {
+    const pending = authDeferred<AwsConsoleLoginSession>();
+    const login = vi.fn(() => pending.promise);
+    const { service, vault } = await authService({ login, refresh: vi.fn() });
+    const controller = new AbortController();
+    const creating = service.createCredential(nativeAuthInput(), controller.signal);
+    controller.abort();
+    pending.resolve(authSession("cancelled"));
+    await expect(creating).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old"), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const relogin = authDeferred<AwsConsoleLoginSession>();
+    login.mockImplementation(() => relogin.promise);
+    const signingIn = service.loginAwsCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledTimes(2));
+    await service.deleteCredential({ credentialId: CREDENTIAL_ID });
+    relogin.resolve(authSession("deleted"));
+    await expect(signingIn).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("prevents a stale refresh from overwriting a newer browser login and hides refresh errors", async () => {
+    const refreshing = authDeferred<AwsConsoleLoginSession>();
+    const latest = authSession("latest");
+    const refresh = vi.fn(() => refreshing.promise);
+    const { service, vault } = await authService({ login: vi.fn(async () => latest), refresh });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", NOW.getTime() - 1), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const testing = service.testCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    refreshing.resolve(authSession("stale"));
+    await expect(testing).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/AWS Login/u) });
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(latest.refreshToken);
+    service.dispose();
+  });
+
   it.each(["provisioning", "deleting"] as const)(
     "marks an interrupted %s transition failed when a new service session starts",
     async (status) => {
@@ -3068,4 +3339,69 @@ function xor(input: Buffer): Buffer {
   const output = Buffer.alloc(input.length);
   for (let index = 0; index < input.length; index += 1) output[index] = input[index]! ^ 0xa5;
   return output;
+}
+
+function nativeAuthInput() {
+  return { provider: "aws" as const, authentication: "login" as const, label: "Browser login", defaultRegion: "us-west-2",
+    sshUsername: "ubuntu", sshPrivateKeyToken: null, sshPassphrase: null };
+}
+
+function authSession(name: string, expires = NOW.getTime() + 900_000): AwsConsoleLoginSession {
+  return { loginSessionArn: "arn:aws:iam::123456789012:root", region: "us-west-2", accessKeyId: "ASIAEXAMPLE00000001",
+    secretAccessKey: `${name}-secret`, sessionToken: `${name}-session`, refreshToken: `${name}-refresh`,
+    privateKey: "-----BEGIN EC PRIVATE KEY-----\nproof-key\n-----END EC PRIVATE KEY-----", expiresAt: new Date(expires).toISOString() };
+}
+
+async function authService(awsConsoleLogin: CloudAwsConsoleLogin, awsProfileSource: CloudAwsProfileSource = {
+  list: async () => [], credentialProvider: async () => { throw new Error("CLI unavailable"); },
+}) {
+  const deps = await dependencies();
+  const seen: AwsEc2Credentials[] = [];
+  const service = await CloudDeploymentService.create({ ...deps, rootDirectory, operatorConfigDirectory,
+    awsConsoleLogin, awsProfileSource, now: () => NOW.getTime(),
+    awsPermissionCheckerFactory: (connection) => ({ check: async () => {
+      seen.push(typeof connection.credentials === "function" ? await connection.credentials() : connection.credentials);
+      return fakeAwsPermissionChecker().check();
+    } }),
+  });
+  return { ...deps, service, seen };
+}
+
+function authDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+  return { promise, resolve, reject };
+}
+
+function azureAuthSession(name: string): AzureBrowserLoginSession {
+  return { clientId: "04b07795-8ddb-461a-bbee-02f9e1bf7b46", tenantId: AZURE_TENANT_ID,
+    homeAccountId: "home-account", localAccountId: "local-account", username: "operator@example.com",
+    cache: JSON.stringify({ RefreshToken: { account: { secret: `${name}-refresh` } } }) };
+}
+
+function azureNativeInput(loginToken: string) {
+  return { provider: "azure" as const, authentication: "login" as const, loginToken, label: "Azure Login", defaultLocation: "eastus",
+    subscriptionId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, sshUsername: "azureuser", sshPrivateKeyToken: null, sshPassphrase: null };
+}
+
+async function azureAuthService(azureBrowserLogin: CloudAzureBrowserLogin, options: { now?: () => number } = {}) {
+  const deps = await dependencies();
+  const cliGetToken = vi.fn(async () => ({ token: "cli-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+  const connections: AzureVmProviderConnection[] = [];
+  const azureAccounts = fakeAzureAccountSource();
+  const service = await CloudDeploymentService.create({ ...deps, rootDirectory, operatorConfigDirectory,
+    azureBrowserLogin, azureAccountSource: azureAccounts, now: options.now ?? (() => NOW.getTime()),
+    azureCliCredentialFactory: () => ({ getToken: cliGetToken }),
+    azureProviderFactory: (connection) => {
+      connections.push(connection);
+      const provider = new FakeAzureProvider();
+      provider.checkPermissions.mockImplementation(async () => {
+        await connection.credential.getToken("https://management.azure.com/.default");
+        return createCloudPermissionEvaluation("azure", new Map(cloudRequiredPermissions("azure").map(({ id }) => [id, "verified" as const])));
+      });
+      return provider;
+    },
+  });
+  return { ...deps, service, azureAccounts, cliGetToken, connections };
 }

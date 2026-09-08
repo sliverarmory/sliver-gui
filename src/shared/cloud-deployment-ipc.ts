@@ -1,6 +1,8 @@
 import type {
   AwsCliProfileSummary,
   AzureCliAccountSummary,
+  BeginAzureLoginInput,
+  AzureLoginSelection,
   CloudFirewallSnapshot,
   CloudProvider,
   CloudCredentialSummary,
@@ -37,6 +39,11 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
   chooseSshPrivateKey: "sliver:cloud-deployment:ssh-key:choose",
   createCredential: "sliver:cloud-deployment:credential:create",
+  loginAwsCredential: "sliver:cloud-deployment:aws:login",
+  cancelAwsLogin: "sliver:cloud-deployment:aws:login:cancel",
+  beginAzureLogin: "sliver:cloud-deployment:azure:login:begin",
+  loginAzureCredential: "sliver:cloud-deployment:azure:login",
+  cancelAzureLogin: "sliver:cloud-deployment:azure:login:cancel",
   deleteCredential: "sliver:cloud-deployment:credential:delete",
   testCredential: "sliver:cloud-deployment:credential:test",
   discoverAwsOptions: "sliver:cloud-deployment:aws:options:discover",
@@ -146,6 +153,11 @@ export interface CloudDeploymentAPI {
   detectCurrentEgressIpv4(): Promise<OperationResult<CurrentEgressIpv4>>;
   chooseSshPrivateKey(): Promise<OperationResult<SshPrivateKeySelection>>;
   createCredential(input: CreateCloudCredentialInput): Promise<OperationResult<CloudCredentialSummary>>;
+  loginAwsCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialSummary>>;
+  cancelAwsLogin(): Promise<OperationResult>;
+  beginAzureLogin(input: BeginAzureLoginInput): Promise<OperationResult<AzureLoginSelection>>;
+  loginAzureCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialSummary>>;
+  cancelAzureLogin(): Promise<OperationResult>;
   deleteCredential(input: CloudCredentialIdInput): Promise<OperationResult>;
   testCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialTestResult>>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): Promise<OperationResult<AwsDeploymentOptions>>;

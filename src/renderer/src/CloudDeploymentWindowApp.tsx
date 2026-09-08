@@ -657,6 +657,7 @@ function DeploymentsPanel({
         <DeploymentCard
           actionRequest={actionRequest?.deploymentId === resumedDeployment.id ? actionRequest : null}
           api={api}
+          credential={snapshot.credentials.find(({ id }) => id === resumedDeployment.credentialId)}
           deployment={resumedDeployment}
           hasSshCredential={snapshot.credentials.some(({ id, provider }) => (
             id === resumedDeployment.credentialId && provider === resumedDeployment.provider
@@ -712,6 +713,7 @@ function DeploymentsPanel({
             <DeploymentCard
               actionRequest={actionRequest?.deploymentId === deployment.id ? actionRequest : null}
               api={api}
+              credential={snapshot.credentials.find(({ id }) => id === deployment.credentialId)}
               deployment={deployment}
               hasSshCredential={snapshot.credentials.some(({ id, provider }) => (
                 id === deployment.credentialId && provider === deployment.provider
@@ -1000,6 +1002,7 @@ function DeploymentWizard({
       return (
         <DeploymentCard
           api={api}
+          credential={snapshot.credentials.find(({ id }) => id === activeDeployment.credentialId)}
           deployment={activeDeployment}
           hasSshCredential={snapshot.credentials.some(({ id, provider: credentialProvider }) => (
             id === activeDeployment.credentialId && credentialProvider === activeDeployment.provider
@@ -1722,6 +1725,7 @@ function AzureInfrastructureFields({
 function DeploymentCard({
   actionRequest,
   api,
+  credential,
   deployment,
   hasSshCredential,
   isDeploymentView = false,
@@ -1737,6 +1741,7 @@ function DeploymentCard({
 }: {
   readonly actionRequest?: CloudDeploymentActionRequest | null;
   readonly api: CloudDeploymentAPI;
+  readonly credential?: CloudCredentialSummary | undefined;
   readonly deployment: CloudDeploymentRecord;
   readonly hasSshCredential: boolean;
   readonly isDeploymentView?: boolean;
@@ -1945,6 +1950,16 @@ function DeploymentCard({
           </ProgressBar>
         ) : null}
         {deployment.lastError ? <InlineMessage tone="danger" title="Last operation failed" detail={deployment.lastError} /> : null}
+        {deployment.lastError && canLoginCloudCredential(credential) ? (
+          <CloudLoginAction
+            api={api}
+            credential={credential}
+            isDisabled={pendingAction !== null}
+            onFeedback={onFeedback}
+            onPendingChange={(pending) => setPendingAction(pending ? "cloud-login" : null)}
+            onRefresh={onRefresh}
+          />
+        ) : null}
         {isDeploymentView && deployment.provider === "aws" ? <AwsStatusChecks deployment={deployment} /> : null}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <DeploymentDetail label="Management ID" value={deployment.id} mono />
@@ -3903,8 +3918,8 @@ function CredentialForm({
 }): React.JSX.Element {
   const initialAwsProfile = preferredAwsProfile(awsProfiles);
   const [provider, setProvider] = useState<CloudProvider>("aws");
-  const [awsAuthentication, setAwsAuthentication] = useState<"profile" | "access-keys">(
-    initialAwsProfile ? "profile" : "access-keys",
+  const [awsAuthentication, setAwsAuthentication] = useState<"login" | "profile" | "access-keys">(
+    initialAwsProfile ? "profile" : "login",
   );
   const [awsProfileName, setAwsProfileName] = useState(initialAwsProfile?.name ?? "");
   const [label, setLabel] = useState("");
@@ -3914,6 +3929,16 @@ function CredentialForm({
   const [secretAccessKey, setSecretAccessKey] = useState("");
   const [sessionToken, setSessionToken] = useState("");
   const [azureAccounts, setAzureAccounts] = useState<readonly AzureCliAccountSummary[]>([]);
+  const [azureAuthentication, setAzureAuthentication] = useState<"login" | "cli">("login");
+  const [azureLoginSession, setAzureLoginSession] = useState<{
+    readonly token: string;
+    readonly expiresAt: string;
+    readonly subscriptions: readonly AzureCliAccountSummary[];
+  } | null>(null);
+  const [azureLoginTenantId, setAzureLoginTenantId] = useState("");
+  const [azureLoginClientId, setAzureLoginClientId] = useState("");
+  const [isAzureLoginPending, setIsAzureLoginPending] = useState(false);
+  const [isCancellingAzureLogin, setIsCancellingAzureLogin] = useState(false);
   const [azureSubscriptionId, setAzureSubscriptionId] = useState("");
   const [azureTenantId, setAzureTenantId] = useState("");
   const [defaultLocation, setDefaultLocation] = useState("eastus");
@@ -3924,7 +3949,20 @@ function CredentialForm({
   const [error, setError] = useState<string | null>(null);
   const [isPicking, setIsPicking] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCancellingLogin, setIsCancellingLogin] = useState(false);
+  const loginPending = useRef(false);
+  const loginCancelled = useRef(false);
   const azureDiscoverySequence = useRef(0);
+  const azureLoginSequence = useRef(0);
+  const azureFlowActive = useRef(false);
+  const azureModeChosen = useRef(false);
+  const selectedAzureAccounts = azureAuthentication === "login" ? azureLoginSession?.subscriptions ?? [] : azureAccounts;
+
+  useEffect(() => () => {
+    if (loginPending.current) void api.cancelAwsLogin().catch(() => undefined);
+    azureLoginSequence.current += 1;
+    if (azureFlowActive.current) void api.cancelAzureLogin().catch(() => undefined);
+  }, [api]);
 
   useEffect(() => {
     if (awsAuthentication !== "profile") return;
@@ -3932,7 +3970,7 @@ function CredentialForm({
 
     const profile = preferredAwsProfile(awsProfiles);
     if (!profile) {
-      setAwsAuthentication("access-keys");
+      setAwsAuthentication("login");
       setAwsProfileName("");
       return;
     }
@@ -3951,20 +3989,16 @@ function CredentialForm({
       if (azureDiscoverySequence.current !== sequence) return;
       if (!result.ok || !result.value) {
         setAzureAccounts([]);
-        setAzureSubscriptionId("");
-        setAzureTenantId("");
+        if (!azureModeChosen.current) setAzureAuthentication("login");
         setAzureDiscoveryError(result.error ?? "Azure CLI accounts could not be discovered.");
         return;
       }
       setAzureAccounts(result.value);
-      const preferred = preferredAzureAccount(result.value);
-      setAzureSubscriptionId(preferred?.subscriptionId ?? "");
-      setAzureTenantId(preferred?.tenantId ?? "");
+      if (!azureModeChosen.current) setAzureAuthentication(result.value.length > 0 ? "cli" : "login");
     }).catch((caught: unknown) => {
       if (azureDiscoverySequence.current !== sequence) return;
       setAzureAccounts([]);
-      setAzureSubscriptionId("");
-      setAzureTenantId("");
+      if (!azureModeChosen.current) setAzureAuthentication("login");
       setAzureDiscoveryError(errorMessage(caught));
     }).finally(() => {
       if (azureDiscoverySequence.current === sequence) setIsDiscoveringAzure(false);
@@ -3973,6 +4007,67 @@ function CredentialForm({
       if (azureDiscoverySequence.current === sequence) azureDiscoverySequence.current += 1;
     };
   }, [api, provider]);
+
+  useEffect(() => {
+    const accounts = azureAuthentication === "login" ? azureLoginSession?.subscriptions ?? [] : azureAccounts;
+    const account = accounts.find(({ subscriptionId }) => subscriptionId === azureSubscriptionId) ?? preferredAzureAccount(accounts);
+    setAzureSubscriptionId(account?.subscriptionId ?? "");
+    setAzureTenantId(account?.tenantId ?? "");
+  }, [azureAccounts, azureAuthentication, azureLoginSession, azureSubscriptionId]);
+
+  const discardAzureLogin = async (): Promise<void> => {
+    const sequence = ++azureLoginSequence.current;
+    setAzureLoginSession(null);
+    if (!azureFlowActive.current) return;
+    setIsCancellingAzureLogin(true);
+    try {
+      const result = await api.cancelAzureLogin();
+      if (sequence !== azureLoginSequence.current) return;
+      if (!result.ok) {
+        setError(result.error ?? "Azure Login could not be cancelled.");
+        return;
+      }
+      azureFlowActive.current = false;
+    } catch (caught) {
+      if (sequence === azureLoginSequence.current) setError(errorMessage(caught));
+    } finally {
+      if (sequence === azureLoginSequence.current) {
+        setIsAzureLoginPending(false);
+        setIsCancellingAzureLogin(false);
+      }
+    }
+  };
+
+  const beginAzureLogin = async (): Promise<void> => {
+    if (isAzureLoginPending || isCancellingAzureLogin || isSaving) return;
+    if (azureFlowActive.current) {
+      await discardAzureLogin();
+      if (azureFlowActive.current) return;
+    }
+    const sequence = ++azureLoginSequence.current;
+    azureModeChosen.current = true;
+    azureFlowActive.current = true;
+    setAzureLoginSession(null);
+    setIsAzureLoginPending(true);
+    setError(null);
+    try {
+      const result = await api.beginAzureLogin({ tenantId: nullable(azureLoginTenantId), clientId: nullable(azureLoginClientId) });
+      if (sequence !== azureLoginSequence.current) return;
+      if (!result.ok || !result.value) {
+        azureFlowActive.current = false;
+        setError(result.error ?? "Azure Login could not be completed.");
+        return;
+      }
+      setAzureLoginSession(result.value);
+    } catch (caught) {
+      if (sequence === azureLoginSequence.current) {
+        azureFlowActive.current = false;
+        setError(errorMessage(caught));
+      }
+    } finally {
+      if (sequence === azureLoginSequence.current) setIsAzureLoginPending(false);
+    }
+  };
 
   const pickKey = async (): Promise<void> => {
     setIsPicking(true);
@@ -3992,6 +4087,11 @@ function CredentialForm({
   };
 
   const save = async (): Promise<void> => {
+    if (isSaving || isAzureLoginPending || isCancellingAzureLogin) return;
+    if (provider === "azure" && azureAuthentication === "login" && !azureLoginSession) {
+      setError("Complete Azure Login before saving the credential.");
+      return;
+    }
     const validation = validateCredential({
       provider,
       label,
@@ -4002,7 +4102,7 @@ function CredentialForm({
       awsProfiles,
       accessKeyId,
       secretAccessKey,
-      azureAccounts,
+      azureAccounts: selectedAzureAccounts,
       azureSubscriptionId,
       azureTenantId,
       defaultLocation,
@@ -4014,7 +4114,17 @@ function CredentialForm({
     const sshPrivateKeyToken = keySelection?.token ?? null;
 
     const input: CreateCloudCredentialInput = provider === "aws"
-      ? awsAuthentication === "profile"
+      ? awsAuthentication === "login"
+        ? {
+          provider: "aws",
+          authentication: "login",
+          label: label.trim(),
+          defaultRegion: defaultRegion.trim(),
+          sshUsername: sshUsername.trim(),
+          sshPrivateKeyToken,
+          sshPassphrase: nullable(sshPassphrase),
+        }
+        : awsAuthentication === "profile"
         ? {
           provider: "aws",
           label: label.trim(),
@@ -4044,12 +4154,23 @@ function CredentialForm({
           subscriptionId: azureSubscriptionId,
           tenantId: azureTenantId,
           sshPassphrase: nullable(sshPassphrase),
+          ...(azureAuthentication === "login" && azureLoginSession
+            ? { authentication: "login" as const, loginToken: azureLoginSession.token }
+            : {}),
         };
 
     setIsSaving(true);
+    loginPending.current = provider === "aws" && awsAuthentication === "login";
+    loginCancelled.current = false;
     setError(null);
     try {
       const result = await api.createCredential(input);
+      loginPending.current = false;
+      if (input.provider === "azure" && "authentication" in input) {
+        azureFlowActive.current = false;
+        setAzureLoginSession(null);
+      }
+      if (loginCancelled.current && !result.ok) return;
       if (!result.ok || !result.value) {
         setError(result.error ?? "The credential was rejected.");
         return;
@@ -4060,8 +4181,13 @@ function CredentialForm({
       setKeySelection(null);
       await onCreated(result.value.label);
     } catch (caught) {
-      setError(errorMessage(caught));
+      if (!loginCancelled.current) setError(errorMessage(caught));
     } finally {
+      if (input.provider === "azure" && "authentication" in input) {
+        setAzureLoginSession(null);
+        if (azureFlowActive.current) void discardAzureLogin();
+      }
+      loginPending.current = false;
       scrubCredentialInput(input);
       setAccessKeyId("");
       setSecretAccessKey("");
@@ -4072,14 +4198,39 @@ function CredentialForm({
     }
   };
 
+  const cancelLogin = async (): Promise<void> => {
+    if (isCancellingLogin) return;
+    setIsCancellingLogin(true);
+    loginCancelled.current = true;
+    try {
+      const result = await api.cancelAwsLogin();
+      if (!result.ok) {
+        loginCancelled.current = false;
+        setError(result.error ?? "AWS Login could not be cancelled.");
+      }
+    } catch (caught) {
+      loginCancelled.current = false;
+      setError(errorMessage(caught));
+    } finally {
+      setIsCancellingLogin(false);
+    }
+  };
+
   return (
     <Card>
       <Card.Header>
         <Card.Title>Add Provider Credential</Card.Title>
-        <Card.Description>Credentials are validated in the main process and are never listed back to the renderer.</Card.Description>
+        <Card.Description>Connect a cloud account and choose how to authenticate.</Card.Description>
       </Card.Header>
       <Card.Content className="space-y-5">
         {error ? <InlineMessage tone="danger" title="Credential not saved" detail={error} /> : null}
+        {isSaving && loginPending.current ? (
+          <p role="status" className="text-sm text-muted">Complete AWS Login in your browser, then return here. This window will save the credential when sign-in finishes.</p>
+        ) : null}
+        {isAzureLoginPending ? (
+          <p role="status" className="text-sm text-muted">Complete Azure Login in your browser, then return here to choose a subscription.</p>
+        ) : null}
+        <fieldset className="space-y-5" disabled={isSaving || isAzureLoginPending || isCancellingAzureLogin}>
         <div className="grid gap-4 md:grid-cols-2">
           <CloudNativeSelect
             label="Provider"
@@ -4087,13 +4238,17 @@ function CredentialForm({
             options={[{ value: "aws", label: "AWS" }, { value: "azure", label: "Microsoft Azure" }]}
             onChange={(value) => {
               if (value === "aws" || value === "azure") {
+                void discardAzureLogin();
                 setProvider(value);
                 setSshUsername(value === "aws" ? "ubuntu" : "azureuser");
                 if (value === "aws") {
                   const profile = preferredAwsProfile(awsProfiles);
-                  setAwsAuthentication(profile ? "profile" : "access-keys");
+                  setAwsAuthentication(profile ? "profile" : "login");
                   setAwsProfileName(profile?.name ?? "");
                   setDefaultRegion(profile?.region ?? "us-east-1");
+                } else {
+                  azureModeChosen.current = false;
+                  setAzureAuthentication(azureAccounts.length > 0 ? "cli" : "login");
                 }
                 setAccessKeyId("");
                 setSecretAccessKey("");
@@ -4134,20 +4289,25 @@ function CredentialForm({
             <CloudNativeSelect
               description={awsAuthentication === "profile"
                 ? "Resolve credentials from the selected local AWS CLI profile at use time."
-                : "Store access keys in Cloud Deployment's encrypted credential vault."}
+                : awsAuthentication === "login"
+                  ? "Sign in with your AWS console account in your browser. No AWS CLI required."
+                  : "Store access keys in Cloud Deployment's encrypted credential vault."}
               label="AWS Authentication"
               value={awsAuthentication}
               options={[
-                ...(awsProfiles.length > 0 ? [{ value: "profile", label: "AWS CLI profile" }] : []),
-                { value: "access-keys", label: "Access keys" },
+                { value: "login", label: "AWS Login" },
+                ...(awsProfiles.length > 0 ? [{ value: "profile", label: "AWS CLI Profile" }] : []),
+                { value: "access-keys", label: "Access Keys" },
               ]}
               onChange={(value) => {
-                if (value !== "profile" && value !== "access-keys") return;
+                if (value !== "login" && value !== "profile" && value !== "access-keys") return;
                 setAwsAuthentication(value);
-                if (value === "profile") {
+                if (value !== "access-keys") {
                   setAccessKeyId("");
                   setSecretAccessKey("");
                   setSessionToken("");
+                }
+                if (value === "profile") {
                   const profile = awsProfiles.find(({ name }) => name === awsProfileName) ?? preferredAwsProfile(awsProfiles);
                   setAwsProfileName(profile?.name ?? "");
                   if (profile?.region) setDefaultRegion(profile.region);
@@ -4180,10 +4340,12 @@ function CredentialForm({
                 <CloudTextField autoComplete="new-password" label="Secret Access Key" type="password" value={secretAccessKey} onChange={setSecretAccessKey} />
                 <CloudTextField autoComplete="new-password" description="Optional for temporary STS credentials." label="Session Token" type="password" value={sessionToken} onChange={setSessionToken} />
               </>
+            ) : awsAuthentication === "profile" ? (
+              <p className="self-end text-sm leading-6 text-muted">
+                Existing profile credentials are reused. Refresh IAM Identity Center (SSO) sessions with the AWS CLI. AWS Login uses your AWS console account; interactive MFA profile prompts are not supported.
+              </p>
             ) : (
-              <div className="self-end rounded-2xl bg-surface-secondary px-4 py-3 text-sm leading-6 text-muted">
-                Static, SSO, credential-process, and noninteractive role profiles are resolved by the official AWS SDK. Refresh expired SSO sessions with the AWS CLI; profiles that require an interactive MFA prompt are not supported yet.
-              </div>
+              <p className="self-end text-sm leading-6 text-muted">AWS Login opens your browser when you choose Sign In and Save. Your AWS password stays with AWS. For IAM Identity Center (SSO), use an existing AWS CLI profile.</p>
             )}
             {awsProfileDiscoveryError ? (
               <div className="md:col-span-2">
@@ -4191,31 +4353,78 @@ function CredentialForm({
               </div>
             ) : awsProfiles.length === 0 ? (
               <div className="md:col-span-2">
-                <InlineMessage tone="info" title="No local AWS profiles found" detail="Configure an AWS CLI profile or continue with access keys." />
+                <InlineMessage tone="info" title="No local AWS profiles found" detail="Continue with AWS Login or access keys." />
               </div>
             ) : null}
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             <CloudNativeSelect
-              description="Only the selected subscription and tenant IDs are stored. Access tokens remain in the local Azure CLI cache."
-              isDisabled={isDiscoveringAzure || azureAccounts.length === 0}
-              label="Azure CLI Subscription"
+              description={azureAuthentication === "login"
+                ? "Sign in with Microsoft in your browser. No Azure CLI required."
+                : "Use the selected account from your local Azure CLI."}
+              label="Azure Authentication"
+              value={azureAuthentication}
+              options={[{ value: "login", label: "Azure Login" }, { value: "cli", label: "Azure CLI" }]}
+              onChange={(value) => {
+                if (value !== "login" && value !== "cli") return;
+                azureModeChosen.current = true;
+                void discardAzureLogin();
+                setAzureAuthentication(value);
+                setError(null);
+              }}
+            />
+            {azureAuthentication === "login" ? (
+              <>
+                <CloudTextField
+                  description="Optional. Leave blank to use your current directory."
+                  label="Directory (Tenant) ID"
+                  value={azureLoginTenantId}
+                  onChange={(value) => {
+                    void discardAzureLogin();
+                    setAzureLoginTenantId(value);
+                  }}
+                />
+                <CloudTextField
+                  description="Optional. Use your organization's application ID if required."
+                  label="Application (Client) ID"
+                  value={azureLoginClientId}
+                  onChange={(value) => {
+                    void discardAzureLogin();
+                    setAzureLoginClientId(value);
+                  }}
+                />
+                <div className="flex flex-col items-start justify-end gap-2">
+                  <p className="text-sm text-muted">
+                    {azureLoginSession ? "Signed in. Choose a subscription, then save this credential." : "Sign in to discover subscriptions in your Azure directory."}
+                  </p>
+                  <Button variant="outline" onPress={() => void beginAzureLogin()}>
+                    {azureLoginSession ? "Sign In Again" : "Sign In to Azure"}
+                  </Button>
+                </div>
+              </>
+            ) : null}
+            <CloudNativeSelect
+              description={azureAuthentication === "login"
+                ? "Choose a subscription from your signed-in directory."
+                : "Only the selected subscription and tenant IDs are stored. Access tokens remain in the local Azure CLI cache."}
+              isDisabled={(azureAuthentication === "cli" && isDiscoveringAzure) || selectedAzureAccounts.length === 0}
+              label={azureAuthentication === "login" ? "Azure Subscription" : "Azure CLI Subscription"}
               value={azureSubscriptionId}
-              options={azureAccounts.map((account) => ({
+              options={selectedAzureAccounts.map((account) => ({
                 value: account.subscriptionId,
                 label: `${account.name} · ${account.subscriptionId} · ${account.cloudName}`,
               }))}
-              placeholder={isDiscoveringAzure ? "Discovering Azure CLI accounts…" : "Choose a subscription"}
+              placeholder={azureAuthentication === "cli" && isDiscoveringAzure ? "Discovering Azure CLI accounts…" : "Choose a subscription"}
               onChange={(subscriptionId) => {
-                const account = azureAccounts.find((candidate) => candidate.subscriptionId === subscriptionId);
+                const account = selectedAzureAccounts.find((candidate) => candidate.subscriptionId === subscriptionId);
                 setAzureSubscriptionId(subscriptionId);
                 setAzureTenantId(account?.tenantId ?? "");
                 setError(null);
               }}
             />
             <CloudTextField
-              description="Tenant associated with the selected Azure CLI subscription."
+              description="Directory associated with the selected subscription."
               isReadOnly
               label="Tenant ID"
               value={azureTenantId}
@@ -4228,16 +4437,16 @@ function CredentialForm({
               value={defaultLocation}
               onChange={setDefaultLocation}
             />
-            <div className="self-end rounded-2xl bg-surface-secondary px-4 py-3 text-sm leading-6 text-muted">
-              Sign in or refresh the selected account with <span className="font-mono text-xs">az login</span>. Cloud Deployment resolves that account at use time and never reads an access token into this window.
-            </div>
-            {azureDiscoveryError ? (
+            {azureAuthentication === "cli" ? (
+              <p className="self-end text-sm leading-6 text-muted">Existing Azure CLI credentials are reused. Choose Azure Login to sign in through the app.</p>
+            ) : null}
+            {azureAuthentication === "cli" && azureDiscoveryError ? (
               <div className="md:col-span-2">
                 <InlineMessage tone="warning" title="Azure CLI accounts unavailable" detail={azureDiscoveryError} />
               </div>
-            ) : !isDiscoveringAzure && azureAccounts.length === 0 ? (
+            ) : azureAuthentication === "cli" && !isDiscoveringAzure && azureAccounts.length === 0 ? (
               <div className="md:col-span-2">
-                <InlineMessage tone="info" title="No Azure CLI subscriptions found" detail="Run az login, then reopen this form to discover local Azure subscriptions." />
+                <InlineMessage tone="info" title="No Azure CLI subscriptions found" detail="Choose Azure Login to sign in through the app, or run az login and reopen this form." />
               </div>
             ) : null}
           </div>
@@ -4246,10 +4455,19 @@ function CredentialForm({
         {keySelection ? (
           <CloudTextField autoComplete="new-password" description="Optional. Used once to unlock the selected key." label="SSH Key Passphrase" type="password" value={sshPassphrase} onChange={setSshPassphrase} />
         ) : null}
+        </fieldset>
       </Card.Content>
       <Card.Footer className="flex justify-end gap-2">
-        <Button isDisabled={isSaving} variant="tertiary" onPress={onCancel}>Cancel</Button>
-        <Button isPending={isSaving} variant="primary" onPress={() => void save()}>Save Credential</Button>
+        {isAzureLoginPending || isCancellingAzureLogin ? (
+          <Button isPending={isCancellingAzureLogin} variant="tertiary" onPress={() => void discardAzureLogin()}>Cancel Azure Login</Button>
+        ) : isSaving && loginPending.current ? (
+          <Button isPending={isCancellingLogin} variant="tertiary" onPress={() => void cancelLogin()}>Cancel AWS Login</Button>
+        ) : (
+          <Button isDisabled={isSaving} variant="tertiary" onPress={onCancel}>Cancel</Button>
+        )}
+        <Button isDisabled={isAzureLoginPending || isCancellingAzureLogin || (provider === "azure" && azureAuthentication === "login" && !azureLoginSession)} isPending={isSaving} variant="primary" onPress={() => void save()}>
+          {provider === "aws" && awsAuthentication === "login" ? "Sign In and Save" : "Save Credential"}
+        </Button>
       </Card.Footer>
     </Card>
   );
@@ -4266,7 +4484,7 @@ function CredentialCard({
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onRefresh: () => Promise<void>;
 }): React.JSX.Element {
-  const [pending, setPending] = useState<"test" | "delete" | null>(null);
+  const [pending, setPending] = useState<"test" | "delete" | "login" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [testResult, setTestResult] = useState<CloudCredentialTestResult | null>(null);
 
@@ -4317,8 +4535,8 @@ function CredentialCard({
           <Card.Title className="truncate">{credential.label}</Card.Title>
           <Card.Description>
             {credential.provider === "aws"
-              ? `${"profileName" in credential ? `AWS CLI · ${credential.profileName}` : "Access keys"} · ${credential.defaultRegion}`
-              : `Azure CLI · ${credential.defaultLocation}`}
+              ? `${awsCredentialAuthenticationLabel(credential)} · ${credential.defaultRegion}`
+              : `${azureCredentialAuthenticationLabel(credential)} · ${credential.defaultLocation}`}
           </Card.Description>
         </div>
         <Chip color={credential.persistence === "secure" ? "success" : "warning"} size="sm" variant="soft">
@@ -4331,7 +4549,7 @@ function CredentialCard({
           {credential.provider === "aws" ? (
             <DeploymentDetail
               label="Authentication"
-              value={"profileName" in credential ? `CLI profile: ${credential.profileName}` : "Stored access keys"}
+              value={awsCredentialAuthenticationLabel(credential)}
             />
           ) : (
             <DeploymentDetail label="Subscription" value={credential.subscriptionId} mono />
@@ -4341,9 +4559,24 @@ function CredentialCard({
           <DeploymentDetail label="Credential ID" value={credential.id} mono />
         </dl>
         {testResult ? <CredentialPermissionSummary result={testResult} /> : null}
+        {canLoginCloudCredential(credential) ? (
+          <div className="mt-4">
+            <CloudLoginAction
+              api={api}
+              credential={credential}
+              isDisabled={pending !== null}
+              onFeedback={onFeedback}
+              onPendingChange={(active) => {
+                setPending(active ? "login" : null);
+                if (active) setTestResult(null);
+              }}
+              onRefresh={onRefresh}
+            />
+          </div>
+        ) : null}
       </Card.Content>
       <Card.Footer className="flex gap-2">
-        <Button aria-label={`Test connection for ${credential.label}`} isPending={pending === "test"} size="sm" variant="outline" onPress={() => void test()}>Test Connection</Button>
+        <Button aria-label={`Test connection for ${credential.label}`} isDisabled={pending !== null} isPending={pending === "test"} size="sm" variant="outline" onPress={() => void test()}>Test Connection</Button>
         <Button aria-label={`Delete ${credential.label}`} className="ml-auto" isDisabled={pending !== null} size="sm" variant="danger-soft" onPress={() => setConfirmDelete(true)}>Delete</Button>
       </Card.Footer>
 
@@ -4365,6 +4598,117 @@ function CredentialCard({
         </AlertDialog.Container>
       </AlertDialog.Backdrop>
     </Card>
+  );
+}
+
+function canLoginCloudCredential(
+  credential: CloudCredentialSummary | undefined,
+): credential is CloudCredentialSummary {
+  return credential?.provider === "azure" || (credential?.provider === "aws" && ("profileName" in credential || "loginSessionArn" in credential));
+}
+
+function awsCredentialAuthenticationLabel(credential: Extract<CloudCredentialSummary, { readonly provider: "aws" }>): string {
+  if ("profileName" in credential) {
+    return `${"loginSessionArn" in credential ? "AWS CLI + AWS Login" : "AWS CLI"} · ${credential.profileName}`;
+  }
+  return "loginSessionArn" in credential ? "AWS Login" : "Access keys";
+}
+
+function azureCredentialAuthenticationLabel(credential: Extract<CloudCredentialSummary, { readonly provider: "azure" }>): string {
+  if ("authentication" in credential && credential.authentication === "login") return "Azure Login";
+  return "loginAccountId" in credential ? "Azure CLI + Azure Login" : "Azure CLI";
+}
+
+function CloudLoginAction({
+  api,
+  credential,
+  isDisabled,
+  onFeedback,
+  onPendingChange,
+  onRefresh,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly credential: CloudCredentialSummary;
+  readonly isDisabled: boolean;
+  readonly onFeedback: (feedback: Feedback) => void;
+  readonly onPendingChange: (pending: boolean) => void;
+  readonly onRefresh: () => Promise<void>;
+}): React.JSX.Element {
+  const loginName = credential.provider === "aws" ? "AWS Login" : "Azure Login";
+  const [isPending, setIsPending] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const active = useRef(false);
+  const cancelled = useRef(false);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (active.current) {
+        void (credential.provider === "aws" ? api.cancelAwsLogin() : api.cancelAzureLogin()).catch(() => undefined);
+      }
+    };
+  }, [api, credential.provider]);
+
+  const login = async (): Promise<void> => {
+    if (active.current || isDisabled) return;
+    active.current = true;
+    cancelled.current = false;
+    setIsPending(true);
+    setError(null);
+    onPendingChange(true);
+    try {
+      const result = await (credential.provider === "aws"
+        ? api.loginAwsCredential({ credentialId: credential.id })
+        : api.loginAzureCredential({ credentialId: credential.id }));
+      active.current = false;
+      if (!mounted.current) return;
+      if (!result.ok || !result.value) {
+        if (!cancelled.current) setError(result.error ?? `${loginName} could not be completed.`);
+        return;
+      }
+      onFeedback({ tone: "success", title: `${loginName} complete`, detail: `${credential.label} is signed in. You can retry the previous operation.` });
+      await onRefresh();
+    } catch (caught) {
+      if (mounted.current && !cancelled.current) setError(errorMessage(caught));
+    } finally {
+      active.current = false;
+      if (mounted.current) {
+        setIsPending(false);
+        onPendingChange(false);
+      }
+    }
+  };
+
+  const cancel = async (): Promise<void> => {
+    if (isCancelling) return;
+    cancelled.current = true;
+    setIsCancelling(true);
+    try {
+      const result = await (credential.provider === "aws" ? api.cancelAwsLogin() : api.cancelAzureLogin());
+      if (!result.ok && mounted.current) {
+        cancelled.current = false;
+        setError(result.error ?? `${loginName} could not be cancelled.`);
+      }
+    } catch (caught) {
+      cancelled.current = false;
+      if (mounted.current) setError(errorMessage(caught));
+    } finally {
+      if (mounted.current) setIsCancelling(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      {error ? <InlineMessage tone="danger" title={`${loginName} failed`} detail={error} /> : null}
+      {isPending ? <p role="status" className="text-sm text-muted">Complete {loginName} in your browser, then return here.</p> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button aria-label={`${loginName} for ${credential.label}`} isDisabled={isDisabled} isPending={isPending} size="sm" variant="outline" onPress={() => void login()}>{loginName}</Button>
+        {isPending ? <Button isPending={isCancelling} size="sm" variant="tertiary" onPress={() => void cancel()}>Cancel {loginName}</Button> : null}
+      </div>
+    </div>
   );
 }
 
@@ -5093,7 +5437,7 @@ function validateCredential(values: {
   readonly label: string;
   readonly sshUsername: string;
   readonly defaultRegion: string;
-  readonly awsAuthentication: "profile" | "access-keys";
+  readonly awsAuthentication: "login" | "profile" | "access-keys";
   readonly awsProfileName: string;
   readonly awsProfiles: readonly AwsCliProfileSummary[];
   readonly accessKeyId: string;
@@ -5111,7 +5455,7 @@ function validateCredential(values: {
       if (!values.awsProfileName || !values.awsProfiles.some(({ name }) => name === values.awsProfileName)) {
         return "Choose an available AWS CLI profile.";
       }
-    } else if (values.accessKeyId.trim().length < 16 || !values.secretAccessKey) {
+    } else if (values.awsAuthentication === "access-keys" && (values.accessKeyId.trim().length < 16 || !values.secretAccessKey)) {
       return "Enter the AWS access key ID and secret access key.";
     }
   } else {
@@ -5119,7 +5463,7 @@ function validateCredential(values: {
       return "Enter a valid, non-reserved Azure Linux SSH username.";
     }
     const account = values.azureAccounts.find(({ subscriptionId }) => subscriptionId === values.azureSubscriptionId);
-    if (!account || account.tenantId !== values.azureTenantId) return "Choose an available Azure CLI subscription.";
+    if (!account || account.tenantId !== values.azureTenantId) return "Choose an available Azure subscription.";
     if (account.cloudName !== "AzureCloud") return "Only AzureCloud subscriptions are currently supported.";
     if (!validAzureLocation(values.defaultLocation)) return "Enter a valid Azure location such as eastus.";
   }
@@ -5325,7 +5669,7 @@ function feedbackToneClass(tone: FeedbackTone): string {
 
 function scrubCredentialInput(input: CreateCloudCredentialInput): void {
   const mutable = input as unknown as Record<string, unknown>;
-  for (const key of ["accessKeyId", "secretAccessKey", "sessionToken", "sshPassphrase", "sshPrivateKeyToken"]) {
+  for (const key of ["accessKeyId", "secretAccessKey", "sessionToken", "sshPassphrase", "sshPrivateKeyToken", "loginToken"]) {
     if (Object.hasOwn(mutable, key)) mutable[key] = null;
   }
 }

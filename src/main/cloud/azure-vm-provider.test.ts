@@ -791,6 +791,20 @@ describe("Azure VM provider", () => {
     expect(fake.mutations).toHaveLength(mutationStart);
   });
 
+  it.each(["AzureBrowserLoginError", "CredentialUnavailableError", "AuthenticationRequiredError"])("turns %s into safe Azure Login guidance", async (name) => {
+    const fake = new FakeAzureClients();
+    const failingCredential: TokenCredential = { getToken: async () => {
+      throw Object.assign(new Error("private cached refresh token"), { name, code: "login-required" });
+    } };
+    const provider = new AzureVmProvider(
+      { subscriptionId, tenantId, location, credential: failingCredential },
+      { clientFactory: () => fake.clients },
+    );
+    const error = await provider.checkPermissions().catch((value: unknown) => value);
+    expect(String(error)).toContain("Use Azure Login to renew this credential");
+    expect(String(error)).not.toContain("private cached refresh token");
+  });
+
   it("surfaces credential and non-authorization probe failures without misreporting permissions", async () => {
     const fake = new FakeAzureClients();
     const failingCredential: TokenCredential = {

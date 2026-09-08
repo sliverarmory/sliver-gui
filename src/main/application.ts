@@ -2092,6 +2092,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         rootDirectory: join(consoleClientRootDirectory, "gui", "cloud-deployment", "v1"),
         operatorConfigDirectory: join(consoleClientRootDirectory, "configs"),
         safeStorage,
+        openExternal: (url) => shell.openExternal(url),
         egressIpv4Detector: () => detectCurrentEgressIpv4(
           (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
         ),
@@ -2478,6 +2479,10 @@ function unavailableCloudDeploymentController(
     detectCurrentEgressIpv4: () => ({ ok: false, error: message }),
     chooseSshPrivateKey: () => ({ ok: false, error: message }),
     createCredential: () => ({ ok: false, error: message }),
+    loginAwsCredential: () => ({ ok: false, error: message }),
+    beginAzureLogin: () => ({ ok: false, error: message }),
+    loginAzureCredential: () => ({ ok: false, error: message }),
+    cancelAzureLogin: () => undefined,
     deleteCredential: () => ({ ok: false, error: message }),
     testCredential: () => ({ ok: false, error: message }),
     discoverAwsOptions: () => ({ ok: false, error: message }),

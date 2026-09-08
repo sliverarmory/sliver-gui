@@ -14,6 +14,26 @@ import {
 } from "./aws-shared-profiles.js";
 
 describe("AWS shared profile discovery", () => {
+  it("reads only the selected profile's console login identity and rejects ambiguous identity changes", async () => {
+    const arn = "arn:aws:sts::123456789012:assumed-role/Admin/session";
+    const paths = await profileFiles("", `[profile selected]\nlogin_session = ${arn} # comment\nsecret = never-return\n[profile another]\nlogin_session = arn:aws:iam::999999999999:root`);
+    const source = new AwsSharedProfileSource({ paths });
+    expect(await source.loginSessionArn("selected")).toBe(arn);
+    expect(await source.loginSessionArn("missing")).toBeNull();
+    await writeFile(paths.configFilePath, `[profile selected]\nlogin_session = ${arn}\nlogin_session = arn:aws:iam::999999999999:root`);
+    await expect(source.loginSessionArn("selected")).rejects.toMatchObject({ code: "profile-files-unavailable" });
+  });
+
+  it("rejects resolved credentials after their expiration without exposing token values", async () => {
+    const paths = await profileFiles("[default]", "");
+    const source = new AwsSharedProfileSource({ paths, now: () => 100_000, credentialResolver: async () => ({
+      accessKeyId: "ASIAEXAMPLE00000001", secretAccessKey: "must-not-be-returned", expiration: new Date(99_999),
+    }) });
+    const provider = await source.credentialProvider("default");
+    await expect(provider()).rejects.toMatchObject({ code: "credential-resolution-failed" });
+    await expect(provider()).rejects.not.toThrow(/must-not-be-returned/u);
+  });
+
   it("merges and sorts credentials/config profiles without returning secret values", async () => {
     const paths = await profileFiles(
       [

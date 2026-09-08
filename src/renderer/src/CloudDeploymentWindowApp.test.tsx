@@ -8,6 +8,7 @@ import type {
   AwsFirewallSnapshot,
   AzureCloudDeploymentRecord,
   AzureFirewallSnapshot,
+  CloudCredentialSummary,
   CloudFirewallSnapshot,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
@@ -43,6 +44,8 @@ const AZURE_DEPLOYMENT_ID = "f208145e-76d9-49a9-8a40-f83b817971fe";
 const AZURE_SUBSCRIPTION_ID = "11111111-2222-3333-4444-555555555555";
 const AZURE_TENANT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const KEY_TOKEN = "2b1cbf1a-6861-4db8-a39d-ffbdad8087f8";
+const LOGIN_SESSION_ARN = "arn:aws:iam::123456789012:user/operator";
+const AZURE_LOGIN_TOKEN = "c9b06d16-8a57-427f-a9de-c762c3f45f8c";
 const SSH_REVIEW_TOKEN = "r".repeat(43);
 
 let currentSnapshot: CloudDeploymentSnapshot;
@@ -411,6 +414,9 @@ const api: CloudDeploymentAPI = {
           subscriptionId: input.subscriptionId,
           tenantId: input.tenantId,
           sshUsername: input.sshUsername,
+          ...("authentication" in input && input.authentication === "login"
+            ? { authentication: "login" as const, loginAccountId: "home-account-id" }
+            : {}),
         },
       };
     }
@@ -425,9 +431,19 @@ const api: CloudDeploymentAPI = {
         defaultRegion: input.defaultRegion,
         sshUsername: input.sshUsername,
         ...("profileName" in input ? { profileName: input.profileName } : {}),
+        ...("authentication" in input && input.authentication === "login" ? { loginSessionArn: LOGIN_SESSION_ARN } : {}),
       },
     };
   }),
+  loginAwsCredential: vi.fn(async () => ({ ok: true as const, value: { ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN } })),
+  cancelAwsLogin: vi.fn(async () => ({ ok: true as const })),
+  beginAzureLogin: vi.fn(async () => ({ ok: true as const, value: {
+    token: AZURE_LOGIN_TOKEN,
+    expiresAt: "2026-09-08T20:00:00.000Z",
+    subscriptions: [azureAccount],
+  } })),
+  loginAzureCredential: vi.fn(async () => ({ ok: true as const, value: { ...azureCredential, loginAccountId: "home-account-id" } })),
+  cancelAzureLogin: vi.fn(async () => ({ ok: true as const })),
   deleteCredential: vi.fn(async () => ({ ok: true as const })),
   testCredential: vi.fn(async () => ({
     ok: true as const,
@@ -531,6 +547,11 @@ beforeEach(() => {
   vi.mocked(api.getProvisioningTranscripts).mockClear();
   vi.mocked(api.chooseSshPrivateKey).mockClear();
   vi.mocked(api.createCredential).mockClear();
+  vi.mocked(api.loginAwsCredential).mockClear();
+  vi.mocked(api.cancelAwsLogin).mockClear();
+  vi.mocked(api.beginAzureLogin).mockClear();
+  vi.mocked(api.loginAzureCredential).mockClear();
+  vi.mocked(api.cancelAzureLogin).mockClear();
   detectCurrentEgressIpv4.mockClear();
   detectCurrentEgressIpv4.mockResolvedValue({
     ok: false,
@@ -685,6 +706,7 @@ describe("CloudDeploymentWindowApp", () => {
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     expect(screen.getByRole("heading", { name: "Provider Credentials" })).toBeInTheDocument();
 
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "access-keys");
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Production AWS");
     await user.type(screen.getByLabelText("Access Key ID"), "AKIAIOSFODNN7EXAMPLE");
     await user.type(screen.getByLabelText("Secret Access Key"), "super-secret-value");
@@ -715,6 +737,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByText(/a new Ed25519 key will be generated automatically/i)).toBeInTheDocument();
     expect(screen.queryByLabelText("SSH Key Passphrase")).not.toBeInTheDocument();
 
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "access-keys");
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Generated Key AWS");
     await user.type(screen.getByLabelText("Access Key ID"), "AKIAIOSFODNN7EXAMPLE");
     await user.type(screen.getByLabelText("Secret Access Key"), "super-secret-value");
@@ -832,10 +855,160 @@ describe("CloudDeploymentWindowApp", () => {
     act(() => changedListener?.("snapshot"));
 
     await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("access-keys");
+      expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("login");
       expect(screen.queryByRole("combobox", { name: "AWS CLI Profile" })).not.toBeInTheDocument();
-      expect(screen.getByLabelText("Access Key ID")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Access Key ID")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign In and Save" })).toBeInTheDocument();
     });
+  });
+
+  it("defaults to AWS Login without profiles and saves after browser sign-in", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async (input) => {
+      capturedCredential = structuredClone(input);
+      return login.promise;
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+
+    expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("login");
+    expect(api.createCredential).not.toHaveBeenCalled();
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Access Key ID")).not.toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+
+    expect(await screen.findByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Label" })).toBeDisabled();
+    expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
+    expect(capturedCredential).toEqual({
+      provider: "aws",
+      authentication: "login",
+      label: "Browser AWS",
+      defaultRegion: "us-east-1",
+      sshUsername: "ubuntu",
+      sshPrivateKeyToken: null,
+      sshPassphrase: null,
+    });
+    await act(async () => login.resolve({ ok: true, value: { ...awsCredential, label: "Browser AWS", loginSessionArn: LOGIN_SESSION_ARN } }));
+    expect(await screen.findByText("Credential saved")).toBeInTheDocument();
+    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels pending AWS Login without saving a credential or reporting a failure", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => {
+      login.resolve({ ok: false, error: "AWS Login was cancelled." });
+      return { ok: true };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Cancelled AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel AWS Login" }));
+
+    expect(api.cancelAwsLogin).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.queryByText(/Complete AWS Login in your browser/u)).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Sign In and Save" })).toBeEnabled();
+    expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
+    expect(screen.queryByText("Credential not saved")).not.toBeInTheDocument();
+    expect(api.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("reauthenticates a saved native AWS credential and disables competing credential actions", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => login.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+
+    expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
+    expect(screen.getByRole("button", { name: "Test connection for Production AWS" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete Production AWS" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel AWS Login" })).toBeInTheDocument();
+    await act(async () => login.resolve({ ok: true, value: currentSnapshot.credentials[0]! }));
+
+    expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
+    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(api.testCredential).not.toHaveBeenCalled();
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it("cancels pending credential creation when the AWS Login form closes", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => {
+      login.resolve({ ok: false, error: "AWS Login was cancelled." });
+      return { ok: true };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Closing AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.click(screen.getByRole("button", { name: "Close Form" }));
+
+    await waitFor(() => expect(api.cancelAwsLogin).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/Complete AWS Login in your browser/u)).not.toBeInTheDocument();
+    expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
+    expect(api.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("offers AWS Login on a failed deployment using a shared profile without retrying lifecycle actions", async () => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      credentials: [{ ...awsCredential, profileName: "operators" }],
+      state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "AWS Login for Production AWS" }));
+
+    expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
+    expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
+    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
+    expect(screen.getByText("The AWS session has expired.")).toBeInTheDocument();
+  });
+
+  it("cancels AWS reauthentication when its credential view is closed", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => {
+      login.resolve({ ok: false, error: "AWS Login was cancelled." });
+      return { ok: true };
+    });
+    const user = userEvent.setup();
+    const view = renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    expect(screen.getByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
+
+    view.unmount();
+    await waitFor(() => expect(api.cancelAwsLogin).toHaveBeenCalledOnce());
+    expect(api.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("reports an AWS Login error on the credential card and allows retry", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, profileName: "operators" }] };
+    vi.mocked(api.loginAwsCredential).mockResolvedValueOnce({ ok: false, error: "Refresh this IAM Identity Center profile with the AWS CLI." });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+
+    expect(await screen.findByText("AWS Login failed")).toBeInTheDocument();
+    expect(screen.getByText("Refresh this IAM Identity Center profile with the AWS CLI.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeEnabled();
+    expect(api.getSnapshot).toHaveBeenCalledOnce();
   });
 
   it("creates an Azure credential from the discovered CLI subscription without exposing SSH key contents", async () => {
@@ -845,6 +1018,7 @@ describe("CloudDeploymentWindowApp", () => {
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
     await waitFor(() => expect(api.discoverAzureAccounts).toHaveBeenCalledOnce());
+    expect(screen.getByRole("combobox", { name: "Azure Authentication" })).toHaveValue("cli");
     expect(screen.getByRole("combobox", { name: "Azure CLI Subscription" })).toHaveValue(AZURE_SUBSCRIPTION_ID);
     expect(screen.getByRole("textbox", { name: "Tenant ID" })).toHaveValue(AZURE_TENANT_ID);
     expect(screen.getByRole("textbox", { name: "Default Location" })).toHaveValue("eastus");
@@ -867,6 +1041,145 @@ describe("CloudDeploymentWindowApp", () => {
       sshPassphrase: "azure-key-passphrase",
     });
     expect(capturedCredential).not.toHaveProperty("sshPrivateKey");
+  });
+
+  it("signs into Azure without the CLI and saves the chosen subscription using an opaque login capability", async () => {
+    vi.mocked(api.discoverAzureAccounts).mockResolvedValueOnce({ ok: false, error: "Azure CLI was not found." });
+    const secondSubscriptionId = "22222222-3333-4444-5555-666666666666";
+    const clientId = "33333333-4444-5555-6666-777777777777";
+    vi.mocked(api.beginAzureLogin).mockResolvedValueOnce({ ok: true, value: {
+      token: AZURE_LOGIN_TOKEN,
+      expiresAt: "2026-09-08T20:00:00.000Z",
+      subscriptions: [azureAccount, { ...azureAccount, subscriptionId: secondSubscriptionId, name: "Lab Subscription", isDefault: false }],
+    } });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    await waitFor(() => expect(api.discoverAzureAccounts).toHaveBeenCalledOnce());
+
+    expect(screen.getByRole("combobox", { name: "Azure Authentication" })).toHaveValue("login");
+    expect(screen.getByRole("button", { name: "Save Credential" })).toBeDisabled();
+    expect(api.beginAzureLogin).not.toHaveBeenCalled();
+    expect(screen.queryByText("Azure CLI was not found.")).not.toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Native Azure");
+    await user.type(screen.getByRole("textbox", { name: "Directory (Tenant) ID" }), AZURE_TENANT_ID);
+    await user.type(screen.getByRole("textbox", { name: "Application (Client) ID" }), clientId);
+    await user.click(screen.getByRole("button", { name: "Sign In to Azure" }));
+    expect(api.beginAzureLogin).toHaveBeenCalledExactlyOnceWith({ tenantId: AZURE_TENANT_ID, clientId });
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Azure Subscription" }), secondSubscriptionId);
+    expect(screen.getByRole("textbox", { name: "Tenant ID" })).toHaveValue(AZURE_TENANT_ID);
+    expect(screen.getByRole("textbox", { name: "Tenant ID" })).toHaveAttribute("readonly");
+    await user.click(screen.getByRole("button", { name: "Save Credential" }));
+
+    expect(await screen.findByText("Credential saved")).toBeInTheDocument();
+    expect(capturedCredential).toEqual({
+      provider: "azure", authentication: "login", loginToken: AZURE_LOGIN_TOKEN,
+      label: "Native Azure", defaultLocation: "eastus", sshUsername: "azureuser",
+      sshPrivateKeyToken: null, sshPassphrase: null, subscriptionId: secondSubscriptionId, tenantId: AZURE_TENANT_ID,
+    });
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    expect(api.cancelAzureLogin).not.toHaveBeenCalled();
+    expect(capturedCredential).not.toHaveProperty("accessToken");
+    expect(capturedCredential).not.toHaveProperty("tokenCache");
+  });
+
+  it("keeps an explicit Azure Login choice when delayed CLI discovery completes", async () => {
+    const discovery = deferred<Awaited<ReturnType<CloudDeploymentAPI["discoverAzureAccounts"]>>>();
+    vi.mocked(api.discoverAzureAccounts).mockImplementationOnce(async () => discovery.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Azure Authentication" }), "cli");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Azure Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to Azure" }));
+    expect(await screen.findByText("Signed in. Choose a subscription, then save this credential.")).toBeInTheDocument();
+    await act(async () => discovery.resolve({ ok: true, value: [azureAccount] }));
+
+    expect(screen.getByRole("combobox", { name: "Azure Authentication" })).toHaveValue("login");
+    expect(screen.getByRole("combobox", { name: "Azure Subscription" })).toHaveValue(AZURE_SUBSCRIPTION_ID);
+    expect(api.beginAzureLogin).toHaveBeenCalledExactlyOnceWith({ tenantId: null, clientId: null });
+  });
+
+  it("cancels Azure browser login and ignores its late completion", async () => {
+    vi.mocked(api.discoverAzureAccounts).mockResolvedValueOnce({ ok: true, value: [] });
+    const login = deferred<Awaited<ReturnType<CloudDeploymentAPI["beginAzureLogin"]>>>();
+    vi.mocked(api.beginAzureLogin).mockImplementationOnce(async () => login.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    await user.click(screen.getByRole("button", { name: "Sign In to Azure" }));
+    expect(await screen.findByText(/Complete Azure Login in your browser/u)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Provider" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Directory (Tenant) ID" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Cancel Azure Login" }));
+    expect(api.cancelAzureLogin).toHaveBeenCalledOnce();
+    await act(async () => login.resolve({ ok: true, value: { token: AZURE_LOGIN_TOKEN, expiresAt: "2026-09-08T20:00:00.000Z", subscriptions: [azureAccount] } }));
+
+    expect(screen.queryByText(/Complete Azure Login in your browser/u)).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Azure Subscription" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Save Credential" })).toBeDisabled();
+    expect(api.createCredential).not.toHaveBeenCalled();
+  });
+
+  it.each(["authentication", "provider", "form"])("discards staged Azure login when changing %s", async (change) => {
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Azure Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to Azure" }));
+    expect(await screen.findByText("Signed in. Choose a subscription, then save this credential.")).toBeInTheDocument();
+
+    if (change === "authentication") await user.selectOptions(screen.getByRole("combobox", { name: "Azure Authentication" }), "cli");
+    else if (change === "provider") await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "aws");
+    else await user.click(screen.getByRole("button", { name: "Close Form" }));
+
+    await waitFor(() => expect(api.cancelAzureLogin).toHaveBeenCalledOnce());
+    expect(screen.queryByText("Signed in. Choose a subscription, then save this credential.")).not.toBeInTheDocument();
+    expect(api.createCredential).not.toHaveBeenCalled();
+  });
+
+  it("requires a new Azure login after a staged save is rejected", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.createCredential).mockResolvedValueOnce({ ok: false, error: "The selected login session expired." });
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Azure Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Expired Azure");
+    await user.click(screen.getByRole("button", { name: "Sign In to Azure" }));
+    await user.click(screen.getByRole("button", { name: "Save Credential" }));
+
+    expect(await screen.findByText("The selected login session expired.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Credential" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sign In to Azure" })).toBeEnabled();
+  });
+
+  it("reauthenticates an Azure credential from its failed deployment without replaying lifecycle actions", async () => {
+    currentSnapshot = {
+      ...emptySnapshot,
+      credentials: [azureCredential],
+      state: { v: 1, revision: 9, deployments: [{ ...runningAzureDeployment, status: "failed", lastError: "Azure credentials have expired." }] },
+    };
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.loginAzureCredential).mockImplementationOnce(async () => login.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Azure Login for Production Azure" }));
+    expect(await screen.findByText(/Complete Azure Login in your browser/u)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel Azure Login" })).toBeInTheDocument();
+    await act(async () => login.resolve({ ok: true, value: { ...azureCredential, loginAccountId: "home-account-id" } }));
+
+    expect(await screen.findByText("Azure Login complete")).toBeInTheDocument();
+    expect(api.loginAzureCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: AZURE_CREDENTIAL_ID });
+    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
+    expect(screen.getByText("Azure credentials have expired.")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /Credentials/i }));
+    expect(screen.getByRole("button", { name: "Azure Login for Production Azure" })).toBeEnabled();
   });
 
   it("reports incomplete and missing provider permissions without treating them as success", async () => {

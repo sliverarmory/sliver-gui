@@ -78,7 +78,7 @@ export async function readBoundedRegularFile(path: string, options: SecureReadOp
 }
 
 /** Writes a private file atomically in its destination directory and verifies its final mode. */
-export async function writePrivateFileAtomic(path: string, data: Buffer): Promise<void> {
+export async function writePrivateFileAtomic(path: string, data: Buffer, beforeCommit?: () => void): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const directoryStats = await lstat(directory);
@@ -98,6 +98,7 @@ export async function writePrivateFileAtomic(path: string, data: Buffer): Promis
     assertPrivateMode(stats.mode, { label: "Imported configuration", maxBytes: data.length, requirePrivateMode: true });
     await handle.close();
     handle = undefined;
+    beforeCommit?.();
     await rename(temporaryPath, path);
 
     const final = await lstat(path);
@@ -115,7 +116,7 @@ export async function writePrivateFileAtomic(path: string, data: Buffer): Promis
  * A hard-link commit gives the final name O_EXCL-style collision semantics
  * while keeping partial bytes hidden under a random temporary name.
  */
-export async function writePrivateFileExclusiveAtomic(path: string, data: Buffer): Promise<void> {
+export async function writePrivateFileExclusiveAtomic(path: string, data: Buffer, beforeCommit?: () => void): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const directoryStats = await lstat(directory);
@@ -140,6 +141,7 @@ export async function writePrivateFileExclusiveAtomic(path: string, data: Buffer
     });
     await handle.close();
     handle = undefined;
+    beforeCommit?.();
     await link(temporaryPath, path);
     destinationCreated = true;
     await unlink(temporaryPath);

@@ -10,13 +10,15 @@ import {
   parseResolvedCloudCredentialInput,
   type AwsCloudCredentialSummary,
   type AwsCredentialSecret,
+  type AwsConsoleLoginSession,
   type AzureCliCredentialSecret,
+  type AzureBrowserLoginSession,
   type AzureCloudCredentialSummary,
   type CloudCredentialSummary,
   type CloudProvider,
   type ResolvedCloudCredentialInput,
 } from "../shared/cloud-deployment-contracts.js";
-import { readBoundedRegularFile, writePrivateFileExclusiveAtomic } from "./secure-file.js";
+import { readBoundedRegularFile, writePrivateFileAtomic, writePrivateFileExclusiveAtomic } from "./secure-file.js";
 
 export const CLOUD_CREDENTIAL_DIRECTORY = "credentials";
 export const CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES = 2 * 1024 * 1024;
@@ -101,9 +103,10 @@ export class CloudCredentialVault {
     return this.#canPersistSecurely();
   }
 
-  create(input: ResolvedCloudCredentialInput): Promise<CloudCredentialSummary> {
+  create(input: ResolvedCloudCredentialInput, signal?: AbortSignal): Promise<CloudCredentialSummary> {
     return this.#serializeMutation(async () => {
       this.#assertActive();
+      signal?.throwIfAborted();
       const parsed = parseResolvedCloudCredentialInput(input);
       const id = this.#idFactory();
       if (!isUuidV4(id) || this.#sessionCredentials.has(id)) {
@@ -118,6 +121,7 @@ export class CloudCredentialVault {
           throw new Error("Cloud credential is too large");
         }
         this.#assertActive();
+        signal?.throwIfAborted();
         if (persistence === "session") {
           this.#sessionCredentials.set(id, {
             summary: envelope.summary,
@@ -133,13 +137,117 @@ export class CloudCredentialVault {
             throw new Error("Encrypted cloud credential is invalid");
           }
           await assertCredentialFileMissing(join(this.credentialDirectory, id));
-          await writePrivateFileExclusiveAtomic(join(this.credentialDirectory, id), ciphertext);
+          this.#assertActive();
+          signal?.throwIfAborted();
+          await writePrivateFileExclusiveAtomic(join(this.credentialDirectory, id), ciphertext, () => {
+            this.#assertActive();
+            signal?.throwIfAborted();
+          });
         } finally {
           ciphertext?.fill(0);
         }
         return envelope.summary;
       } finally {
         serialized.fill(0);
+      }
+    });
+  }
+
+  /** Replaces session material only if the credential still matches the captured snapshot. */
+  updateAwsLoginSession(
+    id: string,
+    expected: AwsCredentialSecret,
+    loginSession: AwsConsoleLoginSession,
+    signal?: AbortSignal,
+  ): Promise<AwsCloudCredentialSummary> {
+    return this.#serializeMutation(async () => {
+      this.#assertActive();
+      assertCredentialId(id);
+      signal?.throwIfAborted();
+      const session = this.#sessionCredentials.get(id);
+      const current = session
+        ? parseCredentialEnvelopeFromBuffer(Buffer.from(session.plaintext), id, "session")
+        : await this.#readPersistentEnvelope(id);
+      if (current.summary.provider !== "aws" || JSON.stringify(current.secret) !== JSON.stringify(parseAwsCredentialSecret(expected))) {
+        throw new Error("The cloud credential changed during AWS login. Try again.");
+      }
+      if ("accessKeyId" in current.secret) throw new Error("AWS login is unavailable for an access-key credential");
+      const secret = parseAwsCredentialSecret({ ...current.secret, loginSession });
+      const envelope = createEnvelope(id, current.summary.createdAt, current.summary.persistence, {
+        provider: "aws", label: current.summary.label, defaultRegion: current.summary.defaultRegion,
+        sshUsername: current.summary.sshUsername, secret,
+      });
+      if (envelope.summary.provider !== "aws") throw new Error("Cloud credential provider mismatch");
+      const serialized = Buffer.from(JSON.stringify(envelope), "utf8");
+      let ciphertext: Buffer | undefined;
+      try {
+        if (serialized.length > CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES) throw new Error("Cloud credential is too large");
+        this.#assertActive();
+        signal?.throwIfAborted();
+        if (session) {
+          session.plaintext.fill(0);
+          this.#sessionCredentials.set(id, { summary: envelope.summary, plaintext: Buffer.from(serialized) });
+        } else {
+          ciphertext = this.#safeStorage.encryptString(serialized.toString("utf8"));
+          if (ciphertext.length < 1 || ciphertext.length > CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES) throw new Error("Encrypted cloud credential is invalid");
+          await writePrivateFileAtomic(join(this.credentialDirectory, id), ciphertext, () => {
+            this.#assertActive();
+            signal?.throwIfAborted();
+          });
+        }
+        return envelope.summary;
+      } finally {
+        serialized.fill(0);
+        ciphertext?.fill(0);
+      }
+    });
+  }
+
+  /** Updates an encrypted MSAL cache only while its credential snapshot remains current. */
+  updateAzureLoginSession(
+    id: string,
+    expected: AzureCliCredentialSecret,
+    loginSession: AzureBrowserLoginSession,
+    signal?: AbortSignal,
+  ): Promise<AzureCloudCredentialSummary> {
+    return this.#serializeMutation(async () => {
+      this.#assertActive();
+      assertCredentialId(id);
+      signal?.throwIfAborted();
+      const session = this.#sessionCredentials.get(id);
+      const current = session
+        ? parseCredentialEnvelopeFromBuffer(Buffer.from(session.plaintext), id, "session")
+        : await this.#readPersistentEnvelope(id);
+      if (current.summary.provider !== "azure" || JSON.stringify(current.secret) !== JSON.stringify(parseAzureCliCredentialSecret(expected))) {
+        throw new Error("The cloud credential changed during Azure login. Try again.");
+      }
+      const secret = parseAzureCliCredentialSecret({ ...current.secret, loginSession });
+      const envelope = createEnvelope(id, current.summary.createdAt, current.summary.persistence, {
+        provider: "azure", label: current.summary.label, defaultLocation: current.summary.defaultLocation,
+        sshUsername: current.summary.sshUsername, secret,
+      });
+      if (envelope.summary.provider !== "azure") throw new Error("Cloud credential provider mismatch");
+      const serialized = Buffer.from(JSON.stringify(envelope), "utf8");
+      let ciphertext: Buffer | undefined;
+      try {
+        if (serialized.length > CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES) throw new Error("Cloud credential is too large");
+        this.#assertActive();
+        signal?.throwIfAborted();
+        if (session) {
+          session.plaintext.fill(0);
+          this.#sessionCredentials.set(id, { summary: envelope.summary, plaintext: Buffer.from(serialized) });
+        } else {
+          ciphertext = this.#safeStorage.encryptString(serialized.toString("utf8"));
+          if (ciphertext.length < 1 || ciphertext.length > CLOUD_CREDENTIAL_CIPHERTEXT_MAX_BYTES) throw new Error("Encrypted cloud credential is invalid");
+          await writePrivateFileAtomic(join(this.credentialDirectory, id), ciphertext, () => {
+            this.#assertActive();
+            signal?.throwIfAborted();
+          });
+        }
+        return envelope.summary;
+      } finally {
+        serialized.fill(0);
+        ciphertext?.fill(0);
       }
     });
   }
@@ -304,6 +412,7 @@ function createEnvelope(
         defaultRegion: input.defaultRegion,
         sshUsername: input.sshUsername,
         ...profileSummary,
+        ...("loginSession" in input.secret && input.secret.loginSession ? { loginSessionArn: input.secret.loginSession.loginSessionArn } : {}),
       }) as AwsCloudCredentialSummary,
       secret: input.secret,
     });
@@ -319,6 +428,8 @@ function createEnvelope(
       defaultLocation: input.defaultLocation,
       subscriptionId: input.secret.subscriptionId,
       tenantId: input.secret.tenantId,
+      ...(input.secret.authentication ? { authentication: input.secret.authentication } : {}),
+      ...(input.secret.loginSession ? { loginAccountId: input.secret.loginSession.homeAccountId } : {}),
       sshUsername: input.sshUsername,
     }) as AzureCloudCredentialSummary,
     secret: input.secret,
@@ -357,7 +468,8 @@ function parseCredentialEnvelope(
     const secretUsesProfile = "profileName" in secret;
     if (
       summaryUsesProfile !== secretUsesProfile ||
-      (summaryUsesProfile && secretUsesProfile && summary.profileName !== secret.profileName)
+      (summaryUsesProfile && secretUsesProfile && summary.profileName !== secret.profileName) ||
+      (("loginSessionArn" in summary ? summary.loginSessionArn : undefined) !== ("loginSession" in secret ? secret.loginSession?.loginSessionArn : undefined))
     ) {
       throw new TypeError("Invalid AWS cloud credential source");
     }
@@ -370,7 +482,9 @@ function parseCredentialEnvelope(
   const secret = parseAzureCliCredentialSecret(value["secret"]);
   if (
     summary.subscriptionId !== secret.subscriptionId ||
-    summary.tenantId !== secret.tenantId
+    summary.tenantId !== secret.tenantId ||
+    summary.authentication !== secret.authentication ||
+    summary.loginAccountId !== secret.loginSession?.homeAccountId
   ) {
     throw new TypeError("Invalid Azure CLI cloud credential source");
   }
