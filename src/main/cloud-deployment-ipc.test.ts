@@ -30,7 +30,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-const CLOUD_RENDERER_URL = "http://127.0.0.1:5173/?surface=cloud-deployment";
+const CLOUD_RENDERER_URL = "sliver://app/index.html?surface=cloud-deployment";
 const CREDENTIAL_ID = "80ae1382-e6e2-44d6-a663-537cafb60e74";
 const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
 const PRIVATE_KEY_TOKEN = "939914c7-7b6d-4f35-bcd6-461d7ff3cf81";
@@ -139,10 +139,10 @@ describe("Cloud Deployment IPC boundary", () => {
   });
 
   it.each([
-    ["workspace document", "http://127.0.0.1:5173/"],
-    ["origin prefix impostor", "http://127.0.0.1:5173.evil.test/?surface=cloud-deployment"],
-    ["surface query impostor", "http://127.0.0.1:5173/?surface=cloud-deployment-extra"],
-    ["extra query state", "http://127.0.0.1:5173/?surface=cloud-deployment&admin=true"],
+    ["workspace document", "sliver://app/index.html"],
+    ["origin prefix impostor", "sliver://app.evil.test/index.html?surface=cloud-deployment"],
+    ["surface query impostor", "sliver://app/index.html?surface=cloud-deployment-extra"],
+    ["extra query state", "sliver://app/index.html?surface=cloud-deployment&admin=true"],
   ])("rejects the %s", async (_label, url) => {
     const getSnapshot = vi.fn(async () => ({ ok: false as const, error: "should not run" }));
     registerCloudDeploymentIpcHandlers(
@@ -462,7 +462,7 @@ describe("Cloud Deployment IPC boundary", () => {
 
     await expect(invoke(
       CLOUD_DEPLOYMENT_IPC_INVOKE.createCredential,
-      invokeEvent("http://127.0.0.1:5173/", 77).event,
+      invokeEvent("sliver://app/index.html", 77).event,
       rawCredential,
     )).resolves.toEqual(REJECTED);
 

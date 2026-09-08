@@ -10,6 +10,7 @@ import {
   startApplication,
   type ApplicationCloudDeploymentController,
 } from "../main/application.js";
+import { createAppProtocolHandler } from "../main/app-protocol.js";
 import type {
   NativePty,
   NativePtyDisposable,
@@ -98,6 +99,7 @@ declare global {
   // It is inspected externally by Playwright and is never part of dist/.
   var __SLIVER_GUI_E2E_STATE__: FakeMainState;
   var __SLIVER_GUI_E2E_CONTROL__: FakeMainControl;
+  var __SLIVER_GUI_PROTOCOL_E2E_HANDLER__: typeof createAppProtocolHandler;
 }
 
 const repositoryRoot = requiredArgument("--repository-root=");
@@ -140,6 +142,7 @@ const state: FakeMainState = {
   },
 };
 globalThis.__SLIVER_GUI_E2E_STATE__ = state;
+globalThis.__SLIVER_GUI_PROTOCOL_E2E_HANDLER__ = createAppProtocolHandler;
 let holdNextConsoleExit = false;
 let heldConsoleExit: (() => void) | undefined;
 const consoleClientRootDirectory = requiredArgument("--console-client-root-directory=");

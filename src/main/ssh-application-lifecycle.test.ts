@@ -208,8 +208,12 @@ vi.mock("electron", () => {
       unsubscribeNotification: vi.fn(),
     },
     net: { fetch: vi.fn() },
+    protocol: { registerSchemesAsPrivileged: vi.fn() },
     safeStorage: {},
-    session: { defaultSession: {}, fromPartition: vi.fn(() => ({})) },
+    session: {
+      defaultSession: { protocol: { handle: vi.fn(), unhandle: vi.fn() } },
+      fromPartition: vi.fn(() => ({ protocol: { handle: vi.fn(), unhandle: vi.fn() } })),
+    },
     shell: { openExternal: vi.fn(async () => undefined) },
   };
 });
@@ -300,6 +304,82 @@ vi.mock("./ssh-ipc.js", () => ({
   }),
   unregisterSshIpcHandlers: vi.fn(),
 }));
+
+describe("application protocol lifecycle", () => {
+  it("loads bundled windows through both owned sessions and removes each handler once during teardown", async () => {
+    vi.stubEnv("ELECTRON_RENDERER_URL", undefined);
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      startSshSession: vi.fn(async (deploymentId: string) => ({
+        ok: true as const,
+        value: { target: managedTarget(deploymentId), runtime: fakeRuntime() },
+      })),
+      approveSshHostKey: vi.fn(),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const { session } = await import("electron");
+    const { startApplication } = await import("./application.js");
+    const { registerIpcHandlers } = await import("./ipc.js");
+    const defaultProtocol = session.defaultSession.protocol;
+    vi.mocked(defaultProtocol.handle).mockClear();
+    vi.mocked(defaultProtocol.unhandle).mockClear();
+    let application: Awaited<ReturnType<typeof startApplication>> | undefined;
+
+    try {
+      application = await startApplication({
+        cloudDeploymentController: controller,
+        registry: fakeConnectionRegistry() as never,
+        sshPreloadPath: "/test/ssh-preload.cjs",
+      });
+      const partitionResult = vi.mocked(session.fromPartition).mock.results.at(-1)!;
+      expect(session.fromPartition).toHaveBeenLastCalledWith("sliver-cloud-deployment");
+      expect(partitionResult.type).toBe("return");
+      const cloudProtocol = partitionResult.value.protocol;
+      for (const ownedProtocol of [defaultProtocol, cloudProtocol]) {
+        expect(ownedProtocol.handle).toHaveBeenCalledExactlyOnceWith("sliver", expect.any(Function));
+        expect(ownedProtocol.unhandle).not.toHaveBeenCalled();
+      }
+
+      const workspaceWindow = harness.windows.at(-1)!;
+      expect(workspaceWindow.webContents.getURL()).toBe("sliver://app/index.html");
+      const registration = vi.mocked(registerIpcHandlers).mock.calls.at(-1)!;
+      expect(registration[2]).toBe("sliver://app/index.html");
+      const cloudWindowActions = registration[9]!;
+      expect(await cloudWindowActions.open(identityFor(workspaceWindow))).toEqual({ ok: true });
+      const cloudWindow = harness.windows.at(-1)!;
+      expect(cloudWindow.options.webPreferences.partition).toBe("sliver-cloud-deployment");
+      expect(cloudWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=cloud-deployment");
+      expect(harness.hardenedWindows).toContainEqual({
+        window: cloudWindow,
+        rendererUrl: "sliver://app/index.html",
+        utilityUrl: "sliver://app/index.html?surface=cloud-deployment",
+      });
+
+      expect(await harness.cloudSshWindows.open("6f0a80ed-bdd5-4ec0-aa53-7ecca9df0010"))
+        .toMatchObject({ ok: true, value: { status: "opened" } });
+      const sshWindow = sshWindows().at(-1)!;
+      expect(sshWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=ssh");
+
+      await application.stop();
+      for (const window of [workspaceWindow, cloudWindow, sshWindow]) {
+        expect(window.isDestroyed()).toBe(true);
+      }
+      for (const ownedProtocol of [defaultProtocol, cloudProtocol]) {
+        expect(ownedProtocol.unhandle).toHaveBeenCalledExactlyOnceWith("sliver");
+      }
+
+      await application.stop();
+      for (const ownedProtocol of [defaultProtocol, cloudProtocol]) {
+        expect(ownedProtocol.unhandle).toHaveBeenCalledExactlyOnceWith("sliver");
+      }
+      application = undefined;
+    } finally {
+      await application?.stop();
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe("SSH application window lifecycle", () => {
   it("uses a dedicated trusted surface while sessions survive window replacement and close explicitly", async () => {

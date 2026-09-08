@@ -41,7 +41,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-const SSH_RENDERER_URL = "http://127.0.0.1:5173/?surface=ssh";
+const SSH_RENDERER_URL = "sliver://app/index.html?surface=ssh";
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const TAB_ID = "T".repeat(43);
 const TOKEN = "A".repeat(43);
@@ -159,10 +159,10 @@ describe("SSH IPC boundary", () => {
   });
 
   it.each([
-    ["workspace document", "http://127.0.0.1:5173/"],
-    ["origin impostor", "http://127.0.0.1:5173.evil.test/?surface=ssh"],
-    ["surface suffix", "http://127.0.0.1:5173/?surface=ssh-extra"],
-    ["extra query state", "http://127.0.0.1:5173/?surface=ssh&admin=true"],
+    ["workspace document", "sliver://app/index.html"],
+    ["origin impostor", "sliver://app.evil.test/index.html?surface=ssh"],
+    ["surface suffix", "sliver://app/index.html?surface=ssh-extra"],
+    ["extra query state", "sliver://app/index.html?surface=ssh&admin=true"],
   ])("rejects the %s", async (_label, url) => {
     const services = servicesMock();
     registerSshIpcHandlers(services, SSH_RENDERER_URL, authorizeCurrentWindow);

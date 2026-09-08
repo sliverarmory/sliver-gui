@@ -116,7 +116,7 @@ test("packaged production app completes current mTLS read and mutation flows", {
     });
     assert.equal(productionState.isPackaged, true);
     assert.match(productionState.appPath, /app\.asar$/u);
-    assert.match(productionState.rendererUrl ?? "", /^file:/u);
+    assert.equal(productionState.rendererUrl, "sliver://app/index.html");
     assert.equal(await realpath(productionState.executablePath), await realpath(executablePath));
 
     await electronApplication.evaluate(({ dialog }, selectedConfigPath) => {

@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 
 import {
   app,
@@ -12,6 +11,7 @@ import {
   Menu,
   net,
   nativeTheme,
+  protocol,
   safeStorage,
   session,
   shell,
@@ -78,6 +78,7 @@ import {
   type TrustedWindowIdentity,
 } from "./ipc.js";
 import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl } from "./security.js";
+import { APP_RENDERER_URL, APP_SCHEME, APP_SCHEME_PRIVILEGES, createAppProtocolHandler } from "./app-protocol.js";
 import { SliverReleaseDownloader } from "./sliver-release-download.js";
 import {
   CLOUD_DEPLOYMENT_IPC_EVENTS,
@@ -126,6 +127,10 @@ import {
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
+
+// Scheme privileges must be declared synchronously before Electron is ready,
+// including when a test entry imports this application module.
+protocol.registerSchemesAsPrivileged([{ scheme: APP_SCHEME, privileges: APP_SCHEME_PRIVILEGES }]);
 
 type NativeWindowSurface =
   | "workspace"
@@ -259,13 +264,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ".sliver-client",
   );
   const startConsoleRuntime = options.startConsoleRuntime ?? SliverConsoleRuntime.start;
-  // Packaged applications always trust their immutable file entry. A caller's
+  // Packaged applications always trust their bundled protocol entry. A caller's
   // inherited environment must never redirect production IPC trust to even a
   // loopback web origin.
   const developmentRendererUrl = app.isPackaged
     ? undefined
     : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
-  const rendererUrl = developmentRendererUrl ?? pathToFileURL(rendererEntryPath).href;
+  const rendererUrl = developmentRendererUrl ?? APP_RENDERER_URL;
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
   const windows = new Set<BrowserWindow>();
@@ -350,14 +355,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     window: BrowserWindow,
     surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "ssh",
   ): Promise<void> {
-    if (developmentRendererUrl) {
-      const url = new URL(developmentRendererUrl);
-      if (surface) url.searchParams.set("surface", surface);
-      await window.loadURL(url.href);
-      return;
-    }
-    if (surface) await window.loadFile(rendererEntryPath, { query: { surface } });
-    else await window.loadFile(rendererEntryPath);
+    const url = new URL(rendererUrl);
+    if (surface) url.searchParams.set("surface", surface);
+    await window.loadURL(url.href);
   }
 
   function trackWindow(
@@ -2121,10 +2121,18 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   applicationUpdateState = applicationUpdater.getState();
   applicationUpdater.subscribe(publishApplicationUpdateState);
   configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
+  const cloudDeploymentSession = session.fromPartition(CLOUD_DEPLOYMENT_SESSION_PARTITION);
   configureSessionSecurity(
-    session.fromPartition(CLOUD_DEPLOYMENT_SESSION_PARTITION),
+    cloudDeploymentSession,
     developmentRendererUrl,
   );
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession]);
+  for (const rendererSession of appProtocolSessions) {
+    rendererSession.protocol.handle(
+      APP_SCHEME,
+      createAppProtocolHandler(dirname(rendererEntryPath), (url) => net.fetch(url)),
+    );
+  }
   registerIpcHandlers(
     registry,
     (inheritFromContentsId) => createWindow(inheritFromContentsId),
@@ -2231,6 +2239,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         window.close();
       }
       await Promise.allSettled([...pendingWindowCleanup]);
+      for (const rendererSession of appProtocolSessions) {
+        rendererSession.protocol.unhandle(APP_SCHEME);
+        appProtocolSessions.delete(rendererSession);
+      }
     },
   };
 }

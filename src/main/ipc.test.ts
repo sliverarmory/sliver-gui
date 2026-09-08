@@ -43,7 +43,7 @@ vi.mock("electron", () => ({
 
 import { registerIpcHandlers, unregisterIpcHandlers, type IpcConnectionRegistry } from "./ipc.js";
 
-const RENDERER_URL = "http://127.0.0.1:5173";
+const RENDERER_URL = "sliver://app/index.html";
 
 beforeEach(() => {
   unregisterIpcHandlers();
@@ -96,7 +96,7 @@ describe("trusted Electron IPC boundary", () => {
   it("accepts the registered main frame and captures its webContents ID", () => {
     const snapshot = vi.fn((_contentsId: number) => disconnectedSnapshot());
     registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/builds", 42);
+    const { event } = invokeEvent("sliver://app/index.html#/builds", 42);
 
     expect(electronMocks.handlers.get(IPC.getSnapshot)?.(event)).toEqual(disconnectedSnapshot());
     expect(snapshot).toHaveBeenCalledWith(42);
@@ -105,7 +105,7 @@ describe("trusted Electron IPC boundary", () => {
   it("allows a trusted renderer to request application exit", () => {
     const exitApplication = vi.fn();
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL, undefined, exitApplication);
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 42);
+    const { event } = invokeEvent("sliver://app/index.html", 42);
 
     expect(electronMocks.handlers.get(IPC.exitApp)?.(event)).toEqual({ ok: true });
     expect(exitApplication).toHaveBeenCalledOnce();
@@ -125,7 +125,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       { open },
     );
-    const trusted = invokeEvent("http://127.0.0.1:5173/", 77);
+    const trusted = invokeEvent("sliver://app/index.html", 77);
 
     await expect(electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(trusted.event))
       .resolves.toEqual({ ok: true });
@@ -156,7 +156,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       { getState, checkForUpdates, restartToApply },
     );
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 42);
+    const { event } = invokeEvent("sliver://app/index.html", 42);
 
     expect(electronMocks.handlers.get(IPC.getApplicationUpdateState)?.(event)).toEqual(state);
     await expect(electronMocks.handlers.get(IPC.checkForApplicationUpdates)?.(event)).resolves.toEqual({
@@ -190,7 +190,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       { getState, update },
     );
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 42);
+    const { event } = invokeEvent("sliver://app/index.html", 42);
     const input = {
       expectedRevision: 0,
       settings: {
@@ -227,14 +227,14 @@ describe("trusted Electron IPC boundary", () => {
 
   it("rejects origins that merely prefix-match the configured renderer", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173.evil.test/", 42);
+    const { event } = invokeEvent("sliver://app.evil.test/index.html", 42);
 
     expect(() => electronMocks.handlers.get(IPC.getSnapshot)?.(event)).toThrow(/untrusted renderer/);
   });
 
   it("rejects child-frame invocations even when they use the trusted origin", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
-    const { event, mainFrame } = invokeEvent("http://127.0.0.1:5173/", 42);
+    const { event, mainFrame } = invokeEvent("sliver://app/index.html", 42);
     const childFrame = {
       ...mainFrame,
       frameToken: "child-frame",
@@ -251,7 +251,7 @@ describe("trusted Electron IPC boundary", () => {
       value: disconnectedSnapshot(),
     } as const));
     registerIpcHandlers(registryMock({ listSavedConfigs, connectSavedConfig }), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event } = invokeEvent("sliver://app/index.html", 77);
     const id = "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2";
 
     await expect(electronMocks.handlers.get(IPC.listSavedConfigs)?.(event)).resolves.toEqual({ ok: true, value: [] });
@@ -272,8 +272,8 @@ describe("trusted Electron IPC boundary", () => {
       return value;
     });
     registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
-    const local = invokeEvent("http://127.0.0.1:5173/", 77);
-    const remote = invokeEvent("http://127.0.0.1:5173/", 88);
+    const local = invokeEvent("sliver://app/index.html", 77);
+    const remote = invokeEvent("sliver://app/index.html", 88);
     const handler = electronMocks.handlers.get(IPC.listLocalNetworkInterfaces);
 
     const localResult = handler?.(local.event) as {
@@ -305,7 +305,7 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const { event, sender } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event, sender } = invokeEvent("sliver://app/index.html", 77);
     const id = "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2";
     const token = "8e577480-5dc2-4dde-aa58-23c8f1770627";
 
@@ -323,7 +323,7 @@ describe("trusted Electron IPC boundary", () => {
   it("rejects malformed saved-config IDs at the central IPC boundary", () => {
     const connectSavedConfig = vi.fn(async () => ({ ok: false, error: "not called" } as const));
     registerIpcHandlers(registryMock({ connectSavedConfig }), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event } = invokeEvent("sliver://app/index.html", 77);
 
     expect(() => electronMocks.handlers.get(IPC.connectSavedConfig)?.(event, "../../operator.cfg")).toThrow(
       /invalid saved configuration ID/,
@@ -354,7 +354,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.listExecutionCatalog,
   ] as const)("rejects unexpected arguments for %s", (channel) => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event } = invokeEvent("sliver://app/index.html", 77);
 
     expect(() => electronMocks.handlers.get(channel)?.(event, "unexpected")).toThrow(/invalid arguments/);
   });
@@ -377,7 +377,7 @@ describe("trusted Electron IPC boundary", () => {
     ] satisfies ReadonlyArray<readonly [IpcInvokeChannel, readonly unknown[]]>,
   )("rejects malformed renderer payloads for %s", (channel, args) => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event } = invokeEvent("sliver://app/index.html", 77);
 
     expect(() => electronMocks.handlers.get(channel)?.(event, ...args)).toThrow(/Rejected invalid/);
   });
@@ -439,7 +439,7 @@ describe("trusted Electron IPC boundary", () => {
   ] satisfies readonly ListenerInput[])("decodes a valid $kind listener payload", async (listener) => {
     const startListener = vi.fn(async () => ({ ok: false, error: "listener probe" } as const));
     registerIpcHandlers(registryMock({ startListener }), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event } = invokeEvent("sliver://app/index.html", 77);
 
     await expect(electronMocks.handlers.get(IPC.startListener)?.(event, listener)).resolves.toEqual({
       ok: false,
@@ -459,7 +459,7 @@ describe("trusted Electron IPC boundary", () => {
       createWindow,
       RENDERER_URL,
     );
-    const { event, sender } = invokeEvent("http://127.0.0.1:5173/", 77);
+    const { event, sender } = invokeEvent("sliver://app/index.html", 77);
     const profileGeneration = { profileName: "default", name: "test" };
     const profileSave = { profileName: "default", config: defaultGenerateInput, overwrite: false };
     const stagedBuilds = ["alpha", "bravo"];
@@ -484,7 +484,7 @@ describe("trusted Electron IPC boundary", () => {
     const open = vi.fn(async () => ({ ok: true as const }));
     const claim = vi.fn(async () => ({ ok: false as const, error: "claim probe" }));
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL, { open, claim });
-    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const { event } = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
     const resourceId = "P".repeat(43);
 
     await expect(electronMocks.handlers.get(IPC.openSessionShellWindow)?.(event, {
@@ -548,7 +548,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       { open, claim, createTab, closeTab, attach },
     );
-    const trusted = invokeEvent("http://127.0.0.1:5173/", 77);
+    const trusted = invokeEvent("sliver://app/index.html", 77);
 
     await expect(electronMocks.handlers.get(IPC.openConsoleWindow)?.(trusted.event)).resolves.toEqual({ ok: true });
     await expect(electronMocks.handlers.get(IPC.claimConsoleWindow)?.(trusted.event)).resolves.toEqual({
@@ -594,7 +594,7 @@ describe("trusted Electron IPC boundary", () => {
 
     const port = messagePort();
     const request = { v: 1 as const, attachmentToken: "D".repeat(43) };
-    requireConsoleStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [port]).event, request);
+    requireConsoleStreamListener()(streamEvent("sliver://app/index.html", 77, [port]).event, request);
     expect(attach).toHaveBeenCalledExactlyOnceWith(
       { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" },
       request,
@@ -603,7 +603,7 @@ describe("trusted Electron IPC boundary", () => {
     expect(Object.isFrozen(attach.mock.calls[0]?.[1])).toBe(true);
 
     const rejected = messagePort();
-    requireConsoleStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [rejected]).event, {
+    requireConsoleStreamListener()(streamEvent("sliver://app/index.html", 77, [rejected]).event, {
       ...request,
       configPath: "/tmp/attacker.cfg",
     });
@@ -623,7 +623,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       { open, claim, selectTarget },
     );
-    const trusted = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
 
     await expect(
       electronMocks.handlers.get(IPC.openInteractionWindow)?.(trusted.event),
@@ -651,7 +651,7 @@ describe("trusted Electron IPC boundary", () => {
       { targetId: "attacker-selected-session" },
     )).toThrow(/invalid arguments/i);
 
-    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/", 88);
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html", 88);
     expect(() => electronMocks.handlers.get(IPC.openInteractionWindow)?.(untrusted.event)).toThrow(
       /untrusted renderer/i,
     );
@@ -659,7 +659,7 @@ describe("trusted Electron IPC boundary", () => {
       /untrusted renderer/i,
     );
 
-    const child = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 99);
+    const child = invokeEvent("sliver://app/index.html#/sessions/session_1", 99);
     Object.defineProperty(child.event, "senderFrame", {
       value: { ...child.mainFrame, frameToken: "child-frame" } as WebFrameMain,
     });
@@ -670,7 +670,7 @@ describe("trusted Electron IPC boundary", () => {
       /untrusted renderer/i,
     );
 
-    const wrongProcess = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 100);
+    const wrongProcess = invokeEvent("sliver://app/index.html#/sessions/session_1", 100);
     Object.defineProperty(wrongProcess.event, "senderFrame", {
       value: { ...wrongProcess.mainFrame, processId: 101 } as WebFrameMain,
     });
@@ -683,7 +683,7 @@ describe("trusted Electron IPC boundary", () => {
 
   it("rejects interaction claims when no main-owned controller recognizes the window", async () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/?surface=interaction", 77);
+    const { event } = invokeEvent("sliver://app/index.html?surface=interaction", 77);
 
     expect(electronMocks.handlers.get(IPC.claimInteractionWindow)?.(event)).toEqual({
       ok: false,
@@ -706,7 +706,7 @@ describe("trusted Electron IPC boundary", () => {
         selectTarget: controllerSelectTarget,
       },
     );
-    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const { event } = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
     const target = {
       mode: "session",
       id: "session_2",
@@ -736,7 +736,7 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const { event } = invokeEvent("http://127.0.0.1:5173/targets", 77);
+    const { event } = invokeEvent("sliver://app/index.html#/targets", 77);
     const target = {
       mode: "beacon",
       id: "beacon_1",
@@ -819,7 +819,7 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const { event, sender } = invokeEvent("http://127.0.0.1:5173/sessions", 77);
+    const { event, sender } = invokeEvent("sliver://app/index.html#/sessions", 77);
     const planToken = "8e577480-5dc2-4dde-aa58-23c8f1770627";
 
     await electronMocks.handlers.get(IPC.runSessionWorkbench)?.(event, {
@@ -875,7 +875,7 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const { event } = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
     const resourceId = "R".repeat(43);
 
     await electronMocks.handlers.get(IPC.prepareSessionShell)?.(event, {
@@ -933,7 +933,7 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const { event, sender } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const { event, sender } = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
     const action = { draft: { operationId: "privilege.revert" as const, timeoutSeconds: 30 } };
     const plan = { token: "execution_plan_1" };
     const request = { requestId: "execution_request_1" };
@@ -971,7 +971,7 @@ describe("trusted Electron IPC boundary", () => {
       return { ok: true as const, value: {} as never };
     });
     registerIpcHandlers(registryMock({ prepareExecutionAction }), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+    const { event } = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
     const secretText = "main-clone-secret";
     const drafts = [
       (password: Uint8Array) => ({
@@ -1030,7 +1030,7 @@ describe("trusted Electron IPC boundary", () => {
         return { ok: false as const, error: "prepare failed" };
       });
       registerIpcHandlers(registryMock({ prepareExecutionAction }), vi.fn(), RENDERER_URL);
-      const { event } = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
+      const { event } = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
       const rawPassword = Uint8Array.from(Buffer.from(secretText, "utf8"));
       const pending = electronMocks.handlers.get(IPC.prepareExecutionAction)?.(event, {
         draft: {
@@ -1058,8 +1058,8 @@ describe("trusted Electron IPC boundary", () => {
   it("scrubs credential-shaped raw views on parse and trust rejection without exposing their contents", () => {
     const prepareExecutionAction = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
     registerIpcHandlers(registryMock({ prepareExecutionAction }), vi.fn(), RENDERER_URL);
-    const trusted = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
-    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/sessions/session_1", 88);
+    const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html#/sessions/session_1", 88);
     const secretText = "rejected-boundary-secret";
     const malformedPassword = Uint8Array.from(Buffer.from(secretText, "utf8"));
 
@@ -1117,8 +1117,8 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const trusted = invokeEvent("http://127.0.0.1:5173/sessions/session_1", 77);
-    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/sessions/session_1", 88);
+    const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html#/sessions/session_1", 88);
 
     expect(() => electronMocks.handlers.get(IPC.runExecutionRead)?.(untrusted.event, {
       operationId: "execution.children",
@@ -1170,7 +1170,7 @@ describe("trusted Electron IPC boundary", () => {
       vi.fn(),
       RENDERER_URL,
     );
-    const { event } = invokeEvent("http://127.0.0.1:5173/credentials", 77);
+    const { event } = invokeEvent("sliver://app/index.html#/credentials", 77);
     const plaintext = new TextEncoder().encode("credential-boundary-secret");
     const hash = new TextEncoder().encode("d41d8cd98f00b204e9800998ecf8427e");
 
@@ -1211,8 +1211,8 @@ describe("trusted Electron IPC boundary", () => {
   it("scrubs credential-shaped bytes on operator-data parse and trust rejection", () => {
     const addCredential = vi.fn(async () => ({ ok: true as const }));
     registerIpcHandlers(registryMock({ addCredential }), vi.fn(), RENDERER_URL);
-    const trusted = invokeEvent("http://127.0.0.1:5173/credentials", 77);
-    const untrusted = invokeEvent("http://127.0.0.1:5173.evil.test/credentials", 88);
+    const trusted = invokeEvent("sliver://app/index.html#/credentials", 77);
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html#/credentials", 88);
     const malformedSecret = new TextEncoder().encode("malformed-secret");
 
     expect(() => electronMocks.handlers.get(IPC.addCredential)?.(trusted.event, {
@@ -1241,7 +1241,7 @@ describe("trusted Electron IPC boundary", () => {
     const attachStream = vi.fn();
     registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
     const port = messagePort();
-    const { event } = streamEvent("http://127.0.0.1:5173/sessions/session_1", 77, [port]);
+    const { event } = streamEvent("sliver://app/index.html#/sessions/session_1", 77, [port]);
     const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
 
     requireStreamListener()(event, request);
@@ -1256,12 +1256,12 @@ describe("trusted Electron IPC boundary", () => {
     registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
     const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
     const hostilePort = messagePort();
-    const hostile = streamEvent("http://127.0.0.1:5173.evil.test/", 77, [hostilePort]);
+    const hostile = streamEvent("sliver://app.evil.test/index.html", 77, [hostilePort]);
 
     requireStreamListener()(hostile.event, request);
 
     const childPort = messagePort();
-    const child = streamEvent("http://127.0.0.1:5173/", 77, [childPort]);
+    const child = streamEvent("sliver://app/index.html", 77, [childPort]);
     Object.defineProperty(child.event, "senderFrame", {
       value: { ...child.mainFrame, frameToken: "child-frame" } as WebFrameMain,
     });
@@ -1276,14 +1276,14 @@ describe("trusted Electron IPC boundary", () => {
     const attachStream = vi.fn();
     registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
     const request = { v: 1 as const, attachmentToken: "A".repeat(43) };
-    const empty = streamEvent("http://127.0.0.1:5173/", 77, []);
+    const empty = streamEvent("sliver://app/index.html", 77, []);
     requireStreamListener()(empty.event, request);
 
     const first = messagePort(() => {
       throw new Error("already closed");
     });
     const second = messagePort();
-    const multiple = streamEvent("http://127.0.0.1:5173/", 77, [first, second]);
+    const multiple = streamEvent("sliver://app/index.html", 77, [first, second]);
     requireStreamListener()(multiple.event, request);
 
     expect(attachStream).not.toHaveBeenCalled();
@@ -1295,7 +1295,7 @@ describe("trusted Electron IPC boundary", () => {
     const attachStream = vi.fn();
     registerIpcHandlers(registryMock({ attachStream }), vi.fn(), RENDERER_URL);
     const port = messagePort();
-    const { event } = streamEvent("http://127.0.0.1:5173/", 77, [port]);
+    const { event } = streamEvent("sliver://app/index.html", 77, [port]);
 
     requireStreamListener()(event, {
       v: 1,
@@ -1318,8 +1318,8 @@ describe("trusted Electron IPC boundary", () => {
     const first = messagePort();
     const second = messagePort();
 
-    requireStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [first]).event, request);
-    requireStreamListener()(streamEvent("http://127.0.0.1:5173/", 77, [second]).event, request);
+    requireStreamListener()(streamEvent("sliver://app/index.html", 77, [first]).event, request);
+    requireStreamListener()(streamEvent("sliver://app/index.html", 77, [second]).event, request);
 
     expect(attachStream).toHaveBeenCalledTimes(2);
     expect(first.close).not.toHaveBeenCalled();

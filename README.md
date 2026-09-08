@@ -172,6 +172,16 @@ This deliberately avoids Vite's inline React refresh bootstrap and HMR
 WebSocket so the renderer can keep the production content security policy;
 restart the command after source changes.
 
+The renderer runs at `sliver://app/index.html`, following Electron's
+[custom protocol guidance](https://www.electronjs.org/docs/latest/tutorial/security#18-avoid-usage-of-the-file-protocol-and-prefer-usage-of-custom-protocols).
+The static handler serves regular files only from the built renderer directory,
+including inside ASAR packages, and checks resolved paths to reject symlink
+escapes. Both the main session and the isolated cloud deployment session use
+this handler. IPC trusts the exact renderer document and its window surface.
+The CSP permits local scripts, styles, and fonts, plus the exact hash of React
+Aria's fixed pressable stylesheet. Its only unsafe keyword is
+`wasm-unsafe-eval`; renderer network connections remain disabled.
+
 The HeroUI login/install steps are only needed once per workstation and can be
 skipped when `HEROUI_AUTH_TOKEN` is already present in the environment.
 
@@ -185,6 +195,7 @@ npm run protocol:ghostty
 npm run parity:check
 npm run build:console
 npm run test:e2e:electron
+npm run test:e2e:protocol
 npm run test:e2e:m1
 npm run build
 npm run package

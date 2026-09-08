@@ -80,6 +80,18 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   let page: Page | undefined;
   const consoleMessages: string[] = [];
   const pageErrors: string[] = [];
+  const stylePolicyViolations: Array<{ url: string; message: string }> = [];
+  const observedPages = new Set<Page>();
+  const observeStylePolicy = (renderer: Page): void => {
+    if (observedPages.has(renderer)) return;
+    observedPages.add(renderer);
+    renderer.on("console", (message) => {
+      const text = message.text();
+      if (/Content Security Policy/iu.test(text) && /style-src/iu.test(text)) {
+        stylePolicyViolations.push({ url: renderer.url(), message: text });
+      }
+    });
+  };
   try {
     electronApplication = await electron.launch({
       args: [
@@ -95,7 +107,10 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       chromiumSandbox: true,
       cwd: repositoryRoot,
     } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    electronApplication.on("window", observeStylePolicy);
+    for (const renderer of electronApplication.windows()) observeStylePolicy(renderer);
     page = await electronApplication.firstWindow();
+    observeStylePolicy(page);
     page.on("console", (message) => consoleMessages.push(message.text()));
     page.on("pageerror", (error) => pageErrors.push(error.message));
 
@@ -215,7 +230,9 @@ test("real renderer reaches an injected fake only through frozen preload and tru
     await page.getByRole("menuitem", { name: "Disconnect" }).click();
     await page.getByText("No server connected", { exact: true }).waitFor();
     assert.equal((await readFakeState(electronApplication)).disconnects, 1);
+    assert.deepEqual(stylePolicyViolations, [], "all renderer surfaces must preserve styles under CSP");
   } catch (error) {
+    process.stderr.write(`Style CSP violations: ${JSON.stringify(stylePolicyViolations)}\n`);
     if (page && !page.isClosed()) {
       await page.screenshot({
         animations: "disabled",

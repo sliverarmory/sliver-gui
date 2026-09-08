@@ -1,6 +1,8 @@
-import { fileURLToPath } from "node:url";
-
 import type { BrowserWindow, Session, WebContents, WebPreferences } from "electron";
+
+// React Aria injects this fixed pressable touch-action stylesheet. Authorize
+// only its exact contents; arbitrary inline styles remain blocked.
+const REACT_ARIA_PRESSABLE_STYLE_HASH = "'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o='";
 
 export function productionContentSecurityPolicy(): string {
   return [
@@ -8,9 +10,9 @@ export function productionContentSecurityPolicy(): string {
     "script-src 'self' 'wasm-unsafe-eval'",
     "script-src-elem 'self'",
     "script-src-attr 'none'",
-    "style-src 'self' 'unsafe-inline'",
+    `style-src 'self' ${REACT_ARIA_PRESSABLE_STYLE_HASH}`,
     "img-src 'self' data: blob:",
-    "font-src 'self' data:",
+    "font-src 'self'",
     "connect-src 'none'",
     "media-src 'none'",
     "object-src 'none'",
@@ -30,9 +32,9 @@ export function developmentContentSecurityPolicy(devServerUrl: string): string {
     `script-src 'self' 'wasm-unsafe-eval' ${origin}`,
     `script-src-elem 'self' ${origin}`,
     "script-src-attr 'none'",
-    "style-src 'self' 'unsafe-inline'",
+    `style-src 'self' ${REACT_ARIA_PRESSABLE_STYLE_HASH}`,
     `img-src 'self' ${origin} data: blob:`,
-    "font-src 'self' data:",
+    "font-src 'self'",
     `connect-src 'self' ${origin} ${websocketOrigin}`,
     "media-src 'none'",
     "object-src 'none'",
@@ -121,12 +123,18 @@ export function isTrustedRendererUrl(candidateUrl: string, expectedRendererUrl: 
     const candidate = new URL(candidateUrl);
     const expected = new URL(expectedRendererUrl);
 
-    if (expected.protocol === "file:") {
-      return candidate.protocol === "file:" && fileURLToPath(candidate) === fileURLToPath(expected);
-    }
+    if (!["sliver:", "http:", "https:"].includes(expected.protocol)) return false;
+    // Node treats custom schemes as opaque origins. Compare URL components
+    // explicitly so another sliver host cannot share the renderer's trust.
+    if (
+      candidate.protocol !== expected.protocol ||
+      candidate.hostname !== expected.hostname ||
+      candidate.port !== expected.port ||
+      candidate.username !== "" || candidate.password !== "" ||
+      expected.username !== "" || expected.password !== ""
+    ) return false;
 
-    if (expected.protocol !== "http:" && expected.protocol !== "https:") return false;
-    return candidate.protocol === expected.protocol && candidate.origin === expected.origin;
+    return expected.protocol !== "sliver:" || candidate.pathname === expected.pathname;
   } catch {
     return false;
   }
@@ -154,8 +162,7 @@ export function isSameRendererDocument(candidateUrl: string, expectedUrl: string
   try {
     const candidate = new URL(candidateUrl);
     const expected = new URL(expectedUrl);
-    return candidate.protocol === expected.protocol &&
-      candidate.host === expected.host &&
+    return isTrustedRendererUrl(candidateUrl, expectedUrl) &&
       candidate.pathname === expected.pathname &&
       candidate.search === expected.search;
   } catch {
