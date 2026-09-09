@@ -161,8 +161,8 @@ describe("application menu templates", () => {
       "File",
       "Edit",
       "View",
-      "Cloud",
       "Armory",
+      "Cloud",
       "Network",
       "Window",
       "Help",
@@ -407,7 +407,7 @@ describe("application menu templates", () => {
     });
 
     expect(template.map((item) => item.label)).toEqual([
-      "File", "Edit", "View", "Cloud", "Armory", "Network", "Window", "Help",
+      "File", "Edit", "View", "Armory", "Cloud", "Network", "Window", "Help",
     ]);
     expect(menuRoles(template, "File")).toContain("quit");
     expect(menuRoles(template, "Window")).toContain("close");
@@ -450,8 +450,8 @@ describe("application menu templates", () => {
       "File",
       "Edit",
       "View",
-      "Cloud",
       "Armory",
+      "Cloud",
       "Network",
       "Terminal",
       "Window",

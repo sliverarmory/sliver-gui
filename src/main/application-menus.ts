@@ -230,6 +230,15 @@ export function buildApplicationMenuTemplate(
       ],
     },
     {
+      label: "Armory",
+      submenu: [
+        { id: "armory.manage", label: "Manage", click: () => actions.openArmory("manage") },
+        { id: "armory.install", label: "Install…", click: () => actions.openArmory("install") },
+        { type: "separator" },
+        { id: "armory.sources", label: "Sources…", click: () => actions.openArmory("sources") },
+      ],
+    },
+    {
       label: "Cloud",
       submenu: [
         {
@@ -252,15 +261,6 @@ export function buildApplicationMenuTemplate(
               }),
             ]
           : []),
-      ],
-    },
-    {
-      label: "Armory",
-      submenu: [
-        { id: "armory.manage", label: "Manage", click: () => actions.openArmory("manage") },
-        { id: "armory.install", label: "Install…", click: () => actions.openArmory("install") },
-        { type: "separator" },
-        { id: "armory.sources", label: "Sources…", click: () => actions.openArmory("sources") },
       ],
     },
     {
