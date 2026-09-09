@@ -354,9 +354,11 @@ if (sliverNoticeTags.length !== 1 || sliverNoticeTags[0][1] !== sliverScriptVers
 }
 
 const builderConfiguration = await readFile(join(rootDir, "electron-builder.yml"), "utf8");
+const enabledNpmRebuildSettings = builderConfiguration.match(/^npmRebuild:[ \t]*true[ \t]*$/gmu) ?? [];
 const disabledNpmRebuildSettings = builderConfiguration.match(/^npmRebuild:[ \t]*false[ \t]*$/gmu) ?? [];
-if (disabledNpmRebuildSettings.length !== 1) {
-  throw new Error("Production packaging must disable Electron Builder dependency rebuilds exactly once");
+const nodePtyStagingHooks = builderConfiguration.match(/^beforePack:[ \t]*scripts\/stageNodePtyForElectron\.mjs[ \t]*$/gmu) ?? [];
+if (enabledNpmRebuildSettings.length !== 0 || disabledNpmRebuildSettings.length !== 1 || nodePtyStagingHooks.length !== 1) {
+  throw new Error("Production packaging must disable dependency rebuilding and configure the node-pty staging hook exactly once");
 }
 for (const requiredPath of requiredBuilderPaths) {
   if (!builderConfiguration.includes(`- ${requiredPath}`)) {

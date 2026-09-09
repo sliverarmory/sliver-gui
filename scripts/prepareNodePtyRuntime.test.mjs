@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   prepareNodePtyRuntime,
   runtimeFilesForPlatform,
 } from "./prepareNodePtyRuntime.mjs";
+import stageNodePtyBeforePack, { stageNodePtyRuntimeForElectron } from "./stageNodePtyForElectron.mjs";
 
 async function fixture(platform, omittedPath) {
   const directory = await mkdtemp(join(tmpdir(), "node-pty-runtime-test-"));
@@ -59,6 +60,73 @@ test("validates Windows x64 runtime inventory without POSIX chmod", async () => 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("stages only the requested macOS prebuild for Electron packaging", async () => {
+  const { directory } = await fixture("darwin");
+  try {
+    const stalePath = join(directory, "build", "Release", "stale.node");
+    await mkdir(dirname(stalePath), { recursive: true });
+    await writeFile(stalePath, "stale");
+
+    await stageNodePtyRuntimeForElectron({
+      arch: "x64",
+      moduleDirectory: directory,
+      platform: "darwin",
+    });
+
+    await assert.rejects(stat(stalePath), { code: "ENOENT" });
+    for (const relativePath of packagedRuntimeFilesForPlatform("darwin").required) {
+      const sourcePath = relativePath.replace("build/Release/", "prebuilds/darwin-x64/");
+      assert.equal(
+        await readFile(join(directory, ...relativePath.split("/")), "utf8"),
+        sourcePath,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("stages the exact Windows runtime without debug artifacts", async () => {
+  const { directory } = await fixture("win32");
+  try {
+    const debugArtifact = join(directory, "prebuilds", "win32-x64", "pty.pdb");
+    await writeFile(debugArtifact, "debug-only");
+
+    await stageNodePtyRuntimeForElectron({
+      arch: "x64",
+      moduleDirectory: directory,
+      platform: "win32",
+    });
+
+    await assert.rejects(stat(join(directory, "build", "Release", "pty.pdb")), { code: "ENOENT" });
+    for (const relativePath of packagedRuntimeFilesForPlatform("win32").required) {
+      const sourcePath = relativePath.replace("build/Release/", "prebuilds/win32-x64/");
+      assert.equal(
+        await readFile(join(directory, ...relativePath.split("/")), "utf8"),
+        sourcePath,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("maps Electron Builder architectures to the exact node-pty module directory", async () => {
+  const calls = [];
+  await stageNodePtyBeforePack({
+    arch: 3,
+    electronPlatformName: "darwin",
+    packager: { info: { appDir: "/workspace/app" } },
+  }, {
+    stageNodePtyRuntimeForElectron: async (options) => calls.push(options),
+  });
+  assert.deepEqual(calls, [{
+    arch: "arm64",
+    moduleDirectory: join("/workspace/app", "node_modules", "node-pty"),
+    platform: "darwin",
+  }]);
 });
 
 test("fails closed when a current-platform runtime file is absent", async () => {

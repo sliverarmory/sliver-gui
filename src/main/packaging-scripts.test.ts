@@ -6,6 +6,18 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("native distribution packaging", () => {
+  it("stages only the packaged Electron runtime's native dependency", () => {
+    const rootDir = resolve(import.meta.dirname, "../..");
+    const builderConfig = readFileSync(
+      resolve(rootDir, "electron-builder.yml"),
+      "utf8",
+    );
+
+    expect(builderConfig.match(/^npmRebuild:\s*false\s*$/gmu)).toHaveLength(1);
+    expect(builderConfig).not.toMatch(/^npmRebuild:\s*true\s*$/mu);
+    expect(builderConfig.match(/^beforePack:\s*scripts\/stageNodePtyForElectron\.mjs\s*$/gmu)).toHaveLength(1);
+  });
+
   it("routes CI platform and publish arguments directly to electron-builder", () => {
     const rootDir = resolve(import.meta.dirname, "../..");
     const packageJson = JSON.parse(

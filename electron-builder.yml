@@ -2,6 +2,7 @@ appId: io.sliver.client.gui
 productName: Sliver GUI
 asar: true
 npmRebuild: false
+beforePack: scripts/stageNodePtyForElectron.mjs
 afterPack: scripts/afterPack.mjs
 directories:
   output: release

@@ -66,6 +66,11 @@ const AZURE_NSG_ID =
   `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/networkSecurityGroups/sliver-nsg-${DEPLOYMENT_ID}`;
 const AZURE_FIREWALL_RULE_ID = `${AZURE_NSG_ID}/securityRules/operator-api`;
 const NOW = new Date("2026-09-06T18:00:00.000Z");
+const TEST_SSH_PRIVATE_KEY = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+}).privateKey;
 
 let temporaryDirectory = "";
 let rootDirectory = "";
@@ -3120,11 +3125,6 @@ function fakeSshTerminalRuntime(): ConsolePortRuntime & { readonly close: Return
 }
 
 function awsCredential(): ResolvedAwsCloudCredentialInput {
-  const { privateKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs1", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  });
   return {
     provider: "aws",
     label: "AWS",
@@ -3134,18 +3134,13 @@ function awsCredential(): ResolvedAwsCloudCredentialInput {
       accessKeyId: "AKIAEXAMPLE00000001",
       secretAccessKey: "secret-cloud-value",
       sessionToken: null,
-      sshPrivateKey: privateKey,
+      sshPrivateKey: TEST_SSH_PRIVATE_KEY,
       sshPassphrase: null,
     },
   };
 }
 
 function azureCredential(): ResolvedAzureCloudCredentialInput {
-  const { privateKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs1", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  });
   return {
     provider: "azure",
     label: "Azure CLI",
@@ -3154,7 +3149,7 @@ function azureCredential(): ResolvedAzureCloudCredentialInput {
     secret: {
       subscriptionId: AZURE_SUBSCRIPTION_ID,
       tenantId: AZURE_TENANT_ID,
-      sshPrivateKey: privateKey,
+      sshPrivateKey: TEST_SSH_PRIVATE_KEY,
       sshPassphrase: null,
     },
   };
