@@ -73,6 +73,32 @@ beforeEach(() => {
 afterEach(() => { cleanup(); Reflect.deleteProperty(window, "armory"); });
 
 describe("ArmoryWindowApp", () => {
+  it.each([
+    { tab: "manage", list: "Installed packages", title: "Installed Packages" },
+    { tab: "install", list: "Available packages", title: "Package Catalog" },
+  ] as const)("keeps $tab controls outside its bounded HeroUI package scroll region", async ({ tab, list, title }) => {
+    currentTab = tab;
+    const user = userEvent.setup();
+    render(<ArmoryWindowApp />);
+    const packages = await screen.findByRole("list", { name: list });
+    const scroll = screen.getByTestId(`armory-${tab}-scroll`);
+    const controls = screen.getByTestId(`armory-${tab}-controls`);
+    expect(scroll).toHaveClass("scroll-shadow", "overflow-y-auto", "flex-1");
+    expect(scroll).toHaveAttribute("role", "region");
+    expect(scroll).toHaveAttribute("tabindex", "0");
+    expect(scroll).toContainElement(packages);
+    expect(scroll).not.toContainElement(controls);
+    expect(controls).toHaveClass("shrink-0");
+    expect(controls).toContainElement(screen.getByRole("heading", { name: title }));
+    expect(controls).toContainElement(screen.getByRole("searchbox", { name: "Search packages" }));
+    expect(scroll).not.toContainElement(screen.getByRole("tablist", { name: "Armory features" }));
+    expect(scroll).not.toContainElement(screen.getByRole("heading", { name: "Armory" }));
+    expect(scroll).not.toContainElement(screen.getByText(baseline.rootPath));
+    expect(screen.getByRole("main")).toHaveClass("h-screen", "overflow-hidden");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Package type" }), tab === "manage" ? "alias" : "bof");
+    expect(screen.getByTestId(`armory-${tab}-scroll`)).not.toBe(scroll);
+  });
+
   it("loads console-shared packages, honors native navigation, and cleans up subscriptions", async () => {
     const view = render(<ArmoryWindowApp />);
     expect(await screen.findByRole("list", { name: "Installed packages" })).toHaveTextContent("Inventory");
@@ -130,10 +156,10 @@ describe("ArmoryWindowApp", () => {
     currentTab = "install";
     const user = userEvent.setup();
     render(<ArmoryWindowApp />);
-    const list = await screen.findByRole("list", { name: "Available packages" });
+    await screen.findByRole("list", { name: "Available packages" });
     await user.selectOptions(screen.getByRole("combobox", { name: "Package type" }), "bof");
-    expect(list).toHaveTextContent("Process List");
-    expect(list).not.toHaveTextContent("Inventory");
+    expect(screen.getByRole("list", { name: "Available packages" })).toHaveTextContent("Process List");
+    expect(screen.getByRole("list", { name: "Available packages" })).not.toHaveTextContent("Inventory");
     await user.type(screen.getByRole("searchbox", { name: "Search packages" }), "process-list");
     vi.mocked(api.install).mockResolvedValue({ ok: false, error: "Package signature verification failed" });
     await user.click(screen.getByRole("button", { name: "Install Process List" }));
@@ -152,6 +178,36 @@ describe("ArmoryWindowApp", () => {
     await user.click(await screen.findByRole("button", { name: "Update" }));
     expect(api.install).toHaveBeenCalledWith({ packageId: catalogPackage.id, replace: true });
     expect(await screen.findByText("Inventory updated.")).toBeInTheDocument();
+  });
+
+  it.each([
+    { tab: "manage", list: "Installed packages" },
+    { tab: "install", list: "Available packages" },
+  ] as const)("shows available author attribution in $tab package details and supports older manifests", async ({ tab, list }) => {
+    currentTab = tab;
+    const authors = { originalAuthor: "Ada Example", extensionAuthor: "Armory Maintainer" };
+    currentSnapshot = {
+      ...baseline,
+      installed: [{ ...installed, id: "extensions/inventory", kind: "bof", installPath: "/home/operator/.sliver-client/extensions/inventory", ...authors }],
+      packages: [{ ...catalogPackage, kind: "bof", ...authors }],
+    };
+    const user = userEvent.setup();
+    render(<ArmoryWindowApp />);
+    const packages = await screen.findByRole("list", { name: list });
+    await user.click(within(packages).getByRole("button", { name: "Details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inventory" });
+    expect(within(dialog).getByText("Original Author").nextElementSibling).toHaveTextContent("Ada Example");
+    expect(within(dialog).getByText("Extension Author").nextElementSibling).toHaveTextContent("Armory Maintainer");
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+
+    currentSnapshot = { ...baseline, packages: [catalogPackage] };
+    act(() => changedListener?.());
+    await waitFor(() => expect(api.snapshot).toHaveBeenCalledTimes(2));
+    await user.click(within(screen.getByRole("list", { name: list })).getByRole("button", { name: "Details" }));
+    const legacyDialog = await screen.findByRole("dialog", { name: "Inventory" });
+    expect(within(legacyDialog).queryByText("Original Author")).not.toBeInTheDocument();
+    expect(within(legacyDialog).queryByText("Extension Author")).not.toBeInTheDocument();
+    expect(within(legacyDialog).getByText("Repository")).toBeInTheDocument();
   });
 
   it("installs a bundle and resets bundle filtering when navigating to Manage", async () => {

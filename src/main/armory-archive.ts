@@ -131,6 +131,8 @@ export interface ArmoryManifest {
   kind: "alias" | "extension" | "bof";
   version: string;
   description: string;
+  originalAuthor?: string;
+  extensionAuthor?: string;
   repoUrl: string;
   dependencies: string[];
   artifactPaths: string[];
@@ -147,9 +149,18 @@ export function armoryText(value: unknown, required = false): string {
   if (typeof value !== "string" || value.length > MAX_ARMORY_MANIFEST_BYTES || (required && !value.trim())) throw new Error("Invalid Armory text field");
   return value;
 }
+function armoryAuthor(value: unknown): string {
+  const text = armoryText(value);
+  if (text.length > 4096 || /[\x00-\x1f\x7f]/u.test(text)) throw new Error("Invalid Armory author field");
+  return text.trim();
+}
 export function parseArmoryManifest(bytes: Uint8Array, isAlias: boolean): ArmoryManifest {
   if (bytes.length > MAX_ARMORY_MANIFEST_BYTES) throw new Error("Armory manifest exceeds its size limit");
   const raw = armoryRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown);
+  // Console aliases define original_author; both extension schemas define
+  // original_author and extension_author at the package level, not per command.
+  const originalAuthor = armoryAuthor(raw["original_author"]);
+  const extensionAuthor = isAlias ? "" : armoryAuthor(raw["extension_author"]);
   const commands = !isAlias && Array.isArray(raw["commands"]) && raw["commands"].length ? raw["commands"].map(armoryRecord) : [raw];
   if (commands.length > 1_000) throw new Error("Armory manifest contains too many commands");
   const legacyExtension = !isAlias && commands[0] === raw;
@@ -182,6 +193,7 @@ export function parseArmoryManifest(bytes: Uint8Array, isAlias: boolean): Armory
     if (executor === "coff-loader" && !dependency) throw new Error("Armory BOF manifest is missing its dependency");
   }
   return { name, directoryName, commandNames, kind: isAlias ? "alias" : bof ? "bof" : "extension", version: armoryText(raw["version"]),
+    ...(originalAuthor ? { originalAuthor } : {}), ...(extensionAuthor ? { extensionAuthor } : {}),
     description: descriptions[0] ?? "", repoUrl: armoryText(raw["repo_url"]), dependencies: [...dependencies], artifactPaths: [...artifactPaths],
     manifestFile: isAlias ? "alias.json" : "extension.json" };
 }

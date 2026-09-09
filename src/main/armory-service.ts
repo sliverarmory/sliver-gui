@@ -287,6 +287,8 @@ export class ArmoryService {
           const manifest = parseArmoryManifest(bytes, category === "aliases");
           if (manifest.directoryName !== name) throw new Error("Manifest name does not match its installation directory");
           result.push({ manifest, manifestBytes: bytes, dto: { id: installedId(manifest), name: manifest.name, commandNames: manifest.commandNames,
+            ...(manifest.originalAuthor ? { originalAuthor: manifest.originalAuthor } : {}),
+            ...(manifest.extensionAuthor ? { extensionAuthor: manifest.extensionAuthor } : {}),
             kind: manifest.kind, version: manifest.version, description: manifest.description, repoUrl: manifest.repoUrl, installPath: path } });
         } catch (error) { warnings.push(`Could not read ${category}/${name}: ${errorText(error)}`); }
       }
@@ -342,7 +344,9 @@ export class ArmoryService {
             const manifest = parseArmoryManifest(decodeArmoryBase64(parsed.trustedComment, MAX_ARMORY_MANIFEST_BYTES), entry.isAlias);
             this.checkIdentity(entry, manifest);
             entry.manifest = manifest;
-            entry.dto = { ...entry.dto, kind: manifest.kind, version: manifest.version, description: manifest.description };
+            entry.dto = { ...entry.dto, kind: manifest.kind, version: manifest.version, description: manifest.description,
+              ...(manifest.originalAuthor ? { originalAuthor: manifest.originalAuthor } : {}),
+              ...(manifest.extensionAuthor ? { extensionAuthor: manifest.extensionAuthor } : {}) };
           } catch (error) { entry.dto = { ...entry.dto, error: errorText(error) }; }
         });
         for (const entry of sourcePackages) catalog.set(entry.dto.id, entry);

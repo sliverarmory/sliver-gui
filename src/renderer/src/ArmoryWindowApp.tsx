@@ -7,6 +7,7 @@ import {
   Input,
   Label,
   Modal,
+  ScrollShadow,
   SearchField,
   Spinner,
   Switch,
@@ -161,6 +162,17 @@ export function ArmoryWindowApp(): React.JSX.Element {
     matches(item, query, filter, `${item.commandName} ${item.sourceName}`)), [snapshot, query, filter]);
   const bundles = useMemo(() => (snapshot?.bundles ?? []).filter((item) =>
     (filter === "all" || filter === "bundle") && searchMatches(query, item.name, item.sourceName, ...item.packageNames)), [snapshot, query, filter]);
+  // ScrollShadow observes its viewport size, but result changes can alter only scrollHeight.
+  // Remount changed result sets so its initial overflow check and shadow state stay current.
+  const installedResultsKey = useMemo(() => JSON.stringify([
+    loading && !snapshot, query, filter === "bundle" ? "all" : filter,
+    ...installed.map((item) => [item.id, item.name, item.version, item.description, item.commandNames, item.updateAvailable]),
+  ]), [filter, installed, loading, query, snapshot]);
+  const availableResultsKey = useMemo(() => JSON.stringify([
+    loading && !snapshot, query, filter,
+    ...packages.map((item) => [item.id, item.name, item.version, item.description, item.commandName, item.sourceName, item.error, item.installedId, item.updateAvailable]),
+    ...bundles.map((item) => [item.id, item.name, item.packageNames]),
+  ]), [bundles, filter, loading, packages, query, snapshot]);
 
   const install = (item: ArmoryPackage): void => {
     if (!api) return;
@@ -185,9 +197,9 @@ export function ArmoryWindowApp(): React.JSX.Element {
     : "This removes the package files from the shared local directory. The package will also be removed from the console's installed inventory.";
 
   return (
-    <main className="h-screen overflow-y-auto bg-background">
-      <div className="mx-auto flex min-h-full w-full max-w-[1240px] flex-col gap-6 px-5 py-8 sm:px-8">
-        <header className="flex flex-wrap items-start justify-between gap-4">
+    <main className="h-screen overflow-hidden bg-background">
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1240px] flex-col gap-3 px-5 py-8 sm:px-8">
+        <header className="flex shrink-0 flex-wrap items-start justify-between gap-4">
           <div className="flex items-start gap-4">
             <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
               <FontAwesomeIcon aria-hidden icon={faBoxOpen} className="size-5" />
@@ -203,7 +215,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
         </header>
 
         {error || loadError ? <Notice tone="danger" title="Armory Could Not Complete the Request">{error ?? loadError}</Notice> : null}
-        {notice ? <p role="status" className="text-sm text-success">{notice}</p> : null}
+        {notice ? <p role="status" className="shrink-0 text-sm text-success">{notice}</p> : null}
         {snapshot?.warnings.length ? (
           <Notice tone="warning" title="Some Armory Data Is Unavailable">
             {snapshot.warnings.length === 1 ? snapshot.warnings[0] : (
@@ -212,8 +224,8 @@ export function ArmoryWindowApp(): React.JSX.Element {
           </Notice>
         ) : null}
 
-        <Tabs selectedKey={tab} variant="secondary" onSelectionChange={(key) => { if (isArmoryTab(key)) setTab(key); }}>
-          <Tabs.ListContainer className="w-fit max-w-full">
+        <Tabs className="flex min-h-0 flex-1 flex-col gap-0" selectedKey={tab} variant="secondary" onSelectionChange={(key) => { if (isArmoryTab(key)) setTab(key); }}>
+          <Tabs.ListContainer className="w-fit max-w-full shrink-0">
             <Tabs.List aria-label="Armory features">
               <Tabs.Tab id="manage">Manage<Tabs.Indicator /></Tabs.Tab>
               <Tabs.Tab id="install">Install<Tabs.Indicator /></Tabs.Tab>
@@ -221,71 +233,79 @@ export function ArmoryWindowApp(): React.JSX.Element {
             </Tabs.List>
           </Tabs.ListContainer>
 
-          <Tabs.Panel id="manage" className="pt-6">
-            <div className="space-y-6">
-              <SectionHeading title="Installed Packages" description="Aliases, extensions, and BOFs in your console's local package directories.">
-                <Button variant="outline" isDisabled={!api || Boolean(busy) || !snapshot} onPress={() => { if (api) void perform("Checking for Updates", () => api.refreshCatalog(), "Package catalog refreshed."); }}>
-                  Check for Updates
-                </Button>
-              </SectionHeading>
-              <PackageFilters query={query} filter={filter === "bundle" ? "all" : filter} onQuery={setQuery} onFilter={setFilter} />
-              {loading && !snapshot ? <Loading /> : installed.length > 0 ? (
-                <ul aria-label="Installed packages" className="divide-y divide-separator">
-                  {installed.map((item) => (
-                    <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.commandNames.join(", ")}>
-                      {item.updateAvailable && item.packageId ? (
-                        <Button variant="outline" isDisabled={Boolean(busy)} onPress={() => {
-                          const available = snapshot?.packages.find((pkg) => pkg.id === item.packageId);
-                          if (available) install(available);
-                        }}>Update</Button>
-                      ) : null}
-                      <Button variant="ghost" onPress={() => setDetail({ kind: "installed", value: item })}>Details</Button>
-                      <Button aria-label={`Remove ${item.name}`} variant="danger-soft" isDisabled={Boolean(busy)} onPress={() => { setError(undefined); setRemoval({ kind: "package", value: item }); }}>Remove</Button>
-                    </PackageRow>
-                  ))}
-                </ul>
-              ) : (
-                <PackageEmpty title={snapshot?.installed.length ? "No Matching Packages" : "No Packages Installed"} description={snapshot?.installed.length ? "Try another search or package type." : "Browse the catalog or import a signed package to get started."}>
-                  {!snapshot?.installed.length ? <Button onPress={() => setTab("install")}>Browse Packages</Button> : null}
-                </PackageEmpty>
-              )}
+          <Tabs.Panel id="manage" className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden pt-0">
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="shrink-0 space-y-2" data-testid="armory-manage-controls">
+                <SectionHeading title="Installed Packages" description="Aliases, extensions, and BOFs in your console's local package directories.">
+                  <Button variant="outline" isDisabled={!api || Boolean(busy) || !snapshot} onPress={() => { if (api) void perform("Checking for Updates", () => api.refreshCatalog(), "Package catalog refreshed."); }}>
+                    Check for Updates
+                  </Button>
+                </SectionHeading>
+                <PackageFilters query={query} filter={filter === "bundle" ? "all" : filter} onQuery={setQuery} onFilter={setFilter} />
+              </div>
+              <ScrollShadow key={installedResultsKey} aria-label="Installed package results" className="-mx-1 h-0 max-h-full min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 pb-1" data-testid="armory-manage-scroll" role="region" tabIndex={0}>
+                {loading && !snapshot ? <Loading /> : installed.length > 0 ? (
+                  <ul aria-label="Installed packages" className="divide-y divide-separator">
+                    {installed.map((item) => (
+                      <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.commandNames.join(", ")}>
+                        {item.updateAvailable && item.packageId ? (
+                          <Button variant="outline" isDisabled={Boolean(busy)} onPress={() => {
+                            const available = snapshot?.packages.find((pkg) => pkg.id === item.packageId);
+                            if (available) install(available);
+                          }}>Update</Button>
+                        ) : null}
+                        <Button variant="ghost" onPress={() => setDetail({ kind: "installed", value: item })}>Details</Button>
+                        <Button aria-label={`Remove ${item.name}`} variant="danger-soft" isDisabled={Boolean(busy)} onPress={() => { setError(undefined); setRemoval({ kind: "package", value: item }); }}>Remove</Button>
+                      </PackageRow>
+                    ))}
+                  </ul>
+                ) : (
+                  <PackageEmpty title={snapshot?.installed.length ? "No Matching Packages" : "No Packages Installed"} description={snapshot?.installed.length ? "Try another search or package type." : "Browse the catalog or import a signed package to get started."}>
+                    {!snapshot?.installed.length ? <Button onPress={() => setTab("install")}>Browse Packages</Button> : null}
+                  </PackageEmpty>
+                )}
+              </ScrollShadow>
             </div>
           </Tabs.Panel>
 
-          <Tabs.Panel id="install" className="pt-6">
-            <div className="space-y-6">
-              <SectionHeading title="Package Catalog" description={snapshot?.refreshedAt ? `Last refreshed ${formatDate(snapshot.refreshedAt)}.` : "Browse packages from your enabled Armory sources."}>
-                <Button variant="ghost" isDisabled={!api || Boolean(busy)} onPress={() => { setError(undefined); setLocalImport(true); }}>Import Signed Package</Button>
-                <Button variant="outline" isDisabled={!api || Boolean(busy)} onPress={() => { if (api) void perform("Refreshing Catalog", () => api.refreshCatalog(), "Package catalog refreshed."); }}>Refresh Catalog</Button>
-              </SectionHeading>
-              <PackageFilters query={query} filter={filter} onQuery={setQuery} onFilter={setFilter} includeBundles />
-              {snapshot?.sources.some((source) => source.error) ? <Notice tone="warning" title="Some Sources Could Not Be Refreshed">
-                <ul className="space-y-1">{snapshot.sources.filter((source) => source.error).map((source) => <li key={source.id}>{source.name}: {source.error}</li>)}</ul>
-                <Button className="mt-3" size="sm" variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button>
-              </Notice> : null}
-              <p className="flex items-center gap-2 text-xs text-muted"><FontAwesomeIcon aria-hidden icon={faShieldHalved} className="text-success" />Package signatures are verified before installation.</p>
-              {loading && !snapshot ? <Loading /> : packages.length + bundles.length > 0 ? (
-                <ul aria-label="Available packages" className="divide-y divide-separator">
-                  {packages.map((item) => (
-                    <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.sourceName}>
-                      {item.error ? <span className="max-w-56 break-words text-xs text-danger">{item.error}</span> : null}
-                      <Button variant="ghost" onPress={() => setDetail({ kind: "catalog", value: item })}>Details</Button>
-                      <Button aria-label={`${item.installedId ? item.updateAvailable ? "Update" : "Installed" : "Install"} ${item.name}`} variant={item.installedId ? "outline" : "primary"} isDisabled={Boolean(busy) || Boolean(item.error) || Boolean(item.installedId && !item.updateAvailable)} onPress={() => install(item)}>
-                        {item.installedId ? item.updateAvailable ? "Update" : "Installed" : "Install"}
-                      </Button>
-                    </PackageRow>
-                  ))}
-                  {bundles.map((item) => <BundleRow key={item.id} item={item} disabled={Boolean(busy)} onInstall={() => { if (api) void perform(`Installing ${item.name}`, () => api.installBundle({ bundleId: item.id }), `${item.name} installed.`); }} />)}
-                </ul>
-              ) : (
-                <PackageEmpty title={busy ? "Refreshing Package Catalog" : "No Packages Found"} description={busy ? "Fetching package information from your enabled sources." : query || filter !== "all" ? "Try another search or package type." : "Refresh the catalog or add an Armory source."}>
-                  {!busy && !query && filter === "all" ? <Button variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button> : null}
-                </PackageEmpty>
-              )}
+          <Tabs.Panel id="install" className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden pt-0">
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="shrink-0 space-y-2" data-testid="armory-install-controls">
+                <SectionHeading title="Package Catalog" description={snapshot?.refreshedAt ? `Last refreshed ${formatDate(snapshot.refreshedAt)}.` : "Browse packages from your enabled Armory sources."}>
+                  <Button variant="ghost" isDisabled={!api || Boolean(busy)} onPress={() => { setError(undefined); setLocalImport(true); }}>Import Signed Package</Button>
+                  <Button variant="outline" isDisabled={!api || Boolean(busy)} onPress={() => { if (api) void perform("Refreshing Catalog", () => api.refreshCatalog(), "Package catalog refreshed."); }}>Refresh Catalog</Button>
+                </SectionHeading>
+                <PackageFilters query={query} filter={filter} onQuery={setQuery} onFilter={setFilter} includeBundles />
+                {snapshot?.sources.some((source) => source.error) ? <Notice tone="warning" title="Some Sources Could Not Be Refreshed">
+                  <ul className="space-y-1">{snapshot.sources.filter((source) => source.error).map((source) => <li key={source.id}>{source.name}: {source.error}</li>)}</ul>
+                  <Button className="mt-3" size="sm" variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button>
+                </Notice> : null}
+                <p className="flex items-center gap-2 text-xs text-muted"><FontAwesomeIcon aria-hidden icon={faShieldHalved} className="text-success" />Package signatures are verified before installation.</p>
+              </div>
+              <ScrollShadow key={availableResultsKey} aria-label="Available package results" className="-mx-1 h-0 max-h-full min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 pb-1" data-testid="armory-install-scroll" role="region" tabIndex={0}>
+                {loading && !snapshot ? <Loading /> : packages.length + bundles.length > 0 ? (
+                  <ul aria-label="Available packages" className="divide-y divide-separator">
+                    {packages.map((item) => (
+                      <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.sourceName}>
+                        {item.error ? <span className="max-w-56 break-words text-xs text-danger">{item.error}</span> : null}
+                        <Button variant="ghost" onPress={() => setDetail({ kind: "catalog", value: item })}>Details</Button>
+                        <Button aria-label={`${item.installedId ? item.updateAvailable ? "Update" : "Installed" : "Install"} ${item.name}`} variant={item.installedId ? "outline" : "primary"} isDisabled={Boolean(busy) || Boolean(item.error) || Boolean(item.installedId && !item.updateAvailable)} onPress={() => install(item)}>
+                          {item.installedId ? item.updateAvailable ? "Update" : "Installed" : "Install"}
+                        </Button>
+                      </PackageRow>
+                    ))}
+                    {bundles.map((item) => <BundleRow key={item.id} item={item} disabled={Boolean(busy)} onInstall={() => { if (api) void perform(`Installing ${item.name}`, () => api.installBundle({ bundleId: item.id }), `${item.name} installed.`); }} />)}
+                  </ul>
+                ) : (
+                  <PackageEmpty title={busy ? "Refreshing Package Catalog" : "No Packages Found"} description={busy ? "Fetching package information from your enabled sources." : query || filter !== "all" ? "Try another search or package type." : "Refresh the catalog or add an Armory source."}>
+                    {!busy && !query && filter === "all" ? <Button variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button> : null}
+                  </PackageEmpty>
+                )}
+              </ScrollShadow>
             </div>
           </Tabs.Panel>
 
-          <Tabs.Panel id="sources" className="pt-6">
+          <Tabs.Panel id="sources" className="mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain pt-0">
             <div className="space-y-6">
               <SectionHeading title="Armory Sources" description="Repository URLs and trusted public keys shared with the console's Armory configuration.">
                 <Button isDisabled={!api || Boolean(busy)} onPress={() => { setError(undefined); setSourceEditor("new"); }}>Add Source</Button>
@@ -316,7 +336,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
           </Tabs.Panel>
         </Tabs>
 
-        {snapshot ? <footer className="mt-auto break-all pt-6 text-xs text-muted">Shared directory: <span className="font-mono">{snapshot.rootPath}</span></footer> : null}
+        {snapshot ? <footer className="shrink-0 truncate text-xs text-muted" title={snapshot.rootPath}>Shared directory: <span className="font-mono">{snapshot.rootPath}</span></footer> : null}
       </div>
 
       {busy ? <div role="status" className="fixed bottom-5 left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-full bg-overlay px-5 py-3 text-sm text-overlay-foreground shadow-overlay"><Spinner size="sm" /><span className="truncate">{busy}…</span></div> : null}
@@ -349,7 +369,7 @@ function PackageFilters({ query, filter, onQuery, onFilter, includeBundles = fal
 }
 
 function SectionHeading({ title, description, children }: { title: string; description: string; children?: ReactNode }): React.JSX.Element {
-  return <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0 max-w-xl"><h2 className="text-lg font-semibold">{title}</h2><p className="mt-1 text-sm leading-6 text-muted">{description}</p></div><div className="flex flex-wrap items-center gap-2">{children}</div></div>;
+  return <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0 max-w-xl"><h2 className="text-lg font-semibold">{title}</h2><p className="mt-1 text-sm leading-5 text-muted">{description}</p></div><div className="flex flex-wrap items-center gap-2">{children}</div></div>;
 }
 
 function PackageRow({ name, kind, version, description, secondary, children }: { name: string; kind: ArmoryPackageKind | "bundle"; version: string; description: string; secondary: string; children: ReactNode }): React.JSX.Element {
@@ -372,7 +392,7 @@ function Loading(): React.JSX.Element {
 }
 
 function Notice({ tone, title, children }: { tone: "danger" | "warning"; title: string; children: ReactNode }): React.JSX.Element {
-  return <Alert status={tone}><Alert.Indicator /><Alert.Content><Alert.Title>{title}</Alert.Title><Alert.Description className="break-words">{children}</Alert.Description></Alert.Content></Alert>;
+  return <Alert className="shrink-0" status={tone}><Alert.Indicator /><Alert.Content><Alert.Title>{title}</Alert.Title><Alert.Description className="break-words">{children}</Alert.Description></Alert.Content></Alert>;
 }
 
 function SourceEditor({ source, busy, error, onClose, onSave }: { source: ArmorySource | undefined; busy: boolean; error: string | undefined; onClose: () => void; onSave: (input: ArmorySaveSourceInput) => Promise<boolean> }): React.JSX.Element {
@@ -424,6 +444,8 @@ function PackageDetails({ detail, onClose }: { detail: Detail; onClose: () => vo
     <Modal.Body className="space-y-5"><div className="flex items-center gap-3"><Chip variant="soft">{kindLabel(item.kind)}</Chip><span className="text-sm tabular-nums text-muted">{item.version || "Version unspecified"}</span></div>
       <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted">{item.description || "No description provided."}</p>
       <dl className="space-y-4 text-sm"><DetailField label="Commands" value={detail.kind === "installed" ? detail.value.commandNames.join(", ") : detail.value.commandName} />
+        {item.originalAuthor ? <DetailField label="Original Author" value={item.originalAuthor} /> : null}
+        {item.kind !== "alias" && item.extensionAuthor ? <DetailField label="Extension Author" value={item.extensionAuthor} /> : null}
         <DetailField label="Repository" value={item.repoUrl || "Not recorded"} />
         {detail.kind === "installed" ? <DetailField label="Installed Directory" value={detail.value.installPath} /> : <><DetailField label="Source" value={detail.value.sourceName} /><DetailField label="Package Public Key" value={detail.value.publicKey} /></>}
       </dl>

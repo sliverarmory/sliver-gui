@@ -18,6 +18,7 @@ test("Armory shares local console packages through an isolated native window", {
     await writeFile(join(clientRoot, "armories.json"), "[]", { mode: 0o600 });
     const manifest = Buffer.from(JSON.stringify({
       name: "Fixture BOF", command_name: "fixture-bof", version: "1.0.0", help: "Harmless package fixture",
+      original_author: "Fixture Original Author", extension_author: "Fixture Extension Author",
       files: [{ os: "windows", arch: "amd64", path: "/fixture.x64.o" }],
     }));
     const artifact = Buffer.from("inert test fixture; never executed");
@@ -77,16 +78,56 @@ test("Armory shares local console packages through an isolated native window", {
     await armory.locator('[role="tab"][aria-selected="true"]', { hasText: "Sources" }).waitFor();
     await menu(application, "armory.manage");
     await armory.getByText("fixture-bof", { exact: true }).first().waitFor();
-    // Simulate the console installing an alias using its native on-disk schema.
-    const aliasPath = join(clientRoot, "aliases", "console-alias");
-    await mkdir(aliasPath, { recursive: true });
-    await writeFile(join(aliasPath, "alias.json"), JSON.stringify({
-      name: "Console Alias", command_name: "console-alias", version: "1.2.0", help: "Installed by console fixture",
-      files: [{ os: "linux", arch: "amd64", path: "/payload" }],
-    }));
-    await writeFile(join(aliasPath, "payload"), "inert fixture");
+    const fixtureRow = armory.getByRole("list", { name: "Installed packages" }).getByRole("listitem").filter({ hasText: "fixture-bof" });
+    await fixtureRow.getByRole("button", { name: "Details", exact: true }).click();
+    const details = armory.getByRole("dialog", { name: "fixture-bof", exact: true });
+    await details.getByText("Fixture Original Author", { exact: true }).waitFor();
+    await details.getByText("Fixture Extension Author", { exact: true }).waitFor();
+    await details.getByRole("button", { name: "Close", exact: true }).click();
+    await details.waitFor({ state: "hidden" });
+    // Simulate the console installing aliases using its native on-disk schema.
+    // Enough rows are included to exercise the bounded package-results viewport.
+    const aliases = [
+      { directory: "console-alias", name: "Console Alias", commandName: "console-alias" },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        directory: `scroll-fixture-${index + 1}`,
+        name: `Scroll Fixture ${String(index + 1).padStart(2, "0")}`,
+        commandName: `scroll-fixture-${index + 1}`,
+      })),
+    ];
+    for (const alias of aliases) {
+      const aliasPath = join(clientRoot, "aliases", alias.directory);
+      await mkdir(aliasPath, { recursive: true });
+      await writeFile(join(aliasPath, "alias.json"), JSON.stringify({
+        name: alias.name, command_name: alias.commandName, version: "1.2.0", help: "Installed by console fixture",
+        files: [{ os: "linux", arch: "amd64", path: "/payload" }],
+      }));
+      await writeFile(join(aliasPath, "payload"), "inert fixture");
+    }
     await armory.evaluate(() => (globalThis as unknown as { dispatchEvent(event: Event): boolean }).dispatchEvent(new Event("focus")));
     await armory.getByText("Console Alias", { exact: true }).first().waitFor();
+    const packageResults = armory.getByRole("region", { name: "Installed package results" });
+    await armory.waitForFunction(() => {
+      const browser = globalThis as unknown as { document: { querySelector(selector: string): {
+        clientHeight: number; scrollHeight: number; dataset: Record<string, string | undefined>;
+      } | null } };
+      const region = browser.document.querySelector('[data-testid="armory-manage-scroll"]');
+      return Boolean(region && region.clientHeight > 0 && region.scrollHeight > region.clientHeight && region.dataset["bottomScroll"] === "true");
+    });
+    const controls = armory.getByTestId("armory-manage-controls");
+    const controlsBefore = await controls.boundingBox();
+    assert.ok(controlsBefore);
+    await packageResults.evaluate((region) => { region.scrollTop = region.scrollHeight; region.dispatchEvent(new Event("scroll")); });
+    await armory.waitForFunction(() => {
+      const browser = globalThis as unknown as { document: { querySelector(selector: string): {
+        scrollTop: number; dataset: Record<string, string | undefined>;
+      } | null } };
+      const region = browser.document.querySelector('[data-testid="armory-manage-scroll"]');
+      return Boolean(region && region.scrollTop > 0 && region.dataset["topScroll"] === "true");
+    });
+    const controlsAfter = await controls.boundingBox();
+    assert.ok(controlsAfter);
+    assert.equal(controlsAfter.y, controlsBefore.y);
     const snapshot = await armory.evaluate(() => (globalThis as unknown as { armory: ArmoryAPI }).armory.snapshot());
     assert.ok(snapshot.ok && snapshot.value);
     const bof = snapshot.value.installed.find((item) => item.name === "fixture-bof");

@@ -22,6 +22,8 @@ export interface ArmoryInstalledPackage {
   readonly kind: ArmoryPackageKind;
   readonly version: string;
   readonly description: string;
+  readonly originalAuthor?: string;
+  readonly extensionAuthor?: string;
   readonly repoUrl: string;
   readonly installPath: string;
   readonly packageId?: string;
@@ -37,6 +39,8 @@ export interface ArmoryPackage {
   readonly kind: ArmoryPackageKind;
   readonly version: string;
   readonly description: string;
+  readonly originalAuthor?: string;
+  readonly extensionAuthor?: string;
   readonly repoUrl: string;
   readonly publicKey: string;
   readonly installedId?: string;
