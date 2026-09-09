@@ -1,18 +1,19 @@
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { Arch } from "electron-builder";
-
 import { prepareNodePtyRuntime, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
 
-const CONCRETE_ARCHITECTURES = new Set(["ia32", "x64", "armv7l", "arm64"]);
+// Electron Builder passes its stable numeric Arch enum to beforePack hooks.
+// Keep this hook dependency-free because protocol CI intentionally installs
+// production dependencies only before exercising the packaging helpers.
+const ARCHITECTURES = Object.freeze(["ia32", "x64", "armv7l", "arm64"]);
 
 export default async function stageNodePtyBeforePack(context, dependencies = {}) {
   const stageRuntime = dependencies.stageNodePtyRuntimeForElectron ?? stageNodePtyRuntimeForElectron;
-  const arch = Number.isInteger(context?.arch) ? Arch[context.arch] : undefined;
+  const arch = Number.isInteger(context?.arch) ? ARCHITECTURES[context.arch] : undefined;
   const platform = context?.electronPlatformName;
   const appDirectory = context?.packager?.info?.appDir;
-  if (!CONCRETE_ARCHITECTURES.has(arch) || typeof platform !== "string" || typeof appDirectory !== "string") {
+  if (typeof arch !== "string" || typeof platform !== "string" || typeof appDirectory !== "string") {
     throw new Error("Electron Builder supplied an invalid node-pty staging context");
   }
 
