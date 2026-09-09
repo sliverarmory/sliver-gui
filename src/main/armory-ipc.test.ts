@@ -29,6 +29,7 @@ const SNAPSHOT: ArmorySnapshot = {
 };
 const currentWindow = { isDestroyed: vi.fn(() => false) } as unknown as BrowserWindow;
 const IDENTITY: TrustedWindowIdentity = { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" };
+const CANONICAL_PUBLIC_KEY = Buffer.concat([Buffer.from("Ed", "ascii"), Buffer.alloc(40, 0x2a)]).toString("base64");
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -79,6 +80,107 @@ describe("Armory IPC boundary", () => {
     expect(authorize).toHaveBeenCalledWith(IDENTITY, currentWindow);
   });
 
+  it("copies a validated public key from the trusted Armory main frame without publishing a mutation", async () => {
+    const services = servicesMock();
+    const authorize = vi.fn(authorizeCurrentWindow);
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorize);
+    await expect(invoke(ARMORY_IPC_INVOKE.copyPublicKey, invokeEvent().event, { publicKey: `  ${CANONICAL_PUBLIC_KEY}  ` }))
+      .resolves.toEqual({ ok: true });
+    expect(authorize).toHaveBeenCalledExactlyOnceWith(IDENTITY, currentWindow);
+    expect(services.writeClipboardText).toHaveBeenCalledExactlyOnceWith(CANONICAL_PUBLIC_KEY);
+    expect(authorize.mock.invocationCallOrder[0]).toBeLessThan(services.writeClipboardText.mock.invocationCallOrder[0]!);
+    expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it("rejects an untrusted public-key copy before reading its input", async () => {
+    const services = servicesMock();
+    registerArmoryIpcHandlers(services, RENDERER_URL, () => false);
+    const readPublicKey = vi.fn(() => CANONICAL_PUBLIC_KEY);
+    const input = Object.defineProperty({}, "publicKey", { enumerable: true, get: readPublicKey });
+    await expect(invoke(ARMORY_IPC_INVOKE.copyPublicKey, invokeEvent().event, input))
+      .resolves.toEqual({ ok: false, error: "Untrusted Armory renderer" });
+    expect(readPublicKey).not.toHaveBeenCalled();
+    expect(services.writeClipboardText).not.toHaveBeenCalled();
+    expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "trusted-public-key",
+    `RWQ\u202e${CANONICAL_PUBLIC_KEY.slice(3)}`,
+  ])("rejects a non-Minisign package public key without writing it: %s", async (publicKey) => {
+    const services = servicesMock();
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(ARMORY_IPC_INVOKE.copyPublicKey, invokeEvent().event, { publicKey }))
+      .resolves.toEqual({ ok: false, error: "The package public key is invalid" });
+    expect(services.writeClipboardText).not.toHaveBeenCalled();
+    expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes clipboard failures", async () => {
+    const services = servicesMock();
+    services.writeClipboardText.mockImplementationOnce(() => { throw new Error("PRIVATE_CLIPBOARD_FAILURE"); });
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(ARMORY_IPC_INVOKE.copyPublicKey, invokeEvent().event, { publicKey: CANONICAL_PUBLIC_KEY }))
+      .resolves.toEqual({ ok: false, error: "The public key could not be copied to the clipboard" });
+    expect(services.writeClipboardText).toHaveBeenCalledExactlyOnceWith(CANONICAL_PUBLIC_KEY);
+    expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["https://example.test/repo", "https://example.test/repo"],
+    ["http://example.test/repo", "http://example.test/repo"],
+    [" HTTPS://Example.test:443/repo?tab=readme#overview ", "https://example.test/repo?tab=readme#overview"],
+    ["http://localhost:8080/repo", "http://localhost:8080/repo"],
+    ["https://[::1]:8443/repo", "https://[::1]:8443/repo"],
+  ])("validates and canonicalizes repository URL %s in main before opening the browser", async (url, expected) => {
+    const services = servicesMock();
+    const authorize = vi.fn(authorizeCurrentWindow);
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorize);
+    await expect(invoke(ARMORY_IPC_INVOKE.openRepository, invokeEvent().event, { url })).resolves.toEqual({ ok: true });
+    expect(authorize).toHaveBeenCalledExactlyOnceWith(IDENTITY, currentWindow);
+    expect(services.openExternal).toHaveBeenCalledExactlyOnceWith(expected);
+    expect(authorize.mock.invocationCallOrder[0]).toBeLessThan(services.openExternal.mock.invocationCallOrder[0]!);
+    expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "javascript:alert(1)", "data:text/html,test", "file:///tmp/repository", "ftp://example.test/repo", "sliver://app/index.html",
+    "//example.test/repo", "/repo", "example.test/repo", "https://", "https://example.test:65536/repo", "https://bad host/repo",
+    "https://username:password@example.test/repo", "https://username@example.test/repo", "https://:password@example.test/repo",
+    "https://@example.test/repo", "https:example.test", "https:/example.test", "https:///example.test", "http:\\example.test",
+    "https://exam\tple.test/repo", "https://exam\nple.test/repo", "https://example.test\\repo",
+  ])("rejects invalid repository target %s without opening anything", async (url) => {
+    const services = servicesMock();
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(ARMORY_IPC_INVOKE.openRepository, invokeEvent().event, { url })).resolves.toMatchObject({ ok: false });
+    expect(services.openExternal).not.toHaveBeenCalled();
+    expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it.each(["asynchronous", "synchronous"])("returns a safe failure after %s browser rejection", async (failure) => {
+    const services = servicesMock();
+    services.openExternal.mockImplementation(() => {
+      if (failure === "synchronous") throw new Error("PRIVATE_BROWSER_FAILURE");
+      return Promise.reject(new Error("PRIVATE_BROWSER_FAILURE"));
+    });
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(ARMORY_IPC_INVOKE.openRepository, invokeEvent().event, { url: "https://example.test/repo" }))
+      .resolves.toEqual({ ok: false, error: "The repository could not be opened in your browser" });
+    expect(services.openExternal).toHaveBeenCalledExactlyOnceWith("https://example.test/repo");
+  });
+
+  it("rejects untrusted repository callers before reading their input", async () => {
+    const services = servicesMock();
+    const authorize = vi.fn(() => false);
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorize);
+    const readUrl = vi.fn(() => "https://example.test/repo");
+    const input = Object.defineProperty({}, "url", { enumerable: true, get: readUrl });
+    await expect(invoke(ARMORY_IPC_INVOKE.openRepository, invokeEvent().event, input))
+      .resolves.toEqual({ ok: false, error: "Untrusted Armory renderer" });
+    expect(readUrl).not.toHaveBeenCalled();
+    expect(services.openExternal).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["workspace", "sliver://app/index.html"],
     ["another surface", "sliver://app/index.html?surface=network"],
@@ -95,8 +197,11 @@ describe("Armory IPC boundary", () => {
       else fixture.mainFrame.url = url;
       await expect(invoke(ARMORY_IPC_INVOKE.install, fixture.event, { packageId: "package" }))
         .resolves.toEqual({ ok: false, error: "Untrusted Armory renderer" });
+      await expect(invoke(ARMORY_IPC_INVOKE.openRepository, fixture.event, { url: "https://example.test/repo" }))
+        .resolves.toEqual({ ok: false, error: "Untrusted Armory renderer" });
     }
     expect(services.manager.install).not.toHaveBeenCalled();
+    expect(services.openExternal).not.toHaveBeenCalled();
     expect(services.changed).not.toHaveBeenCalled();
   });
 
@@ -106,6 +211,7 @@ describe("Armory IPC boundary", () => {
     registerArmoryIpcHandlers(services, RENDERER_URL, authorize);
     const reject = async (event: IpcMainInvokeEvent): Promise<void> => {
       await expect(invoke(ARMORY_IPC_INVOKE.snapshot, event)).resolves.toMatchObject({ ok: false });
+      await expect(invoke(ARMORY_IPC_INVOKE.openRepository, event, { url: "https://example.test/repo" })).resolves.toMatchObject({ ok: false });
     };
     const child = invokeEvent();
     Object.defineProperty(child.event, "senderFrame", { value: { ...child.mainFrame, frameToken: "child-frame" } });
@@ -122,15 +228,16 @@ describe("Armory IPC boundary", () => {
     const deadContents = invokeEvent();
     deadContents.sender.isDestroyed = () => true;
     await reject(deadContents.event);
-    vi.mocked(currentWindow.isDestroyed).mockReturnValueOnce(true);
+    vi.mocked(currentWindow.isDestroyed).mockReturnValueOnce(true).mockReturnValueOnce(true);
     await reject(invokeEvent().event);
-    electronMocks.fromWebContents.mockReturnValueOnce(null);
+    electronMocks.fromWebContents.mockReturnValueOnce(null).mockReturnValueOnce(null);
     await reject(invokeEvent().event);
-    electronMocks.fromWebContents.mockReturnValueOnce({ isDestroyed: () => false });
+    electronMocks.fromWebContents.mockReturnValueOnce({ isDestroyed: () => false }).mockReturnValueOnce({ isDestroyed: () => false });
     await reject(invokeEvent().event);
-    authorize.mockReturnValueOnce(false);
+    authorize.mockReturnValue(false);
     await reject(invokeEvent().event);
     expect(services.manager.snapshot).not.toHaveBeenCalled();
+    expect(services.openExternal).not.toHaveBeenCalled();
   });
 
   it("rejects malformed counts, unknown fields, filesystem paths and execution requests before dispatch", async () => {
@@ -149,11 +256,18 @@ describe("Armory IPC boundary", () => {
       [ARMORY_IPC_INVOKE.installLocal, [{ publicKey: "key", archivePath: "/tmp/arbitrary.tar.gz" }]],
       [ARMORY_IPC_INVOKE.installLocal, [{ publicKey: "key", signaturePath: "/tmp/arbitrary.minisig" }]],
       [ARMORY_IPC_INVOKE.installLocal, [{ publicKey: "key", execute: true }]],
+      [ARMORY_IPC_INVOKE.copyPublicKey, []], [ARMORY_IPC_INVOKE.copyPublicKey, [{ publicKey: "key" }, "extra"]],
+      [ARMORY_IPC_INVOKE.copyPublicKey, [{ publicKey: "key", channel: "arbitrary" }]],
+      [ARMORY_IPC_INVOKE.openRepository, []], [ARMORY_IPC_INVOKE.openRepository, [{ url: "https://example.test/repo" }, "extra"]],
+      [ARMORY_IPC_INVOKE.openRepository, [{ url: "https://example.test/repo", options: { activate: true } }]],
+      [ARMORY_IPC_INVOKE.openRepository, [{ url: "https://example.test/repo", channel: "arbitrary" }]],
     ];
     for (const [channel, args] of malformed) await expect(invoke(channel, event, ...args)).resolves.toMatchObject({ ok: false });
     for (const method of Object.values(services.manager)) expect(method).not.toHaveBeenCalled();
     expect(electronMocks.showOpenDialog).not.toHaveBeenCalled();
     expect(services.changed).not.toHaveBeenCalled();
+    expect(services.writeClipboardText).not.toHaveBeenCalled();
+    expect(services.openExternal).not.toHaveBeenCalled();
   });
 
   it("returns default settings for rejected reads without revealing service state", async () => {
@@ -268,6 +382,8 @@ function servicesMock() {
     getTab: vi.fn(() => "manage" as const),
     getApplicationSettings: vi.fn(() => DEFAULT_APPLICATION_SETTINGS_STATE),
     changed: vi.fn(),
+    writeClipboardText: vi.fn((_text: string) => undefined),
+    openExternal: vi.fn(async (_url: string) => undefined),
   } satisfies ArmoryIpcServices;
 }
 

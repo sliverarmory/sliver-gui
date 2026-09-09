@@ -12,6 +12,8 @@ test("Armory shares local console packages through an isolated native window", {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-armory-e2e-"));
   const clientRoot = join(temporaryRoot, "client");
+  const repositoryUrl = "HTTPS://Packages.Example/fixture-bof?tab=readme#overview";
+  const canonicalRepositoryUrl = "https://packages.example/fixture-bof?tab=readme#overview";
   let application: ElectronApplication | undefined;
   try {
     for (const name of ["saved", "managed", "user-data", "client"]) await mkdir(join(temporaryRoot, name));
@@ -19,6 +21,7 @@ test("Armory shares local console packages through an isolated native window", {
     const manifest = Buffer.from(JSON.stringify({
       name: "Fixture BOF", command_name: "fixture-bof", version: "1.0.0", help: "Harmless package fixture",
       original_author: "Fixture Original Author", extension_author: "Fixture Extension Author",
+      repo_url: repositoryUrl,
       files: [{ os: "windows", arch: "amd64", path: "/fixture.x64.o" }],
     }));
     const artifact = Buffer.from("inert test fixture; never executed");
@@ -83,6 +86,29 @@ test("Armory shares local console packages through an isolated native window", {
     const details = armory.getByRole("dialog", { name: "fixture-bof", exact: true });
     await details.getByText("Fixture Original Author", { exact: true }).waitFor();
     await details.getByText("Fixture Extension Author", { exact: true }).waitFor();
+    await application.evaluate(({ clipboard, shell }) => {
+      const state = globalThis as unknown as { __armoryClipboardWrites?: string[]; __armoryExternalUrls?: string[] };
+      state.__armoryClipboardWrites = [];
+      state.__armoryExternalUrls = [];
+      clipboard.writeText = (text) => { state.__armoryClipboardWrites?.push(text); };
+      shell.openExternal = async (url) => { state.__armoryExternalUrls?.push(url); };
+    });
+    const armoryUrl = armory.url();
+    const windowsBeforeRepositoryClick = application.windows().length;
+    await details.getByRole("link", { name: `${repositoryUrl} (opens in browser)`, exact: true }).click();
+    const copyResult = await armory.evaluate((publicKey) =>
+      (globalThis as unknown as { armory: ArmoryAPI }).armory.copyPublicKey({ publicKey }), key);
+    const nativeEffects = await application.evaluate(async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const state = globalThis as unknown as { __armoryClipboardWrites?: string[]; __armoryExternalUrls?: string[] };
+      return { clipboardWrites: state.__armoryClipboardWrites ?? [], externalUrls: state.__armoryExternalUrls ?? [] };
+    });
+    assert.deepEqual(copyResult, { ok: true });
+    assert.deepEqual(nativeEffects.clipboardWrites, [key]);
+    assert.deepEqual(nativeEffects.externalUrls, [canonicalRepositoryUrl]);
+    assert.equal(armory.url(), armoryUrl);
+    assert.equal(application.windows().length, windowsBeforeRepositoryClick);
+    assert.equal(await details.isVisible(), true);
     await details.getByRole("button", { name: "Close", exact: true }).click();
     await details.waitFor({ state: "hidden" });
     // Simulate the console installing aliases using its native on-disk schema.

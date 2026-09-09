@@ -5,8 +5,10 @@ import {
   ARMORY_IPC_INVOKE,
   isArmoryTab,
   parseArmoryChooseLocalInput,
+  parseArmoryCopyPublicKeyInput,
   parseArmoryInstallBundleInput,
   parseArmoryInstallInput,
+  parseArmoryOpenRepositoryInput,
   parseArmoryRemoveSourceInput,
   parseArmorySaveSourceInput,
   parseArmoryUninstallInput,
@@ -42,6 +44,8 @@ describe("Armory contracts", () => {
     expect(parseArmoryRemoveSourceInput({ sourceId: "source" })).toEqual({ sourceId: "source" });
     expect(parseArmoryChooseLocalInput({ publicKey: "trusted-public-key", replace: true }))
       .toEqual({ publicKey: "trusted-public-key", replace: true });
+    expect(parseArmoryCopyPublicKeyInput({ publicKey: "trusted-public-key" }))
+      .toEqual({ publicKey: "trusted-public-key" });
   });
 
   const parsers = [
@@ -50,6 +54,7 @@ describe("Armory contracts", () => {
     ["uninstall", parseArmoryUninstallInput, { installedId: "installed" }, "installedId"],
     ["remove source", parseArmoryRemoveSourceInput, { sourceId: "source" }, "sourceId"],
     ["local install", parseArmoryChooseLocalInput, { publicKey: "key" }, "publicKey"],
+    ["public key copy", parseArmoryCopyPublicKeyInput, { publicKey: "key" }, "publicKey"],
   ] as const;
 
   it.each(parsers)("rejects malformed %s requests before reaching native services", (_label, parse, input, required) => {
@@ -69,6 +74,19 @@ describe("Armory contracts", () => {
       expect(() => parseArmoryInstallInput({ packageId: "package", replace })).toThrow(TypeError);
       expect(() => parseArmoryInstallBundleInput({ bundleId: "bundle", replace })).toThrow(TypeError);
       expect(() => parseArmoryChooseLocalInput({ publicKey: "key", replace })).toThrow(TypeError);
+    }
+  });
+
+  it("accepts only a single bounded URL field for repository requests", () => {
+    expect(parseArmoryOpenRepositoryInput({ url: "https://example.test/repo" })).toEqual({ url: "https://example.test/repo" });
+    for (const value of [undefined, null, [], "https://example.test/repo", 1, true, {}]) {
+      expect(() => parseArmoryOpenRepositoryInput(value)).toThrow(TypeError);
+    }
+    for (const url of [undefined, null, 1, "", "  ", "a\nvalue", "a\0value", "a\u007fvalue", "a".repeat(2049)]) {
+      expect(() => parseArmoryOpenRepositoryInput({ url })).toThrow(TypeError);
+    }
+    for (const extra of [{ channel: "arbitrary" }, { execute: true }, { options: {} }, { path: "/tmp/file" }]) {
+      expect(() => parseArmoryOpenRepositoryInput({ url: "https://example.test/repo", ...extra })).toThrow(TypeError);
     }
   });
 

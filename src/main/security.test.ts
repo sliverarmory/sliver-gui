@@ -401,6 +401,14 @@ describe("Electron BrowserWindow hardening", () => {
     navigate?.(differentSurface, `${rendererUrl}?surface=interaction`);
     expect(differentSurface.preventDefault).toHaveBeenCalledOnce();
 
+    const frameNavigation = handlers.get("will-frame-navigate");
+    const allowedFrame = { url: `${cloudUrl}#placeholder`, preventDefault: vi.fn() };
+    frameNavigation?.(allowedFrame);
+    expect(allowedFrame.preventDefault).not.toHaveBeenCalled();
+    const differentFrame = { url: `${rendererUrl}?surface=interaction`, preventDefault: vi.fn() };
+    frameNavigation?.(differentFrame);
+    expect(differentFrame.preventDefault).toHaveBeenCalledOnce();
+
     expect(isSameRendererDocument(`sliver://user@app/index.html?surface=cloud-deployment`, cloudUrl)).toBe(false);
     expect(isSameRendererDocument(`sliver://other/index.html?surface=cloud-deployment`, cloudUrl)).toBe(false);
     expect(isSameRendererDocument(`sliver://app:123/index.html?surface=cloud-deployment`, cloudUrl)).toBe(false);

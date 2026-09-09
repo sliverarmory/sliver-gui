@@ -189,7 +189,8 @@ This deliberately avoids Vite's inline React refresh bootstrap and HMR
 WebSocket so the renderer can keep the production content security policy;
 restart the command after source changes.
 
-The renderer runs at `sliver://app/index.html`, following Electron's
+The renderer always runs at `sliver://app/index.html`, including development;
+`ELECTRON_RENDERER_URL` cannot override its URL. This follows Electron's
 [custom protocol guidance](https://www.electronjs.org/docs/latest/tutorial/security#18-avoid-usage-of-the-file-protocol-and-prefer-usage-of-custom-protocols).
 The static handler serves regular files only from the built renderer directory,
 including inside ASAR packages, and checks resolved paths to reject symlink
@@ -213,6 +214,7 @@ npm run parity:check
 npm run build:console
 npm run test:e2e:electron
 npm run test:e2e:protocol
+npm run test:e2e:navigation
 npm run test:e2e:m1
 npm run build
 npm run package
@@ -439,8 +441,20 @@ packaged executable before launch.
   Ghostty runtime. Inline scripts, `unsafe-eval`, event handlers, workers,
   remote connections, objects, and frames remain blocked; `connect-src` and
   `worker-src` remain `none`.
-- Navigation, new windows, device access, and all unrelated permissions are
-  denied. The session grants only `clipboard-read` and
+- Global hooks installed before creating application windows restrict every
+  window and view to `sliver://app/index.html` (including surface queries and
+  hash routes). Frame navigation, redirects, document requests, popups, and
+  webview attachment are guarded, including in newly created session partitions.
+  Embedded frame documents are denied, matching the renderer's existing CSP.
+  A session-wide isolated preload also cancels no-request navigation such as
+  `about:blank` before it can replace an application document.
+  Main-process `loadURL` calls are validated before dispatch and `loadFile`
+  is rejected so blocked loads do not replace the current application document.
+  Utility windows retain their stricter surface restrictions. Electron's bundled
+  DevTools frontend remains available; documentation and cloud sign-in open in
+  the system browser. Downloads and main-process API requests are unaffected.
+- Device access and all unrelated permissions are denied. The session grants
+  only `clipboard-read` and
   `clipboard-sanitized-write` to the exact trusted main frame for the explicit
   operator Copy/Paste controls, which also require active user interaction.
   IPC accepts only that renderer URL, frame, and owning BrowserWindow.

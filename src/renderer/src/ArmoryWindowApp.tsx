@@ -6,6 +6,7 @@ import {
   Chip,
   Input,
   Label,
+  Link,
   Modal,
   ScrollShadow,
   SearchField,
@@ -13,9 +14,21 @@ import {
   Switch,
   Tabs,
   TextField,
+  toast,
 } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faBoxOpen, faMagnifyingGlass, faShieldHalved } from "@fortawesome/free-solid-svg-icons";
+import {
+  faBoxOpen,
+  faCodeBranch,
+  faFolderOpen,
+  faGlobe,
+  faKey,
+  faMagnifyingGlass,
+  faShieldHalved,
+  faTerminal,
+  faUser,
+  faUserPen,
+} from "@fortawesome/free-solid-svg-icons";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type {
@@ -37,6 +50,16 @@ type PackageFilter = "all" | ArmoryPackageKind | "bundle";
 type Removal = { kind: "package"; value: ArmoryInstalledPackage } | { kind: "source"; value: ArmorySource };
 type Detail = { kind: "installed"; value: ArmoryInstalledPackage } | { kind: "catalog"; value: ArmoryPackage };
 type Operation = () => Promise<OperationResult<ArmorySnapshot>>;
+const ARMORY_SUCCESS_TOAST_TIMEOUT_MS = 20_000;
+const DETAIL_FIELD_ICONS = {
+  Commands: faTerminal,
+  "Original Author": faUser,
+  "Extension Author": faUserPen,
+  Repository: faCodeBranch,
+  "Installed Directory": faFolderOpen,
+  Source: faGlobe,
+  "Package Public Key": faKey,
+} as const;
 
 export function ArmoryWindowApp(): React.JSX.Element {
   const api = window.armory;
@@ -46,7 +69,6 @@ export function ArmoryWindowApp(): React.JSX.Element {
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const [loadError, setLoadError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PackageFilter>("all");
   const [sourceEditor, setSourceEditor] = useState<ArmorySource | "new">();
@@ -58,6 +80,15 @@ export function ArmoryWindowApp(): React.JSX.Element {
   const mounted = useRef(false);
   const refreshAfterOperation = useRef(false);
   const autoRefreshed = useRef(false);
+  const successToastIds = useRef(new Set<string>());
+
+  useEffect(() => {
+    const activeToastIds = successToastIds.current;
+    return () => {
+      for (const toastId of activeToastIds) toast.close(toastId);
+      activeToastIds.clear();
+    };
+  }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!api) return;
@@ -85,14 +116,19 @@ export function ArmoryWindowApp(): React.JSX.Element {
     ++loadGeneration.current;
     setBusy(label);
     setError(undefined);
-    setNotice(undefined);
     try {
       const result = await operation();
       if (!result.ok) throw new Error(result.error ?? "The Armory operation could not be completed.");
       // Cancelling the main-owned file chooser returns success without a snapshot.
       if (mounted.current && result.value) {
         setSnapshot(result.value);
-        if (success) setNotice(success);
+        if (success) {
+          const toastId = toast.success(success, {
+            timeout: ARMORY_SUCCESS_TOAST_TIMEOUT_MS,
+            onClose: () => { successToastIds.current.delete(toastId); },
+          });
+          successToastIds.current.add(toastId);
+        }
       }
       return true;
     } catch (caught) {
@@ -215,7 +251,6 @@ export function ArmoryWindowApp(): React.JSX.Element {
         </header>
 
         {error || loadError ? <Notice tone="danger" title="Armory Could Not Complete the Request">{error ?? loadError}</Notice> : null}
-        {notice ? <p role="status" className="shrink-0 text-sm text-success">{notice}</p> : null}
         {snapshot?.warnings.length ? (
           <Notice tone="warning" title="Some Armory Data Is Unavailable">
             {snapshot.warnings.length === 1 ? snapshot.warnings[0] : (
@@ -439,6 +474,19 @@ function LocalImportDialog({ busy, error, onClose, onImport }: { busy: boolean; 
 
 function PackageDetails({ detail, onClose }: { detail: Detail; onClose: () => void }): React.JSX.Element {
   const item = detail.value;
+  const repositoryHref = safeRepositoryHref(item.repoUrl);
+  const [repositoryError, setRepositoryError] = useState<string>();
+  const openRepository = async (): Promise<void> => {
+    if (!repositoryHref) return;
+    setRepositoryError(undefined);
+    try {
+      if (!window.armory) throw new Error("The Armory bridge is unavailable in this window.");
+      const result = await window.armory.openRepository({ url: repositoryHref });
+      if (!result.ok) throw new Error(result.error ?? "The repository could not be opened in your browser.");
+    } catch (caught) {
+      setRepositoryError(errorMessage(caught));
+    }
+  };
   return <Modal.Backdrop isOpen variant="blur" onOpenChange={(open) => { if (!open) onClose(); }}><Modal.Container size="md"><Modal.Dialog>
     <Modal.Header><Modal.Heading>{item.name}</Modal.Heading></Modal.Header>
     <Modal.Body className="space-y-5"><div className="flex items-center gap-3"><Chip variant="soft">{kindLabel(item.kind)}</Chip><span className="text-sm tabular-nums text-muted">{item.version || "Version unspecified"}</span></div>
@@ -446,15 +494,79 @@ function PackageDetails({ detail, onClose }: { detail: Detail; onClose: () => vo
       <dl className="space-y-4 text-sm"><DetailField label="Commands" value={detail.kind === "installed" ? detail.value.commandNames.join(", ") : detail.value.commandName} />
         {item.originalAuthor ? <DetailField label="Original Author" value={item.originalAuthor} /> : null}
         {item.kind !== "alias" && item.extensionAuthor ? <DetailField label="Extension Author" value={item.extensionAuthor} /> : null}
-        <DetailField label="Repository" value={item.repoUrl || "Not recorded"} />
-        {detail.kind === "installed" ? <DetailField label="Installed Directory" value={detail.value.installPath} /> : <><DetailField label="Source" value={detail.value.sourceName} /><DetailField label="Package Public Key" value={detail.value.publicKey} /></>}
+        <DetailField label="Repository" value={repositoryHref ? (
+          <Link
+            aria-label={`${item.repoUrl} (opens in browser)`}
+            className="break-all"
+            href={repositoryHref}
+            rel="noopener noreferrer"
+            onClickCapture={(event) => event.preventDefault()}
+            onAuxClick={(event) => event.preventDefault()}
+            onPress={() => { void openRepository(); }}
+          >{item.repoUrl}</Link>
+        ) : item.repoUrl || "Not recorded"} />
+        {detail.kind === "installed" ? <DetailField label="Installed Directory" value={detail.value.installPath} /> : <><DetailField label="Source" value={detail.value.sourceName} /><DetailField label="Package Public Key" value={<CopyablePublicKey publicKey={detail.value.publicKey} />} /></>}
       </dl>
+      {repositoryError ? <p role="alert" className="break-words text-sm text-danger">{repositoryError}</p> : null}
     </Modal.Body><Modal.Footer><Button variant="outline" onPress={onClose}>Close</Button></Modal.Footer>
   </Modal.Dialog></Modal.Container></Modal.Backdrop>;
 }
 
-function DetailField({ label, value }: { label: string; value: string }): React.JSX.Element {
-  return <div><dt className="font-medium">{label}</dt><dd className="mt-1 select-text break-all text-muted">{value}</dd></div>;
+function DetailField({ label, value }: { label: keyof typeof DETAIL_FIELD_ICONS; value: ReactNode }): React.JSX.Element {
+  return <div><dt className="flex items-center gap-2 font-medium"><FontAwesomeIcon aria-hidden icon={DETAIL_FIELD_ICONS[label]} className="size-3.5 shrink-0 text-muted" /><span>{label}</span></dt><dd className="mt-1 select-text break-all text-muted">{value}</dd></div>;
+}
+
+function CopyablePublicKey({ publicKey }: { publicKey: string }): React.JSX.Element {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string>();
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+  const copy = async (): Promise<void> => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
+    setCopied(false);
+    setCopyError(undefined);
+    try {
+      if (!window.armory) throw new Error("The Armory bridge is unavailable in this window.");
+      const result = await window.armory.copyPublicKey({ publicKey });
+      if (!result.ok) throw new Error(result.error ?? "The public key could not be copied.");
+      setCopied(true);
+    } catch (caught) {
+      setCopyError(errorMessage(caught));
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  };
+  return <div>
+    <Button
+      aria-label="Copy package public key"
+      className="h-auto min-h-0 justify-start whitespace-normal px-3 py-2 text-left"
+      fullWidth
+      isPending={pending}
+      variant="secondary"
+      onPress={() => { void copy(); }}
+    >
+      <code className="min-w-0 whitespace-normal break-all font-mono text-xs leading-5">{publicKey}</code>
+    </Button>
+    <p aria-atomic="true" aria-live={copyError ? "assertive" : "polite"} className={`mt-1 min-h-4 text-xs ${copyError ? "text-danger" : copied ? "text-success" : "text-muted"}`} role={copyError ? "alert" : "status"}>
+      {copyError ?? (copied ? "Copied to clipboard." : "Click to copy.")}
+    </p>
+  </div>;
+}
+
+function safeRepositoryHref(value: string): string | undefined {
+  try {
+    const input = value.trim();
+    const authority = /^https?:\/\/([^/?#]+)/iu.exec(input)?.[1];
+    if (!authority || authority.includes("@") || /[\\\x00-\x20\x7f]/u.test(input)) return undefined;
+    const url = new URL(input);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname || url.username || url.password) return undefined;
+    return url.href.length <= 2048 ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function matches(item: { name: string; kind: ArmoryPackageKind; description: string }, query: string, filter: PackageFilter, extra: string): boolean {

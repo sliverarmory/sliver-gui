@@ -319,6 +319,36 @@ vi.mock("./ssh-ipc.js", () => ({
 }));
 
 describe("application protocol lifecycle", () => {
+  it.each([
+    "http://127.0.0.1:5173/",
+    "https://example.invalid/renderer",
+  ])("ignores ELECTRON_RENDERER_URL=%s in unpackaged applications", async (rendererOverride) => {
+    vi.stubEnv("ELECTRON_RENDERER_URL", rendererOverride);
+    const { app } = await import("electron");
+    const { startApplication } = await import("./application.js");
+    const { registerIpcHandlers } = await import("./ipc.js");
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    let application: Awaited<ReturnType<typeof startApplication>> | undefined;
+
+    try {
+      expect(app.isPackaged).toBe(false);
+      application = await startApplication({
+        cloudDeploymentController: controller,
+        registry: fakeConnectionRegistry() as never,
+      });
+      expect(harness.windows.at(-1)!.webContents.getURL()).toBe("sliver://app/index.html");
+      expect(application.createWindow().webContents.getURL()).toBe("sliver://app/index.html");
+      expect(vi.mocked(registerIpcHandlers).mock.calls.at(-1)![2]).toBe("sliver://app/index.html");
+    } finally {
+      await application?.stop();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("loads bundled windows through both owned sessions and removes each handler once during teardown", async () => {
     vi.stubEnv("ELECTRON_RENDERER_URL", undefined);
     const controller = {
@@ -337,6 +367,8 @@ describe("application protocol lifecycle", () => {
     const defaultProtocol = session.defaultSession.protocol;
     vi.mocked(defaultProtocol.handle).mockClear();
     vi.mocked(defaultProtocol.unhandle).mockClear();
+    vi.mocked(session.fromPartition).mockClear();
+    vi.mocked(Menu.buildFromTemplate).mockClear();
     let application: Awaited<ReturnType<typeof startApplication>> | undefined;
 
     try {
@@ -669,7 +701,6 @@ describe("SSH application window lifecycle", () => {
     const application = await startApplication({
       cloudDeploymentController: controller,
       registry: connectionRegistry as never,
-      developmentRendererUrl: "http://127.0.0.1:5173/",
       sshPreloadPath: "/test/ssh-preload.cjs",
     });
 
@@ -690,11 +721,11 @@ describe("SSH application window lifecycle", () => {
         webSecurity: true,
       },
     });
-    expect(firstSshWindow.webContents.getURL()).toBe("http://127.0.0.1:5173/?surface=ssh");
+    expect(firstSshWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=ssh");
     expect(harness.hardenedWindows).toContainEqual({
       window: firstSshWindow,
-      rendererUrl: "http://127.0.0.1:5173/",
-      utilityUrl: "http://127.0.0.1:5173/?surface=ssh",
+      rendererUrl: "sliver://app/index.html",
+      utilityUrl: "sliver://app/index.html?surface=ssh",
     });
 
     const firstOwner = identityFor(firstSshWindow);
@@ -788,7 +819,6 @@ describe("SSH application window lifecycle", () => {
       application = await startApplication({
         cloudDeploymentController: controller,
         registry: fakeConnectionRegistry() as never,
-        developmentRendererUrl: "http://127.0.0.1:5173/",
         sshPreloadPath: "/test/ssh-preload.cjs",
       });
 
@@ -857,7 +887,6 @@ describe("SSH application window lifecycle", () => {
     const application = await startApplication({
       cloudDeploymentController: controller,
       registry: fakeConnectionRegistry() as never,
-      developmentRendererUrl: "http://127.0.0.1:5173/",
       sshPreloadPath: "/test/ssh-preload.cjs",
     });
 
@@ -925,7 +954,6 @@ describe("SSH application window lifecycle", () => {
     const application = await startApplication({
       cloudDeploymentController: controller,
       registry: fakeConnectionRegistry() as never,
-      developmentRendererUrl: "http://127.0.0.1:5173/",
       sshPreloadPath: "/test/ssh-preload.cjs",
     });
     const deploymentId = "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0005";
@@ -1039,7 +1067,6 @@ async function createConsoleLifecycleFixture(
   const application = await startApplication({
     cloudDeploymentController: controller,
     registry: registry as never,
-    developmentRendererUrl: "http://127.0.0.1:5173/",
     consolePtyFactory: {} as never,
     startConsoleRuntime: startConsoleRuntime as never,
   });

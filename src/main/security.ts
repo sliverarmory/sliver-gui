@@ -152,6 +152,9 @@ export function hardenWindow(
   window.webContents.on("will-navigate", (event, url) => {
     if (!allowsNavigation(url)) event.preventDefault();
   });
+  window.webContents.on("will-frame-navigate", (event) => {
+    if (!allowsNavigation(event.url)) event.preventDefault();
+  });
   window.webContents.on("will-redirect", (event, url) => {
     if (!allowsNavigation(url)) event.preventDefault();
   });

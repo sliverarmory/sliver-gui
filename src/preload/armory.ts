@@ -19,6 +19,8 @@ const CHANNELS = Object.freeze({
   saveSource: "sliver:armory:source:save",
   removeSource: "sliver:armory:source:remove",
   installLocal: "sliver:armory:local:install",
+  copyPublicKey: "sliver:armory:public-key:copy",
+  openRepository: "sliver:armory:repository:open",
   getApplicationSettings: "sliver:armory:application-settings:get",
   changed: "sliver:armory:changed",
   navigationRequested: "sliver:armory:navigation-requested",
@@ -52,6 +54,8 @@ const api: ArmoryAPI = {
   saveSource: (input) => ipcRenderer.invoke(CHANNELS.saveSource, input),
   removeSource: (input) => ipcRenderer.invoke(CHANNELS.removeSource, input),
   installLocal: (input) => ipcRenderer.invoke(CHANNELS.installLocal, input),
+  copyPublicKey: (input) => ipcRenderer.invoke(CHANNELS.copyPublicKey, input),
+  openRepository: (input) => ipcRenderer.invoke(CHANNELS.openRepository, input),
   getApplicationSettings: () => ipcRenderer.invoke(CHANNELS.getApplicationSettings),
   onChanged: (listener) => {
     if (typeof listener !== "function") throw new TypeError("change listener must be a function");

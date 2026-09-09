@@ -39,6 +39,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve("src/preload/index.ts"),
+          navigation: resolve("src/preload/navigation.ts"),
           "cloud-deployment": resolve("src/preload/cloud-deployment.ts"),
           network: resolve("src/preload/network.ts"),
           armory: resolve("src/preload/armory.ts"),

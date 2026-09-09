@@ -11,6 +11,7 @@ import {
   app,
   autoUpdater as nativeAutoUpdater,
   BrowserWindow,
+  clipboard,
   dialog,
   Menu,
   net,
@@ -86,6 +87,7 @@ import {
   type TrustedWindowIdentity,
 } from "./ipc.js";
 import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl } from "./security.js";
+import { installApplicationNavigationSecurity } from "./navigation-security.js";
 import { APP_RENDERER_URL, APP_SCHEME, APP_SCHEME_PRIVILEGES, createAppProtocolHandler } from "./app-protocol.js";
 import { SliverReleaseDownloader } from "./sliver-release-download.js";
 import {
@@ -164,7 +166,6 @@ export interface StartApplicationOptions {
   networkPreloadPath?: string;
   armoryPreloadPath?: string;
   sshPreloadPath?: string;
-  developmentRendererUrl?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
   consoleClientRootDirectory?: string;
@@ -259,6 +260,9 @@ interface NetworkWindowRecord {
  * entrypoint always uses the real ConnectionRegistry defaults.
  */
 export async function startApplication(options: StartApplicationOptions = {}): Promise<ApplicationHandle> {
+  // Install synchronously before any windows, sessions, or asynchronous startup.
+  const preloadPath = options.preloadPath ?? join(import.meta.dirname, "../preload/index.cjs");
+  installApplicationNavigationSecurity(app, join(dirname(preloadPath), "navigation.cjs"));
   const registry = options.registry ?? new ConnectionRegistry();
   const mainBundleDirectory = import.meta.dirname;
   const applicationAssetsDirectory = options.applicationAssetsDirectory ?? join(mainBundleDirectory, "../../build");
@@ -272,7 +276,6 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   });
   const systemIconAppearance = createSystemIconAppearance({ nativeTheme, systemPreferences });
   const rendererEntryPath = options.rendererEntryPath ?? join(mainBundleDirectory, "../renderer/index.html");
-  const preloadPath = options.preloadPath ?? join(mainBundleDirectory, "../preload/index.cjs");
   const cloudDeploymentPreloadPath = options.cloudDeploymentPreloadPath ?? join(
     mainBundleDirectory,
     "../preload/cloud-deployment.cjs",
@@ -297,13 +300,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ".sliver-client",
   ));
   const startConsoleRuntime = options.startConsoleRuntime ?? SliverConsoleRuntime.start;
-  // Packaged applications always trust their bundled protocol entry. A caller's
-  // inherited environment must never redirect production IPC trust to even a
-  // loopback web origin.
-  const developmentRendererUrl = app.isPackaged
-    ? undefined
-    : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
-  const rendererUrl = developmentRendererUrl ?? APP_RENDERER_URL;
+  // Every application build uses the bundled protocol entry. Environment
+  // variables must never redirect renderer navigation or IPC trust.
+  const rendererUrl = APP_RENDERER_URL;
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
@@ -2415,16 +2414,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   });
   applicationUpdateState = applicationUpdater.getState();
   applicationUpdater.subscribe(publishApplicationUpdateState);
-  configureSessionSecurity(session.defaultSession, developmentRendererUrl, rendererUrl);
+  configureSessionSecurity(session.defaultSession, undefined, rendererUrl);
   const cloudDeploymentSession = session.fromPartition(CLOUD_DEPLOYMENT_SESSION_PARTITION);
-  configureSessionSecurity(
-    cloudDeploymentSession,
-    developmentRendererUrl,
-  );
+  configureSessionSecurity(cloudDeploymentSession);
   const networkSession = session.fromPartition(NETWORK_SESSION_PARTITION);
-  configureSessionSecurity(networkSession, developmentRendererUrl);
+  configureSessionSecurity(networkSession);
   const armorySession = session.fromPartition(ARMORY_SESSION_PARTITION);
-  configureSessionSecurity(armorySession, developmentRendererUrl);
+  configureSessionSecurity(armorySession);
   const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
@@ -2479,6 +2475,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   );
   registerArmoryIpcHandlers({
     manager: armoryService,
+    writeClipboardText: (text) => clipboard.writeText(text),
+    openExternal: (url) => shell.openExternal(url),
     getTab: () => armoryTab,
     getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
     changed: publishArmoryChanged,
@@ -2609,23 +2607,6 @@ function readLinuxPackageType(): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-export function readDevelopmentRendererUrl(): string | undefined {
-  const value = process.env.ELECTRON_RENDERER_URL?.trim();
-  if (!value) return undefined;
-
-  const url = new URL(value);
-  const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    !loopbackHosts.has(url.hostname) ||
-    url.username !== "" ||
-    url.password !== ""
-  ) {
-    throw new Error("ELECTRON_RENDERER_URL must be an HTTP(S) loopback URL");
-  }
-  return url.href;
 }
 
 function rendererUrlForSurface(

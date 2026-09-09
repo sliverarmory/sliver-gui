@@ -95,6 +95,7 @@ const requiredPackagedFiles = [
   "dist/main/index.js",
   "dist/preload/cloud-deployment.cjs",
   "dist/preload/index.cjs",
+  "dist/preload/navigation.cjs",
   "dist/preload/network.cjs",
   "dist/preload/armory.cjs",
   "dist/preload/ssh.cjs",

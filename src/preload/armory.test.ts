@@ -38,7 +38,7 @@ describe("Armory preload", () => {
     expect(Object.isFrozen(api)).toBe(true);
     expect(Object.keys(api)).toEqual([
       "getContext", "snapshot", "refreshCatalog", "install", "installBundle", "uninstall", "saveSource",
-      "removeSource", "installLocal", "getApplicationSettings", "onChanged", "onNavigationRequested", "onApplicationSettingsChanged",
+      "removeSource", "installLocal", "copyPublicKey", "openRepository", "getApplicationSettings", "onChanged", "onNavigationRequested", "onApplicationSettingsChanged",
     ]);
     for (const key of ["ipcRenderer", "invoke", "send", "rpc", "execute", "session", "beacon", "readFile", "writeFile"]) {
       expect(api).not.toHaveProperty(key);
@@ -53,6 +53,8 @@ describe("Armory preload", () => {
     const source = { name: "Example", repoUrl: "https://example.test/index", publicKey: "key", enabled: true };
     const remove = { sourceId: "source" };
     const local = { publicKey: "key" };
+    const publicKey = { publicKey: "trusted-public-key" };
+    const repository = { url: "https://example.test/repo" };
     await api.getContext();
     await api.snapshot();
     await api.refreshCatalog();
@@ -62,12 +64,15 @@ describe("Armory preload", () => {
     await api.saveSource(source);
     await api.removeSource(remove);
     await api.installLocal(local);
+    await api.copyPublicKey(publicKey);
+    await api.openRepository(repository);
     await api.getApplicationSettings();
     expect(electronMocks.invoke.mock.calls).toEqual([
       [ARMORY_IPC_INVOKE.getContext], [ARMORY_IPC_INVOKE.snapshot], [ARMORY_IPC_INVOKE.refreshCatalog],
       [ARMORY_IPC_INVOKE.install, install], [ARMORY_IPC_INVOKE.installBundle, bundle], [ARMORY_IPC_INVOKE.uninstall, uninstall],
       [ARMORY_IPC_INVOKE.saveSource, source], [ARMORY_IPC_INVOKE.removeSource, remove],
-      [ARMORY_IPC_INVOKE.installLocal, local], [ARMORY_IPC_INVOKE.getApplicationSettings],
+      [ARMORY_IPC_INVOKE.installLocal, local], [ARMORY_IPC_INVOKE.copyPublicKey, publicKey],
+      [ARMORY_IPC_INVOKE.openRepository, repository], [ARMORY_IPC_INVOKE.getApplicationSettings],
     ]);
   });
 

@@ -94,6 +94,8 @@ export interface ArmoryInstallLocalInput extends ArmoryChooseLocalInput {
   readonly archivePath: string;
   readonly signaturePath: string;
 }
+export interface ArmoryCopyPublicKeyInput { readonly publicKey: string }
+export interface ArmoryOpenRepositoryInput { readonly url: string }
 
 export interface ArmoryAPI {
   getContext(): Promise<OperationResult<{ readonly tab: ArmoryTabId }>>;
@@ -105,6 +107,8 @@ export interface ArmoryAPI {
   saveSource(input: ArmorySaveSourceInput): Promise<OperationResult<ArmorySnapshot>>;
   removeSource(input: ArmoryRemoveSourceInput): Promise<OperationResult<ArmorySnapshot>>;
   installLocal(input: ArmoryChooseLocalInput): Promise<OperationResult<ArmorySnapshot>>;
+  copyPublicKey(input: ArmoryCopyPublicKeyInput): Promise<OperationResult>;
+  openRepository(input: ArmoryOpenRepositoryInput): Promise<OperationResult>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   onChanged(listener: () => void): () => void;
   onNavigationRequested(listener: (tab: ArmoryTabId) => void): () => void;
@@ -121,6 +125,8 @@ export const ARMORY_IPC_INVOKE = Object.freeze({
   saveSource: "sliver:armory:source:save",
   removeSource: "sliver:armory:source:remove",
   installLocal: "sliver:armory:local:install",
+  copyPublicKey: "sliver:armory:public-key:copy",
+  openRepository: "sliver:armory:repository:open",
   getApplicationSettings: "sliver:armory:application-settings:get",
 });
 export const ARMORY_IPC_EVENTS = Object.freeze({
@@ -169,6 +175,14 @@ export function parseArmoryRemoveSourceInput(value: unknown): ArmoryRemoveSource
 export function parseArmoryChooseLocalInput(value: unknown): ArmoryChooseLocalInput {
   const input = record(value, ["publicKey", "replace"]);
   return { publicKey: string(input["publicKey"]), ...replace(input["replace"]) };
+}
+export function parseArmoryCopyPublicKeyInput(value: unknown): ArmoryCopyPublicKeyInput {
+  const input = record(value, ["publicKey"]);
+  return { publicKey: string(input["publicKey"]) };
+}
+export function parseArmoryOpenRepositoryInput(value: unknown): ArmoryOpenRepositoryInput {
+  const input = record(value, ["url"]);
+  return { url: string(input["url"], 2048) };
 }
 export function parseArmorySaveSourceInput(value: unknown): ArmorySaveSourceInput {
   const input = record(value, ["id", "name", "repoUrl", "publicKey", "enabled", "authorization"]);

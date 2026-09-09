@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { isSafeExternalWebUrl } from "./external-web-url.js";
+
 import {
   BrowserWindow,
   clipboard,
@@ -585,15 +587,4 @@ function isSafeDynamicLabel(value: string): boolean {
   return value.length > 0 &&
     value.length <= APPLICATION_CONTEXT_MENU_MAX_LABEL_LENGTH &&
     !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value);
-}
-
-function isSafeExternalWebUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (url.protocol === "https:" || url.protocol === "http:") &&
-      url.username === "" &&
-      url.password === "";
-  } catch {
-    return false;
-  }
 }

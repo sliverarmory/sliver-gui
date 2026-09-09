@@ -1,5 +1,6 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
@@ -43,6 +44,8 @@ const api: ArmoryAPI = {
   getContext: vi.fn(async () => ({ ok: true as const, value: { tab: currentTab } })),
   snapshot: vi.fn(success), refreshCatalog: vi.fn(success), install: vi.fn(success), installBundle: vi.fn(success),
   uninstall: vi.fn(success), saveSource: vi.fn(success), removeSource: vi.fn(success), installLocal: vi.fn(success),
+  openRepository: vi.fn(async () => ({ ok: true as const })),
+  copyPublicKey: vi.fn(async () => ({ ok: true as const })),
   getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
   onChanged: vi.fn((listener) => { changedListener = listener; return unsubscribeChanged; }),
   onNavigationRequested: vi.fn((listener) => { navigationListener = listener; return unsubscribeNavigation; }),
@@ -66,11 +69,24 @@ beforeEach(() => {
   changedListener = undefined;
   navigationListener = undefined;
   vi.clearAllMocks();
+  toast.clear();
   for (const method of [api.snapshot, api.refreshCatalog, api.install, api.installBundle, api.uninstall, api.saveSource, api.removeSource, api.installLocal]) vi.mocked(method).mockImplementation(success);
+  vi.mocked(api.openRepository).mockResolvedValue({ ok: true });
+  vi.mocked(api.copyPublicKey).mockResolvedValue({ ok: true });
   vi.mocked(api.getContext).mockImplementation(async () => ({ ok: true, value: { tab: currentTab } }));
   Object.defineProperty(window, "armory", { configurable: true, value: api });
 });
-afterEach(() => { cleanup(); Reflect.deleteProperty(window, "armory"); });
+afterEach(() => {
+  cleanup();
+  toast.clear();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  Reflect.deleteProperty(window, "armory");
+});
+
+function renderArmoryApp(): ReturnType<typeof render> {
+  return render(<><ArmoryWindowApp /><Toast.Provider placement="bottom" maxVisibleToasts={4} /></>);
+}
 
 describe("ArmoryWindowApp", () => {
   it.each([
@@ -79,7 +95,7 @@ describe("ArmoryWindowApp", () => {
   ] as const)("keeps $tab controls outside its bounded HeroUI package scroll region", async ({ tab, list, title }) => {
     currentTab = tab;
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     const packages = await screen.findByRole("list", { name: list });
     const scroll = screen.getByTestId(`armory-${tab}-scroll`);
     const controls = screen.getByTestId(`armory-${tab}-controls`);
@@ -100,7 +116,7 @@ describe("ArmoryWindowApp", () => {
   });
 
   it("loads console-shared packages, honors native navigation, and cleans up subscriptions", async () => {
-    const view = render(<ArmoryWindowApp />);
+    const view = renderArmoryApp();
     expect(await screen.findByRole("list", { name: "Installed packages" })).toHaveTextContent("Inventory");
     expect(screen.getByText(baseline.rootPath)).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Manage" })).toHaveAttribute("aria-selected", "true");
@@ -114,7 +130,7 @@ describe("ArmoryWindowApp", () => {
   });
 
   it("reflects console changes on focus and change notifications", async () => {
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await screen.findByRole("list", { name: "Installed packages" });
     currentSnapshot = { ...baseline, installed: [] };
     act(() => window.dispatchEvent(new Event("focus")));
@@ -126,7 +142,7 @@ describe("ArmoryWindowApp", () => {
 
   it("requires confirmation before removing a shared package", async () => {
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await user.click(await screen.findByRole("button", { name: "Remove Inventory" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("console's installed inventory");
@@ -143,7 +159,7 @@ describe("ArmoryWindowApp", () => {
   it("keeps a failed removal open with the actionable error", async () => {
     const user = userEvent.setup();
     vi.mocked(api.uninstall).mockResolvedValue({ ok: false, error: "Another package depends on inventory" });
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await user.click(await screen.findByRole("button", { name: "Remove Inventory" }));
     const dialog = await screen.findByRole("alertdialog");
     await user.click(within(dialog).getByRole("button", { name: "Remove" }));
@@ -155,7 +171,7 @@ describe("ArmoryWindowApp", () => {
   it("filters BOFs and commands, installs by catalog identity, and keeps verification errors visible", async () => {
     currentTab = "install";
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await screen.findByRole("list", { name: "Available packages" });
     await user.selectOptions(screen.getByRole("combobox", { name: "Package type" }), "bof");
     expect(screen.getByRole("list", { name: "Available packages" })).toHaveTextContent("Process List");
@@ -174,10 +190,41 @@ describe("ArmoryWindowApp", () => {
 
   it("updates an installed package using explicit replacement", async () => {
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await user.click(await screen.findByRole("button", { name: "Update" }));
     expect(api.install).toHaveBeenCalledWith({ packageId: catalogPackage.id, replace: true });
     expect(await screen.findByText("Inventory updated.")).toBeInTheDocument();
+  });
+
+  it("shows operation success in a toast that expires after 20 seconds without moving the page layout", async () => {
+    renderArmoryApp();
+    await screen.findByRole("list", { name: "Installed packages" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const showSuccess = vi.spyOn(toast, "success");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Check for Updates" })); });
+    expect(showSuccess).toHaveBeenCalledWith("Package catalog refreshed.", expect.objectContaining({ timeout: 20_000 }));
+    const feedback = screen.getByText("Package catalog refreshed.");
+    expect(screen.getByRole("main")).not.toContainElement(feedback);
+    await act(async () => { await vi.advanceTimersByTimeAsync(19_999); });
+    expect(screen.getByText("Package catalog refreshed.")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(screen.queryByText("Package catalog refreshed.")).not.toBeInTheDocument();
+  });
+
+  it("cleans up only the Armory success toasts when its window unmounts", async () => {
+    const user = userEvent.setup();
+    const view = renderArmoryApp();
+    await screen.findByRole("list", { name: "Installed packages" });
+    const showSuccess = vi.spyOn(toast, "success");
+    await user.click(screen.getByRole("button", { name: "Check for Updates" }));
+    await screen.findByText("Package catalog refreshed.");
+    const ownToastId = showSuccess.mock.results[0]?.value;
+    act(() => { toast.info("Unrelated notification", { timeout: 0 }); });
+    const closeToast = vi.spyOn(toast, "close");
+    view.rerender(<Toast.Provider placement="bottom" maxVisibleToasts={4} />);
+    expect(closeToast).toHaveBeenCalledExactlyOnceWith(ownToastId);
+    expect(screen.queryByText("Package catalog refreshed.")).not.toBeInTheDocument();
+    expect(screen.getByText("Unrelated notification")).toBeInTheDocument();
   });
 
   it.each([
@@ -192,12 +239,27 @@ describe("ArmoryWindowApp", () => {
       packages: [{ ...catalogPackage, kind: "bof", ...authors }],
     };
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     const packages = await screen.findByRole("list", { name: list });
     await user.click(within(packages).getByRole("button", { name: "Details" }));
     const dialog = await screen.findByRole("dialog", { name: "Inventory" });
-    expect(within(dialog).getByText("Original Author").nextElementSibling).toHaveTextContent("Ada Example");
-    expect(within(dialog).getByText("Extension Author").nextElementSibling).toHaveTextContent("Armory Maintainer");
+    expect(within(dialog).getByText("Original Author").closest("dt")?.nextElementSibling).toHaveTextContent("Ada Example");
+    expect(within(dialog).getByText("Extension Author").closest("dt")?.nextElementSibling).toHaveTextContent("Armory Maintainer");
+    const expectedIcons: ReadonlyArray<readonly [string, string]> = [
+      ["Commands", "terminal"],
+      ["Original Author", "user"],
+      ["Extension Author", "user-pen"],
+      ["Repository", "code-branch"],
+      ...(tab === "manage"
+        ? [["Installed Directory", "folder-open"]] as const
+        : [["Source", "globe"], ["Package Public Key", "key"]] as const),
+    ];
+    for (const [label, iconName] of expectedIcons) {
+      const icon = within(dialog).getByText(label).closest("dt")?.querySelector("svg");
+      expect(icon).toHaveAttribute("aria-hidden", "true");
+      expect(icon).toHaveAttribute("data-icon", iconName);
+      expect(icon).toHaveClass("size-3.5", "shrink-0", "text-muted");
+    }
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
 
     currentSnapshot = { ...baseline, packages: [catalogPackage] };
@@ -210,10 +272,119 @@ describe("ArmoryWindowApp", () => {
     expect(within(legacyDialog).getByText("Repository")).toBeInTheDocument();
   });
 
+  it.each([
+    { tab: "manage", repoUrl: "https://packages.example/inventory", href: "https://packages.example/inventory" },
+    { tab: "install", repoUrl: "http://packages.example/inventory", href: "http://packages.example/inventory" },
+    { tab: "manage", repoUrl: "HTTPS://PACKAGES.EXAMPLE/inventory", href: "https://packages.example/inventory" },
+    { tab: "install", repoUrl: "  https://packages.example/inventory  ", href: "https://packages.example/inventory" },
+  ] as const)("opens $repoUrl through IPC without navigating Armory", async ({ tab, repoUrl, href }) => {
+    currentTab = tab;
+    currentSnapshot = { ...baseline, installed: [{ ...installed, repoUrl }], packages: [{ ...catalogPackage, repoUrl }], bundles: [] };
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inventory" });
+    const link = within(dialog).getByRole("link", { name: /opens in browser/ });
+    expect(link.textContent).toBe(repoUrl);
+    expect(link).toHaveAttribute("href", href);
+    expect(link).not.toHaveAttribute("target");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    const armoryUrl = window.location.href;
+    await user.click(link);
+    expect(api.openRepository).toHaveBeenCalledExactlyOnceWith({ url: href });
+    expect(window.location.href).toBe(armoryUrl);
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "data:text/html,example",
+    "file:///tmp/package",
+    "ftp://packages.example/inventory",
+    "not a URL",
+    "/relative/package",
+    "//packages.example/inventory",
+    "https://user:secret@packages.example/inventory",
+    "https:packages.example/inventory",
+    "https:///packages.example/inventory",
+    "https://@packages.example/inventory",
+    "https://packages.example\\inventory",
+    "https://packa\nges.example/inventory",
+    "https://packages.example/a b",
+    "https://packages.example/a\u0001b",
+  ])("keeps unsafe or non-absolute repository value %s as plain text", async (repoUrl) => {
+    currentSnapshot = { ...baseline, installed: [{ ...installed, repoUrl }] };
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inventory" });
+    const repositoryValue = within(dialog).getByText("Repository").closest("dt")?.nextElementSibling;
+    expect(repositoryValue?.textContent).toBe(repoUrl);
+    expect(within(dialog).queryByRole("link")).not.toBeInTheDocument();
+    expect(dialog.querySelector("[href]")).toBeNull();
+    await user.click(repositoryValue!);
+    expect(api.openRepository).not.toHaveBeenCalled();
+  });
+
+  it("opens a repository from the keyboard and keeps browser failures in its details dialog", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.openRepository).mockResolvedValue({ ok: false, error: "Your browser could not be opened" });
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inventory" });
+    const link = within(dialog).getByRole("link", { name: /opens in browser/ });
+    const armoryUrl = window.location.href;
+    link.focus();
+    await user.keyboard("{Enter}");
+    expect(api.openRepository).toHaveBeenCalledExactlyOnceWith({ url: installed.repoUrl });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Your browser could not be opened");
+    expect(window.location.href).toBe(armoryUrl);
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it.each(["click", "Enter", "Space"] as const)("copies the catalog public key exactly once through IPC using %s", async (activation) => {
+    currentTab = "install";
+    const publicKey = "RW" + "a".repeat(120);
+    currentSnapshot = { ...baseline, packages: [{ ...catalogPackage, publicKey }], bundles: [] };
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inventory" });
+    const copy = within(dialog).getByRole("button", { name: "Copy package public key" });
+    expect(copy).toHaveClass("button--full-width", "whitespace-normal");
+    expect(copy.querySelector("code")).toHaveClass("font-mono", "text-xs", "break-all");
+    expect(copy).toHaveTextContent(publicKey);
+    if (activation === "click") await user.click(copy);
+    else {
+      copy.focus();
+      await user.keyboard(activation === "Enter" ? "{Enter}" : " ");
+    }
+    expect(api.copyPublicKey).toHaveBeenCalledExactlyOnceWith({ publicKey });
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("Copied to clipboard.");
+    expect(within(dialog).getByRole("status")).toHaveAttribute("aria-live", "polite");
+    expect(dialog).toBeInTheDocument();
+    expect(api.openRepository).not.toHaveBeenCalled();
+  });
+
+  it("shows a public-key copy failure locally without copied feedback", async () => {
+    currentTab = "install";
+    currentSnapshot = { ...baseline, packages: [catalogPackage], bundles: [] };
+    vi.mocked(api.copyPublicKey).mockResolvedValue({ ok: false, error: "The clipboard is unavailable" });
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Inventory" });
+    await user.click(within(dialog).getByRole("button", { name: "Copy package public key" }));
+    expect(api.copyPublicKey).toHaveBeenCalledExactlyOnceWith({ publicKey: catalogPackage.publicKey });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("The clipboard is unavailable");
+    expect(within(dialog).queryByText("Copied to clipboard.")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Copy package public key" })).toBeEnabled();
+  });
+
   it("installs a bundle and resets bundle filtering when navigating to Manage", async () => {
     currentTab = "install";
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await screen.findByRole("list", { name: "Available packages" });
     await user.selectOptions(screen.getByRole("combobox", { name: "Package type" }), "bundle");
     await user.click(screen.getByRole("button", { name: "Install bundle Inventory Bundle" }));
@@ -225,7 +396,7 @@ describe("ArmoryWindowApp", () => {
   it("preserves existing authorization when editing a source", async () => {
     currentTab = "sources";
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await user.click(await screen.findByRole("button", { name: "Edit Team Armory" }));
     const dialog = await screen.findByRole("dialog");
     const name = within(dialog).getByRole("textbox", { name: "Name" });
@@ -239,7 +410,7 @@ describe("ArmoryWindowApp", () => {
   it("passes only a public key and replace choice to the native signed-import dialog", async () => {
     currentTab = "install";
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await user.click(await screen.findByRole("button", { name: "Import Signed Package" }));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByRole("textbox", { name: "Trusted Public Key" }), "RWPUBLISHERKEY");
@@ -255,7 +426,7 @@ describe("ArmoryWindowApp", () => {
     currentTab = "install";
     currentSnapshot = { ...baseline, packages: [], bundles: [], refreshedAt: null };
     vi.mocked(api.refreshCatalog).mockResolvedValue({ ok: false, error: "Source unavailable" });
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     expect(await screen.findByText("Source unavailable")).toBeInTheDocument();
     expect(api.refreshCatalog).toHaveBeenCalledOnce();
   });
@@ -263,7 +434,7 @@ describe("ArmoryWindowApp", () => {
   it("shows source failures directly in the catalog", async () => {
     currentTab = "install";
     currentSnapshot = { ...baseline, packages: [], bundles: [], sources: [{ ...source, error: "Index signature is invalid" }] };
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     expect(await screen.findByText("Team Armory: Index signature is invalid")).toBeInTheDocument();
     expect(screen.getByText("Some Sources Could Not Be Refreshed")).toBeInTheDocument();
   });
@@ -271,7 +442,7 @@ describe("ArmoryWindowApp", () => {
   it("does not overwrite an installation with a stale inventory refresh", async () => {
     let resolveRefresh: ((result: OperationResult<ArmorySnapshot>) => void) | undefined;
     const user = userEvent.setup();
-    render(<ArmoryWindowApp />);
+    renderArmoryApp();
     await screen.findByRole("list", { name: "Installed packages" });
     vi.mocked(api.snapshot).mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve; }));
     act(() => window.dispatchEvent(new Event("focus")));
