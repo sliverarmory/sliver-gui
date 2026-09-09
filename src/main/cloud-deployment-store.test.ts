@@ -80,6 +80,36 @@ describe("CloudDeploymentStore", () => {
     expect(store.getState().deployments).toHaveLength(1);
   });
 
+  it("discards a cancelled status update before replacing persisted state", async () => {
+    const store = await createStore();
+    const created = await store.create(awsCreateInput());
+    if (!created.ok) throw new Error(created.error);
+    const originalState = store.getState();
+    const originalFile = await readFile(store.filePath, "utf8");
+    let checked = false;
+
+    const result = await store.update({
+      expectedRevision: originalState.revision,
+      deployment: { ...created.value.deployment, remoteHost: "198.51.100.42" },
+    }, () => {
+      checked = true;
+      throw new Error("Status read became stale");
+    });
+
+    expect(checked).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(store.getState()).toBe(originalState);
+    expect(await readFile(store.filePath, "utf8")).toBe(originalFile);
+    expect(await readdir(stateRoot)).toEqual([CLOUD_DEPLOYMENT_STATE_FILE]);
+
+    const next = await store.update({
+      expectedRevision: originalState.revision,
+      deployment: { ...created.value.deployment, remoteHost: "198.51.100.43" },
+    });
+    expect(next.ok).toBe(true);
+    expect(store.getState().deployments[0]?.remoteHost).toBe("198.51.100.43");
+  });
+
   it("creates an Azure deployment with empty provider runtime identities", async () => {
     const store = await createStore();
     const result = await store.create(azureCreateInput());

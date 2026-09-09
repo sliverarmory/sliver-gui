@@ -245,6 +245,7 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
         },
       ],
       secureCredentialStorage: true,
+      refreshErrors: [],
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
       azureAccounts: [{
@@ -262,6 +263,13 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   getProvisioningTranscripts: () => ({
     ok: true,
     value: { provisioningTranscripts: [] },
+  }),
+  refreshDeployments: () => ({
+    ok: true,
+    value: {
+      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT] },
+      refreshErrors: [],
+    },
   }),
   chooseSshPrivateKey: () => ({ ok: false, error: "The E2E key picker is unavailable" }),
   createCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),

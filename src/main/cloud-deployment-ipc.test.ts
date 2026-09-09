@@ -271,6 +271,22 @@ describe("Cloud Deployment IPC boundary", () => {
     expect(getProvisioningTranscripts).toHaveBeenCalledExactlyOnceWith();
   });
 
+  it("refreshes cloud status only from the authorized window without renderer arguments", async () => {
+    const response = { ok: true as const, value: { state: { v: 1 as const, revision: 0, deployments: [] }, refreshErrors: [] } };
+    const refreshDeployments = vi.fn(async () => response);
+    registerCloudDeploymentIpcHandlers(controllerMock({ refreshDeployments }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments,
+      invokeEvent("sliver://app/index.html", 77).event)).resolves.toEqual(REJECTED);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event, { credentialId: CREDENTIAL_ID })).resolves.toEqual(REJECTED);
+    expect(refreshDeployments).not.toHaveBeenCalled();
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event)).resolves.toBe(response);
+    expect(refreshDeployments).toHaveBeenCalledExactlyOnceWith();
+  });
+
   it.each([
     ["workspace document", "sliver://app/index.html"],
     ["origin prefix impostor", "sliver://app.evil.test/index.html?surface=cloud-deployment"],
@@ -366,6 +382,7 @@ describe("Cloud Deployment IPC boundary", () => {
     const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
     const malformedRequests: ReadonlyArray<readonly [string, readonly unknown[]]> = [
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot, [{ unexpected: true }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime, ["ghostty-vt.wasm"]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.detectCurrentEgressIpv4, [null]],
@@ -666,6 +683,7 @@ function controllerMock(
   const unavailable = vi.fn(async () => ({ ok: false as const, error: "not implemented" }));
   return {
     getSnapshot: vi.fn(unavailable),
+    refreshDeployments: vi.fn(unavailable),
     getProvisioningTranscripts: vi.fn(unavailable),
     getTerminalRuntime: vi.fn(unavailable),
     detectCurrentEgressIpv4: vi.fn(unavailable),

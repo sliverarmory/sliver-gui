@@ -9,6 +9,7 @@ const harness = vi.hoisted(() => ({
   windows: [] as any[],
   focusedWindow: undefined as any,
   nextContentsId: 100,
+  suppressReadyToShow: false,
   cloudSshWindows: undefined as any,
   sshServices: undefined as any,
   sshAuthorizer: undefined as any,
@@ -113,7 +114,12 @@ vi.mock("electron", () => {
     readonly webContents = new FakeWebContents();
     readonly options: Record<string, unknown>;
     readonly show = vi.fn(() => {
+      this.visible = true;
       harness.focusedWindow = this;
+    });
+    readonly hide = vi.fn(() => {
+      this.visible = false;
+      if (harness.focusedWindow === this) harness.focusedWindow = undefined;
     });
     readonly focus = vi.fn(() => {
       harness.focusedWindow = this;
@@ -124,6 +130,7 @@ vi.mock("electron", () => {
     readonly setBackgroundColor = vi.fn();
     readonly setTitleBarOverlay = vi.fn();
     destroyed = false;
+    visible = false;
 
     constructor(options: Record<string, unknown>) {
       super();
@@ -134,7 +141,7 @@ vi.mock("electron", () => {
     async loadURL(url: string): Promise<void> {
       this.webContents.url = url;
       this.webContents.emit("did-finish-load");
-      this.emit("ready-to-show");
+      if (!harness.suppressReadyToShow) this.emit("ready-to-show");
     }
 
     async loadFile(filePath: string, options?: { query?: Record<string, string> }): Promise<void> {
@@ -153,6 +160,10 @@ vi.mock("electron", () => {
       return false;
     }
 
+    isVisible(): boolean {
+      return this.visible && !this.destroyed;
+    }
+
     close(): void {
       if (this.destroyed) return;
       let prevented = false;
@@ -164,6 +175,7 @@ vi.mock("electron", () => {
     destroy(): void {
       if (this.destroyed) return;
       this.destroyed = true;
+      this.visible = false;
       this.webContents.destroyed = true;
       if (harness.focusedWindow === this) harness.focusedWindow = undefined;
       this.emit("closed");
@@ -378,6 +390,201 @@ describe("application protocol lifecycle", () => {
       await application?.stop();
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe("Console application window lifecycle", () => {
+  it("retains tabs in a hidden window until explicit tab close or application shutdown", async () => {
+    const fixture = await createConsoleLifecycleFixture();
+    const { application, actions, workspaceWindow, runtimes, startConsoleRuntime } = fixture;
+
+    try {
+      const source = identityFor(workspaceWindow);
+      expect(await actions.open(source)).toEqual({ ok: true });
+      const consoleWindow = harness.windows.at(-1)!;
+      const owner = identityFor(consoleWindow);
+      const claimed = await actions.claim(owner);
+      expect(claimed).toMatchObject({ ok: true, value: { kind: "console" } });
+      const firstTabId = claimed.value!.initialTab.tabId;
+      const second = await actions.createTab(owner);
+      expect(second.ok).toBe(true);
+      expect(startConsoleRuntime).toHaveBeenCalledTimes(2);
+      const windowCount = harness.windows.length;
+
+      consoleWindow.close();
+      await settleLifecycle();
+      expect(consoleWindow.isVisible()).toBe(false);
+      expect(consoleWindow.isDestroyed()).toBe(false);
+      expect(consoleWindow.hide).toHaveBeenCalledOnce();
+      for (const runtime of runtimes) expect(runtime.close).not.toHaveBeenCalled();
+
+      expect(await actions.open(source)).toEqual({ ok: true });
+      expect(harness.windows).toHaveLength(windowCount);
+      expect(consoleWindow.isVisible()).toBe(true);
+      expect(harness.focusedWindow).toBe(consoleWindow);
+      expect(startConsoleRuntime).toHaveBeenCalledTimes(2);
+      expect(await actions.claim(owner)).toEqual(claimed);
+
+      expect(await actions.closeTab(owner, firstTabId)).toEqual({
+        ok: true,
+        value: { remainingTabs: 1 },
+      });
+      expect(runtimes[0]!.close).toHaveBeenCalledOnce();
+      expect(runtimes[1]!.close).not.toHaveBeenCalled();
+
+      consoleWindow.close();
+      expect(consoleWindow.isVisible()).toBe(false);
+      await application.stop();
+      expect(consoleWindow.isDestroyed()).toBe(true);
+      for (const runtime of runtimes) expect(runtime.close).toHaveBeenCalledOnce();
+    } finally {
+      await application.stop();
+    }
+  });
+
+  it("keeps a console hidden when its initial tab finishes starting before ready-to-show", async () => {
+    const startup = deferred<ReturnType<typeof fakeRuntime>>();
+    const runtime = fakeRuntime();
+    const fixture = await createConsoleLifecycleFixture(() => startup.promise);
+    const { application, actions, workspaceWindow, startConsoleRuntime } = fixture;
+
+    try {
+      harness.suppressReadyToShow = true;
+      const source = identityFor(workspaceWindow);
+      expect(await actions.open(source)).toEqual({ ok: true });
+      const consoleWindow = harness.windows.at(-1)!;
+      const claiming = actions.claim(identityFor(consoleWindow));
+      await vi.waitFor(() => expect(startConsoleRuntime).toHaveBeenCalledOnce());
+
+      consoleWindow.close();
+      expect(consoleWindow.isDestroyed()).toBe(false);
+      startup.resolve(runtime);
+      expect(await claiming).toMatchObject({ ok: true, value: { kind: "console" } });
+      consoleWindow.emit("ready-to-show");
+      expect(consoleWindow.isVisible()).toBe(false);
+      expect(consoleWindow.show).not.toHaveBeenCalled();
+      expect(runtime.close).not.toHaveBeenCalled();
+
+      expect(await actions.open(source)).toEqual({ ok: true });
+      expect(consoleWindow.isVisible()).toBe(true);
+      expect(startConsoleRuntime).toHaveBeenCalledOnce();
+    } finally {
+      harness.suppressReadyToShow = false;
+      startup.resolve(runtime);
+      await application.stop();
+    }
+    expect(runtime.close).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a hidden console when showing its retained window fails", async () => {
+    const { application, actions, workspaceWindow, runtimes, startConsoleRuntime } =
+      await createConsoleLifecycleFixture();
+
+    try {
+      const source = identityFor(workspaceWindow);
+      expect(await actions.open(source)).toEqual({ ok: true });
+      const consoleWindow = harness.windows.at(-1)!;
+      expect((await actions.claim(identityFor(consoleWindow))).ok).toBe(true);
+      consoleWindow.close();
+      consoleWindow.show.mockImplementationOnce(() => {
+        throw new Error("simulated native window show failure");
+      });
+
+      expect(await actions.open(source)).toMatchObject({ ok: false });
+      expect(consoleWindow.isDestroyed()).toBe(false);
+      expect(consoleWindow.isVisible()).toBe(false);
+      expect(runtimes[0]!.close).not.toHaveBeenCalled();
+      expect(await actions.open(source)).toEqual({ ok: true });
+      expect(consoleWindow.isVisible()).toBe(true);
+      expect(startConsoleRuntime).toHaveBeenCalledOnce();
+    } finally {
+      await application.stop();
+    }
+    expect(runtimes[0]!.close).toHaveBeenCalledOnce();
+  });
+
+  it("shows a hidden console immediately when reopened before its renderer load promise resolves", async () => {
+    const { application, actions, workspaceWindow, runtimes, startConsoleRuntime } =
+      await createConsoleLifecycleFixture();
+    const { BrowserWindow } = await import("electron");
+    const loading = deferred<void>();
+    const originalLoadURL = BrowserWindow.prototype.loadURL;
+    const loadURL = vi.spyOn(BrowserWindow.prototype, "loadURL").mockImplementationOnce(
+      async function (this: Electron.BrowserWindow, url, options) {
+        await originalLoadURL.call(this, url, options);
+        await loading.promise;
+      },
+    );
+
+    try {
+      const source = identityFor(workspaceWindow);
+      const opening = actions.open(source);
+      const consoleWindow = harness.windows.at(-1)!;
+      expect((await actions.claim(identityFor(consoleWindow))).ok).toBe(true);
+      expect(consoleWindow.isVisible()).toBe(true);
+      const windowCount = harness.windows.length;
+      consoleWindow.close();
+      expect(consoleWindow.isVisible()).toBe(false);
+
+      const reopening = Promise.resolve(actions.open(source));
+      expect(consoleWindow.isVisible()).toBe(true);
+      expect(harness.focusedWindow).toBe(consoleWindow);
+      expect(harness.windows).toHaveLength(windowCount);
+      expect(startConsoleRuntime).toHaveBeenCalledOnce();
+      expect(runtimes[0]!.close).not.toHaveBeenCalled();
+      let reopened = false;
+      void reopening.then(() => { reopened = true; });
+      await settleLifecycle();
+      expect(reopened).toBe(false);
+
+      loading.resolve();
+      expect(await opening).toEqual({ ok: true });
+      expect(await reopening).toEqual({ ok: true });
+      expect(consoleWindow.isVisible()).toBe(true);
+    } finally {
+      loading.resolve();
+      loadURL.mockRestore();
+      await application.stop();
+    }
+    expect(runtimes[0]!.close).toHaveBeenCalledOnce();
+  });
+
+  it("recovers a hidden console on activation after its source closes and destroys an explicitly emptied host", async () => {
+    const fixture = await createConsoleLifecycleFixture();
+    const { application, actions, workspaceWindow, runtimes, startConsoleRuntime } = fixture;
+    const { app } = await import("electron");
+
+    try {
+      expect(await actions.open(identityFor(workspaceWindow))).toEqual({ ok: true });
+      const consoleWindow = harness.windows.at(-1)!;
+      const owner = identityFor(consoleWindow);
+      const claimed = await actions.claim(owner);
+      expect(claimed.ok).toBe(true);
+      const windowCount = harness.windows.length;
+
+      consoleWindow.close();
+      workspaceWindow.close();
+      await settleLifecycle();
+      expect(workspaceWindow.isDestroyed()).toBe(true);
+      expect(consoleWindow.isVisible()).toBe(false);
+      expect(runtimes[0]!.close).not.toHaveBeenCalled();
+
+      app.emit("activate");
+      expect(harness.windows).toHaveLength(windowCount);
+      expect(consoleWindow.isVisible()).toBe(true);
+      expect(harness.focusedWindow).toBe(consoleWindow);
+      expect(startConsoleRuntime).toHaveBeenCalledOnce();
+      expect(await actions.closeTab(owner, claimed.value!.initialTab.tabId)).toEqual({
+        ok: true,
+        value: { remainingTabs: 0 },
+      });
+      expect(runtimes[0]!.close).toHaveBeenCalledOnce();
+      consoleWindow.close();
+      expect(consoleWindow.isDestroyed()).toBe(true);
+    } finally {
+      await application.stop();
+    }
+    expect(runtimes[0]!.close).toHaveBeenCalledOnce();
   });
 });
 
@@ -735,6 +942,50 @@ function fakeConnectionRegistry() {
     inheritConnection: vi.fn(),
     closeWindowStreams: vi.fn(async () => undefined),
     unregisterWindow: vi.fn(async () => undefined),
+  };
+}
+
+async function createConsoleLifecycleFixture(
+  startRuntime: () => Promise<ReturnType<typeof fakeRuntime>> = async () => fakeRuntime(),
+) {
+  const runtimes: ReturnType<typeof fakeRuntime>[] = [];
+  const startConsoleRuntime = vi.fn(async (options: { configBytes: Buffer }) => {
+    options.configBytes.fill(0);
+    const runtime = await startRuntime();
+    runtimes.push(runtime);
+    return runtime;
+  });
+  const registry = {
+    ...fakeConnectionRegistry(),
+    snapshot: vi.fn(() => ({
+      connection: { incarnation: 1, configName: "test-console.cfg", status: "connected" },
+    })),
+    copyActiveConfig: vi.fn(async () => ({
+      configName: "test-console.cfg",
+      configBytes: Buffer.from("local console lifecycle fixture"),
+    })),
+  };
+  const controller = {
+    getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+    getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+    dispose: vi.fn(),
+  } as unknown as ApplicationCloudDeploymentController;
+  const { startApplication } = await import("./application.js");
+  const { registerIpcHandlers } = await import("./ipc.js");
+  const application = await startApplication({
+    cloudDeploymentController: controller,
+    registry: registry as never,
+    developmentRendererUrl: "http://127.0.0.1:5173/",
+    consolePtyFactory: {} as never,
+    startConsoleRuntime: startConsoleRuntime as never,
+  });
+  const registration = vi.mocked(registerIpcHandlers).mock.calls.at(-1)!;
+  return {
+    application,
+    actions: registration[7]!,
+    workspaceWindow: harness.windows.at(-1)!,
+    runtimes,
+    startConsoleRuntime,
   };
 }
 

@@ -20,6 +20,7 @@ import type {
 // main-process contract.
 const CHANNELS = Object.freeze({
   getSnapshot: "sliver:cloud-deployment:snapshot:get",
+  refreshDeployments: "sliver:cloud-deployment:status:refresh",
   getProvisioningTranscripts: "sliver:cloud-deployment:transcripts:get",
   getTerminalRuntime: "sliver:cloud-deployment:terminal-runtime:get",
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
@@ -110,6 +111,7 @@ ipcRenderer.on(CHANNELS.navigationRequested, (_event, ...payload: unknown[]) => 
 
 const api: CloudDeploymentAPI = {
   getSnapshot: () => ipcRenderer.invoke(CHANNELS.getSnapshot),
+  refreshDeployments: () => ipcRenderer.invoke(CHANNELS.refreshDeployments),
   getProvisioningTranscripts: () => ipcRenderer.invoke(CHANNELS.getProvisioningTranscripts),
   getTerminalRuntime: () => ipcRenderer.invoke(CHANNELS.getTerminalRuntime),
   detectCurrentEgressIpv4: () => ipcRenderer.invoke(CHANNELS.detectCurrentEgressIpv4),

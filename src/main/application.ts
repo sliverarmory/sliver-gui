@@ -207,6 +207,7 @@ interface ConsoleWindowRecord {
   readonly tabsById: Map<string, ConsoleTabRecord>;
   readonly tabsByAttachmentToken: Map<string, ConsoleTabRecord>;
   nextTabOrdinal: number;
+  hiddenByUser: boolean;
   finalizing: boolean;
 }
 
@@ -465,7 +466,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       });
     }
     window.on("focus", installMenu);
-    window.once("ready-to-show", () => window.show());
+    window.once("ready-to-show", () => {
+      if (!consoleWindowRecord?.hiddenByUser) window.show();
+    });
     let completedInitialLoad = false;
     window.webContents.once("did-finish-load", () => {
       completedInitialLoad = true;
@@ -500,6 +503,21 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
       }
     });
+    if (consoleWindowRecord) {
+      window.on("close", (event) => {
+        if (
+          shutdown.isStopping ||
+          consoleWindowRecord.finalizing ||
+          (consoleWindowRecord.tabsById.size === 0 && !consoleWindowRecord.claimPromise)
+        ) return;
+        // Keep the renderer and its terminals intact, including scrollback,
+        // unfinished input, tab names and selection. Only an explicit tab
+        // close (or application teardown) should stop a live console client.
+        event.preventDefault();
+        consoleWindowRecord.hiddenByUser = true;
+        window.hide();
+      });
+    }
     if (sessionShellRecord) {
       window.on("close", (event) => {
         if (
@@ -1300,14 +1318,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const key = `${source.contentsId}:${incarnation}`;
       const existing = consoleWindowsByKey.get(key);
       if (existing && !existing.window.isDestroyed() && !existing.finalizing) {
-        if (existing.openPromise) return existing.openPromise;
+        if (existing.openPromise && !existing.hiddenByUser) return existing.openPromise;
         failureKind = "window-restore-failed";
-        candidateWindow = existing.window;
-        candidateRecord = existing;
-        if (existing.window.isMinimized()) existing.window.restore();
-        existing.window.show();
-        existing.window.focus();
-        return { ok: true };
+        // A failed native show/focus must leave retained clients available
+        // for another attempt, rather than rolling back their live window.
+        showConsoleWindow(existing);
+        return existing.openPromise ?? { ok: true };
       }
       if (existing) retireConsoleWindow(existing, "window-closed");
 
@@ -1327,6 +1343,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         tabsById: new Map(),
         tabsByAttachmentToken: new Map(),
         nextTabOrdinal: 1,
+        hiddenByUser: false,
         finalizing: false,
       };
       candidateRecord = record;
@@ -1341,6 +1358,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       if (candidateWindow) await rollbackConsoleWindowOpen(candidateWindow, candidateRecord);
       return consoleWindowOpenFailure(failureKind);
     }
+  }
+
+  function showConsoleWindow(record: ConsoleWindowRecord): void {
+    if (record.window.isMinimized()) record.window.restore();
+    record.window.show();
+    record.hiddenByUser = false;
+    record.window.focus();
   }
 
   async function finishConsoleWindowOpen(record: ConsoleWindowRecord): Promise<OperationResult> {
@@ -2042,7 +2066,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   const onActivate = (): void => {
-    if (windows.size === 0) createWindow();
+    if (shutdown.isStopping) return;
+    if (windows.size === 0) {
+      createWindow();
+      return;
+    }
+    if ([...windows].some((window) => !window.isDestroyed() && window.isVisible())) return;
+    // A retained console can outlive its source workspace. Dock activation
+    // must still make its tabs reachable when every visible window is closed.
+    const retainedConsole = [...consoleWindowsByContentsId.values()].reverse().find((record) =>
+      record.hiddenByUser && !record.finalizing && !record.window.isDestroyed());
+    if (retainedConsole) showConsoleWindow(retainedConsole);
   };
   const onWindowAllClosed = (): void => {
     if (process.platform !== "darwin") app.quit();
@@ -2474,6 +2508,7 @@ function unavailableCloudDeploymentController(
 ): ApplicationCloudDeploymentController {
   const controller: ApplicationCloudDeploymentController = {
     getSnapshot: () => ({ ok: false, error: message }),
+    refreshDeployments: () => ({ ok: false, error: message }),
     getProvisioningTranscripts: () => ({ ok: false, error: message }),
     getTerminalRuntime: () => ({ ok: false, error: message }),
     detectCurrentEgressIpv4: () => ({ ok: false, error: message }),

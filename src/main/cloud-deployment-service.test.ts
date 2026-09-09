@@ -18,6 +18,7 @@ import type {
   AzureFirewallRuleSpec,
   AzureFirewallSnapshot,
   AzureCliAccountSummary,
+  CloudDeploymentRecord,
   CreateAwsCloudDeploymentInput,
   CreateAzureCloudDeploymentInput,
   ResolvedAwsCloudCredentialInput,
@@ -41,6 +42,7 @@ import {
   type CloudPrivateKeyCapabilities,
   type CloudSshTerminalStarter,
   type CloudSliverProvisioner,
+  type CloudDeploymentServiceOptions,
 } from "./cloud-deployment-service.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
@@ -2632,10 +2634,385 @@ describe("CloudDeploymentService", () => {
   });
 });
 
-async function dependencies() {
+describe("CloudDeploymentService provider status refresh", () => {
+  let activeService: CloudDeploymentService | undefined;
+
+  afterEach(() => {
+    activeService?.dispose();
+    activeService = undefined;
+  });
+
+  async function fixture(
+    provider: "aws" | "azure" = "aws",
+    options: Pick<CloudDeploymentServiceOptions, "deploymentRefreshTimeoutMs" | "awsConsoleLogin" | "azureBrowserLogin" | "now"> = {},
+    deploymentIds?: readonly string[],
+  ) {
+    const deps = await dependencies(deploymentIds);
+    const aws = new FakeAwsProvider();
+    const azure = new FakeAzureProvider();
+    const azureConnections: AzureVmProviderConnection[] = [];
+    const provisioner = fakeProvisioner();
+    const credential = awsCredential();
+    const azureInput = provider === "azure" ? azureCredential() : undefined;
+    await deps.vault.create(azureInput ? (options.azureBrowserLogin ? {
+      ...azureInput,
+      secret: { ...azureInput.secret, authentication: "login", loginSession: azureAuthSession("before-login") },
+    } : azureInput) : options.awsConsoleLogin ? {
+      ...credential,
+      secret: {
+        loginSession: authSession("before-login"),
+        sshPrivateKey: credential.secret.sshPrivateKey,
+        sshPassphrase: null,
+      },
+    } : credential);
+    const service = await CloudDeploymentService.create({
+      ...deps,
+      rootDirectory,
+      operatorConfigDirectory,
+      now: () => NOW.getTime(),
+      ...options,
+      provisioner,
+      privateKeyCapabilities: fakePrivateKeys(),
+      awsProviderFactory: () => aws,
+      azureProviderFactory: (connection) => {
+        azureConnections.push(connection);
+        return azure;
+      },
+      awsProfileSource: { list: async () => [], credentialProvider: vi.fn() },
+      azureAccountSource: fakeAzureAccountSource(),
+    });
+    activeService = service;
+    const result = await service.createDeployment(provider === "aws" ? awsDeployment() : azureDeployment());
+    if (!result.ok) throw new Error(result.error);
+    for (const candidate of [aws, azure]) {
+      candidate.create.mockClear();
+      candidate.refresh.mockClear();
+    }
+    provisioner.provision.mockClear();
+    const assertNoMutations = (): void => {
+      for (const candidate of [aws, azure]) {
+        for (const mutation of [candidate.create, candidate.start, candidate.stop, candidate.reboot,
+          candidate.replaceFirewall, candidate.createFirewallRule, candidate.updateFirewallRule,
+          candidate.deleteFirewallRule, candidate.destroy]) expect(mutation).not.toHaveBeenCalled();
+      }
+      expect(provisioner.provision).not.toHaveBeenCalled();
+    };
+    const update = async (patch: Partial<CloudDeploymentRecord>): Promise<CloudDeploymentRecord> => {
+      const current = deps.store.getState().deployments[0]!;
+      const updated = await deps.store.update({ expectedRevision: deps.store.getState().revision,
+        deployment: { ...current, ...patch } as CloudDeploymentRecord });
+      if (!updated.ok) throw new Error(updated.error);
+      return updated.value.deployment;
+    };
+    return { ...deps, service, aws, azure, azureConnections, assertNoMutations, update };
+  }
+
+  it.each(["aws", "azure"] as const)("recovers completed %s deployments from legacy authentication read failures", async (provider) => {
+    const f = await fixture(provider);
+    const lastError = provider === "aws"
+      ? "AWS EC2 could not read the managed instance. Refresh the selected AWS CLI profile with `aws login` and try again."
+      : "Azure could not read the managed virtual machine. Use Azure Login to renew this credential, or refresh its Azure CLI sign-in, and try again.";
+    const failed = await f.update({ status: "failed", phase: "failed", lastError });
+
+    const result = await f.service.refreshDeployments();
+
+    expect(result).toMatchObject({ ok: true, value: { refreshErrors: [], state: { deployments: [{
+      status: "running", phase: "ready", lastError: null,
+      operatorConfigFileName: failed.operatorConfigFileName,
+      operatorConfigDigest: failed.operatorConfigDigest,
+      managedAssets: failed.managedAssets,
+    }] } } });
+    f.assertNoMutations();
+  });
+
+  it.each(["provisioning", "termination"])("keeps a genuine %s failure while observing the current VM", async (operation) => {
+    const f = await fixture();
+    const lastError = `The ${operation} operation was interrupted when the application closed. Review the managed assets before retrying termination.`;
+    const failed = await f.update({ status: "failed", phase: "failed", lastError });
+    f.aws.refresh.mockResolvedValue({ ...awsResource(), instanceHealth: "impaired" });
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      status: "failed", phase: "failed", lastError,
+      managedAssets: failed.managedAssets,
+      runtime: { instanceHealth: "impaired" },
+    });
+    f.assertNoMutations();
+  });
+
+  it("does not mark an incompletely provisioned running VM ready after a read succeeds", async () => {
+    const f = await fixture();
+    const lastError = "AWS EC2 could not read the managed instance. Use AWS Login to renew this credential, or refresh its AWS CLI sign-in, and try again.";
+    await f.update({ status: "failed", phase: "failed", lastError, operatorConfigFileName: null, operatorConfigDigest: null });
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({ status: "failed", phase: "failed", lastError });
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("does not change revision or emit changes for unchanged %s observations", async (provider) => {
+    let now = NOW.getTime();
+    const f = await fixture(provider, { now: () => now });
+    await f.service.refreshDeployments();
+    const before = f.store.getState();
+    const changed = vi.fn();
+    f.service.subscribe(changed);
+    now += 60_000;
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({
+      ok: true, value: { state: before, refreshErrors: [] },
+    });
+
+    expect(f.store.getState().revision).toBe(before.revision);
+    expect(changed.mock.calls.filter(([scope]) => scope === "snapshot")).toEqual([]);
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("clears disappeared %s connection addresses while preserving cleanup identity", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState().deployments[0]!;
+    if (provider === "aws") {
+      const value = { ...awsResource(), state: "terminated" as const, volumeIds: [], networkInterfaceIds: [] };
+      delete value.publicIpAddress;
+      delete value.privateIpAddress;
+      delete value.elasticIp;
+      f.aws.refresh.mockResolvedValue(value);
+    } else {
+      const value = { ...azureResource("deallocated") };
+      delete value.publicIpAddress;
+      delete value.privateIpAddress;
+      f.azure.refresh.mockResolvedValue(value);
+    }
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      remoteHost: null,
+      runtime: { publicIpAddress: null, privateIpAddress: null },
+      managedAssets: before.managedAssets,
+    });
+    f.assertNoMutations();
+  });
+
+  it("reports transient read failures separately and clears them after a successful read", async () => {
+    const f = await fixture();
+    const before = f.store.getState();
+    f.aws.refresh.mockRejectedValueOnce(new Error("Unable to read with secret-cloud-value"));
+
+    const failed = await f.service.refreshDeployments();
+
+    expect(failed).toMatchObject({ ok: true, value: { state: before, refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    expect(JSON.stringify(failed)).not.toContain("secret-cloud-value");
+    expect(f.store.getState()).toEqual(before);
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    f.assertNoMutations();
+  });
+
+  it("coalesces concurrent refresh calls into one provider read", async () => {
+    const f = await fixture();
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const first = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+    const second = f.service.refreshDeployments();
+    const third = f.service.refreshDeployments();
+    reading.resolve(awsResource());
+
+    const results = await Promise.all([first, second, third]);
+
+    expect(results.every(({ ok }) => ok)).toBe(true);
+    expect(f.aws.refresh).toHaveBeenCalledOnce();
+    f.assertNoMutations();
+  });
+
+  it("bounds slow reads, aborts their signal, and ignores late results", async () => {
+    const f = await fixture("aws", { deploymentRefreshTimeoutMs: 10 });
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const before = f.store.getState();
+
+    const result = await f.service.refreshDeployments();
+
+    expect(result).toMatchObject({ ok: true, value: { state: before, refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    expect(f.aws.refresh.mock.calls[0]?.[1]?.aborted).toBe(true);
+    reading.resolve({ ...awsResource(), state: "stopped" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.store.getState()).toEqual(before);
+    f.assertNoMutations();
+  });
+
+  it("aborts refresh on disposal and does not apply its late response", async () => {
+    const f = await fixture();
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const before = f.store.getState();
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+
+    f.service.dispose();
+    expect(f.aws.refresh.mock.calls[0]?.[1]?.aborted).toBe(true);
+    reading.resolve({ ...awsResource(), state: "stopped" });
+    await pending;
+
+    expect(f.store.getState()).toEqual(before);
+    f.assertNoMutations();
+  });
+
+  it("does not let an old running observation overwrite a completed stop action", async () => {
+    const f = await fixture();
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+    await expect(f.service.runLifecycleAction({ deploymentId: DEPLOYMENT_ID,
+      expectedRevision: f.store.getState().revision, action: "stop" })).resolves.toMatchObject({ ok: true });
+
+    reading.resolve(awsResource());
+    await pending;
+
+    expect(f.store.getState().deployments[0]).toMatchObject({ status: "stopped", runtime: { instanceState: "stopped" } });
+  });
+
+  it("reads provider status automatically after successful native reauthentication", async () => {
+    const login = vi.fn(async () => authSession("after-login"));
+    const f = await fixture("aws", { awsConsoleLogin: { login, refresh: vi.fn() } });
+    await f.update({ status: "failed", phase: "failed",
+      lastError: "AWS EC2 could not read the managed instance. Use AWS Login to renew this credential, or refresh its AWS CLI sign-in, and try again." });
+
+    await expect(f.service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(f.store.getState().deployments[0]).toMatchObject({ status: "running", phase: "ready", lastError: null }));
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("supersedes an old %s read with a fresh read after reauthentication", async (provider) => {
+    const f = await fixture(provider, provider === "aws" ? {
+      awsConsoleLogin: { login: async () => authSession("after-login"), refresh: vi.fn() },
+    } : {
+      azureBrowserLogin: { login: async () => ({ session: azureAuthSession("after-login"), subscriptions: [azureAccount()] }), getToken: vi.fn() },
+    });
+    let oldSignal: AbortSignal | undefined;
+    const waitForAbort = <T,>(_resource: T, signal?: AbortSignal): Promise<never> => {
+      oldSignal = signal;
+      if (!signal) throw new Error("Missing provider abort signal");
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("obsolete provider read")), { once: true });
+      });
+    };
+    if (provider === "aws") {
+      f.aws.refresh.mockImplementationOnce(waitForAbort).mockResolvedValue({ ...awsResource(), state: "stopped" });
+    } else {
+      f.azure.refresh.mockImplementationOnce(waitForAbort).mockResolvedValue(azureResource("deallocated"));
+    }
+    const refresh = provider === "aws" ? f.aws.refresh : f.azure.refresh;
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+
+    const result = provider === "aws"
+      ? await f.service.loginAwsCredential({ credentialId: CREDENTIAL_ID })
+      : await f.service.loginAzureCredential({ credentialId: CREDENTIAL_ID });
+    await pending;
+
+    expect(result.ok).toBe(true);
+    expect(oldSignal?.aborted).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(f.store.getState().deployments[0]).toMatchObject({ status: "stopped", phase: "stopped", lastError: null });
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    f.assertNoMutations();
+  });
+
+  it("persists concurrent observations of different deployments across unrelated store revisions", async () => {
+    const f = await fixture("aws", {}, [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID]);
+    const secondResource = { ...awsResource(), guid: SECOND_DEPLOYMENT_ID, name: "Second AWS server",
+      instanceId: "i-11111111111111111", publicIpAddress: "203.0.113.21",
+      keyPair: { id: "key-11111111111111111", name: `sliver-gui-${SECOND_DEPLOYMENT_ID}` } };
+    f.aws.create.mockResolvedValueOnce(secondResource);
+    const second = await f.service.createDeployment({ ...awsDeployment(), name: secondResource.name,
+      expectedRevision: f.store.getState().revision });
+    if (!second.ok) throw new Error(second.error);
+    f.aws.create.mockClear();
+    const firstReading = deferred<AwsEc2DeploymentResource>();
+    const secondReading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation((resource) => resource.guid === DEPLOYMENT_ID ? firstReading.promise : secondReading.promise);
+    const beforeRevision = f.store.getState().revision;
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledTimes(2));
+
+    secondReading.resolve({ ...secondResource, state: "stopped" });
+    await vi.waitFor(() => expect(f.store.getState().deployments.find(({ id }) => id === SECOND_DEPLOYMENT_ID)?.status).toBe("stopped"));
+    firstReading.resolve({ ...awsResource(), state: "stopped" });
+    await pending;
+
+    expect(f.store.getState().revision).toBe(beforeRevision + 2);
+    expect(f.store.getState().deployments.map(({ status }) => status)).toEqual(["stopped", "stopped"]);
+    expect(f.aws.start).not.toHaveBeenCalled();
+    expect(f.aws.stop).not.toHaveBeenCalled();
+    expect(f.aws.destroy).not.toHaveBeenCalled();
+  });
+
+  it("keeps successful login successful when its immediate provider status read fails", async () => {
+    const f = await fixture("aws", { awsConsoleLogin: { login: async () => authSession("after-login"), refresh: vi.fn() } });
+    const before = f.store.getState();
+    f.aws.refresh.mockRejectedValue(new Error("AWS EC2 could not read the managed instance (HTTP 503)."));
+
+    await expect(f.service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+
+    expect(f.aws.refresh).toHaveBeenCalledOnce();
+    expect(f.store.getState()).toEqual(before);
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    f.assertNoMutations();
+  });
+
+  it("does not join obsolete native Azure token work when reauthentication starts a fresh provider read", async () => {
+    const stale = deferred<{ session: AzureBrowserLoginSession; token: string; expiresOnTimestamp: number }>();
+    const freshSession = azureAuthSession("after-login");
+    const getToken = vi.fn<CloudAzureBrowserLogin["getToken"]>()
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValue({ session: freshSession, token: "current-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 });
+    const f = await fixture("azure", { azureBrowserLogin: {
+      login: async () => ({ session: freshSession, subscriptions: [azureAccount()] }), getToken,
+    } });
+    f.azure.refresh.mockImplementation(async (_resource, signal) => {
+      if (!signal) throw new Error("Missing provider abort signal");
+      const connection = f.azureConnections.at(-1)!;
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new Error("Azure provider read aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      try {
+        await Promise.race([connection.credential.getToken("https://management.azure.com/.default"), aborted]);
+        return azureResource();
+      } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+      }
+    });
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(getToken).toHaveBeenCalledOnce());
+
+    await expect(f.service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    await pending;
+
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(f.azure.refresh).toHaveBeenCalledTimes(2);
+    stale.resolve({ session: azureAuthSession("obsolete"), token: "obsolete-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(f.vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(freshSession.cache);
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    f.assertNoMutations();
+  });
+});
+
+async function dependencies(deploymentIds: readonly string[] = [DEPLOYMENT_ID]) {
   const safeStorage = new XorSafeStorage();
+  let nextDeploymentId = 0;
   const store = await CloudDeploymentStore.load(rootDirectory, {
-    idFactory: () => DEPLOYMENT_ID,
+    idFactory: () => deploymentIds[nextDeploymentId++] ?? DEPLOYMENT_ID,
     clock: () => NOW,
   });
   const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
@@ -2890,6 +3267,7 @@ function fakeProvisioner(): CloudSliverProvisioner & { provision: ReturnType<typ
 }
 
 class FakeAwsProvider implements CloudAwsProvider {
+  readonly refresh = vi.fn(async (_resource: AwsEc2DeploymentResource, _signal?: AbortSignal) => awsResource());
   readonly create = vi.fn(async (
     _input: Parameters<CloudAwsProvider["create"]>[0],
     onMutation?: Parameters<CloudAwsProvider["create"]>[1],
@@ -3233,7 +3611,7 @@ class FakeAzureProvider implements CloudAzureProvider {
     });
     return resource;
   });
-  readonly refresh = vi.fn(async () => azureResource());
+  readonly refresh = vi.fn(async (_resource: AzureVmDeploymentResource, _signal?: AbortSignal) => azureResource());
   readonly start = vi.fn(async () => azureResource("running"));
   readonly stop = vi.fn(async () => azureResource("deallocated"));
   readonly reboot = vi.fn(async () => azureResource("running"));

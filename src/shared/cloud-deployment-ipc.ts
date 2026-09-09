@@ -34,6 +34,7 @@ import type {
 
 export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   getSnapshot: "sliver:cloud-deployment:snapshot:get",
+  refreshDeployments: "sliver:cloud-deployment:status:refresh",
   getProvisioningTranscripts: "sliver:cloud-deployment:transcripts:get",
   getTerminalRuntime: "sliver:cloud-deployment:terminal-runtime:get",
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
@@ -81,6 +82,7 @@ export type CloudDeploymentNavigationRequest =
 
 export interface CloudDeploymentSnapshot {
   readonly state: CloudDeploymentState;
+  readonly refreshErrors: readonly CloudDeploymentRefreshError[];
   readonly credentials: readonly CloudCredentialSummary[];
   readonly secureCredentialStorage: boolean;
   readonly awsProfiles: readonly AwsCliProfileSummary[];
@@ -89,6 +91,17 @@ export interface CloudDeploymentSnapshot {
   readonly azureAccountDiscoveryError: string | null;
   /** Session-only, bounded SSH provisioning output. This is never written to disk. */
   readonly provisioningTranscripts: readonly CloudProvisioningTranscript[];
+}
+
+/** Session-only read failures, separate from persisted operation failures. */
+export interface CloudDeploymentRefreshError {
+  readonly deploymentId: string;
+  readonly message: string;
+}
+
+export interface CloudDeploymentRefreshResult {
+  readonly state: CloudDeploymentState;
+  readonly refreshErrors: readonly CloudDeploymentRefreshError[];
 }
 
 export interface CloudProvisioningTranscriptChunk {
@@ -148,6 +161,8 @@ export interface ExecuteDestroyCloudDeploymentInput {
 
 export interface CloudDeploymentAPI {
   getSnapshot(): Promise<OperationResult<CloudDeploymentSnapshot>>;
+  /** Read provider state; passive change notifications continue to use getSnapshot. */
+  refreshDeployments(): Promise<OperationResult<CloudDeploymentRefreshResult>>;
   getProvisioningTranscripts(): Promise<OperationResult<CloudProvisioningTranscriptSnapshot>>;
   getTerminalRuntime(): Promise<OperationResult<TerminalRuntimeAsset>>;
   detectCurrentEgressIpv4(): Promise<OperationResult<CurrentEgressIpv4>>;

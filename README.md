@@ -55,6 +55,10 @@ configuration files and their private keys stay in the Electron main process.
   themes, and settings. Electron main stages the selected config and command
   history in a private temporary workspace, disables transcript logging, and
   owns the PTY, process, input/output bounds, and cleanup.
+  Closing the console window keeps its clients and terminal state alive in the
+  background; reopening it from the same connected workspace restores its tabs,
+  names, selection, and scrollback. Close a tab explicitly to stop that client
+  and remove its private workspace. Quitting the app cleans up all clients.
   SSH and console terminals offer Copy/Paste in the right-click menu for
   Ghostty's highlighted text. Shortcuts are Cmd+C/Cmd+V on macOS and
   Ctrl+Shift+C/Ctrl+Shift+V on Windows/Linux; Ctrl+C still interrupts the

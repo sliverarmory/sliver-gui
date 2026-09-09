@@ -12,6 +12,8 @@ import type {
   CloudCredentialTestResult,
   CloudDeploymentChangeScope,
   CloudDeploymentSnapshot,
+  CloudDeploymentRefreshResult,
+  CloudDeploymentRefreshError,
   CloudProvisioningTranscript,
   CloudProvisioningTranscriptSnapshot,
   CurrentEgressIpv4,
@@ -140,6 +142,8 @@ const MAX_PROVISIONING_TRANSCRIPT_CHUNKS = 512;
 const MAX_PROVISIONING_TRANSCRIPTS = 8;
 const PROVISIONING_TRANSCRIPT_EMIT_DELAY_MS = 100;
 const SSH_HOST_KEY_REVIEW_TTL_MS = 5 * 60 * 1000;
+const DEPLOYMENT_REFRESH_TIMEOUT_MS = 30_000;
+const DEPLOYMENT_REFRESH_CONCURRENCY = 4;
 const AZURE_PUBLIC_IP_REFRESH_ATTEMPTS = 7;
 const AZURE_PUBLIC_IP_REFRESH_DELAY_MS = 5_000;
 const SSH_HOST_KEY_STORE_FILE_NAME = "ssh-host-keys.json";
@@ -171,6 +175,7 @@ export interface CloudAwsProvider {
     input: Parameters<AwsEc2Provider["create"]>[0],
     onMutation?: Parameters<AwsEc2Provider["create"]>[1],
   ): Promise<AwsEc2DeploymentResource>;
+  refresh(resource: AwsEc2DeploymentResource, signal?: AbortSignal): Promise<AwsEc2DeploymentResource>;
   start(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource>;
   stop(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource>;
   reboot(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource>;
@@ -199,7 +204,7 @@ export interface CloudAzureProvider {
     input: Parameters<AzureVmProvider["create"]>[0],
     onMutation?: Parameters<AzureVmProvider["create"]>[1],
   ): Promise<AzureVmDeploymentResource>;
-  refresh(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
+  refresh(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<AzureVmDeploymentResource>;
   start(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
   stop(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
   reboot(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
@@ -248,6 +253,13 @@ export interface CloudAzureBrowserLogin {
 
 type AzureAccessToken = NonNullable<Awaited<ReturnType<TokenCredential["getToken"]>>>;
 
+interface DeploymentRefreshRead {
+  readonly credentialId: string;
+  readonly generation: number;
+  readonly controller: AbortController;
+  readonly promise: Promise<CloudDeploymentRecord | null>;
+}
+
 interface StagedAzureLogin {
   readonly ownerId: number;
   readonly session: Buffer;
@@ -281,6 +293,8 @@ export interface CloudDeploymentServiceOptions {
   readonly azureAccountSource?: CloudAzureAccountSource;
   readonly azureBrowserLogin?: CloudAzureBrowserLogin;
   readonly azureCliCredentialFactory?: (secret: AzureCliCredentialSecret) => TokenCredential;
+  /** Deadline for each read-only provider status refresh. */
+  readonly deploymentRefreshTimeoutMs?: number;
   /** Test seam for the bounded Azure public-IP propagation wait. */
   readonly azurePublicIpRefreshDelay?: (milliseconds: number) => Promise<void>;
   readonly sshHostKeyStore?: SshHostKeyStore;
@@ -355,6 +369,17 @@ export class CloudDeploymentService {
   readonly #sshHostKeyReviews = new Map<string, SshHostKeyReviewEntry>();
   readonly #issuedSshHostKeyReviewTokens = new Set<string>();
   readonly #provisioningTranscripts = new Map<string, MutableProvisioningTranscript>();
+  readonly #deploymentRefreshTimeoutMs: number;
+  readonly #refreshErrors = new Map<string, string>();
+  readonly #refreshReads = new Map<string, DeploymentRefreshRead>();
+  readonly #credentialRefreshGenerations = new Map<string, number>();
+  readonly #deploymentRefreshGenerations = new Map<string, number>();
+  readonly #busyDeployments = new Map<string, number>();
+  readonly #pendingRefreshCredentials = new Set<string>();
+  #pendingRefreshAll = false;
+  #refreshingAll = false;
+  #refreshLoop: Promise<void> | undefined;
+  #stateMutationChain: Promise<void> = Promise.resolve();
   #transitionChain: Promise<void> = Promise.resolve();
   #transcriptEmitTimer: NodeJS.Timeout | undefined;
   #disposed = false;
@@ -400,6 +425,8 @@ export class CloudDeploymentService {
     this.#opaqueIdFactory = options.opaqueIdFactory ?? (() => randomBytes(32).toString("base64url"));
     this.#now = options.now ?? Date.now;
     this.#idFactory = options.idFactory ?? randomUUID;
+    this.#deploymentRefreshTimeoutMs = options.deploymentRefreshTimeoutMs ?? DEPLOYMENT_REFRESH_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.#deploymentRefreshTimeoutMs) || this.#deploymentRefreshTimeoutMs < 1 || this.#deploymentRefreshTimeoutMs > 120_000) throw new TypeError("Invalid cloud refresh timeout");
     if (options.provisioner) {
       this.#provisioner = options.provisioner;
     } else {
@@ -447,6 +474,7 @@ export class CloudDeploymentService {
         ok: true,
         value: Object.freeze({
           state: this.#store.getState(),
+          refreshErrors: this.#refreshErrorSnapshot(),
           credentials: await this.#vault.list(),
           secureCredentialStorage: this.#canPersistCredentials(),
           awsProfiles,
@@ -459,6 +487,244 @@ export class CloudDeploymentService {
     } catch (error) {
       return failure(error, "Cloud deployment state is unavailable");
     }
+  }
+
+  async refreshDeployments(): Promise<OperationResult<CloudDeploymentRefreshResult>> {
+    try {
+      this.#assertActive();
+      await this.#enqueueDeploymentRefresh();
+      this.#assertActive();
+      return {
+        ok: true,
+        value: {
+          state: this.#store.getState(),
+          refreshErrors: this.#refreshErrorSnapshot(),
+        },
+      };
+    } catch (error) {
+      return failure(error, "Cloud deployment status could not be refreshed");
+    }
+  }
+
+  #refreshErrorSnapshot(): readonly CloudDeploymentRefreshError[] {
+    const existing = new Set(this.#store.getState().deployments.map(({ id }) => id));
+    return Object.freeze([...this.#refreshErrors]
+      .filter(([id]) => existing.has(id))
+      .map(([deploymentId, message]) => Object.freeze({ deploymentId, message }))
+      .sort((left, right) => left.deploymentId.localeCompare(right.deploymentId)));
+  }
+
+  async #refreshAfterCredentialLogin(credentialId: string): Promise<void> {
+    const generation = this.#credentialRefreshGenerations.get(credentialId) ?? 0;
+    this.#credentialRefreshGenerations.set(credentialId, generation + 1);
+    // A new login must not join token work started with the previous session.
+    // The vault's snapshot guard still prevents those old requests from saving.
+    this.#awsRefreshes.delete(credentialId);
+    this.#azureRefreshes.delete(credentialId);
+    for (const read of this.#refreshReads.values()) {
+      if (read.credentialId === credentialId) read.controller.abort();
+    }
+    try {
+      await this.#enqueueDeploymentRefresh(credentialId);
+    } catch {
+      // Login remains successful when status reads fail.
+    }
+  }
+
+  #enqueueDeploymentRefresh(credentialId?: string): Promise<void> {
+    if (credentialId !== undefined) this.#pendingRefreshCredentials.add(credentialId);
+    else if (!this.#refreshLoop || !this.#refreshingAll) this.#pendingRefreshAll = true;
+    if (!this.#refreshLoop) {
+      const loop = this.#drainDeploymentRefreshes();
+      this.#refreshLoop = loop;
+      void loop.finally(() => {
+        if (this.#refreshLoop === loop) this.#refreshLoop = undefined;
+      }).catch(() => undefined);
+    }
+    return this.#refreshLoop;
+  }
+
+  async #drainDeploymentRefreshes(): Promise<void> {
+    while (!this.#disposed && (this.#pendingRefreshAll || this.#pendingRefreshCredentials.size > 0)) {
+      const all = this.#pendingRefreshAll;
+      const credentials = new Set(this.#pendingRefreshCredentials);
+      this.#pendingRefreshAll = false;
+      this.#pendingRefreshCredentials.clear();
+      this.#refreshingAll = all;
+      const candidates = this.#store.getState().deployments.filter((record) =>
+        (all || credentials.has(record.credentialId)) &&
+        isRefreshableDeployment(record) &&
+        !this.#busyDeployments.has(record.id));
+      const workerCount = Math.min(DEPLOYMENT_REFRESH_CONCURRENCY, candidates.length);
+      let next = 0;
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (!this.#disposed) {
+          const record = candidates[next++];
+          if (!record) return;
+          await this.#refreshDeployment(record);
+        }
+      }));
+      this.#refreshingAll = false;
+      const existing = new Set(this.#store.getState().deployments.map(({ id }) => id));
+      for (const id of this.#refreshErrors.keys()) {
+        if (!existing.has(id)) this.#refreshErrors.delete(id);
+      }
+    }
+  }
+
+  async #refreshDeployment(record: CloudDeploymentRecord): Promise<void> {
+    const generation = this.#credentialRefreshGenerations.get(record.credentialId) ?? 0;
+    const deploymentGeneration = this.#deploymentRefreshGenerations.get(record.id) ?? 0;
+    const fingerprint = JSON.stringify(record);
+    const canApply = () => {
+      const current = this.#store.getState().deployments.find(({ id }) => id === record.id);
+      return !this.#disposed &&
+        !this.#busyDeployments.has(record.id) &&
+        (this.#credentialRefreshGenerations.get(record.credentialId) ?? 0) === generation &&
+        (this.#deploymentRefreshGenerations.get(record.id) ?? 0) === deploymentGeneration &&
+        JSON.stringify(current) === fingerprint;
+    };
+    try {
+      let read = this.#refreshReads.get(record.id);
+      if (read && read.generation !== generation) {
+        read.controller.abort();
+        // Aborted SDK requests settle promptly; retain the gate if an adapter does not.
+        try {
+          await this.#awaitRefreshRead(read);
+        } catch {
+          // Superseded credentials are never reused.
+        }
+        read = this.#refreshReads.get(record.id);
+        if (read) {
+          throw new Error("The previous cloud status request is still ending. Try refreshing again.");
+        }
+      }
+      if (!read) {
+        if (this.#refreshReads.size >= DEPLOYMENT_REFRESH_CONCURRENCY) {
+          throw new Error("Cloud status refresh is busy. Try refreshing again.");
+        }
+        const controller = new AbortController();
+        const signal = AbortSignal.any([controller.signal, this.#authLifetime.signal]);
+        const promise = this.#readDeploymentStatus(record, signal);
+        read = { credentialId: record.credentialId, generation, controller, promise };
+        this.#refreshReads.set(record.id, read);
+        const observed = read;
+        void promise.finally(() => {
+          if (this.#refreshReads.get(record.id) === observed) this.#refreshReads.delete(record.id);
+        }).catch(() => undefined);
+      }
+      const refreshed = await this.#awaitRefreshRead(read);
+      if (!refreshed || !canApply()) return;
+      await this.#serializeStateMutation(async () => {
+        if (!canApply()) return;
+        if (JSON.stringify(refreshed) !== fingerprint) {
+          const updated = await this.#store.update({
+            expectedRevision: this.#store.getState().revision,
+            deployment: refreshed,
+          }, () => {
+            if (!canApply()) throw new Error("Cloud deployment changed during status refresh");
+          });
+          if (!updated.ok) {
+            if (canApply()) throw new Error(updated.error);
+            return;
+          }
+          this.#refreshErrors.delete(record.id);
+          if (!this.#disposed) this.#emitChanged();
+        } else if (this.#refreshErrors.delete(record.id) && !this.#disposed) {
+          this.#emitChanged();
+        }
+      });
+    } catch (error) {
+      if (!canApply()) return;
+      const message = cloudErrorMessage(error, "Cloud deployment status could not be read");
+      if (this.#refreshErrors.get(record.id) !== message) {
+        this.#refreshErrors.set(record.id, message);
+        this.#emitChanged();
+      }
+    }
+  }
+
+  async #awaitRefreshRead(read: DeploymentRefreshRead): Promise<CloudDeploymentRecord | null> {
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    const bounded = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new Error("Cloud deployment status refresh was cancelled"));
+      this.#authLifetime.signal.addEventListener("abort", onAbort, { once: true });
+      if (this.#authLifetime.signal.aborted) onAbort();
+      timer = setTimeout(() => {
+        read.controller.abort();
+        reject(new Error("Cloud deployment status refresh timed out. Try again."));
+      }, this.#deploymentRefreshTimeoutMs);
+      timer.unref();
+    });
+    try {
+      return await Promise.race([read.promise, bounded]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) this.#authLifetime.signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async #readDeploymentStatus(
+    record: CloudDeploymentRecord,
+    signal: AbortSignal,
+  ): Promise<CloudDeploymentRecord | null> {
+    signal.throwIfAborted();
+    if (record.provider === "aws") {
+      return this.#vault.withCredential(record.credentialId, "aws", async (secret) => {
+        signal.throwIfAborted();
+        let resource: AwsEc2DeploymentResource;
+        try {
+          resource = awsResourceFromRecord(record);
+        } catch {
+          return null;
+        }
+        try {
+          const connection = await this.#awsConnection(record.spec.region, secret, record.credentialId);
+          signal.throwIfAborted();
+          const provider = this.#awsProviderFactory(connection);
+          const observed = await provider.refresh(resource, signal);
+          signal.throwIfAborted();
+          if (
+            observed.guid !== record.id ||
+            observed.instanceId !== resource.instanceId ||
+            observed.region !== resource.region
+          ) throw new Error("AWS returned a different deployment identity");
+          return applyAwsStatusObservation(record, observed);
+        } catch (error) {
+          throw new Error(cloudErrorMessage(
+            error, "AWS deployment status could not be read", credentialValues(secret),
+          ));
+        }
+      });
+    }
+    return this.#vault.withCredential(record.credentialId, "azure", async (secret) => {
+      signal.throwIfAborted();
+      let resource: AzureVmDeploymentResource;
+      try {
+        resource = azureResourceFromRecord(record, secret);
+      } catch {
+        return null;
+      }
+      try {
+        const provider = this.#azureProviderFactory(
+          this.#azureConnection(record.spec.location, secret, record.credentialId),
+        );
+        const observed = await provider.refresh(resource, signal);
+        signal.throwIfAborted();
+        if (
+          observed.guid !== record.id ||
+          observed.virtualMachineId !== resource.virtualMachineId ||
+          !sameAzureGuid(observed.tenantId, secret.tenantId) ||
+          !sameAzureGuid(observed.subscriptionId, secret.subscriptionId)
+        ) throw new Error("Azure returned a different deployment identity");
+        return applyAzureStatusObservation(record, observed);
+      } catch (error) {
+        throw new Error(cloudErrorMessage(
+          error, "Azure deployment status could not be read", credentialValues(secret),
+        ));
+      }
+    });
   }
 
   getProvisioningTranscripts(): OperationResult<CloudProvisioningTranscriptSnapshot> {
@@ -728,6 +994,7 @@ export class CloudDeploymentService {
         if (loginSession.loginSessionArn !== expectedArn) return { ok: false, error: "AWS Login used a different identity. Sign in with the original AWS identity and try again." };
         const updated = await this.#vault.updateAwsLoginSession(summary.id, secret, loginSession, authSignal);
         this.#emitChanged();
+        await this.#refreshAfterCredentialLogin(summary.id);
         return { ok: true, value: updated };
       });
     } catch (error) {
@@ -799,6 +1066,7 @@ export class CloudDeploymentService {
         }
         const updated = await this.#vault.updateAzureLoginSession(summary.id, secret, session, authSignal);
         this.#emitChanged();
+        await this.#refreshAfterCredentialLogin(summary.id);
         return { ok: true, value: updated };
       });
     } catch (error) {
@@ -1238,10 +1506,10 @@ export class CloudDeploymentService {
           operationStarted = true;
           await this.#destroyProviderResources(deployment);
           await this.#removeOperatorConfig(deployment);
-          const deleted = await this.#store.delete({
+          const deleted = await this.#serializeStateMutation(() => this.#store.delete({
             deploymentId: deployment.id,
             expectedRevision: this.#store.getState().revision,
-          });
+          }));
           if (!deleted.ok) return deleted;
           this.#discardProvisioningTranscript(deployment.id);
           this.#emitChanged();
@@ -1261,6 +1529,9 @@ export class CloudDeploymentService {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#authLifetime.abort();
+    for (const read of this.#refreshReads.values()) read.controller.abort();
+    this.#pendingRefreshCredentials.clear();
+    this.#pendingRefreshAll = false;
     for (const token of this.#stagedAzureLogins.keys()) this.#discardAzureLogin(token);
     this.#azureLoginGenerations.clear();
     if (this.#transcriptEmitTimer) clearTimeout(this.#transcriptEmitTimer);
@@ -1924,17 +2195,16 @@ export class CloudDeploymentService {
     deploymentId: string,
     mutate: (current: CloudDeploymentRecord) => CloudDeploymentRecord,
   ): Promise<CloudDeploymentRecord> {
-    this.#assertActive();
-    const state = this.#store.getState();
-    const current = state.deployments.find(({ id }) => id === deploymentId);
-    if (!current) throw new Error("The cloud deployment no longer exists");
-    const updated = await this.#store.update({
-      expectedRevision: state.revision,
-      deployment: mutate(current),
+    return this.#serializeStateMutation(async () => {
+      this.#assertActive();
+      const state = this.#store.getState();
+      const current = state.deployments.find(({ id }) => id === deploymentId);
+      if (!current) throw new Error("The cloud deployment no longer exists");
+      const updated = await this.#store.update({ expectedRevision: state.revision, deployment: mutate(current) });
+      if (!updated.ok) throw new Error(updated.error);
+      this.#emitChanged();
+      return updated.value.deployment;
     });
-    if (!updated.ok) throw new Error(updated.error);
-    this.#emitChanged();
-    return updated.value.deployment;
   }
 
   async #markFailed(deploymentId: string, message: string): Promise<void> {
@@ -1947,12 +2217,26 @@ export class CloudDeploymentService {
     })).catch(() => undefined);
   }
 
-  #serializeDeployment<T>(_deploymentId: string, operation: () => Promise<T>): Promise<T> {
-    const result = this.#transitionChain.then(operation, operation);
-    this.#transitionChain = result.then(
-      () => undefined,
-      () => undefined,
-    );
+  #serializeDeployment<T>(deploymentId: string, operation: () => Promise<T>): Promise<T> {
+    this.#busyDeployments.set(deploymentId, (this.#busyDeployments.get(deploymentId) ?? 0) + 1);
+    this.#deploymentRefreshGenerations.set(deploymentId, (this.#deploymentRefreshGenerations.get(deploymentId) ?? 0) + 1);
+    this.#refreshReads.get(deploymentId)?.controller.abort();
+    const run = async () => {
+      try { return await operation(); }
+      finally {
+        const remaining = (this.#busyDeployments.get(deploymentId) ?? 1) - 1;
+        if (remaining > 0) this.#busyDeployments.set(deploymentId, remaining);
+        else this.#busyDeployments.delete(deploymentId);
+      }
+    };
+    const result = this.#transitionChain.then(run, run);
+    this.#transitionChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  #serializeStateMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#stateMutationChain.then(operation);
+    this.#stateMutationChain = result.then(() => undefined, () => undefined);
     return result;
   }
 
@@ -2217,6 +2501,74 @@ export class CloudDeploymentService {
     });
   }
 
+}
+
+function isRefreshableDeployment(record: CloudDeploymentRecord): boolean {
+  return record.status !== "provisioning" &&
+    record.status !== "deleting" &&
+    record.operatorConfigFileName !== null &&
+    record.operatorConfigDigest !== null;
+}
+
+function canRecoverLegacyReadFailure(record: CloudDeploymentRecord): boolean {
+  if (record.status !== "failed" || !record.lastError || !isRefreshableDeployment(record)) return false;
+  // Legacy records did not preserve the failed operation's origin. Only these
+  // known read messages are safe to recover after a successful full provider read.
+  return /^(?:AWS EC2 could not (?:read the managed (?:instance|security group|Elastic IP)|read instance health)|Azure could not read the managed (?:virtual machine|network security group|network interface|public IP address|OS disk))(?: \([A-Za-z0-9_. ,:-]+\))?\.(?: (?:Refresh the selected AWS CLI profile with `aws login` and try again\.|Use (?:AWS|Azure) Login to renew this credential, or refresh its (?:AWS|Azure) CLI sign-in, and try again\.))?$/u.test(record.lastError);
+}
+
+function observedDeploymentState(
+  record: CloudDeploymentRecord,
+  state: "running" | "stopped" | undefined,
+): Pick<CloudDeploymentRecord, "status" | "phase" | "lastError"> {
+  if (!state || (record.status === "failed" && !canRecoverLegacyReadFailure(record))) {
+    return { status: record.status, phase: record.phase, lastError: record.lastError };
+  }
+  return { status: state, phase: state === "stopped" ? "stopped" : "ready", lastError: null };
+}
+
+function applyAwsStatusObservation(
+  record: AwsCloudDeploymentRecord,
+  resource: AwsEc2DeploymentResource,
+): AwsCloudDeploymentRecord {
+  const state = resource.state === "running"
+    ? "running"
+    : resource.state === "stopped" ? "stopped" : undefined;
+  return {
+    ...record,
+    ...observedDeploymentState(record, state),
+    remoteHost: resource.publicIpAddress ?? resource.privateIpAddress ?? null,
+    runtime: {
+      ...record.runtime,
+      instanceState: resource.state,
+      instanceHealth: resource.instanceHealth,
+      systemHealth: resource.systemHealth,
+      availabilityZone: resource.availabilityZone ?? null,
+      publicIpAddress: resource.publicIpAddress ?? null,
+      privateIpAddress: resource.privateIpAddress ?? null,
+    },
+  };
+}
+
+function applyAzureStatusObservation(
+  record: AzureCloudDeploymentRecord,
+  resource: AzureVmDeploymentResource,
+): AzureCloudDeploymentRecord {
+  const state = resource.instanceState === "running"
+    ? "running"
+    : resource.instanceState === "stopped" || resource.instanceState === "deallocated" ? "stopped" : undefined;
+  return {
+    ...record,
+    ...observedDeploymentState(record, state),
+    remoteHost: azureConnectionAddress(record.spec.usePublicIp, resource) ?? null,
+    runtime: {
+      ...record.runtime,
+      instanceState: resource.instanceState,
+      provisioningState: resource.provisioningState ?? null,
+      publicIpAddress: resource.publicIpAddress ?? null,
+      privateIpAddress: resource.privateIpAddress ?? null,
+    },
+  };
 }
 
 function managedSshTarget(

@@ -888,6 +888,7 @@ async function assertCloudDeploymentSurface(
         },
       ],
       secureCredentialStorage: true,
+      refreshErrors: [],
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
       azureAccounts: [{
@@ -900,6 +901,16 @@ async function assertCloudDeploymentSurface(
       }],
       azureAccountDiscoveryError: null,
       provisioningTranscripts: [],
+    },
+  });
+  const refreshedCloud = await cloudPage.evaluate(async () => (
+    globalThis as unknown as { cloudDeployment: CloudDeploymentAPI }
+  ).cloudDeployment.refreshDeployments());
+  assert.deepEqual(refreshedCloud, {
+    ok: true,
+    value: {
+      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT] },
+      refreshErrors: [],
     },
   });
   const azureDiscovery = await cloudPage.evaluate(async ({ credentialId, location }) => {
@@ -1493,7 +1504,7 @@ async function verifyOperatorDataStores(
   const renameDialog = page.getByRole("dialog", { name: "Rename loot", exact: true });
   await renameDialog.getByRole("textbox", { name: "Display name", exact: true }).fill("e2e-renamed-loot");
   await renameDialog.getByRole("button", { name: "Rename", exact: true }).click();
-  await page.getByText("e2e-renamed-loot", { exact: true }).waitFor();
+  await page.locator('[aria-label="Sliver loot"]').getByText("e2e-renamed-loot", { exact: true }).waitFor();
 
   const renamedLootRow = page.getByRole("row").filter({ hasText: "e2e-renamed-loot" });
   await renamedLootRow.getByRole("button", { name: "Delete e2e-renamed-loot", exact: true }).click();
@@ -1820,6 +1831,42 @@ async function verifySliverConsoleWindow(
     await secondTabBeforeRename.click();
     await waitForSelectedConsoleTab(consolePage, /Console 2/iu);
 
+    const clipboardBeforeResume = await electronApplication.evaluate(({ clipboard }) => clipboard.readText());
+    try {
+      await secondTerminal.locator("canvas").dblclick({ position: { x: 12, y: 8 } });
+      await electronApplication.evaluate(({ clipboard }) => clipboard.writeText("before-console-resume"));
+      await verifyConsoleWindowResume(electronApplication, sourcePage, consolePage);
+      assert.equal(await renamedFirstTab.getAttribute("aria-selected"), "false");
+      assert.equal(await secondTabBeforeRename.getAttribute("aria-selected"), "true");
+      assert.equal(await consolePage.title(), "Sliver console — chosen-m0-operator.cfg — Console 2");
+
+      const resumedCanvasBounds = await secondTerminal.locator("canvas").boundingBox();
+      assert.ok(resumedCanvasBounds);
+      await sendNativeContextMenu(electronApplication, consolePage, {
+        x: resumedCanvasBounds.x + 12,
+        y: resumedCanvasBounds.y + 8,
+      });
+      await contextMenu.waitFor();
+      const copy = contextMenu.getByRole("menuitem", { name: "Copy", exact: true });
+      assert.notEqual(await copy.getAttribute("aria-disabled"), "true");
+      await copy.click();
+      await contextMenu.waitFor({ state: "hidden" });
+      const clipboardDeadline = Date.now() + 5_000;
+      let resumedSelection = "";
+      while (Date.now() < clipboardDeadline) {
+        resumedSelection = await electronApplication.evaluate(({ clipboard }) => clipboard.readText());
+        if (resumedSelection === "Sliver") break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(
+        resumedSelection,
+        "Sliver",
+        "reopening the window must preserve Ghostty output and its existing text selection",
+      );
+    } finally {
+      await electronApplication.evaluate(({ clipboard }, value) => clipboard.writeText(value), clipboardBeforeResume);
+    }
+
     await consolePage.screenshot({
       animations: "disabled",
       path: join(artifactDirectory, "console-tabs.png"),
@@ -1982,19 +2029,40 @@ async function verifySliverConsoleWindow(
     assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
     assert.deepEqual(pageErrors, []);
 
-    // Close the BrowserWindow with a live tab to cover native process and private-root teardown.
-    await consolePage.close();
+    await verifyConsoleWindowResume(electronApplication, sourcePage, consolePage);
+    await waitForSelectedConsoleTab(consolePage, new RegExp(`Console ${replacementOrdinal}`, "iu"));
+    assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
+
+    for (let remaining = CONSOLE_MAX_TABS_PER_WINDOW; remaining > 0; remaining -= 1) {
+      await consolePage.getByRole("button", { name: "Close active console tab" }).click();
+      await waitForConsoleState(
+        electronApplication,
+        (state) => state.console.kills === initialKillCount + 3 + CONSOLE_MAX_TABS_PER_WINDOW - remaining + 1,
+        "explicit console tab cleanup after reopening the window",
+      );
+    }
+    await consolePage.getByText("No console tabs", { exact: true }).waitFor();
+    for (const rootDirectory of rootDirectories) await waitForPathRemoval(rootDirectory);
+    assert.deepEqual(pageErrors, []);
   } finally {
     await electronApplication.evaluate(() => {
       globalThis.__SLIVER_GUI_E2E_CONTROL__.releaseConsoleExitHold();
     }).catch(() => undefined);
-    if (!consolePage.isClosed()) await consolePage.close().catch(() => undefined);
+    if (!consolePage.isClosed()) {
+      await electronApplication.browserWindow(consolePage).then(async (nativeWindow) => {
+        try {
+          await nativeWindow.evaluate((window) => window.destroy());
+        } finally {
+          await nativeWindow.dispose();
+        }
+      }).catch(() => undefined);
+    }
   }
 
   const closedState = await waitForConsoleState(
     electronApplication,
     (state) => state.console.kills === initialKillCount + CONSOLE_MAX_TABS_PER_WINDOW + 3,
-    "live console tab cleanup when its reusable window closes",
+    "all explicitly closed console tabs to finish cleanup",
   );
   assert.equal(
     closedState.console.spawns.length,
@@ -2002,7 +2070,6 @@ async function verifySliverConsoleWindow(
   );
   assert.equal(closedState.console.spawns.at(-1)?.kills, 1);
   assert.equal(rootDirectories.length, CONSOLE_MAX_TABS_PER_WINDOW + 3);
-  for (const rootDirectory of rootDirectories) await waitForPathRemoval(rootDirectory);
   assert.equal(
     await readFile(clientRootMarker, "utf8"),
     "preserve shared client assets",
@@ -4117,6 +4184,76 @@ async function waitForConsoleWindow(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for the dedicated Sliver console window");
+}
+
+async function verifyConsoleWindowResume(
+  application: ElectronApplication,
+  sourcePage: Page,
+  consolePage: Page,
+): Promise<void> {
+  const stateBefore = await readFakeState(application);
+  const windowsBefore = application.windows();
+  const titleBefore = await consolePage.title();
+  const readTabs = (): Promise<unknown> => consolePage.getByRole("tab").evaluateAll((tabs) =>
+    tabs.map((tab) => ({
+      id: tab.getAttribute("id"),
+      label: tab.getAttribute("aria-label"),
+      selected: tab.getAttribute("aria-selected"),
+      text: tab.textContent,
+    })));
+  const tabsBefore = await readTabs();
+  const terminalsBefore = await consolePage.locator("[data-console-terminal-tab-id]").elementHandles();
+  const nativeWindow = await application.browserWindow(consolePage);
+  try {
+    const hiddenWindow = await nativeWindow.evaluate((window) => {
+      const id = window.id;
+      window.close();
+      const destroyed = window.isDestroyed();
+      return { id, destroyed, visible: !destroyed && window.isVisible() };
+    });
+    assert.equal(hiddenWindow.destroyed, false, "native window close must retain the console BrowserWindow");
+    assert.equal(hiddenWindow.visible, false, "native window close must hide the console BrowserWindow");
+    assert.equal(consolePage.isClosed(), false, "native window close must keep the console renderer alive");
+    const hiddenState = await readFakeState(application);
+    assert.equal(hiddenState.console.kills, stateBefore.console.kills, "hiding the console must not kill a PTY");
+    assert.equal(hiddenState.console.spawns.length, stateBefore.console.spawns.length);
+    for (const spawn of stateBefore.console.spawns.filter(({ kills }) => kills === 0)) {
+      assert.equal(await pathExists(spawn.rootDirectory), true, "a hidden console tab must retain its private root");
+    }
+
+    await sourcePage.bringToFront();
+    await sourcePage.locator('button[aria-label="Open Sliver console"]').click();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !await nativeWindow.evaluate((window) => window.isVisible())) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(
+      await nativeWindow.evaluate((window) => ({ id: window.id, visible: window.isVisible() })),
+      { id: hiddenWindow.id, visible: true },
+      "opening Console Client again must show the existing native window",
+    );
+    assert.deepEqual(application.windows(), windowsBefore, "reopening Console Client must reuse the same Page");
+    assert.equal(await consolePage.title(), titleBefore);
+    assert.deepEqual(await readTabs(), tabsBefore, "reopening must preserve tab names, ordering, and active selection");
+    for (const terminal of terminalsBefore) {
+      assert.equal(
+        await terminal.evaluate((element) => element.isConnected),
+        true,
+        "reopening must preserve each existing Ghostty terminal element",
+      );
+    }
+    const reopenedState = await readFakeState(application);
+    assert.equal(reopenedState.console.spawns.length, stateBefore.console.spawns.length, "reopening must not spawn another PTY");
+    assert.equal(reopenedState.console.kills, stateBefore.console.kills, "reopening must not clean up retained tabs");
+    assert.deepEqual(
+      reopenedState.console.spawns.map(({ writes }) => writes),
+      stateBefore.console.spawns.map(({ writes }) => writes),
+      "closing and reopening the window must not write to any console PTY",
+    );
+  } finally {
+    await nativeWindow.dispose();
+    await Promise.all(terminalsBefore.map((terminal) => terminal.dispose()));
+  }
 }
 
 async function waitForManagedShellWindow(

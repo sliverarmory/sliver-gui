@@ -10,6 +10,7 @@ import {
   type CloudCredentialIdInput,
   type CloudCredentialTestResult,
   type CloudDeploymentSnapshot,
+  type CloudDeploymentRefreshResult,
   type CloudProvisioningTranscriptSnapshot,
   type CurrentEgressIpv4,
   type DestroyCloudDeploymentPlan,
@@ -66,6 +67,7 @@ type MaybePromise<T> = T | Promise<T>;
 
 export interface CloudDeploymentController {
   getSnapshot(): MaybePromise<OperationResult<CloudDeploymentSnapshot>>;
+  refreshDeployments(): MaybePromise<OperationResult<CloudDeploymentRefreshResult>>;
   getProvisioningTranscripts(): MaybePromise<OperationResult<CloudProvisioningTranscriptSnapshot>>;
   getTerminalRuntime(): MaybePromise<OperationResult<TerminalRuntimeAsset>>;
   detectCurrentEgressIpv4(): MaybePromise<OperationResult<CurrentEgressIpv4>>;
@@ -117,6 +119,13 @@ export function registerCloudDeploymentIpcHandlers(
     authorizeWindow,
     parseNoArguments,
     () => controller.getSnapshot(),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    () => controller.refreshDeployments(),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts,

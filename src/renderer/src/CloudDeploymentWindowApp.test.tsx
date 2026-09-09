@@ -371,6 +371,7 @@ const azureDeploymentOptions: AzureDeploymentOptions = {
 const emptySnapshot: CloudDeploymentSnapshot = {
   state: { v: 1, revision: 0, deployments: [] },
   credentials: [],
+  refreshErrors: [],
   secureCredentialStorage: true,
   awsProfiles: [],
   awsProfileDiscoveryError: null,
@@ -389,6 +390,7 @@ const detectCurrentEgressIpv4 = vi.fn(async (): Promise<OperationResult<CurrentE
 
 const api: CloudDeploymentAPI = {
   getSnapshot: vi.fn(async () => ({ ok: true as const, value: currentSnapshot })),
+  refreshDeployments: vi.fn(async () => ({ ok: true as const, value: { state: currentSnapshot.state, refreshErrors: currentSnapshot.refreshErrors } })),
   getProvisioningTranscripts: vi.fn(async () => ({
     ok: true as const,
     value: { provisioningTranscripts: currentSnapshot.provisioningTranscripts },
@@ -544,6 +546,7 @@ beforeEach(() => {
   unsubscribeChanged.mockClear();
   unsubscribeNavigation.mockClear();
   vi.mocked(api.getSnapshot).mockClear();
+  vi.mocked(api.refreshDeployments).mockClear();
   vi.mocked(api.getProvisioningTranscripts).mockClear();
   vi.mocked(api.chooseSshPrivateKey).mockClear();
   vi.mocked(api.createCredential).mockClear();
@@ -586,6 +589,8 @@ afterEach(() => {
   document.documentElement.className = "";
   document.documentElement.removeAttribute("data-theme");
   document.documentElement.style.colorScheme = "";
+  vi.useRealTimers();
+  Reflect.deleteProperty(document, "visibilityState");
 });
 
 function renderCloudDeploymentApp(): ReturnType<typeof render> {
@@ -652,6 +657,212 @@ describe("CloudDeploymentWindowApp", () => {
     });
     expect(await screen.findByText("No Managed Servers")).toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("polls provider state every 30 seconds without rediscovering accounts or replacing form and firewall drafts", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "Add Credential" }));
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Unsaved credential");
+    const labelInput = screen.getByRole("textbox", { name: "Label" });
+    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [{
+      ...runningDeployment, status: "stopped", phase: "stopped", remoteHost: "198.51.100.25",
+      runtime: { ...runningDeployment.runtime, instanceState: "stopped", publicIpAddress: "198.51.100.25" },
+    }] } };
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(api.refreshDeployments).toHaveBeenCalledTimes(2);
+    expect(api.getSnapshot).toHaveBeenCalledOnce();
+    expect(api.discoverAzureAccounts).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Label" })).toBe(labelInput);
+    expect(labelInput).toHaveValue("Unsaved credential");
+    await user.click(screen.getByRole("tab", { name: /Deployments/i }));
+    expect(screen.getByRole("button", { name: "Start range-control" })).toBeEnabled();
+    expect(screen.getByText(/198\.51\.100\.25/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit firewall for range-control" }));
+    await user.click(await screen.findByRole("button", { name: "Add rule" }));
+    const sheet = await screen.findByRole("dialog", { name: "Add firewall rule" });
+    await user.type(within(sheet).getByRole("textbox", { name: "Description" }), "Unsaved firewall edit");
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(api.refreshDeployments).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("dialog", { name: "Add firewall rule" })).toBe(sheet);
+    expect(within(sheet).getByRole("textbox", { name: "Description" })).toHaveValue("Unsaved firewall edit");
+  });
+
+  it("pauses hidden polling, refreshes on visibility and focus, deduplicates requests and stops on unmount", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    currentSnapshot = runningCloudSnapshot();
+    const firstRefresh = deferred<Awaited<ReturnType<CloudDeploymentAPI["refreshDeployments"]>>>();
+    vi.mocked(api.refreshDeployments).mockReturnValueOnce(firstRefresh.promise);
+    const view = renderCloudDeploymentApp();
+    expect(await screen.findByText("range-control")).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.refreshDeployments).not.toHaveBeenCalled();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.refreshDeployments).toHaveBeenCalledOnce();
+    await act(async () => firstRefresh.resolve({ ok: true, value: { state: currentSnapshot.state, refreshErrors: [] } }));
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledTimes(2));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.refreshDeployments).toHaveBeenCalledTimes(2);
+    view.unmount();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.refreshDeployments).toHaveBeenCalledTimes(2);
+    expect(api.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("keeps per-server read failures separate and clears them when a manual provider refresh succeeds", async () => {
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 9, deployments: [{
+      ...runningDeployment, lastError: "Earlier provisioning step failed.",
+    }] } };
+    vi.mocked(api.refreshDeployments).mockResolvedValueOnce({ ok: true, value: {
+      state: currentSnapshot.state, refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "AWS status is temporarily unavailable." }],
+    } });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    expect(await screen.findByText("Status refresh failed")).toBeInTheDocument();
+    expect(screen.getByText("Last operation failed")).toBeInTheDocument();
+    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [runningDeployment] } };
+    await user.click(screen.getByRole("button", { name: "Refresh cloud deployments" }));
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Last operation failed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop range-control" })).toBeEnabled();
+  });
+
+  it("does not let an older provider response overwrite a newer snapshot or its same-revision read errors", async () => {
+    currentSnapshot = { ...runningCloudSnapshot(), refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "Expired session" }] };
+    const provider = deferred<Awaited<ReturnType<CloudDeploymentAPI["refreshDeployments"]>>>();
+    vi.mocked(api.refreshDeployments).mockReturnValueOnce(provider.promise);
+    renderCloudDeploymentApp();
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
+    const stale = currentSnapshot;
+    currentSnapshot = { ...currentSnapshot, refreshErrors: [] };
+    act(() => changedListener?.("snapshot"));
+    await waitFor(() => expect(screen.queryByText("Expired session")).not.toBeInTheDocument());
+    await act(async () => provider.resolve({ ok: true, value: { state: stale.state, refreshErrors: stale.refreshErrors } }));
+    expect(screen.queryByText("Expired session")).not.toBeInTheDocument();
+    expect(api.refreshDeployments).toHaveBeenCalledOnce();
+
+    const olderProvider = deferred<Awaited<ReturnType<CloudDeploymentAPI["refreshDeployments"]>>>();
+    vi.mocked(api.refreshDeployments).mockReturnValueOnce(olderProvider.promise);
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledTimes(2));
+    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [{
+      ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
+    }] } };
+    act(() => changedListener?.("snapshot"));
+    expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
+    await act(async () => olderProvider.resolve({ ok: true, value: { state: stale.state, refreshErrors: stale.refreshErrors } }));
+    expect(screen.getByRole("button", { name: "Start range-control" })).toBeEnabled();
+    expect(screen.queryByText("Expired session")).not.toBeInTheDocument();
+  });
+
+  it("preserves a newer provider response when an older local snapshot completes later", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
+    const local = deferred<OperationResult<CloudDeploymentSnapshot>>();
+    vi.mocked(api.getSnapshot).mockReturnValueOnce(local.promise);
+    act(() => changedListener?.("snapshot"));
+    await waitFor(() => expect(api.getSnapshot).toHaveBeenCalledTimes(2));
+    const stale = currentSnapshot;
+    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [{
+      ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
+    }] } };
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
+    await act(async () => local.resolve({ ok: true, value: stale }));
+    expect(screen.getByRole("button", { name: "Start range-control" })).toBeEnabled();
+    await user.click(screen.getByRole("tab", { name: /Credentials/i }));
+    expect(screen.getByText("Production AWS")).toBeInTheDocument();
+  });
+
+  it("uses the provider state refreshed during login without issuing a duplicate remote request", async () => {
+    currentSnapshot = { ...runningCloudSnapshot(), credentials: [{ ...awsCredential, profileName: "operators" }],
+      refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS login expired." }],
+    };
+    vi.mocked(api.refreshDeployments).mockResolvedValueOnce({ ok: false, error: "Provider refresh connection failed." });
+    vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => {
+      currentSnapshot = { ...currentSnapshot, refreshErrors: [], state: { v: 1, revision: 10, deployments: [{
+        ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
+      }] } };
+      return { ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    expect(await screen.findByText(/Provider refresh connection failed/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
+    expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Provider refresh connection failed/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/retry the previous operation/u)).not.toBeInTheDocument();
+    expect(api.refreshDeployments).toHaveBeenCalledOnce();
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolved failure", "rejection"] as const)("ignores an older provider %s after a successful login snapshot", async (failure) => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      credentials: [{ ...awsCredential, profileName: "operators" }],
+      refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS login expired." }],
+    };
+    const provider = deferred<Awaited<ReturnType<CloudDeploymentAPI["refreshDeployments"]>>>();
+    const staleError = "The previous provider request failed.";
+    vi.mocked(api.refreshDeployments).mockReturnValueOnce(provider.promise.then((result) => {
+      if (failure === "rejection") throw new Error(staleError);
+      return result;
+    }));
+    vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => {
+      currentSnapshot = { ...currentSnapshot, refreshErrors: [] };
+      return { ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await waitFor(() => expect(screen.queryByText("The AWS login expired.")).not.toBeInTheDocument());
+    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+
+    await act(async () => provider.resolve({ ok: false, error: staleError }));
+
+    expect(screen.queryByText(staleError)).not.toBeInTheDocument();
+    expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
+    expect(api.refreshDeployments).toHaveBeenCalledOnce();
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
+  });
+
+  it.each(["stopping", "terminated", "unknown"] as const)("shows external AWS %s state and disables connection/lifecycle actions", async (instanceState) => {
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 9, deployments: [{
+      ...runningDeployment, runtime: { ...runningDeployment.runtime, instanceState },
+    }] } };
+    renderCloudDeploymentApp();
+    expect(await screen.findByText(instanceState.charAt(0).toUpperCase() + instanceState.slice(1))).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "SSH to range-control" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start range-control" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reboot range-control" })).toBeDisabled();
+    act(() => navigationListener?.({ view: "deployments", deploymentId: DEPLOYMENT_ID, action: "stop" }));
+    expect(await screen.findByText("Cloud action unavailable")).toBeInTheDocument();
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
   });
 
   it("refreshes only bounded transcript data for transcript change signals", async () => {
@@ -1648,6 +1859,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       state: { v: 1, revision: 9, deployments: [runningDeployment] },
       credentials: [awsCredential],
+      refreshErrors: [],
       secureCredentialStorage: true,
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
@@ -1851,6 +2063,7 @@ describe("CloudDeploymentWindowApp", () => {
       name: "stopped-server",
       status: "stopped",
       phase: "stopped",
+      runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
     };
     const missingCredentialDeployment: AwsCloudDeploymentRecord = {
       ...runningDeployment,
@@ -1983,7 +2196,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     expect(await screen.findByRole("dialog", { name: "Starting range-control" })).toBeInTheDocument();
 
-    currentSnapshot = runningCloudSnapshot();
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 11, deployments: [runningDeployment] } };
     await act(async () => {
       lifecycleResult.resolve({ ok: true, value: runningDeployment });
       await lifecycleResult.promise;
@@ -2539,6 +2752,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       state: { v: 1, revision: 9, deployments: [runningDeployment] },
       credentials: [awsCredential],
+      refreshErrors: [],
       secureCredentialStorage: true,
       awsProfiles: [{ name: "default", region: "us-west-2" }],
       awsProfileDiscoveryError: null,
@@ -2567,6 +2781,7 @@ function runningCloudSnapshot(): CloudDeploymentSnapshot {
   return {
     state: { v: 1, revision: 9, deployments: [runningDeployment] },
     credentials: [awsCredential],
+    refreshErrors: [],
     secureCredentialStorage: true,
     awsProfiles: [{ name: "default", region: "us-west-2" }],
     awsProfileDiscoveryError: null,

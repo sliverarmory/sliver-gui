@@ -24,8 +24,15 @@ unavailable, it is kept only for the current app session. Tokens and signing
 keys stay in the main process and never enter renderer snapshots.
 
 You can cancel a pending login in the app. Closing or navigating away from its
-window also cancels the login. Login does not retry a failed server operation;
-retry the desired action after sign-in succeeds.
+window also cancels the login. Successful sign-in immediately checks the saved
+deployments that use that credential. A successful status read clears stale
+authentication errors from completed deployments.
+
+Cloud Deployment checks AWS and Azure status every 30 seconds while its window
+is visible, when you return to the window, and when you select **Refresh**.
+These checks update instance state, health, and addresses. Status-read failures
+appear separately and clear when a later check succeeds. Incomplete setup and
+failed operations remain available for review; retry the desired action as needed.
 
 This implements AWS console login for IAM users and supported federated
 identities. IAM Identity Center SSO continues to use the shared AWS profile

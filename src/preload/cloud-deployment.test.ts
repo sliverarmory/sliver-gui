@@ -56,6 +56,7 @@ describe("Cloud Deployment preload bridge", () => {
     const api = exposedApi();
     expect(Object.keys(api)).toEqual([
       "getSnapshot",
+      "refreshDeployments",
       "getProvisioningTranscripts",
       "getTerminalRuntime",
       "detectCurrentEgressIpv4",
@@ -89,6 +90,7 @@ describe("Cloud Deployment preload bridge", () => {
     expect(Object.isFrozen(api)).toBe(true);
 
     await api.getSnapshot();
+    await api.refreshDeployments();
     await api.getProvisioningTranscripts();
     await api.getTerminalRuntime();
     await api.detectCurrentEgressIpv4();
@@ -127,8 +129,9 @@ describe("Cloud Deployment preload bridge", () => {
     });
     await api.openSshWindow({ deploymentId });
     await api.approveSshHostKey({ token: "a".repeat(43) });
-    expect(electronMocks.invoke.mock.calls.slice(0, 14)).toEqual([
+    expect(electronMocks.invoke.mock.calls.slice(0, 15)).toEqual([
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.detectCurrentEgressIpv4],

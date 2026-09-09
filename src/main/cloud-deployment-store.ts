@@ -144,7 +144,7 @@ export class CloudDeploymentStore {
     });
   }
 
-  update(input: UpdateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentMutation>> {
+  update(input: UpdateCloudDeploymentInput, beforeCommit?: () => void): Promise<OperationResult<CloudDeploymentMutation>> {
     return this.#serializeMutation(async () => {
       let parsed: UpdateCloudDeploymentInput;
       try {
@@ -169,7 +169,7 @@ export class CloudDeploymentStore {
       }
       const deployments = [...this.#state.deployments];
       deployments[index] = deployment;
-      const stateResult = await this.#commit(deployments);
+      const stateResult = await this.#commit(deployments, beforeCommit);
       return stateResult.ok
         ? { ok: true, value: Object.freeze({ state: stateResult.value, deployment }) }
         : stateResult;
@@ -203,7 +203,10 @@ export class CloudDeploymentStore {
     return undefined;
   }
 
-  async #commit(deployments: readonly CloudDeploymentRecord[]): Promise<OperationResult<CloudDeploymentState>> {
+  async #commit(
+    deployments: readonly CloudDeploymentRecord[],
+    beforeCommit?: () => void,
+  ): Promise<OperationResult<CloudDeploymentState>> {
     let next: CloudDeploymentState;
     try {
       next = parseCloudDeploymentState({
@@ -220,7 +223,7 @@ export class CloudDeploymentStore {
       if (data.length > CLOUD_DEPLOYMENT_STATE_MAX_BYTES) {
         return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
       }
-      await writePrivateFileAtomic(this.filePath, data);
+      await writePrivateFileAtomic(this.filePath, data, beforeCommit);
     } catch {
       return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
     } finally {

@@ -1763,12 +1763,52 @@ describe("AWS EC2 owned lifecycle and firewall operations", () => {
   });
 });
 
+describe("AWS EC2 provider refresh cancellation", () => {
+  it("aborts every in-flight status read and sanitizes cancellation failures", async () => {
+    const client = managedResourceClient();
+    const controller = new AbortController();
+    const readSignals: AbortSignal[] = [];
+    let abortedReads = 0;
+    vi.spyOn(client, "send").mockImplementation((_command, options) => {
+      const signal = options?.abortSignal;
+      if (!signal) return Promise.reject(new Error("Missing refresh cancellation signal"));
+      readSignals.push(signal);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          abortedReads += 1;
+          reject(Object.assign(new Error("private cancellation details"), { name: "AbortError" }));
+        }, { once: true });
+      });
+    });
+
+    const pending = providerFor(client).refresh(resource(), controller.signal);
+    expect(readSignals).toEqual(Array.from({ length: 4 }, () => controller.signal));
+    controller.abort("private cancellation reason");
+    const error: unknown = await pending.catch((failure: unknown) => failure);
+
+    expect(abortedReads).toBe(4);
+    expect(String(error)).toContain("AbortError");
+    expect(String(error)).not.toContain("private cancellation");
+  });
+
+  it("does not send requests for an already cancelled refresh", async () => {
+    const client = managedResourceClient();
+    const controller = new AbortController();
+    controller.abort("private cancellation reason");
+
+    await expect(providerFor(client).refresh(resource(), controller.signal))
+      .rejects.toThrow("AWS EC2 status refresh was cancelled.");
+
+    expect(client.commandNames()).toEqual([]);
+  });
+});
+
 class RecordingEc2Client implements AwsEc2ClientLike {
   readonly commands: unknown[] = [];
 
   constructor(private readonly responses: Readonly<Record<string, unknown | ((command: unknown) => unknown)>>) {}
 
-  async send(command: unknown): Promise<unknown> {
+  async send(command: unknown, _options?: { readonly abortSignal?: AbortSignal }): Promise<unknown> {
     this.commands.push(command);
     const name = commandName(command);
     const response = this.responses[name];

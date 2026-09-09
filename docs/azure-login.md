@@ -14,8 +14,15 @@ acquisition fails. It does not modify the Azure CLI cache.
 
 Re-login preserves the credential ID, tenant, subscription, SSH key, and
 deployment references. A replacement browser session must retain the same
-account once one has been saved. Login does not retry a failed server operation;
-retry the desired action after sign-in succeeds.
+account once one has been saved. Successful sign-in immediately checks saved
+deployments that use the credential and clears stale authentication errors
+after a successful status read of a completed deployment.
+
+Cloud Deployment also checks status every 30 seconds while visible, when you
+return to the window, and when you select **Refresh**. Instance state and
+addresses follow the current cloud state. Status-read failures clear when a
+later check succeeds; incomplete setup and failed operations remain available
+for review.
 
 The optional **Directory (Tenant) ID** selects the directory to sign into.
 Only enabled subscriptions in that directory are listed. Enter another

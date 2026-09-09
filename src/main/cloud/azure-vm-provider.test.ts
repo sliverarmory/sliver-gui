@@ -31,6 +31,7 @@ import {
   type AzureVmCreateInput,
   type AzureVmCreatePhase,
   type AzureVmDestroyResource,
+  type AzureVmReadOptions,
 } from "./azure-vm-provider.js";
 
 const subscriptionId = "00000000-1111-2222-3333-444444444444";
@@ -467,6 +468,99 @@ describe("Azure VM provider", () => {
     expect(fake.mutations.filter((entry) => ["vm.deallocate", "vm.start", "vm.restart"].includes(entry)))
       .toEqual(["vm.deallocate", "vm.start", "vm.restart"]);
     expect(fake.reads.filter((entry) => entry === "vm.get").length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("clears disappeared addresses and provisioning state when refreshing without cloud mutations", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    expect(resource).toMatchObject({
+      publicIpAddress: "203.0.113.42",
+      privateIpAddress: "10.0.1.4",
+      provisioningState: "Succeeded",
+    });
+    const publicIp = { ...fake.publicIpAddresses.get(publicIpId)! };
+    delete publicIp.ipAddress;
+    fake.publicIpAddresses.set(publicIpId, publicIp);
+    fake.networkInterfaces.set(nicId, {
+      ...fake.networkInterfaces.get(nicId)!,
+      ipConfigurations: [],
+    });
+    const virtualMachine = {
+      ...fake.virtualMachines.get(vmId)!,
+      instanceView: { statuses: [{ code: "PowerState/deallocated" }] },
+    };
+    delete virtualMachine.provisioningState;
+    fake.virtualMachines.set(vmId, virtualMachine);
+    const mutationStart = fake.mutations.length;
+
+    const refreshed = await provider.refresh(resource);
+
+    expect(refreshed.instanceState).toBe("deallocated");
+    expect(refreshed).not.toHaveProperty("publicIpAddress");
+    expect(refreshed).not.toHaveProperty("privateIpAddress");
+    expect(refreshed).not.toHaveProperty("provisioningState");
+    expect(refreshed).toMatchObject({
+      virtualMachineId: resource.virtualMachineId,
+      publicIpAddressId: resource.publicIpAddressId,
+      networkInterfaceId: resource.networkInterfaceId,
+      osDiskId: resource.osDiskId,
+    });
+    expect(resource.publicIpAddress).toBe("203.0.113.42");
+    expect(resource.privateIpAddress).toBe("10.0.1.4");
+    expect(fake.mutations.slice(mutationStart)).toEqual([]);
+  });
+
+  it("aborts every in-flight refresh read and sanitizes cancellation failures", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const controller = new AbortController();
+    const readSignals: AbortSignal[] = [];
+    let abortedReads = 0;
+    const read = (_group: string, _name: string, options?: AzureVmReadOptions): Promise<never> => {
+      const signal = options?.abortSignal;
+      if (!signal) return Promise.reject(new Error("Missing refresh cancellation signal"));
+      readSignals.push(signal);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          abortedReads += 1;
+          reject(Object.assign(new Error("private cancellation details"), { name: "AbortError" }));
+        }, { once: true });
+      });
+    };
+    vi.spyOn(fake.clients.virtualMachines, "get").mockImplementation(read);
+    vi.spyOn(fake.clients.networkSecurityGroups, "get").mockImplementation(read);
+    vi.spyOn(fake.clients.networkInterfaces, "get").mockImplementation(read);
+    vi.spyOn(fake.clients.publicIpAddresses, "get").mockImplementation(read);
+    vi.spyOn(fake.clients.disks, "get").mockImplementation(read);
+    const mutationStart = fake.mutations.length;
+
+    const pending = provider.refresh(resource, controller.signal);
+    expect(readSignals).toEqual(Array.from({ length: 5 }, () => controller.signal));
+    controller.abort("private cancellation reason");
+    const error: unknown = await pending.catch((failure: unknown) => failure);
+
+    expect(abortedReads).toBe(5);
+    expect(String(error)).toContain("AbortError");
+    expect(String(error)).not.toContain("private cancellation");
+    expect(fake.mutations.slice(mutationStart)).toEqual([]);
+  });
+
+  it("does not make requests for an already cancelled refresh", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const controller = new AbortController();
+    controller.abort("private cancellation reason");
+    const readStart = fake.reads.length;
+    const mutationStart = fake.mutations.length;
+
+    await expect(provider.refresh(resource, controller.signal))
+      .rejects.toThrow("Azure status refresh was cancelled.");
+
+    expect(fake.reads.slice(readStart)).toEqual([]);
+    expect(fake.mutations.slice(mutationStart)).toEqual([]);
   });
 
   it("keeps the working baseline intact when a replacement upsert fails", async () => {

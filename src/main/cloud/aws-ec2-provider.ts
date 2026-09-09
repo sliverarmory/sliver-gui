@@ -190,7 +190,7 @@ export interface AwsEc2ClientConfiguration {
 }
 
 export interface AwsEc2ClientLike {
-  send(command: unknown): Promise<unknown>;
+  send(command: unknown, options?: { readonly abortSignal?: AbortSignal }): Promise<unknown>;
 }
 
 export type AwsEc2ClientFactory = (configuration: AwsEc2ClientConfiguration) => AwsEc2ClientLike;
@@ -804,17 +804,20 @@ export class AwsEc2Provider {
     }
   }
 
-  async refresh(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource> {
+  async refresh(resource: AwsEc2DeploymentResource, signal?: AbortSignal): Promise<AwsEc2DeploymentResource> {
     this.validateResource(resource);
+    if (signal?.aborted) throw new AwsEc2ProviderError("AWS EC2 status refresh was cancelled.");
     const [instance, securityGroup, status, address] = await Promise.all([
-      this.describeOwnedInstance(resource),
-      this.describeOwnedSecurityGroup(resource),
+      this.describeOwnedInstance(resource, signal),
+      this.describeOwnedSecurityGroup(resource, signal),
       this.send<DescribeInstanceStatusCommandOutput>(
         "read instance health",
         new DescribeInstanceStatusCommand({ InstanceIds: [resource.instanceId], IncludeAllInstances: true }),
+        signal,
       ),
-      resource.elasticIp ? this.describeOwnedElasticIp(resource) : Promise.resolve(undefined),
+      resource.elasticIp ? this.describeOwnedElasticIp(resource, signal) : Promise.resolve(undefined),
     ]);
+    if (signal?.aborted) throw new AwsEc2ProviderError("AWS EC2 status refresh was cancelled.");
     void securityGroup;
     const health = status.InstanceStatuses?.find((candidate) => candidate.InstanceId === resource.instanceId);
     const elasticIp = address?.AllocationId && address.PublicIp ? {
@@ -1440,11 +1443,12 @@ export class AwsEc2Provider {
     return networkInterface;
   }
 
-  private async describeOwnedInstance(resource: AwsEc2DeploymentResource) {
+  private async describeOwnedInstance(resource: AwsEc2DeploymentResource, signal?: AbortSignal) {
     this.validateResource(resource);
     const response = await this.send<DescribeInstancesCommandOutput>(
       "read the managed instance",
       new DescribeInstancesCommand({ InstanceIds: [resource.instanceId] }),
+      signal,
     );
     const instance = response.Reservations?.flatMap((reservation) => reservation.Instances ?? [])
       .find((candidate) => candidate.InstanceId === resource.instanceId);
@@ -1453,11 +1457,12 @@ export class AwsEc2Provider {
     return instance;
   }
 
-  private async describeOwnedSecurityGroup(resource: AwsEc2DeploymentResource): Promise<SecurityGroup> {
+  private async describeOwnedSecurityGroup(resource: AwsEc2DeploymentResource, signal?: AbortSignal): Promise<SecurityGroup> {
     this.validateResource(resource);
     const response = await this.send<DescribeSecurityGroupsCommandOutput>(
       "read the managed security group",
       new DescribeSecurityGroupsCommand({ GroupIds: [resource.securityGroupId] }),
+      signal,
     );
     const group = response.SecurityGroups?.find((candidate) => candidate.GroupId === resource.securityGroupId);
     if (!group) throw new AwsEc2ProviderError("The tracked EC2 security group was not found.");
@@ -1484,12 +1489,13 @@ export class AwsEc2Provider {
     return rules[0]!;
   }
 
-  private async describeOwnedElasticIp(resource: AwsEc2DeploymentResource) {
+  private async describeOwnedElasticIp(resource: AwsEc2DeploymentResource, signal?: AbortSignal) {
     const allocationId = resource.elasticIp?.allocationId;
     if (!allocationId) return undefined;
     const response = await this.send<DescribeAddressesCommandOutput>(
       "read the managed Elastic IP",
       new DescribeAddressesCommand({ AllocationIds: [allocationId] }),
+      signal,
     );
     const address = response.Addresses?.find((candidate) => candidate.AllocationId === allocationId);
     if (!address) throw new AwsEc2ProviderError("The tracked EC2 Elastic IP was not found.");
@@ -1562,9 +1568,9 @@ export class AwsEc2Provider {
     }
   }
 
-  private async send<T = unknown>(operation: string, command: unknown): Promise<T> {
+  private async send<T = unknown>(operation: string, command: unknown, signal?: AbortSignal): Promise<T> {
     try {
-      return await this.client.send(command) as T;
+      return await this.client.send(command, signal ? { abortSignal: signal } : undefined) as T;
     } catch (error) {
       throw sanitizeAwsError(operation, error);
     }

@@ -152,6 +152,10 @@ export interface AzureResourceSkuClient {
   list(): AsyncIterable<ResourceSku>;
 }
 
+export interface AzureVmReadOptions {
+  readonly abortSignal?: AbortSignal;
+}
+
 export interface AzureVirtualNetworkClient {
   listAll(): AsyncIterable<VirtualNetwork>;
   get(resourceGroupName: string, virtualNetworkName: string): Promise<VirtualNetwork>;
@@ -177,7 +181,7 @@ export interface AzureSubnetClient {
 
 export interface AzureNetworkSecurityGroupClient {
   listAll(): AsyncIterable<NetworkSecurityGroup>;
-  get(resourceGroupName: string, networkSecurityGroupName: string): Promise<NetworkSecurityGroup>;
+  get(resourceGroupName: string, networkSecurityGroupName: string, options?: AzureVmReadOptions): Promise<NetworkSecurityGroup>;
   createOrUpdate(
     resourceGroupName: string,
     networkSecurityGroupName: string,
@@ -208,7 +212,7 @@ export interface AzureSecurityRuleClient {
 
 export interface AzurePublicIpAddressClient {
   listAll(): AsyncIterable<PublicIPAddress>;
-  get(resourceGroupName: string, publicIpAddressName: string): Promise<PublicIPAddress>;
+  get(resourceGroupName: string, publicIpAddressName: string, options?: AzureVmReadOptions): Promise<PublicIPAddress>;
   createOrUpdate(
     resourceGroupName: string,
     publicIpAddressName: string,
@@ -219,7 +223,7 @@ export interface AzurePublicIpAddressClient {
 
 export interface AzureNetworkInterfaceClient {
   listAll(): AsyncIterable<NetworkInterface>;
-  get(resourceGroupName: string, networkInterfaceName: string): Promise<NetworkInterface>;
+  get(resourceGroupName: string, networkInterfaceName: string, options?: AzureVmReadOptions): Promise<NetworkInterface>;
   createOrUpdate(
     resourceGroupName: string,
     networkInterfaceName: string,
@@ -230,7 +234,7 @@ export interface AzureNetworkInterfaceClient {
 
 export interface AzureVirtualMachineClient {
   listAll(): AsyncIterable<VirtualMachine>;
-  get(resourceGroupName: string, virtualMachineName: string): Promise<VirtualMachine>;
+  get(resourceGroupName: string, virtualMachineName: string, options?: AzureVmReadOptions): Promise<VirtualMachine>;
   createOrUpdate(
     resourceGroupName: string,
     virtualMachineName: string,
@@ -244,7 +248,7 @@ export interface AzureVirtualMachineClient {
 
 export interface AzureDiskClient {
   list(): AsyncIterable<Disk>;
-  get(resourceGroupName: string, diskName: string): Promise<Disk>;
+  get(resourceGroupName: string, diskName: string, options?: AzureVmReadOptions): Promise<Disk>;
   update(resourceGroupName: string, diskName: string, parameters: DiskUpdate): Promise<Disk>;
   delete(resourceGroupName: string, diskName: string): Promise<void>;
 }
@@ -1032,23 +1036,30 @@ export class AzureVmProvider {
     }
   }
 
-  async refresh(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource> {
+  async refresh(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<AzureVmDeploymentResource> {
     this.validateDeploymentResource(resource);
+    if (signal?.aborted) throw new AzureVmProviderError("Azure status refresh was cancelled.");
     const [virtualMachine, networkSecurityGroup, networkInterface, osDisk, publicIpAddress] = await Promise.all([
-      this.getOwnedVirtualMachine(resource),
-      this.getOwnedNetworkSecurityGroup(resource),
-      this.getOwnedNetworkInterface(resource),
-      this.getOwnedDisk(resource),
-      resource.publicIpAddressId ? this.getOwnedPublicIpAddress(resource) : Promise.resolve(undefined),
+      this.getOwnedVirtualMachine(resource, signal),
+      this.getOwnedNetworkSecurityGroup(resource, signal),
+      this.getOwnedNetworkInterface(resource, signal),
+      this.getOwnedDisk(resource, signal),
+      resource.publicIpAddressId ? this.getOwnedPublicIpAddress(resource, signal) : Promise.resolve(undefined),
     ]);
+    if (signal?.aborted) throw new AzureVmProviderError("Azure status refresh was cancelled.");
     void networkSecurityGroup;
     void osDisk;
     const privateIpAddress = networkInterface.ipConfigurations
       ?.map((configuration) => configuration.privateIPAddress)
       .find((address): address is string => address !== undefined);
     const publicIpValue = publicIpAddress?.ipAddress;
+    const refreshedResource = { ...resource };
+    // Absent fields in a current response must replace the previous observation.
+    delete refreshedResource.provisioningState;
+    delete refreshedResource.privateIpAddress;
+    delete refreshedResource.publicIpAddress;
     return {
-      ...resource,
+      ...refreshedResource,
       instanceState: normalizeInstanceState(virtualMachine),
       ...optionalString("provisioningState", normalizeOptionalAzureString(
         virtualMachine.provisioningState,
@@ -1401,7 +1412,7 @@ export class AzureVmProvider {
     );
   }
 
-  private async getOwnedVirtualMachine(resource: AzureVmDeploymentResource): Promise<VirtualMachine> {
+  private async getOwnedVirtualMachine(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<VirtualMachine> {
     const parsed = parseExpectedResourceId(
       resource.virtualMachineId,
       this.subscriptionId,
@@ -1411,7 +1422,7 @@ export class AzureVmProvider {
     );
     const value = await this.call(
       "read the managed virtual machine",
-      () => this.clients.virtualMachines.get(parsed.resourceGroupName, parsed.nameSegments[0]!),
+      () => this.clients.virtualMachines.get(parsed.resourceGroupName, parsed.nameSegments[0]!, signal ? { abortSignal: signal } : undefined),
     );
     assertOwnedResource(value, parsed.id, resource.guid, "virtual machine");
     return value;
@@ -1419,6 +1430,7 @@ export class AzureVmProvider {
 
   private async getOwnedNetworkSecurityGroup(
     resource: Pick<AzureVmDeploymentResource, "networkSecurityGroupId" | "guid">,
+    signal?: AbortSignal,
   ): Promise<NetworkSecurityGroup> {
     const parsed = parseExpectedResourceId(
       resource.networkSecurityGroupId,
@@ -1429,13 +1441,13 @@ export class AzureVmProvider {
     );
     const value = await this.call(
       "read the managed network security group",
-      () => this.clients.networkSecurityGroups.get(parsed.resourceGroupName, parsed.nameSegments[0]!),
+      () => this.clients.networkSecurityGroups.get(parsed.resourceGroupName, parsed.nameSegments[0]!, signal ? { abortSignal: signal } : undefined),
     );
     assertOwnedResource(value, parsed.id, resource.guid, "network security group");
     return value;
   }
 
-  private async getOwnedNetworkInterface(resource: AzureVmDeploymentResource): Promise<NetworkInterface> {
+  private async getOwnedNetworkInterface(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<NetworkInterface> {
     const parsed = parseExpectedResourceId(
       resource.networkInterfaceId,
       this.subscriptionId,
@@ -1445,13 +1457,13 @@ export class AzureVmProvider {
     );
     const value = await this.call(
       "read the managed network interface",
-      () => this.clients.networkInterfaces.get(parsed.resourceGroupName, parsed.nameSegments[0]!),
+      () => this.clients.networkInterfaces.get(parsed.resourceGroupName, parsed.nameSegments[0]!, signal ? { abortSignal: signal } : undefined),
     );
     assertOwnedResource(value, parsed.id, resource.guid, "network interface");
     return value;
   }
 
-  private async getOwnedPublicIpAddress(resource: AzureVmDeploymentResource): Promise<PublicIPAddress> {
+  private async getOwnedPublicIpAddress(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<PublicIPAddress> {
     const parsed = parseExpectedResourceId(
       requirePresent(resource.publicIpAddressId, "public IP address ID"),
       this.subscriptionId,
@@ -1461,13 +1473,13 @@ export class AzureVmProvider {
     );
     const value = await this.call(
       "read the managed public IP address",
-      () => this.clients.publicIpAddresses.get(parsed.resourceGroupName, parsed.nameSegments[0]!),
+      () => this.clients.publicIpAddresses.get(parsed.resourceGroupName, parsed.nameSegments[0]!, signal ? { abortSignal: signal } : undefined),
     );
     assertOwnedResource(value, parsed.id, resource.guid, "public IP address");
     return value;
   }
 
-  private async getOwnedDisk(resource: AzureVmDeploymentResource): Promise<Disk> {
+  private async getOwnedDisk(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<Disk> {
     const parsed = parseExpectedResourceId(
       resource.osDiskId,
       this.subscriptionId,
@@ -1477,7 +1489,7 @@ export class AzureVmProvider {
     );
     const value = await this.call(
       "read the managed OS disk",
-      () => this.clients.disks.get(parsed.resourceGroupName, parsed.nameSegments[0]!),
+      () => this.clients.disks.get(parsed.resourceGroupName, parsed.nameSegments[0]!, signal ? { abortSignal: signal } : undefined),
     );
     assertOwnedResource(value, parsed.id, resource.guid, "OS disk");
     return value;
@@ -1875,8 +1887,8 @@ export const defaultAzureVmClientFactory: AzureVmClientFactory = (configuration)
     },
     networkSecurityGroups: {
       listAll: () => networkClient.networkSecurityGroups.listAll(),
-      get: async (resourceGroupName, networkSecurityGroupName) => (
-        await networkClient.networkSecurityGroups.get(resourceGroupName, networkSecurityGroupName)
+      get: async (resourceGroupName, networkSecurityGroupName, options) => (
+        await networkClient.networkSecurityGroups.get(resourceGroupName, networkSecurityGroupName, options)
       ),
       createOrUpdate: async (resourceGroupName, networkSecurityGroupName, parameters) => (
         await networkClient.networkSecurityGroups
@@ -1923,8 +1935,8 @@ export const defaultAzureVmClientFactory: AzureVmClientFactory = (configuration)
     },
     publicIpAddresses: {
       listAll: () => networkClient.publicIPAddresses.listAll(),
-      get: async (resourceGroupName, publicIpAddressName) => (
-        await networkClient.publicIPAddresses.get(resourceGroupName, publicIpAddressName)
+      get: async (resourceGroupName, publicIpAddressName, options) => (
+        await networkClient.publicIPAddresses.get(resourceGroupName, publicIpAddressName, options)
       ),
       createOrUpdate: async (resourceGroupName, publicIpAddressName, parameters) => (
         await networkClient.publicIPAddresses
@@ -1939,8 +1951,8 @@ export const defaultAzureVmClientFactory: AzureVmClientFactory = (configuration)
     },
     networkInterfaces: {
       listAll: () => networkClient.networkInterfaces.listAll(),
-      get: async (resourceGroupName, networkInterfaceName) => (
-        await networkClient.networkInterfaces.get(resourceGroupName, networkInterfaceName)
+      get: async (resourceGroupName, networkInterfaceName, options) => (
+        await networkClient.networkInterfaces.get(resourceGroupName, networkInterfaceName, options)
       ),
       createOrUpdate: async (resourceGroupName, networkInterfaceName, parameters) => (
         await networkClient.networkInterfaces
@@ -1955,11 +1967,11 @@ export const defaultAzureVmClientFactory: AzureVmClientFactory = (configuration)
     },
     virtualMachines: {
       listAll: () => computeClient.virtualMachines.listAll(),
-      get: async (resourceGroupName, virtualMachineName) => (
+      get: async (resourceGroupName, virtualMachineName, options) => (
         await computeClient.virtualMachines.get(
           resourceGroupName,
           virtualMachineName,
-          { expand: "instanceView" },
+          { ...options, expand: "instanceView" },
         )
       ),
       createOrUpdate: async (resourceGroupName, virtualMachineName, parameters) => (
@@ -1990,7 +2002,7 @@ export const defaultAzureVmClientFactory: AzureVmClientFactory = (configuration)
     },
     disks: {
       list: () => computeClient.disks.list(),
-      get: async (resourceGroupName, diskName) => await computeClient.disks.get(resourceGroupName, diskName),
+      get: async (resourceGroupName, diskName, options) => await computeClient.disks.get(resourceGroupName, diskName, options),
       update: async (resourceGroupName, diskName, parameters) => (
         await computeClient.disks.update(resourceGroupName, diskName, parameters).pollUntilDone()
       ),

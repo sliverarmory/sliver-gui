@@ -113,6 +113,7 @@ interface ActiveCloudDeploymentCardAction {
 }
 
 const FEEDBACK_TOAST_TIMEOUT_MS = 30_000;
+const CLOUD_PROVIDER_POLL_INTERVAL_MS = 30_000;
 
 type EgressIpv4Detection =
   | { readonly status: "loading" }
@@ -262,6 +263,8 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<CloudDeploymentSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<RefreshFailure | null>(null);
+  const [providerRefreshError, setProviderRefreshError] = useState<string | null>(null);
+  const [isRefreshingProvider, setIsRefreshingProvider] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [selectedTab, setSelectedTab] = useState("deployments");
   const [detailsDeploymentId, setDetailsDeploymentId] = useState<string | null>(null);
@@ -269,6 +272,10 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshQueued = useRef<CloudDeploymentChangeScope | null>(null);
   const snapshotRef = useRef<CloudDeploymentSnapshot | null>(null);
+  const providerRefreshInFlight = useRef<Promise<void> | null>(null);
+  const providerRefreshVersion = useRef(0);
+  const localSnapshotVersion = useRef(0);
+  const mounted = useRef(true);
   const activeCardAction = useRef<ActiveCloudDeploymentCardAction | null>(null);
   const queuedNavigationRequest = useRef<CloudDeploymentNavigationRequest | null>(null);
 
@@ -334,10 +341,10 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
       let scope: CloudDeploymentChangeScope | null = initialScope;
       let showedLoading = false;
       try {
-        while (scope) {
+        while (scope && mounted.current) {
           const activeScope = scope;
           refreshQueued.current = null;
-          if ((scope === "snapshot" || !snapshotRef.current) && !showedLoading) {
+          if (!snapshotRef.current && !showedLoading) {
             showedLoading = true;
             setIsLoading(true);
           }
@@ -350,19 +357,32 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           }
           try {
             if (activeScope === "snapshot" || !snapshotRef.current) {
+              const providerVersion = providerRefreshVersion.current;
               const result = await api.getSnapshot();
+              if (!mounted.current) return;
               if (!result.ok || !result.value) {
                 setLoadError({
                   scope: "snapshot",
                   message: result.error ?? "Cloud Deployment state could not be loaded.",
                 });
               } else {
-                snapshotRef.current = result.value;
-                setSnapshot(result.value);
+                const current = snapshotRef.current;
+                const keepProviderState = current && (
+                  result.value.state.revision < current.state.revision ||
+                  (providerVersion !== providerRefreshVersion.current && result.value.state.revision === current.state.revision)
+                );
+                const updated = keepProviderState
+                  ? { ...result.value, state: current.state, refreshErrors: current.refreshErrors }
+                  : result.value;
+                snapshotRef.current = updated;
+                setSnapshot(updated);
+                localSnapshotVersion.current += 1;
                 setLoadError(null);
+                setProviderRefreshError(null);
               }
             } else {
               const result = await api.getProvisioningTranscripts();
+              if (!mounted.current) return;
               if (!result.ok || !result.value) {
                 setLoadError((current) => current?.scope === "snapshot"
                   ? current
@@ -384,6 +404,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               }
             }
           } catch (error) {
+            if (!mounted.current) return;
             const message = errorMessage(error);
             setLoadError((current) => activeScope === "transcripts" && current?.scope === "snapshot"
               ? current
@@ -392,7 +413,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           scope = refreshQueued.current;
         }
       } finally {
-        if (showedLoading) setIsLoading(false);
+        if (showedLoading && mounted.current) setIsLoading(false);
       }
     })().finally(() => {
       if (refreshInFlight.current === request) refreshInFlight.current = null;
@@ -401,18 +422,84 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
     return request;
   }, [api]);
 
+  const refreshProvider = useCallback((): Promise<void> => {
+    if (!api || !mounted.current || !snapshotRef.current || document.visibilityState === "hidden") return Promise.resolve();
+    if (providerRefreshInFlight.current) return providerRefreshInFlight.current;
+    const snapshotVersion = localSnapshotVersion.current;
+    setIsRefreshingProvider(true);
+    const request = (async () => {
+      try {
+        const result = await api.refreshDeployments();
+        if (!mounted.current) return;
+        if (!result.ok || !result.value) {
+          if (snapshotVersion === localSnapshotVersion.current) {
+            setProviderRefreshError(result.error ?? "Provider status could not be refreshed.");
+          }
+          return;
+        }
+        const current = snapshotRef.current;
+        if (current && (result.value.state.revision > current.state.revision ||
+          (result.value.state.revision === current.state.revision && snapshotVersion === localSnapshotVersion.current))) {
+          const updated = { ...current, state: result.value.state, refreshErrors: result.value.refreshErrors };
+          providerRefreshVersion.current += 1;
+          snapshotRef.current = updated;
+          setSnapshot(updated);
+        }
+        setProviderRefreshError(null);
+      } catch (error) {
+        if (mounted.current && snapshotVersion === localSnapshotVersion.current) {
+          setProviderRefreshError(errorMessage(error));
+        }
+      } finally {
+        if (mounted.current) setIsRefreshingProvider(false);
+      }
+    })().finally(() => {
+      if (providerRefreshInFlight.current === request) providerRefreshInFlight.current = null;
+    });
+    providerRefreshInFlight.current = request;
+    return request;
+  }, [api]);
+
+  const refreshAll = useCallback(async (): Promise<void> => {
+    await refresh();
+    await refreshProvider();
+  }, [refresh, refreshProvider]);
+
   useEffect(() => {
+    mounted.current = true;
     document.title = "Cloud Deployment";
     const removeThemeListener = api?.onThemeChanged(applyRendererTheme);
     const removeChangedListener = api?.onChanged((scope) => void refresh(scope));
     const removeNavigationListener = api?.onNavigationRequested(handleNavigationRequest);
-    void refresh();
+    void refreshAll();
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const schedule = (): void => {
+      if (timer !== undefined) clearInterval(timer);
+      timer = document.visibilityState === "hidden"
+        ? undefined
+        : setInterval(() => void refreshProvider(), CLOUD_PROVIDER_POLL_INTERVAL_MS);
+    };
+    const regainVisibility = (): void => {
+      schedule();
+      if (document.visibilityState !== "hidden") void refreshProvider();
+    };
+    const regainFocus = (): void => {
+      if (document.visibilityState !== "hidden") void refreshProvider();
+    };
+    schedule();
+    document.addEventListener("visibilitychange", regainVisibility);
+    window.addEventListener("focus", regainFocus);
     return () => {
+      mounted.current = false;
+      refreshQueued.current = null;
+      if (timer !== undefined) clearInterval(timer);
+      document.removeEventListener("visibilitychange", regainVisibility);
+      window.removeEventListener("focus", regainFocus);
       removeThemeListener?.();
       removeChangedListener?.();
       removeNavigationListener?.();
     };
-  }, [api, handleNavigationRequest, refresh]);
+  }, [api, handleNavigationRequest, refresh, refreshAll, refreshProvider]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -440,6 +527,8 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
     ? snapshot?.state.deployments.find(({ id }) => id === detailsDeploymentId)
     : undefined;
   const showingDetails = detailsDeployment !== undefined;
+  const refreshFailureMessage = loadError?.message ?? providerRefreshError;
+  const detailsRefreshError = snapshot?.refreshErrors.find(({ deploymentId }) => deploymentId === detailsDeploymentId)?.message;
 
   return (
     <main className={`h-screen bg-background text-foreground ${showingDetails ? "overflow-hidden" : "overflow-y-auto"}`}>
@@ -466,12 +555,12 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               <Tooltip delay={0}>
                 <Button
                   aria-label="Refresh cloud deployments"
-                  isDisabled={isLoading}
+                  isDisabled={isLoading || isRefreshingProvider}
                   isIconOnly
                   variant="outline"
-                  onPress={() => void refresh()}
+                  onPress={() => void refreshAll()}
                 >
-                  <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoading ? "animate-spin" : ""} />
+                  <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoading || isRefreshingProvider ? "animate-spin" : ""} />
                 </Button>
                 <Tooltip.Content>Refresh cloud deployments</Tooltip.Content>
               </Tooltip>
@@ -481,12 +570,12 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
 
         {!showingDetails && feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
         {isLoading && !snapshot ? <LoadingSurface /> : null}
-        {loadError && !snapshot ? <LoadError message={loadError.message} onRetry={() => void refresh()} /> : null}
-        {!showingDetails && loadError && snapshot ? (
+        {loadError && !snapshot ? <LoadError message={loadError.message} onRetry={() => void refreshAll()} /> : null}
+        {!showingDetails && refreshFailureMessage && snapshot ? (
           <InlineMessage
             tone="warning"
             title="Refresh failed"
-            detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
+            detail={`${refreshFailureMessage} The last successfully loaded deployment data remains visible.`}
           />
         ) : null}
 
@@ -498,13 +587,14 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               notices={(
                 <>
                   {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
-                  {loadError ? (
+                  {refreshFailureMessage ? (
                     <InlineMessage
                       tone="warning"
                       title="Refresh failed"
-                      detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
+                      detail={`${refreshFailureMessage} The last successfully loaded deployment data remains visible.`}
                     />
                   ) : null}
+                  {detailsRefreshError ? <InlineMessage tone="warning" title="Status refresh failed" detail={detailsRefreshError} /> : null}
                 </>
               )}
               revision={snapshot.state.revision}
@@ -519,13 +609,14 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               notices={(
                 <>
                   {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
-                  {loadError ? (
+                  {refreshFailureMessage ? (
                     <InlineMessage
                       tone="warning"
                       title="Refresh failed"
-                      detail={`${loadError.message} The last successfully loaded deployment data remains visible.`}
+                      detail={`${refreshFailureMessage} The last successfully loaded deployment data remains visible.`}
                     />
                   ) : null}
+                  {detailsRefreshError ? <InlineMessage tone="warning" title="Status refresh failed" detail={detailsRefreshError} /> : null}
                 </>
               )}
               revision={snapshot.state.revision}
@@ -664,6 +755,7 @@ function DeploymentsPanel({
           ))}
           isDeploymentView
           revision={snapshot.state.revision}
+          refreshError={snapshot.refreshErrors.find(({ deploymentId }) => deploymentId === resumedDeployment.id)?.message}
           {...(resumedTranscript ? { transcript: resumedTranscript } : {})}
           onFeedback={onFeedback}
           onActionRequestHandled={onActionRequestHandled}
@@ -720,6 +812,7 @@ function DeploymentsPanel({
               ))}
               key={deployment.id}
               revision={snapshot.state.revision}
+              refreshError={snapshot.refreshErrors.find(({ deploymentId }) => deploymentId === deployment.id)?.message}
               onFeedback={onFeedback}
               onActionRequestHandled={onActionRequestHandled}
               onBeginCardAction={onBeginCardAction}
@@ -1009,6 +1102,7 @@ function DeploymentWizard({
           ))}
           isDeploymentView
           revision={snapshot.state.revision}
+          refreshError={snapshot.refreshErrors.find(({ deploymentId }) => deploymentId === activeDeployment.id)?.message}
           {...(transcript ? { transcript } : {})}
           onBeginCardAction={onBeginCardAction}
           onFeedback={onFeedback}
@@ -1730,6 +1824,7 @@ function DeploymentCard({
   hasSshCredential,
   isDeploymentView = false,
   revision,
+  refreshError,
   transcript,
   onActionRequestHandled,
   onBeginCardAction,
@@ -1746,6 +1841,7 @@ function DeploymentCard({
   readonly hasSshCredential: boolean;
   readonly isDeploymentView?: boolean;
   readonly revision: number;
+  readonly refreshError?: string | undefined;
   readonly transcript?: CloudProvisioningTranscript;
   readonly onActionRequestHandled?: (request: CloudDeploymentActionRequest) => void;
   readonly onBeginCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => boolean;
@@ -1764,8 +1860,17 @@ function DeploymentCard({
   const actionInFlight = useRef(false);
   const destroyExecutionInFlight = useRef(false);
   const sshRequestInFlight = useRef(false);
+  const runtimeIsStable = hasStableDeploymentRuntime(deployment);
 
   const lifecycle = useCallback(async (action: "start" | "stop" | "reboot"): Promise<void> => {
+    if ((deployment.status === "running" || deployment.status === "stopped") && !runtimeIsStable) {
+      onFeedback({
+        tone: "warning",
+        title: "Cloud action unavailable",
+        detail: "Wait until the provider confirms this server is running or stopped before using power controls.",
+      });
+      return;
+    }
     if (actionInFlight.current || !onBeginCardAction(deployment.id, action)) return;
     actionInFlight.current = true;
     setPendingAction(action);
@@ -1784,7 +1889,7 @@ function DeploymentCard({
       setPendingAction(null);
       onFinishCardAction(deployment.id, action);
     }
-  }, [api, deployment.id, deployment.name, deployment.provider, onBeginCardAction, onFeedback, onFinishCardAction, onRefresh, revision]);
+  }, [api, deployment.id, deployment.name, deployment.provider, deployment.status, onBeginCardAction, onFeedback, onFinishCardAction, onRefresh, revision, runtimeIsStable]);
 
   const prepareDestroy = useCallback(async (): Promise<void> => {
     if (actionInFlight.current || !onBeginCardAction(deployment.id, "terminate")) return;
@@ -1911,9 +2016,9 @@ function DeploymentCard({
   }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, openSsh, prepareDestroy]);
 
   const progress = phaseProgress(deployment.phase);
-  const lifecycleAction = deployment.status === "running"
+  const lifecycleAction = deployment.status === "running" && runtimeIsStable
     ? "stop"
-    : deployment.status === "stopped"
+    : deployment.status === "stopped" && runtimeIsStable
       ? "start"
       : null;
   const lifecycleLabel = lifecycleAction === "stop" ? "Stop" : "Start";
@@ -1934,8 +2039,8 @@ function DeploymentCard({
           <Card.Title className="truncate">{deployment.name}</Card.Title>
           <Card.Description>{providerLabel(deployment.provider)} · {deployment.remoteHost ?? "Address pending"}</Card.Description>
         </div>
-        <Chip color={statusColor(deployment.status)} size="sm" variant="soft">
-          {deployment.status === "deleting" ? "Terminating" : titleCase(deployment.status)}
+        <Chip color={(deployment.status === "running" || deployment.status === "stopped") && !runtimeIsStable ? "warning" : statusColor(deployment.status)} size="sm" variant="soft">
+          {deploymentStatusLabel(deployment)}
         </Chip>
       </Card.Header>
       <Card.Content className="space-y-4">
@@ -1950,7 +2055,8 @@ function DeploymentCard({
           </ProgressBar>
         ) : null}
         {deployment.lastError ? <InlineMessage tone="danger" title="Last operation failed" detail={deployment.lastError} /> : null}
-        {deployment.lastError && canLoginCloudCredential(credential) ? (
+        {refreshError ? <InlineMessage tone="warning" title="Status refresh failed" detail={refreshError} /> : null}
+        {(deployment.lastError || refreshError) && canLoginCloudCredential(credential) ? (
           <CloudLoginAction
             api={api}
             credential={credential}
@@ -2028,7 +2134,7 @@ function DeploymentCard({
           >
             <FontAwesomeIcon aria-hidden icon={lifecycleAction === "stop" ? faStop : faPlay} /> {lifecycleLabel}
           </Button>
-          <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
+          <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || !runtimeIsStable || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
             <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
           </Button>
           <Tooltip delay={0}>
@@ -4669,7 +4775,7 @@ function CloudLoginAction({
         if (!cancelled.current) setError(result.error ?? `${loginName} could not be completed.`);
         return;
       }
-      onFeedback({ tone: "success", title: `${loginName} complete`, detail: `${credential.label} is signed in. You can retry the previous operation.` });
+      onFeedback({ tone: "success", title: `${loginName} complete`, detail: `${credential.label} is signed in.` });
       await onRefresh();
     } catch (caught) {
       if (mounted.current && !cancelled.current) setError(errorMessage(caught));
@@ -5687,10 +5793,27 @@ function hasDeploymentSshHost(deployment: CloudDeploymentRecord): boolean {
   return Boolean(host?.trim());
 }
 
+function hasStableDeploymentRuntime(deployment: CloudDeploymentRecord): boolean {
+  const state = deployment.runtime.instanceState;
+  if (deployment.status === "running") return state === "running";
+  return deployment.status === "stopped" && (state === "stopped" || (deployment.provider === "azure" && state === "deallocated"));
+}
+
+function deploymentStatusLabel(deployment: CloudDeploymentRecord): string {
+  if (deployment.status === "deleting") return "Terminating";
+  if ((deployment.status === "running" || deployment.status === "stopped") && !hasStableDeploymentRuntime(deployment)) {
+    return titleCase(deployment.runtime.instanceState ?? "unknown");
+  }
+  return titleCase(deployment.status);
+}
+
 function deploymentSshUnavailableReason(
   deployment: CloudDeploymentRecord,
   hasSshCredential: boolean,
 ): string | undefined {
+  if ((deployment.status === "running" || deployment.status === "stopped") && !hasStableDeploymentRuntime(deployment)) {
+    return "Wait until the provider confirms this server is running before opening SSH.";
+  }
   if (deployment.status === "stopped") return "Start this server before opening SSH.";
   if (deployment.status === "provisioning") return "This server is still being provisioned.";
   if (deployment.status === "deleting") return "This server is being terminated.";
