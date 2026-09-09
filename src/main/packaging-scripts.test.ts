@@ -42,7 +42,28 @@ describe("native distribution packaging", () => {
     expect(workflow).toContain(
       "DEBUG: ${{ runner.os == 'Windows' && 'pw:browser' || '' }}",
     );
+    expect(workflowStep(workflow, "Exercise packaged mTLS application")).toContain(
+      "timeout-minutes: 10",
+    );
     expect(workflow).not.toContain("npm run dist --");
+  });
+
+  it("keeps isolated macOS packaged smoke noninteractive and bounded", () => {
+    const rootDir = resolve(import.meta.dirname, "../..");
+    const packagedSmoke = readFileSync(
+      resolve(rootDir, "src/e2e/packaged-mtls.e2e.ts"),
+      "utf8",
+    );
+    const fixture = readFileSync(resolve(rootDir, "src/e2e/mtls-fixture.ts"), "utf8");
+
+    expect(packagedSmoke).toContain('const PACKAGED_MTLS_TEST_TIMEOUT_MS = process.platform === "darwin" ? 300_000 : 120_000;');
+    expect(packagedSmoke).toContain('["--password-store=basic", "--use-mock-keychain"]');
+    expect(packagedSmoke).toContain("CFFIXED_USER_HOME: isolatedHome");
+    expect(packagedSmoke).toContain('context.signal.addEventListener("abort", abortElectronApplication');
+    expect(packagedSmoke).toContain("context.after(cleanupResources, { timeout: 20_000 });");
+    expect(packagedSmoke).toContain("cleanupOwnedApplication(");
+    expect(fixture).toContain("FIXTURE_GRACEFUL_SHUTDOWN_TIMEOUT_MS");
+    expect(fixture).toContain("if (!completedGracefully) server.forceShutdown();");
   });
 
   it("routes workflow verifier flags directly to their Node scripts", () => {

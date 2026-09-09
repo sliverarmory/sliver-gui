@@ -336,6 +336,7 @@ jobs:
         run: node ./scripts/verifyUpdateArtifacts.mjs --platform windows --app-update "${{ matrix.app_update_path }}" --publisher-name "$env:WIN_CSC_PUBLISHER_NAME"
 
       - name: Exercise packaged mTLS application
+        timeout-minutes: 10
         env:
           DEBUG: ${{ runner.os == 'Windows' && 'pw:browser' || '' }}
         run: ${{ matrix.packaged_smoke }}

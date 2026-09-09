@@ -16,8 +16,14 @@ import {
   verifyFixtureAuthenticationBoundary,
 } from "./mtls-fixture.js";
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
+import { cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
-test("packaged production app completes current mTLS read and mutation flows", { timeout: 120_000 }, async () => {
+const PACKAGED_MTLS_TEST_TIMEOUT_MS = process.platform === "darwin" ? 300_000 : 120_000;
+const PACKAGED_APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
+
+test("packaged production app completes current mTLS read and mutation flows", {
+  timeout: PACKAGED_MTLS_TEST_TIMEOUT_MS,
+}, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const executablePath = await findPackagedExecutable(repositoryRoot);
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-packaged-e2e-"));
@@ -28,6 +34,34 @@ test("packaged production app completes current mTLS read and mutation flows", {
   const decoyConfigPath = join(savedConfigDirectory, "unselected-decoy.cfg");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   const fixture = await startMtlsFixture(repositoryRoot);
+  let electronApplication: ElectronApplication | undefined;
+  let abortElectronApplication: (() => void) | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanupResources = (): Promise<void> => {
+    cleanupPromise ??= (async (): Promise<void> => {
+      const failures: unknown[] = [];
+      try {
+        if (electronApplication) {
+          await cleanupOwnedApplication(
+            electronApplication,
+            "packaged mTLS",
+            PACKAGED_APPLICATION_CLEANUP_TIMEOUT_MS,
+          ).catch((error) => failures.push(error));
+        }
+        await fixture.close().catch((error) => failures.push(error));
+        await rm(temporaryRoot, { recursive: true, force: true }).catch((error) => failures.push(error));
+      } finally {
+        if (abortElectronApplication) {
+          context.signal.removeEventListener("abort", abortElectronApplication);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "Packaged mTLS E2E cleanup failed");
+      }
+    })();
+    return cleanupPromise;
+  };
+  context.after(cleanupResources, { timeout: 20_000 });
   const diagnosticRedactions = [
     PACKAGED_FIXTURE_TOKEN,
     PACKAGED_FIXTURE_EVENT_SECRET,
@@ -52,7 +86,6 @@ test("packaged production app completes current mTLS read and mutation flows", {
     await access(executablePath, constants.X_OK);
   }
 
-  let electronApplication: ElectronApplication | undefined;
   const consoleMessages: string[] = [];
   const pageErrors: string[] = [];
   try {
@@ -62,19 +95,37 @@ test("packaged production app completes current mTLS read and mutation flows", {
     try {
       electronApplication = await electron.launch({
         executablePath,
-        args: ["--enable-sandbox", `--user-data-dir=${userDataDirectory}`],
+        args: [
+          "--enable-sandbox",
+          // The isolated test HOME intentionally has no login keychain. Keep
+          // Chromium from opening an interactive Keychain prompt for its
+          // profile-encryption key on macOS runners and developer machines.
+          ...(process.platform === "darwin"
+            ? ["--password-store=basic", "--use-mock-keychain"]
+            : []),
+          `--user-data-dir=${userDataDirectory}`,
+        ],
         bypassCSP: false,
         chromiumSandbox: true,
         cwd: repositoryRoot,
         env: {
           ...cleanEnvironment,
           HOME: isolatedHome,
+          ...(process.platform === "darwin" ? { CFFIXED_USER_HOME: isolatedHome } : {}),
           USERPROFILE: isolatedHome,
           XDG_CONFIG_HOME: join(isolatedHome, ".config"),
           // A packaged application must ignore this development-only redirect.
           ELECTRON_RENDERER_URL: "http://127.0.0.1:65535/",
         },
       } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+      const electronProcess = electronApplication.process();
+      abortElectronApplication = (): void => {
+        if (electronProcess.exitCode === null && electronProcess.signalCode === null) {
+          electronProcess.kill("SIGKILL");
+        }
+      };
+      if (context.signal.aborted) abortElectronApplication();
+      else context.signal.addEventListener("abort", abortElectronApplication, { once: true });
     } catch (error) {
       await writePackagedDiagnosticArtifact(
         artifactDirectory,
@@ -219,9 +270,9 @@ test("packaged production app completes current mTLS read and mutation flows", {
     await page.getByRole("menuitem", { name: "Disconnect" }).click();
     await page.getByText("No server connected", { exact: true }).waitFor();
   } finally {
-    await electronApplication?.close().catch(() => undefined);
-    await fixture.close();
-    await rm(temporaryRoot, { recursive: true, force: true });
+    await cleanupResources().catch((cleanupError) => {
+      console.error("Failed to clean packaged mTLS resources", errorMessage(cleanupError));
+    });
   }
 });
 
@@ -379,7 +430,15 @@ async function verifyPackagedSliverConsole({
       ),
     );
   } finally {
-    await consolePage?.close().catch(() => undefined);
+    if (consolePage && !consolePage.isClosed()) {
+      await electronApplication.browserWindow(consolePage).then(async (nativeWindow) => {
+        try {
+          await nativeWindow.evaluate((window) => window.destroy());
+        } finally {
+          await nativeWindow.dispose();
+        }
+      }).catch(() => undefined);
+    }
   }
 
   assert.ok(privateRootName, "the packaged native console must create one private root");
