@@ -147,6 +147,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -161,10 +162,16 @@ describe("application menu templates", () => {
       "Edit",
       "View",
       "Cloud",
+      "Armory",
       "Network",
       "Window",
       "Help",
     ]);
+    const armoryItems = menuItems(template, "Armory");
+    expect(armoryItems.map((item) => item.id).filter(Boolean)).toEqual(["armory.manage", "armory.install", "armory.sources"]);
+    expect(armoryItems[0]).toMatchObject({ label: "Manage" });
+    for (const item of armoryItems.filter((item) => item.id)) clickItem(item);
+    expect(actions.openArmory.mock.calls).toEqual([["manage"], ["install"], ["sources"]]);
     expect(menuItems(template, "Sliver GUI")[0]).toMatchObject({
       label: "About Sliver GUI",
       role: "about",
@@ -203,6 +210,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork,
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -244,6 +252,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment,
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -389,6 +398,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel,
       downloadRelease: vi.fn(),
@@ -397,7 +407,7 @@ describe("application menu templates", () => {
     });
 
     expect(template.map((item) => item.label)).toEqual([
-      "File", "Edit", "View", "Cloud", "Network", "Window", "Help",
+      "File", "Edit", "View", "Cloud", "Armory", "Network", "Window", "Help",
     ]);
     expect(menuRoles(template, "File")).toContain("quit");
     expect(menuRoles(template, "Window")).toContain("close");
@@ -412,6 +422,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -440,6 +451,7 @@ describe("application menu templates", () => {
       "Edit",
       "View",
       "Cloud",
+      "Armory",
       "Network",
       "Terminal",
       "Window",
@@ -511,6 +523,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease,
@@ -553,6 +566,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -582,6 +596,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
+      openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),

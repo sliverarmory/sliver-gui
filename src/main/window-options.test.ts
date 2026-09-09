@@ -3,6 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ARMORY_SESSION_PARTITION,
+  armoryWindowOptions,
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
   NETWORK_SESSION_PARTITION,
   cloudDeploymentWindowOptions,
@@ -279,5 +281,22 @@ describe("interaction window", () => {
   it("uses the resolved application theme for its native background", () => {
     expect(interactionWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
       .toBe("#fafafa");
+  });
+});
+
+
+describe("Armory window", () => {
+  it.each(["darwin", "linux", "win32"] as const)("isolates local package management on %s", (platform) => {
+    const options = armoryWindowOptions("/armory.cjs", platform, "/icon.png");
+    expect(options).toMatchObject({
+      title: "Armory", show: false,
+      webPreferences: {
+        preload: "/armory.cjs", partition: ARMORY_SESSION_PARTITION,
+        sandbox: true, contextIsolation: true, nodeIntegration: false,
+        nodeIntegrationInSubFrames: false, webSecurity: true, webviewTag: false,
+      },
+    });
+    expect(options).not.toHaveProperty("parent");
+    expect(options).not.toHaveProperty("transparent");
   });
 });

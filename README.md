@@ -11,6 +11,12 @@ configuration files and their private keys stay in the Electron main process.
 
 ## Implemented features
 
+- A standalone **Armory** package manager for downloading, installing, updating,
+  and removing local aliases, extensions, and BOFs. It shares the console's
+  package directories and source configuration, verifies Minisign signatures,
+  and validates archives in memory before installation. See
+  [Armory package management](docs/armory.md) for source settings and console
+  interoperability.
 - Multiple application windows, each connected to the same or a different
   backend. Windows using the same operator configuration share one ref-counted
   backend connection; unrelated configurations remain isolated.

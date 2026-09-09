@@ -41,6 +41,7 @@ export default defineConfig({
           index: resolve("src/preload/index.ts"),
           "cloud-deployment": resolve("src/preload/cloud-deployment.ts"),
           network: resolve("src/preload/network.ts"),
+          armory: resolve("src/preload/armory.ts"),
           ssh: resolve("src/preload/ssh.ts"),
         },
         output: {

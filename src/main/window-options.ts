@@ -213,3 +213,25 @@ export function interactionWindowOptions(
     webPreferences: secureWebPreferences(preload),
   };
 }
+
+/** A local-only package manager with no operator or execution bridge. */
+export function armoryWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1180,
+    height: 840,
+    minWidth: 880,
+    minHeight: 640,
+    show: false,
+    title: "Armory",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: { ...secureWebPreferences(preload), partition: ARMORY_SESSION_PARTITION },
+  };
+}
+
+export const ARMORY_SESSION_PARTITION = "sliver-armory";

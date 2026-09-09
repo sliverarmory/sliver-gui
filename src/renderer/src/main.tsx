@@ -1,3 +1,4 @@
+import { ArmoryWindowApp } from "./ArmoryWindowApp";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { Toast } from "@heroui/react";
@@ -36,6 +37,13 @@ function RendererSurface(): React.JSX.Element {
 }
 
 function ApplicationRoot(): React.JSX.Element {
+  if (surface === "armory") {
+    return window.armory ? (
+      <ApplicationSettingsProvider api={window.armory}>
+        <ArmoryWindowApp />
+      </ApplicationSettingsProvider>
+    ) : <ArmoryWindowApp />;
+  }
   if (surface === "network") {
     return window.network ? (
       <ApplicationSettingsProvider api={window.network}>

@@ -1,3 +1,4 @@
+import type { ArmoryTabId } from "../shared/armory-contracts.js";
 import type { BaseWindow, MenuItemConstructorOptions } from "electron";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import {
@@ -23,6 +24,7 @@ export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly duplicateConnectedWindow: () => void;
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
+  readonly openArmory: (tab: ArmoryTabId) => void;
   readonly openNetwork: (tab: NetworkTabId, sourceWindow?: BaseWindow) => void;
   readonly openDocumentation: () => void;
   readonly showAboutPanel: () => void;
@@ -250,6 +252,15 @@ export function buildApplicationMenuTemplate(
               }),
             ]
           : []),
+      ],
+    },
+    {
+      label: "Armory",
+      submenu: [
+        { id: "armory.manage", label: "Manage", click: () => actions.openArmory("manage") },
+        { id: "armory.install", label: "Install…", click: () => actions.openArmory("install") },
+        { type: "separator" },
+        { id: "armory.sources", label: "Sources…", click: () => actions.openArmory("sources") },
       ],
     },
     {

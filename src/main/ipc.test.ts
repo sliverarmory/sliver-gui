@@ -70,6 +70,14 @@ beforeEach(() => {
 afterEach(() => unregisterIpcHandlers());
 
 describe("trusted Electron IPC boundary", () => {
+  it("rejects Armory windows at every operator invoke channel", () => {
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent("sliver://app/index.html?surface=armory", 77);
+    for (const handler of electronMocks.handlers.values()) {
+      expect(() => handler(event)).toThrow(/untrusted renderer/iu);
+    }
+  });
+
   it("registers every shared invoke channel exactly once", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
 

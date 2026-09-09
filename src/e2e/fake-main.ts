@@ -393,6 +393,7 @@ void startApplication({
   sshPreloadPath: `${repositoryRoot}/dist/preload/ssh.cjs`,
   cloudDeploymentPreloadPath: `${repositoryRoot}/dist/preload/cloud-deployment.cjs`,
   networkPreloadPath: `${repositoryRoot}/dist/preload/network.cjs`,
+  armoryPreloadPath: `${repositoryRoot}/dist/preload/armory.cjs`,
   cloudDeploymentController,
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);

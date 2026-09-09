@@ -654,6 +654,8 @@ export function unregisterIpcHandlers(): void {
 export function isTrustedSender(sender: WebContents, rendererUrl: string): boolean {
   try {
     if (sender.isDestroyed() || !BrowserWindow.fromWebContents(sender)) return false;
+    // Armory has an independent local-package capability bridge.
+    if (new URL(sender.getURL()).searchParams.get("surface") === "armory") return false;
     return isTrustedRendererUrl(sender.getURL(), rendererUrl);
   } catch {
     return false;

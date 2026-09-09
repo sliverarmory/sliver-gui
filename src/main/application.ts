@@ -1,7 +1,11 @@
+import { ARMORY_IPC_EVENTS, type ArmoryTabId } from "../shared/armory-contracts.js";
+import { ArmoryService } from "./armory-service.js";
+import { registerArmoryIpcHandlers, unregisterArmoryIpcHandlers } from "./armory-ipc.js";
+import { ARMORY_SESSION_PARTITION, armoryWindowOptions } from "./window-options.js";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
   app,
@@ -143,6 +147,7 @@ const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
 protocol.registerSchemesAsPrivileged([{ scheme: APP_SCHEME, privileges: APP_SCHEME_PRIVILEGES }]);
 
 type NativeWindowSurface =
+  | "armory"
   | "workspace"
   | "cloud-deployment"
   | "interaction"
@@ -157,6 +162,7 @@ export interface StartApplicationOptions {
   preloadPath?: string;
   cloudDeploymentPreloadPath?: string;
   networkPreloadPath?: string;
+  armoryPreloadPath?: string;
   sshPreloadPath?: string;
   developmentRendererUrl?: string;
   applicationAssetsDirectory?: string;
@@ -271,6 +277,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     "../preload/cloud-deployment.cjs",
   );
+  const armoryPreloadPath = options.armoryPreloadPath ?? join(mainBundleDirectory, "../preload/armory.cjs");
   const networkPreloadPath = options.networkPreloadPath ?? join(
     mainBundleDirectory,
     "../preload/network.cjs",
@@ -285,10 +292,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     process.platform,
   );
-  const consoleClientRootDirectory = options.consoleClientRootDirectory ?? join(
+  const consoleClientRootDirectory = resolve(options.consoleClientRootDirectory ?? (process.env["SLIVER_CLIENT_ROOT_DIR"] || undefined) ?? join(
     homedir(),
     ".sliver-client",
-  );
+  ));
   const startConsoleRuntime = options.startConsoleRuntime ?? SliverConsoleRuntime.start;
   // Packaged applications always trust their bundled protocol entry. A caller's
   // inherited environment must never redirect production IPC trust to even a
@@ -298,6 +305,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
   const rendererUrl = developmentRendererUrl ?? APP_RENDERER_URL;
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
+  const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
+  const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
+  let armoryWindow: BrowserWindow | undefined;
+  let armoryTab: ArmoryTabId = "manage";
+  let armoryRendererReady = false;
   const networkRendererUrl = rendererUrlForSurface(rendererUrl, "network");
   const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
   const windows = new Set<BrowserWindow>();
@@ -382,7 +394,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
+    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
   ): Promise<void> {
     const url = new URL(rendererUrl);
     if (surface) url.searchParams.set("surface", surface);
@@ -425,7 +437,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     hardenWindow(
       window,
       rendererUrl,
-      surface === "cloud-deployment"
+      surface === "armory"
+        ? armoryRendererUrl
+        : surface === "cloud-deployment"
         ? cloudDeploymentRendererUrl
         : surface === "network"
           ? networkRendererUrl
@@ -434,7 +448,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           : undefined,
     );
     if (!applicationContextMenus) throw new Error("Application context menus are not initialized");
-    if (surface !== "network") applicationContextMenus.install(window.webContents);
+    if (surface !== "network" && surface !== "armory") applicationContextMenus.install(window.webContents);
     if (registerWithConnectionRegistry && surface !== "network") window.webContents.on("before-input-event", (event, input) => {
       const commandPaletteDisposition = applicationSettingsStore
         ? commandPaletteShortcutDispositionForInput(
@@ -630,6 +644,48 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     trackWindow(window, inheritFromContentsId);
     void loadRenderer(window);
     return window;
+  }
+
+  function publishArmoryChanged(): void {
+    if (shutdown.isStopping || !armoryWindow || armoryWindow.isDestroyed() || armoryWindow.webContents.isDestroyed()) return;
+    try { armoryWindow.webContents.send(ARMORY_IPC_EVENTS.changed); } catch { /* Closing renderer. */ }
+  }
+
+  async function openArmoryWindow(tab: ArmoryTabId): Promise<void> {
+    if (shutdown.isStopping) return;
+    armoryTab = tab;
+    let createdWindow: BrowserWindow | undefined;
+    try {
+      if (armoryWindow && !armoryWindow.isDestroyed() && !armoryWindow.webContents.isDestroyed()) {
+        if (armoryWindow.isMinimized()) armoryWindow.restore();
+        armoryWindow.show();
+        armoryWindow.focus();
+        if (armoryRendererReady) armoryWindow.webContents.send(ARMORY_IPC_EVENTS.navigationRequested, armoryTab);
+        return;
+      }
+      const window = new BrowserWindow(armoryWindowOptions(
+        armoryPreloadPath, process.platform, applicationIcons.getIconPath(), nativeTheme.shouldUseDarkColors,
+      ));
+      createdWindow = armoryWindow = window;
+      armoryRendererReady = false;
+      window.on("closed", () => {
+        if (armoryWindow === window) { armoryWindow = undefined; armoryRendererReady = false; }
+      });
+      window.webContents.on("did-start-loading", () => { if (armoryWindow === window) armoryRendererReady = false; });
+      window.webContents.on("did-finish-load", () => {
+        if (armoryWindow !== window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+        armoryRendererReady = true;
+        window.setTitle("Armory");
+        window.webContents.send(ARMORY_IPC_EVENTS.navigationRequested, armoryTab);
+      });
+      window.webContents.on("render-process-gone", () => { if (!window.isDestroyed()) window.destroy(); });
+      trackWindow(window, undefined, undefined, undefined, undefined, "armory", false);
+      await loadRenderer(window, "armory");
+    } catch {
+      if (armoryWindow === createdWindow) armoryWindow = undefined;
+      if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
+      if (!shutdown.isStopping) dialog.showErrorBox("Armory unavailable", "The Armory window could not be opened");
+    }
   }
 
   function flushNetworkNavigation(record: NetworkWindowRecord): void {
@@ -1944,6 +2000,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
       openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
+      openArmory: (tab) => void openArmoryWindow(tab),
       openNetwork: (tab, sourceWindow) => {
         void openNetworkWindow(
           tab,
@@ -2044,6 +2101,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   function beginShutdown(): void {
     systemIconAppearance.dispose();
     if (!shutdown.isStopping) {
+      armoryService.dispose();
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
         const cleanup = sshCleanup.finally(disposeCloudDeployment);
@@ -2365,7 +2423,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   );
   const networkSession = session.fromPartition(NETWORK_SESSION_PARTITION);
   configureSessionSecurity(networkSession, developmentRendererUrl);
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession]);
+  const armorySession = session.fromPartition(ARMORY_SESSION_PARTITION);
+  configureSessionSecurity(armorySession, developmentRendererUrl);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
@@ -2416,6 +2476,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       open: openManagedSshWindow,
       approveHostKey: approveManagedSshHostKey,
     },
+  );
+  registerArmoryIpcHandlers({
+    manager: armoryService,
+    getTab: () => armoryTab,
+    getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+    changed: publishArmoryChanged,
+  }, armoryRendererUrl, (identity, window) =>
+    !shutdown.isStopping && armoryWindow === window && nativeWindowSurfaces.get(window) === "armory" &&
+    sameWindowIdentity(identity, identityForWindow(window)),
   );
   registerNetworkForwardingIpcHandlers(
     {
@@ -2499,6 +2568,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       applicationContextMenus = undefined;
       unregisterCloudDeploymentIpcHandlers();
       unregisterNetworkForwardingIpcHandlers();
+      unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
@@ -2560,7 +2630,7 @@ export function readDevelopmentRendererUrl(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
+  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);

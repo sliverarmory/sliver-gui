@@ -1,3 +1,4 @@
+import type { ArmoryAPI } from "../../shared/armory-contracts";
 import type { CloudDeploymentAPI } from "../../shared/cloud-deployment-ipc";
 import type { ApplicationContextMenuAPI } from "../../shared/application-context-menu-contracts";
 import type { SliverDesktopAPI } from "../../shared/contracts";
@@ -9,6 +10,7 @@ declare global {
     applicationContextMenu: ApplicationContextMenuAPI;
     cloudDeployment?: CloudDeploymentAPI;
     network?: NetworkForwardingAPI;
+    armory?: ArmoryAPI;
     sliver: SliverDesktopAPI;
     ssh?: SshWindowAPI;
   }
