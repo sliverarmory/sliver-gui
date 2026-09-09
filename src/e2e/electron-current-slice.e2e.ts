@@ -18,6 +18,7 @@ import type { SliverReleaseDownloadEvent } from "../shared/release-contracts.js"
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import type { SessionShellResourceList } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
+import { readElectronSnapshot } from "./read-electron-snapshot.js";
 import {
   E2E_AWS_DEPLOYMENT,
   E2E_AWS_DEPLOYMENT_ID,
@@ -3205,7 +3206,7 @@ async function verifySshTerminalClipboard(application: ElectronApplication, clou
       sshPage,
       activeTerminal,
       "Managed",
-      () => application.evaluate(() => structuredClone(globalThis.__SLIVER_GUI_E2E_STATE__.ssh.map(({ writes }) => writes))),
+      async () => (await readFakeState(application)).ssh.map(({ writes }) => writes),
       1,
     );
     await sshPage.getByRole("button", { name: "Close active SSH tab", exact: true }).click();
@@ -3352,6 +3353,7 @@ async function verifyM3SessionTerminal(
       }
       await page.keyboard.press("Escape");
       await contextMenu.waitFor({ state: "hidden" });
+      await waitForRendererCommit(terminal);
 
       await page.evaluate(() => {
         delete (globalThis as unknown as { __terminalContextMenuKinds?: readonly string[] })
@@ -3363,35 +3365,31 @@ async function verifyM3SessionTerminal(
         host.removeAttribute("data-application-context-menu-policy");
       });
       const terminalTextarea = terminal.locator("textarea");
-      const platformSupportsContextMenuKey = await electronApplication.evaluate(
-        () => process.platform !== "darwin",
+      // Ghostty consumes Shift+F10 as terminal input on Linux. Exercise the
+      // real textarea with a native pointer request on every platform instead.
+      const originalTerminalTextareaStyle = await terminalTextarea.evaluate((element) => {
+        const originalStyle = element.style.cssText;
+        const bounds = element.parentElement?.getBoundingClientRect();
+        element.style.position = "fixed";
+        element.style.left = `${(bounds?.left ?? 0) + 8}px`;
+        element.style.top = `${(bounds?.top ?? 0) + 8}px`;
+        element.style.width = "8px";
+        element.style.height = "8px";
+        element.style.clipPath = "none";
+        element.style.pointerEvents = "auto";
+        element.style.zIndex = "2147483647";
+        return originalStyle;
+      });
+      await waitForRendererCommit(terminalTextarea);
+      const terminalTextareaBounds = await terminalTextarea.boundingBox();
+      assert.ok(
+        terminalTextareaBounds && terminalTextareaBounds.width > 0 && terminalTextareaBounds.height > 0,
+        "the Ghostty textarea must have nonzero native input bounds",
       );
-      let originalTerminalTextareaStyle: string | undefined;
-      if (platformSupportsContextMenuKey) {
-        await terminalTextarea.evaluate((element) => element.focus());
-        await page.keyboard.press("Shift+F10");
-      } else {
-        originalTerminalTextareaStyle = await terminalTextarea.evaluate((element) => {
-          const originalStyle = element.style.cssText;
-          const bounds = element.parentElement?.getBoundingClientRect();
-          element.style.position = "fixed";
-          element.style.left = `${(bounds?.left ?? 0) + 8}px`;
-          element.style.top = `${(bounds?.top ?? 0) + 8}px`;
-          element.style.width = "8px";
-          element.style.height = "8px";
-          element.style.clipPath = "none";
-          element.style.pointerEvents = "auto";
-          element.style.zIndex = "2147483647";
-          element.focus();
-          return originalStyle;
-        });
-        const terminalTextareaBounds = await terminalTextarea.boundingBox();
-        assert.ok(terminalTextareaBounds, "the Ghostty textarea must have native input bounds");
-        await sendNativeContextMenu(electronApplication, page, {
-          x: terminalTextareaBounds.x + terminalTextareaBounds.width / 2,
-          y: terminalTextareaBounds.y + terminalTextareaBounds.height / 2,
-        });
-      }
+      await sendNativeContextMenu(electronApplication, page, {
+        x: terminalTextareaBounds.x + terminalTextareaBounds.width / 2,
+        y: terminalTextareaBounds.y + terminalTextareaBounds.height / 2,
+      });
       await page.waitForFunction(() => Array.isArray(
         (globalThis as unknown as { __terminalContextMenuKinds?: unknown })
           .__terminalContextMenuKinds,
@@ -3423,11 +3421,9 @@ async function verifyM3SessionTerminal(
       }
       await page.keyboard.press("Escape");
       await contextMenu.waitFor({ state: "hidden" });
-      if (originalTerminalTextareaStyle !== undefined) {
-        await terminalTextarea.evaluate((element, originalStyle) => {
-          element.style.cssText = originalStyle;
-        }, originalTerminalTextareaStyle);
-      }
+      await terminalTextarea.evaluate((element, originalStyle) => {
+        element.style.cssText = originalStyle;
+      }, originalTerminalTextareaStyle);
       assert.equal(
         await electronApplication.evaluate(
           ({ clipboard }, expected) => clipboard.readText() === expected,
@@ -4565,7 +4561,9 @@ async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<
 }
 
 async function readFakeState(electronApplication: ElectronApplication): Promise<FakeStateSnapshot> {
-  return electronApplication.evaluate(() => structuredClone(globalThis.__SLIVER_GUI_E2E_STATE__));
+  return readElectronSnapshot(() =>
+    electronApplication.evaluate(() => structuredClone(globalThis.__SLIVER_GUI_E2E_STATE__))
+  );
 }
 
 function fakeMethodCount(state: FakeStateSnapshot, method: string): number {
@@ -4599,6 +4597,7 @@ interface FakeStateSnapshot {
   dialogCalls: number;
   methods: string[];
   disconnects: number;
+  ssh: Array<{ writes: string[]; closed: boolean }>;
   holdNextBeaconTask: boolean;
   sessionName: string;
   beaconName: string;

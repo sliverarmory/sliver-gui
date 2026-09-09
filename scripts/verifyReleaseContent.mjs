@@ -95,6 +95,7 @@ const requiredPackagedFiles = [
   "dist/main/index.js",
   "dist/preload/cloud-deployment.cjs",
   "dist/preload/index.cjs",
+  "dist/preload/network.cjs",
   "dist/preload/ssh.cjs",
   "dist/renderer/index.html",
   "node_modules/sliver-script/LICENSE",
@@ -469,7 +470,7 @@ async function verifyPreparedSliverConsole() {
     sourceManifest.source?.tree !== baseline.tree ||
     sourceManifest.source?.module !== "github.com/bishopfox/sliver" ||
     sourceManifest.source?.commandPackage !== "github.com/bishopfox/sliver/client" ||
-    sourceManifest.toolchain?.go !== "go1.26.6"
+    sourceManifest.toolchain?.go !== `go${baseline.toolchain?.go}`
   ) {
     throw new Error("Native Sliver console source provenance does not match the pinned protocol baseline");
   }

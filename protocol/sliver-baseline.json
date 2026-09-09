@@ -1,14 +1,14 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/BishopFox/sliver.git",
-  "commit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
-  "tree": "25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1",
+  "commit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+  "tree": "29be1ac3a7580b1f0b672d8ade45fd32389e6231",
   "commandSources": [
     "client/command/server.go",
     "client/command/sliver.go",
     "client/cli/cli.go"
   ],
   "toolchain": {
-    "go": "1.26.6"
+    "go": "1.27.1"
   }
 }

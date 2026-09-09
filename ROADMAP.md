@@ -2,8 +2,8 @@
 
 - Status: living document
 - Scope: remote Sliver operator workflows
-- Parity baseline: Sliver commit `ca685f5eed64c3327c0e57504928cfd2d2e96bea`
-- Last command-tree audit: 2026-08-29
+- Parity baseline: Sliver commit `bbb20155b7a18d4906ec936566bf0dc61fe38f35`
+- Last command-tree audit: 2026-09-08
 - Target desktop platforms: macOS arm64 and x64 (universal package), Windows
   x64, Linux x64
 
@@ -29,11 +29,11 @@ server process; administer certificate authorities; or expose other local
 The authoritative interactive parity sources are the registered remote-client
 command trees, not the presence of Go packages or helper functions:
 
-- [`client/command/server.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/ca685f5eed64c3327c0e57504928cfd2d2e96bea/client/command/server.go)
-- [`client/command/sliver.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/ca685f5eed64c3327c0e57504928cfd2d2e96bea/client/command/sliver.go)
+- [`client/command/server.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/bbb20155b7a18d4906ec936566bf0dc61fe38f35/client/command/server.go)
+- [`client/command/sliver.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/bbb20155b7a18d4906ec936566bf0dc61fe38f35/client/command/sliver.go)
 
 Root client modes such as config import and stdio MCP are audited separately
-from [`client/cli/cli.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/ca685f5eed64c3327c0e57504928cfd2d2e96bea/client/cli/cli.go).
+from [`client/cli/cli.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/bbb20155b7a18d4906ec936566bf0dc61fe38f35/client/cli/cli.go).
 
 The baseline must be updated deliberately. A newer Sliver checkout does not
 silently expand this roadmap until its reachable command trees and protobuf
@@ -320,7 +320,7 @@ Operator-only scope is enforced at the application boundary:
 | M2 | Core endpoint reconnaissance, files, and processes | **Complete (accepted session-first scope)** | 4-6 weeks |
 | M3 | Bounded session streaming and managed shells | **Complete (accepted session-shell scope)** | 3-5 weeks |
 | M4 | Execution, post-exploitation, and privilege workflows | **Awaiting operator acceptance** | 4-6 weeks |
-| M5 | Forwarding, SOCKS, WireGuard networking, and pivots | Not started | 4-5 weeks |
+| M5 | Forwarding, SOCKS, WireGuard networking, and pivots | **In progress (rc4 forwarding slice delivered)** | 4-5 weeks |
 | M6 | Operator data, collaboration, monitoring, and cracking | Not started | 4-6 weeks |
 | M7 | Complete payload, profile, build, and encoder lifecycle | Not started | 3-5 weeks |
 | M8 | Extensions, Armory, automation, AI, and MCP | Not started | 5-8 weeks |
@@ -335,7 +335,7 @@ Milestone governance is tracked separately from checklist state:
 | M2 | Codex / operator accepted (session-first scope) | 2026-08-10 | Session-first scope below | [Session-first verification](docs/m2-session-verification.md) |
 | M3 | Codex / operator accepted (session-shell scope) | 2026-08-15 | Streaming and terminal boundaries below | [M3 verification](docs/m3-verification.md) |
 | M4 | Codex / operator acceptance pending | 2026-08-15 | Execution and credential boundaries below | [M4 verification](docs/m4-verification.md) |
-| M5 | Unassigned | 2026-08-09 | TBD | TBD |
+| M5 | Codex / operator-directed forwarding slice | 2026-09-08 | Forwarding boundary below | [Network window E2E](src/e2e/network-window.e2e.ts) |
 | M6 | Unassigned | 2026-08-09 | TBD | TBD |
 | M7 | Unassigned | 2026-08-09 | TBD | TBD |
 | M8 | Unassigned | 2026-08-09 | TBD | TBD |
@@ -831,7 +831,8 @@ remain M5 work even though they can later reuse this bounded stream foundation.
 The bounded M4 workbench slice was delivered on 2026-08-15. Automated evidence
 and the exact security boundary are recorded in
 [M4 verification](docs/m4-verification.md). The parity rows remain in progress,
-and M5 does not begin until the operator accepts this delivered M4 scope.
+and operator acceptance remains pending. The separately requested M5 forwarding
+slice proceeds without changing that M4 acceptance status.
 
 ### Execution workflows
 
@@ -887,25 +888,32 @@ and M5 does not begin until the operator accepts this delivered M4 scope.
   crash reports.
 - [x] Destructive and high-impact actions always identify the target and require
   the configured confirmation policy.
-- [ ] The operator tests and explicitly accepts the delivered M4 scope before M5
-  begins.
+- [ ] The operator tests and explicitly accepts the delivered M4 scope; this
+  remains open while the separately requested M5 forwarding slice proceeds.
 
 ## M5 - Forwarding, SOCKS, WireGuard networking, and pivots
 
-- Status: Not started
-- Dependencies: M1; after operator acceptance, local stream-backed forwarding
-  and SOCKS can extend the M3 bounded-stream foundation
+- Status: **In progress**
+- Dependencies: M1 and the M3 bounded-stream foundation; the operator-directed
+  forwarding slice proceeds while M4 acceptance remains open
+
+The sliver-script rc4 forwarding slice was delivered on 2026-09-08. It provides
+strict main-owned local port-forward and SOCKS handles, authoritative
+session-scoped reverse-forward inventory, a dedicated Network window, and a
+deterministic native-menu Electron journey. Real-server and packaged-platform
+certification, broader-bind confirmation, reconnect and fault-injection
+coverage, pivots, and WireGuard workflows remain open.
 
 ### Target networking
 
 - [ ] Interface and connection inventory.
-- [ ] Local port-forward list/add/remove parity (`implant.portfwd`,
-  `implant.portfwd.add`, and `implant.portfwd.rm`).
-- [ ] Reverse port-forward list/add/remove parity (`implant.rportfwd`,
-  `implant.rportfwd.add`, and `implant.rportfwd.rm`).
-- [ ] Session SOCKS list/start/stop parity (`implant.socks5`,
-  `implant.socks5.start`, and `implant.socks5.stop`).
-- [ ] GUI-local SOCKS inventory and stop operations by extending the
+- [x] Local port-forward list/add/remove GUI and main-process path
+  (`implant.portfwd`, `implant.portfwd.add`, and `implant.portfwd.rm`).
+- [x] Reverse port-forward list/add/remove GUI and main-process path
+  (`implant.rportfwd`, `implant.rportfwd.add`, and `implant.rportfwd.rm`).
+- [x] Session SOCKS list/start/stop GUI and main-process path
+  (`implant.socks5`, `implant.socks5.start`, and `implant.socks5.stop`).
+- [x] GUI-local SOCKS inventory and stop operations by extending the
   shell-specific M3 resource foundation under M5 policy; this is client state,
   not server-owned SOCKS inventory.
 - [ ] WireGuard session port-forward and SOCKS workflows with session and
@@ -1251,7 +1259,7 @@ fields per reachable command node:
 {
   "schemaVersion": 1,
   "id": "implant.filesystem.download",
-  "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
+  "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
   "source": "sliver/client/command/filesystem/commands.go",
   "surface": "implant",
   "operatorScope": true,

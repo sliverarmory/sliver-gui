@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ApplicationCloudDeploymentController } from "./application.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
+import { NETWORK_FORWARDING_IPC_EVENTS } from "../shared/network-forwarding-contracts.js";
 
 const harness = vi.hoisted(() => ({
   windows: [] as any[],
@@ -330,7 +331,7 @@ describe("application protocol lifecycle", () => {
       approveSshHostKey: vi.fn(),
       dispose: vi.fn(),
     } as unknown as ApplicationCloudDeploymentController;
-    const { session } = await import("electron");
+    const { Menu, session } = await import("electron");
     const { startApplication } = await import("./application.js");
     const { registerIpcHandlers } = await import("./ipc.js");
     const defaultProtocol = session.defaultSession.protocol;
@@ -339,22 +340,71 @@ describe("application protocol lifecycle", () => {
     let application: Awaited<ReturnType<typeof startApplication>> | undefined;
 
     try {
+      const registry = fakeConnectionRegistry();
       application = await startApplication({
         cloudDeploymentController: controller,
-        registry: fakeConnectionRegistry() as never,
+        registry: registry as never,
+        networkPreloadPath: "/test/network-preload.cjs",
         sshPreloadPath: "/test/ssh-preload.cjs",
       });
-      const partitionResult = vi.mocked(session.fromPartition).mock.results.at(-1)!;
-      expect(session.fromPartition).toHaveBeenLastCalledWith("sliver-cloud-deployment");
-      expect(partitionResult.type).toBe("return");
-      const cloudProtocol = partitionResult.value.protocol;
-      for (const ownedProtocol of [defaultProtocol, cloudProtocol]) {
+      const partitionCalls = vi.mocked(session.fromPartition).mock.calls;
+      const cloudPartitionIndex = partitionCalls.findIndex(([name]) => name === "sliver-cloud-deployment");
+      const networkPartitionIndex = partitionCalls.findIndex(([name]) => name === "sliver-network");
+      expect(cloudPartitionIndex).toBeGreaterThanOrEqual(0);
+      expect(networkPartitionIndex).toBeGreaterThanOrEqual(0);
+      const cloudPartitionResult = vi.mocked(session.fromPartition).mock.results[cloudPartitionIndex]!;
+      const networkPartitionResult = vi.mocked(session.fromPartition).mock.results[networkPartitionIndex]!;
+      expect(cloudPartitionResult.type).toBe("return");
+      expect(networkPartitionResult.type).toBe("return");
+      const cloudProtocol = cloudPartitionResult.value.protocol;
+      const networkProtocol = networkPartitionResult.value.protocol;
+      for (const ownedProtocol of [defaultProtocol, cloudProtocol, networkProtocol]) {
         expect(ownedProtocol.handle).toHaveBeenCalledExactlyOnceWith("sliver", expect.any(Function));
         expect(ownedProtocol.unhandle).not.toHaveBeenCalled();
       }
 
       const workspaceWindow = harness.windows.at(-1)!;
       expect(workspaceWindow.webContents.getURL()).toBe("sliver://app/index.html");
+      const applicationMenuTemplate = vi.mocked(Menu.buildFromTemplate).mock.calls
+        .map(([template]) => template)
+        .find((template) => findTemplateMenuItem(template, "network.port-forward"));
+      const portForwardMenuItem = findTemplateMenuItem(applicationMenuTemplate ?? [], "network.port-forward");
+      expect(portForwardMenuItem).toBeDefined();
+      Reflect.apply(portForwardMenuItem!.click, portForwardMenuItem, [portForwardMenuItem, workspaceWindow, {}]);
+      await settleLifecycle();
+
+      const networkWindow = harness.windows.at(-1)!;
+      expect(networkWindow).not.toBe(workspaceWindow);
+      expect(networkWindow.options.webPreferences.partition).toBe("sliver-network");
+      expect(networkWindow.options.webPreferences.preload).toBe("/test/network-preload.cjs");
+      expect(networkWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=network");
+      expect(networkWindow.setTitle).toHaveBeenCalledWith("Network");
+      expect(registry.inheritConnection).toHaveBeenCalledWith(
+        workspaceWindow.webContents.id,
+        networkWindow.webContents.id,
+      );
+      expect(networkWindow.webContents.send).toHaveBeenCalledExactlyOnceWith(
+        NETWORK_FORWARDING_IPC_EVENTS.navigationRequested,
+        "port-forward",
+      );
+      expect(harness.hardenedWindows).toContainEqual({
+        window: networkWindow,
+        rendererUrl: "sliver://app/index.html",
+        utilityUrl: "sliver://app/index.html?surface=network",
+      });
+
+      networkWindow.webContents.send.mockClear();
+      const windowCount = harness.windows.length;
+      const reverseMenuItem = findTemplateMenuItem(applicationMenuTemplate ?? [], "network.reverse-port-forward");
+      Reflect.apply(reverseMenuItem!.click, reverseMenuItem, [reverseMenuItem, networkWindow, {}]);
+      await settleLifecycle();
+      expect(harness.windows).toHaveLength(windowCount);
+      expect(harness.focusedWindow).toBe(networkWindow);
+      expect(networkWindow.webContents.send).toHaveBeenCalledExactlyOnceWith(
+        NETWORK_FORWARDING_IPC_EVENTS.navigationRequested,
+        "reverse-port-forward",
+      );
+
       const registration = vi.mocked(registerIpcHandlers).mock.calls.at(-1)!;
       expect(registration[2]).toBe("sliver://app/index.html");
       const cloudWindowActions = registration[9]!;
@@ -374,15 +424,15 @@ describe("application protocol lifecycle", () => {
       expect(sshWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=ssh");
 
       await application.stop();
-      for (const window of [workspaceWindow, cloudWindow, sshWindow]) {
+      for (const window of [workspaceWindow, networkWindow, cloudWindow, sshWindow]) {
         expect(window.isDestroyed()).toBe(true);
       }
-      for (const ownedProtocol of [defaultProtocol, cloudProtocol]) {
+      for (const ownedProtocol of [defaultProtocol, cloudProtocol, networkProtocol]) {
         expect(ownedProtocol.unhandle).toHaveBeenCalledExactlyOnceWith("sliver");
       }
 
       await application.stop();
-      for (const ownedProtocol of [defaultProtocol, cloudProtocol]) {
+      for (const ownedProtocol of [defaultProtocol, cloudProtocol, networkProtocol]) {
         expect(ownedProtocol.unhandle).toHaveBeenCalledExactlyOnceWith("sliver");
       }
       application = undefined;
@@ -940,9 +990,23 @@ function fakeConnectionRegistry() {
   return {
     registerWindow: vi.fn(),
     inheritConnection: vi.fn(),
+    snapshot: vi.fn(() => ({
+      connection: { status: "connected", epoch: 7, incarnation: 1 },
+    })),
     closeWindowStreams: vi.fn(async () => undefined),
     unregisterWindow: vi.fn(async () => undefined),
   };
+}
+
+function findTemplateMenuItem(template: readonly any[], id: string): any | undefined {
+  for (const item of template) {
+    if (item?.id === id) return item;
+    if (Array.isArray(item?.submenu)) {
+      const nested = findTemplateMenuItem(item.submenu, id);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 async function createConsoleLifecycleFixture(

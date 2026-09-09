@@ -4,7 +4,17 @@ import { join } from "node:path";
 
 import { app } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
-import { clientpb, sliverpb, type SliverClientConfig } from "sliver-script";
+import {
+  clientpb,
+  sliverpb,
+  type LocalForwardState,
+  type PortForward,
+  type ReversePortForward,
+  type ReversePortForwardInfo,
+  type ReversePortForwardState,
+  type SliverClientConfig,
+  type Socks5Proxy,
+} from "sliver-script";
 
 import {
   startApplication,
@@ -382,6 +392,7 @@ void startApplication({
   preloadPath: `${repositoryRoot}/dist/preload/index.cjs`,
   sshPreloadPath: `${repositoryRoot}/dist/preload/ssh.cjs`,
   cloudDeploymentPreloadPath: `${repositoryRoot}/dist/preload/cloud-deployment.cjs`,
+  networkPreloadPath: `${repositoryRoot}/dist/preload/network.cjs`,
   cloudDeploymentController,
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);
@@ -508,6 +519,20 @@ function disposable(dispose: () => void): NativePtyDisposable {
   };
 }
 
+function localForwardState(
+  status: LocalForwardState["status"],
+  reason?: LocalForwardState["reason"],
+): LocalForwardState {
+  return Object.freeze({
+    status,
+    activeConnections: 0,
+    totalConnections: 0,
+    bytesToTarget: 0,
+    bytesFromTarget: 0,
+    ...(reason ? { reason } : {}),
+  });
+}
+
 function createFakeClient(config: SliverClientConfig, testState: FakeMainState): SliverClientAdapter {
   const eventSubject = new Subject<clientpb.Event>();
   const eventStreamState = new BehaviorSubject<{
@@ -521,6 +546,8 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   let nextJobId = 42;
   let nextTaskId = 1;
   let nextShellId = 1;
+  let nextEphemeralPort = 45_550;
+  let nextReverseListenerId = 7_001;
   let jobs: clientpb.Job[] = [
     {
       ID: 41,
@@ -599,6 +626,9 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       fakeProcess(42_000 + index, `m2-worker-${String(index + 1).padStart(3, "0")}`, 41001)),
   ];
   const tasks = new Map<string, clientpb.BeaconTask>();
+  const portForwards = new Map<string, PortForward>();
+  const socks5Proxies = new Map<string, Socks5Proxy>();
+  const reversePortForwards = new Map<number, ReversePortForwardInfo>();
 
   globalThis.__SLIVER_GUI_E2E_CONTROL__ = {
     setEventStreamStatus(status) {
@@ -704,6 +734,10 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async disconnect() {
       record("disconnect");
       testState.disconnects += 1;
+      await Promise.all([
+        ...[...portForwards.values()].map((forward) => forward.close()),
+        ...[...socks5Proxies.values()].map((proxy) => proxy.close()),
+      ]);
       eventStreamState.next({ status: "stopped", attempt: 0 });
     },
     async startShellSession(sessionId, options) {
@@ -785,6 +819,123 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async jobs() {
       record("jobs");
       return jobs.map((job) => ({ ...job, Domains: [...job.Domains] }));
+    },
+    async startPortForward(sessionId, options) {
+      record("startPortForward");
+      requireSession(sessionId);
+      const id = randomUUID();
+      const state = new BehaviorSubject<LocalForwardState>(localForwardState("listening"));
+      const connection = new Subject<never>();
+      let current = state.value;
+      const subscription = state.subscribe((next) => { current = next; });
+      const forward: PortForward = {
+        id,
+        sessionId,
+        bind: { ...options.bind, port: options.bind.port === 0 ? nextEphemeralPort++ : options.bind.port },
+        target: { ...options.target },
+        get state() { return current; },
+        state$: state.asObservable(),
+        connection$: connection.asObservable(),
+        async close() {
+          if (!portForwards.has(id)) return;
+          record("stopPortForward");
+          current = localForwardState("closed", "requested");
+          state.next(current);
+          state.complete();
+          connection.complete();
+          subscription.unsubscribe();
+          portForwards.delete(id);
+        },
+      };
+      portForwards.set(id, forward);
+      return forward;
+    },
+    listPortForwards() {
+      record("listPortForwards");
+      return Object.freeze([...portForwards.values()]);
+    },
+    async stopPortForward(id) {
+      await portForwards.get(id)?.close();
+    },
+    async startSocks5Proxy(sessionId, options) {
+      record("startSocks5Proxy");
+      requireSession(sessionId);
+      const id = `socks5-${randomUUID()}`;
+      const state = new BehaviorSubject<LocalForwardState>(localForwardState("listening"));
+      const connection = new Subject<never>();
+      let current = state.value;
+      const subscription = state.subscribe((next) => { current = next; });
+      const proxy: Socks5Proxy = {
+        id,
+        sessionId,
+        bind: { ...options.bind, port: options.bind.port === 0 ? nextEphemeralPort++ : options.bind.port },
+        get state() { return current; },
+        state$: state.asObservable(),
+        connection$: connection.asObservable(),
+        async close() {
+          if (!socks5Proxies.has(id)) return;
+          record("stopSocks5Proxy");
+          current = localForwardState("closed", "requested");
+          state.next(current);
+          state.complete();
+          connection.complete();
+          subscription.unsubscribe();
+          socks5Proxies.delete(id);
+        },
+      };
+      socks5Proxies.set(id, proxy);
+      return proxy;
+    },
+    listSocks5Proxies() {
+      record("listSocks5Proxies");
+      return Object.freeze([...socks5Proxies.values()]);
+    },
+    async stopSocks5Proxy(id) {
+      await socks5Proxies.get(id)?.close();
+    },
+    async startReversePortForward(sessionId, options) {
+      record("startReversePortForward");
+      requireSession(sessionId);
+      const id = nextReverseListenerId++;
+      const info: ReversePortForwardInfo = {
+        id,
+        sessionId,
+        bind: { ...options.bind },
+        target: { ...options.target },
+      };
+      reversePortForwards.set(id, info);
+      const state = new BehaviorSubject<ReversePortForwardState>({ status: "listening" });
+      let current = state.value;
+      const subscription = state.subscribe((next) => { current = next; });
+      const forward: ReversePortForward = {
+        ...info,
+        bind: info.bind!,
+        target: info.target!,
+        get state() { return current; },
+        state$: state.asObservable(),
+        async refresh() { return current; },
+        async close() {
+          if (!reversePortForwards.has(id)) return;
+          record("stopReversePortForward");
+          reversePortForwards.delete(id);
+          current = { status: "stopped", reason: "requested" };
+          state.next(current);
+          state.complete();
+          subscription.unsubscribe();
+        },
+      };
+      return forward;
+    },
+    async listReversePortForwards(sessionId) {
+      record("listReversePortForwards");
+      requireSession(sessionId);
+      return Object.freeze([...reversePortForwards.values()].filter((forward) => forward.sessionId === sessionId));
+    },
+    async stopReversePortForward(sessionId, listenerId) {
+      record("stopReversePortForward");
+      requireSession(sessionId);
+      const current = reversePortForwards.get(listenerId);
+      if (current?.sessionId === sessionId) reversePortForwards.delete(listenerId);
     },
     async implantBuilds() {
       record("implantBuilds");

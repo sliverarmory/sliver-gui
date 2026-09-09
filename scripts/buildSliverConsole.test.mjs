@@ -142,14 +142,14 @@ test("requires exact module, VCS, target, and build settings", () => {
   const sourceManifest = {
     source: {
       commandPackage: "github.com/bishopfox/sliver/client",
-      commit: "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
+      commit: "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
       module: "github.com/bishopfox/sliver",
     },
     build: { tags: ["go_sqlite", "client"] },
   };
   const slice = { goos: "linux", goarch: "amd64" };
   const buildInfo = [
-    "/tmp/sliver-client: go1.26.6",
+    "/tmp/sliver-client: go1.27.1",
     "\tpath\tgithub.com/bishopfox/sliver/client",
     "\tmod\tgithub.com/bishopfox/sliver\tv1.7.7",
     "\tbuild\t-tags=go_sqlite,client",
@@ -395,8 +395,8 @@ test("emits a digest-bound native artifact and build record", async () => {
   await writeFile(join(repositoryDirectory, overlayReplacementPath), overlayReplacement);
   await writeFile(join(repositoryDirectory, "package.json"), '{"version":"0.1.0"}\n');
 
-  const pinnedCommit = "ca685f5eed64c3327c0e57504928cfd2d2e96bea";
-  const pinnedTree = "25e1385fa1fe6e0a7e41606e426b1c1d0cd320b1";
+  const pinnedCommit = "bbb20155b7a18d4906ec936566bf0dc61fe38f35";
+  const pinnedTree = "29be1ac3a7580b1f0b672d8ade45fd32389e6231";
   const goEnvironments = [];
   const goOverlays = [];
   const run = async (command, args, options = {}) => {
@@ -406,7 +406,7 @@ test("emits a digest-bound native artifact and build record", async () => {
     if (key === "git rev-parse HEAD^{tree}") return `${pinnedTree}\n`;
     if (key === "git status --porcelain=v1 --untracked-files=all") return "";
     if (command === "go") goEnvironments.push(options.env);
-    if (key === "go env GOVERSION") return "go1.26.6\n";
+    if (key === "go env GOVERSION") return "go1.27.1\n";
     if (command === "go" && args[0] === "build") {
       const overlayPath = args[args.indexOf("-overlay") + 1];
       goOverlays.push(JSON.parse(await readFile(overlayPath, "utf8")));
@@ -417,7 +417,7 @@ test("emits a digest-bound native artifact and build record", async () => {
     }
     if (command === "go" && args[0] === "version" && args[1] === "-m") {
       return [
-        `${args[2]}: go1.26.6`,
+        `${args[2]}: go1.27.1`,
         "\tpath\tgithub.com/bishopfox/sliver/client",
         "\tmod\tgithub.com/bishopfox/sliver\tv1.7.7",
         "\tbuild\t-tags=go_sqlite,client",
@@ -461,7 +461,7 @@ test("emits a digest-bound native artifact and build record", async () => {
           licenseFile: "LICENSE",
           licenseSha256: createHash("sha256").update(license).digest("hex"),
         },
-        toolchain: { go: "go1.26.6" },
+        toolchain: { go: "go1.27.1" },
         build: { tags: ["go_sqlite", "client"], overlay: sourceOverlay },
       },
     });

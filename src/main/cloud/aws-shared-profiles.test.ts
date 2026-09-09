@@ -273,7 +273,7 @@ describe("AWS shared profile path selection", () => {
     });
 
     expect(paths).toEqual({
-      credentialsFilePath: "/tmp/aws-profile-home/.aws/work-credentials",
+      credentialsFilePath: join("/tmp/aws-profile-home", ".aws", "work-credentials"),
       configFilePath: "/tmp/aws-config",
     });
   });

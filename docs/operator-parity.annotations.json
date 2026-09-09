@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "baselineCommit": "ca685f5eed64c3327c0e57504928cfd2d2e96bea",
-  "reviewVersion": 4,
+  "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+  "reviewVersion": 6,
   "reviewPolicy": "Every generated reachable node has an explicit product classification. Regeneration never edits this file.",
   "scopeDecisions": [
     {
@@ -24,6 +24,13 @@
       "milestone": "M4",
       "operatorScope": true,
       "notes": "The bounded execution and privilege workbench is delivered and awaits operator acceptance. The closed session/beacon action surface, main-owned review and artifact boundary, canonical wrappers, exact task-bound beacon protobuf decoding and output save, credential zeroization, and deterministic Electron journey are implemented. Session-only composites, unverifiable beacon TaskReq results for shellcode and Metasploit, synchronous session cancellation, long-tail command options, real-target certification, and all individual parity rows remain in progress."
+    },
+    {
+      "id": "operator-networking.m5-forwarding",
+      "status": "in-progress",
+      "milestone": "M5",
+      "operatorScope": true,
+      "notes": "The sliver-script rc4 local port-forward, reverse-port-forward, and SOCKS5 management slice is implemented behind strict main-owned handles and a dedicated Network window. Contract, controller, IPC, renderer, native-menu, and Electron journey coverage is complete. Real-server and packaged-platform certification, broader-bind confirmation, reconnect and fault-injection evidence, pivots, and WireGuard workflows remain open."
     },
     {
       "id": "operator-transport.wireguard",
@@ -2916,7 +2923,7 @@
     {
       "id": "implant.portfwd",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -2947,16 +2954,20 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.portfwd"
+        "parity-contract:implant.portfwd",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Port-forward inventory remains planned for M5. M3 delivered only the bounded session-shell stream foundation and does not claim forwarding parity."
+      "notes": "The dedicated Network window inventories main-owned sliver-script rc4 port-forward handles across the bound backend, grouped by session and including state and byte counters. Automated contract, controller, IPC, renderer, and Electron coverage passes; real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.portfwd.add",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -2989,16 +3000,20 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.portfwd.add"
+        "parity-contract:implant.portfwd.add",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Port-forward creation remains planned for M5, including local exposure review. M3 delivered only the bounded session-shell stream foundation."
+      "notes": "The dedicated Network window validates and starts sliver-script rc4 port forwards for the exact selected session, using a loopback local-bind default and main-owned lifecycle. Broader-bind confirmation plus real-server and packaged-platform certification remain pending."
     },
     {
       "id": "implant.portfwd.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -3029,11 +3044,15 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.portfwd.rm"
+        "parity-contract:implant.portfwd.rm",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Port-forward removal remains planned for M5. M3 delivered only the bounded session-shell stream foundation."
+      "notes": "The dedicated Network window stops the exact main-owned sliver-script rc4 port-forward handle and reports terminal failures. Real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.procdump",
@@ -3732,7 +3751,7 @@
     {
       "id": "implant.rportfwd",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -3763,16 +3782,20 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.rportfwd"
+        "parity-contract:implant.rportfwd",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Reverse-port-forward inventory remains planned for M5. M3 delivered only the bounded session-shell stream foundation and does not claim forwarding parity."
+      "notes": "The dedicated Network window shows server-authoritative sliver-script rc4 reverse-forward inventory across all active sessions, including partial per-session inventory errors. Rc4 does not expose reverse-forward byte counters; real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.rportfwd.add",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -3805,16 +3828,20 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.rportfwd.add"
+        "parity-contract:implant.rportfwd.add",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Reverse-port-forward creation remains planned for M5, including endpoint policy and operator review. M3 delivered only the bounded session-shell stream foundation."
+      "notes": "The dedicated Network window validates and starts sliver-script rc4 reverse forwards for the exact selected session and refreshes authoritative inventory. Endpoint confirmation plus real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.rportfwd.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -3845,11 +3872,15 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.rportfwd.rm"
+        "parity-contract:implant.rportfwd.rm",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Reverse-port-forward removal remains planned for M5. M3 delivered only the bounded session-shell stream foundation."
+      "notes": "The dedicated Network window revalidates the exact listener, bind, and destination against authoritative inventory before stopping a sliver-script rc4 reverse forward. Real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.runas",
@@ -4337,7 +4368,7 @@
     {
       "id": "implant.socks5",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -4368,16 +4399,20 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.socks5"
+        "parity-contract:implant.socks5",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Session SOCKS inventory remains planned for M5. M3 delivered only the bounded session-shell stream foundation and does not claim SOCKS parity."
+      "notes": "The dedicated Network window inventories main-owned sliver-script rc4 SOCKS5 handles across the bound backend, grouped by session with state, authentication visibility, and byte counters. Automated coverage passes; real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.socks5.start",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -4410,16 +4445,20 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.socks5.start"
+        "parity-contract:implant.socks5.start",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Session SOCKS creation and local exposure review remain planned for M5. M3 delivered only the bounded session-shell stream foundation."
+      "notes": "The dedicated Network window starts sliver-script rc4 SOCKS5 proxies for the exact selected session with a loopback default, optional credentials, transient password handling, and an unauthenticated wildcard warning. Exact broader-bind confirmation plus real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.socks5.stop",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M5",
       "restrictionReview": {
         "targetModes": [
@@ -4450,11 +4489,15 @@
         "compatible-server",
         "session-target"
       ],
-      "guiSurface": "streams",
+      "guiSurface": "networking",
       "testIds": [
-        "parity-contract:implant.socks5.stop"
+        "parity-contract:implant.socks5.stop",
+        "network-forwarding-controller",
+        "network-forwarding-ipc",
+        "network-window-renderer",
+        "network-window-native-e2e"
       ],
-      "notes": "Session SOCKS stop remains planned for M5. M3 delivered only the bounded session-shell stream foundation."
+      "notes": "The dedicated Network window stops the exact main-owned sliver-script rc4 SOCKS5 handle and reports terminal failures. Real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.spawndll",

@@ -44,7 +44,7 @@ protocol-parity:
         cache: npm
     - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
       with:
-        go-version: 1.26.6
+        go-version: 1.27.1
         cache: false
     - name: Set up exact npm
       run: npm install --global npm@11.19.0 --ignore-scripts

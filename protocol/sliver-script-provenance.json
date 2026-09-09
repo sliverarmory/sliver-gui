@@ -2,35 +2,35 @@
   "schemaVersion": 3,
   "package": {
     "name": "sliver-script",
-    "version": "2.0.0-rc.2",
-    "dependencySpec": "2.0.0-rc.2",
-    "tarball": "https://registry.npmjs.org/sliver-script/-/sliver-script-2.0.0-rc.2.tgz",
-    "integrity": "sha512-OixPOHl4bakt1wNktiwuhe9SNJkrb0SIVYfOBu+CCesF3gbUhX4/KJilIIE0HH7KfFuNVgVbwzIs8RqfP2dvew==",
-    "shasum": "f507facaea98a542072ed7e40ef75fe234eaeb88",
+    "version": "2.0.0-rc.4",
+    "dependencySpec": "2.0.0-rc.4",
+    "tarball": "https://registry.npmjs.org/sliver-script/-/sliver-script-2.0.0-rc.4.tgz",
+    "integrity": "sha512-8AttstbME5lQxw5q7qavQ5aF5j8NyOd9ExEyHEMkjzdV2MVcfc/tkk7+o/Ks8fggEbbcxVCIOE5SIlvgH8U/5A==",
+    "shasum": "bb8e346c19c9bbbe40840493d64f7be9ee9dcb69",
     "source": {
       "repository": "https://github.com/sliverarmory/sliver-script.git",
-      "tag": "v2.0.0-rc.2",
-      "commit": "eb385632f2a390cba05dc06f0819d0f99d82c7d2"
+      "tag": "v2.0.0-rc.4",
+      "commit": "ea287f92dff10d85d8352d7d8e3b6c4fefe607bc"
     }
   },
   "installedPackage": {
     "root": "node_modules/sliver-script",
     "tree": {
-      "files": 54,
-      "sha256": "fdc6cea64a012f8a9556d33de9cc46cb46b4edc6d4b2c659f20339dcd3173484"
+      "files": 66,
+      "sha256": "714a498e46b228b695c103be40a4efc2131158d6ac530104b228b57d0ae22f18"
     },
     "files": [
       {
         "path": "package.json",
-        "sha256": "a2dd23f8e1c48c4de3ef6a128bf13d7ffaa135c7204b8431636c2a6fb9dbe9a3"
+        "sha256": "bf1ea25dc63606c57a874700402c689fcf273c75042ebb08d6e020feb25330e6"
       },
       {
         "path": "integration.lock.json",
-        "sha256": "9a99acec7acaa92b61953fc353a5caa31178637f58aec159c47629ebf916fc42"
+        "sha256": "1ddda9899c30d2eef59978ed2e387b107fcceb70e9d1a71057a91f0413ee9453"
       },
       {
         "path": "protobuf.lock.json",
-        "sha256": "b20a238556d75e444c0dc68e1f7514a6d38c438ce0183e61a6b12eeb9b9b4bc5"
+        "sha256": "de95deaa294fea5063efd0ff8d2ef8ba369d6eb2622af441eb3c33e6643936ec"
       }
     ]
   },

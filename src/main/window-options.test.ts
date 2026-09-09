@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
+  NETWORK_SESSION_PARTITION,
   cloudDeploymentWindowOptions,
   consoleWindowOptions,
   interactionWindowOptions,
   mainWindowOptions,
+  networkWindowOptions,
   sessionShellWindowOptions,
   sshWindowOptions,
 } from "./window-options.js";
@@ -79,6 +81,39 @@ describe("main window transparency", () => {
     expect(mainWindowOptions("/preload.js", "linux", undefined, false)).toMatchObject({
       titleBarOverlay: { symbolColor: "#18181b" },
     });
+  });
+});
+
+describe("Network window", () => {
+  it("uses standalone native chrome and its dedicated hardened preload partition", () => {
+    const options = networkWindowOptions("/network-preload.js", "linux", "/brand.png");
+    expect(options).toMatchObject({
+      title: "Network",
+      width: 1280,
+      height: 840,
+      minWidth: 880,
+      minHeight: 640,
+      show: false,
+      backgroundColor: "#09090b",
+      icon: "/brand.png",
+      webPreferences: {
+        preload: "/network-preload.js",
+        partition: NETWORK_SESSION_PARTITION,
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+        nodeIntegrationInSubFrames: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        webviewTag: false,
+      },
+    });
+    expect(JSON.stringify(options)).not.toMatch(/sessionId|password|destination|forwardId/iu);
+  });
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(networkWindowOptions("/network-preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
   });
 });
 

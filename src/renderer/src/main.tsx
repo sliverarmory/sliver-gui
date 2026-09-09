@@ -10,6 +10,7 @@ import { SessionShellWindowApp } from "./SessionShellWindowApp";
 import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
+import { NetworkWindowApp } from "./NetworkWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 import { ApplicationContextMenu } from "./components/ApplicationContextMenu";
@@ -34,8 +35,15 @@ function RendererSurface(): React.JSX.Element {
   return <App />;
 }
 
-ReactDOM.createRoot(root).render(
-  <React.StrictMode>
+function ApplicationRoot(): React.JSX.Element {
+  if (surface === "network") {
+    return window.network ? (
+      <ApplicationSettingsProvider api={window.network}>
+        <NetworkWindowApp />
+      </ApplicationSettingsProvider>
+    ) : <NetworkWindowApp />;
+  }
+  return (
     <ApplicationContextMenu>
       {surface === "cloud-deployment" ? (
         <CloudDeploymentWindowApp />
@@ -52,7 +60,13 @@ ReactDOM.createRoot(root).render(
           <ReleaseDownloadToasts />
         </ApplicationSettingsProvider>
       )}
-      <Toast.Provider placement="bottom" maxVisibleToasts={4} />
     </ApplicationContextMenu>
+  );
+}
+
+ReactDOM.createRoot(root).render(
+  <React.StrictMode>
+    <ApplicationRoot />
+    <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

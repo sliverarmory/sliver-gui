@@ -1,4 +1,4 @@
-import type { MenuItemConstructorOptions } from "electron";
+import type { BaseWindow, MenuItemConstructorOptions } from "electron";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import {
   isCommandPaletteShortcut,
@@ -8,6 +8,7 @@ import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { CloudDeploymentStatus, CloudProvider } from "../shared/cloud-deployment-contracts.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
+import type { NetworkTabId } from "../shared/network-forwarding-contracts.js";
 
 export type ReleaseMenuCatalog =
   | { readonly status: "loading" }
@@ -22,6 +23,7 @@ export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly duplicateConnectedWindow: () => void;
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
+  readonly openNetwork: (tab: NetworkTabId, sourceWindow?: BaseWindow) => void;
   readonly openDocumentation: () => void;
   readonly showAboutPanel: () => void;
   readonly downloadRelease: (target: SliverReleaseTarget) => void;
@@ -146,6 +148,7 @@ export function buildApplicationMenuTemplate(
   applicationUpdateState?: ApplicationUpdateState,
   consoleActions?: ConsoleApplicationMenuActions,
   cloudDeployments: readonly CloudMenuDeployment[] = [],
+  networkEnabled = false,
 ): MenuItemConstructorOptions[] {
   const updateItems = applicationUpdateState
     ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
@@ -247,6 +250,29 @@ export function buildApplicationMenuTemplate(
               }),
             ]
           : []),
+      ],
+    },
+    {
+      label: "Network",
+      submenu: [
+        {
+          id: "network.port-forward",
+          label: "Port Forward",
+          enabled: networkEnabled,
+          click: (_item, sourceWindow) => actions.openNetwork("port-forward", sourceWindow),
+        },
+        {
+          id: "network.reverse-port-forward",
+          label: "Reverse Port Forward",
+          enabled: networkEnabled,
+          click: (_item, sourceWindow) => actions.openNetwork("reverse-port-forward", sourceWindow),
+        },
+        {
+          id: "network.socks5",
+          label: "SOCKS5 Proxy",
+          enabled: networkEnabled,
+          click: (_item, sourceWindow) => actions.openNetwork("socks5", sourceWindow),
+        },
       ],
     },
     ...(consoleActions

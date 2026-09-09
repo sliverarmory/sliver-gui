@@ -48,6 +48,10 @@ import {
   type SshWindowLaunchContext,
 } from "../shared/ssh-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
+import {
+  NETWORK_FORWARDING_IPC_EVENTS,
+  type NetworkTabId,
+} from "../shared/network-forwarding-contracts.js";
 import type {
   SliverReleaseDownloadEvent,
   SliverReleaseTarget,
@@ -94,11 +98,13 @@ import { CloudDeploymentService } from "./cloud-deployment-service.js";
 import { detectCurrentEgressIpv4 } from "./cloud/current-egress-ipv4.js";
 import {
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
+  NETWORK_SESSION_PARTITION,
   cloudDeploymentWindowOptions,
   consoleWindowOptions,
   interactionWindowOptions,
   mainWindowOptions,
   nativeWindowBackgroundColor,
+  networkWindowOptions,
   sessionShellWindowOptions,
   sshWindowOptions,
   titleBarSymbolColor,
@@ -124,6 +130,10 @@ import {
   SshSessionRegistry,
   type StartedManagedSshSession,
 } from "./ssh-session-registry.js";
+import {
+  registerNetworkForwardingIpcHandlers,
+  unregisterNetworkForwardingIpcHandlers,
+} from "./network-forwarding-ipc.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
@@ -138,6 +148,7 @@ type NativeWindowSurface =
   | "interaction"
   | "managed-shells"
   | "console"
+  | "network"
   | "ssh";
 
 export interface StartApplicationOptions {
@@ -145,6 +156,7 @@ export interface StartApplicationOptions {
   rendererEntryPath?: string;
   preloadPath?: string;
   cloudDeploymentPreloadPath?: string;
+  networkPreloadPath?: string;
   sshPreloadPath?: string;
   developmentRendererUrl?: string;
   applicationAssetsDirectory?: string;
@@ -226,6 +238,15 @@ interface StartedConsoleTab {
   readonly configName: string;
 }
 
+interface NetworkWindowRecord {
+  readonly key: string;
+  readonly window: BrowserWindow;
+  readonly source: TrustedWindowIdentity;
+  readonly connectionIncarnation: number;
+  rendererReady: boolean;
+  pendingTab?: NetworkTabId;
+}
+
 /**
  * Compose the trusted Electron main process. Tests may inject an in-memory
  * backend by importing this module from a test-only main entry; the production
@@ -250,6 +271,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     "../preload/cloud-deployment.cjs",
   );
+  const networkPreloadPath = options.networkPreloadPath ?? join(
+    mainBundleDirectory,
+    "../preload/network.cjs",
+  );
   const sshPreloadPath = options.sshPreloadPath ?? join(
     mainBundleDirectory,
     "../preload/ssh.cjs",
@@ -273,6 +298,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     : options.developmentRendererUrl ?? readDevelopmentRendererUrl();
   const rendererUrl = developmentRendererUrl ?? APP_RENDERER_URL;
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
+  const networkRendererUrl = rendererUrlForSurface(rendererUrl, "network");
   const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
@@ -282,6 +308,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const interactionWindowsByContentsId = new Map<number, InteractionWindowRecord>();
   const consoleWindowsByKey = new Map<string, ConsoleWindowRecord>();
   const consoleWindowsByContentsId = new Map<number, ConsoleWindowRecord>();
+  const networkWindowsByKey = new Map<string, NetworkWindowRecord>();
+  const networkWindowsByContentsId = new Map<number, NetworkWindowRecord>();
   let cloudDeploymentWindow: BrowserWindow | undefined;
   let cloudDeploymentRendererReady = false;
   let pendingCloudDeploymentNavigationRequest: CloudDeploymentNavigationRequest | undefined;
@@ -354,7 +382,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "ssh",
+    surface?: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
   ): Promise<void> {
     const url = new URL(rendererUrl);
     if (surface) url.searchParams.set("surface", surface);
@@ -399,13 +427,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       rendererUrl,
       surface === "cloud-deployment"
         ? cloudDeploymentRendererUrl
+        : surface === "network"
+          ? networkRendererUrl
         : surface === "ssh"
           ? sshRendererUrl
           : undefined,
     );
     if (!applicationContextMenus) throw new Error("Application context menus are not initialized");
-    applicationContextMenus.install(window.webContents);
-    if (registerWithConnectionRegistry) window.webContents.on("before-input-event", (event, input) => {
+    if (surface !== "network") applicationContextMenus.install(window.webContents);
+    if (registerWithConnectionRegistry && surface !== "network") window.webContents.on("before-input-event", (event, input) => {
       const commandPaletteDisposition = applicationSettingsStore
         ? commandPaletteShortcutDispositionForInput(
             process.platform,
@@ -569,6 +599,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           consoleWindowsByKey.delete(consoleWindowRecord.key);
         }
       }
+      const networkWindowRecord = networkWindowsByContentsId.get(contentsId);
+      if (networkWindowRecord) {
+        networkWindowsByContentsId.delete(contentsId);
+        if (networkWindowsByKey.get(networkWindowRecord.key) === networkWindowRecord) {
+          networkWindowsByKey.delete(networkWindowRecord.key);
+        }
+      }
       const cleanup = Promise.all([
         registerWithConnectionRegistry
           ? registry.unregisterWindow(contentsId).catch(() => undefined)
@@ -593,6 +630,150 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     trackWindow(window, inheritFromContentsId);
     void loadRenderer(window);
     return window;
+  }
+
+  function flushNetworkNavigation(record: NetworkWindowRecord): void {
+    const { window } = record;
+    const pendingTab = record.pendingTab;
+    if (
+      !pendingTab ||
+      !record.rendererReady ||
+      window.isDestroyed() ||
+      window.webContents.isDestroyed() ||
+      networkWindowsByContentsId.get(window.webContents.id) !== record
+    ) return;
+    try {
+      window.webContents.send(NETWORK_FORWARDING_IPC_EVENTS.navigationRequested, pendingTab);
+      if (record.pendingTab === pendingTab) delete record.pendingTab;
+    } catch {
+      // The buffered tab remains available for the next trusted renderer load.
+    }
+  }
+
+  function showNetworkWindow(record: NetworkWindowRecord, tab: NetworkTabId): void {
+    record.pendingTab = tab;
+    if (record.window.isMinimized()) record.window.restore();
+    record.window.show();
+    record.window.focus();
+    flushNetworkNavigation(record);
+  }
+
+  async function openNetworkWindow(
+    tab: NetworkTabId,
+    sourceWindow?: BrowserWindow,
+  ): Promise<OperationResult> {
+    if (shutdown.isStopping) {
+      return { ok: false, error: "Network forwarding is unavailable while the application is closing" };
+    }
+
+    const focused = sourceWindow ?? BrowserWindow.getFocusedWindow();
+    if (!focused || focused.isDestroyed() || focused.webContents.isDestroyed()) {
+      return { ok: false, error: "Focus a connected Sliver window first" };
+    }
+    const focusedRecord = networkWindowsByContentsId.get(focused.webContents.id);
+    if (focusedRecord) {
+      showNetworkWindow(focusedRecord, tab);
+      return { ok: true };
+    }
+
+    const source = identityForWindow(focused);
+    if (!source || !nativeWindowSurfaces.has(focused)) {
+      return { ok: false, error: "Focus a connected Sliver window first" };
+    }
+    let snapshot: SliverSnapshot;
+    try {
+      snapshot = registry.snapshot(source.contentsId);
+    } catch {
+      return { ok: false, error: "Focus a connected Sliver window first" };
+    }
+    const epoch = snapshot.connection.epoch;
+    const incarnation = snapshot.connection.incarnation;
+    if (
+      !["connected", "degraded", "reconnecting"].includes(snapshot.connection.status) ||
+      !Number.isSafeInteger(epoch) ||
+      !Number.isSafeInteger(incarnation)
+    ) {
+      return { ok: false, error: "Connect to a Sliver server before opening Network" };
+    }
+
+    const key = String(epoch);
+    const existing = networkWindowsByKey.get(key);
+    if (existing && !existing.window.isDestroyed() && !existing.window.webContents.isDestroyed()) {
+      showNetworkWindow(existing, tab);
+      return { ok: true };
+    }
+    if (existing) {
+      networkWindowsByKey.delete(key);
+      networkWindowsByContentsId.delete(existing.window.webContents.id);
+    }
+
+    let createdWindow: BrowserWindow | undefined;
+    let createdRecord: NetworkWindowRecord | undefined;
+    try {
+      const window = new BrowserWindow(networkWindowOptions(
+        networkPreloadPath,
+        process.platform,
+        applicationIcons.getIconPath(),
+        nativeTheme.shouldUseDarkColors,
+      ));
+      createdWindow = window;
+      const record: NetworkWindowRecord = {
+        key,
+        window,
+        source,
+        connectionIncarnation: incarnation!,
+        rendererReady: false,
+        pendingTab: tab,
+      };
+      createdRecord = record;
+      networkWindowsByKey.set(key, record);
+      networkWindowsByContentsId.set(window.webContents.id, record);
+      window.webContents.on("did-start-loading", () => {
+        if (networkWindowsByContentsId.get(window.webContents.id) === record) {
+          record.rendererReady = false;
+        }
+      });
+      window.webContents.on("did-finish-load", () => {
+        if (
+          networkWindowsByContentsId.get(window.webContents.id) !== record ||
+          window.isDestroyed() ||
+          window.webContents.isDestroyed()
+        ) return;
+        record.rendererReady = true;
+        window.setTitle("Network");
+        flushNetworkNavigation(record);
+      });
+      const retireFailedNetworkWindow = (): void => {
+        if (networkWindowsByContentsId.get(window.webContents.id) !== record) return;
+        if (!window.isDestroyed()) window.destroy();
+      };
+      window.webContents.on("render-process-gone", retireFailedNetworkWindow);
+      window.webContents.on(
+        "did-fail-load",
+        (_event, _errorCode, _errorDescription, _url, isMainFrame) => {
+          if (isMainFrame) retireFailedNetworkWindow();
+        },
+      );
+      trackWindow(window, source.contentsId, undefined, undefined, undefined, "network");
+      await loadRenderer(window, "network");
+      if (window.isDestroyed()) throw new Error("The Network window closed while loading");
+      if (!record.rendererReady) {
+        record.rendererReady = true;
+        window.setTitle("Network");
+      }
+      flushNetworkNavigation(record);
+      return { ok: true };
+    } catch (error) {
+      if (createdRecord && networkWindowsByKey.get(createdRecord.key) === createdRecord) {
+        networkWindowsByKey.delete(createdRecord.key);
+      }
+      if (createdWindow) networkWindowsByContentsId.delete(createdWindow.webContents.id);
+      if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
+      return {
+        ok: false,
+        error: applicationErrorMessage(error, "Network could not be opened"),
+      };
+    }
   }
 
   async function openCloudDeploymentWindow(
@@ -1763,6 +1944,16 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       newWindow: () => createWindow(),
       duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
       openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
+      openNetwork: (tab, sourceWindow) => {
+        void openNetworkWindow(
+          tab,
+          sourceWindow instanceof BrowserWindow ? sourceWindow : undefined,
+        ).then((result) => {
+          if (!result.ok && !shutdown.isStopping) {
+            dialog.showErrorBox("Network unavailable", result.error);
+          }
+        });
+      },
       openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
       showAboutPanel: () => app.showAboutPanel(),
       downloadRelease: (target) => startReleaseDownload(target),
@@ -1770,7 +1961,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       restartToApplyApplicationUpdate: () => {
         void confirmApplicationUpdateRestart();
       },
-    }, releaseCatalog, applicationUpdateState, terminalActions, cloudMenuDeployments);
+    }, releaseCatalog, applicationUpdateState, terminalActions, cloudMenuDeployments, true);
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
@@ -2172,7 +2363,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     cloudDeploymentSession,
     developmentRendererUrl,
   );
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession]);
+  const networkSession = session.fromPartition(NETWORK_SESSION_PARTITION);
+  configureSessionSecurity(networkSession, developmentRendererUrl);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
@@ -2222,6 +2415,33 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     {
       open: openManagedSshWindow,
       approveHostKey: approveManagedSshHostKey,
+    },
+  );
+  registerNetworkForwardingIpcHandlers(
+    {
+      forwarding: {
+        getContext: (contentsId) => registry.networkContext(contentsId),
+        list: (contentsId, input) => registry.listNetworkForwards(contentsId, input),
+        startPortForward: (contentsId, input) => registry.startNetworkPortForward(contentsId, input),
+        stopPortForward: (contentsId, id) => registry.stopNetworkPortForward(contentsId, id),
+        startReversePortForward: (contentsId, input) =>
+          registry.startNetworkReversePortForward(contentsId, input),
+        stopReversePortForward: (contentsId, input) =>
+          registry.stopNetworkReversePortForward(contentsId, input),
+        startSocks5Proxy: (contentsId, input) => registry.startNetworkSocks5Proxy(contentsId, input),
+        stopSocks5Proxy: (contentsId, id) => registry.stopNetworkSocks5Proxy(contentsId, id),
+      },
+      applicationSettings: {
+        getState: () => loadedApplicationSettingsStore.getState(),
+      },
+    },
+    networkRendererUrl,
+    (identity, window) => {
+      const record = networkWindowsByContentsId.get(identity.contentsId);
+      return record !== undefined &&
+        record.window === window &&
+        nativeWindowSurfaces.get(window) === "network" &&
+        sameWindowIdentity(identity, identityForWindow(window));
     },
   );
   registerSshIpcHandlers(
@@ -2278,6 +2498,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       applicationContextMenus?.dispose();
       applicationContextMenus = undefined;
       unregisterCloudDeploymentIpcHandlers();
+      unregisterNetworkForwardingIpcHandlers();
       unregisterSshIpcHandlers();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
@@ -2339,7 +2560,7 @@ export function readDevelopmentRendererUrl(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "ssh",
+  surface: "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);

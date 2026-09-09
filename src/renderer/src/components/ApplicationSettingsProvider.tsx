@@ -47,7 +47,7 @@ export interface ApplicationSettingsContextValue {
  */
 export interface ApplicationSettingsAPI {
   getApplicationSettings(): Promise<ApplicationSettingsState>;
-  updateApplicationSettings(
+  updateApplicationSettings?(
     input: ApplicationSettingsUpdateInput,
   ): Promise<OperationResult<ApplicationSettingsState>>;
   onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;
@@ -103,6 +103,7 @@ export function ApplicationSettingsProvider({
         if (
           current.revision === 0 &&
           legacyTerminal &&
+          settingsApi.updateApplicationSettings &&
           !sameTerminalSettings(current.terminal, legacyTerminal)
         ) {
           const migrated = await settingsApi.updateApplicationSettings({
@@ -152,6 +153,8 @@ export function ApplicationSettingsProvider({
   }, [resolvedTheme, settings.reduceMotion]);
 
   const updateSettings = useCallback((updater: ApplicationSettingsUpdater): Promise<boolean> => {
+    const updateApplicationSettings = settingsApi.updateApplicationSettings;
+    if (!updateApplicationSettings) return Promise.resolve(false);
     let resolveResult!: (saved: boolean) => void;
     const result = new Promise<boolean>((resolve) => {
       resolveResult = resolve;
@@ -166,7 +169,7 @@ export function ApplicationSettingsProvider({
           resolveResult(true);
           return;
         }
-        const response = await settingsApi.updateApplicationSettings({
+        const response = await updateApplicationSettings({
           expectedRevision: current.revision,
           settings: next,
         });

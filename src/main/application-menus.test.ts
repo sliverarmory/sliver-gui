@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import type { MenuItem, MenuItemConstructorOptions } from "electron";
+import type { BrowserWindow, MenuItem, MenuItemConstructorOptions } from "electron";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -146,6 +146,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -160,6 +161,7 @@ describe("application menu templates", () => {
       "Edit",
       "View",
       "Cloud",
+      "Network",
       "Window",
       "Help",
     ]);
@@ -194,12 +196,54 @@ describe("application menu templates", () => {
     expect(actions.openDocumentation).toHaveBeenCalledOnce();
   });
 
+  it("routes each native Network command to its standalone-window tab", () => {
+    const openNetwork = vi.fn();
+    const actions = {
+      newWindow: vi.fn(),
+      duplicateConnectedWindow: vi.fn(),
+      openCloudDeployment: vi.fn(),
+      openNetwork,
+      openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(),
+      downloadRelease: vi.fn(),
+      checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
+    };
+    const template = buildApplicationMenuTemplate(
+      "darwin",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      undefined,
+      undefined,
+      [],
+      true,
+    );
+    const items = menuItems(template, "Network");
+    expect(items).toMatchObject([
+      { id: "network.port-forward", label: "Port Forward", enabled: true },
+      { id: "network.reverse-port-forward", label: "Reverse Port Forward", enabled: true },
+      { id: "network.socks5", label: "SOCKS5 Proxy", enabled: true },
+    ]);
+    const sourceWindow = {} as BrowserWindow;
+    for (const item of items) {
+      if (!item.click) throw new Error("Expected a clickable Network menu item");
+      item.click({} as MenuItem, sourceWindow, {} as Electron.KeyboardEvent);
+    }
+    expect(openNetwork.mock.calls).toEqual([
+      ["port-forward", sourceWindow],
+      ["reverse-port-forward", sourceWindow],
+      ["socks5", sourceWindow],
+    ]);
+  });
+
   it("builds state-aware AWS deployment actions and routes exact navigation requests", () => {
     const openCloudDeployment = vi.fn();
     const actions = {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment,
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -344,6 +388,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel,
       downloadRelease: vi.fn(),
@@ -351,7 +396,9 @@ describe("application menu templates", () => {
       restartToApplyApplicationUpdate: vi.fn(),
     });
 
-    expect(template.map((item) => item.label)).toEqual(["File", "Edit", "View", "Cloud", "Window", "Help"]);
+    expect(template.map((item) => item.label)).toEqual([
+      "File", "Edit", "View", "Cloud", "Network", "Window", "Help",
+    ]);
     expect(menuRoles(template, "File")).toContain("quit");
     expect(menuRoles(template, "Window")).toContain("close");
     const about = menuItems(template, "Help").find((item) => item.label === "About Sliver GUI");
@@ -364,6 +411,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -392,6 +440,7 @@ describe("application menu templates", () => {
       "Edit",
       "View",
       "Cloud",
+      "Network",
       "Terminal",
       "Window",
       "Help",
@@ -461,6 +510,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease,
@@ -502,6 +552,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -530,6 +581,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),

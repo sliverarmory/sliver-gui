@@ -68,6 +68,20 @@ import {
   type TargetRef,
   type TargetSummary,
 } from "../shared/target-contracts.js";
+import {
+  NETWORK_FORWARDING_IPC_EVENTS,
+  type ListNetworkForwardsInput,
+  type NetworkAddress,
+  type NetworkForwardingSnapshot,
+  type NetworkPortForwardSummary,
+  type NetworkReversePortForwardSummary,
+  type NetworkSocks5ProxySummary,
+  type NetworkWindowContext,
+  type StartPortForwardInput,
+  type StartReversePortForwardInput,
+  type StartSocks5ProxyInput,
+  type StopReversePortForwardInput,
+} from "../shared/network-forwarding-contracts.js";
 import type {
   BeaconTaskDetail,
   BeaconTaskPage,
@@ -165,6 +179,7 @@ import {
 } from "./operator-config-store.js";
 import { readBoundedRegularFile, writePrivateArtifactFileAtomic } from "./secure-file.js";
 import type { SliverClientAdapter, SliverClientFactory } from "./sliver-client-adapter.js";
+import { NetworkForwardingController } from "./network-forwarding-controller.js";
 import {
   BeaconTaskCancellationError,
   BeaconTaskStore,
@@ -1061,6 +1076,137 @@ export class ConnectionRegistry {
           ...(nextCursor ? { nextCursor } : {}),
         },
       };
+    });
+  }
+
+  networkContext(contentsId: number): OperationResult<NetworkWindowContext> {
+    try {
+      const context = this.requireWindow(contentsId);
+      const snapshot = this.snapshot(contentsId);
+      const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+      const sessionDomain = snapshot.domains.sessions;
+      const sessions = pool && (sessionDomain.status === "ready" || sessionDomain.status === "empty")
+        ? pool.targetStore.catalogPage("session", 0, Number.MAX_SAFE_INTEGER).items.flatMap((target) => {
+            if (target.mode !== "session") return [];
+            const ref = pool.targetStore.createTargetRef("session", target.id, pool.epoch);
+            return ref ? [{
+              session: {
+                id: target.id,
+                name: target.name,
+                hostname: target.hostname,
+                username: target.username,
+                os: target.os,
+                arch: target.arch,
+                liveness: target.liveness,
+              },
+              ref,
+            }] : [];
+          })
+        : [];
+      return {
+        ok: true,
+        value: Object.freeze({
+          connection: Object.freeze({ ...snapshot.connection }),
+          sessions: Object.freeze({
+            status: sessionDomain.status,
+            items: Object.freeze(sessions.map(({ session, ref }) => Object.freeze({
+              session: Object.freeze({ ...session }),
+              ref: Object.freeze({ ...ref }),
+            }))),
+            ...(sessionDomain.updatedAt ? { updatedAt: sessionDomain.updatedAt } : {}),
+            ...(sessionDomain.error ? { error: sessionDomain.error } : {}),
+          }),
+        }),
+      };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
+  async listNetworkForwards(
+    contentsId: number,
+    input: ListNetworkForwardsInput,
+  ): Promise<OperationResult<NetworkForwardingSnapshot>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const reverseTargets = input.reverseTargets?.map((target) => (
+        this.requireActiveNetworkSession(pool, target, false)
+      ));
+      assertBinding();
+      return pool.networkForwarding.list(reverseTargets ? { reverseTargets } : {});
+    });
+  }
+
+  async startNetworkPortForward(
+    contentsId: number,
+    input: StartPortForwardInput,
+  ): Promise<OperationResult<NetworkPortForwardSummary>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const session = this.requireActiveNetworkSession(pool, input.session, true);
+      assertBinding();
+      return pool.networkForwarding.startPortForward({ ...input, session });
+    });
+  }
+
+  async stopNetworkPortForward(contentsId: number, id: string): Promise<OperationResult> {
+    return this.withPoolWithoutValue(contentsId, async (pool, assertBinding) => {
+      assertBinding();
+      await pool.networkForwarding.stopPortForward(id);
+    });
+  }
+
+  async startNetworkSocks5Proxy(
+    contentsId: number,
+    input: StartSocks5ProxyInput,
+  ): Promise<OperationResult<NetworkSocks5ProxySummary>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const session = this.requireActiveNetworkSession(pool, input.session, true);
+      assertBinding();
+      return pool.networkForwarding.startSocks5Proxy({ ...input, session });
+    });
+  }
+
+  async stopNetworkSocks5Proxy(contentsId: number, id: string): Promise<OperationResult> {
+    return this.withPoolWithoutValue(contentsId, async (pool, assertBinding) => {
+      assertBinding();
+      await pool.networkForwarding.stopSocks5Proxy(id);
+    });
+  }
+
+  async startNetworkReversePortForward(
+    contentsId: number,
+    input: StartReversePortForwardInput,
+  ): Promise<OperationResult<NetworkReversePortForwardSummary>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const session = this.requireActiveNetworkSession(pool, input.session, true);
+      assertBinding();
+      return pool.networkForwarding.startReversePortForward({ ...input, session });
+    });
+  }
+
+  async stopNetworkReversePortForward(
+    contentsId: number,
+    input: StopReversePortForwardInput,
+  ): Promise<OperationResult> {
+    return this.withPoolWithoutValue(contentsId, async (pool, assertBinding) => {
+      const session = this.requireActiveNetworkSession(pool, input.session, true);
+      const inventory = await pool.networkForwarding.list({ reverseTargets: [session] });
+      assertBinding();
+      if (inventory.reversePortForwards.status !== "ready") {
+        throw new Error(
+          inventory.reversePortForwards.error ?? "The reverse port forward inventory is unavailable",
+        );
+      }
+      const current = inventory.reversePortForwards.items.find(
+        (forward) => forward.listenerId === input.listenerId,
+      );
+      if (!current) throw new Error("The reverse port forward is no longer active");
+      if (
+        !sameNetworkAddress(current.bind, input.expectedBind) ||
+        !sameNetworkAddress(current.destination, input.expectedDestination)
+      ) {
+        throw new Error("The reverse port forward changed after it was reviewed; refresh and try again");
+      }
+      await pool.networkForwarding.stopReversePortForward(session.id, input.listenerId);
     });
   }
 
@@ -5335,6 +5481,23 @@ export class ConnectionRegistry {
       : { ok: false, error: executionBoundaryError(new Error(result.error)) };
   }
 
+  private requireActiveNetworkSession(
+    pool: BackendPool,
+    target: TargetRef,
+    requireCurrentRevision: boolean,
+  ): TargetRef {
+    if (target.mode !== "session") throw new Error("Network forwarding requires a session");
+    assertTargetDomainAuthoritative(pool, "session");
+    if (requireCurrentRevision && !pool.targetStore.isCurrentTargetRef(target, pool.epoch)) {
+      throw new Error("The selected session changed; refresh and select it again");
+    }
+    const current = pool.targetStore.revalidateTargetRef(target, pool.epoch);
+    if (!current || current.target.mode !== "session" || current.target.liveness !== "active") {
+      throw new Error("The selected session is no longer active");
+    }
+    return current.ref;
+  }
+
   private async withPool<T>(
     contentsId: number,
     operation: (pool: BackendPool, assertBinding: () => void) => Promise<T>,
@@ -5443,6 +5606,11 @@ export class ConnectionRegistry {
           },
           (reason) => {
             if (this.pools.get(poolKey) === createdPool) this.reconcilePoolOperations(poolKey, reason);
+          },
+          () => {
+            if (this.pools.get(poolKey) === createdPool) {
+              this.broadcastNetworkForwardingChanged(poolKey, epoch);
+            }
           },
           this.now,
         );
@@ -5718,6 +5886,22 @@ export class ConnectionRegistry {
     }
   }
 
+  private broadcastNetworkForwardingChanged(poolKey: string, epoch: number): void {
+    const pool = this.pools.get(poolKey);
+    if (!pool || pool.epoch !== epoch) return;
+    for (const [contentsId, context] of this.windows) {
+      if (context.poolKey !== poolKey) continue;
+      const contents = webContents.fromId(contentsId);
+      if (!contents || contents.isDestroyed()) continue;
+      try {
+        contents.send(NETWORK_FORWARDING_IPC_EVENTS.changed);
+      } catch {
+        // Forwarding events are advisory; a trusted Network renderer reads a
+        // fresh main-owned inventory after its next load or interaction.
+      }
+    }
+  }
+
   private snapshotForWindow(context: WindowContext, snapshot: SliverSnapshot): SliverSnapshot {
     const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
     if (pool && context.operationEngine) {
@@ -5884,6 +6068,7 @@ class BackendPool {
   private compatibility: "supported" | "degraded" | "unsupported" = "supported";
   readonly targetStore: TargetStore;
   readonly beaconTasks: BeaconTaskStore;
+  readonly networkForwarding: NetworkForwardingController;
 
   snapshot: SliverSnapshot;
 
@@ -5894,10 +6079,16 @@ class BackendPool {
     readonly client: SliverClientAdapter,
     private readonly onSnapshot: (snapshot: SliverSnapshot) => void,
     private readonly onTaskSignal: (reason: PoolTaskSignalReason) => void,
+    onNetworkForwardingChanged: () => void,
     private readonly now: () => number,
   ) {
     this.targetStore = new TargetStore({ now: this.now });
     this.beaconTasks = new BeaconTaskStore(client);
+    this.networkForwarding = new NetworkForwardingController(
+      client,
+      this.now,
+      onNetworkForwardingChanged,
+    );
     this.snapshot = {
       ...disconnectedSnapshot(),
       connection: {
@@ -6122,6 +6313,7 @@ class BackendPool {
     this.taskClaims.clear();
     this.taskClaimReservations.clear();
     this.beaconTasks.clear();
+    this.networkForwarding.dispose();
     for (const subscription of this.subscriptions) subscription.unsubscribe();
     this.subscriptions.length = 0;
     await this.client.disconnect();
@@ -7626,6 +7818,12 @@ function isProbablyTextLoot(data: Uint8Array): boolean {
 
 function clipboardDigest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function sameNetworkAddress(left: NetworkAddress | null, right: NetworkAddress | null): boolean {
+  return left === null
+    ? right === null
+    : right !== null && left.host === right.host && left.port === right.port;
 }
 
 function errorMessage(error: unknown): string {

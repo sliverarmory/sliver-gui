@@ -4,6 +4,7 @@ import { secureWebPreferences } from "./security.js";
 
 const TRANSPARENT_WINDOW_COLOR = "#00000000";
 export const CLOUD_DEPLOYMENT_SESSION_PARTITION = "sliver-cloud-deployment";
+export const NETWORK_SESSION_PARTITION = "sliver-network";
 export const DARK_NATIVE_WINDOW_COLOR = "#09090b";
 export const LIGHT_NATIVE_WINDOW_COLOR = "#fafafa";
 export const DARK_TITLE_BAR_SYMBOL_COLOR = "#f4f4f5";
@@ -89,6 +90,29 @@ export function cloudDeploymentWindowOptions(
     webPreferences: {
       ...secureWebPreferences(preload),
       partition: CLOUD_DEPLOYMENT_SESSION_PARTITION,
+    },
+  };
+}
+
+/** A connection-bound manager for client and server-owned network forwards. */
+export function networkWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1280,
+    height: 840,
+    minWidth: 880,
+    minHeight: 640,
+    show: false,
+    title: "Network",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: {
+      ...secureWebPreferences(preload),
+      partition: NETWORK_SESSION_PARTITION,
     },
   };
 }
