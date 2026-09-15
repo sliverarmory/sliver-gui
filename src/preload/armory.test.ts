@@ -34,7 +34,10 @@ beforeEach(async () => {
 describe("Armory preload", () => {
   it("exposes one frozen package-management API with no execution or raw transport", () => {
     const api = exposedApi();
-    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledExactlyOnceWith("armory", api);
+    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledWith("armory", api);
+    expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toEqual([
+      "armory", "applicationContextMenu",
+    ]);
     expect(Object.isFrozen(api)).toBe(true);
     expect(Object.keys(api)).toEqual([
       "getContext", "snapshot", "refreshCatalog", "install", "installBundle", "uninstall", "saveSource",

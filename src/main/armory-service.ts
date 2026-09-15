@@ -601,7 +601,7 @@ export class ArmoryService {
         }
         if (response.status !== 200) {
           await response.body?.cancel();
-          if ([401, 403].includes(response.status) && source.authorization_cmd) throw new Error("This source uses a console authorization command; save an authorization value in Sources for GUI downloads");
+          if ([401, 403].includes(response.status) && source.authorization_cmd) throw new Error("This source uses a console authorization command; save an authorization value in Armories for GUI downloads");
           throw new Error(`Armory download failed (HTTP ${response.status})`);
         }
         const length = response.headers.get("content-length");

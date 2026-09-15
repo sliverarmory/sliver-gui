@@ -273,7 +273,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
             <Tabs.List aria-label="Armory features">
               <Tabs.Tab id="manage">Manage<Tabs.Indicator /></Tabs.Tab>
               <Tabs.Tab id="install">Install<Tabs.Indicator /></Tabs.Tab>
-              <Tabs.Tab id="sources">Sources<Tabs.Indicator /></Tabs.Tab>
+              <Tabs.Tab id="sources">Armories<Tabs.Indicator /></Tabs.Tab>
             </Tabs.List>
           </Tabs.ListContainer>
 
@@ -354,7 +354,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
           <Tabs.Panel id="sources" className="mt-3 min-h-0 flex-1 overflow-y-auto overscroll-contain pt-0">
             <div className="space-y-6">
               <SectionHeading title="Armory Sources" description="Repository URLs and trusted public keys shared with the console's Armory configuration.">
-                <Button isDisabled={!api || Boolean(busy)} onPress={() => { setError(undefined); setSourceEditor("new"); }}>Add Source</Button>
+                <Button isDisabled={!api || Boolean(busy)} onPress={() => { setError(undefined); setSourceEditor("new"); }}>Add Armory</Button>
               </SectionHeading>
               {loading && !snapshot ? <Loading /> : snapshot?.sources.length ? (
                 <ul aria-label="Armory sources" className="divide-y divide-separator">
@@ -534,7 +534,7 @@ function PackageDetails({ detail, onClose }: { detail: Detail; onClose: () => vo
   };
   return <Modal.Backdrop isOpen variant="blur" onOpenChange={(open) => { if (!open) onClose(); }}><Modal.Container size="md"><Modal.Dialog>
     <Modal.Header><Modal.Heading>{item.name}</Modal.Heading></Modal.Header>
-    <Modal.Body className="space-y-5"><div className="flex items-center gap-3"><Chip variant="soft">{kindLabel(item.kind)}</Chip><span className="text-sm tabular-nums text-muted">{item.version || "Version unspecified"}</span></div>
+    <Modal.Body className="space-y-5"><div className="flex flex-wrap items-center gap-3"><Chip variant="soft">{kindLabel(item.kind)}</Chip><span className="text-sm tabular-nums text-muted">{item.version || "Version unspecified"}</span><ArmoryPlatformBadges targets={item.targets} /></div>
       <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted">{item.description || "No description provided."}</p>
       <dl className="space-y-4 text-sm"><DetailField label="Commands" value={detail.kind === "installed" ? detail.value.commandNames.join(", ") : detail.value.commandName} />
         {item.originalAuthor ? <DetailField label="Original Author" value={item.originalAuthor} /> : null}

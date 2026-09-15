@@ -198,14 +198,20 @@ async function assertNetworkWindowBoundary(
       sliver: typeof browser.sliver,
       cloudDeployment: typeof browser.cloudDeployment,
       ssh: typeof browser.ssh,
-      applicationContextMenu: typeof browser.applicationContextMenu,
+      applicationContextMenu: {
+        frozen: Object.isFrozen(browser.applicationContextMenu),
+        keys: Object.keys(browser.applicationContextMenu ?? {}).sort(),
+      },
     };
   });
   assert.equal(bridge.frozen, true);
   assert.equal(bridge.sliver, "undefined");
   assert.equal(bridge.cloudDeployment, "undefined");
   assert.equal(bridge.ssh, "undefined");
-  assert.equal(bridge.applicationContextMenu, "undefined");
+  assert.deepEqual(bridge.applicationContextMenu, {
+    frozen: true,
+    keys: ["executeAction", "onMenuRequested", "setOpen"],
+  });
   assert.deepEqual(bridge.sessionKeys, ["arch", "hostname", "id", "liveness", "name", "os", "username"]);
   assert.deepEqual(bridge.keys, [
     "getApplicationSettings",

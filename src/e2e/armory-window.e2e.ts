@@ -78,7 +78,7 @@ test("Armory shares local console packages through an isolated native window", {
     assert.deepEqual(await readFile(join(clientRoot, "extensions", "fixture-bof", "extension.json")), manifest);
     assert.deepEqual(await readFile(join(clientRoot, "extensions", "fixture-bof", "fixture.x64.o")), artifact);
     await menu(application, "armory.sources");
-    await armory.locator('[role="tab"][aria-selected="true"]', { hasText: "Sources" }).waitFor();
+    await armory.locator('[role="tab"][aria-selected="true"]', { hasText: "Armories" }).waitFor();
     await menu(application, "armory.manage");
     await armory.getByText("fixture-bof", { exact: true }).first().waitFor();
     const fixtureRow = armory.getByRole("list", { name: "Installed packages" }).getByRole("listitem").filter({ hasText: "fixture-bof" });

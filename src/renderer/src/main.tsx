@@ -51,30 +51,28 @@ function ApplicationRoot(): React.JSX.Element {
       </ApplicationSettingsProvider>
     ) : <NetworkWindowApp />;
   }
-  return (
-    <ApplicationContextMenu>
-      {surface === "cloud-deployment" ? (
-        <CloudDeploymentWindowApp />
-      ) : surface === "ssh" ? (
-        window.ssh ? (
-          <ApplicationSettingsProvider api={window.ssh}>
-            <RendererSurface />
-          </ApplicationSettingsProvider>
-        ) : <RendererSurface />
-      ) : (
-        <ApplicationSettingsProvider>
-          <RendererSurface />
-          <ApplicationUpdateStatus showIdleControl={surface === null} />
-          <ReleaseDownloadToasts />
-        </ApplicationSettingsProvider>
-      )}
-    </ApplicationContextMenu>
+  return surface === "cloud-deployment" ? (
+    <CloudDeploymentWindowApp />
+  ) : surface === "ssh" ? (
+    window.ssh ? (
+      <ApplicationSettingsProvider api={window.ssh}>
+        <RendererSurface />
+      </ApplicationSettingsProvider>
+    ) : <RendererSurface />
+  ) : (
+    <ApplicationSettingsProvider>
+      <RendererSurface />
+      <ApplicationUpdateStatus showIdleControl={surface === null} />
+      <ReleaseDownloadToasts />
+    </ApplicationSettingsProvider>
   );
 }
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <ApplicationRoot />
+    <ApplicationContextMenu>
+      <ApplicationRoot />
+    </ApplicationContextMenu>
     <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

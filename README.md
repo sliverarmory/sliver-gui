@@ -20,6 +20,9 @@ configuration files and their private keys stay in the Electron main process.
 - Multiple application windows, each connected to the same or a different
   backend. Windows using the same operator configuration share one ref-counted
   backend connection; unrelated configurations remain isolated.
+- Standard right-click menus are available in the main, Armory, Network, and
+  Cloud Deployment windows, including text fields and dialogs. Available edit
+  actions follow the focused control and its selection.
 - Automatic discovery of operator configurations in
   `~/.sliver-client/configs`, with a metadata-rich selector and the native file
   picker retained for configs stored elsewhere. Config secrets and full paths

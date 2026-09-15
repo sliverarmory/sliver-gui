@@ -4,7 +4,7 @@ Open **Armory → Manage** from the native menu. The standalone window works wit
 
 - **Manage** lists locally installed aliases, extensions, and BOFs, with package details, update checks, and removal.
 - **Install** searches enabled sources, installs packages and bundles with their dependencies, and imports signed local `.tar.gz` packages through native file pickers.
-- **Sources** edits the console-compatible repository list and trusted Minisign keys. Authorization headers stay in Electron main and are never returned to the renderer.
+- **Armories** edits the console-compatible repository list and trusted Minisign keys. Authorization headers stay in Electron main and are never returned to the renderer.
 
 Installed and catalog package rows show OS icons with architecture badges from their manifests, keeping architectures grouped under each OS. Multi-command packages combine their declared targets; unavailable metadata is labeled **OS/Arch unknown**. Hover over a badge to see the original OS/architecture identifiers.
 

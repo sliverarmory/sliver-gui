@@ -267,7 +267,7 @@ describe("ArmoryWindowApp", () => {
     expect(screen.getByRole("tab", { name: "Manage" })).toHaveAttribute("aria-selected", "true");
     expect(api.refreshCatalog).not.toHaveBeenCalled();
     act(() => navigationListener?.("sources"));
-    expect(screen.getByRole("tab", { name: "Sources" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Armories" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("list", { name: "Armory sources" })).toHaveTextContent(source.name);
     view.unmount();
     expect(unsubscribeChanged).toHaveBeenCalledOnce();
