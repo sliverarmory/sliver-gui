@@ -15,6 +15,7 @@ export const CONSOLE_TERMINAL_FONTS = [
 
 export type ApplicationTheme = "system" | "light" | "dark";
 export type ApplicationIcon = "auto" | "light" | "dark" | "passion";
+export type ResolvedApplicationIcon = Exclude<ApplicationIcon, "auto">;
 export type ConsoleTerminalFontId = (typeof CONSOLE_TERMINAL_FONTS)[number]["id"];
 export type ConsoleTerminalCursorStyle = "block" | "underline" | "bar";
 
@@ -121,6 +122,10 @@ export function isApplicationTheme(value: unknown): value is ApplicationTheme {
 
 export function isApplicationIcon(value: unknown): value is ApplicationIcon {
   return typeof value === "string" && APPLICATION_ICONS.has(value as ApplicationIcon);
+}
+
+export function isResolvedApplicationIcon(value: unknown): value is ResolvedApplicationIcon {
+  return value !== "auto" && isApplicationIcon(value);
 }
 
 export function isConsoleTerminalFontId(value: unknown): value is ConsoleTerminalFontId {

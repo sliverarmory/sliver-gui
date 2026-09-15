@@ -214,15 +214,11 @@
     height: 2rem;
     flex: none;
     place-items: center;
-    border-radius: 0.75rem;
-    background: var(--color-accent-soft);
-    color: var(--color-accent-soft-foreground);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 22%, transparent);
   }
 
   .brand-mark__image {
-    width: 1.5rem;
-    height: 1.5rem;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
     pointer-events: none;
     user-select: none;

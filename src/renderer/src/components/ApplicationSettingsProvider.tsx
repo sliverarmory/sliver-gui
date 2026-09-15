@@ -13,12 +13,14 @@ import { toast } from "@heroui/react";
 
 import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
+  isResolvedApplicationIcon,
   parseApplicationSettingsState,
   parseApplicationSettingsValues,
   type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
   type ApplicationSettingsValues,
   type ApplicationTheme,
+  type ResolvedApplicationIcon,
 } from "../../../shared/application-settings-contracts";
 import type { OperationResult } from "../../../shared/contracts";
 import {
@@ -35,6 +37,7 @@ export type ApplicationSettingsUpdater = (
 export interface ApplicationSettingsContextValue {
   readonly settings: ApplicationSettingsState;
   readonly resolvedTheme: ResolvedApplicationTheme;
+  readonly resolvedAppIcon: ResolvedApplicationIcon;
   readonly isReady: boolean;
   readonly isSaving: boolean;
   updateSettings(updater: ApplicationSettingsUpdater): Promise<boolean>;
@@ -51,6 +54,8 @@ export interface ApplicationSettingsAPI {
     input: ApplicationSettingsUpdateInput,
   ): Promise<OperationResult<ApplicationSettingsState>>;
   onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;
+  getApplicationIcon?(): Promise<ResolvedApplicationIcon>;
+  onApplicationIconChanged?(listener: (icon: ResolvedApplicationIcon) => void): () => void;
 }
 
 const ApplicationSettingsContext = createContext<ApplicationSettingsContextValue | undefined>(undefined);
@@ -74,6 +79,7 @@ export function ApplicationSettingsProvider({
   const settingsApi = api ?? window.sliver;
   const [settings, setSettings] = useState<ApplicationSettingsState>(DEFAULT_APPLICATION_SETTINGS_STATE);
   const [isReady, setIsReady] = useState(false);
+  const [resolvedAppIcon, setResolvedAppIcon] = useState<ResolvedApplicationIcon>("dark");
   const [savingCount, setSavingCount] = useState(0);
   const [systemDark, setSystemDark] = useState(
     () => globalThis.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true,
@@ -134,6 +140,28 @@ export function ApplicationSettingsProvider({
       unsubscribe();
     };
   }, [accept, settingsApi]);
+
+  useEffect(() => {
+    // Electron's media query follows the app theme override. The main process
+    // resolves the icon against the OS appearance used by the Dock instead.
+    if (!settingsApi.getApplicationIcon || !settingsApi.onApplicationIconChanged) return;
+    let active = true;
+    let receivedChange = false;
+    const unsubscribe = settingsApi.onApplicationIconChanged((icon) => {
+      if (!active || !isResolvedApplicationIcon(icon)) return;
+      receivedChange = true;
+      setResolvedAppIcon(icon);
+    });
+    void settingsApi.getApplicationIcon().then((icon) => {
+      if (active && !receivedChange && isResolvedApplicationIcon(icon)) setResolvedAppIcon(icon);
+    }).catch(() => {
+      // Retain the dark packaged fallback until the next native icon update.
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [settingsApi]);
 
   useEffect(() => {
     const media = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
@@ -201,10 +229,11 @@ export function ApplicationSettingsProvider({
   const value = useMemo<ApplicationSettingsContextValue>(() => ({
     settings,
     resolvedTheme,
+    resolvedAppIcon,
     isReady,
     isSaving: savingCount > 0,
     updateSettings,
-  }), [isReady, resolvedTheme, savingCount, settings, updateSettings]);
+  }), [isReady, resolvedAppIcon, resolvedTheme, savingCount, settings, updateSettings]);
 
   return (
     <ApplicationSettingsContext.Provider value={value}>

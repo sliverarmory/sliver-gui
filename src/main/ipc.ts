@@ -34,6 +34,7 @@ import {
   parseApplicationSettingsUpdateInput,
   type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
+  type ResolvedApplicationIcon,
 } from "../shared/application-settings-contracts.js";
 import {
   parseCancelBeaconTaskInput,
@@ -137,6 +138,7 @@ export interface ApplicationUpdateController {
 
 export interface ApplicationSettingsController {
   getState(): ApplicationSettingsState;
+  getIcon(): ResolvedApplicationIcon;
   update(input: ApplicationSettingsUpdateInput): MaybePromise<OperationResult<ApplicationSettingsState>>;
 }
 
@@ -334,6 +336,9 @@ export function registerIpcHandlers(
   });
   handleTrusted(IPC.getApplicationSettings, rendererUrl, parseNoArguments, () =>
     applicationSettings?.getState() ?? DEFAULT_APPLICATION_SETTINGS_STATE,
+  );
+  handleTrusted(IPC.getApplicationIcon, rendererUrl, parseNoArguments, () =>
+    applicationSettings?.getIcon() ?? "dark",
   );
   handleTrusted(
     IPC.updateApplicationSettings,

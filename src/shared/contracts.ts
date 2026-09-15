@@ -47,6 +47,7 @@ import type { ApplicationUpdateState } from "./application-update-contracts.js";
 import type {
   ApplicationSettingsState,
   ApplicationSettingsUpdateInput,
+  ResolvedApplicationIcon,
 } from "./application-settings-contracts.js";
 import type {
   ExecuteExecutionPlanInput,
@@ -98,6 +99,7 @@ export const IPC_INVOKE = {
   claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
   getApplicationSettings: "sliver:application-settings:get",
+  getApplicationIcon: "sliver:application-icon:get",
   updateApplicationSettings: "sliver:application-settings:update",
   getApplicationUpdateState: "sliver:application-update:get",
   checkForApplicationUpdates: "sliver:application-update:check",
@@ -175,6 +177,7 @@ export const IPC_EVENTS = {
   releaseDownloadChanged: "sliver:release-download:changed",
   applicationUpdateChanged: "sliver:application-update:changed",
   applicationSettingsChanged: "sliver:application-settings:changed",
+  applicationIconChanged: "sliver:application-icon:changed",
   commandPaletteRequested: "sliver:command-palette:requested",
   consoleNewTabRequested: "sliver:console:new-tab-requested",
   consoleCloseTabRequested: "sliver:console:close-tab-requested",
@@ -649,6 +652,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [];
     result: ApplicationSettingsState;
   };
+  [IPC.getApplicationIcon]: {
+    args: [];
+    result: ResolvedApplicationIcon;
+  };
   [IPC.updateApplicationSettings]: {
     args: [input: ApplicationSettingsUpdateInput];
     result: OperationResult<ApplicationSettingsState>;
@@ -921,6 +928,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
   onApplicationUpdateChanged: (listener: (state: ApplicationUpdateState) => void) => () => void;
   onApplicationSettingsChanged: (listener: (state: ApplicationSettingsState) => void) => () => void;
+  onApplicationIconChanged: (listener: (icon: ResolvedApplicationIcon) => void) => () => void;
   onCommandPaletteRequested: (listener: () => void) => () => void;
   onConsoleNewTabRequested: (listener: () => void) => () => void;
   onConsoleCloseTabRequested: (listener: () => void) => () => void;

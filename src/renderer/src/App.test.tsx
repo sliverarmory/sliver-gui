@@ -5,7 +5,10 @@ import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT, SLIVER_PROTOCOL_COMPATIBILITY } from "../../shared/contracts";
-import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
+import {
+  DEFAULT_APPLICATION_SETTINGS_STATE,
+  type ResolvedApplicationIcon,
+} from "../../shared/application-settings-contracts";
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
 import type {
   OperationResult,
@@ -15,6 +18,7 @@ import type {
 } from "../../shared/contracts";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
+import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -67,6 +71,8 @@ function installSliverAPI(
     downloadLoot: vi.fn(failedOperation),
     exitApp: vi.fn(failedOperation),
     getApplicationSettings: vi.fn().mockResolvedValue(DEFAULT_APPLICATION_SETTINGS_STATE),
+    getApplicationIcon: vi.fn().mockResolvedValue("dark"),
+    onApplicationIconChanged: vi.fn(() => vi.fn()),
     updateApplicationSettings: vi.fn(async (input) => ({
       ok: true as const,
       value: {
@@ -811,9 +817,9 @@ describe("Current server menu", () => {
 });
 
 describe("Sidebar navigation", () => {
-  function renderNavigation(open: boolean) {
+  function renderNavigation(open: boolean, icon?: ResolvedApplicationIcon) {
     const onViewChange = vi.fn();
-    render(
+    const navigation = (
       <Sidebar.Provider collapsible="icon" open={open}>
         <Sidebar className="app-sidebar">
           <NavigationContent
@@ -826,7 +832,15 @@ describe("Sidebar navigation", () => {
             onViewChange={onViewChange}
           />
         </Sidebar>
-      </Sidebar.Provider>,
+      </Sidebar.Provider>
+    );
+    render(
+      icon ? <ApplicationSettingsProvider api={{
+        getApplicationSettings: async () => DEFAULT_APPLICATION_SETTINGS_STATE,
+        onApplicationSettingsChanged: () => () => {},
+        getApplicationIcon: async () => icon,
+        onApplicationIconChanged: () => () => {},
+      }}>{navigation}</ApplicationSettingsProvider> : navigation,
     );
     return onViewChange;
   }
@@ -870,12 +884,16 @@ describe("Sidebar navigation", () => {
     await waitFor(() => expect(api.listCredentials).toHaveBeenCalledOnce());
   });
 
-  it("uses the approved Sliver creature glyph for the sidebar brand mark", () => {
-    renderNavigation(true);
+  it.each([
+    ["dark", "icon1a-dark.png"],
+    ["light", "icon1a-light.png"],
+    ["passion", "passion.png"],
+  ] as const)("uses the native %s application icon for the sidebar brand mark", async (icon, fileName) => {
+    renderNavigation(true, icon);
 
     const image = document.querySelector<HTMLImageElement>(".brand-mark__image");
     expect(image).not.toBeNull();
-    expect(image).toHaveAttribute("src", expect.stringContaining("sliver-sidebar.png"));
+    await waitFor(() => expect(image).toHaveAttribute("src", expect.stringContaining(fileName)));
     expect(image).toHaveAttribute("alt", "");
     expect(image).toHaveAttribute("draggable", "false");
   });

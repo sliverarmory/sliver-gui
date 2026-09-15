@@ -16,7 +16,7 @@ import {
 } from "../shared/application-context-menu-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
-import { parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
+import { isResolvedApplicationIcon, parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import { parseSliverReleaseDownloadEvent } from "../shared/release-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -206,6 +206,14 @@ const api: SliverDesktopAPI = {
     };
     ipcRenderer.on(IPC.applicationSettingsChanged, handler);
     return () => ipcRenderer.removeListener(IPC.applicationSettingsChanged, handler);
+  },
+  onApplicationIconChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length !== 1 || !isResolvedApplicationIcon(payload[0])) return;
+      listener(payload[0]);
+    };
+    ipcRenderer.on(IPC.applicationIconChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.applicationIconChanged, handler);
   },
   onCommandPaletteRequested: (listener) => onFixedEvent(IPC.commandPaletteRequested, listener),
   onConsoleNewTabRequested: (listener) => onFixedEvent(IPC.consoleNewTabRequested, listener),

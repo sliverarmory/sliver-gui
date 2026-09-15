@@ -12,17 +12,23 @@ describe("application icon selection", () => {
   it("follows system appearance in Auto and keeps explicit icons through system changes", () => {
     const setDockIcon = vi.fn();
     const controller = new ApplicationIconController({ platform: "darwin", assetsDirectory, setDockIcon });
+    expect(controller.getResolvedIcon()).toBe("dark");
     controller.update("auto", true);
+    expect(controller.getResolvedIcon()).toBe("dark");
     expect(setDockIcon).toHaveBeenLastCalledWith(icon("icon1a-dark.png"));
     controller.update("auto", false);
+    expect(controller.getResolvedIcon()).toBe("light");
     expect(setDockIcon).toHaveBeenLastCalledWith(icon("icon1a-light.png"));
     controller.update("passion", false);
     controller.update("passion", true);
+    expect(controller.getResolvedIcon()).toBe("passion");
     expect(setDockIcon).toHaveBeenCalledTimes(3);
     expect(setDockIcon).toHaveBeenLastCalledWith(icon("passion.png"));
     controller.update("light", true);
+    expect(controller.getResolvedIcon()).toBe("light");
     expect(controller.getIconPath()).toBe(icon("icon1a-light.png"));
     controller.update("dark", false);
+    expect(controller.getResolvedIcon()).toBe("dark");
     expect(controller.getIconPath()).toBe(icon("icon1a-dark.png"));
     controller.update("auto", false);
     expect(controller.getIconPath()).toBe(icon("icon1a-light.png"));
@@ -52,6 +58,7 @@ describe("application icon selection", () => {
     const window = windowIcon();
     for (const preference of ["auto", "light", "dark", "passion"] as const) {
       controller.update(preference, false);
+      expect(controller.getResolvedIcon()).toBe("dark");
       expect(controller.getIconPath()).toBe(icon("icon1a-dark.png"));
       controller.applyToWindow(window);
     }

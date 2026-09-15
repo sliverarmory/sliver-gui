@@ -35,6 +35,7 @@ const invokeArguments = {
   claimInteractionWindow: [],
   exitApp: [],
   getApplicationSettings: [],
+  getApplicationIcon: [],
   updateApplicationSettings: [{
     expectedRevision: 0,
     settings: {
@@ -320,6 +321,7 @@ describe("sandboxed preload bridge", () => {
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
       "onApplicationSettingsChanged",
+      "onApplicationIconChanged",
       "onCommandPaletteRequested",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
@@ -363,6 +365,7 @@ describe("sandboxed preload bridge", () => {
       "onReleaseDownloadChanged",
       "onApplicationUpdateChanged",
       "onApplicationSettingsChanged",
+      "onApplicationIconChanged",
       "onCommandPaletteRequested",
       "onConsoleNewTabRequested",
       "onConsoleCloseTabRequested",
@@ -479,11 +482,19 @@ describe("sandboxed preload bridge", () => {
       receivedBytes: 64,
       totalBytes: 128,
     };
+    const validCrackstation = {
+      ...valid,
+      artifact: "crackstation",
+      os: "windows",
+      version: "v0.0.4",
+      fileName: "sliver-crackstation_windows-amd64.exe",
+    };
     handler({} as Electron.IpcRendererEvent, valid);
+    handler({} as Electron.IpcRendererEvent, validCrackstation);
     handler({} as Electron.IpcRendererEvent, { ...valid, destinationPath: "/Users/private/Downloads" });
     handler({} as Electron.IpcRendererEvent, { ...valid, receivedBytes: 129 });
 
-    expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
+    expect(listener.mock.calls).toEqual([[valid], [validCrackstation]]);
     unsubscribe();
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(
       IPC.releaseDownloadChanged,
@@ -549,6 +560,30 @@ describe("sandboxed preload bridge", () => {
       IPC.applicationSettingsChanged,
       handler,
     );
+  });
+
+  it("delivers only resolved application icons and removes the listener", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls[0];
+    if (!call) throw new Error("Expected the preload API to be exposed");
+    const [, exposed] = call;
+    const listener = vi.fn();
+    electronMocks.on.mockClear();
+    electronMocks.removeListener.mockClear();
+
+    const unsubscribe = exposed.onApplicationIconChanged(listener);
+    const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
+    expect(channel).toBe(IPC.applicationIconChanged);
+    if (typeof handler !== "function") throw new Error("Expected the application-icon event handler");
+    for (const icon of ["light", "dark", "passion"]) handler({} as Electron.IpcRendererEvent, icon);
+    for (const invalid of ["auto", "system", "", null, { icon: "light" }]) {
+      handler({} as Electron.IpcRendererEvent, invalid);
+    }
+    handler({} as Electron.IpcRendererEvent);
+    handler({} as Electron.IpcRendererEvent, "light", "dark");
+
+    expect(listener.mock.calls).toEqual([["light"], ["dark"], ["passion"]]);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(IPC.applicationIconChanged, handler);
   });
 
   it("hands one port to main and one port to the document using the fixed envelope", () => {

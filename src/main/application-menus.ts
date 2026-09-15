@@ -151,6 +151,7 @@ export function buildApplicationMenuTemplate(
   consoleActions?: ConsoleApplicationMenuActions,
   cloudDeployments: readonly CloudMenuDeployment[] = [],
   networkEnabled = false,
+  crackstationReleaseCatalog: ReleaseMenuCatalog = { status: "loading" },
 ): MenuItemConstructorOptions[] {
   const updateItems = applicationUpdateState
     ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
@@ -359,6 +360,14 @@ export function buildApplicationMenuTemplate(
         {
           label: "Download Console Client",
           submenu: buildReleaseDownloadSubmenu("client", releaseCatalog, actions.downloadRelease),
+        },
+        {
+          label: "Download Crackstation",
+          submenu: buildReleaseDownloadSubmenu(
+            "crackstation",
+            crackstationReleaseCatalog,
+            actions.downloadRelease,
+          ),
         },
         ...(platform === "darwin"
           ? []

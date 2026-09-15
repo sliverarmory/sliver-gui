@@ -179,6 +179,7 @@ describe("trusted Electron IPC boundary", () => {
 
   it("exposes strict revision-bound application settings operations", async () => {
     const getState = vi.fn(() => DEFAULT_APPLICATION_SETTINGS_STATE);
+    const getIcon = vi.fn(() => "light" as const);
     const update = vi.fn(async (input) => ({
       ok: true as const,
       value: {
@@ -196,7 +197,7 @@ describe("trusted Electron IPC boundary", () => {
       undefined,
       undefined,
       undefined,
-      { getState, update },
+      { getState, getIcon, update },
     );
     const { event } = invokeEvent("sliver://app/index.html", 42);
     const input = {
@@ -212,6 +213,8 @@ describe("trusted Electron IPC boundary", () => {
 
     expect(electronMocks.handlers.get(IPC.getApplicationSettings)?.(event))
       .toBe(DEFAULT_APPLICATION_SETTINGS_STATE);
+    expect(electronMocks.handlers.get(IPC.getApplicationIcon)?.(event)).toBe("light");
+    expect(getIcon).toHaveBeenCalledOnce();
     await expect(electronMocks.handlers.get(IPC.updateApplicationSettings)?.(event, input))
       .resolves.toMatchObject({ ok: true, value: { revision: 1, theme: "light", appIcon: "passion" } });
     expect(update).toHaveBeenCalledOnce();
@@ -354,6 +357,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.claimInteractionWindow,
     IPC.exitApp,
     IPC.getApplicationSettings,
+    IPC.getApplicationIcon,
     IPC.getApplicationUpdateState,
     IPC.checkForApplicationUpdates,
     IPC.restartToApplyApplicationUpdate,

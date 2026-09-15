@@ -37,8 +37,10 @@ test("app icon settings apply, follow system appearance and survive restart", { 
     await openSettings(page);
     await chooseIcon(page, "light");
     await assertNativeIcon(application, "icon1a-light.png");
+    await page.screenshot({ path: join(artifacts, "sidebar-light-icon.png"), animations: "disabled" });
     await chooseIcon(page, "dark");
     await assertNativeIcon(application, "icon1a-dark.png");
+    await page.screenshot({ path: join(artifacts, "sidebar-dark-icon.png"), animations: "disabled" });
     await chooseIcon(page, "passion");
     await assertNativeIcon(application, "passion.png");
 
@@ -115,6 +117,28 @@ async function chooseIcon(page: Page, value: ApplicationIcon): Promise<void> {
 async function assertNativeIcon(application: ElectronApplication, name: string): Promise<void> {
   const paths = await application.evaluate(() => (globalThis as unknown as { iconPaths: string[] }).iconPaths);
   assert.equal(basename(paths.at(-1) ?? ""), name);
+  const page = await application.firstWindow();
+  await page.waitForFunction((expected) => {
+    const document = (globalThis as unknown as {
+      document: { querySelectorAll(selector: string): ArrayLike<{
+        currentSrc: string;
+        src: string;
+        complete: boolean;
+        naturalWidth: number;
+        naturalHeight: number;
+      }> };
+    }).document;
+    const icons = Array.from(document.querySelectorAll(".brand-mark__image"));
+    return icons.length > 0 && icons.every((icon) => {
+      const fileName = new URL(icon.currentSrc || icon.src).pathname.split("/").at(-1) ?? "";
+      return fileName.startsWith(expected.stem) && icon.complete &&
+        icon.naturalWidth === expected.width && icon.naturalHeight === expected.height;
+    });
+  }, {
+    stem: name.slice(0, -4),
+    width: name === "passion.png" ? 618 : 1514,
+    height: name === "passion.png" ? 417 : 1514,
+  });
 }
 
 async function setMacSystemAppearance(application: ElectronApplication, dark: boolean): Promise<void> {

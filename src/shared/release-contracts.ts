@@ -1,4 +1,4 @@
-export type SliverReleaseArtifact = "server" | "client";
+export type SliverReleaseArtifact = "server" | "client" | "crackstation";
 
 export interface SliverReleaseTarget {
   readonly artifact: SliverReleaseArtifact;
@@ -43,7 +43,7 @@ export function parseSliverReleaseDownloadEvent(value: unknown): SliverReleaseDo
   const status = requireLiteral(event["status"], ["started", "progress", "completed", "failed"] as const);
   const base = {
     downloadId: requirePattern(event["downloadId"], DOWNLOAD_ID_PATTERN),
-    artifact: requireLiteral(event["artifact"], ["server", "client"] as const),
+    artifact: requireLiteral(event["artifact"], ["server", "client", "crackstation"] as const),
     os: requirePattern(event["os"], TARGET_SEGMENT_PATTERN),
     arch: requirePattern(event["arch"], TARGET_SEGMENT_PATTERN),
   };

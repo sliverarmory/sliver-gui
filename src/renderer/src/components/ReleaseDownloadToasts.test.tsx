@@ -116,6 +116,25 @@ describe("release download toasts", () => {
     expect(screen.getByText("GitHub returned HTTP 503 for the release download")).toBeInTheDocument();
   });
 
+  it("labels Crackstation downloads distinctly", async () => {
+    render(
+      <>
+        <ReleaseDownloadToasts />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    emit({
+      status: "started",
+      downloadId,
+      artifact: "crackstation",
+      os: "darwin",
+      arch: "arm64",
+    });
+
+    expect(await screen.findByText("Downloading Sliver Crackstation · macOS / arm64")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: /Downloading Sliver Crackstation/ })).toBeInTheDocument();
+  });
+
   it("unsubscribes and closes active progress toasts on unmount", async () => {
     const view = render(
       <>

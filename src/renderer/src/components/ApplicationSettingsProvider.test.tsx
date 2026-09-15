@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -7,6 +7,7 @@ import {
   APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   type ApplicationSettingsState,
+  type ResolvedApplicationIcon,
 } from "../../../shared/application-settings-contracts";
 import { CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY } from "./console-terminal-settings";
 import {
@@ -117,6 +118,57 @@ describe("ApplicationSettingsProvider", () => {
     expect(injectedApi.onApplicationSettingsChanged).toHaveBeenCalledOnce();
     expect(workspaceApi.getApplicationSettings).not.toHaveBeenCalled();
     expect(workspaceApi.onApplicationSettingsChanged).not.toHaveBeenCalled();
+  });
+
+  it("uses the native icon independently of the renderer theme and follows live updates", async () => {
+    let listener!: (icon: ResolvedApplicationIcon) => void;
+    const unsubscribe = vi.fn();
+    installSettingsAPI({
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ theme: "dark" })),
+      getApplicationIcon: vi.fn().mockResolvedValue("light"),
+      onApplicationIconChanged: vi.fn((next) => {
+        listener = next;
+        return unsubscribe;
+      }),
+    });
+    renderProvider();
+
+    await waitFor(() => expect(screen.getByTestId("resolved-app-icon")).toHaveTextContent("light"));
+    expect(document.documentElement).toHaveClass("dark");
+    act(() => media.setMatches(false));
+    act(() => media.setMatches(true));
+    expect(screen.getByTestId("resolved-app-icon")).toHaveTextContent("light");
+
+    act(() => listener("passion"));
+    expect(screen.getByTestId("resolved-app-icon")).toHaveTextContent("passion");
+    act(() => listener("dark"));
+    expect(screen.getByTestId("resolved-app-icon")).toHaveTextContent("dark");
+    cleanup();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a newer native icon event when the initial read arrives late", async () => {
+    let resolveInitial!: (icon: ResolvedApplicationIcon) => void;
+    const initial = new Promise<ResolvedApplicationIcon>((resolve) => { resolveInitial = resolve; });
+    let listener!: (icon: ResolvedApplicationIcon) => void;
+    const api = installSettingsAPI({
+      getApplicationIcon: vi.fn(() => initial),
+      onApplicationIconChanged: vi.fn((next) => {
+        listener = next;
+        return vi.fn();
+      }),
+    });
+    renderProvider();
+
+    expect(vi.mocked(api.onApplicationIconChanged).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(api.getApplicationIcon).mock.invocationCallOrder[0]!,
+    );
+    await act(async () => {
+      listener("passion");
+      resolveInitial("light");
+      await initial;
+    });
+    expect(screen.getByTestId("resolved-app-icon")).toHaveTextContent("passion");
   });
 
   it("sends a complete revision-bound update and accepts the persisted response", async () => {
@@ -240,6 +292,7 @@ function SettingsProbe(): React.JSX.Element {
       <span data-testid="revision">{context.settings.revision}</span>
       <span data-testid="theme">{context.settings.theme}</span>
       <span data-testid="app-icon">{context.settings.appIcon}</span>
+      <span data-testid="resolved-app-icon">{context.resolvedAppIcon}</span>
       <button
         type="button"
         onClick={() => void context.updateSettings((current) => ({ ...current, theme: "light" }))}
@@ -258,12 +311,15 @@ function SettingsProbe(): React.JSX.Element {
 
 type SettingsAPI = Pick<
   SliverDesktopAPI,
-  "getApplicationSettings" | "updateApplicationSettings" | "onApplicationSettingsChanged"
+  "getApplicationSettings" | "updateApplicationSettings" | "onApplicationSettingsChanged" |
+  "getApplicationIcon" | "onApplicationIconChanged"
 >;
 
 function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
   const api: SettingsAPI = {
     getApplicationSettings: vi.fn().mockResolvedValue(DEFAULT_APPLICATION_SETTINGS_STATE),
+    getApplicationIcon: vi.fn().mockResolvedValue("dark"),
+    onApplicationIconChanged: vi.fn(() => vi.fn()),
     updateApplicationSettings: vi.fn().mockResolvedValue({
       ok: false,
       error: "Updates are not configured by this test",

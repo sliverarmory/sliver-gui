@@ -89,7 +89,10 @@ import {
 import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl } from "./security.js";
 import { installApplicationNavigationSecurity } from "./navigation-security.js";
 import { APP_RENDERER_URL, APP_SCHEME, APP_SCHEME_PRIVILEGES, createAppProtocolHandler } from "./app-protocol.js";
-import { SliverReleaseDownloader } from "./sliver-release-download.js";
+import {
+  CrackstationReleaseDownloader,
+  SliverReleaseDownloader,
+} from "./sliver-release-download.js";
 import {
   CLOUD_DEPLOYMENT_IPC_EVENTS,
   type CloudDeploymentChangeScope,
@@ -327,6 +330,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const pendingWindowCleanup = new Set<Promise<void>>();
   let releaseCatalog: ReleaseMenuCatalog = { status: "loading" };
   let releaseDownloader: SliverReleaseDownloader | undefined;
+  let crackstationReleaseCatalog: ReleaseMenuCatalog = { status: "loading" };
+  let crackstationReleaseDownloader: CrackstationReleaseDownloader | undefined;
   let applicationUpdater: ApplicationUpdater | undefined;
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
@@ -342,7 +347,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let unsubscribeCloudDeployment: (() => void) | undefined;
   let cloudDeploymentDisposed = false;
   const shutdown = new ApplicationShutdownCoordinator({
-    stopReleaseDownloads: () => releaseDownloader?.stop(),
+    stopReleaseDownloads: () => {
+      releaseDownloader?.stop();
+      crackstationReleaseDownloader?.stop();
+    },
     disposeApplicationUpdater: () => applicationUpdater?.dispose(),
   });
 
@@ -1995,29 +2003,39 @@ export async function startApplication(options: StartApplicationOptions = {}): P
             showSettings: () => sendSshMenuEvent(focusedSsh, SSH_IPC_EVENTS.settingsRequested),
           }
         : undefined;
-    const template = buildApplicationMenuTemplate(process.platform, APPLICATION_DISPLAY_NAME, {
-      newWindow: () => createWindow(),
-      duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
-      openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
-      openArmory: (tab) => void openArmoryWindow(tab),
-      openNetwork: (tab, sourceWindow) => {
-        void openNetworkWindow(
-          tab,
-          sourceWindow instanceof BrowserWindow ? sourceWindow : undefined,
-        ).then((result) => {
-          if (!result.ok && !shutdown.isStopping) {
-            dialog.showErrorBox("Network unavailable", result.error);
-          }
-        });
+    const template = buildApplicationMenuTemplate(
+      process.platform,
+      APPLICATION_DISPLAY_NAME,
+      {
+        newWindow: () => createWindow(),
+        duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
+        openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
+        openArmory: (tab) => void openArmoryWindow(tab),
+        openNetwork: (tab, sourceWindow) => {
+          void openNetworkWindow(
+            tab,
+            sourceWindow instanceof BrowserWindow ? sourceWindow : undefined,
+          ).then((result) => {
+            if (!result.ok && !shutdown.isStopping) {
+              dialog.showErrorBox("Network unavailable", result.error);
+            }
+          });
+        },
+        openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
+        showAboutPanel: () => app.showAboutPanel(),
+        downloadRelease: (target) => startReleaseDownload(target),
+        checkForApplicationUpdates: () => void applicationUpdater?.checkForUpdates(),
+        restartToApplyApplicationUpdate: () => {
+          void confirmApplicationUpdateRestart();
+        },
       },
-      openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
-      showAboutPanel: () => app.showAboutPanel(),
-      downloadRelease: (target) => startReleaseDownload(target),
-      checkForApplicationUpdates: () => void applicationUpdater?.checkForUpdates(),
-      restartToApplyApplicationUpdate: () => {
-        void confirmApplicationUpdateRestart();
-      },
-    }, releaseCatalog, applicationUpdateState, terminalActions, cloudMenuDeployments, true);
+      releaseCatalog,
+      applicationUpdateState,
+      terminalActions,
+      cloudMenuDeployments,
+      true,
+      crackstationReleaseCatalog,
+    );
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
@@ -2163,6 +2181,16 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (shutdown.isStopping) return;
     applicationIcons.update(applicationSettingsStore?.getState().appIcon ?? "auto", systemIconAppearance.isDark());
     for (const window of nativeWindowSurfaces.keys()) applicationIcons.applyToWindow(window);
+    const icon = applicationIcons.getResolvedIcon();
+    for (const [window, surface] of nativeWindowSurfaces) {
+      if (surface !== "workspace" || window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try {
+        window.webContents.send(IPC.applicationIconChanged, icon);
+      } catch {
+        // A renderer can navigate or close during an OS appearance update.
+        // Its next trusted load reads the current icon through the getter.
+      }
+    }
   }
 
   function publishApplicationSettingsState(state: ApplicationSettingsState): void {
@@ -2239,13 +2267,24 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   function startReleaseDownload(target: SliverReleaseTarget): void {
     const window = BrowserWindow.getFocusedWindow();
-    if (!window || window.isDestroyed() || !releaseDownloader) return;
-    void releaseDownloader.download(target, (event) => sendReleaseDownloadEvent(window, event));
+    if (!window || window.isDestroyed()) return;
+    const downloader = target.artifact === "crackstation"
+      ? crackstationReleaseDownloader
+      : releaseDownloader;
+    if (!downloader) return;
+    trackPendingCleanup(
+      downloader.download(target, (event) => sendReleaseDownloadEvent(window, event)),
+    );
   }
 
   function sendReleaseDownloadEvent(window: BrowserWindow, event: SliverReleaseDownloadEvent): void {
     if (window.isDestroyed() || window.webContents.isDestroyed()) return;
-    window.webContents.send(IPC.releaseDownloadChanged, event);
+    try {
+      window.webContents.send(IPC.releaseDownloadChanged, event);
+    } catch {
+      // A renderer can close between the liveness check and event delivery;
+      // the main-owned download and its cleanup must continue independently.
+    }
   }
 
   async function refreshReleaseMenu(): Promise<void> {
@@ -2260,6 +2299,22 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     } catch {
       if (shutdown.isStopping) return;
       releaseCatalog = { status: "unavailable" };
+    }
+    installMenu();
+  }
+
+  async function refreshCrackstationReleaseMenu(): Promise<void> {
+    try {
+      const catalog = await crackstationReleaseDownloader?.latestRelease();
+      if (!catalog || shutdown.isStopping) return;
+      crackstationReleaseCatalog = {
+        status: "ready",
+        version: catalog.version,
+        targets: catalog.assets.map(({ artifact, os, arch }) => ({ artifact, os, arch })),
+      };
+    } catch {
+      if (shutdown.isStopping) return;
+      crackstationReleaseCatalog = { status: "unavailable" };
     }
     installMenu();
   }
@@ -2368,6 +2423,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     downloadsDirectory: resolveDownloadsDirectory((name) => app.getPath(name)),
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
   });
+  crackstationReleaseDownloader = new CrackstationReleaseDownloader({
+    downloadsDirectory: resolveDownloadsDirectory((name) => app.getPath(name)),
+    fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+  });
   if (!cloudDeploymentController) {
     try {
       cloudDeploymentController = await CloudDeploymentService.create({
@@ -2455,6 +2514,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     },
     {
       getState: () => loadedApplicationSettingsStore.getState(),
+      getIcon: () => applicationIcons.getResolvedIcon(),
       update: updateApplicationSettings,
     },
     {
@@ -2539,6 +2599,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   );
   installMenu();
   void refreshReleaseMenu();
+  void refreshCrackstationReleaseMenu();
   app.on("activate", onActivate);
   app.on("window-all-closed", onWindowAllClosed);
   app.on("before-quit", onBeforeQuit);

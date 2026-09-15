@@ -15,6 +15,8 @@ const harness = vi.hoisted(() => ({
   sshServices: undefined as any,
   sshAuthorizer: undefined as any,
   hardenedWindows: [] as any[],
+  sliverReleaseDownloaders: [] as any[],
+  crackstationReleaseDownloaders: [] as any[],
   updater: {
     getState: vi.fn(() => ({ status: "idle" })),
     subscribe: vi.fn(() => () => undefined),
@@ -298,6 +300,22 @@ vi.mock("./sliver-release-download.js", () => ({
     readonly stop = vi.fn();
     readonly download = vi.fn(async () => undefined);
     readonly latestRelease = vi.fn(async () => ({ version: "v0.0.0", assets: [] }));
+
+    constructor() {
+      harness.sliverReleaseDownloaders.push(this);
+    }
+  },
+  CrackstationReleaseDownloader: class {
+    readonly stop = vi.fn();
+    readonly download = vi.fn(async () => undefined);
+    readonly latestRelease = vi.fn(async () => ({
+      version: "v0.0.4",
+      assets: [{ artifact: "crackstation", os: "windows", arch: "amd64" }],
+    }));
+
+    constructor() {
+      harness.crackstationReleaseDownloaders.push(this);
+    }
   },
 }));
 
@@ -346,6 +364,57 @@ describe("application protocol lifecycle", () => {
     } finally {
       await application?.stop();
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("routes Crackstation menu downloads to their own downloader and stops both sources", async () => {
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const { Menu } = await import("electron");
+    const { startApplication } = await import("./application.js");
+    const sliverIndex = harness.sliverReleaseDownloaders.length;
+    const crackstationIndex = harness.crackstationReleaseDownloaders.length;
+    const downloadCleanup = deferred<void>();
+    vi.mocked(Menu.buildFromTemplate).mockClear();
+    const application = await startApplication({
+      cloudDeploymentController: controller,
+      registry: fakeConnectionRegistry() as never,
+    });
+
+    try {
+      await settleLifecycle();
+      const sliverDownloader = harness.sliverReleaseDownloaders[sliverIndex];
+      const crackstationDownloader = harness.crackstationReleaseDownloaders[crackstationIndex];
+      const template = vi.mocked(Menu.buildFromTemplate).mock.calls.at(-1)?.[0] ?? [];
+      const crackstationMenu = findTemplateMenuItemByLabel(template, "Download Crackstation");
+      const windowsMenu = findTemplateMenuItemByLabel(crackstationMenu?.submenu ?? [], "Windows");
+      const amd64Item = findTemplateMenuItemByLabel(windowsMenu?.submenu ?? [], "x86_64 (amd64)");
+      expect(amd64Item).toBeDefined();
+      crackstationDownloader.download.mockImplementationOnce(() => downloadCleanup.promise);
+
+      Reflect.apply(amd64Item!.click, amd64Item, [amd64Item, harness.focusedWindow, {}]);
+      expect(crackstationDownloader.download).toHaveBeenCalledExactlyOnceWith(
+        { artifact: "crackstation", os: "windows", arch: "amd64" },
+        expect.any(Function),
+      );
+      expect(sliverDownloader.download).not.toHaveBeenCalled();
+
+      let stopped = false;
+      const stopping = application.stop().then(() => {
+        stopped = true;
+      });
+      await settleLifecycle();
+      expect(stopped).toBe(false);
+      expect(sliverDownloader.stop).toHaveBeenCalledOnce();
+      expect(crackstationDownloader.stop).toHaveBeenCalledOnce();
+      downloadCleanup.resolve();
+      await stopping;
+    } finally {
+      downloadCleanup.resolve();
+      await application.stop();
     }
   });
 
@@ -1031,6 +1100,17 @@ function findTemplateMenuItem(template: readonly any[], id: string): any | undef
     if (item?.id === id) return item;
     if (Array.isArray(item?.submenu)) {
       const nested = findTemplateMenuItem(item.submenu, id);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
+function findTemplateMenuItemByLabel(template: readonly any[], label: string): any | undefined {
+  for (const item of template) {
+    if (item?.label === label) return item;
+    if (Array.isArray(item?.submenu)) {
+      const nested = findTemplateMenuItemByLabel(item.submenu, label);
       if (nested) return nested;
     }
   }

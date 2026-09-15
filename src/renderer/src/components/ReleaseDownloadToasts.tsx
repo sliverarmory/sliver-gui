@@ -115,7 +115,11 @@ function scheduleDownloadStateRemoval(downloadId: string): void {
 }
 
 function downloadTitle(event: Pick<SliverReleaseDownloadEvent, "artifact" | "os" | "arch">): string {
-  const artifact = event.artifact === "server" ? "server" : "console client";
+  const artifact = event.artifact === "server"
+    ? "server"
+    : event.artifact === "client"
+      ? "console client"
+      : "Crackstation";
   return `Downloading Sliver ${artifact} · ${operatingSystemLabel(event.os)} / ${architectureLabel(event.arch)}`;
 }
 

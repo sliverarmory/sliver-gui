@@ -32,10 +32,13 @@ import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
   type ApplicationSettingsState,
   type ApplicationSettingsValues,
+  type ResolvedApplicationIcon,
 } from "../../shared/application-settings-contracts";
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../shared/target-contracts";
-import sliverSidebarIcon from "./assets/sliver-sidebar.png";
+import sliverDarkIcon from "../../../build/icon1a-dark.png";
+import sliverLightIcon from "../../../build/icon1a-light.png";
+import sliverPassionIcon from "../../../build/passion.png";
 import {
   AppCommandPalette,
   type AppCommandPaletteCommand,
@@ -56,6 +59,12 @@ import {
 import { TargetsPage } from "./pages/TargetsPage";
 
 type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
+
+const sidebarIcons = {
+  dark: sliverDarkIcon,
+  light: sliverLightIcon,
+  passion: sliverPassionIcon,
+} satisfies Record<ResolvedApplicationIcon, string>;
 
 interface BeaconWorkspaceRoute {
   target: TargetRef;
@@ -780,6 +789,8 @@ export function NavigationContent({
   onSwitchConfig: () => void;
   onViewChange: (view: ViewId) => void;
 }) {
+  const applicationSettings = useApplicationSettings();
+  const sidebarIcon = applicationSettings?.resolvedAppIcon ?? "dark";
   const connected = isUsableConnection(snapshot.connection.status);
   const { setMobileOpen } = useSidebar();
   const switchConfig = () => {
@@ -807,7 +818,7 @@ export function NavigationContent({
       <Heading className="sr-only" slot="title">Sliver navigation</Heading>
       <Sidebar.Header className="brand-block">
         <div className="brand-mark" aria-hidden="true">
-          <img alt="" className="brand-mark__image" draggable={false} src={sliverSidebarIcon} />
+          <img alt="" className="brand-mark__image" draggable={false} src={sidebarIcons[sidebarIcon]} />
         </div>
         <div className="min-w-0" data-sidebar="label">
           <p className="truncate text-sm font-semibold tracking-tight">Sliver Desktop</p>

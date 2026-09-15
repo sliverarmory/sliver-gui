@@ -258,6 +258,8 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     downloadLoot: vi.fn(failed),
     exitApp: vi.fn(failed),
     getApplicationSettings: vi.fn().mockResolvedValue(DEFAULT_APPLICATION_SETTINGS_STATE),
+    getApplicationIcon: vi.fn().mockResolvedValue("dark"),
+    onApplicationIconChanged: vi.fn(() => vi.fn()),
     updateApplicationSettings: vi.fn(failed),
     getApplicationUpdateState: vi.fn().mockResolvedValue({
       status: "disabled",

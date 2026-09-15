@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import type { ApplicationIcon } from "../shared/application-settings-contracts.js";
+import type { ApplicationIcon, ResolvedApplicationIcon } from "../shared/application-settings-contracts.js";
 
 export const APPLICATION_ICON_FILES = Object.freeze({
   light: "icon1a-light.png",
@@ -20,6 +20,7 @@ export class ApplicationIconController {
   readonly #setDockIcon: ((path: string) => void) | undefined;
   readonly #windowIcons = new WeakMap<IconWindow, string>();
   #iconPath: string;
+  #resolvedIcon: ResolvedApplicationIcon = "dark";
   #dockIconPath: string | undefined;
 
   constructor(options: {
@@ -37,11 +38,16 @@ export class ApplicationIconController {
     return this.#iconPath;
   }
 
+  getResolvedIcon(): ResolvedApplicationIcon {
+    return this.#resolvedIcon;
+  }
+
   update(preference: ApplicationIcon, systemDark: boolean): void {
     const supportsIcons = ["darwin", "win32", "linux"].includes(this.#platform);
     const variant = supportsIcons
       ? preference === "auto" ? systemDark ? "dark" : "light" : preference
       : "dark";
+    this.#resolvedIcon = variant;
     this.#iconPath = join(this.#assetsDirectory, APPLICATION_ICON_FILES[variant]);
     if (this.#platform === "darwin" && this.#setDockIcon && this.#dockIconPath !== this.#iconPath) {
       this.#dockIconPath = this.#apply(this.#setDockIcon);

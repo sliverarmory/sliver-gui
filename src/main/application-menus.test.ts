@@ -539,12 +539,21 @@ describe("application menu templates", () => {
         { artifact: "client", os: "macos", arch: "arm64" },
         { artifact: "client", os: "windows", arch: "386" },
       ],
+    }, undefined, undefined, [], false, {
+      status: "ready",
+      version: "v0.0.4",
+      targets: [
+        { artifact: "crackstation", os: "windows", arch: "amd64" },
+        { artifact: "crackstation", os: "linux", arch: "amd64" },
+        { artifact: "crackstation", os: "darwin", arch: "arm64" },
+      ],
     });
     const help = menuItems(template, "Help");
     expect(help.map((item) => item.label).filter(Boolean)).toEqual([
       "Sliver Documentation",
       "Download Server",
       "Download Console Client",
+      "Download Crackstation",
     ]);
 
     const server = nestedMenuItems(help, "Download Server");
@@ -558,6 +567,24 @@ describe("application menu templates", () => {
     const client = nestedMenuItems(help, "Download Console Client");
     expect(client.filter((item) => item.submenu).map((item) => item.label)).toEqual(["macOS", "Windows"]);
     expect(nestedMenuItems(client, "Windows").map((item) => item.label)).toEqual(["x86 (386)"]);
+
+    const crackstation = nestedMenuItems(help, "Download Crackstation");
+    expect(crackstation[0]?.label).toBe("Latest release: v0.0.4");
+    expect(crackstation.filter((item) => item.submenu).map((item) => item.label)).toEqual([
+      "macOS",
+      "Linux",
+      "Windows",
+    ]);
+    expect(nestedMenuItems(crackstation, "macOS").map((item) => item.label)).toEqual(["arm64"]);
+    expect(nestedMenuItems(crackstation, "Linux").map((item) => item.label)).toEqual(["x86_64 (amd64)"]);
+    const windowsCrackstation = nestedMenuItems(crackstation, "Windows");
+    expect(windowsCrackstation.map((item) => item.label)).toEqual(["x86_64 (amd64)"]);
+    clickItem(windowsCrackstation[0]);
+    expect(downloadRelease).toHaveBeenLastCalledWith({
+      artifact: "crackstation",
+      os: "windows",
+      arch: "amd64",
+    });
   });
 
   it("shows non-actionable release status while the live catalog is loading or unavailable", () => {
@@ -577,6 +604,9 @@ describe("application menu templates", () => {
     expect(nestedMenuItems(loading, "Download Server")).toEqual([
       expect.objectContaining({ label: "Checking latest release…", enabled: false }),
     ]);
+    expect(nestedMenuItems(loading, "Download Crackstation")).toEqual([
+      expect.objectContaining({ label: "Checking latest release…", enabled: false }),
+    ]);
     const unavailable = menuItems(buildApplicationMenuTemplate(
       "linux",
       "Sliver GUI",
@@ -584,6 +614,27 @@ describe("application menu templates", () => {
       { status: "unavailable" },
     ), "Help");
     expect(nestedMenuItems(unavailable, "Download Console Client")).toEqual([
+      expect.objectContaining({ label: "Latest release unavailable", enabled: false }),
+    ]);
+    expect(nestedMenuItems(unavailable, "Download Crackstation")).toEqual([
+      expect.objectContaining({ label: "Checking latest release…", enabled: false }),
+    ]);
+
+    const crackstationUnavailable = menuItems(buildApplicationMenuTemplate(
+      "linux",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      undefined,
+      undefined,
+      [],
+      false,
+      { status: "unavailable" },
+    ), "Help");
+    expect(nestedMenuItems(crackstationUnavailable, "Download Server")).toEqual([
+      expect.objectContaining({ label: "Checking latest release…", enabled: false }),
+    ]);
+    expect(nestedMenuItems(crackstationUnavailable, "Download Crackstation")).toEqual([
       expect.objectContaining({ label: "Latest release unavailable", enabled: false }),
     ]);
   });

@@ -32,6 +32,38 @@ describe("Sliver release download events", () => {
     })).toEqual(expect.objectContaining({ status: "completed", receivedBytes: 128 }));
   });
 
+  it("accepts exact Crackstation download events", () => {
+    expect(parseSliverReleaseDownloadEvent({
+      status: "started",
+      downloadId,
+      artifact: "crackstation",
+      os: "darwin",
+      arch: "arm64",
+    })).toEqual({
+      status: "started",
+      downloadId,
+      artifact: "crackstation",
+      os: "darwin",
+      arch: "arm64",
+    });
+    expect(parseSliverReleaseDownloadEvent({
+      status: "completed",
+      downloadId,
+      artifact: "crackstation",
+      os: "windows",
+      arch: "amd64",
+      version: "v0.0.4",
+      fileName: "sliver-crackstation_windows-amd64.exe",
+      receivedBytes: 256,
+      totalBytes: 256,
+    })).toEqual(expect.objectContaining({
+      status: "completed",
+      artifact: "crackstation",
+      fileName: "sliver-crackstation_windows-amd64.exe",
+      receivedBytes: 256,
+    }));
+  });
+
   it.each([
     { status: "started", downloadId: "not-a-uuid", artifact: "server", os: "linux", arch: "amd64" },
     { status: "started", downloadId, artifact: "implant", os: "linux", arch: "amd64" },

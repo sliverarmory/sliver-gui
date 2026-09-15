@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -13,6 +13,10 @@ import {
 
 const LATEST_RELEASE_URL = "https://api.github.com/repos/BishopFox/sliver/releases/latest";
 const RELEASE_DOWNLOAD_PATH_PREFIX = "/BishopFox/sliver/releases/download/";
+const CRACKSTATION_LATEST_RELEASE_URL =
+  "https://api.github.com/repos/sliverarmory/sliver-crackstation/releases/latest";
+const CRACKSTATION_RELEASE_DOWNLOAD_PATH_PREFIX =
+  "/sliverarmory/sliver-crackstation/releases/download/";
 const MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RELEASE_ASSET_BYTES = 1024 * 1024 * 1024;
 const MAX_RELEASE_SIGNATURE_BYTES = 16 * 1024;
@@ -20,12 +24,16 @@ const RELEASE_REQUEST_TIMEOUT_MS = 15_000;
 const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 const PROGRESS_INTERVAL_MS = 100;
 const ASSET_NAME_PATTERN = /^sliver-(server|client)_([a-z0-9]+)-([a-z0-9]+)(\.exe)?$/u;
+const CRACKSTATION_ASSET_NAME_PATTERN =
+  /^sliver-crackstation_([a-z0-9]+)-([a-z0-9]+)(\.exe)?$/u;
 const VERSION_PATTERN = /^v?[0-9][0-9A-Za-z.+-]{0,63}$/u;
+const SHA256_DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/u;
 
 export interface SliverReleaseAsset extends SliverReleaseTarget {
   readonly fileName: string;
   readonly size: number;
   readonly downloadUrl: string;
+  readonly sha256: string | null;
   readonly signature: SliverReleaseSignatureAsset | null;
 }
 
@@ -56,22 +64,45 @@ interface SliverReleaseDownloadOptions {
   readonly trustedMinisignPublicKey?: string;
 }
 
+interface ReleaseSource {
+  readonly latestReleaseUrl: string;
+  readonly parseLatestRelease: (value: unknown) => SliverReleaseCatalog;
+  readonly failureMessage: string;
+}
+
+const SLIVER_RELEASE_SOURCE: ReleaseSource = {
+  latestReleaseUrl: LATEST_RELEASE_URL,
+  parseLatestRelease,
+  failureMessage: "The Sliver release download failed",
+};
+
+const CRACKSTATION_RELEASE_SOURCE: ReleaseSource = {
+  latestReleaseUrl: CRACKSTATION_LATEST_RELEASE_URL,
+  parseLatestRelease: parseLatestCrackstationRelease,
+  failureMessage: "The Crackstation release download failed",
+};
+
 export class SliverReleaseDownloader {
   private readonly downloadsDirectory: string;
   private readonly fetch: typeof fetch;
   private readonly createDownloadId: () => string;
   private readonly now: () => number;
   private readonly trustedMinisignPublicKey: string;
+  private readonly source: ReleaseSource;
   private readonly abortControllers = new Set<AbortController>();
   private catalogPromise: Promise<SliverReleaseCatalog> | undefined;
 
-  constructor(options: SliverReleaseDownloadOptions) {
+  constructor(
+    options: SliverReleaseDownloadOptions,
+    source: ReleaseSource = SLIVER_RELEASE_SOURCE,
+  ) {
     this.downloadsDirectory = options.downloadsDirectory;
     this.fetch = options.fetch;
     this.createDownloadId = options.createDownloadId ?? randomUUID;
     this.now = options.now ?? Date.now;
     this.trustedMinisignPublicKey =
       options.trustedMinisignPublicKey ?? SLIVER_RELEASE_MINISIGN_PUBLIC_KEY;
+    this.source = source;
   }
 
   latestRelease(forceRefresh = false): Promise<SliverReleaseCatalog> {
@@ -116,6 +147,7 @@ export class SliverReleaseDownloader {
       const file = await open(temporaryPath, "wx", 0o600);
       let receivedBytes = 0;
       let lastProgressAt = 0;
+      const sha256 = asset.sha256 ? createHash("sha256") : undefined;
       try {
         const reader = response.body.getReader();
         for (;;) {
@@ -127,6 +159,7 @@ export class SliverReleaseDownloader {
             await reader.cancel();
             throw new ReleaseDownloadError("The release download exceeded its advertised size");
           }
+          sha256?.update(chunk.value);
           await writeAll(file, chunk.value);
           const timestamp = this.now();
           if (timestamp - lastProgressAt >= PROGRESS_INTERVAL_MS || receivedBytes === asset.size) {
@@ -134,12 +167,15 @@ export class SliverReleaseDownloader {
             onEvent(progressEvent(base, catalog.version, asset, receivedBytes));
           }
         }
+        if (receivedBytes !== asset.size) {
+          throw new ReleaseDownloadError("The release download ended before all bytes were received");
+        }
+        if (sha256 && sha256.digest("hex") !== asset.sha256) {
+          throw new ReleaseDownloadError("The release download failed SHA-256 verification");
+        }
         await file.sync();
       } finally {
         await file.close();
-      }
-      if (receivedBytes !== asset.size) {
-        throw new ReleaseDownloadError("The release download ended before all bytes were received");
       }
       const destinationPath = await moveToAvailableDownloadPath(temporaryPath, this.downloadsDirectory, asset.fileName);
       temporaryPath = undefined;
@@ -158,7 +194,7 @@ export class SliverReleaseDownloader {
       onEvent({
         ...base,
         status: "failed",
-        error: releaseDownloadErrorMessage(error),
+        error: releaseDownloadErrorMessage(error, this.source.failureMessage),
       });
     } finally {
       clearTimeout(timeout);
@@ -268,7 +304,7 @@ export class SliverReleaseDownloader {
   }
 
   private async fetchLatestRelease(): Promise<SliverReleaseCatalog> {
-    const response = await this.fetch(LATEST_RELEASE_URL, {
+    const response = await this.fetch(this.source.latestReleaseUrl, {
       method: "GET",
       redirect: "error",
       signal: AbortSignal.timeout(RELEASE_REQUEST_TIMEOUT_MS),
@@ -288,7 +324,7 @@ export class SliverReleaseDownloader {
     } catch {
       throw new ReleaseDownloadError("GitHub returned an invalid latest-release response");
     }
-    return parseLatestRelease(value);
+    return this.source.parseLatestRelease(value);
   }
 
   private async fetchReleaseSignature(
@@ -309,6 +345,29 @@ export class SliverReleaseDownloader {
     }
     validateDownloadResponse(response, asset, "release signature");
     return readExactResponseBytes(response, asset.size, MAX_RELEASE_SIGNATURE_BYTES, "release signature");
+  }
+}
+
+export class CrackstationReleaseDownloader {
+  private readonly delegate: SliverReleaseDownloader;
+
+  constructor(options: SliverReleaseDownloadOptions) {
+    this.delegate = new SliverReleaseDownloader(options, CRACKSTATION_RELEASE_SOURCE);
+  }
+
+  latestRelease(forceRefresh = false): Promise<SliverReleaseCatalog> {
+    return this.delegate.latestRelease(forceRefresh);
+  }
+
+  download(
+    target: SliverReleaseTarget,
+    onEvent: (event: SliverReleaseDownloadEvent) => void,
+  ): Promise<void> {
+    return this.delegate.download(target, onEvent);
+  }
+
+  stop(): void {
+    this.delegate.stop();
   }
 }
 
@@ -363,6 +422,7 @@ export function parseLatestRelease(value: unknown): SliverReleaseCatalog {
       fileName,
       size,
       downloadUrl,
+      sha256: null,
       signature: signatures.get(fileName) ?? null,
     });
   }
@@ -370,7 +430,59 @@ export function parseLatestRelease(value: unknown): SliverReleaseCatalog {
   return { version, assets: assets.sort(compareAssets) };
 }
 
+export function parseLatestCrackstationRelease(value: unknown): SliverReleaseCatalog {
+  const release = requireRecord(value, "latest release");
+  const version = requireString(release["tag_name"], "release version", 64);
+  if (!VERSION_PATTERN.test(version)) throw new ReleaseDownloadError("GitHub returned an invalid release version");
+  if (!Array.isArray(release["assets"])) throw new ReleaseDownloadError("GitHub returned no release assets");
+
+  const assets: SliverReleaseAsset[] = [];
+  const targetKeys = new Set<string>();
+  for (const candidate of release["assets"]) {
+    const record = requireRecord(candidate, "release asset");
+    const fileName = requireString(record["name"], "release asset name", 200);
+    const match = CRACKSTATION_ASSET_NAME_PATTERN.exec(fileName);
+    if (!match) continue;
+    const os = match[1];
+    const arch = match[2];
+    if (!os || !arch) continue;
+    const size = record["size"];
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1 || size > MAX_RELEASE_ASSET_BYTES) {
+      throw new ReleaseDownloadError("GitHub returned an invalid release asset size");
+    }
+    const downloadUrl = requireString(record["browser_download_url"], "release asset URL", 2_048);
+    if (!isTrustedCrackstationReleaseDownloadUrl(downloadUrl)) {
+      throw new ReleaseDownloadError("GitHub returned an untrusted release asset URL");
+    }
+    const key = `${os}:${arch}`;
+    if (targetKeys.has(key)) throw new ReleaseDownloadError("GitHub returned duplicate release targets");
+    targetKeys.add(key);
+    assets.push({
+      artifact: "crackstation",
+      os,
+      arch,
+      fileName,
+      size,
+      downloadUrl,
+      sha256: parseRequiredSha256Digest(record),
+      signature: null,
+    });
+  }
+  if (assets.length === 0) {
+    throw new ReleaseDownloadError("The latest GitHub release has no downloadable Crackstation binaries");
+  }
+  return { version, assets: assets.sort(compareAssets) };
+}
+
 export function isTrustedSliverReleaseDownloadUrl(value: string): boolean {
+  return isTrustedReleaseDownloadUrl(value, RELEASE_DOWNLOAD_PATH_PREFIX);
+}
+
+export function isTrustedCrackstationReleaseDownloadUrl(value: string): boolean {
+  return isTrustedReleaseDownloadUrl(value, CRACKSTATION_RELEASE_DOWNLOAD_PATH_PREFIX);
+}
+
+function isTrustedReleaseDownloadUrl(value: string, pathPrefix: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "https:" &&
@@ -378,7 +490,7 @@ export function isTrustedSliverReleaseDownloadUrl(value: string): boolean {
       url.port === "" &&
       url.username === "" &&
       url.password === "" &&
-      url.pathname.startsWith(RELEASE_DOWNLOAD_PATH_PREFIX);
+      url.pathname.startsWith(pathPrefix);
   } catch {
     return false;
   }
@@ -568,16 +680,35 @@ function requireString(value: unknown, label: string, maximumLength: number): st
   return value;
 }
 
+function parseRequiredSha256Digest(record: Record<string, unknown>): string {
+  const digest = record["digest"];
+  if (digest === undefined || digest === null) {
+    throw new ReleaseDownloadError("GitHub returned a release asset without a SHA-256 digest");
+  }
+  return parseSha256Digest(digest);
+}
+
+function parseSha256Digest(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new ReleaseDownloadError("GitHub returned an invalid release asset digest");
+  }
+  const match = SHA256_DIGEST_PATTERN.exec(value);
+  if (!match?.[1]) {
+    throw new ReleaseDownloadError("GitHub returned an invalid release asset digest");
+  }
+  return match[1];
+}
+
 function isAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
-function releaseDownloadErrorMessage(error: unknown): string {
+function releaseDownloadErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof ReleaseDownloadError) return error.message;
   if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
     return "The release download timed out or was cancelled";
   }
-  return "The Sliver release download failed";
+  return fallback;
 }
 
 async function writeAll(file: Awaited<ReturnType<typeof open>>, bytes: Uint8Array): Promise<void> {
