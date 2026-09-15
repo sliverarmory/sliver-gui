@@ -90,6 +90,148 @@ function renderArmoryApp(): ReturnType<typeof render> {
 
 describe("ArmoryWindowApp", () => {
   it.each([
+    { tab: "manage", list: "Installed packages" },
+    { tab: "install", list: "Available packages" },
+  ] as const)("shows declared OS and architecture pairs in $tab listings", async ({ tab, list }) => {
+    currentTab = tab;
+    const targets = [
+      { os: "darwin", arch: "arm64" },
+      { os: "windows", arch: "386" },
+      { os: "linux", arch: "riscv64" },
+      { os: "windows", arch: "amd64" },
+      { os: "windows", arch: "amd64" },
+      { os: "plan9", arch: "mips" },
+    ];
+    currentSnapshot = {
+      ...baseline,
+      installed: [{ ...installed, targets }],
+      packages: [{ ...catalogPackage, targets }],
+    };
+    renderArmoryApp();
+    const packages = await screen.findByRole("list", { name: list });
+    const row = within(packages).getByRole("heading", { name: "Inventory" }).closest("li")!;
+    const platforms = within(row).getByRole("group", { name: "Supported platforms" });
+    expect(platforms).toHaveTextContent("Windows · x64, x86");
+    expect(platforms).toHaveTextContent("Linux · riscv64");
+    expect(platforms).toHaveTextContent("macOS · ARM64");
+    expect(platforms).toHaveTextContent("plan9 · mips");
+    expect(within(platforms).getByTitle("windows/amd64, windows/386")).toHaveTextContent("Windows · x64, x86");
+    expect(within(platforms).getByTitle("darwin/arm64")).toHaveTextContent("macOS · ARM64");
+    expect(platforms.querySelector('[data-icon="windows"]')).toHaveAttribute("aria-hidden", "true");
+    expect(platforms.querySelector('[data-icon="linux"]')).toHaveAttribute("aria-hidden", "true");
+    expect(platforms.querySelector('[data-icon="apple"]')).toHaveAttribute("aria-hidden", "true");
+    expect(within(platforms).getByTitle("plan9/mips").querySelector('[data-icon="desktop"]')).toBeInTheDocument();
+    if (tab === "install") {
+      const bundle = within(packages).getByRole("heading", { name: "Inventory Bundle" }).closest("li")!;
+      expect(within(bundle).queryByRole("group", { name: "Supported platforms" })).not.toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    { tab: "manage", list: "Installed packages", targets: undefined },
+    { tab: "install", list: "Available packages", targets: [] },
+  ] as const)("labels missing support metadata as unknown in $tab listings", async ({ tab, list, targets }) => {
+    currentTab = tab;
+    currentSnapshot = { ...baseline, packages: [{ ...catalogPackage, ...(targets ? { targets } : {}) }] };
+    renderArmoryApp();
+    const packages = await screen.findByRole("list", { name: list });
+    const platforms = within(packages).getByRole("group", { name: "Supported platforms" });
+    expect(platforms).toHaveTextContent("OS/Arch unknown");
+    expect(platforms.querySelector("svg")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { tab: "manage", list: "Installed packages" },
+    { tab: "install", list: "Available packages" },
+  ] as const)("combines platform pairs with search and package type in $tab listings", async ({ tab, list }) => {
+    currentTab = tab;
+    const entries: Pick<ArmoryInstalledPackage, "id" | "name" | "kind" | "targets">[] = [
+      { id: "mixed", name: "Inventory", kind: "alias", targets: [{ os: "windows", arch: "amd64" }, { os: "linux", arch: "arm64" }] },
+      { id: "native", name: "Native Inventory", kind: "alias", targets: [{ os: "windows", arch: "arm64" }] },
+      { id: "extension", name: "Inventory Extension", kind: "extension", targets: [{ os: "windows", arch: "arm64" }] },
+      { id: "other", name: "Other Package", kind: "alias", targets: [{ os: "windows", arch: "arm64" }] },
+      { id: "legacy", name: "Legacy Inventory", kind: "alias", targets: [{ os: "darwin", arch: "386" }, { os: "plan9", arch: "riscv64" }] },
+      { id: "unknown", name: "Unknown Support", kind: "alias" },
+      { id: "empty", name: "Empty Support", kind: "alias", targets: [] },
+    ];
+    currentSnapshot = {
+      ...baseline,
+      installed: entries.map((entry) => ({ ...installed, ...entry, description: "", commandNames: [entry.id] })),
+      packages: entries.map((entry) => ({ ...catalogPackage, ...entry, description: "", commandName: entry.id })),
+    };
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await screen.findByRole("list", { name: list });
+    const os = screen.getByRole("combobox", { name: "Operating system" });
+    const arch = screen.getByRole("combobox", { name: "Architecture" });
+    const type = screen.getByRole("combobox", { name: "Package type" });
+    const search = screen.getByRole("searchbox", { name: "Search packages" });
+    const titles = (): string[] => within(screen.getByRole("list", { name: list })).getAllByRole("heading").map((heading) => heading.textContent!);
+
+    await user.selectOptions(os, "windows");
+    expect(titles()).toEqual(["Inventory", "Native Inventory", "Inventory Extension", "Other Package"]);
+    await user.selectOptions(arch, "arm64");
+    expect(titles()).toEqual(["Native Inventory", "Inventory Extension", "Other Package"]);
+    await user.selectOptions(type, "alias");
+    expect(titles()).toEqual(["Native Inventory", "Other Package"]);
+    await user.type(search, "inventory");
+    expect(titles()).toEqual(["Native Inventory"]);
+
+    // Filtering results must not remove choices from the current tab's inventory.
+    for (const [value, label] of [["windows", "Windows"], ["linux", "Linux"], ["darwin", "macOS"], ["plan9", "plan9"]] as const) {
+      expect(within(os).getByRole("option", { name: label })).toHaveValue(value);
+    }
+    for (const [value, label] of [["amd64", "x64"], ["386", "x86"], ["arm64", "ARM64"], ["riscv64", "riscv64"]] as const) {
+      expect(within(arch).getByRole("option", { name: label })).toHaveValue(value);
+    }
+
+    await user.clear(search);
+    await user.selectOptions(type, "all");
+    await user.selectOptions(os, "");
+    expect(titles()).toEqual(["Inventory", "Native Inventory", "Inventory Extension", "Other Package"]);
+    await user.selectOptions(arch, "");
+    expect(titles()).toEqual([...entries.map((entry) => entry.name), ...(tab === "install" ? ["Inventory Bundle"] : [])]);
+  });
+
+  it("retains platform selections across tabs and refreshes while updating inventory choices", async () => {
+    currentSnapshot = {
+      ...baseline,
+      installed: [{ ...installed, targets: [{ os: "plan9", arch: "mips" }, { os: "darwin", arch: "386" }] }],
+      packages: [{ ...catalogPackage, targets: [{ os: "linux", arch: "arm64" }] }],
+    };
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await screen.findByRole("list", { name: "Installed packages" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Operating system" }), "plan9");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Architecture" }), "mips");
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    const os = screen.getByRole("combobox", { name: "Operating system" });
+    const arch = screen.getByRole("combobox", { name: "Architecture" });
+    expect(os).toHaveValue("plan9");
+    expect(arch).toHaveValue("mips");
+    expect(within(os).getByRole("option", { name: "Linux" })).toHaveValue("linux");
+    expect(within(os).queryByRole("option", { name: "macOS" })).not.toBeInTheDocument();
+    expect(within(arch).getByRole("option", { name: "ARM64" })).toHaveValue("arm64");
+    expect(within(arch).queryByRole("option", { name: "x86" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No Packages Found" })).toBeInTheDocument();
+
+    currentSnapshot = { ...currentSnapshot, packages: [{ ...catalogPackage, targets: [{ os: "windows", arch: "amd64" }] }] };
+    act(() => changedListener?.());
+    await waitFor(() => expect(within(os).getByRole("option", { name: "Windows" })).toHaveValue("windows"));
+    expect(os).toHaveValue("plan9");
+    expect(arch).toHaveValue("mips");
+    expect(within(os).queryByRole("option", { name: "Linux" })).not.toBeInTheDocument();
+    expect(within(arch).getByRole("option", { name: "x64" })).toHaveValue("amd64");
+    expect(within(arch).queryByRole("option", { name: "ARM64" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No Packages Found" })).toBeInTheDocument();
+    await user.selectOptions(os, "");
+    await user.selectOptions(arch, "");
+    expect(await screen.findByRole("list", { name: "Available packages" })).toHaveTextContent("Inventory");
+    expect(within(os).queryByRole("option", { name: "plan9" })).not.toBeInTheDocument();
+    expect(within(arch).queryByRole("option", { name: "mips" })).not.toBeInTheDocument();
+  });
+
+  it.each([
     { tab: "manage", list: "Installed packages", title: "Installed Packages" },
     { tab: "install", list: "Available packages", title: "Package Catalog" },
   ] as const)("keeps $tab controls outside its bounded HeroUI package scroll region", async ({ tab, list, title }) => {
@@ -107,6 +249,8 @@ describe("ArmoryWindowApp", () => {
     expect(controls).toHaveClass("shrink-0");
     expect(controls).toContainElement(screen.getByRole("heading", { name: title }));
     expect(controls).toContainElement(screen.getByRole("searchbox", { name: "Search packages" }));
+    expect(controls).toContainElement(screen.getByRole("combobox", { name: "Operating system" }));
+    expect(controls).toContainElement(screen.getByRole("combobox", { name: "Architecture" }));
     expect(scroll).not.toContainElement(screen.getByRole("tablist", { name: "Armory features" }));
     expect(scroll).not.toContainElement(screen.getByRole("heading", { name: "Armory" }));
     expect(scroll).not.toContainElement(screen.getByText(baseline.rootPath));

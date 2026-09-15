@@ -1,4 +1,5 @@
 import { gunzip } from "node:zlib";
+import type { ArmoryPackageTarget } from "../shared/armory-contracts.js";
 import { MAX_ARMORY_MANIFEST_BYTES } from "./armory-signature.js";
 
 export const ARMORY_ARCHIVE_LIMITS = {
@@ -136,6 +137,7 @@ export interface ArmoryManifest {
   repoUrl: string;
   dependencies: string[];
   artifactPaths: string[];
+  targets: ArmoryPackageTarget[];
   manifestFile: "alias.json" | "extension.json";
 }
 export function armoryRecord(value: unknown): Record<string, unknown> {
@@ -169,6 +171,7 @@ export function parseArmoryManifest(bytes: Uint8Array, isAlias: boolean): Armory
   if (new Set(commandNames).size !== commandNames.length) throw new Error("Duplicate Armory command names");
   const directoryName = safeArmoryName(isAlias ? commandNames[0]! : legacyExtension ? name : armoryText(raw["package_name"]) || name);
   const artifactPaths = new Set<string>();
+  const targets = new Map<string, ArmoryPackageTarget>();
   const dependencies = new Set<string>();
   let bof = false;
   const descriptions: string[] = [];
@@ -180,7 +183,8 @@ export function parseArmoryManifest(bytes: Uint8Array, isAlias: boolean): Armory
     if (!Array.isArray(files) || !files.length || files.length > 10_000) throw new Error("Armory manifest has no artifact files");
     for (const entry of files) {
       const file = armoryRecord(entry);
-      armoryText(file["os"], true); armoryText(file["arch"], true);
+      const os = armoryText(file["os"], true); const arch = armoryText(file["arch"], true);
+      targets.set(JSON.stringify([os, arch]), { os, arch });
       const path = safeArmoryPath(armoryText(file["path"], true), true);
       if (path === "alias.json" || path === "extension.json") throw new Error("Armory artifact conflicts with its manifest");
       artifactPaths.add(path);
@@ -194,6 +198,6 @@ export function parseArmoryManifest(bytes: Uint8Array, isAlias: boolean): Armory
   }
   return { name, directoryName, commandNames, kind: isAlias ? "alias" : bof ? "bof" : "extension", version: armoryText(raw["version"]),
     ...(originalAuthor ? { originalAuthor } : {}), ...(extensionAuthor ? { extensionAuthor } : {}),
-    description: descriptions[0] ?? "", repoUrl: armoryText(raw["repo_url"]), dependencies: [...dependencies], artifactPaths: [...artifactPaths],
+    description: descriptions[0] ?? "", repoUrl: armoryText(raw["repo_url"]), dependencies: [...dependencies], artifactPaths: [...artifactPaths], targets: [...targets.values()],
     manifestFile: isAlias ? "alias.json" : "extension.json" };
 }

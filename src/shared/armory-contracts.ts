@@ -4,6 +4,12 @@ import type { OperationResult } from "./contracts.js";
 export type ArmoryTabId = "manage" | "install" | "sources";
 export type ArmoryPackageKind = "alias" | "extension" | "bof";
 
+/** A manifest-declared artifact target; package targets combine all its commands. */
+export interface ArmoryPackageTarget {
+  readonly os: string;
+  readonly arch: string;
+}
+
 export interface ArmorySource {
   readonly id: string;
   readonly name: string;
@@ -22,6 +28,7 @@ export interface ArmoryInstalledPackage {
   readonly kind: ArmoryPackageKind;
   readonly version: string;
   readonly description: string;
+  readonly targets?: readonly ArmoryPackageTarget[];
   readonly originalAuthor?: string;
   readonly extensionAuthor?: string;
   readonly repoUrl: string;
@@ -39,6 +46,7 @@ export interface ArmoryPackage {
   readonly kind: ArmoryPackageKind;
   readonly version: string;
   readonly description: string;
+  readonly targets?: readonly ArmoryPackageTarget[];
   readonly originalAuthor?: string;
   readonly extensionAuthor?: string;
   readonly repoUrl: string;

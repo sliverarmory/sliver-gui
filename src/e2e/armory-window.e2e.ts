@@ -82,6 +82,9 @@ test("Armory shares local console packages through an isolated native window", {
     await menu(application, "armory.manage");
     await armory.getByText("fixture-bof", { exact: true }).first().waitFor();
     const fixtureRow = armory.getByRole("list", { name: "Installed packages" }).getByRole("listitem").filter({ hasText: "fixture-bof" });
+    const fixturePlatforms = fixtureRow.getByRole("group", { name: "Supported platforms" });
+    assert.equal(await fixturePlatforms.innerText(), "Windows · x64");
+    assert.equal(await fixturePlatforms.locator('[data-icon="windows"]').count(), 1);
     await fixtureRow.getByRole("button", { name: "Details", exact: true }).click();
     const details = armory.getByRole("dialog", { name: "fixture-bof", exact: true });
     await details.getByText("Fixture Original Author", { exact: true }).waitFor();
@@ -126,12 +129,63 @@ test("Armory shares local console packages through an isolated native window", {
       await mkdir(aliasPath, { recursive: true });
       await writeFile(join(aliasPath, "alias.json"), JSON.stringify({
         name: alias.name, command_name: alias.commandName, version: "1.2.0", help: "Installed by console fixture",
-        files: [{ os: "linux", arch: "amd64", path: "/payload" }],
+        files: [
+          { os: "windows", arch: "amd64", path: "/payload" },
+          { os: "windows", arch: "386", path: "/payload" },
+          { os: "linux", arch: "amd64", path: "/payload" },
+          { os: "darwin", arch: "arm64", path: "/payload" },
+        ],
       }));
       await writeFile(join(aliasPath, "payload"), "inert fixture");
     }
     await armory.evaluate(() => (globalThis as unknown as { dispatchEvent(event: Event): boolean }).dispatchEvent(new Event("focus")));
     await armory.getByText("Console Alias", { exact: true }).first().waitFor();
+    const consoleRow = armory.getByRole("list", { name: "Installed packages" }).getByRole("listitem").filter({ hasText: "Console Alias" });
+    const consolePlatforms = consoleRow.getByRole("group", { name: "Supported platforms" });
+    assert.equal(await consolePlatforms.getByTitle("windows/amd64, windows/386", { exact: true }).innerText(), "Windows · x64, x86");
+    assert.equal(await consolePlatforms.getByTitle("linux/amd64", { exact: true }).innerText(), "Linux · x64");
+    assert.equal(await consolePlatforms.getByTitle("darwin/arm64", { exact: true }).innerText(), "macOS · ARM64");
+    await mkdir(join(repositoryRoot, "artifacts", "e2e"), { recursive: true });
+    await armory.screenshot({ path: join(repositoryRoot, "artifacts", "e2e", "armory-platform-badges.png"), animations: "disabled" });
+    const nativeWindow = await application.browserWindow(armory);
+    const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+    await nativeWindow.evaluate((window) => window.setSize(880, 720));
+    await armory.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth <= 880);
+    assert.equal(await consoleRow.evaluate((row) => row.scrollWidth <= row.clientWidth), true);
+    const filters = armory.getByRole("group", { name: "Package filters", exact: true });
+    const filterBounds = await Promise.all([
+      filters.getByRole("searchbox", { name: "Search packages" }).boundingBox(),
+      filters.getByRole("combobox", { name: "Package type" }).boundingBox(),
+      filters.getByRole("combobox", { name: "Operating system" }).boundingBox(),
+      filters.getByRole("combobox", { name: "Architecture" }).boundingBox(),
+    ]);
+    const searchBounds = filterBounds[0];
+    assert.ok(searchBounds && searchBounds.width > 150);
+    for (const bounds of filterBounds) {
+      assert.ok(bounds);
+      assert.ok(Math.abs(bounds.y + bounds.height / 2 - searchBounds.y - searchBounds.height / 2) < 2);
+    }
+    assert.equal(await filters.evaluate((row) => row.scrollWidth <= row.clientWidth), true);
+    const osFilter = filters.getByRole("combobox", { name: "Operating system" });
+    const archFilter = filters.getByRole("combobox", { name: "Architecture" });
+    await osFilter.selectOption("darwin");
+    await archFilter.selectOption("arm64");
+    await consoleRow.waitFor();
+    assert.equal(await fixtureRow.count(), 0);
+    await filters.getByRole("searchbox", { name: "Search packages" }).fill("console-alias");
+    assert.equal(await armory.getByRole("list", { name: "Installed packages" }).getByRole("listitem").count(), 1);
+    await osFilter.selectOption("windows");
+    await armory.getByRole("heading", { name: "No Matching Packages", exact: true }).waitFor();
+    await osFilter.selectOption("");
+    await archFilter.selectOption("");
+    await filters.getByRole("searchbox", { name: "Search packages" }).fill("");
+    await consoleRow.waitFor();
+    await armory.screenshot({ path: join(repositoryRoot, "artifacts", "e2e", "armory-platform-badges-narrow.png"), animations: "disabled" });
+    await armory.emulateMedia({ colorScheme: "dark" });
+    await armory.locator("html.dark").waitFor();
+    await armory.getByTestId("armory-manage-controls").screenshot({ path: join(repositoryRoot, "artifacts", "e2e", "armory-platform-filters.png"), animations: "disabled" });
+    await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    await consoleRow.screenshot({ path: join(repositoryRoot, "artifacts", "e2e", "armory-platform-badges-row.png"), animations: "disabled" });
     const packageResults = armory.getByRole("region", { name: "Installed package results" });
     await armory.waitForFunction(() => {
       const browser = globalThis as unknown as { document: { querySelector(selector: string): {

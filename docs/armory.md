@@ -6,6 +6,10 @@ Open **Armory → Manage** from the native menu. The standalone window works wit
 - **Install** searches enabled sources, installs packages and bundles with their dependencies, and imports signed local `.tar.gz` packages through native file pickers.
 - **Sources** edits the console-compatible repository list and trusted Minisign keys. Authorization headers stay in Electron main and are never returned to the renderer.
 
+Installed and catalog package rows show OS icons with architecture badges from their manifests, keeping architectures grouped under each OS. Multi-command packages combine their declared targets; unavailable metadata is labeled **OS/Arch unknown**. Hover over a badge to see the original OS/architecture identifiers.
+
+Use the inline **All OS** and **All Arch** selectors alongside Search and package type to narrow either package list. OS and architecture must match the same declared target. Packages with unknown support and bundles appear when both platform selectors are unrestricted. Filter selections carry across tabs and refreshes.
+
 ## Console Interoperability
 
 The GUI and its bundled console use `SLIVER_CLIENT_ROOT_DIR`, defaulting to `~/.sliver-client`. A separately launched console must use the same root. Packages and configuration use the console's original layout:

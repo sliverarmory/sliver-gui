@@ -36,6 +36,7 @@ import type {
   ArmoryInstalledPackage,
   ArmoryPackage,
   ArmoryPackageKind,
+  ArmoryPackageTarget,
   ArmorySaveSourceInput,
   ArmorySnapshot,
   ArmorySource,
@@ -46,6 +47,8 @@ import type { OperationResult } from "../../shared/contracts";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { Field } from "./components/FormControls";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
+import { ArmoryPlatformBadges } from "./components/ArmoryPlatformBadges";
+import { armoryArchitectureLabel, armoryOperatingSystemLabel, armoryTargetOptions, matchesArmoryPlatform } from "./armory-platforms";
 
 type PackageFilter = "all" | ArmoryPackageKind | "bundle";
 type Removal = { kind: "package"; value: ArmoryInstalledPackage } | { kind: "source"; value: ArmorySource };
@@ -72,6 +75,8 @@ export function ArmoryWindowApp(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string>();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PackageFilter>("all");
+  const [osFilter, setOSFilter] = useState("");
+  const [archFilter, setArchFilter] = useState("");
   const [sourceEditor, setSourceEditor] = useState<ArmorySource | "new">();
   const [localImport, setLocalImport] = useState(false);
   const [removal, setRemoval] = useState<Removal>();
@@ -194,22 +199,25 @@ export function ArmoryWindowApp(): React.JSX.Element {
   }, [api, perform, snapshot, tab]);
 
   const installed = useMemo(() => (snapshot?.installed ?? []).filter((item) =>
-    matches(item, query, filter === "bundle" ? "all" : filter, item.commandNames.join(" "))), [snapshot, query, filter]);
+    matches(item, query, filter === "bundle" ? "all" : filter, item.commandNames.join(" ")) &&
+    matchesArmoryPlatform(item.targets, osFilter, archFilter)), [snapshot, query, filter, osFilter, archFilter]);
   const packages = useMemo(() => (snapshot?.packages ?? []).filter((item) =>
-    matches(item, query, filter, `${item.commandName} ${item.sourceName}`)), [snapshot, query, filter]);
+    matches(item, query, filter, `${item.commandName} ${item.sourceName}`) &&
+    matchesArmoryPlatform(item.targets, osFilter, archFilter)), [snapshot, query, filter, osFilter, archFilter]);
   const bundles = useMemo(() => (snapshot?.bundles ?? []).filter((item) =>
-    (filter === "all" || filter === "bundle") && searchMatches(query, item.name, item.sourceName, ...item.packageNames)), [snapshot, query, filter]);
+    !osFilter && !archFilter && (filter === "all" || filter === "bundle") &&
+    searchMatches(query, item.name, item.sourceName, ...item.packageNames)), [snapshot, query, filter, osFilter, archFilter]);
   // ScrollShadow observes its viewport size, but result changes can alter only scrollHeight.
   // Remount changed result sets so its initial overflow check and shadow state stay current.
   const installedResultsKey = useMemo(() => JSON.stringify([
-    loading && !snapshot, query, filter === "bundle" ? "all" : filter,
-    ...installed.map((item) => [item.id, item.name, item.version, item.description, item.commandNames, item.updateAvailable]),
-  ]), [filter, installed, loading, query, snapshot]);
+    loading && !snapshot, query, filter === "bundle" ? "all" : filter, osFilter, archFilter,
+    ...installed.map((item) => [item.id, item.name, item.version, item.description, item.commandNames, item.targets, item.updateAvailable]),
+  ]), [filter, installed, loading, query, snapshot, osFilter, archFilter]);
   const availableResultsKey = useMemo(() => JSON.stringify([
-    loading && !snapshot, query, filter,
-    ...packages.map((item) => [item.id, item.name, item.version, item.description, item.commandName, item.sourceName, item.error, item.installedId, item.updateAvailable]),
+    loading && !snapshot, query, filter, osFilter, archFilter,
+    ...packages.map((item) => [item.id, item.name, item.version, item.description, item.commandName, item.sourceName, item.targets, item.error, item.installedId, item.updateAvailable]),
     ...bundles.map((item) => [item.id, item.name, item.packageNames]),
-  ]), [bundles, filter, loading, packages, query, snapshot]);
+  ]), [bundles, filter, loading, packages, query, snapshot, osFilter, archFilter]);
 
   const install = (item: ArmoryPackage): void => {
     if (!api) return;
@@ -277,13 +285,14 @@ export function ArmoryWindowApp(): React.JSX.Element {
                     Check for Updates
                   </Button>
                 </SectionHeading>
-                <PackageFilters query={query} filter={filter === "bundle" ? "all" : filter} onQuery={setQuery} onFilter={setFilter} />
+                <PackageFilters query={query} filter={filter === "bundle" ? "all" : filter} onQuery={setQuery} onFilter={setFilter}
+                  items={snapshot?.installed ?? []} os={osFilter} arch={archFilter} onOS={setOSFilter} onArch={setArchFilter} />
               </div>
               <ScrollShadow key={installedResultsKey} aria-label="Installed package results" className="-mx-1 h-0 max-h-full min-h-0 flex-1 overflow-y-auto overscroll-contain px-1 pb-1" data-testid="armory-manage-scroll" role="region" tabIndex={0}>
                 {loading && !snapshot ? <Loading /> : installed.length > 0 ? (
                   <ul aria-label="Installed packages" className="divide-y divide-separator">
                     {installed.map((item) => (
-                      <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.commandNames.join(", ")}>
+                      <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.commandNames.join(", ")} targets={item.targets}>
                         {item.updateAvailable && item.packageId ? (
                           <Button variant="outline" isDisabled={Boolean(busy)} onPress={() => {
                             const available = snapshot?.packages.find((pkg) => pkg.id === item.packageId);
@@ -296,7 +305,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
                     ))}
                   </ul>
                 ) : (
-                  <PackageEmpty title={snapshot?.installed.length ? "No Matching Packages" : "No Packages Installed"} description={snapshot?.installed.length ? "Try another search or package type." : "Browse the catalog or import a signed package to get started."}>
+                  <PackageEmpty title={snapshot?.installed.length ? "No Matching Packages" : "No Packages Installed"} description={snapshot?.installed.length ? "Try another search or adjust the filters." : "Browse the catalog or import a signed package to get started."}>
                     {!snapshot?.installed.length ? <Button onPress={() => setTab("install")}>Browse Packages</Button> : null}
                   </PackageEmpty>
                 )}
@@ -311,7 +320,8 @@ export function ArmoryWindowApp(): React.JSX.Element {
                   <Button variant="ghost" isDisabled={!api || Boolean(busy)} onPress={() => { setError(undefined); setLocalImport(true); }}>Import Signed Package</Button>
                   <Button variant="outline" isDisabled={!api || Boolean(busy)} onPress={() => { if (api) void perform("Refreshing Catalog", () => api.refreshCatalog(), "Package catalog refreshed."); }}>Refresh Catalog</Button>
                 </SectionHeading>
-                <PackageFilters query={query} filter={filter} onQuery={setQuery} onFilter={setFilter} includeBundles />
+                <PackageFilters query={query} filter={filter} onQuery={setQuery} onFilter={setFilter} includeBundles
+                  items={snapshot?.packages ?? []} os={osFilter} arch={archFilter} onOS={setOSFilter} onArch={setArchFilter} />
                 {snapshot?.sources.some((source) => source.error) ? <Notice tone="warning" title="Some Sources Could Not Be Refreshed">
                   <ul className="space-y-1">{snapshot.sources.filter((source) => source.error).map((source) => <li key={source.id}>{source.name}: {source.error}</li>)}</ul>
                   <Button className="mt-3" size="sm" variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button>
@@ -322,7 +332,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
                 {loading && !snapshot ? <Loading /> : packages.length + bundles.length > 0 ? (
                   <ul aria-label="Available packages" className="divide-y divide-separator">
                     {packages.map((item) => (
-                      <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.sourceName}>
+                      <PackageRow key={item.id} name={item.name} kind={item.kind} version={item.version} description={item.description} secondary={item.sourceName} targets={item.targets}>
                         {item.error ? <span className="max-w-56 break-words text-xs text-danger">{item.error}</span> : null}
                         <Button variant="ghost" onPress={() => setDetail({ kind: "catalog", value: item })}>Details</Button>
                         <Button aria-label={`${item.installedId ? item.updateAvailable ? "Update" : "Installed" : "Install"} ${item.name}`} variant={item.installedId ? "outline" : "primary"} isDisabled={Boolean(busy) || Boolean(item.error) || Boolean(item.installedId && !item.updateAvailable)} onPress={() => install(item)}>
@@ -333,8 +343,8 @@ export function ArmoryWindowApp(): React.JSX.Element {
                     {bundles.map((item) => <BundleRow key={item.id} item={item} disabled={Boolean(busy)} onInstall={() => { if (api) void perform(`Installing ${item.name}`, () => api.installBundle({ bundleId: item.id }), `${item.name} installed.`); }} />)}
                   </ul>
                 ) : (
-                  <PackageEmpty title={busy ? "Refreshing Package Catalog" : "No Packages Found"} description={busy ? "Fetching package information from your enabled sources." : query || filter !== "all" ? "Try another search or package type." : "Refresh the catalog or add an Armory source."}>
-                    {!busy && !query && filter === "all" ? <Button variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button> : null}
+                  <PackageEmpty title={busy ? "Refreshing Package Catalog" : "No Packages Found"} description={busy ? "Fetching package information from your enabled sources." : query || filter !== "all" || osFilter || archFilter ? "Try another search or adjust the filters." : "Refresh the catalog or add an Armory source."}>
+                    {!busy && !query && filter === "all" && !osFilter && !archFilter ? <Button variant="outline" onPress={() => setTab("sources")}>Manage Sources</Button> : null}
                   </PackageEmpty>
                 )}
               </ScrollShadow>
@@ -392,14 +402,39 @@ export function ArmoryWindowApp(): React.JSX.Element {
   );
 }
 
-function PackageFilters({ query, filter, onQuery, onFilter, includeBundles = false }: { query: string; filter: PackageFilter; onQuery: (value: string) => void; onFilter: (value: PackageFilter) => void; includeBundles?: boolean }): React.JSX.Element {
-  return <div className="flex flex-wrap items-center gap-3">
-    <SearchField aria-label="Search packages" className="min-w-56 flex-1" value={query} onChange={onQuery}>
+interface PackageFiltersProps {
+  query: string;
+  filter: PackageFilter;
+  os: string;
+  arch: string;
+  items: readonly { readonly targets?: readonly ArmoryPackageTarget[] }[];
+  onQuery: (value: string) => void;
+  onFilter: (value: PackageFilter) => void;
+  onOS: (value: string) => void;
+  onArch: (value: string) => void;
+  includeBundles?: boolean;
+}
+
+function PackageFilters({ query, filter, os, arch, items, onQuery, onFilter, onOS, onArch, includeBundles = false }: PackageFiltersProps): React.JSX.Element {
+  const operatingSystems = useMemo(() => armoryTargetOptions(items, "os", os), [items, os]);
+  const architectures = useMemo(() => armoryTargetOptions(items, "arch", arch), [items, arch]);
+  return <div className="flex items-center gap-3" role="group" aria-label="Package filters">
+    <SearchField aria-label="Search packages" className="min-w-0 flex-1" value={query} onChange={onQuery}>
       <SearchField.Group><SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon><SearchField.Input placeholder="Search packages or commands…" /></SearchField.Group>
     </SearchField>
-    <NativeSelect className="w-44 shrink-0"><NativeSelect.Trigger aria-label="Package type" value={filter} onChange={(event) => onFilter(event.target.value as PackageFilter)}>
+    <NativeSelect className="w-36 shrink-0"><NativeSelect.Trigger aria-label="Package type" value={filter} onChange={(event) => onFilter(event.target.value as PackageFilter)}>
       <NativeSelect.Option value="all">All Types</NativeSelect.Option><NativeSelect.Option value="alias">Aliases</NativeSelect.Option><NativeSelect.Option value="extension">Extensions</NativeSelect.Option><NativeSelect.Option value="bof">BOFs</NativeSelect.Option>
       {includeBundles ? <NativeSelect.Option value="bundle">Bundles</NativeSelect.Option> : null}<NativeSelect.Indicator />
+    </NativeSelect.Trigger></NativeSelect>
+    <NativeSelect className="w-36 shrink-0"><NativeSelect.Trigger aria-label="Operating system" value={os} onChange={(event) => onOS(event.target.value)}>
+      <NativeSelect.Option value="">All OS</NativeSelect.Option>
+      {operatingSystems.map((value) => <NativeSelect.Option key={value} value={value}>{armoryOperatingSystemLabel(value)}</NativeSelect.Option>)}
+      <NativeSelect.Indicator />
+    </NativeSelect.Trigger></NativeSelect>
+    <NativeSelect className="w-32 shrink-0"><NativeSelect.Trigger aria-label="Architecture" value={arch} onChange={(event) => onArch(event.target.value)}>
+      <NativeSelect.Option value="">All Arch</NativeSelect.Option>
+      {architectures.map((value) => <NativeSelect.Option key={value} value={value}>{armoryArchitectureLabel(value)}</NativeSelect.Option>)}
+      <NativeSelect.Indicator />
     </NativeSelect.Trigger></NativeSelect>
   </div>;
 }
@@ -408,9 +443,18 @@ function SectionHeading({ title, description, children }: { title: string; descr
   return <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0 max-w-xl"><h2 className="text-lg font-semibold">{title}</h2><p className="mt-1 text-sm leading-5 text-muted">{description}</p></div><div className="flex flex-wrap items-center gap-2">{children}</div></div>;
 }
 
-function PackageRow({ name, kind, version, description, secondary, children }: { name: string; kind: ArmoryPackageKind | "bundle"; version: string; description: string; secondary: string; children: ReactNode }): React.JSX.Element {
+function PackageRow({ name, kind, version, description, secondary, targets, children }: { name: string; kind: ArmoryPackageKind | "bundle"; version: string; description: string; secondary: string; targets?: readonly ArmoryPackageTarget[] | undefined; children: ReactNode }): React.JSX.Element {
   return <li className="flex flex-col gap-4 py-5 first:pt-0 sm:flex-row sm:items-center sm:justify-between">
-    <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="break-words font-medium">{name}</h3><Chip size="sm" variant="soft">{kindLabel(kind)}</Chip>{version ? <span className="text-xs tabular-nums text-muted">{version}</span> : null}</div>{description ? <p className="mt-2 line-clamp-2 text-sm leading-6 text-muted">{description}</p> : null}{secondary ? <p className="mt-1 truncate text-xs text-muted">{secondary}</p> : null}</div>
+    <div className="min-w-0 flex-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="break-words font-medium">{name}</h3>
+        <Chip size="sm" variant="soft">{kindLabel(kind)}</Chip>
+        {version ? <span className="text-xs tabular-nums text-muted">{version}</span> : null}
+        {kind !== "bundle" ? <ArmoryPlatformBadges targets={targets} /> : null}
+      </div>
+      {description ? <p className="mt-2 line-clamp-2 text-sm leading-6 text-muted">{description}</p> : null}
+      {secondary ? <p className="mt-1 truncate text-xs text-muted">{secondary}</p> : null}
+    </div>
     <div className="flex shrink-0 flex-wrap items-center gap-2">{children}</div>
   </li>;
 }

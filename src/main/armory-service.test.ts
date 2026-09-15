@@ -44,9 +44,9 @@ function manifest(name = "test-bof", version = "1.0.0", dependsOn = "") {
     depends_on: dependsOn, bof_executor: "reflektor", files: [{ os: "windows", arch: "amd64", path: "/dist/test.o" }] };
 }
 function packageFixture(name = "test-bof", version = "1.0.0", dependency = "", signatureKind = true,
-  authors: { original_author?: unknown; extension_author?: unknown } = {}, isAlias = false) {
+  metadata: { original_author?: unknown; extension_author?: unknown; files?: ReturnType<typeof manifest>["files"] } = {}, isAlias = false) {
   const signing = signer();
-  const raw = { ...manifest(name, version, dependency), ...authors };
+  const raw = { ...manifest(name, version, dependency), ...metadata };
   const manifestBytes = Buffer.from(JSON.stringify(raw));
   const archive = tar([{ path: "./", type: "5" }, { path: isAlias ? "./alias.json" : "./extension.json", bytes: manifestBytes },
     { path: "./dist/", type: "5" }, { path: "./dist/test.o", bytes: Buffer.from("inert test BOF") }, { path: "./LICENSE", bytes: Buffer.from("unused") }]);
@@ -85,11 +85,16 @@ describe("Armory Minisign signatures", () => {
     expect(verifyArmoryMinisign(fixture.archive, fixture.signature, fixture.signing.key)).toBe(fixture.manifestBytes.toString("base64"));
     expect(() => verifyArmoryMinisign(Buffer.from("tampered"), fixture.signature, fixture.signing.key)).toThrow(/signature is invalid/u);
   });
-  it("rejects tampered trusted comments before catalog metadata is trusted", () => {
+  it("rejects tampered trusted comments before catalog metadata is trusted", async () => {
     const fixture = packageFixture();
     const changed = Buffer.from(fixture.signature.toString().replace(fixture.manifestBytes.toString("base64"), Buffer.from("{}").toString("base64")));
     expect(() => verifyArmorySignatureMetadata(changed, fixture.signing.key)).toThrow(/manifest signature is invalid/u);
     expect(() => verifyArmoryMinisign(fixture.archive, fixture.signature, signer().key)).toThrow(/signature/u);
+    const setup = await setupCatalog([fixture]);
+    setup.responses.set(fixture.raw.repo_url, Buffer.from(JSON.stringify({ minisig: changed.toString("base64"), tar_gz_url: `${fixture.raw.repo_url}.tar.gz` })));
+    const catalog = await setup.service.refreshCatalog();
+    expect(catalog.packages[0]?.error).toMatch(/manifest signature is invalid/u);
+    expect(catalog.packages[0]).not.toHaveProperty("targets");
   });
 });
 
@@ -98,6 +103,7 @@ describe("Armory in-memory archive validation", () => {
     const fixture = packageFixture(); const files = await unpackArmoryArchive(fixture.archive);
     const legacy = parseArmoryManifest(files.get("extension.json")!, false);
     expect(legacy.directoryName).toBe("test-bof"); expect(legacy.name).toBe("test-bof"); expect(legacy.artifactPaths).toEqual(["dist/test.o"]);
+    expect(legacy.targets).toEqual([{ os: "windows", arch: "amd64" }]);
     const multi = { name: "Friendly package", package_name: "test-package", version: "2", commands: [fixture.raw, { ...fixture.raw, command_name: "second-command" }] };
     expect(parseArmoryManifest(Buffer.from(JSON.stringify(multi)), false).directoryName).toBe("test-package");
     expect(safeArmoryPath("/dist/test.o", true)).toBe("dist/test.o");
@@ -125,35 +131,50 @@ describe("Armory in-memory archive validation", () => {
 });
 
 describe("Armory local package service", () => {
-  it("propagates verified original and extension authors into catalog and installed snapshots", async () => {
+  it("propagates verified authors and target metadata into catalog and installed snapshots", async () => {
     const setup = await setupCatalog([packageFixture("authored-bof", "1", "", true, {
       original_author: "Original Developer", extension_author: "Extension Maintainer",
     })]);
     const catalog = await setup.service.refreshCatalog();
-    expect(catalog.packages[0]).toMatchObject({ originalAuthor: "Original Developer", extensionAuthor: "Extension Maintainer" });
+    expect(catalog.packages[0]).toMatchObject({ originalAuthor: "Original Developer", extensionAuthor: "Extension Maintainer",
+      targets: [{ os: "windows", arch: "amd64" }] });
     const installed = await setup.service.install({ packageId: catalog.packages[0]!.id });
-    expect(installed.installed[0]).toMatchObject({ originalAuthor: "Original Developer", extensionAuthor: "Extension Maintainer" });
+    expect(installed.installed[0]).toMatchObject({ originalAuthor: "Original Developer", extensionAuthor: "Extension Maintainer",
+      targets: [{ os: "windows", arch: "amd64" }] });
     expect(await readFile(join(setup.root, "extensions/authored-bof/extension.json"))).toEqual(setup.fixtures[0]!.manifestBytes);
   });
-  it("propagates only the original author supported by alias manifests", async () => {
+  it("propagates alias authors and deduplicates its declared target pairs", async () => {
+    const targets = [{ os: "windows", arch: "amd64" }, { os: "windows", arch: "386" }, { os: "linux", arch: "arm64" }];
     const setup = await setupCatalog([packageFixture("authored-alias", "1", "", true, {
       original_author: "Alias Developer", extension_author: "Not An Alias Schema Field",
+      files: [...targets, targets[0]!].map((target) => ({ ...target, path: "/dist/test.o" })),
     }, true)]);
     const catalog = await setup.service.refreshCatalog();
     expect(catalog.packages[0]).toMatchObject({ kind: "alias", originalAuthor: "Alias Developer" });
     expect(catalog.packages[0]).not.toHaveProperty("extensionAuthor");
+    expect(catalog.packages[0]?.targets).toEqual(targets);
     const installed = await setup.service.install({ packageId: catalog.packages[0]!.id });
     expect(installed.installed[0]).toMatchObject({ kind: "alias", originalAuthor: "Alias Developer" });
     expect(installed.installed[0]).not.toHaveProperty("extensionAuthor");
+    expect(installed.installed[0]?.targets).toEqual(targets);
   });
-  it("reads author metadata at the package level for console-installed multi-command extensions", async () => {
+  it("reads package authors and combines command targets for console-installed extensions", async () => {
     const root = await temporary(); const path = join(root, "extensions/multi-package"); await mkdir(path, { recursive: true });
     await writeFile(join(path, "extension.json"), JSON.stringify({ name: "Multi Package", package_name: "multi-package", version: "2",
       original_author: "Package Developer", extension_author: "Package Maintainer",
-      commands: [{ ...manifest("first-command"), original_author: "Ignored Command Author", extension_author: "Ignored Command Maintainer" }, manifest("second-command")] }));
+      commands: [{ ...manifest("first-command"), original_author: "Ignored Command Author", extension_author: "Ignored Command Maintainer" }, {
+        ...manifest("second-command"), files: [
+          { os: "linux", arch: "arm64", path: "/dist/linux.o" },
+          { os: "windows", arch: "amd64", path: "/dist/second.o" },
+          { os: "custom-OS", arch: "custom-Arch", path: "/dist/custom.o" },
+        ],
+      }] }));
     const snapshot = await new ArmoryService({ rootPath: root }).snapshot();
     expect(snapshot.installed[0]).toMatchObject({ commandNames: ["first-command", "second-command"],
       originalAuthor: "Package Developer", extensionAuthor: "Package Maintainer" });
+    expect(snapshot.installed[0]?.targets).toEqual([
+      { os: "windows", arch: "amd64" }, { os: "linux", arch: "arm64" }, { os: "custom-OS", arch: "custom-Arch" },
+    ]);
   });
   it.each([{}, { original_author: "", extension_author: "  " }, { original_author: null, extension_author: null }])(
     "keeps packages compatible when author metadata is absent or blank: %j", async (authors) => {
@@ -169,6 +190,7 @@ describe("Armory local package service", () => {
     const catalog = await setup.service.refreshCatalog();
     expect(catalog.packages[0]?.error).toMatch(/Invalid Armory (?:text|author) field/u);
     expect(catalog.packages[0]).not.toHaveProperty("originalAuthor");
+    expect(catalog.packages[0]).not.toHaveProperty("targets");
     expect(await readdir(setup.root)).toEqual(["armories.json"]);
   });
   it("uses the console trust roots and SLIVER_CLIENT_ROOT_DIR", async () => {
@@ -219,7 +241,8 @@ describe("Armory local package service", () => {
     await writeFile(archivePath, archive); await writeFile(signaturePath, signing.sign(archive, bytes.toString("base64"), false));
     const service = new ArmoryService({ rootPath: join(root, "client") });
     const installed = await service.installLocal({ archivePath, signaturePath, publicKey: signing.key });
-    expect(installed.installed[0]).toMatchObject({ id: "aliases/local-alias", name: "Friendly Alias", kind: "alias" });
+    expect(installed.installed[0]).toMatchObject({ id: "aliases/local-alias", name: "Friendly Alias", kind: "alias",
+      targets: [{ os: "windows", arch: "amd64" }] });
     expect(await readFile(join(root, "client/aliases/local-alias/alias.json"))).toEqual(bytes);
     expect(await readFile(join(root, "client/aliases/local-alias/bin/tool.exe"), "utf8")).toBe("inert alias test");
   });
