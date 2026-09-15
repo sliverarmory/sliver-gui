@@ -14,7 +14,6 @@ import {
   type WebContents,
 } from "electron";
 import {
-  SliverClient,
   clientpb,
   commonpb,
   parseConfig,
@@ -178,7 +177,11 @@ import {
   readConfigForImport,
 } from "./operator-config-store.js";
 import { readBoundedRegularFile, writePrivateArtifactFileAtomic } from "./secure-file.js";
-import type { SliverClientAdapter, SliverClientFactory } from "./sliver-client-adapter.js";
+import {
+  createSliverClientAdapter,
+  type SliverClientAdapter,
+  type SliverClientFactory,
+} from "./sliver-client-adapter.js";
 import { NetworkForwardingController } from "./network-forwarding-controller.js";
 import {
   BeaconTaskCancellationError,
@@ -551,7 +554,7 @@ export class ConnectionRegistry {
     const externalDirectory = normalized.savedConfigDirectory ?? join(homedir(), ".sliver-client", "configs");
     const managedDirectory = normalized.managedConfigDirectory ?? join(homedir(), ".sliver-gui", "configs");
     this.configStore = new OperatorConfigStore(externalDirectory, managedDirectory);
-    this.clientFactory = normalized.clientFactory ?? ((config) => new SliverClient(config));
+    this.clientFactory = normalized.clientFactory ?? createSliverClientAdapter;
     this.now = normalized.now ?? Date.now;
     this.sessionArtifacts = new SessionArtifactStore({ now: this.now });
     this.executionArtifacts = new ExecutionArtifactStore({ now: this.now });

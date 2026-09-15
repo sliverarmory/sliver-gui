@@ -22,7 +22,7 @@ describe("compiled operation registry", () => {
         expect(binding).toBeDefined();
         expect(binding?.timeout.timeoutSeconds).toBeGreaterThan(0);
         expect(binding?.timeout.afterSubmission).toBe("outcome-unknown");
-        expect(binding?.adapterMethod).toMatch(/^(ping|rename|setEnv|unsetEnv|reconfigure|openSession)/u);
+        expect(binding?.adapterMethod).toMatch(/^(ping|rename|setEnv|unsetEnv|reconfigure|openSession|pwd|ls|ps|ifconfig)/u);
       }
     }
   });
@@ -33,7 +33,22 @@ describe("compiled operation registry", () => {
       maxAutomaticRetries: 1,
     });
 
-    for (const operationId of TARGET_OPERATION_IDS.filter((id) => id !== "target.ping")) {
+    for (const operationId of [
+      "beacon.filesystem.pwd",
+      "beacon.filesystem.ls",
+      "beacon.process.list",
+      "beacon.network.interfaces",
+    ] as const) {
+      expect(getOperationDescriptor(operationId).idempotency).toEqual({
+        class: "idempotent-read",
+        maxAutomaticRetries: 0,
+      });
+    }
+
+    for (const operationId of TARGET_OPERATION_IDS.filter((id) =>
+      id !== "target.ping" && !id.startsWith("beacon.filesystem.") &&
+      id !== "beacon.process.list" && id !== "beacon.network.interfaces"
+    )) {
       expect(getOperationDescriptor(operationId).idempotency).toEqual({
         class: "unconfirmed-mutation",
         maxAutomaticRetries: 0,

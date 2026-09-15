@@ -1,4 +1,10 @@
-import type { SliverClient, SliverClientConfig } from "sliver-script";
+import {
+  SliverClient,
+  timeoutSecondsToNanoseconds,
+  withTimeoutSignal,
+  type SliverClientConfig,
+  type sliverpb,
+} from "sliver-script";
 
 /**
  * The complete, reviewed main-process Sliver surface.
@@ -149,6 +155,43 @@ export type SliverClientAdapter = Pick<
   Exclude<SliverClientMethod, "connect"> | "event$" | "eventStreamState$"
 > & {
   connect(): Promise<unknown>;
+  pwdBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Pwd>;
+  lsBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
+  psBeacon(beaconId: string, fullInfo: boolean, timeoutSeconds: number): Promise<sliverpb.Ps>;
+  ifconfigBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Ifconfig>;
 };
 
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
+
+/**
+ * Adds only the four reviewed beacon-read wrappers used by the operation
+ * registry. `interactBeacon` deliberately remains outside SliverClientAdapter.
+ */
+export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
+  return Object.assign(client, {
+    pwdBeacon: (beaconId: string, timeoutSeconds: number) =>
+      client.interactBeacon(beaconId).pwd(timeoutSeconds),
+    // InteractiveBeacon.lsTask intentionally exposes only {id, wait}; it
+    // discards the server acknowledgement fields that OperationEngine must
+    // verify. Queue this one reviewed RPC directly so the actual Async,
+    // BeaconID, TaskID, and Err envelope is preserved for correlation.
+    lsBeacon: (beaconId: string, path: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.ls({
+        Path: path,
+        Request: {
+          Async: true,
+          Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
+          BeaconID: beaconId,
+          SessionID: "",
+        },
+      }, { signal })),
+    psBeacon: (beaconId: string, fullInfo: boolean, timeoutSeconds: number) =>
+      client.interactBeacon(beaconId).ps(fullInfo, timeoutSeconds),
+    ifconfigBeacon: (beaconId: string, timeoutSeconds: number) =>
+      client.interactBeacon(beaconId).ifconfig(timeoutSeconds),
+  });
+}
+
+export function createSliverClientAdapter(config: SliverClientConfig): SliverClientAdapter {
+  return adaptSliverClient(new SliverClient(config));
+}

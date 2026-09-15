@@ -564,6 +564,10 @@ describe("OperationEngine", () => {
     [{ operationId: "target.env-unset", name: "KEY" }, "unsetEnvBeacon", 30],
     [{ operationId: "beacon.reconfigure", intervalSeconds: 5, jitterSeconds: 1 }, "reconfigureBeacon", 60],
     [{ operationId: "beacon.open-session", delaySeconds: 2 }, "openSessionFromBeacon", 60],
+    [{ operationId: "beacon.filesystem.pwd" }, "pwdBeacon", 30],
+    [{ operationId: "beacon.filesystem.ls", path: "/tmp" }, "lsBeacon", 60],
+    [{ operationId: "beacon.process.list", fullInfo: true }, "psBeacon", 60],
+    [{ operationId: "beacon.network.interfaces" }, "ifconfigBeacon", 30],
   ];
 
   it.each(asyncCases)("correlates an exact async task ID for %s", async (input, method, timeout) => {
@@ -578,6 +582,34 @@ describe("OperationEngine", () => {
     expect(harness.engine.requiresTaskResultVerification(taskId, harness.active.ref.id)).toBe(true);
     expect(harness.client[method].mock.calls[0]?.at(-1)).toBe(timeout);
     expect(harness.refreshTargets).toHaveBeenCalled();
+  });
+
+  it("dispatches only the compiled beacon read arguments", async () => {
+    const harness = createHarness("beacon");
+
+    await harness.engine.submit({ operationId: "beacon.filesystem.pwd" });
+    await harness.engine.submit({ operationId: "beacon.filesystem.ls", path: "/var/tmp" });
+    await harness.engine.submit({ operationId: "beacon.process.list", fullInfo: true });
+    await harness.engine.submit({ operationId: "beacon.network.interfaces" });
+
+    expect(harness.client.pwdBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
+    expect(harness.client.lsBeacon).toHaveBeenCalledWith(harness.active.ref.id, "/var/tmp", 60);
+    expect(harness.client.psBeacon).toHaveBeenCalledWith(harness.active.ref.id, true, 60);
+    expect(harness.client.ifconfigBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
+  });
+
+  it("rejects a directory-list acknowledgement for a different beacon", async () => {
+    const harness = createHarness("beacon");
+    harness.client.lsBeacon.mockResolvedValueOnce({
+      Response: { Err: "", Async: true, BeaconID: "another_beacon", TaskID: "cross_routed_ls" },
+    });
+
+    const record = await harness.engine.submit({ operationId: "beacon.filesystem.ls", path: "/tmp" });
+
+    expect(record).toMatchObject({ state: "outcome-unknown" });
+    expect(record.taskId).toBeUndefined();
+    expect(harness.engine.findByTask("cross_routed_ls", harness.active.ref.id)).toBeUndefined();
+    expect(harness.client.lsBeacon).toHaveBeenCalledOnce();
   });
 
   it("converts seconds to nanoseconds for compiled beacon operations", async () => {
@@ -1496,6 +1528,10 @@ function fakeClient(mode: TargetMode) {
     })),
     reconfigureBeacon: vi.fn(async () => defaultTask),
     openSessionFromBeacon: vi.fn(async () => defaultTask),
+    pwdBeacon: vi.fn(async () => defaultTask),
+    lsBeacon: vi.fn(async () => defaultTask),
+    psBeacon: vi.fn(async () => defaultTask),
+    ifconfigBeacon: vi.fn(async () => defaultTask),
   } as unknown as OperationEngineHost["client"] & Record<OperationClientMethod, ReturnType<typeof vi.fn>>;
 }
 
@@ -1526,7 +1562,11 @@ type OperationClientMethod =
   | "unsetEnvBeacon"
   | "getEnvSession"
   | "reconfigureBeacon"
-  | "openSessionFromBeacon";
+  | "openSessionFromBeacon"
+  | "pwdBeacon"
+  | "lsBeacon"
+  | "psBeacon"
+  | "ifconfigBeacon";
 
 function resolvedTarget(mode: TargetMode): ResolvedOperationTarget {
   const summary = targetSummary(mode);
@@ -1639,5 +1679,9 @@ const _closedInputProof: TargetOperationInput[] = [
   { operationId: "target.env-unset", name: "KEY" },
   { operationId: "beacon.reconfigure", intervalSeconds: 5 },
   { operationId: "beacon.open-session", delaySeconds: 0 },
+  { operationId: "beacon.filesystem.pwd" },
+  { operationId: "beacon.filesystem.ls", path: "/tmp" },
+  { operationId: "beacon.process.list", fullInfo: true },
+  { operationId: "beacon.network.interfaces" },
 ];
 void _closedInputProof;

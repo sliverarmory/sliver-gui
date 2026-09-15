@@ -27,6 +27,10 @@ const OPERATION_LABELS: Readonly<Record<TargetOperationId, string>> = {
   "target.env-unset": "Unset environment variable",
   "beacon.reconfigure": "Reconfigure beacon",
   "beacon.open-session": "Open session",
+  "beacon.filesystem.pwd": "Read working directory",
+  "beacon.filesystem.ls": "List directory",
+  "beacon.process.list": "List processes",
+  "beacon.network.interfaces": "List network interfaces",
 };
 
 const SESSION_OPERATION_LABELS = {

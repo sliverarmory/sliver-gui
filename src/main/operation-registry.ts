@@ -16,7 +16,11 @@ export type OperationAdapterMethodId =
   | "unsetEnvSession"
   | "unsetEnvBeacon"
   | "reconfigureBeacon"
-  | "openSessionFromBeacon";
+  | "openSessionFromBeacon"
+  | "pwdBeacon"
+  | "lsBeacon"
+  | "psBeacon"
+  | "ifconfigBeacon";
 
 export type OperationRequestEncoderId =
   | "ping"
@@ -24,14 +28,22 @@ export type OperationRequestEncoderId =
   | "set-environment"
   | "unset-environment"
   | "reconfigure-beacon"
-  | "open-beacon-session";
+  | "open-beacon-session"
+  | "beacon-working-directory"
+  | "beacon-directory-listing"
+  | "beacon-process-list"
+  | "beacon-network-interfaces";
 
 export type OperationResponseDecoderId =
   | "ping"
   | "rename-target"
   | "environment-mutation"
   | "reconfigure-beacon"
-  | "open-beacon-session";
+  | "open-beacon-session"
+  | "beacon-working-directory"
+  | "beacon-directory-listing"
+  | "beacon-process-list"
+  | "beacon-network-interfaces";
 
 export type OperationExecutionMode = "synchronous-response" | "asynchronous-beacon-task";
 
@@ -116,6 +128,13 @@ const SMALL_RESULT_BOUNDS = Object.freeze({
 
 const MUTATION_IDEMPOTENCY = Object.freeze({
   class: "unconfirmed-mutation",
+  maxAutomaticRetries: 0,
+} as const satisfies OperationIdempotencyPolicy);
+
+const ASYNC_READ_IDEMPOTENCY = Object.freeze({
+  class: "idempotent-read",
+  // Enqueuing is itself a side effect. A lost acknowledgement must never
+  // create a duplicate task, even though the implant operation is read-only.
   maxAutomaticRetries: 0,
 } as const satisfies OperationIdempotencyPolicy);
 
@@ -276,6 +295,86 @@ const registry = {
         timeout: SIXTY_SECOND_TIMEOUT,
         cancellation: "best-effort-beacon-task",
         reconciliation: "task-delivery-only",
+      },
+    },
+  },
+  "beacon.filesystem.pwd": {
+    id: "beacon.filesystem.pwd",
+    modes: ["beacon"],
+    capabilityId: "target.task.execute",
+    idempotency: ASYNC_READ_IDEMPOTENCY,
+    confirmation: "none",
+    disposition: "structured-detail",
+    resultBounds: SMALL_RESULT_BOUNDS,
+    bindings: {
+      beacon: {
+        adapterMethod: "pwdBeacon",
+        requestEncoder: "beacon-working-directory",
+        responseDecoder: "beacon-working-directory",
+        execution: "asynchronous-beacon-task",
+        timeout: THIRTY_SECOND_TIMEOUT,
+        cancellation: "best-effort-beacon-task",
+        reconciliation: "beacon-task-state",
+      },
+    },
+  },
+  "beacon.filesystem.ls": {
+    id: "beacon.filesystem.ls",
+    modes: ["beacon"],
+    capabilityId: "target.task.execute",
+    idempotency: ASYNC_READ_IDEMPOTENCY,
+    confirmation: "none",
+    disposition: "table",
+    resultBounds: SMALL_RESULT_BOUNDS,
+    bindings: {
+      beacon: {
+        adapterMethod: "lsBeacon",
+        requestEncoder: "beacon-directory-listing",
+        responseDecoder: "beacon-directory-listing",
+        execution: "asynchronous-beacon-task",
+        timeout: SIXTY_SECOND_TIMEOUT,
+        cancellation: "best-effort-beacon-task",
+        reconciliation: "beacon-task-state",
+      },
+    },
+  },
+  "beacon.process.list": {
+    id: "beacon.process.list",
+    modes: ["beacon"],
+    capabilityId: "target.task.execute",
+    idempotency: ASYNC_READ_IDEMPOTENCY,
+    confirmation: "none",
+    disposition: "table",
+    resultBounds: SMALL_RESULT_BOUNDS,
+    bindings: {
+      beacon: {
+        adapterMethod: "psBeacon",
+        requestEncoder: "beacon-process-list",
+        responseDecoder: "beacon-process-list",
+        execution: "asynchronous-beacon-task",
+        timeout: SIXTY_SECOND_TIMEOUT,
+        cancellation: "best-effort-beacon-task",
+        reconciliation: "beacon-task-state",
+      },
+    },
+  },
+  "beacon.network.interfaces": {
+    id: "beacon.network.interfaces",
+    modes: ["beacon"],
+    capabilityId: "target.task.execute",
+    idempotency: ASYNC_READ_IDEMPOTENCY,
+    confirmation: "none",
+    disposition: "table",
+    resultBounds: SMALL_RESULT_BOUNDS,
+    bindings: {
+      beacon: {
+        adapterMethod: "ifconfigBeacon",
+        requestEncoder: "beacon-network-interfaces",
+        responseDecoder: "beacon-network-interfaces",
+        execution: "asynchronous-beacon-task",
+        timeout: THIRTY_SECOND_TIMEOUT,
+        cancellation: "best-effort-beacon-task",
+        reconciliation: "beacon-task-state",
       },
     },
   },

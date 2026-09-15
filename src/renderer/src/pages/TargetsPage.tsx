@@ -48,6 +48,7 @@ import {
 
 import type { PageSummary, SliverSnapshot } from "../../../shared/contracts";
 import type {
+  BeaconSummary,
   DestructiveTargetActionId,
   SessionSummary,
   TargetActionExecutionResult,
@@ -87,6 +88,7 @@ import {
   taskStateColor,
 } from "./target-page-model";
 import type { TargetModeFilter } from "./target-page-model";
+import { BeaconInteractionWorkspace } from "./BeaconInteractionWorkspace";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 export interface TargetsPageProps {
@@ -94,6 +96,8 @@ export interface TargetsPageProps {
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
   onOpenSession?: (session: SessionSummary, target: TargetRef) => void;
+  onOpenBeacon?: (beacon: BeaconSummary, target: TargetRef) => void;
+  onBack?: () => void;
   presentation?: "catalog" | "dedicated";
   expectedTarget?: TargetRef;
 }
@@ -139,6 +143,10 @@ const OPERATION_CAPABILITIES: Readonly<Record<TargetOperationId, TargetCapabilit
   "target.env-unset": "target.environment.write",
   "beacon.reconfigure": "beacon.reconfigure",
   "beacon.open-session": "beacon.open-session",
+  "beacon.filesystem.pwd": "target.task.execute",
+  "beacon.filesystem.ls": "target.task.execute",
+  "beacon.process.list": "target.task.execute",
+  "beacon.network.interfaces": "target.task.execute",
 };
 
 export function TargetsPage({
@@ -146,6 +154,8 @@ export function TargetsPage({
   snapshot,
   onSnapshot,
   onOpenSession,
+  onOpenBeacon,
+  onBack,
   presentation = "catalog",
   expectedTarget,
 }: TargetsPageProps): React.JSX.Element {
@@ -170,6 +180,7 @@ export function TargetsPage({
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [executionSheetTarget, setExecutionSheetTarget] = useState<ExecutionSheetTarget>();
+  const [showDedicatedExecution, setShowDedicatedExecution] = useState(false);
   const targetInventoryIdentity = targetCatalogIdentity(snapshot, mode);
   const normalizedTargetQuery = normalizeTargetCatalogQuery(query);
   const targetSearchIdentity = `${targetInventoryIdentity}\0${mode}\0${normalizedTargetQuery}`;
@@ -492,6 +503,51 @@ export function TargetsPage({
     }
   }, [active?.id, active?.mode, activeIdentity, dedicatedTargetIsCurrent, taskReadCapability?.available, taskReadCapability?.reason?.message]);
 
+  const selectTaskDetail = useCallback((task: BeaconTaskSummary): void => {
+    const expectedTargetIdentity = activeIdentityRef.current;
+    const expectedIncarnation = backendIncarnationRef.current;
+    const requestSequence = ++taskDetailRequestSequence.current;
+    void openTaskDetail(
+      task,
+      (detail) => {
+        selectedTaskIncarnationRef.current = expectedIncarnation;
+        setSelectedTaskIdentity(expectedTargetIdentity);
+        setSelectedTask(detail);
+      },
+      () => expectedTargetIdentity !== undefined &&
+        expectedIncarnation === backendIncarnationRef.current &&
+        expectedTargetIdentity === activeIdentityRef.current &&
+        requestSequence === taskDetailRequestSequence.current,
+    );
+  }, []);
+
+  const cancelSelectedTask = useCallback(async (task: BeaconTaskDetail): Promise<void> => {
+    const expectedTargetIdentity = activeIdentityRef.current;
+    const expectedIncarnation = backendIncarnationRef.current;
+    try {
+      const result = await window.sliver.cancelBeaconTask({ taskId: task.taskId });
+      if (
+        expectedTargetIdentity === undefined ||
+        expectedIncarnation !== backendIncarnationRef.current ||
+        expectedTargetIdentity !== activeIdentityRef.current ||
+        selectedTaskIdRef.current !== task.taskId
+      ) return;
+      if (!result.ok || !result.value) {
+        toast.danger("Could not cancel beacon task", { description: result.error });
+        return;
+      }
+      const updated = { ...task, ...result.value };
+      setSelectedTask(updated);
+      setTasks((current) => current.map((item) => item.taskId === task.taskId ? updated : item));
+    } catch (error) {
+      if (
+        expectedIncarnation === backendIncarnationRef.current &&
+        expectedTargetIdentity === activeIdentityRef.current &&
+        selectedTaskIdRef.current === task.taskId
+      ) toast.danger("Could not cancel beacon task", { description: errorMessage(error) });
+    }
+  }, []);
+
   useEffect(() => {
     targetInventoryPageRequestSequence.current.session += 1;
     targetInventoryPageRequestSequence.current.beacon += 1;
@@ -582,6 +638,7 @@ export function TargetsPage({
     setSelectedTaskIdentity(undefined);
     setReviewPlan(undefined);
     setActionResult(undefined);
+    setShowDedicatedExecution(false);
     if (snapshot.connection.epoch !== undefined) void loadOperations();
   }, [backendIncarnation, loadOperations, snapshot.connection.epoch]);
 
@@ -591,7 +648,13 @@ export function TargetsPage({
       if (subscribedIncarnation === backendIncarnationRef.current) mergeOperation(operation);
     });
     const unsubscribeTasks = window.sliver.onBeaconTasksInvalidated((target) => {
-      if (activeRef?.mode === "beacon" && target.id === activeRef.id && target.backendEpoch === activeRef.backendEpoch) {
+      if (
+        activeRef?.mode === "beacon" &&
+        target.mode === "beacon" &&
+        target.id === activeRef.id &&
+        target.backendEpoch === activeRef.backendEpoch &&
+        target.fingerprint === activeRef.fingerprint
+      ) {
         void loadTasks();
       }
     });
@@ -605,11 +668,23 @@ export function TargetsPage({
     taskDetailRequestSequence.current += 1;
     setTasks([]);
     setTasksPage(undefined);
-    void loadTasks();
     setSelectedTask(undefined);
     selectedTaskIncarnationRef.current = undefined;
     setSelectedTaskIdentity(undefined);
+  }, [activeIdentity, backendIncarnation, presentation]);
+
+  useEffect(() => {
+    void loadTasks();
   }, [loadTasks]);
+
+  useEffect(() => {
+    const current = selectedTask;
+    if (!current) return;
+    const summary = tasks.find((task) => task.taskId === current.taskId);
+    if (!summary) return;
+    if (summary.state === current.state && summary.resultAvailable === current.resultAvailable) return;
+    selectTaskDetail(summary);
+  }, [selectTaskDetail, selectedTask, tasks]);
 
   useEffect(() => {
     if (executionSheetTarget && !executionSheetIsCurrent) setExecutionSheetTarget(undefined);
@@ -654,6 +729,24 @@ export function TargetsPage({
         }
         onOpenSession(selectedSummary, selectedRef);
       }
+      if (target.mode === "beacon" && onOpenBeacon) {
+        const selectedRef = result.value.targetContext.activeTarget;
+        const selectedSummary = result.value.targetContext.activeTargetSummary;
+        if (
+          selectedRef?.mode !== "beacon" ||
+          selectedRef.id !== ref.id ||
+          selectedRef.backendEpoch !== ref.backendEpoch ||
+          selectedRef.fingerprint !== ref.fingerprint ||
+          selectedSummary?.mode !== "beacon" ||
+          selectedSummary.id !== ref.id
+        ) {
+          toast.warning("Beacon changed", {
+            description: "The server did not confirm the selected beacon. Return to the live inventory and select it again.",
+          });
+          return;
+        }
+        onOpenBeacon(selectedSummary, selectedRef);
+      }
     } catch (error) {
       if (
         requestSequence === targetSelectionRequestSequence.current &&
@@ -665,7 +758,7 @@ export function TargetsPage({
         expectedIncarnation === backendIncarnationRef.current
       ) setIsSelecting(false);
     }
-  }, [onOpenSession, onSnapshot, presentedTargetInventory.refs]);
+  }, [onOpenBeacon, onOpenSession, onSnapshot, presentedTargetInventory.refs]);
 
   const selectTargetByKey = useCallback((key: Key) => {
     const target = allTargets.find((candidate) => targetRowKey(candidate) === String(key));
@@ -705,7 +798,8 @@ export function TargetsPage({
   }, [onSnapshot]);
 
   const openInteractionWindow = useCallback(async () => {
-    if (mode !== "beacon" || presentation !== "catalog" || activeIdentityRef.current === undefined) return;
+    const canOpenFromThisSurface = presentation === "catalog" || onBack !== undefined;
+    if (mode !== "beacon" || !canOpenFromThisSurface || activeIdentityRef.current === undefined) return;
     setIsOpeningInteractionWindow(true);
     try {
       const result = await window.sliver.openInteractionWindow();
@@ -717,7 +811,7 @@ export function TargetsPage({
     } finally {
       setIsOpeningInteractionWindow(false);
     }
-  }, [mode, presentation]);
+  }, [mode, onBack, presentation]);
 
   const refreshSnapshot = useCallback(async () => {
     try {
@@ -864,6 +958,11 @@ export function TargetsPage({
               <EmptyState.Description className="max-w-md text-pretty">
                 This window is pinned to an exact beacon identity. The active target changed or became unavailable, so its interaction controls are quarantined.
               </EmptyState.Description>
+              {onBack ? (
+                <Button className="mt-4" variant="secondary" onPress={onBack}>
+                  <FontAwesomeIcon aria-hidden icon={faArrowLeft} /> Back to live beacons
+                </Button>
+              ) : null}
             </EmptyState.Header>
           </EmptyState>
         </div>
@@ -888,7 +987,7 @@ export function TargetsPage({
       onOpenExecution={presentation === "catalog" && activeRef?.mode === "beacon" && active?.id === activeRef.id
         ? () => setExecutionSheetTarget({ ref: activeRef, backendIncarnation })
         : undefined}
-      onPopOut={presentation === "catalog" ? () => void openInteractionWindow() : undefined}
+      onPopOut={presentation === "catalog" || onBack ? () => void openInteractionWindow() : undefined}
       onPrepareAction={(action) => void prepareAction(action)}
       onWatchChange={(enabled) => void setBeaconWatch(enabled)}
       onOperationSubmitted={(operation) => {
@@ -900,6 +999,10 @@ export function TargetsPage({
       operationTargetIdentity={`${backendIncarnation}:${targetRefIdentity(activeRef) ?? `${active?.mode ?? "none"}:${active?.id ?? "none"}`}`}
     />
   ) : null;
+  const isDedicatedBeacon = presentation === "dedicated" &&
+    active?.mode === "beacon" &&
+    activeRef?.mode === "beacon";
+  const taskExecutionCapability = capabilityFor(snapshot.targetContext.capabilities, "target.task.execute");
 
   return (
     <section className="page-stack targets-page" data-presentation={presentation}>
@@ -1027,19 +1130,68 @@ export function TargetsPage({
         </section>
 
         {targetDetail}
-      </div> : (
+      </div> : isDedicatedBeacon ? (
         <>
-          {targetDetail}
-          {activeRef?.mode === "beacon" ? (
-            <TargetExecutionWorkbench
-              expectedTarget={activeRef}
+          <header className="page-heading">
+            <div className="min-w-0">
+              <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={faSatellite} /> Beacon interact</div>
+              <h1>Async task workspace</h1>
+              <p>Queue work for this exact beacon and inspect each completion as it returns.</p>
+            </div>
+            {onBack ? (
+              <Button variant="secondary" onPress={onBack}>
+                <FontAwesomeIcon aria-hidden icon={faArrowLeft} /> Back to live beacons
+              </Button>
+            ) : null}
+          </header>
+          <div className="grid min-w-0 items-start gap-4 2xl:grid-cols-[360px_minmax(0,1fr)]">
+            {targetDetail}
+            <BeaconInteractionWorkspace
+              canQueue={taskExecutionCapability?.available === true}
+              error={tasksError}
+              isLoading={isLoadingTasks}
+              isLoadingMore={isLoadingMoreTasks}
+              page={tasksPage}
+              selectedTask={selectedTask}
               targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
+              tasks={tasks}
+              unavailableReason={taskExecutionCapability?.reason?.message}
+              watchEnabled={snapshot.targetContext.beaconWatch}
+              onCancelTask={cancelSelectedTask}
+              onLoadMore={(cursor) => void loadTasks(cursor)}
+              onRefresh={() => void loadTasks()}
+              onSelectTask={selectTaskDetail}
+              onSubmitted={(operation) => {
+                const submittedIncarnation = backendIncarnation;
+                if (submittedIncarnation !== backendIncarnationRef.current) return false;
+                mergeOperation(operation);
+                return true;
+              }}
             />
-          ) : null}
+          </div>
+          <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="advanced-execution-heading">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-foreground" id="advanced-execution-heading">Advanced execution</h2>
+                <p className="mt-0.5 text-xs text-muted">Process, payload, remote, and identity actions remain available when needed.</p>
+              </div>
+              <Button size="sm" variant="secondary" onPress={() => setShowDedicatedExecution((current) => !current)}>
+                <FontAwesomeIcon aria-hidden icon={faBolt} /> {showDedicatedExecution ? "Hide advanced execution" : "Show advanced execution"}
+              </Button>
+            </div>
+            {showDedicatedExecution ? (
+              <div className="border-t border-separator p-4 sm:p-6">
+                <TargetExecutionWorkbench
+                  expectedTarget={activeRef}
+                  targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
+                />
+              </div>
+            ) : null}
+          </section>
         </>
-      )}
+      ) : targetDetail}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+      {!isDedicatedBeacon ? <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
         <OperationHistory
           error={operationsError}
           isLoadingMore={isLoadingMoreOperations}
@@ -1061,9 +1213,9 @@ export function TargetsPage({
           }}
         />
         <OperatorPresence snapshot={snapshot} />
-      </div>
+      </div> : null}
 
-      {active?.mode === "beacon" ? (
+      {active?.mode === "beacon" && !isDedicatedBeacon ? (
         <BeaconTasks
           error={tasksError}
           isLoading={isLoadingTasks}
@@ -1072,22 +1224,7 @@ export function TargetsPage({
           tasks={tasks}
           watchEnabled={snapshot.targetContext.beaconWatch}
           onLoadMore={(cursor) => void loadTasks(cursor)}
-          onOpen={(task) => {
-            const expectedTarget = activeIdentity;
-            const expectedIncarnation = backendIncarnation;
-            const requestSequence = ++taskDetailRequestSequence.current;
-            void openTaskDetail(
-              task,
-              (detail) => {
-                selectedTaskIncarnationRef.current = expectedIncarnation;
-                setSelectedTaskIdentity(expectedTarget);
-                setSelectedTask(detail);
-              },
-              () => expectedIncarnation === backendIncarnationRef.current &&
-                expectedTarget === activeIdentityRef.current &&
-                requestSequence === taskDetailRequestSequence.current,
-            );
-          }}
+          onOpen={selectTaskDetail}
           onRefresh={() => void loadTasks()}
         />
       ) : null}
@@ -1117,7 +1254,7 @@ export function TargetsPage({
           }
         }}
       />
-      <TaskDetailModal
+      {!isDedicatedBeacon ? <TaskDetailModal
         isCurrent={() => selectedTaskIdentity !== undefined &&
           selectedTaskIncarnationRef.current === backendIncarnationRef.current &&
           selectedTaskIdentity === activeIdentityRef.current &&
@@ -1134,7 +1271,7 @@ export function TargetsPage({
             setSelectedTaskIdentity(undefined);
           }
         }}
-      />
+      /> : null}
       <DestructiveReviewModal
         isExecuting={isExecutingAction}
         plan={reviewPlan}
@@ -1323,14 +1460,16 @@ function TargetDetail({
         </div>
       ) : null}
 
-      <div className="border-t border-separator px-4 py-4">
-        <OperationComposer
-          active={active}
-          targetIdentity={operationTargetIdentity}
-          capabilities={capabilities}
-          onSubmitted={onOperationSubmitted}
-        />
-      </div>
+      {active.mode === "session" ? (
+        <div className="border-t border-separator px-4 py-4">
+          <OperationComposer
+            active={active}
+            targetIdentity={operationTargetIdentity}
+            capabilities={capabilities}
+            onSubmitted={onOperationSubmitted}
+          />
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap gap-2 border-t border-separator px-4 py-4">
         {lifecycleActions.map((action) => {
@@ -2447,6 +2586,11 @@ function operationInputFromDraft(draft: OperationDraft): TargetOperationInput {
         operationId: "beacon.open-session",
         delaySeconds: requiredInteger(draft.delaySeconds, "Delay seconds", 0),
       };
+    case "beacon.filesystem.pwd":
+    case "beacon.filesystem.ls":
+    case "beacon.process.list":
+    case "beacon.network.interfaces":
+      throw new Error("Use the beacon task workspace for this command.");
   }
 }
 

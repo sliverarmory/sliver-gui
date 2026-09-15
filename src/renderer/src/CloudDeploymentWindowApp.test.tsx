@@ -811,7 +811,9 @@ describe("CloudDeploymentWindowApp", () => {
     const user = userEvent.setup();
     renderCloudDeploymentApp();
     expect(await screen.findByText(/Provider refresh connection failed/u)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    const refreshMessage = screen.getByText("The AWS login expired.").closest<HTMLElement>('[role="status"]');
+    if (!refreshMessage) throw new Error("Expected the AWS refresh error status");
+    await user.click(within(refreshMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
     expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
     expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
     expect(screen.queryByText(/Provider refresh connection failed/u)).not.toBeInTheDocument();
@@ -839,7 +841,9 @@ describe("CloudDeploymentWindowApp", () => {
     const user = userEvent.setup();
     renderCloudDeploymentApp();
     await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
-    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    const refreshMessage = screen.getByText("The AWS login expired.").closest<HTMLElement>('[role="status"]');
+    if (!refreshMessage) throw new Error("Expected the AWS refresh error status");
+    await user.click(within(refreshMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
     await waitFor(() => expect(screen.queryByText("The AWS login expired.")).not.toBeInTheDocument());
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
 
@@ -1172,21 +1176,66 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.getSnapshot).toHaveBeenCalledOnce();
   });
 
-  it("offers AWS Login on a failed deployment using a shared profile without retrying lifecycle actions", async () => {
+  it("offers AWS Login inside and below failed deployment errors without retrying lifecycle actions", async () => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      credentials: [{ ...awsCredential, profileName: "operators" }],
+      state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
+      refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS status session has expired." }],
+    };
+    renderCloudDeploymentApp();
+    const operationMessage = (await screen.findByText("The AWS session has expired.")).closest<HTMLElement>('[role="alert"]');
+    const refreshMessage = screen.getByText("The AWS status session has expired.").closest<HTMLElement>('[role="status"]');
+    if (!operationMessage || !refreshMessage) throw new Error("Expected both AWS deployment error messages");
+    const embeddedLogin = within(operationMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" });
+    expect(within(refreshMessage).queryByRole("button", { name: /AWS Login for Production AWS/u })).not.toBeInTheDocument();
+    const standaloneLogin = screen.getByRole("button", { name: "AWS Login for Production AWS" });
+    expect(standaloneLogin.closest('[role="alert"], [role="status"]')).toBeNull();
+    await act(async () => {
+      embeddedLogin.click();
+      standaloneLogin.click();
+    });
+
+    expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
+    expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(api.runLifecycleAction).not.toHaveBeenCalled();
+    expect(screen.getByText("The AWS session has expired.")).toBeInTheDocument();
+  });
+
+  it("keeps one AWS reauthentication alive when a snapshot clears its error message", async () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
       credentials: [{ ...awsCredential, profileName: "operators" }],
       state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
     };
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => login.promise);
     const user = userEvent.setup();
     renderCloudDeploymentApp();
-    await user.click(await screen.findByRole("button", { name: "AWS Login for Production AWS" }));
+    const operationMessage = (await screen.findByText("The AWS session has expired.")).closest<HTMLElement>('[role="alert"]');
+    if (!operationMessage) throw new Error("Expected the AWS deployment error alert");
+    await user.click(within(operationMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
+    expect(await screen.findByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
+
+    currentSnapshot = {
+      ...currentSnapshot,
+      state: { v: 1, revision: 10, deployments: [{ ...runningDeployment, lastError: null }] },
+      refreshErrors: [],
+    };
+    act(() => changedListener?.("snapshot"));
+    await waitFor(() => expect(screen.queryByText("The AWS session has expired.")).not.toBeInTheDocument());
+
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel AWS Login" })).toBeInTheDocument();
+    await act(async () => login.resolve({ ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } }));
 
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
     expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
-    expect(api.getSnapshot).toHaveBeenCalledTimes(2);
-    expect(api.runLifecycleAction).not.toHaveBeenCalled();
-    expect(screen.getByText("The AWS session has expired.")).toBeInTheDocument();
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
   });
 
   it("cancels AWS reauthentication when its credential view is closed", async () => {
@@ -1379,13 +1428,23 @@ describe("CloudDeploymentWindowApp", () => {
     vi.mocked(api.loginAzureCredential).mockImplementationOnce(async () => login.promise);
     const user = userEvent.setup();
     renderCloudDeploymentApp();
-    await user.click(await screen.findByRole("button", { name: "Azure Login for Production Azure" }));
+    const operationMessage = (await screen.findByText("Azure credentials have expired.")).closest<HTMLElement>('[role="alert"]');
+    if (!operationMessage) throw new Error("Expected the Azure deployment error alert");
+    const embeddedLogin = within(operationMessage).getByRole("button", { name: "Azure Login for Production Azure from error message" });
+    const standaloneLogin = screen.getByRole("button", { name: "Azure Login for Production Azure" });
+    expect(standaloneLogin.closest('[role="alert"], [role="status"]')).toBeNull();
+    act(() => {
+      embeddedLogin.click();
+      standaloneLogin.click();
+    });
     expect(await screen.findByText(/Complete Azure Login in your browser/u)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel Azure Login" })).toBeInTheDocument();
+    expect(standaloneLogin).toBeDisabled();
     await act(async () => login.resolve({ ok: true, value: { ...azureCredential, loginAccountId: "home-account-id" } }));
 
     expect(await screen.findByText("Azure Login complete")).toBeInTheDocument();
     expect(api.loginAzureCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: AZURE_CREDENTIAL_ID });
+    expect(api.cancelAzureLogin).not.toHaveBeenCalled();
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
     expect(api.runLifecycleAction).not.toHaveBeenCalled();
     expect(screen.getByText("Azure credentials have expired.")).toBeInTheDocument();

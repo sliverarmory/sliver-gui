@@ -13,7 +13,7 @@ import type {
   SliverDesktopAPI,
   SliverSnapshot,
 } from "../../shared/contracts";
-import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
+import type { BeaconSummary, SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 
 beforeAll(() => {
@@ -1084,6 +1084,100 @@ describe("Sidebar navigation", () => {
 
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(await screen.findByRole("heading", { name: "Live sessions" })).toBeInTheDocument();
+  });
+
+  it("opens a selected beacon in the dedicated async task workspace and returns to the catalog", async () => {
+    const user = userEvent.setup();
+    const beacon: BeaconSummary = {
+      mode: "beacon",
+      id: "beacon-1",
+      name: "warehouse",
+      hostname: "edge-linux",
+      hostId: "host-2",
+      username: "bob",
+      os: "linux",
+      arch: "amd64",
+      transport: "mtls",
+      remoteAddress: "127.0.0.1:4444",
+      activeC2: "mtls://127.0.0.1:4444",
+      executable: "/tmp/agent",
+      version: "1.7.6",
+      locale: "en-US",
+      integrity: "High",
+      burned: false,
+      pid: 4002,
+      checkinStatus: "on-time",
+      nextCheckinAt: "2026-08-09T20:02:00.000Z",
+      intervalMs: 8_000,
+      jitterMs: 0,
+    };
+    const ref: TargetRef = {
+      mode: "beacon",
+      id: beacon.id,
+      backendEpoch: 7,
+      domainRevision: 4,
+      fingerprint: "b".repeat(64),
+    };
+    const initial = disconnectedSnapshot();
+    initial.connection = {
+      status: "connected",
+      server: "127.0.0.1:53137",
+      operator: "alice",
+      configName: "M2 test",
+      version: "1.7.6",
+      epoch: 7,
+      incarnation: 4,
+    };
+    initial.beacons = [beacon];
+    initial.domains.beacons = {
+      status: "ready",
+      revision: 4,
+      items: [beacon],
+      page: { limit: 500, total: 1, truncated: false },
+    };
+    initial.targetContext.selectableTargets = [ref];
+    const selected: SliverSnapshot = {
+      ...initial,
+      targetContext: {
+        status: "selected",
+        activeTarget: ref,
+        activeTargetSummary: beacon,
+        selectableTargets: [ref],
+        capabilities: [
+          { id: "target.task.execute", available: true },
+          { id: "target.terminate", available: true },
+          { id: "beacon.remove", available: true },
+          { id: "beacon.tasks.read", available: true },
+          { id: "beacon.tasks.cancel", available: true },
+        ],
+        beaconWatch: false,
+      },
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial);
+    vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: selected });
+    vi.mocked(api.listTargetOperations).mockResolvedValue({
+      ok: true,
+      value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+    vi.mocked(api.listBeaconTasks).mockResolvedValue({
+      ok: true,
+      value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
+    await user.click(within(interact).getByRole("row", { name: "Beacons" }));
+    await user.click(await screen.findByRole("row", { name: /warehouse/i }));
+
+    expect(await screen.findByRole("heading", { name: "Async task workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
+    expect(screen.queryByRole("grid", { name: "Sliver beacons" })).not.toBeInTheDocument();
+    expect(within(interact).getByRole("row", { name: "Beacons" })).toHaveAttribute("data-current", "true");
+
+    await user.click(screen.getByRole("button", { name: "Back to live beacons" }));
+    expect(await screen.findByRole("heading", { name: "Live beacons" })).toBeInTheDocument();
   });
 
   it("keeps the Interact section actionable in the mobile sheet", async () => {

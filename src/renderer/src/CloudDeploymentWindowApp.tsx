@@ -2028,6 +2028,26 @@ function DeploymentCard({
     : pendingAction !== null
       ? `Wait for the current ${deployment.name} server action to finish.`
       : sshUnavailableReason;
+  const loginCredential = canLoginCloudCredential(credential) ? credential : undefined;
+  const cloudLogin = useCloudLoginActionController({
+    api,
+    credential: loginCredential,
+    isDisabled: pendingAction !== null,
+    onFeedback,
+    onPendingChange: (pending) => setPendingAction(pending ? "cloud-login" : null),
+    onRefresh,
+  });
+  const hasEmbeddedCloudLogin = Boolean(deployment.lastError || refreshError);
+  const showCloudLogin = hasEmbeddedCloudLogin || cloudLogin.isPending || cloudLogin.error !== null;
+  const cloudLoginAction = (embedded: boolean): React.JSX.Element | null => loginCredential && showCloudLogin ? (
+    <CloudLoginAction
+      controller={cloudLogin}
+      credential={loginCredential}
+      isDisabled={pendingAction !== null}
+      isEmbedded={embedded}
+      showDetails={embedded || !hasEmbeddedCloudLogin}
+    />
+  ) : null;
 
   return (
     <Card className={isDeploymentView ? "w-full" : "h-fit"} variant="secondary">
@@ -2054,18 +2074,23 @@ function DeploymentCard({
             <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
           </ProgressBar>
         ) : null}
-        {deployment.lastError ? <InlineMessage tone="danger" title="Last operation failed" detail={deployment.lastError} /> : null}
-        {refreshError ? <InlineMessage tone="warning" title="Status refresh failed" detail={refreshError} /> : null}
-        {(deployment.lastError || refreshError) && canLoginCloudCredential(credential) ? (
-          <CloudLoginAction
-            api={api}
-            credential={credential}
-            isDisabled={pendingAction !== null}
-            onFeedback={onFeedback}
-            onPendingChange={(pending) => setPendingAction(pending ? "cloud-login" : null)}
-            onRefresh={onRefresh}
+        {deployment.lastError ? (
+          <InlineMessage
+            action={cloudLoginAction(true)}
+            detail={deployment.lastError}
+            title="Last operation failed"
+            tone="danger"
           />
         ) : null}
+        {refreshError ? (
+          <InlineMessage
+            action={deployment.lastError ? null : cloudLoginAction(true)}
+            detail={refreshError}
+            title="Status refresh failed"
+            tone="warning"
+          />
+        ) : null}
+        {cloudLoginAction(false)}
         {isDeploymentView && deployment.provider === "aws" ? <AwsStatusChecks deployment={deployment} /> : null}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <DeploymentDetail label="Management ID" value={deployment.id} mono />
@@ -4593,6 +4618,18 @@ function CredentialCard({
   const [pending, setPending] = useState<"test" | "delete" | "login" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [testResult, setTestResult] = useState<CloudCredentialTestResult | null>(null);
+  const loginCredential = canLoginCloudCredential(credential) ? credential : undefined;
+  const cloudLogin = useCloudLoginActionController({
+    api,
+    credential: loginCredential,
+    isDisabled: pending !== null,
+    onFeedback,
+    onPendingChange: (active) => {
+      setPending(active ? "login" : null);
+      if (active) setTestResult(null);
+    },
+    onRefresh,
+  });
 
   const test = async (): Promise<void> => {
     setPending("test");
@@ -4668,15 +4705,9 @@ function CredentialCard({
         {canLoginCloudCredential(credential) ? (
           <div className="mt-4">
             <CloudLoginAction
-              api={api}
+              controller={cloudLogin}
               credential={credential}
               isDisabled={pending !== null}
-              onFeedback={onFeedback}
-              onPendingChange={(active) => {
-                setPending(active ? "login" : null);
-                if (active) setTestResult(null);
-              }}
-              onRefresh={onRefresh}
             />
           </div>
         ) : null}
@@ -4725,7 +4756,15 @@ function azureCredentialAuthenticationLabel(credential: Extract<CloudCredentialS
   return "loginAccountId" in credential ? "Azure CLI + Azure Login" : "Azure CLI";
 }
 
-function CloudLoginAction({
+interface CloudLoginActionController {
+  readonly error: string | null;
+  readonly isCancelling: boolean;
+  readonly isPending: boolean;
+  readonly cancel: () => Promise<void>;
+  readonly login: () => Promise<void>;
+}
+
+function useCloudLoginActionController({
   api,
   credential,
   isDisabled,
@@ -4734,43 +4773,54 @@ function CloudLoginAction({
   onRefresh,
 }: {
   readonly api: CloudDeploymentAPI;
-  readonly credential: CloudCredentialSummary;
+  readonly credential?: CloudCredentialSummary | undefined;
   readonly isDisabled: boolean;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onPendingChange: (pending: boolean) => void;
   readonly onRefresh: () => Promise<void>;
-}): React.JSX.Element {
-  const loginName = credential.provider === "aws" ? "AWS Login" : "Azure Login";
+}): CloudLoginActionController {
   const [isPending, setIsPending] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const active = useRef(false);
+  const cancelling = useRef(false);
   const cancelled = useRef(false);
   const mounted = useRef(true);
+  const attempt = useRef(0);
+  const onPendingChangeRef = useRef(onPendingChange);
+  onPendingChangeRef.current = onPendingChange;
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      if (active.current) {
+      attempt.current += 1;
+      const wasActive = active.current;
+      active.current = false;
+      cancelling.current = false;
+      if (wasActive && credential) {
         void (credential.provider === "aws" ? api.cancelAwsLogin() : api.cancelAzureLogin()).catch(() => undefined);
+        onPendingChangeRef.current(false);
       }
     };
-  }, [api, credential.provider]);
+  }, [api, credential?.id, credential?.provider]);
 
   const login = async (): Promise<void> => {
-    if (active.current || isDisabled) return;
+    if (!credential || active.current || cancelling.current || isDisabled) return;
+    const currentAttempt = attempt.current + 1;
+    attempt.current = currentAttempt;
     active.current = true;
     cancelled.current = false;
     setIsPending(true);
     setError(null);
     onPendingChange(true);
+    const loginName = credential.provider === "aws" ? "AWS Login" : "Azure Login";
     try {
       const result = await (credential.provider === "aws"
         ? api.loginAwsCredential({ credentialId: credential.id })
         : api.loginAzureCredential({ credentialId: credential.id }));
+      if (!mounted.current || attempt.current !== currentAttempt) return;
       active.current = false;
-      if (!mounted.current) return;
       if (!result.ok || !result.value) {
         if (!cancelled.current) setError(result.error ?? `${loginName} could not be completed.`);
         return;
@@ -4778,41 +4828,88 @@ function CloudLoginAction({
       onFeedback({ tone: "success", title: `${loginName} complete`, detail: `${credential.label} is signed in.` });
       await onRefresh();
     } catch (caught) {
-      if (mounted.current && !cancelled.current) setError(errorMessage(caught));
+      if (mounted.current && attempt.current === currentAttempt && !cancelled.current) setError(errorMessage(caught));
     } finally {
-      active.current = false;
-      if (mounted.current) {
-        setIsPending(false);
-        onPendingChange(false);
+      if (attempt.current === currentAttempt) {
+        active.current = false;
+        cancelling.current = false;
+        if (mounted.current) {
+          setIsPending(false);
+          setIsCancelling(false);
+          onPendingChange(false);
+        }
       }
     }
   };
 
   const cancel = async (): Promise<void> => {
-    if (isCancelling) return;
+    if (!credential || !active.current || cancelling.current) return;
+    const currentAttempt = attempt.current;
+    cancelling.current = true;
     cancelled.current = true;
     setIsCancelling(true);
+    const loginName = credential.provider === "aws" ? "AWS Login" : "Azure Login";
     try {
       const result = await (credential.provider === "aws" ? api.cancelAwsLogin() : api.cancelAzureLogin());
-      if (!result.ok && mounted.current) {
+      if (!result.ok && mounted.current && attempt.current === currentAttempt) {
         cancelled.current = false;
         setError(result.error ?? `${loginName} could not be cancelled.`);
       }
     } catch (caught) {
       cancelled.current = false;
-      if (mounted.current) setError(errorMessage(caught));
+      if (mounted.current && attempt.current === currentAttempt) setError(errorMessage(caught));
     } finally {
-      if (mounted.current) setIsCancelling(false);
+      if (mounted.current && attempt.current === currentAttempt) setIsCancelling(false);
+      cancelling.current = false;
     }
   };
 
+  return { cancel, error, isCancelling, isPending, login };
+}
+
+function CloudLoginAction({
+  controller,
+  credential,
+  isDisabled,
+  isEmbedded = false,
+  showDetails = true,
+}: {
+  readonly controller: CloudLoginActionController;
+  readonly credential: CloudCredentialSummary;
+  readonly isDisabled: boolean;
+  readonly isEmbedded?: boolean;
+  readonly showDetails?: boolean;
+}): React.JSX.Element {
+  const loginName = credential.provider === "aws" ? "AWS Login" : "Azure Login";
+
   return (
     <div className="space-y-3">
-      {error ? <InlineMessage tone="danger" title={`${loginName} failed`} detail={error} /> : null}
-      {isPending ? <p role="status" className="text-sm text-muted">Complete {loginName} in your browser, then return here.</p> : null}
+      {showDetails && controller.error ? isEmbedded ? (
+        <p className="text-sm leading-5 opacity-80">
+          <span className="font-semibold">{loginName} failed.</span> {controller.error}
+        </p>
+      ) : <InlineMessage tone="danger" title={`${loginName} failed`} detail={controller.error} /> : null}
+      {showDetails && controller.isPending ? (
+        <p {...(isEmbedded ? {} : { role: "status" })} className="text-sm text-muted">
+          Complete {loginName} in your browser, then return here.
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button aria-label={`${loginName} for ${credential.label}`} isDisabled={isDisabled} isPending={isPending} size="sm" variant="outline" onPress={() => void login()}>{loginName}</Button>
-        {isPending ? <Button isPending={isCancelling} size="sm" variant="tertiary" onPress={() => void cancel()}>Cancel {loginName}</Button> : null}
+        <Button
+          aria-label={`${loginName} for ${credential.label}${isEmbedded ? " from error message" : ""}`}
+          isDisabled={(isDisabled && !controller.isPending) || (controller.isPending && !showDetails)}
+          isPending={controller.isPending && showDetails}
+          size="sm"
+          variant="outline"
+          onPress={() => void controller.login()}
+        >
+          {loginName}
+        </Button>
+        {showDetails && controller.isPending ? (
+          <Button isPending={controller.isCancelling} size="sm" variant="tertiary" onPress={() => void controller.cancel()}>
+            Cancel {loginName}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
@@ -5205,11 +5302,17 @@ function summarizePermissionIds(ids: readonly string[]): string {
   return ids.length > 3 ? `${visible}, +${ids.length - 3} more` : visible;
 }
 
-function InlineMessage({ tone, title, detail }: Feedback): React.JSX.Element {
+function InlineMessage({
+  action,
+  tone,
+  title,
+  detail,
+}: Feedback & { readonly action?: React.ReactNode }): React.JSX.Element {
   return (
     <div className={`rounded-2xl px-4 py-3 ${feedbackToneClass(tone)}`} role={tone === "danger" ? "alert" : "status"}>
       <p className="text-sm font-semibold">{title}</p>
       <p className="mt-1 text-sm leading-5 opacity-80">{detail}</p>
+      {action ? <div className="mt-3">{action}</div> : null}
     </div>
   );
 }

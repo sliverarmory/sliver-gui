@@ -24,6 +24,9 @@ const MAX_CONCURRENT_TASK_DETAILS = 8;
 const MAX_CONCURRENT_TASK_CANCELLATIONS = 8;
 const MAX_CONCURRENT_TASK_REFRESHES = 16;
 const MAX_TASK_CATALOGS = 512;
+const MAX_RESULT_ROWS = 256;
+const MAX_RESULT_TEXT = 4_096;
+const MAX_RESULT_NESTED_ITEMS = 64;
 const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const CANCELLABLE_TASK_DESCRIPTIONS = new Set([
   "Ping",
@@ -44,6 +47,10 @@ const CANCELLABLE_TASK_DESCRIPTIONS = new Set([
   "ImpersonateReq",
   "RevToSelfReq",
   "GetPrivsReq",
+  "PwdReq",
+  "LsReq",
+  "PsReq",
+  "IfconfigReq",
 ]);
 
 interface InternalTask {
@@ -109,6 +116,10 @@ const EXPECTED_DESCRIPTION_BY_OPERATION: Readonly<Partial<Record<TargetOperation
   "target.env-unset": "UnsetEnvReq",
   "beacon.reconfigure": "ReconfigureReq",
   "beacon.open-session": "OpenSession",
+  "beacon.filesystem.pwd": "PwdReq",
+  "beacon.filesystem.ls": "LsReq",
+  "beacon.process.list": "PsReq",
+  "beacon.network.interfaces": "IfconfigReq",
 });
 
 const EXTERNAL_OPERATION_BY_DESCRIPTION = new Map<string, TargetOperationId>(
@@ -295,7 +306,11 @@ export class BeaconTaskStore {
           "The beacon task result did not match the expected empty response",
         );
       }
-      if (content.Response.length === 0 && !requiresExactlyEmptyResponse(operationId)) {
+      if (
+        content.Response.length === 0 &&
+        !requiresExactlyEmptyResponse(operationId) &&
+        !allowsEmptyDecodedResponse(operationId)
+      ) {
         return detailError(
           base,
           operationId,
@@ -714,6 +729,101 @@ function decodeDisposition(
         truncated: false,
       };
     }
+    case "beacon.filesystem.pwd": {
+      const decoded = sliverpb.Pwd.decode(response);
+      // Canonical implant success payloads for these read commands omit the
+      // embedded Response entirely; only a present error envelope is a
+      // target-reported failure.
+      assertResponse(decoded.Response?.Err);
+      const path = boundedResultText(decoded.Path, MAX_RESULT_TEXT);
+      return {
+        kind: "structured-detail" as const,
+        title: "Working directory",
+        fields: [{ label: "Path", value: path.value }],
+        truncated: path.changed,
+      };
+    }
+    case "beacon.filesystem.ls": {
+      const decoded = sliverpb.Ls.decode(response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.Files.length > MAX_RESULT_ROWS;
+      const text = (value: string, maximum = MAX_RESULT_TEXT): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const rows = decoded.Files.slice(0, MAX_RESULT_ROWS).map((file) => [
+        text(file.Name, 512),
+        file.IsDir ? "Directory" : "File",
+        text(file.Size, 128),
+        text(file.ModTime, 128),
+        text(file.Mode, 128),
+        text(file.Link),
+        text(file.Uid, 128),
+        text(file.Gid, 128),
+      ]);
+      return {
+        kind: "table" as const,
+        columns: ["Name", "Type", "Size", "Modified", "Mode", "Link", "UID", "GID"],
+        rows,
+        truncated,
+      };
+    }
+    case "beacon.process.list": {
+      const decoded = sliverpb.Ps.decode(response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.Processes.length > MAX_RESULT_ROWS;
+      const text = (value: string, maximum = MAX_RESULT_TEXT): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const rows = decoded.Processes.slice(0, MAX_RESULT_ROWS).map((process) => {
+        const commandLineItems = process.CmdLine.slice(0, MAX_RESULT_NESTED_ITEMS);
+        if (commandLineItems.length !== process.CmdLine.length) truncated = true;
+        return [
+          nonNegativeInteger(process.Pid),
+          nonNegativeInteger(process.Ppid),
+          text(process.Executable),
+          text(process.Owner, 512),
+          text(process.Architecture, 128),
+          nonNegativeInteger(process.SessionID),
+          text(commandLineItems.join(" ")),
+        ];
+      });
+      return {
+        kind: "table" as const,
+        columns: ["PID", "PPID", "Executable", "Owner", "Architecture", "Session", "Command line"],
+        rows,
+        truncated,
+      };
+    }
+    case "beacon.network.interfaces": {
+      const decoded = sliverpb.Ifconfig.decode(response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.NetInterfaces.length > MAX_RESULT_ROWS;
+      const text = (value: string, maximum = MAX_RESULT_TEXT): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const rows = decoded.NetInterfaces.slice(0, MAX_RESULT_ROWS).map((networkInterface) => {
+        const addresses = networkInterface.IPAddresses.slice(0, MAX_RESULT_NESTED_ITEMS);
+        if (addresses.length !== networkInterface.IPAddresses.length) truncated = true;
+        return [
+          nonNegativeInteger(networkInterface.Index),
+          text(networkInterface.Name, 512),
+          text(networkInterface.MAC, 128),
+          text(addresses.join(", ")),
+        ];
+      });
+      return {
+        kind: "table" as const,
+        columns: ["Index", "Name", "MAC", "Addresses"],
+        rows,
+        truncated,
+      };
+    }
     case "target.rename":
       return {
         kind: "structured-detail" as const,
@@ -737,6 +847,12 @@ function assertEmbeddedResponse(response: { Err?: string } | undefined): void {
 
 function requiresExactlyEmptyResponse(operationId: TargetOperationId): boolean {
   return operationId === "beacon.reconfigure" || operationId === "beacon.open-session";
+}
+
+function allowsEmptyDecodedResponse(operationId: TargetOperationId): boolean {
+  // An empty protobuf message is the canonical encoding of a successful
+  // inventory response containing zero rows.
+  return operationId === "beacon.process.list" || operationId === "beacon.network.interfaces";
 }
 
 function detailError(
@@ -826,4 +942,13 @@ function requireIdentifier(value: string, label: string): string {
 
 function boundedText(value: string, maximum: number): string {
   return [...value.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/gu, " ").trim()].slice(0, maximum).join("");
+}
+
+function boundedResultText(value: string, maximum: number): { value: string; changed: boolean } {
+  const bounded = boundedText(value, maximum);
+  return { value: bounded, changed: bounded !== value };
+}
+
+function nonNegativeInteger(value: number): number | null {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }

@@ -88,6 +88,10 @@ export interface OperationEngineHost {
     | "getEnvSession"
     | "reconfigureBeacon"
     | "openSessionFromBeacon"
+    | "pwdBeacon"
+    | "lsBeacon"
+    | "psBeacon"
+    | "ifconfigBeacon"
   >;
   ownerWindowId: number;
   resolveActiveTarget(): ResolvedOperationTarget | null | Promise<ResolvedOperationTarget | null>;
@@ -1071,6 +1075,14 @@ export class OperationEngine {
           secondsToNanoseconds(input.delaySeconds),
           timeout,
         );
+      case "beacon.filesystem.pwd":
+        return this.host.client.pwdBeacon(targetRef.id, timeout);
+      case "beacon.filesystem.ls":
+        return this.host.client.lsBeacon(targetRef.id, input.path, timeout);
+      case "beacon.process.list":
+        return this.host.client.psBeacon(targetRef.id, input.fullInfo, timeout);
+      case "beacon.network.interfaces":
+        return this.host.client.ifconfigBeacon(targetRef.id, timeout);
     }
   }
 
@@ -1649,6 +1661,11 @@ function decodeSynchronousDisposition(
         text: boundedText("Session conversion submitted", maximumTextCharacters),
         truncated: false,
       };
+    case "beacon.filesystem.pwd":
+    case "beacon.filesystem.ls":
+    case "beacon.process.list":
+    case "beacon.network.interfaces":
+      throw new Error("Beacon read operations require asynchronous task decoding");
   }
 }
 
@@ -1672,6 +1689,10 @@ function reconciledMutationDisposition(operationId: TargetOperationInput["operat
     case "target.ping":
     case "beacon.reconfigure":
     case "beacon.open-session":
+    case "beacon.filesystem.pwd":
+    case "beacon.filesystem.ls":
+    case "beacon.process.list":
+    case "beacon.network.interfaces":
       return structuredResult("Operation reconciled", "The requested state was verified");
   }
 }
@@ -1732,6 +1753,14 @@ function successMessage(operationId: TargetOperationInput["operationId"]): strin
       return "The beacon configuration was submitted";
     case "beacon.open-session":
       return "The session conversion was submitted";
+    case "beacon.filesystem.pwd":
+      return "The working directory request was submitted";
+    case "beacon.filesystem.ls":
+      return "The directory listing request was submitted";
+    case "beacon.process.list":
+      return "The process listing request was submitted";
+    case "beacon.network.interfaces":
+      return "The network interface request was submitted";
   }
 }
 

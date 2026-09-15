@@ -12,6 +12,10 @@ export const TARGET_OPERATION_IDS = Object.freeze([
   "target.env-unset",
   "beacon.reconfigure",
   "beacon.open-session",
+  "beacon.filesystem.pwd",
+  "beacon.filesystem.ls",
+  "beacon.process.list",
+  "beacon.network.interfaces",
 ] as const);
 
 export type TargetOperationId = (typeof TARGET_OPERATION_IDS)[number];
@@ -56,6 +60,24 @@ export interface OpenBeaconSessionOperationInput {
   delaySeconds: number;
 }
 
+export interface BeaconWorkingDirectoryOperationInput {
+  operationId: "beacon.filesystem.pwd";
+}
+
+export interface BeaconDirectoryListingOperationInput {
+  operationId: "beacon.filesystem.ls";
+  path: string;
+}
+
+export interface BeaconProcessListOperationInput {
+  operationId: "beacon.process.list";
+  fullInfo: boolean;
+}
+
+export interface BeaconNetworkInterfacesOperationInput {
+  operationId: "beacon.network.interfaces";
+}
+
 /**
  * The complete renderer-submittable operation surface. The selected target is
  * intentionally absent: the main process resolves it from the calling
@@ -67,7 +89,11 @@ export type TargetOperationInput =
   | SetEnvironmentOperationInput
   | UnsetEnvironmentOperationInput
   | ReconfigureBeaconOperationInput
-  | OpenBeaconSessionOperationInput;
+  | OpenBeaconSessionOperationInput
+  | BeaconWorkingDirectoryOperationInput
+  | BeaconDirectoryListingOperationInput
+  | BeaconProcessListOperationInput
+  | BeaconNetworkInterfacesOperationInput;
 
 export const TARGET_OPERATION_STATES = Object.freeze([
   "queued",
@@ -316,6 +342,7 @@ export const OPERATION_INPUT_LIMITS = Object.freeze({
   renameLength: 32,
   environmentNameLength: 256,
   environmentValueLength: 16_384,
+  beaconPathLength: 4_096,
   maximumIntervalSeconds: 604_800,
   maximumDelaySeconds: 86_400,
   pageCursorLength: 256,
@@ -370,6 +397,20 @@ export function parseTargetOperationInput(value: unknown): TargetOperationInput 
       return parseBeaconReconfigureInput(record);
     case "beacon.open-session":
       return parseOpenBeaconSessionInput(record);
+    case "beacon.filesystem.pwd":
+    case "beacon.network.interfaces":
+      requireExactKeys(record, ["operationId"]);
+      return { operationId };
+    case "beacon.filesystem.ls": {
+      requireExactKeys(record, ["operationId", "path"]);
+      const path = requireString(record["path"], "path", OPERATION_INPUT_LIMITS.beaconPathLength);
+      if (path.includes("\0")) throw new TypeError("path must not contain NUL characters");
+      return { operationId, path };
+    }
+    case "beacon.process.list":
+      requireExactKeys(record, ["operationId", "fullInfo"]);
+      if (typeof record["fullInfo"] !== "boolean") throw new TypeError("fullInfo must be a boolean");
+      return { operationId, fullInfo: record["fullInfo"] };
   }
 }
 

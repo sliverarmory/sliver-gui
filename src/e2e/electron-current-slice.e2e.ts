@@ -2218,6 +2218,7 @@ async function verifyM1TargetsAndOperations(
     { id: "beacon.open-session", available: true },
     "a safe main-owned C2 endpoint must enable beacon session conversion",
   );
+  await verifyBeaconAsyncTaskWorkspace(electronApplication, page, beaconRef);
   await verifyInteractionWindowPopout(electronApplication, page, "beacon", "m1-beacon", artifactDirectory);
   await verifyM4BeaconExecution(electronApplication, page);
 
@@ -2347,7 +2348,7 @@ async function verifyM1TargetsAndOperations(
 
   const taskPage = await invokeSliver(page, "listBeaconTasks", { limit: 1 });
   assert.equal(taskPage.ok, true);
-  assert.equal(taskPage.value?.page.total, 4);
+  assert.equal(taskPage.value?.page.total, 5);
   assert.equal(taskPage.value?.page.truncated, true);
   assert.match(taskPage.value?.page.nextCursor ?? "", /^task:v2:/u);
   const nextTaskPage = await invokeSliver(page, "listBeaconTasks", {
@@ -2512,9 +2513,20 @@ async function verifyInteractionWindowPopout(
       await popout.getByRole("navigation", { name: "Session workspace breadcrumbs", exact: true }).waitFor();
       await popout.getByRole("tablist", { name: "Session interaction sections", exact: true }).waitFor();
     } else {
-      await popout.getByRole("heading", { name: "Beacon tasks", exact: true }).waitFor();
-      await popout.getByRole("heading", { name: "All target operations", exact: true }).waitFor();
-      await popout.getByRole("heading", { name: "Operator presence", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "Task completion", exact: true }).waitFor();
+      assert.equal(
+        await popout.getByRole("heading", { name: "All target operations", exact: true }).count(),
+        0,
+        "the beacon popout must use the task-focused interaction surface",
+      );
+      assert.equal(
+        await popout.getByRole("heading", { name: "Operator presence", exact: true }).count(),
+        0,
+        "the beacon popout must not retain the catalog sidebar content",
+      );
     }
     await popout.screenshot({
       animations: "disabled",
@@ -2651,7 +2663,7 @@ async function verifyInteractionWindowPopout(
         "dedicated interaction operations must remain destination-window-owned",
       );
     } else {
-      await popout.getByRole("button", { name: "Run ping", exact: true }).waitFor();
+      await popout.getByRole("button", { name: "Queue task", exact: true }).waitFor();
     }
 
     const replacementMode = mode === "session" ? "beacon" : "session";
@@ -2700,6 +2712,72 @@ async function verifyInteractionWindowPopout(
     await popout?.close().catch(() => undefined);
   }
   assert.deepEqual(pageErrors, []);
+}
+
+async function verifyBeaconAsyncTaskWorkspace(
+  electronApplication: ElectronApplication,
+  page: Page,
+  beaconRef: TargetRef,
+): Promise<void> {
+  await page.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Task completion", exact: true }).waitFor();
+
+  const command = page.locator('[data-slot="autocomplete-trigger"]:visible');
+  await command.click();
+  const search = page.getByRole("searchbox", { name: "Search beacon commands", exact: true });
+  await search.fill("list directory");
+  await page.getByRole("option", { name: /List directory/iu }).click();
+  const path = page.locator('input[name="path"]:visible');
+  await path.fill("/Users/e2e/workspace");
+
+  const beforeQueue = await readFakeState(electronApplication);
+  const existingTaskIds = new Set(beforeQueue.tasks.map((task) => task.id));
+  const lsCalls = fakeMethodCount(beforeQueue, "lsBeacon");
+  await electronApplication.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  await page.getByRole("button", { name: "Queue task", exact: true }).click();
+  await waitForFakeMethodCount(electronApplication, "lsBeacon", lsCalls + 1);
+
+  const queuedTask = await waitForNewFakeBeaconTask(
+    electronApplication,
+    existingTaskIds,
+    "LsReq",
+  );
+  assert.equal(queuedTask.beaconId, beaconRef.id);
+  assert.equal(queuedTask.state, "pending");
+
+  const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+  const queuedRow = queue.getByRole("row").filter({ hasText: queuedTask.id });
+  await queuedRow.waitFor();
+  await queuedRow.getByText("Pending", { exact: true }).waitFor();
+  await page.getByText("Waiting for the beacon", { exact: true }).waitFor();
+
+  await electronApplication.evaluate((_electron, taskId) => {
+    globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId, true);
+  }, queuedTask.id);
+  await queuedRow.getByText("Completed", { exact: true }).waitFor();
+  await page.getByText("Directory listing", { exact: true }).waitFor();
+  await page.getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
+  await page.getByText("projects", { exact: true }).waitFor();
+
+  await page.getByRole("button", { name: "Back to live beacons", exact: true }).click();
+  await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
+  const beaconsGrid = page.locator('[aria-label="Sliver beacons"]');
+  await beaconsGrid.getByText("m1-beacon", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(),
+    0,
+    "Back from Beacon Interact must return to the live beacon catalog",
+  );
+
+  await activateDataGridRow(
+    page.getByRole("row", { name: /m1-beacon/iu }),
+    "m1-beacon",
+    page.getByRole("heading", { name: "Async task workspace", exact: true }),
+  );
 }
 
 async function verifyM2SessionWorkspace(
@@ -3028,11 +3106,9 @@ async function verifyM4BeaconExecution(
   electronApplication: ElectronApplication,
   page: Page,
 ): Promise<void> {
-  await page.getByRole("button", { name: "Execution", exact: true }).click();
-  const beaconSheet = page.getByRole("dialog", { name: "Beacon execution", exact: true });
-  await beaconSheet.waitFor();
-  await beaconSheet.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
-  await beaconSheet.getByRole("button", { name: "Open: Execute process", exact: true }).click();
+  await page.getByRole("button", { name: "Show advanced execution", exact: true }).click();
+  await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Open: Execute process", exact: true }).click();
 
   const configuration = page.getByRole("dialog", { name: "Execute process", exact: true });
   await configuration.getByLabel("Executable path").fill("/usr/bin/printf");
@@ -3051,7 +3127,7 @@ async function verifyM4BeaconExecution(
   });
   const beaconExecuteCalls = fakeMethodCount(await readFakeState(electronApplication), "executeBeacon");
   await review.getByRole("button", { name: "Execute", exact: true }).click();
-  const latestExecution = beaconSheet.getByRole("region", { name: "Latest execution", exact: true });
+  const latestExecution = page.getByRole("region", { name: "Latest execution", exact: true });
   await latestExecution.waitFor();
   await latestExecution.getByText("Submitted", { exact: true }).waitFor();
   await latestExecution.getByText("The reviewed operation was submitted to the selected target.", { exact: true }).waitFor();
@@ -3063,8 +3139,8 @@ async function verifyM4BeaconExecution(
   assert.equal(submittedTask?.state, "pending");
   assert.equal(afterBeacon.m4Audit.retainedSensitiveInputs, 0);
 
-  await page.keyboard.press("Escape");
-  await beaconSheet.waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Hide advanced execution", exact: true }).click();
+  await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor({ state: "hidden" });
 }
 
 async function activateDataGridRow(
@@ -4589,6 +4665,28 @@ async function waitForFakeMethodCount(
   throw new Error(
     `Timed out waiting for ${method} call ${minimum}; observed ${latest}; ` +
       `recent fake calls: ${latestMethods.slice(-20).join(", ") || "none"}`,
+  );
+}
+
+async function waitForNewFakeBeaconTask(
+  electronApplication: ElectronApplication,
+  existingTaskIds: ReadonlySet<string>,
+  description: string,
+  timeoutMs = 10_000,
+): Promise<FakeStateSnapshot["tasks"][number]> {
+  const deadline = Date.now() + timeoutMs;
+  let latestTasks: FakeStateSnapshot["tasks"] = [];
+  while (Date.now() < deadline) {
+    latestTasks = (await readFakeState(electronApplication)).tasks;
+    const task = latestTasks.find((candidate) =>
+      !existingTaskIds.has(candidate.id) && candidate.description === description
+    );
+    if (task) return task;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for a new ${description} beacon task; ` +
+      `observed: ${JSON.stringify(latestTasks)}`,
   );
 }
 

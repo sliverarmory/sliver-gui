@@ -362,6 +362,26 @@ describe("BeaconTaskStore", () => {
       },
       { description: "ReconfigureReq", operationId: "beacon.reconfigure", response: Buffer.alloc(0) },
       { description: "OpenSession", operationId: "beacon.open-session", response: Buffer.alloc(0) },
+      {
+        description: "PwdReq",
+        operationId: "beacon.filesystem.pwd",
+        response: Buffer.from(sliverpb.Pwd.encode(sliverpb.Pwd.create({ Path: "/tmp" })).finish()),
+      },
+      {
+        description: "LsReq",
+        operationId: "beacon.filesystem.ls",
+        response: Buffer.from(sliverpb.Ls.encode(sliverpb.Ls.create({ Exists: true })).finish()),
+      },
+      {
+        description: "PsReq",
+        operationId: "beacon.process.list",
+        response: Buffer.from(sliverpb.Ps.encode(sliverpb.Ps.create()).finish()),
+      },
+      {
+        description: "IfconfigReq",
+        operationId: "beacon.network.interfaces",
+        response: Buffer.from(sliverpb.Ifconfig.encode(sliverpb.Ifconfig.create()).finish()),
+      },
     ] as const;
 
     for (const [index, testCase] of cases.entries()) {
@@ -392,6 +412,139 @@ describe("BeaconTaskStore", () => {
     expect(unknownDetail.operationId).toBeUndefined();
     expect(unknownDetail.disposition).toBeUndefined();
     expect(unknownClient.fetchBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it("decodes bounded, sanitized filesystem, process, and interface dispositions", async () => {
+    const cases = [
+      {
+        taskId: "pwd_result",
+        description: "PwdReq",
+        operationId: "beacon.filesystem.pwd" as const,
+        response: Buffer.from(sliverpb.Pwd.encode(sliverpb.Pwd.create({
+          Path: "/tmp\nworking",
+        })).finish()),
+        expected: {
+          kind: "structured-detail",
+          fields: [{ label: "Path", value: "/tmp working" }],
+          truncated: true,
+        },
+      },
+      {
+        taskId: "ls_result",
+        description: "LsReq",
+        operationId: "beacon.filesystem.ls" as const,
+        response: Buffer.from(sliverpb.Ls.encode(sliverpb.Ls.create({
+          Path: "/tmp",
+          Exists: true,
+          Files: Array.from({ length: 257 }, (_, index) => ({
+            Name: index === 0 ? "first\nfile" : `file-${index}`,
+            IsDir: index === 1,
+            Size: String(index),
+            ModTime: "1",
+            Mode: "-rw-r--r--",
+            Link: "",
+            Uid: "1000",
+            Gid: "1000",
+          })),
+        })).finish()),
+        expected: {
+          kind: "table",
+          columns: ["Name", "Type", "Size", "Modified", "Mode", "Link", "UID", "GID"],
+          rows: expect.arrayContaining([["first file", "File", "0", "1", "-rw-r--r--", "", "1000", "1000"]]),
+          truncated: true,
+        },
+      },
+      {
+        taskId: "ps_result",
+        description: "PsReq",
+        operationId: "beacon.process.list" as const,
+        response: Buffer.from(sliverpb.Ps.encode(sliverpb.Ps.create({
+          Processes: [{
+            Pid: 7,
+            Ppid: 1,
+            Executable: "/usr/bin/test\nprocess",
+            Owner: "user",
+            Architecture: "amd64",
+            SessionID: 2,
+            CmdLine: ["test", "--flag\u0000value"],
+          }],
+        })).finish()),
+        expected: {
+          kind: "table",
+          columns: ["PID", "PPID", "Executable", "Owner", "Architecture", "Session", "Command line"],
+          rows: [[7, 1, "/usr/bin/test process", "user", "amd64", 2, "test --flag value"]],
+          truncated: true,
+        },
+      },
+      {
+        taskId: "ifconfig_result",
+        description: "IfconfigReq",
+        operationId: "beacon.network.interfaces" as const,
+        response: Buffer.from(sliverpb.Ifconfig.encode(sliverpb.Ifconfig.create({
+          NetInterfaces: [{ Index: 3, Name: "eth\n0", MAC: "00:11:22:33:44:55", IPAddresses: ["10.0.0.1"] }],
+        })).finish()),
+        expected: {
+          kind: "table",
+          columns: ["Index", "Name", "MAC", "Addresses"],
+          rows: [[3, "eth 0", "00:11:22:33:44:55", "10.0.0.1"]],
+          truncated: true,
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const metadata = clientpb.BeaconTasks.create({
+        Tasks: [task(testCase.taskId, "completed", 10, testCase.description)],
+      });
+      const responseBytes = testCase.response;
+      const client = fakeClient(metadata, clientpb.BeaconTask.create({
+        ...metadata.Tasks[0],
+        Response: responseBytes,
+      }));
+      const store = new BeaconTaskStore(client);
+      await store.refresh(beaconId);
+
+      const detail = await store.detail(beaconId, testCase.taskId, () => ({
+        ownership: localOwnership,
+        localRequestId: `request_${testCase.taskId}`,
+        operationId: testCase.operationId,
+      }));
+
+      expect(detail).toMatchObject({ operationId: testCase.operationId, disposition: testCase.expected });
+      if (testCase.operationId === "beacon.filesystem.ls") {
+        expect(detail.disposition?.kind === "table" ? detail.disposition.rows : []).toHaveLength(256);
+      }
+      expect([...responseBytes]).toEqual(new Array(responseBytes.length).fill(0));
+    }
+  });
+
+  it("rejects a present target error on a common beacon read without exposing its text", async () => {
+    const metadata = clientpb.BeaconTasks.create({
+      Tasks: [task("pwd_target_error", "completed", 10, "PwdReq")],
+    });
+    const responseBytes = Buffer.from(sliverpb.Pwd.encode(sliverpb.Pwd.create({
+      Response: { Err: "sensitive target path failure" },
+    })).finish());
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0],
+      Response: responseBytes,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+
+    const detail = await store.detail(beaconId, "pwd_target_error", () => ({
+      ownership: localOwnership,
+      localRequestId: "request_pwd_target_error",
+      operationId: "beacon.filesystem.pwd",
+    }));
+
+    expect(detail).toMatchObject({
+      operationId: "beacon.filesystem.pwd",
+      errorKind: "target-reported",
+      error: "The beacon task response reported an error",
+    });
+    expect(detail.error).not.toContain("sensitive");
+    expect([...responseBytes]).toEqual(new Array(responseBytes.length).fill(0));
   });
 
   it("requires the canonical empty response for reconfigure and open-session tasks", async () => {
@@ -645,12 +798,16 @@ describe("BeaconTaskStore", () => {
     expect(client.cancelBeaconTask).toHaveBeenCalledOnce();
   });
 
-  it("advertises cancellation for the pinned transformed assembly and migrate task names", async () => {
+  it("advertises cancellation for reviewed execution and common beacon task names", async () => {
     const descriptions = [
       "InvokeExecuteAssemblyReq",
       "InvokeInProcExecuteAssemblyReq",
       "InvokeMigrateReq",
       "TaskReq",
+      "PwdReq",
+      "LsReq",
+      "PsReq",
+      "IfconfigReq",
     ];
     const client = fakeClient(clientpb.BeaconTasks.create({
       Tasks: descriptions.map((description, index) =>

@@ -34,7 +34,7 @@ import {
   type ApplicationSettingsValues,
 } from "../../shared/application-settings-contracts";
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
-import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
+import type { BeaconSummary, SessionSummary, TargetRef } from "../../shared/target-contracts";
 import sliverSidebarIcon from "./assets/sliver-sidebar.png";
 import {
   AppCommandPalette,
@@ -56,6 +56,11 @@ import {
 import { TargetsPage } from "./pages/TargetsPage";
 
 type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
+
+interface BeaconWorkspaceRoute {
+  target: TargetRef;
+  connectionIncarnation: number;
+}
 
 const infrastructureNavItems = [
   { id: "generate" as const, label: "Generate", description: "Create implant artifacts.", icon: faBolt },
@@ -139,6 +144,7 @@ export function App() {
   const [view, setView] = useState<ViewId>("operations");
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
+  const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
   const [isConnecting, setIsConnecting] = useState(false);
   const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(true);
   const [isLoadingSavedConfigs, setIsLoadingSavedConfigs] = useState(true);
@@ -359,6 +365,7 @@ export function App() {
   }, [compatibilityKey]);
   const changeView = useCallback((nextView: ViewId) => {
     setSessionWorkspaceRoute(undefined);
+    setBeaconWorkspaceRoute(undefined);
     setView(nextView);
   }, []);
   const updateSettings = useCallback((
@@ -402,6 +409,22 @@ export function App() {
     setSnapshot(next);
     setSessionWorkspaceRoute(route);
   }, []);
+  const openBeaconWorkspace = useCallback((beacon: BeaconSummary, target: TargetRef) => {
+    const backendEpoch = snapshot.connection.epoch;
+    if (
+      backendEpoch === undefined ||
+      target.mode !== "beacon" ||
+      target.id !== beacon.id ||
+      target.backendEpoch !== backendEpoch
+    ) {
+      toast.warning("Beacon changed", { description: "Reconnect and select the beacon again." });
+      return;
+    }
+    setBeaconWorkspaceRoute({
+      target,
+      connectionIncarnation: snapshot.connection.incarnation ?? 0,
+    });
+  }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
 
   useEffect(() => {
     if (!sessionWorkspaceRoute) return;
@@ -413,6 +436,20 @@ export function App() {
   }, [
     connected,
     sessionWorkspaceRoute,
+    snapshot.connection.epoch,
+    snapshot.connection.incarnation,
+  ]);
+
+  useEffect(() => {
+    if (!beaconWorkspaceRoute) return;
+    if (
+      !connected ||
+      snapshot.connection.epoch !== beaconWorkspaceRoute.target.backendEpoch ||
+      (snapshot.connection.incarnation ?? 0) !== beaconWorkspaceRoute.connectionIncarnation
+    ) setBeaconWorkspaceRoute(undefined);
+  }, [
+    beaconWorkspaceRoute,
+    connected,
     snapshot.connection.epoch,
     snapshot.connection.incarnation,
   ]);
@@ -668,7 +705,27 @@ export function App() {
                   />
                 )
               ) : null}
-              {view === "beacons" ? <TargetsPage key="beacons" mode="beacon" snapshot={snapshot} onSnapshot={setSnapshot} /> : null}
+              {view === "beacons" ? (
+                beaconWorkspaceRoute ? (
+                  <TargetsPage
+                    key={`beacon-workspace:${beaconWorkspaceRoute.target.backendEpoch}:${beaconWorkspaceRoute.connectionIncarnation}:${beaconWorkspaceRoute.target.id}:${beaconWorkspaceRoute.target.fingerprint}`}
+                    expectedTarget={beaconWorkspaceRoute.target}
+                    mode="beacon"
+                    presentation="dedicated"
+                    snapshot={snapshot}
+                    onBack={() => setBeaconWorkspaceRoute(undefined)}
+                    onSnapshot={setSnapshot}
+                  />
+                ) : (
+                  <TargetsPage
+                    key="beacons"
+                    mode="beacon"
+                    snapshot={snapshot}
+                    onOpenBeacon={openBeaconWorkspace}
+                    onSnapshot={setSnapshot}
+                  />
+                )
+              ) : null}
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
               {view === "loot" ? <LootPage snapshot={snapshot} /> : null}

@@ -49,6 +49,12 @@ import {
   E2E_AZURE_SUBSCRIPTION_ID,
   E2E_AZURE_TENANT_ID,
 } from "./cloud-deployment-fixture.js";
+import {
+  fakeBeaconIfconfigTaskResult,
+  fakeBeaconLsTaskResult,
+  fakeBeaconPsTaskResult,
+  fakeBeaconPwdTaskResult,
+} from "./beacon-interact-fixture.js";
 
 interface FakeMainState {
   configFactoryCalls: number;
@@ -1214,6 +1220,14 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         Response: response(false),
       });
     },
+    async ifconfigBeacon(beaconId: string) {
+      record("ifconfigBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconIfconfigTaskResult();
+      return sliverpb.Ifconfig.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result),
+      });
+    },
     async netstatSession(sessionId: string) {
       record("netstatSession");
       requireSession(sessionId);
@@ -1233,6 +1247,14 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       record("pwdSession");
       requireSession(sessionId);
       return sliverpb.Pwd.create({ Path: "/Users/e2e/workspace", Response: response(false) });
+    },
+    async pwdBeacon(beaconId: string) {
+      record("pwdBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconPwdTaskResult();
+      return sliverpb.Pwd.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result),
+      });
     },
     async cdSession(sessionId: string, path: string) {
       record("cdSession");
@@ -1255,6 +1277,14 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         timezone: "America/Los_Angeles",
         timezoneOffset: -420,
         Response: response(false),
+      });
+    },
+    async lsBeacon(beaconId: string, path: string) {
+      record("lsBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconLsTaskResult(path);
+      return sliverpb.Ls.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result),
       });
     },
     async downloadFileSession(
@@ -1448,6 +1478,14 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       return sliverpb.Ps.create({
         Processes: processInventory.map((process) => ({ ...process, CmdLine: [...process.CmdLine] })),
         Response: response(false),
+      });
+    },
+    async psBeacon(beaconId: string, fullInfo: boolean) {
+      record("psBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconPsTaskResult(fullInfo);
+      return sliverpb.Ps.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result),
       });
     },
     async terminateSessionProcess() { return unsupported("terminateSessionProcess"); },

@@ -36,6 +36,10 @@ describe("operation contracts", () => {
       "target.env-unset",
       "beacon.reconfigure",
       "beacon.open-session",
+      "beacon.filesystem.pwd",
+      "beacon.filesystem.ls",
+      "beacon.process.list",
+      "beacon.network.interfaces",
     ]);
     expect(TARGET_OPERATION_STATES).toEqual([
       "queued",
@@ -80,7 +84,7 @@ describe("operation contracts", () => {
     >();
   });
 
-  it("accepts only the six typed operation input shapes", () => {
+  it("accepts only the ten typed operation input shapes", () => {
     expect(parseTargetOperationInput({ operationId: "target.ping" })).toEqual({ operationId: "target.ping" });
     expect(parseTargetOperationInput({ operationId: "target.rename", name: "target-01.example" })).toEqual({
       operationId: "target.rename",
@@ -116,6 +120,20 @@ describe("operation contracts", () => {
     ).toEqual({
       operationId: "beacon.open-session",
       delaySeconds: 0,
+    });
+    expect(parseTargetOperationInput({ operationId: "beacon.filesystem.pwd" })).toEqual({
+      operationId: "beacon.filesystem.pwd",
+    });
+    expect(parseTargetOperationInput({ operationId: "beacon.filesystem.ls", path: "/tmp" })).toEqual({
+      operationId: "beacon.filesystem.ls",
+      path: "/tmp",
+    });
+    expect(parseTargetOperationInput({ operationId: "beacon.process.list", fullInfo: true })).toEqual({
+      operationId: "beacon.process.list",
+      fullInfo: true,
+    });
+    expect(parseTargetOperationInput({ operationId: "beacon.network.interfaces" })).toEqual({
+      operationId: "beacon.network.interfaces",
     });
   });
 
@@ -177,6 +195,16 @@ describe("operation contracts", () => {
         delaySeconds: 0,
       }),
     ).toThrow(/exactly these fields/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.filesystem.ls", path: "" })).toThrow(/1-4096/u);
+    expect(() =>
+      parseTargetOperationInput({ operationId: "beacon.filesystem.ls", path: "x".repeat(4_097) }),
+    ).toThrow(/1-4096/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.filesystem.ls", path: "bad\0path" }))
+      .toThrow(/NUL/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.process.list", fullInfo: 1 }))
+      .toThrow(/boolean/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.filesystem.pwd", target: "beacon_1" }))
+      .toThrow(/exactly/u);
   });
 
   it("strictly parses bounded pagination and task/request identifiers", () => {
