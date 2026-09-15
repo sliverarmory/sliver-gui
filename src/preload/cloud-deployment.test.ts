@@ -63,6 +63,7 @@ describe("Cloud Deployment preload bridge", () => {
       "chooseSshPrivateKey",
       "createCredential",
       "loginAwsCredential",
+      "copyAwsLoginLink",
       "cancelAwsLogin",
       "beginAzureLogin",
       "loginAzureCredential",
@@ -167,11 +168,13 @@ describe("Cloud Deployment preload bridge", () => {
     ]);
   });
 
-  it("keeps AWS sign-in and cancellation on fixed credential-scoped channels", async () => {
+  it("keeps AWS sign-in, link copying, and cancellation on fixed channels", async () => {
     const api = exposedApi();
     const input = { credentialId: "11111111-1111-4111-8111-111111111111" };
     await api.loginAwsCredential(input);
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, input);
+    await api.copyAwsLoginLink();
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink);
     await api.cancelAwsLogin();
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin);
   });

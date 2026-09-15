@@ -60,10 +60,20 @@ export class AwsConsoleLogin {
     }
   }
 
-  async login(region: string, signal?: AbortSignal): Promise<AwsConsoleLoginSession> {
+  async login(
+    region: string,
+    signal?: AbortSignal,
+    onPendingAuthorization?: (url: string | null) => void,
+  ): Promise<AwsConsoleLoginSession> {
     const endpoint = signInEndpoint(region);
     const scope = deadline(signal, this.#timeoutMs);
     let callback: Awaited<ReturnType<typeof openCallbackServer>> | undefined;
+    let authorizationPending = false;
+    const clearPendingAuthorization = () => {
+      if (!authorizationPending) return;
+      authorizationPending = false;
+      onPendingAuthorization?.(null);
+    };
     try {
       throwIfAborted(scope.signal);
       const state = randomUUID();
@@ -82,13 +92,27 @@ export class AwsConsoleLogin {
         redirect_uri: callback.redirectUri,
         code_challenge: createHash("sha256").update(verifier).digest("base64url"),
       }).toString();
+      // Keep the original request available to the owning main-process IPC
+      // handler so the user can continue in another browser if AWS rejects a
+      // stale browser session. The PKCE verifier and proof key never leave here.
+      authorizationPending = true;
+      onPendingAuthorization?.(authorizationUrl.toString());
+      const codeReceived = callback.code.then((code) => {
+        clearPendingAuthorization();
+        return code;
+      }, (error: unknown) => {
+        clearPendingAuthorization();
+        throw error;
+      });
+      // A browser callback can settle while its launcher is still pending.
+      void codeReceived.catch(() => undefined);
       try {
         await abortable(this.#openExternal(authorizationUrl.toString()), scope.signal);
       } catch {
         throwIfAborted(scope.signal);
         throw new AwsConsoleLoginError("browser-open-failed", "Could not open the AWS sign-in page in your browser.");
       }
-      const code = await callback.code;
+      const code = await codeReceived;
       const output = await this.#requestToken(endpoint, privateKeyPem, {
         clientId: CLIENT_ID,
         grantType: "authorization_code",
@@ -105,6 +129,7 @@ export class AwsConsoleLogin {
     } finally {
       callback?.close();
       scope.dispose();
+      clearPendingAuthorization();
     }
   }
 

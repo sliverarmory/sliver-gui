@@ -85,6 +85,67 @@ function proofContents(options: RequestInit | undefined): {
 }
 
 describe("AWS console browser login", () => {
+  it("lets a second browser finish the original pending request and withdraws the link before token exchange", async () => {
+    let browserOpened!: () => void;
+    const opened = new Promise<void>((resolve) => { browserOpened = resolve; });
+    let releaseBrowser!: () => void;
+    const browserLauncher = new Promise<void>((resolve) => { releaseBrowser = resolve; });
+    const onPendingAuthorization = vi.fn<(url: string | null) => void>();
+    const openExternal = vi.fn(async () => { browserOpened(); await browserLauncher; });
+    const tokenFetch = vi.fn<typeof fetch>(async () => {
+      expect(onPendingAuthorization).toHaveBeenLastCalledWith(null);
+      return Response.json(tokenOutput());
+    });
+    const login = new AwsConsoleLogin({ openExternal, fetch: tokenFetch });
+    const pending = login.login("us-west-2", undefined, onPendingAuthorization);
+    await opened;
+
+    const authorization = onPendingAuthorization.mock.calls[0]?.[0] ?? "";
+    expect(openExternal).toHaveBeenCalledWith(authorization);
+    expect(onPendingAuthorization).toHaveBeenCalledOnce();
+    expect(tokenFetch).not.toHaveBeenCalled();
+    const { redirectUri, state, authorizationUrl } = callbackInfo(authorization);
+    // A 400 in the first browser never reaches the app. The copied original
+    // request must still work from another browser on the same computer.
+    const response = await callbackRequest(redirectUri, { state, code: "second-browser-code" });
+    expect(response.status).toBe(200);
+    expect(onPendingAuthorization).toHaveBeenLastCalledWith(null);
+    expect(tokenFetch).not.toHaveBeenCalled();
+    releaseBrowser();
+    const session = await pending;
+    expect(session.loginSessionArn).toBe(ARN);
+    expect(onPendingAuthorization.mock.calls).toEqual([[authorization], [null]]);
+    const input = JSON.parse(String(tokenFetch.mock.calls[0]?.[1]?.body)) as Record<string, string>;
+    expect(input["code"]).toBe("second-browser-code");
+    expect(createHash("sha256").update(input["codeVerifier"] ?? "").digest("base64url"))
+      .toBe(authorizationUrl.searchParams.get("code_challenge"));
+    expect(authorization).not.toContain(input["codeVerifier"]);
+    expect(authorization).not.toContain(session.privateKey);
+  });
+
+  it.each(["browser-open-failed", "cancelled", "timeout"])("withdraws the recovery link after %s", async (failure) => {
+    const controller = new AbortController();
+    const onPendingAuthorization = vi.fn<(url: string | null) => void>();
+    let redirectUri = "";
+    const tokenFetch = vi.fn<typeof fetch>();
+    const login = new AwsConsoleLogin({
+      timeoutMs: 75,
+      fetch: tokenFetch,
+      openExternal: async (url) => {
+        redirectUri = callbackInfo(url).redirectUri;
+        expect(onPendingAuthorization).toHaveBeenLastCalledWith(url);
+        if (failure === "browser-open-failed") throw new Error("browser unavailable");
+        if (failure === "cancelled") controller.abort();
+      },
+    });
+
+    await expect(login.login("us-west-2", controller.signal, onPendingAuthorization)).rejects.toMatchObject({ code: failure });
+    expect(onPendingAuthorization).toHaveBeenCalledTimes(2);
+    expect(onPendingAuthorization).toHaveBeenLastCalledWith(null);
+    expect(tokenFetch).not.toHaveBeenCalled();
+    await expect(callbackRequest(redirectUri, { state: "late", code: "late" })).rejects.toThrow();
+  });
+
   it("exchanges a single loopback authorization with PKCE and a verifiable DPoP proof", async () => {
     let authorization: ReturnType<typeof callbackInfo> | undefined;
     let callbackResponse: Awaited<ReturnType<typeof callbackRequest>> | undefined;
@@ -188,6 +249,7 @@ describe("AWS console browser login", () => {
 
   it("handles an AWS callback denial without echoing authorization parameters", async () => {
     const tokenFetch = vi.fn<typeof fetch>();
+    const onPendingAuthorization = vi.fn<(url: string | null) => void>();
     const login = new AwsConsoleLogin({
       fetch: tokenFetch,
       openExternal: async (url) => {
@@ -195,9 +257,10 @@ describe("AWS console browser login", () => {
         const response = await callbackRequest(redirectUri, { state, error: "access_denied", error_description: "PRIVATE_ACCOUNT_DETAILS" });
         expect(response.status).toBe(400);
         expect(response.body).not.toContain("PRIVATE_ACCOUNT_DETAILS");
+        expect(onPendingAuthorization).toHaveBeenLastCalledWith(null);
       },
     });
-    await expect(login.login("us-west-2")).rejects.toMatchObject({ code: "authorization-failed" });
+    await expect(login.login("us-west-2", undefined, onPendingAuthorization)).rejects.toMatchObject({ code: "authorization-failed" });
     expect(tokenFetch).not.toHaveBeenCalled();
   });
 

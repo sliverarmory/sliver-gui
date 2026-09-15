@@ -235,7 +235,7 @@ export interface CloudAwsProfileSource {
 }
 
 export interface CloudAwsConsoleLogin {
-  login(region: string, signal?: AbortSignal): Promise<AwsConsoleLoginSession>;
+  login(region: string, signal?: AbortSignal, onPendingAuthorization?: (url: string | null) => void): Promise<AwsConsoleLoginSession>;
   refresh(session: AwsConsoleLoginSession, signal?: AbortSignal): Promise<AwsConsoleLoginSession>;
 }
 
@@ -885,6 +885,7 @@ export class CloudDeploymentService {
     input: CreateCloudCredentialInput,
     signal?: AbortSignal,
     ownerId = 0,
+    onPendingAuthorization?: (url: string | null) => void,
   ): Promise<OperationResult<CloudCredentialSummary>> {
     try {
       this.#assertActive();
@@ -895,7 +896,7 @@ export class CloudDeploymentService {
         ? this.#consumeAzureLogin(parsed.loginToken, ownerId, parsed.subscriptionId, parsed.tenantId)
         : undefined;
       const loginSession = parsed.provider === "aws" && "authentication" in parsed
-        ? parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(parsed.defaultRegion, authSignal))
+        ? parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(parsed.defaultRegion, authSignal, onPendingAuthorization))
         : undefined;
       this.#assertActive();
       authSignal.throwIfAborted();
@@ -971,6 +972,7 @@ export class CloudDeploymentService {
   async loginAwsCredential(
     input: CloudCredentialIdInput,
     signal?: AbortSignal,
+    onPendingAuthorization?: (url: string | null) => void,
   ): Promise<OperationResult<CloudCredentialSummary>> {
     try {
       this.#assertActive();
@@ -987,7 +989,7 @@ export class CloudDeploymentService {
         if (configuredArn && configuredArn !== expectedArn) return { ok: false, error: "The AWS profile login identity changed. Restore the original profile or add a new credential." };
         this.#assertActive();
         authSignal.throwIfAborted();
-        const loginSession = parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(summary.defaultRegion, authSignal));
+        const loginSession = parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(summary.defaultRegion, authSignal, onPendingAuthorization));
         this.#assertActive();
         authSignal.throwIfAborted();
         if (loginSession.region !== summary.defaultRegion) throw new Error("AWS Login returned a different region");

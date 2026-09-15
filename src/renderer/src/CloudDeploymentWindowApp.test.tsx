@@ -439,6 +439,7 @@ const api: CloudDeploymentAPI = {
   }),
   loginAwsCredential: vi.fn(async () => ({ ok: true as const, value: { ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN } })),
   cancelAwsLogin: vi.fn(async () => ({ ok: true as const })),
+  copyAwsLoginLink: vi.fn(async () => ({ ok: true as const })),
   beginAzureLogin: vi.fn(async () => ({ ok: true as const, value: {
     token: AZURE_LOGIN_TOKEN,
     expiresAt: "2026-09-08T20:00:00.000Z",
@@ -552,6 +553,7 @@ beforeEach(() => {
   vi.mocked(api.createCredential).mockClear();
   vi.mocked(api.loginAwsCredential).mockClear();
   vi.mocked(api.cancelAwsLogin).mockClear();
+  vi.mocked(api.copyAwsLoginLink).mockClear();
   vi.mocked(api.beginAzureLogin).mockClear();
   vi.mocked(api.loginAzureCredential).mockClear();
   vi.mocked(api.cancelAzureLogin).mockClear();
@@ -1098,6 +1100,12 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Label" })).toBeDisabled();
     expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
+    expect(screen.getByText(/If AWS shows 400 Bad Request/u)).toHaveTextContent("private browser window on this computer");
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+    expect(await screen.findByText("Sign-in link copied.")).toBeInTheDocument();
+    expect(api.copyAwsLoginLink).toHaveBeenCalledExactlyOnceWith();
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
     expect(capturedCredential).toEqual({
       provider: "aws",
       authentication: "login",
@@ -1109,6 +1117,8 @@ describe("CloudDeploymentWindowApp", () => {
     });
     await act(async () => login.resolve({ ok: true, value: { ...awsCredential, label: "Browser AWS", loginSessionArn: LOGIN_SESSION_ARN } }));
     expect(await screen.findByText("Credential saved")).toBeInTheDocument();
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
   });
 
@@ -1134,6 +1144,57 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.getSnapshot).toHaveBeenCalledOnce();
   });
 
+  it.each(["returned error", "rejected request"])("keeps credential creation pending after a copy-link %s and allows retry", async (failure) => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    if (failure === "returned error") {
+      vi.mocked(api.copyAwsLoginLink).mockResolvedValueOnce({ ok: false, error: "Sign-in link is not ready." });
+    } else {
+      vi.mocked(api.copyAwsLoginLink).mockRejectedValueOnce(new Error("Sign-in link is not ready."));
+    }
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+
+    expect(await screen.findByText("Sign-in link is not ready.")).toBeInTheDocument();
+    expect(screen.queryByText("Credential not saved")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel AWS Login" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+    expect(await screen.findByText("Sign-in link copied.")).toBeInTheDocument();
+    expect(screen.queryByText("Sign-in link is not ready.")).not.toBeInTheDocument();
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    await act(async () => login.resolve({ ok: true, value: awsCredential }));
+    expect(await screen.findByText("Credential saved")).toBeInTheDocument();
+  });
+
+  it("ignores a pending copy reply when the AWS creation form closes", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    const copy = deferred<OperationResult>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.copyAwsLoginLink).mockImplementationOnce(async () => copy.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => {
+      login.resolve({ ok: false, error: "AWS Login was cancelled." });
+      return { ok: true };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+    await user.click(screen.getByRole("button", { name: "Close Form" }));
+    await waitFor(() => expect(api.cancelAwsLogin).toHaveBeenCalledOnce());
+    await act(async () => copy.resolve({ ok: false, error: "Stale copy failure" }));
+
+    expect(screen.queryByText("Stale copy failure")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
+  });
+
   it("reauthenticates a saved native AWS credential and disables competing credential actions", async () => {
     currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
     const login = deferred<OperationResult<CloudCredentialSummary>>();
@@ -1148,9 +1209,15 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("button", { name: "Test connection for Production AWS" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Delete Production AWS" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel AWS Login" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+    expect(await screen.findByText("Sign-in link copied.")).toBeInTheDocument();
+    expect(api.copyAwsLoginLink).toHaveBeenCalledExactlyOnceWith();
+    expect(api.loginAwsCredential).toHaveBeenCalledOnce();
     await act(async () => login.resolve({ ok: true, value: currentSnapshot.credentials[0]! }));
 
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
     expect(api.testCredential).not.toHaveBeenCalled();
     expect(api.runLifecycleAction).not.toHaveBeenCalled();
@@ -1174,6 +1241,46 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.queryByText(/Complete AWS Login in your browser/u)).not.toBeInTheDocument();
     expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("allows AWS cancellation while copying and ignores the old reply on the next attempt", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const firstLogin = deferred<OperationResult<CloudCredentialSummary>>();
+    const nextLogin = deferred<OperationResult<CloudCredentialSummary>>();
+    const copy = deferred<OperationResult>();
+    const cancel = deferred<OperationResult>();
+    vi.mocked(api.loginAwsCredential)
+      .mockImplementationOnce(async () => firstLogin.promise)
+      .mockImplementationOnce(async () => nextLogin.promise);
+    vi.mocked(api.copyAwsLoginLink).mockImplementationOnce(async () => copy.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => cancel.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    const copyButton = screen.getByRole("button", { name: "Copy Sign-in Link" });
+    await user.click(copyButton);
+    await user.click(copyButton);
+    expect(api.copyAwsLoginLink).toHaveBeenCalledOnce();
+    expect(copyButton).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: "Cancel AWS Login" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Cancel AWS Login" }));
+    expect(api.cancelAwsLogin).toHaveBeenCalledOnce();
+    expect(copyButton).toBeDisabled();
+    await act(async () => {
+      firstLogin.resolve({ ok: false, error: "AWS Login was cancelled." });
+      cancel.resolve({ ok: true });
+    });
+    expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await act(async () => copy.resolve({ ok: true }));
+
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
+    expect(screen.queryByText("AWS Login failed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Sign-in Link" })).toBeEnabled();
+    expect(api.loginAwsCredential).toHaveBeenCalledTimes(2);
+    await act(async () => nextLogin.resolve({ ok: true, value: awsCredential }));
+    expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
   });
 
   it("offers AWS Login inside and below failed deployment errors without retrying lifecycle actions", async () => {
@@ -1218,6 +1325,10 @@ describe("CloudDeploymentWindowApp", () => {
     if (!operationMessage) throw new Error("Expected the AWS deployment error alert");
     await user.click(within(operationMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
     expect(await screen.findByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
+    const copyButton = within(operationMessage).getByRole("button", { name: "Copy Sign-in Link" });
+    expect(screen.getAllByRole("button", { name: "Copy Sign-in Link" })).toHaveLength(1);
+    await user.click(copyButton);
+    expect(await within(operationMessage).findByText("Sign-in link copied.")).toBeInTheDocument();
 
     currentSnapshot = {
       ...currentSnapshot,
@@ -1230,12 +1341,17 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.cancelAwsLogin).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel AWS Login" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Copy Sign-in Link" })).toHaveLength(1);
+    expect(screen.getByText("Sign-in link copied.")).toBeInTheDocument();
+    expect(api.copyAwsLoginLink).toHaveBeenCalledOnce();
     await act(async () => login.resolve({ ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } }));
 
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
     expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
     expect(api.cancelAwsLogin).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
   });
 
   it("cancels AWS reauthentication when its credential view is closed", async () => {

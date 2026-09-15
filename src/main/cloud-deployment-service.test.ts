@@ -247,14 +247,17 @@ describe("CloudDeploymentService", () => {
     const nextSession = authSession("reauthenticated");
     const login = vi.fn().mockResolvedValueOnce(originalSession).mockResolvedValueOnce(nextSession);
     const { service, vault, store, seen } = await authService({ login, refresh: vi.fn() });
-    const created = await service.createCredential(nativeAuthInput());
+    const onCreateAuthorization = vi.fn();
+    const onReloginAuthorization = vi.fn();
+    const created = await service.createCredential(nativeAuthInput(), undefined, 0, onCreateAuthorization);
     expect(created).toMatchObject({ ok: true, value: { id: CREDENTIAL_ID, loginSessionArn: originalSession.loginSessionArn } });
-    expect(login).toHaveBeenCalledWith("us-west-2", expect.any(AbortSignal));
+    expect(login).toHaveBeenCalledWith("us-west-2", expect.any(AbortSignal), onCreateAuthorization);
     expect(JSON.stringify(await service.getSnapshot())).not.toMatch(/original-secret|original-refresh|BEGIN EC PRIVATE KEY/u);
     const sshKey = await vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret.sshPrivateKey);
     await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
     expect(seen[0]?.secretAccessKey).toBe(originalSession.secretAccessKey);
-    const relogged = await service.loginAwsCredential({ credentialId: CREDENTIAL_ID });
+    const relogged = await service.loginAwsCredential({ credentialId: CREDENTIAL_ID }, undefined, onReloginAuthorization);
+    expect(login).toHaveBeenLastCalledWith("us-west-2", expect.any(AbortSignal), onReloginAuthorization);
     expect(relogged).toEqual(created);
     await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => ({
       key: secret.sshPrivateKey, refresh: "loginSession" in secret ? secret.loginSession?.refreshToken : undefined,

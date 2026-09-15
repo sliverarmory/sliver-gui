@@ -22,10 +22,12 @@ const electronMocks = vi.hoisted(() => ({
   handle: vi.fn(),
   removeHandler: vi.fn(),
   fromWebContents: vi.fn(),
+  writeText: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
+  clipboard: { writeText: electronMocks.writeText },
   ipcMain: {
     handle: electronMocks.handle,
     removeHandler: electronMocks.removeHandler,
@@ -39,6 +41,7 @@ const PRIVATE_KEY_TOKEN = "939914c7-7b6d-4f35-bcd6-461d7ff3cf81";
 const CURRENT_WINDOW = { marker: "current-cloud-window" } as unknown as BrowserWindow;
 const OTHER_WINDOW = { marker: "stale-cloud-window" } as unknown as BrowserWindow;
 const REJECTED = { ok: false, error: "The Cloud Deployment request was rejected" };
+const AWS_AUTHORIZATION_URL = "https://us-west-2.signin.aws.amazon.com/v1/authorize?state=test-state&code_challenge=test-challenge";
 
 beforeEach(() => {
   electronMocks.handlers.clear();
@@ -54,6 +57,7 @@ beforeEach(() => {
   });
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue(CURRENT_WINDOW);
+  electronMocks.writeText.mockReset();
 });
 
 afterEach(() => unregisterCloudDeploymentIpcHandlers());
@@ -125,8 +129,10 @@ describe("Cloud Deployment IPC boundary", () => {
       defaultRegion: "us-east-1", sshUsername: "ubuntu", sshPrivateKeyToken: null, sshPassphrase: null,
     };
     let loginSignal: AbortSignal | undefined;
-    const createCredential = vi.fn<CloudDeploymentController["createCredential"]>(async (parsed, signal) => {
+    const createCredential = vi.fn<CloudDeploymentController["createCredential"]>(async (parsed, signal, ownerId, onPendingAuthorization) => {
       expect(parsed).toEqual(input);
+      expect(ownerId).toBeUndefined();
+      onPendingAuthorization?.(AWS_AUTHORIZATION_URL);
       loginSignal = signal;
       await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
       return { ok: false, error: "cancelled" };
@@ -135,11 +141,127 @@ describe("Cloud Deployment IPC boundary", () => {
     const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
     const request = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createCredential, owner.event, input);
     expect(loginSignal?.aborted).toBe(false);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toEqual({ ok: true });
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(AWS_AUTHORIZATION_URL);
     owner.sender.emit("did-start-navigation", { isMainFrame: false });
     expect(loginSignal?.aborted).toBe(false);
     owner.sender.emit("did-start-navigation", { isMainFrame: true });
     await expect(request).resolves.toEqual({ ok: false, error: "cancelled" });
     expect(loginSignal?.aborted).toBe(true);
+  });
+
+  it("copies only the initiating window's pending AWS link without returning it to the renderer", async () => {
+    let releaseLogin!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseLogin = resolve; });
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, _signal, publish) => {
+      publish?.(AWS_AUTHORIZATION_URL);
+      await gate;
+      return { ok: false, error: "test completed" };
+    });
+    const authorize = vi.fn(() => true);
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, authorize);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const other = invokeEvent(CLOUD_RENDERER_URL, 78);
+    const login = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    try {
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, other.event)).resolves.toMatchObject({ ok: false });
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event, AWS_AUTHORIZATION_URL)).resolves.toEqual(REJECTED);
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink,
+        invokeEvent("sliver://app/index.html", 77).event)).resolves.toEqual(REJECTED);
+      authorize.mockReturnValue(false);
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toEqual(REJECTED);
+      expect(electronMocks.writeText).not.toHaveBeenCalled();
+      authorize.mockReturnValue(true);
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toEqual({ ok: true });
+      expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(AWS_AUTHORIZATION_URL);
+      electronMocks.writeText.mockImplementationOnce(() => { throw new Error(`PRIVATE_CLIPBOARD_ERROR ${AWS_AUTHORIZATION_URL}`); });
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toEqual(REJECTED);
+    } finally {
+      releaseLogin();
+      await login;
+    }
+    electronMocks.writeText.mockClear();
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toMatchObject({ ok: false });
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("expires the link at authorization and ignores late publications from completed attempts", async () => {
+    const publishers: Array<(url: string | null) => void> = [];
+    const releases: Array<() => void> = [];
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, _signal, publish) => {
+      publishers.push(publish!);
+      publish?.(`${AWS_AUTHORIZATION_URL}&attempt=${publishers.length}`);
+      await new Promise<void>((resolve) => { releases.push(resolve); });
+      return { ok: false, error: "test completed" };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const first = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    publishers[0]!(null);
+    publishers[0]!(AWS_AUTHORIZATION_URL);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toMatchObject({ ok: false });
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+    releases[0]!();
+    await first;
+    const second = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    try {
+      publishers[0]!(AWS_AUTHORIZATION_URL);
+      publishers[0]!(null);
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toEqual({ ok: true });
+      expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(`${AWS_AUTHORIZATION_URL}&attempt=2`);
+    } finally {
+      releases[1]!();
+      await second;
+    }
+  });
+
+  it.each(["cancel", "destroyed", "render-process-gone", "did-start-navigation", "unregister"])(
+    "immediately revokes copied-link access on %s even if the operation has not settled", async (eventName) => {
+      let publish!: (url: string | null) => void;
+      let signal!: AbortSignal;
+      let releaseLogin!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseLogin = resolve; });
+      const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, authSignal, onPendingAuthorization) => {
+        publish = onPendingAuthorization!;
+        signal = authSignal!;
+        publish(AWS_AUTHORIZATION_URL);
+        await gate;
+        return { ok: false, error: "cancelled" };
+      });
+      registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+      const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+      const login = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+      const copyHandler = electronMocks.handlers.get(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink)!;
+      try {
+        if (eventName === "cancel") await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, owner.event);
+        else if (eventName === "unregister") unregisterCloudDeploymentIpcHandlers();
+        else owner.sender.emit(eventName, { isMainFrame: true });
+        expect(signal.aborted).toBe(true);
+        publish(AWS_AUTHORIZATION_URL);
+        await expect(copyHandler(owner.event)).resolves.toMatchObject({ ok: false });
+        expect(electronMocks.writeText).not.toHaveBeenCalled();
+      } finally {
+        releaseLogin();
+        await login;
+      }
+    },
+  );
+
+  it("does not copy an AWS link during an Azure login", async () => {
+    const loginAzureCredential = vi.fn<CloudDeploymentController["loginAzureCredential"]>(async (_input, signal) => {
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { ok: false, error: "cancelled" };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAzureCredential }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const login = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    try {
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toMatchObject({ ok: false });
+      expect(electronMocks.writeText).not.toHaveBeenCalled();
+    } finally {
+      await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin, owner.event);
+      await login;
+    }
   });
 
   it("scopes login cancellation to the initiating window and rejects a concurrent flow", async () => {
@@ -389,6 +511,7 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.chooseSshPrivateKey, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createCredential, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, [{ credentialId: CREDENTIAL_ID, url: "https://example.test" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, [CREDENTIAL_ID]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin, [{ tenantId: "https://example.test", clientId: null }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential, [{ credentialId: CREDENTIAL_ID, url: "https://example.test" }]],

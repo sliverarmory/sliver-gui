@@ -4082,6 +4082,7 @@ function CredentialForm({
   const [isPicking, setIsPicking] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isCancellingLogin, setIsCancellingLogin] = useState(false);
+  const awsLoginLink = useAwsLoginLinkCopy(api);
   const loginPending = useRef(false);
   const loginCancelled = useRef(false);
   const azureDiscoverySequence = useRef(0);
@@ -4292,12 +4293,14 @@ function CredentialForm({
         };
 
     setIsSaving(true);
+    awsLoginLink.reset();
     loginPending.current = provider === "aws" && awsAuthentication === "login";
     loginCancelled.current = false;
     setError(null);
     try {
       const result = await api.createCredential(input);
       loginPending.current = false;
+      awsLoginLink.reset();
       if (input.provider === "azure" && "authentication" in input) {
         azureFlowActive.current = false;
         setAzureLoginSession(null);
@@ -4320,6 +4323,7 @@ function CredentialForm({
         if (azureFlowActive.current) void discardAzureLogin();
       }
       loginPending.current = false;
+      awsLoginLink.reset();
       scrubCredentialInput(input);
       setAccessKeyId("");
       setSecretAccessKey("");
@@ -4331,7 +4335,7 @@ function CredentialForm({
   };
 
   const cancelLogin = async (): Promise<void> => {
-    if (isCancellingLogin) return;
+    if (!loginPending.current || isCancellingLogin) return;
     setIsCancellingLogin(true);
     loginCancelled.current = true;
     try {
@@ -4357,7 +4361,10 @@ function CredentialForm({
       <Card.Content className="space-y-5">
         {error ? <InlineMessage tone="danger" title="Credential not saved" detail={error} /> : null}
         {isSaving && loginPending.current ? (
-          <p role="status" className="text-sm text-muted">Complete AWS Login in your browser, then return here. This window will save the credential when sign-in finishes.</p>
+          <div role="status" className="space-y-2 text-sm text-muted">
+            <p>Complete AWS Login in your browser, then return here. This window will save the credential when sign-in finishes.</p>
+            <AwsLoginRecoveryDetails controller={awsLoginLink} />
+          </div>
         ) : null}
         {isAzureLoginPending ? (
           <p role="status" className="text-sm text-muted">Complete Azure Login in your browser, then return here to choose a subscription.</p>
@@ -4589,11 +4596,23 @@ function CredentialForm({
         ) : null}
         </fieldset>
       </Card.Content>
-      <Card.Footer className="flex justify-end gap-2">
+      <Card.Footer className="flex flex-wrap justify-end gap-2">
         {isAzureLoginPending || isCancellingAzureLogin ? (
           <Button isPending={isCancellingAzureLogin} variant="tertiary" onPress={() => void discardAzureLogin()}>Cancel Azure Login</Button>
         ) : isSaving && loginPending.current ? (
-          <Button isPending={isCancellingLogin} variant="tertiary" onPress={() => void cancelLogin()}>Cancel AWS Login</Button>
+          <>
+            <Button isPending={isCancellingLogin} variant="tertiary" onPress={() => void cancelLogin()}>Cancel AWS Login</Button>
+            <Button
+              isDisabled={isCancellingLogin}
+              isPending={awsLoginLink.isCopying}
+              variant="outline"
+              onPress={() => {
+                if (loginPending.current && !isCancellingLogin) void awsLoginLink.copy();
+              }}
+            >
+              Copy Sign-in Link
+            </Button>
+          </>
         ) : (
           <Button isDisabled={isSaving} variant="tertiary" onPress={onCancel}>Cancel</Button>
         )}
@@ -4757,11 +4776,84 @@ function azureCredentialAuthenticationLabel(credential: Extract<CloudCredentialS
   return "loginAccountId" in credential ? "Azure CLI + Azure Login" : "Azure CLI";
 }
 
+interface AwsLoginLinkCopyController {
+  readonly isCopying: boolean;
+  readonly isCopied: boolean;
+  readonly error: string | null;
+  readonly copy: () => Promise<void>;
+  readonly reset: () => void;
+}
+
+function useAwsLoginLinkCopy(api: CloudDeploymentAPI): AwsLoginLinkCopyController {
+  const [isCopying, setIsCopying] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const copying = useRef(false);
+  const sequence = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      copying.current = false;
+      sequence.current += 1;
+    };
+  }, [api]);
+
+  const reset = useCallback((): void => {
+    sequence.current += 1;
+    copying.current = false;
+    if (mounted.current) {
+      setIsCopying(false);
+      setIsCopied(false);
+      setError(null);
+    }
+  }, []);
+
+  const copy = async (): Promise<void> => {
+    if (copying.current || !mounted.current) return;
+    const currentSequence = sequence.current + 1;
+    sequence.current = currentSequence;
+    copying.current = true;
+    setIsCopying(true);
+    setIsCopied(false);
+    setError(null);
+    try {
+      const result = await api.copyAwsLoginLink();
+      if (!mounted.current || sequence.current !== currentSequence) return;
+      if (result.ok) setIsCopied(true);
+      else setError(result.error ?? "The AWS sign-in link could not be copied.");
+    } catch (caught) {
+      if (mounted.current && sequence.current === currentSequence) setError(errorMessage(caught));
+    } finally {
+      if (mounted.current && sequence.current === currentSequence) {
+        copying.current = false;
+        setIsCopying(false);
+      }
+    }
+  };
+
+  return { copy, error, isCopied, isCopying, reset };
+}
+
+function AwsLoginRecoveryDetails({ controller }: { readonly controller: AwsLoginLinkCopyController }): React.JSX.Element {
+  return (
+    <>
+      <p>If AWS shows 400 Bad Request, copy the sign-in link and open it in a private browser window on this computer.</p>
+      {controller.isCopied ? <p>Sign-in link copied.</p> : null}
+      {controller.error ? <p className="text-danger">{controller.error}</p> : null}
+    </>
+  );
+}
+
 interface CloudLoginActionController {
+  readonly awsLoginLink: AwsLoginLinkCopyController;
   readonly error: string | null;
   readonly isCancelling: boolean;
   readonly isPending: boolean;
   readonly cancel: () => Promise<void>;
+  readonly copyAwsLoginLink: () => Promise<void>;
   readonly login: () => Promise<void>;
 }
 
@@ -4783,6 +4875,7 @@ function useCloudLoginActionController({
   const [isPending, setIsPending] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const awsLoginLink = useAwsLoginLinkCopy(api);
   const active = useRef(false);
   const cancelling = useRef(false);
   const cancelled = useRef(false);
@@ -4799,12 +4892,13 @@ function useCloudLoginActionController({
       const wasActive = active.current;
       active.current = false;
       cancelling.current = false;
+      awsLoginLink.reset();
       if (wasActive && credential) {
         void (credential.provider === "aws" ? api.cancelAwsLogin() : api.cancelAzureLogin()).catch(() => undefined);
         onPendingChangeRef.current(false);
       }
     };
-  }, [api, credential?.id, credential?.provider]);
+  }, [api, awsLoginLink.reset, credential?.id, credential?.provider]);
 
   const login = async (): Promise<void> => {
     if (!credential || active.current || cancelling.current || isDisabled) return;
@@ -4812,6 +4906,7 @@ function useCloudLoginActionController({
     attempt.current = currentAttempt;
     active.current = true;
     cancelled.current = false;
+    awsLoginLink.reset();
     setIsPending(true);
     setError(null);
     onPendingChange(true);
@@ -4822,6 +4917,7 @@ function useCloudLoginActionController({
         : api.loginAzureCredential({ credentialId: credential.id }));
       if (!mounted.current || attempt.current !== currentAttempt) return;
       active.current = false;
+      awsLoginLink.reset();
       if (!result.ok || !result.value) {
         if (!cancelled.current) setError(result.error ?? `${loginName} could not be completed.`);
         return;
@@ -4834,6 +4930,7 @@ function useCloudLoginActionController({
       if (attempt.current === currentAttempt) {
         active.current = false;
         cancelling.current = false;
+        awsLoginLink.reset();
         if (mounted.current) {
           setIsPending(false);
           setIsCancelling(false);
@@ -4865,7 +4962,12 @@ function useCloudLoginActionController({
     }
   };
 
-  return { cancel, error, isCancelling, isPending, login };
+  const copyAwsLoginLink = async (): Promise<void> => {
+    if (credential?.provider !== "aws" || !active.current || cancelling.current) return;
+    await awsLoginLink.copy();
+  };
+
+  return { awsLoginLink, cancel, copyAwsLoginLink, error, isCancelling, isPending, login };
 }
 
 function CloudLoginAction({
@@ -4890,7 +4992,12 @@ function CloudLoginAction({
           <span className="font-semibold">{loginName} failed.</span> {controller.error}
         </p>
       ) : <InlineMessage tone="danger" title={`${loginName} failed`} detail={controller.error} /> : null}
-      {showDetails && controller.isPending ? (
+      {showDetails && controller.isPending ? credential.provider === "aws" ? (
+        <div {...(isEmbedded ? {} : { role: "status" })} className="space-y-2 text-sm text-muted">
+          <p>Complete {loginName} in your browser, then return here.</p>
+          <AwsLoginRecoveryDetails controller={controller.awsLoginLink} />
+        </div>
+      ) : (
         <p {...(isEmbedded ? {} : { role: "status" })} className="text-sm text-muted">
           Complete {loginName} in your browser, then return here.
         </p>
@@ -4907,9 +5014,16 @@ function CloudLoginAction({
           {loginName}
         </Button>
         {showDetails && controller.isPending ? (
-          <Button isPending={controller.isCancelling} size="sm" variant="tertiary" onPress={() => void controller.cancel()}>
-            Cancel {loginName}
-          </Button>
+          <>
+            <Button isPending={controller.isCancelling} size="sm" variant="tertiary" onPress={() => void controller.cancel()}>
+              Cancel {loginName}
+            </Button>
+            {credential.provider === "aws" ? (
+              <Button isDisabled={controller.isCancelling} isPending={controller.awsLoginLink.isCopying} size="sm" variant="outline" onPress={() => void controller.copyAwsLoginLink()}>
+                Copy Sign-in Link
+              </Button>
+            ) : null}
+          </>
         ) : null}
       </div>
     </div>

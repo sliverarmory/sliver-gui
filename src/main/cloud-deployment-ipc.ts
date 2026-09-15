@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  clipboard,
   ipcMain,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -72,8 +73,8 @@ export interface CloudDeploymentController {
   getTerminalRuntime(): MaybePromise<OperationResult<TerminalRuntimeAsset>>;
   detectCurrentEgressIpv4(): MaybePromise<OperationResult<CurrentEgressIpv4>>;
   chooseSshPrivateKey(owner: BrowserWindow): MaybePromise<OperationResult<SshPrivateKeySelection>>;
-  createCredential(input: CreateCloudCredentialInput, signal?: AbortSignal, ownerId?: number): MaybePromise<OperationResult<CloudCredentialSummary>>;
-  loginAwsCredential(input: CloudCredentialIdInput, signal?: AbortSignal): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  createCredential(input: CreateCloudCredentialInput, signal?: AbortSignal, ownerId?: number, onPendingAuthorization?: (url: string | null) => void): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  loginAwsCredential(input: CloudCredentialIdInput, signal?: AbortSignal, onPendingAuthorization?: (url: string | null) => void): MaybePromise<OperationResult<CloudCredentialSummary>>;
   beginAzureLogin(input: BeginAzureLoginInput, signal?: AbortSignal, ownerId?: number): MaybePromise<OperationResult<AzureLoginSelection>>;
   loginAzureCredential(input: CloudCredentialIdInput, signal?: AbortSignal): MaybePromise<OperationResult<CloudCredentialSummary>>;
   cancelAzureLogin(ownerId?: number): void;
@@ -162,8 +163,8 @@ export function registerCloudDeploymentIpcHandlers(
     (args) => singleArgument(parseCreateCloudCredentialInput(requireSingleArgument(args))),
     ({ sender }, input) => {
       if (!("authentication" in input) || input.authentication !== "login") return controller.createCredential(input);
-      return withCloudLogin(sender, input.provider, async (signal) => {
-        if (input.provider === "aws") return controller.createCredential(input, signal);
+      return withCloudLogin(sender, input.provider, async (signal, onPendingAuthorization) => {
+        if (input.provider === "aws") return controller.createCredential(input, signal, undefined, onPendingAuthorization);
         try {
           return await controller.createCredential(input, signal, sender.id);
         } finally {
@@ -178,7 +179,21 @@ export function registerCloudDeploymentIpcHandlers(
     exactRendererUrl,
     authorizeWindow,
     (args) => singleArgument(parseCredentialIdInput(requireSingleArgument(args))),
-    ({ sender }, input) => withCloudLogin(sender, "aws", (signal) => controller.loginAwsCredential(input, signal)),
+    ({ sender }, input) => withCloudLogin(sender, "aws", (signal, onPendingAuthorization) => controller.loginAwsCredential(input, signal, onPendingAuthorization)),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    ({ sender }): OperationResult => {
+      const pending = pendingCloudLogins.get(sender);
+      if (pending?.provider !== "aws" || pending.controller.signal.aborted || !pending.authorizationUrl) {
+        return { ok: false, error: "No AWS sign-in link is available. Start AWS Login and try again." };
+      }
+      clipboard.writeText(pending.authorizationUrl);
+      return { ok: true };
+    },
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin,
@@ -358,33 +373,51 @@ export function unregisterCloudDeploymentIpcHandlers(): void {
 
 // Only the initiating renderer may cancel its flow. Closing or replacing that
 // document also revokes authorization before the service can save a session.
-const pendingCloudLogins = new Map<WebContents, { provider: "aws" | "azure"; controller: AbortController }>();
+const pendingCloudLogins = new Map<WebContents, {
+  provider: "aws" | "azure";
+  controller: AbortController;
+  authorizationUrl: string | null;
+}>();
 const stagedAzureLogins = new Map<WebContents, () => void>();
 
 async function withCloudLogin<T>(
   sender: WebContents,
   provider: "aws" | "azure",
-  operation: (signal: AbortSignal) => MaybePromise<OperationResult<T>>,
+  operation: (signal: AbortSignal, onPendingAuthorization: (url: string | null) => void) => MaybePromise<OperationResult<T>>,
 ): Promise<OperationResult<T>> {
   if (pendingCloudLogins.has(sender) || pendingCloudLogins.size >= 4) {
     return { ok: false, error: "A cloud login is already in progress. Complete or cancel it first." };
   }
   const controller = new AbortController();
+  const pending = { provider, controller, authorizationUrl: null as string | null };
+  let authorizationFinished = false;
+  const clearAuthorization = (): void => {
+    pending.authorizationUrl = null;
+    authorizationFinished = true;
+  };
+  const onPendingAuthorization = (url: string | null): void => {
+    if (provider !== "aws" || pendingCloudLogins.get(sender) !== pending || controller.signal.aborted || sender.isDestroyed()) return;
+    if (url === null) clearAuthorization();
+    else if (!authorizationFinished) pending.authorizationUrl = url;
+  };
   const abort = (): void => controller.abort();
   const navigation = (event: { readonly isMainFrame: boolean }): void => {
     if (event.isMainFrame) abort();
   };
-  pendingCloudLogins.set(sender, { provider, controller });
+  pendingCloudLogins.set(sender, pending);
+  controller.signal.addEventListener("abort", clearAuthorization, { once: true });
   sender.once("destroyed", abort);
   sender.once("render-process-gone", abort);
   sender.on("did-start-navigation", navigation);
   try {
-    return await operation(controller.signal);
+    return await operation(controller.signal, onPendingAuthorization);
   } finally {
+    clearAuthorization();
+    controller.signal.removeEventListener("abort", clearAuthorization);
     sender.removeListener("destroyed", abort);
     sender.removeListener("render-process-gone", abort);
     sender.removeListener("did-start-navigation", navigation);
-    pendingCloudLogins.delete(sender);
+    if (pendingCloudLogins.get(sender) === pending) pendingCloudLogins.delete(sender);
   }
 }
 

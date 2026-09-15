@@ -41,6 +41,7 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   chooseSshPrivateKey: "sliver:cloud-deployment:ssh-key:choose",
   createCredential: "sliver:cloud-deployment:credential:create",
   loginAwsCredential: "sliver:cloud-deployment:aws:login",
+  copyAwsLoginLink: "sliver:cloud-deployment:aws:login:copy-link",
   cancelAwsLogin: "sliver:cloud-deployment:aws:login:cancel",
   beginAzureLogin: "sliver:cloud-deployment:azure:login:begin",
   loginAzureCredential: "sliver:cloud-deployment:azure:login",
@@ -169,6 +170,7 @@ export interface CloudDeploymentAPI {
   chooseSshPrivateKey(): Promise<OperationResult<SshPrivateKeySelection>>;
   createCredential(input: CreateCloudCredentialInput): Promise<OperationResult<CloudCredentialSummary>>;
   loginAwsCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialSummary>>;
+  copyAwsLoginLink(): Promise<OperationResult>;
   cancelAwsLogin(): Promise<OperationResult>;
   beginAzureLogin(input: BeginAzureLoginInput): Promise<OperationResult<AzureLoginSelection>>;
   loginAzureCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialSummary>>;
