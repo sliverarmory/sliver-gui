@@ -155,6 +155,29 @@ describe("Cloud Deployment window", () => {
   });
 });
 
+describe.each([
+  ["Armory", armoryWindowOptions],
+  ["Cloud Deployment", cloudDeploymentWindowOptions],
+  ["Network", networkWindowOptions],
+] as const)("%s title bar", (_name, windowOptions) => {
+  it.each(["darwin", "linux", "win32"] as const)(
+    "retains native window controls and uses inset chrome only on macOS (%s)",
+    (platform) => {
+      const options = windowOptions("/preload.js", platform, "/brand.png");
+
+      if (platform === "darwin") {
+        expect(options.titleBarStyle).toBe("hiddenInset");
+        expect(options).not.toHaveProperty("icon");
+      } else {
+        expect(options).not.toHaveProperty("titleBarStyle");
+        expect(options.icon).toBe("/brand.png");
+      }
+      expect(options).not.toHaveProperty("frame");
+      expect(options).not.toHaveProperty("titleBarOverlay");
+    },
+  );
+});
+
 describe("managed-shell window", () => {
   it("uses focused native chrome while preserving the hardened renderer preferences", () => {
     const options = sessionShellWindowOptions("/absolute/preload.js", "linux", "/brand.png");

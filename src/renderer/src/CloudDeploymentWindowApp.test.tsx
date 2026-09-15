@@ -2535,7 +2535,8 @@ describe("CloudDeploymentWindowApp", () => {
     const backButton = screen.getByRole("button", { name: "Back to managed servers" });
     const stickyHeader = screen.getByTestId("aws-instance-sticky-header");
     const scrollRegion = screen.getByRole("region", { name: "Instance details content" });
-    expect(container.querySelector("main")).toHaveClass("h-screen", "overflow-hidden");
+    expect(container.querySelector("main")).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
+    expect(container.querySelector("main")?.parentElement).toHaveClass("h-screen", "overflow-hidden");
     expect(stickyHeader).toHaveClass("sticky", "top-0", "z-20", "shrink-0", "bg-background");
     expect(stickyHeader).toContainElement(backButton);
     expect(stickyHeader).toContainElement(instanceHeading);

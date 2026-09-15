@@ -86,6 +86,7 @@ export function cloudDeploymentWindowOptions(
     show: false,
     title: "Cloud Deployment",
     backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: {
       ...secureWebPreferences(preload),
@@ -109,6 +110,7 @@ export function networkWindowOptions(
     show: false,
     title: "Network",
     backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: {
       ...secureWebPreferences(preload),
@@ -229,6 +231,7 @@ export function armoryWindowOptions(
     show: false,
     title: "Armory",
     backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: { ...secureWebPreferences(preload), partition: ARMORY_SESSION_PARTITION },
   };

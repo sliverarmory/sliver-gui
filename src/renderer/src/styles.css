@@ -122,6 +122,21 @@
 }
 
 @layer components {
+  .auxiliary-window-frame[data-titlebar-style="hiddenInset"] {
+    --auxiliary-window-content-top: 1rem;
+  }
+
+  .auxiliary-window-titlebar {
+    height: 2rem;
+    flex: none;
+    user-select: none;
+    -webkit-app-region: drag;
+  }
+
+  .auxiliary-window-content {
+    padding-top: var(--auxiliary-window-content-top, 2rem);
+  }
+
   .sidebar.app-sidebar {
     --sidebar-width: 248px;
     --sidebar-width-collapsed: 56px;

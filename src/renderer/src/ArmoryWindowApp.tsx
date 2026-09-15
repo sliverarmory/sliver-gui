@@ -45,6 +45,7 @@ import { isArmoryTab } from "../../shared/armory-contracts";
 import type { OperationResult } from "../../shared/contracts";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { Field } from "./components/FormControls";
+import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 
 type PackageFilter = "all" | ArmoryPackageKind | "bundle";
 type Removal = { kind: "package"; value: ArmoryInstalledPackage } | { kind: "source"; value: ArmorySource };
@@ -233,8 +234,8 @@ export function ArmoryWindowApp(): React.JSX.Element {
     : "This removes the package files from the shared local directory. The package will also be removed from the console's installed inventory.";
 
   return (
-    <main className="h-screen overflow-hidden bg-background">
-      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1240px] flex-col gap-3 px-5 py-8 sm:px-8">
+    <AuxiliaryWindowFrame className="overflow-hidden bg-background">
+      <div className="auxiliary-window-content mx-auto flex h-full min-h-0 w-full max-w-[1240px] flex-col gap-3 px-5 pb-8 sm:px-8">
         <header className="flex shrink-0 flex-wrap items-start justify-between gap-4">
           <div className="flex items-start gap-4">
             <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
@@ -387,7 +388,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
       }} /> : null}
       {detail ? <PackageDetails detail={detail} onClose={() => setDetail(undefined)} /> : null}
       <ConfirmDialog isOpen={Boolean(removal)} title={`Remove ${removal?.value.name ?? "package"}?`} description={`${removalDescription}${error ? ` ${error}` : ""}`} confirmLabel="Remove" isPending={Boolean(busy)} onOpenChange={(open) => { if (!open && !busyRef.current) setRemoval(undefined); }} onConfirm={confirmRemoval} />
-    </main>
+    </AuxiliaryWindowFrame>
   );
 }
 

@@ -110,7 +110,8 @@ describe("ArmoryWindowApp", () => {
     expect(scroll).not.toContainElement(screen.getByRole("tablist", { name: "Armory features" }));
     expect(scroll).not.toContainElement(screen.getByRole("heading", { name: "Armory" }));
     expect(scroll).not.toContainElement(screen.getByText(baseline.rootPath));
-    expect(screen.getByRole("main")).toHaveClass("h-screen", "overflow-hidden");
+    expect(screen.getByRole("main")).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
+    expect(screen.getByRole("main").parentElement).toHaveClass("h-screen", "overflow-hidden");
     await user.selectOptions(screen.getByRole("combobox", { name: "Package type" }), tab === "manage" ? "alias" : "bof");
     expect(screen.getByTestId(`armory-${tab}-scroll`)).not.toBe(scroll);
   });

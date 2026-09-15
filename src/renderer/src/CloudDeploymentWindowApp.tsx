@@ -90,6 +90,7 @@ import type {
 } from "../../shared/cloud-deployment-ipc";
 import { applyRendererTheme } from "./components/ApplicationSettingsProvider";
 import { CloudProvisioningTerminal } from "./components/CloudProvisioningTerminal";
+import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 
 type FeedbackTone = "danger" | "success" | "warning" | "info";
 
@@ -531,11 +532,11 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const detailsRefreshError = snapshot?.refreshErrors.find(({ deploymentId }) => deploymentId === detailsDeploymentId)?.message;
 
   return (
-    <main className={`h-screen bg-background text-foreground ${showingDetails ? "overflow-hidden" : "overflow-y-auto"}`}>
-      <div className={`mx-auto flex w-full max-w-7xl flex-col px-6 pt-8 lg:px-8 ${showingDetails ? "h-full min-h-0" : "gap-6 pb-12"}`}>
+    <AuxiliaryWindowFrame className={`bg-background text-foreground ${showingDetails ? "overflow-hidden" : "overflow-y-auto"}`}>
+      <div className={`auxiliary-window-content mx-auto flex w-full max-w-7xl flex-col px-6 lg:px-8 ${showingDetails ? "h-full min-h-0" : "gap-6 pb-12"}`}>
         {!showingDetails ? (
           <header className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
-            <div className="flex items-start gap-3">
+            <div className="flex min-w-0 flex-1 items-start gap-3">
               <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
                 <FontAwesomeIcon aria-hidden icon={faCloudArrowUp} className="size-5" />
               </span>
@@ -546,7 +547,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {snapshot ? (
                 <Chip color={snapshot.secureCredentialStorage ? "success" : "warning"} size="sm" variant="soft">
                   {snapshot.secureCredentialStorage ? "Encrypted credentials" : "Session-only credentials"}
@@ -676,7 +677,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           </Tabs>
         ) : null}
       </div>
-    </main>
+    </AuxiliaryWindowFrame>
   );
 }
 
