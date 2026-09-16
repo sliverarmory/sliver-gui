@@ -552,7 +552,7 @@ async function verifyCloudDeploymentWindow(
   );
   await waitForWindowCount(electronApplication, initialWindowCount + 1);
   const coldAzureFirewallPage = await cloudDeploymentPage(electronApplication);
-  await assertAzureFirewallDetails(coldAzureFirewallPage);
+  await assertAzureFirewallDetails(coldAzureFirewallPage, artifactDirectory);
   await coldAzureFirewallPage.close();
   await waitForWindowCount(electronApplication, initialWindowCount);
 
@@ -575,7 +575,7 @@ async function verifyCloudDeploymentWindow(
     electronApplication,
     `cloud.aws.${E2E_AWS_DEPLOYMENT_ID}.firewall`,
   );
-  await assertAwsFirewallDetails(firstCloudPage);
+  await assertAwsFirewallDetails(firstCloudPage, artifactDirectory);
   await firstCloudPage.getByRole("button", { name: "Back to managed servers" }).click();
   await firstCloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
   await verifyAwsDeploymentWizard(firstCloudPage, artifactDirectory);
@@ -642,7 +642,7 @@ async function verifyAzureLoginForm(cloudPage: Page, artifactDirectory: string):
   await cloudPage.getByRole("tab", { name: /^Deployments/u }).click();
 }
 
-async function assertAwsFirewallDetails(cloudPage: Page): Promise<void> {
+async function assertAwsFirewallDetails(cloudPage: Page, artifactDirectory?: string): Promise<void> {
   await cloudPage.getByRole("heading", {
     level: 1,
     name: E2E_AWS_DEPLOYMENT_NAME,
@@ -650,7 +650,19 @@ async function assertAwsFirewallDetails(cloudPage: Page): Promise<void> {
   }).waitFor();
   await cloudPage.getByRole("heading", { name: "Instance summary", exact: true }).waitFor();
   await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
-  await cloudPage.getByRole("grid", { name: "Inbound firewall rules" }).waitFor();
+  const firewallGrid = cloudPage.getByRole("grid", { name: "Inbound firewall rules" });
+  await firewallGrid.waitFor();
+  await assertFirewallAccentRendered(firewallGrid, "danger", "AWS public HTTP rule");
+  await cloudPage.getByRole("button", {
+    name: "Allow current IP 198.51.100.77/32",
+  }).waitFor();
+  if (artifactDirectory) {
+    await cloudPage.screenshot({ path: join(artifactDirectory, "cloud-firewall-aws-add-current-ip.png"), fullPage: true });
+  }
+  await cloudPage.getByRole("tab", { name: /^Outbound/u }).click();
+  const outboundGrid = cloudPage.getByRole("grid", { name: "Outbound firewall rules" });
+  await outboundGrid.waitFor();
+  await assertFirewallAccentRendered(outboundGrid, "danger", "AWS all-IPv4 rule");
   assert.equal(
     await cloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).count(),
     0,
@@ -658,7 +670,7 @@ async function assertAwsFirewallDetails(cloudPage: Page): Promise<void> {
   );
 }
 
-async function assertAzureFirewallDetails(cloudPage: Page): Promise<void> {
+async function assertAzureFirewallDetails(cloudPage: Page, artifactDirectory?: string): Promise<void> {
   await cloudPage.getByRole("heading", {
     level: 1,
     name: E2E_AZURE_DEPLOYMENT_NAME,
@@ -667,7 +679,32 @@ async function assertAzureFirewallDetails(cloudPage: Page): Promise<void> {
   await cloudPage.getByRole("heading", { name: "Virtual machine summary", exact: true }).waitFor();
   await cloudPage.getByText("Microsoft Azure", { exact: false }).first().waitFor();
   await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
-  await cloudPage.getByRole("grid", { name: "Inbound firewall rules" }).waitFor();
+  const firewallGrid = cloudPage.getByRole("grid", { name: "Inbound firewall rules" });
+  await firewallGrid.waitFor();
+  await firewallGrid.getByText("Current IP", { exact: true }).waitFor();
+  await assertFirewallAccentRendered(firewallGrid, "success", "Azure current-IP rule");
+  assert.equal(await cloudPage.getByRole("button", { name: /Allow current IP/u }).count(), 0);
+  if (artifactDirectory) {
+    await cloudPage.screenshot({ path: join(artifactDirectory, "cloud-firewall-azure-current-ip.png"), fullPage: true });
+  }
+}
+
+async function assertFirewallAccentRendered(
+  grid: Locator,
+  accent: "danger" | "success",
+  label: string,
+): Promise<void> {
+  const marker = grid.locator(`[data-firewall-rule-accent="${accent}"]`);
+  assert.equal(await marker.count(), 1, `${label} must have one ${accent} accent marker`);
+  const row = marker.locator("xpath=ancestor::*[@role='row'][1]");
+  const firstCell = row.locator("td").first();
+  const style = await firstCell.evaluate((element) => {
+    const computed = element.ownerDocument.defaultView?.getComputedStyle(element);
+    if (!computed) return { backgroundColor: "", boxShadow: "" };
+    return { backgroundColor: computed.backgroundColor, boxShadow: computed.boxShadow };
+  });
+  assert.notEqual(style.backgroundColor, "rgba(0, 0, 0, 0)", `${label} must render a visible row background`);
+  assert.notEqual(style.boxShadow, "none", `${label} must render a visible edge accent`);
 }
 
 async function verifyAwsDeploymentWizard(

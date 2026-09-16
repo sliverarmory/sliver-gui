@@ -1024,6 +1024,127 @@ describe("AWS EC2 owned lifecycle and firewall operations", () => {
       SecurityGroupRuleIds: [ingressRuleId],
     });
     expect(client.inputs("AuthorizeSecurityGroupIngressCommand")).toHaveLength(1);
+    expect(client.commandNames().indexOf("AuthorizeSecurityGroupIngressCommand"))
+      .toBeLessThan(client.commandNames().indexOf("RevokeSecurityGroupIngressCommand"));
+  });
+
+  it("authorizes only missing baseline peers before revoking obsolete baseline rules", async () => {
+    const retainedRuleId = "sgr-33333333333333333";
+    const obsoleteRuleId = "sgr-44444444444444444";
+    const customRuleId = "sgr-55555555555555555";
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [
+          describedFirewallRule(retainedRuleId, firewallRuleSpec({
+            fromPort: 2222,
+            toPort: 2222,
+            description: `sliver-gui:${guid}:multiplayer`,
+          }), managedTags()),
+          describedFirewallRule(obsoleteRuleId, firewallRuleSpec({
+            fromPort: 31_338,
+            toPort: 31_338,
+            peer: "198.51.99.0/24",
+            description: `sliver-gui:${guid}:multiplayer`,
+          }), managedTags()),
+          describedFirewallRule(customRuleId, firewallRuleSpec({
+            fromPort: 8443,
+            toPort: 8443,
+            peer: "203.0.113.8/32",
+            description: `sliver-gui:${guid}:ssh`,
+          }), [
+            ...managedTags(),
+            { Key: "SliverGUIRuleType", Value: "custom" },
+          ]),
+        ],
+      },
+    });
+    const provider = providerFor(client);
+
+    await provider.replaceFirewall(resource(), {
+      sshPort: 2222,
+      sshSourceCidrs: ["192.0.2.10/32", "203.0.113.40/32"],
+      multiplayerPort: 31_338,
+      multiplayerSourceCidrs: ["198.51.100.0/24"],
+    });
+
+    expect(client.input("AuthorizeSecurityGroupIngressCommand")).toEqual({
+      GroupId: securityGroupId,
+      IpPermissions: [
+        {
+          IpProtocol: "tcp",
+          FromPort: 2222,
+          ToPort: 2222,
+          IpRanges: [{
+            CidrIp: "203.0.113.40/32",
+            Description: `sliver-gui:${guid}:ssh`,
+          }],
+        },
+        {
+          IpProtocol: "tcp",
+          FromPort: 31_338,
+          ToPort: 31_338,
+          IpRanges: [{
+            CidrIp: "198.51.100.0/24",
+            Description: `sliver-gui:${guid}:multiplayer`,
+          }],
+        },
+      ],
+      TagSpecifications: [{ ResourceType: "security-group-rule", Tags: managedTags() }],
+    });
+    expect(client.input("RevokeSecurityGroupIngressCommand")).toEqual({
+      GroupId: securityGroupId,
+      SecurityGroupRuleIds: [obsoleteRuleId],
+    });
+    expect(client.commandNames().indexOf("AuthorizeSecurityGroupIngressCommand"))
+      .toBeLessThan(client.commandNames().indexOf("RevokeSecurityGroupIngressCommand"));
+  });
+
+  it("deduplicates overlapping desired baseline access tuples", async () => {
+    const client = managedResourceClient();
+    const provider = providerFor(client);
+
+    await provider.replaceFirewall(resource(), {
+      sshPort: 22,
+      sshSourceCidrs: ["192.0.2.10/32"],
+      multiplayerPort: 22,
+      multiplayerSourceCidrs: ["192.0.2.10/32"],
+    });
+
+    expect(client.input("AuthorizeSecurityGroupIngressCommand")).toMatchObject({
+      GroupId: securityGroupId,
+      IpPermissions: [{
+        IpProtocol: "tcp",
+        FromPort: 22,
+        ToPort: 22,
+        IpRanges: [{ CidrIp: "192.0.2.10/32" }],
+      }],
+    });
+    expect(client.commandNames()).not.toContain("RevokeSecurityGroupIngressCommand");
+  });
+
+  it("does not revoke baseline rules when authorizing a replacement fails", async () => {
+    const client = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [describedFirewallRule(ingressRuleId, firewallRuleSpec({
+          peer: "198.51.99.0/24",
+          description: `sliver-gui:${guid}:ssh`,
+        }), managedTags())],
+      },
+      AuthorizeSecurityGroupIngressCommand: () => {
+        throw awsError("UnauthorizedOperation");
+      },
+    });
+    const provider = providerFor(client);
+
+    await expect(provider.replaceFirewall(resource(), {
+      sshPort: 22,
+      sshSourceCidrs: ["192.0.2.10/32"],
+      multiplayerPort: 31_337,
+      multiplayerSourceCidrs: ["198.51.100.10/32"],
+    })).rejects.toThrow(/authorize managed firewall rules/u);
+
+    expect(client.inputs("AuthorizeSecurityGroupIngressCommand")).toHaveLength(1);
+    expect(client.commandNames()).not.toContain("RevokeSecurityGroupIngressCommand");
   });
 
   it("preserves custom managed rules when replacing the baseline firewall", async () => {

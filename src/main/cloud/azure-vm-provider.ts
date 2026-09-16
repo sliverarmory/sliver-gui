@@ -1140,6 +1140,23 @@ export class AzureVmProvider {
     if (current.rules.some((rule) => !isBaselineRule(rule, resource.guid) && desiredNames.has(rule.name))) {
       throw new AzureVmProviderError("A custom Azure firewall rule uses a name reserved for baseline access.");
     }
+    const desiredNamesByPriority = new Map(desired.map((rule) => [rule.priority, rule.name]));
+    const priorityBlockers = baselineRules.filter((rule) => {
+      const desiredName = desiredNamesByPriority.get(rule.priority);
+      return desiredName !== undefined && desiredName !== rule.name;
+    });
+    const temporaryPriorities = temporaryFirewallPriorities(
+      current.rules,
+      desiredPriorities,
+      priorityBlockers.length,
+    );
+    // Growing or shrinking the SSH CIDR list shifts every operator rule. Move
+    // any baseline rule that currently blocks a desired priority to a free
+    // temporary priority first. The rule remains effective while Azure's
+    // uniqueness constraint is cleared for the replacement upserts.
+    for (const [index, rule] of priorityBlockers.entries()) {
+      await this.createBaselineRule(resource, firewallRuleWithPriority(rule, temporaryPriorities[index]!));
+    }
     // Azure security-rule writes are upserts. Establish the complete desired
     // baseline before removing obsolete entries so a transient write failure
     // cannot erase working SSH/operator access.
@@ -2291,6 +2308,45 @@ function baselineFirewallRules(
     });
   }
   return rules;
+}
+
+function temporaryFirewallPriorities(
+  currentRules: readonly AzureFirewallRule[],
+  desiredPriorities: ReadonlySet<number>,
+  count: number,
+): number[] {
+  const unavailable = new Set([
+    ...currentRules.map((rule) => rule.priority),
+    ...desiredPriorities,
+  ]);
+  const priorities: number[] = [];
+  for (let priority = 4_096; priority >= 100 && priorities.length < count; priority -= 1) {
+    if (unavailable.has(priority)) continue;
+    unavailable.add(priority);
+    priorities.push(priority);
+  }
+  if (priorities.length !== count) {
+    throw new AzureVmProviderError("Azure has no free firewall priorities available to reconcile baseline access.");
+  }
+  return priorities;
+}
+
+function firewallRuleWithPriority(
+  rule: AzureFirewallRule,
+  priority: number,
+): AzureFirewallRuleSpec {
+  return {
+    name: rule.name,
+    priority,
+    direction: rule.direction,
+    access: rule.access,
+    protocol: rule.protocol,
+    sourceAddressPrefixes: rule.sourceAddressPrefixes,
+    sourcePortRanges: rule.sourcePortRanges,
+    destinationAddressPrefixes: rule.destinationAddressPrefixes,
+    destinationPortRanges: rule.destinationPortRanges,
+    description: rule.description,
+  };
 }
 
 function firewallRuleParameters(spec: AzureFirewallRuleSpec): SecurityRule {

@@ -908,8 +908,27 @@ export class AwsEc2Provider {
         Filters: [{ Name: "group-id", Values: [resource.securityGroupId] }],
       }),
     );
-    const managedRuleIds = (ruleResponse.SecurityGroupRules ?? [])
+    const unmatchedRules = (ruleResponse.SecurityGroupRules ?? [])
       .filter((rule) => isBaselineManagedFirewallRule(rule, resource.guid))
+      .map((rule) => ({ rule, spec: baselineFirewallRuleSpec(rule) }));
+    const missingRules = baselineFirewallRuleSpecs(validated, resource.guid).filter((desired) => {
+      const matchIndex = unmatchedRules.findIndex(({ spec }) =>
+        spec !== undefined && firewallAccessSpecsEqual(spec, desired)
+      );
+      if (matchIndex < 0) return true;
+      unmatchedRules.splice(matchIndex, 1);
+      return false;
+    });
+    if (missingRules.length > 0) {
+      await this.authorizeManagedFirewallPermissions(
+        resource.securityGroupId,
+        resource.guid,
+        resource.name,
+        missingRules.map(firewallRulePermission),
+      );
+    }
+    const managedRuleIds = unmatchedRules
+      .map(({ rule }) => rule)
       .flatMap((rule) => rule.SecurityGroupRuleId ? [rule.SecurityGroupRuleId] : []);
     if (managedRuleIds.length > 0) {
       await this.send(
@@ -920,12 +939,6 @@ export class AwsEc2Provider {
         }),
       );
     }
-    await this.authorizeManagedFirewall(
-      resource.securityGroupId,
-      resource.guid,
-      resource.name,
-      validated,
-    );
     return await this.refresh(resource);
   }
 
@@ -1223,11 +1236,25 @@ export class AwsEc2Provider {
     firewall: AwsEc2FirewallInput,
   ): Promise<void> {
     const validated = validateFirewall(firewall);
+    await this.authorizeManagedFirewallPermissions(
+      securityGroupId,
+      guid,
+      name,
+      firewallPermissions(validated, guid),
+    );
+  }
+
+  private async authorizeManagedFirewallPermissions(
+    securityGroupId: string,
+    guid: string,
+    name: string,
+    permissions: readonly IpPermission[],
+  ): Promise<void> {
     await this.send(
       "authorize managed firewall rules",
       new AuthorizeSecurityGroupIngressCommand({
         GroupId: securityGroupId,
-        IpPermissions: firewallPermissions(validated, guid),
+        IpPermissions: [...permissions],
         TagSpecifications: [{ ResourceType: "security-group-rule", Tags: managedTags(guid, name) }],
       }),
     );
@@ -2065,6 +2092,61 @@ function firewallPermissions(input: AwsEc2FirewallInput, guid: string): IpPermis
   ];
 }
 
+function baselineFirewallRuleSpecs(input: AwsEc2FirewallInput, guid: string): AwsFirewallRuleSpec[] {
+  const specs = [
+    ...input.sshSourceCidrs.map((cidr) => baselineFirewallRuleSpecForCidr(
+      input.sshPort,
+      cidr,
+      `sliver-gui:${guid}:ssh`,
+    )),
+    ...input.multiplayerSourceCidrs.map((cidr) => baselineFirewallRuleSpecForCidr(
+      input.multiplayerPort,
+      cidr,
+      `sliver-gui:${guid}:multiplayer`,
+    )),
+  ];
+  return specs.filter((spec, index) =>
+    specs.findIndex((candidate) => firewallAccessSpecsEqual(candidate, spec)) === index
+  );
+}
+
+function baselineFirewallRuleSpecForCidr(
+  port: number,
+  cidr: string,
+  description: string,
+): AwsFirewallRuleSpec {
+  const address = cidr.slice(0, cidr.lastIndexOf("/"));
+  return {
+    direction: "ingress",
+    protocol: "tcp",
+    fromPort: port,
+    toPort: port,
+    peerType: isIP(address) === 4 ? "ipv4" : "ipv6",
+    peer: cidr,
+    description,
+  };
+}
+
+function baselineFirewallRuleSpec(rule: SecurityGroupRule): AwsFirewallRuleSpec | undefined {
+  const peers: Array<readonly [AwsFirewallPeerType, string]> = [];
+  if (rule.CidrIpv4 !== undefined) peers.push(["ipv4", rule.CidrIpv4]);
+  if (rule.CidrIpv6 !== undefined) peers.push(["ipv6", rule.CidrIpv6]);
+  if (peers.length !== 1 || rule.IsEgress !== false || typeof rule.IpProtocol !== "string") return undefined;
+  try {
+    return validateFirewallRuleSpec({
+      direction: "ingress",
+      protocol: rule.IpProtocol,
+      fromPort: rule.FromPort ?? null,
+      toPort: rule.ToPort ?? null,
+      peerType: peers[0]![0],
+      peer: peers[0]![1],
+      description: rule.Description ?? null,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 function permissionForCidrs(port: number, cidrs: readonly string[], description: string): IpPermission {
   const ipv4 = cidrs.filter((cidr) => isIP(cidr.slice(0, cidr.lastIndexOf("/"))) === 4);
   const ipv6 = cidrs.filter((cidr) => isIP(cidr.slice(0, cidr.lastIndexOf("/"))) === 6);
@@ -2283,13 +2365,16 @@ function normalizeReportedFirewallRulePorts(
 }
 
 function firewallSpecsEqual(left: AwsFirewallRuleSpec, right: AwsFirewallRuleSpec): boolean {
+  return firewallAccessSpecsEqual(left, right) && left.description === right.description;
+}
+
+function firewallAccessSpecsEqual(left: AwsFirewallRuleSpec, right: AwsFirewallRuleSpec): boolean {
   return left.direction === right.direction &&
     left.protocol === right.protocol &&
     left.fromPort === right.fromPort &&
     left.toPort === right.toPort &&
     left.peerType === right.peerType &&
-    firewallPeersEqual(left.peerType, left.peer, right.peer) &&
-    left.description === right.description;
+    firewallPeersEqual(left.peerType, left.peer, right.peer);
 }
 
 function firewallPeersEqual(type: AwsFirewallPeerType, left: string, right: string): boolean {

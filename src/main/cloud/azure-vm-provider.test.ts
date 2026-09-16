@@ -584,6 +584,70 @@ describe("Azure VM provider", () => {
     expect(fake.mutations.slice(mutationStart)).not.toContain("rule.delete");
   });
 
+  it("reconciles growing and shrinking baseline CIDR lists without Azure priority collisions", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const custom = await provider.createFirewallRule(resource, customFirewallRule());
+    const networkSecurityGroup = fake.networkSecurityGroups.get(nsgId)!;
+    fake.networkSecurityGroups.set(nsgId, {
+      ...networkSecurityGroup,
+      defaultSecurityRules: [{
+        id: `${nsgId}/defaultSecurityRules/DenyAllInBound`,
+        name: "DenyAllInBound",
+        protocol: "*",
+        sourcePortRange: "*",
+        destinationPortRange: "*",
+        sourceAddressPrefix: "*",
+        destinationAddressPrefix: "*",
+        access: "Deny",
+        priority: 65_500,
+        direction: "Inbound",
+      }],
+    });
+
+    await provider.replaceFirewall(resource, {
+      sshPort: 22,
+      sshSourceCidrs: ["198.51.100.4/32", "203.0.113.9/32"],
+      operatorPort: 31_337,
+      operatorSourceCidrs: ["198.51.100.4/32"],
+    });
+
+    let snapshot = await provider.listFirewallRules(resource);
+    expect(snapshot.rules.filter((rule) => isTestBaselineRule(rule.description))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "sliver-gui-ssh-001", priority: 1_000 }),
+      expect.objectContaining({ name: "sliver-gui-ssh-002", priority: 1_001 }),
+      expect.objectContaining({ name: "sliver-gui-operator-001", priority: 1_002 }),
+    ]));
+
+    await provider.replaceFirewall(resource, {
+      sshPort: 22,
+      sshSourceCidrs: ["203.0.113.9/32"],
+      operatorPort: 31_337,
+      operatorSourceCidrs: ["198.51.100.4/32"],
+    });
+
+    snapshot = await provider.listFirewallRules(resource);
+    expect(snapshot.rules.filter((rule) => isTestBaselineRule(rule.description))).toEqual([
+      expect.objectContaining({
+        name: "sliver-gui-ssh-001",
+        priority: 1_000,
+        sourceAddressPrefixes: ["203.0.113.9/32"],
+      }),
+      expect.objectContaining({
+        name: "sliver-gui-operator-001",
+        priority: 1_001,
+        sourceAddressPrefixes: ["198.51.100.4/32"],
+      }),
+    ]);
+    expect(snapshot.rules).toContainEqual(custom);
+    expect(snapshot.rules).toContainEqual(expect.objectContaining({
+      name: "DenyAllInBound",
+      priority: 65_500,
+      isDefault: true,
+    }));
+  });
+
   it("lists realistic Azure default rules through priority 65500 while user writes remain capped", async () => {
     const fake = new FakeAzureClients();
     const provider = providerFor(fake);
@@ -972,6 +1036,10 @@ function customFirewallRule(): AzureFirewallRuleSpec {
   };
 }
 
+function isTestBaselineRule(description: string | null): boolean {
+  return description?.startsWith(`sliver-gui:${guid}:baseline:`) ?? false;
+}
+
 function managedTags(): Record<string, string> {
   return {
     [AZURE_MANAGED_TAG_KEY]: AZURE_MANAGED_TAG_VALUE,
@@ -1135,6 +1203,17 @@ class FakeAzureClients {
       },
       createOrUpdate: async (group, networkSecurityGroupName, name, parameters) => {
         const id = `${networkId(group, "networkSecurityGroups", networkSecurityGroupName)}/securityRules/${name}`;
+        const prefix = `${networkId(group, "networkSecurityGroups", networkSecurityGroupName)}/securityRules/`;
+        if ([...this.securityRules.entries()].some(([existingId, rule]) => (
+          existingId.toLowerCase().startsWith(prefix.toLowerCase()) &&
+          existingId.toLowerCase() !== id.toLowerCase() &&
+          rule.priority === parameters.priority
+        ))) {
+          throw Object.assign(new Error("Azure firewall priorities must be unique."), {
+            statusCode: 409,
+            code: "SecurityRuleConflict",
+          });
+        }
         const value = { ...parameters, id, name };
         this.securityRules.set(id, value);
         this.mutations.push("rule.write");

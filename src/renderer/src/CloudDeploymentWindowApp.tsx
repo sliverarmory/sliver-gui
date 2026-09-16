@@ -85,9 +85,17 @@ import type {
   CloudDeploymentNavigationRequest,
   CloudDeploymentSnapshot,
   CloudProvisioningTranscript,
+  CurrentEgressIpv4,
   DestroyCloudDeploymentPlan,
   SshPrivateKeySelection,
 } from "../../shared/cloud-deployment-ipc";
+import {
+  firewallIpv4Accent,
+  ipv4CidrContainsAddress,
+  ipv4RangeContainsAddress,
+  isAnyIpv4Cidr,
+  type FirewallIpv4Accent,
+} from "../../shared/ipv4-cidr";
 import { applyRendererTheme } from "./components/ApplicationSettingsProvider";
 import { CloudProvisioningTerminal } from "./components/CloudProvisioningTerminal";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
@@ -120,6 +128,11 @@ type EgressIpv4Detection =
   | { readonly status: "loading" }
   | { readonly status: "success"; readonly cidr: string }
   | { readonly status: "failed"; readonly error: string };
+
+type CurrentEgressIpv4Lookup =
+  | { readonly status: "loading" }
+  | { readonly status: "success"; readonly value: CurrentEgressIpv4 }
+  | { readonly status: "failed" };
 
 interface AwsDeploymentDraft {
   readonly imageMode: "catalog" | "manual";
@@ -585,6 +598,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
             <AwsInstanceDetails
               api={api}
               deployment={detailsDeployment}
+              key={detailsDeployment.id}
               notices={(
                 <>
                   {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
@@ -607,6 +621,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
             <AzureInstanceDetails
               api={api}
               deployment={detailsDeployment}
+              key={detailsDeployment.id}
               notices={(
                 <>
                   {feedback ? <FeedbackBanner feedback={feedback} onDismiss={() => setFeedback(null)} /> : null}
@@ -2287,6 +2302,37 @@ function DeploymentCard({
   );
 }
 
+function useCurrentEgressIpv4Lookup(api: CloudDeploymentAPI): {
+  readonly state: CurrentEgressIpv4Lookup;
+  readonly refresh: () => Promise<void>;
+} {
+  const [state, setState] = useState<CurrentEgressIpv4Lookup>({ status: "loading" });
+  const generation = useRef(0);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    const currentGeneration = ++generation.current;
+    setState({ status: "loading" });
+    try {
+      const result = await api.detectCurrentEgressIpv4();
+      if (currentGeneration !== generation.current) return;
+      setState(result.ok && result.value
+        ? { status: "success", value: result.value }
+        : { status: "failed" });
+    } catch {
+      if (currentGeneration === generation.current) setState({ status: "failed" });
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refresh();
+    return () => {
+      generation.current += 1;
+    };
+  }, [refresh]);
+
+  return { state, refresh };
+}
+
 function AwsInstanceDetails({
   api,
   deployment,
@@ -2304,6 +2350,7 @@ function AwsInstanceDetails({
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onRefresh: () => Promise<void>;
 }): React.JSX.Element {
+  const currentEgressIpv4 = useCurrentEgressIpv4Lookup(api);
   const [firewall, setFirewall] = useState<AwsFirewallSnapshot | null>(null);
   const [selectedDirection, setSelectedDirection] = useState<AwsFirewallDirection>("ingress");
   const [isLoadingRules, setIsLoadingRules] = useState(true);
@@ -2312,7 +2359,7 @@ function AwsInstanceDetails({
   const [editorError, setEditorError] = useState<string | null>(null);
   const [deleteRule, setDeleteRule] = useState<AwsFirewallRule | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | null>(null);
+  const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | "current-ip" | null>(null);
   const loadGeneration = useRef(0);
 
   const loadRules = useCallback(async (): Promise<void> => {
@@ -2349,6 +2396,40 @@ function AwsInstanceDetails({
   const openEditRule = (rule: AwsFirewallRule): void => {
     setEditorError(null);
     setEditor({ mode: "edit", ruleId: rule.id, draft: awsFirewallRuleDraft(rule) });
+  };
+
+  const allowCurrentEgressIpv4 = async (): Promise<void> => {
+    if (currentEgressIpv4.state.status !== "success") return;
+    const { cidr } = currentEgressIpv4.state.value;
+    setPendingMutation("current-ip");
+    try {
+      const result = await api.updateFirewall({
+        deploymentId: deployment.id,
+        expectedRevision: revision,
+        sshCidrs: appendUniqueCidr(deployment.spec.sshCidrs, cidr),
+        operatorCidrs: appendUniqueCidr(deployment.spec.operatorCidrs, cidr),
+      });
+      if (!result.ok || !result.value || result.value.provider !== "aws") {
+        onFeedback({
+          tone: "danger",
+          title: "Current IP rule failed",
+          detail: result.error ?? `The managed access rules for ${deployment.name} could not be updated.`,
+        });
+        await Promise.allSettled([onRefresh(), loadRules()]);
+        return;
+      }
+      onFeedback({
+        tone: "success",
+        title: "Current IP allowed",
+        detail: `${cidr} was added to the managed SSH and operator access ranges for ${deployment.name}.`,
+      });
+      await Promise.allSettled([onRefresh(), loadRules()]);
+    } catch (error) {
+      onFeedback({ tone: "danger", title: "Current IP rule failed", detail: errorMessage(error) });
+      await Promise.allSettled([onRefresh(), loadRules()]);
+    } finally {
+      setPendingMutation(null);
+    }
   };
 
   const saveRule = async (): Promise<void> => {
@@ -2419,7 +2500,20 @@ function AwsInstanceDetails({
   const visibleRules = selectedDirection === "ingress" ? ingressRules : egressRules;
   const securityGroupId = firewall?.securityGroupId ?? deployment.runtime.securityGroupIds[0] ?? "Pending";
   const securityGroupName = firewall?.securityGroupName ?? "Managed security group";
+  const currentEgressAddress = currentEgressIpv4.state.status === "success"
+    ? currentEgressIpv4.state.value.address
+    : null;
+  const currentEgressCidr = currentEgressIpv4.state.status === "success"
+    ? currentEgressIpv4.state.value.cidr
+    : null;
+  const canAllowCurrentEgressIpv4 = Boolean(
+    firewall &&
+    currentEgressCidr &&
+    currentEgressAddress &&
+    !awsFirewallHasSpecificIngressRangeFor(firewall.rules, currentEgressAddress),
+  );
   const columns = awsFirewallColumns({
+    currentEgressAddress,
     direction: selectedDirection,
     isPending: pendingMutation !== null,
     onDelete: (rule) => {
@@ -2503,7 +2597,7 @@ function AwsInstanceDetails({
                   {securityGroupName} · {securityGroupId}
                 </Card.Description>
               </div>
-              <div className="flex items-center gap-2 self-end sm:self-auto">
+              <div className="flex flex-wrap items-center justify-end gap-2 self-end sm:self-auto">
                 <Tooltip delay={0}>
                   <Button
                     aria-label="Refresh firewall rules"
@@ -2511,12 +2605,29 @@ function AwsInstanceDetails({
                     isIconOnly
                     size="sm"
                     variant="outline"
-                    onPress={() => void loadRules()}
+                    onPress={() => void Promise.allSettled([
+                      loadRules(),
+                      currentEgressIpv4.refresh(),
+                    ])}
                   >
                     <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoadingRules ? "animate-spin" : ""} />
                   </Button>
                   <Tooltip.Content>Refresh firewall rules</Tooltip.Content>
                 </Tooltip>
+                {canAllowCurrentEgressIpv4 && currentEgressCidr ? (
+                  <Button
+                    aria-label={`Allow current IP ${currentEgressCidr}`}
+                    className="text-success"
+                    isDisabled={pendingMutation !== null}
+                    isPending={pendingMutation === "current-ip"}
+                    size="sm"
+                    variant="outline"
+                    onPress={() => void allowCurrentEgressIpv4()}
+                  >
+                    <FontAwesomeIcon aria-hidden icon={faShieldHalved} />
+                    Allow my IP
+                  </Button>
+                ) : null}
                 <Button
                   isDisabled={!firewall || isLoadingRules || pendingMutation !== null}
                   size="sm"
@@ -2653,6 +2764,7 @@ function AzureInstanceDetails({
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onRefresh: () => Promise<void>;
 }): React.JSX.Element {
+  const currentEgressIpv4 = useCurrentEgressIpv4Lookup(api);
   const [firewall, setFirewall] = useState<AzureFirewallSnapshot | null>(null);
   const [selectedDirection, setSelectedDirection] = useState<AzureFirewallDirection>("ingress");
   const [isLoadingRules, setIsLoadingRules] = useState(true);
@@ -2661,7 +2773,7 @@ function AzureInstanceDetails({
   const [editorError, setEditorError] = useState<string | null>(null);
   const [deleteRule, setDeleteRule] = useState<AzureFirewallRule | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | null>(null);
+  const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | "current-ip" | null>(null);
   const loadGeneration = useRef(0);
 
   const loadRules = useCallback(async (): Promise<void> => {
@@ -2699,6 +2811,40 @@ function AzureInstanceDetails({
     if (azureFirewallRuleEditUnsupportedReason(rule, deployment.id)) return;
     setEditorError(null);
     setEditor({ mode: "edit", ruleId: rule.id, draft: azureFirewallRuleDraft(rule) });
+  };
+
+  const allowCurrentEgressIpv4 = async (): Promise<void> => {
+    if (currentEgressIpv4.state.status !== "success") return;
+    const { cidr } = currentEgressIpv4.state.value;
+    setPendingMutation("current-ip");
+    try {
+      const result = await api.updateFirewall({
+        deploymentId: deployment.id,
+        expectedRevision: revision,
+        sshCidrs: appendUniqueCidr(deployment.spec.sshCidrs, cidr),
+        operatorCidrs: appendUniqueCidr(deployment.spec.operatorCidrs, cidr),
+      });
+      if (!result.ok || !result.value || result.value.provider !== "azure") {
+        onFeedback({
+          tone: "danger",
+          title: "Current IP rule failed",
+          detail: result.error ?? `The managed access rules for ${deployment.name} could not be updated.`,
+        });
+        await Promise.allSettled([onRefresh(), loadRules()]);
+        return;
+      }
+      onFeedback({
+        tone: "success",
+        title: "Current IP allowed",
+        detail: `${cidr} was added to the managed SSH and operator access ranges for ${deployment.name}.`,
+      });
+      await Promise.allSettled([onRefresh(), loadRules()]);
+    } catch (error) {
+      onFeedback({ tone: "danger", title: "Current IP rule failed", detail: errorMessage(error) });
+      await Promise.allSettled([onRefresh(), loadRules()]);
+    } finally {
+      setPendingMutation(null);
+    }
   };
 
   const saveRule = async (): Promise<void> => {
@@ -2768,7 +2914,20 @@ function AzureInstanceDetails({
   const egressRules = firewall?.rules.filter(({ direction }) => direction === "egress") ?? [];
   const nsgId = firewall?.networkSecurityGroupId ?? deployment.runtime.networkSecurityGroupId ?? "Pending";
   const nsgName = firewall?.networkSecurityGroupName ?? "Managed network security group";
+  const currentEgressAddress = currentEgressIpv4.state.status === "success"
+    ? currentEgressIpv4.state.value.address
+    : null;
+  const currentEgressCidr = currentEgressIpv4.state.status === "success"
+    ? currentEgressIpv4.state.value.cidr
+    : null;
+  const canAllowCurrentEgressIpv4 = Boolean(
+    firewall &&
+    currentEgressCidr &&
+    currentEgressAddress &&
+    !azureFirewallHasSpecificIngressRangeFor(firewall.rules, currentEgressAddress),
+  );
   const columns = azureFirewallColumns({
+    currentEgressAddress,
     deploymentId: deployment.id,
     direction: selectedDirection,
     isPending: pendingMutation !== null,
@@ -2850,7 +3009,7 @@ function AzureInstanceDetails({
                 <Card.Title>Firewall rules</Card.Title>
                 <Card.Description>{nsgName} · {nsgId}</Card.Description>
               </div>
-              <div className="flex items-center gap-2 self-end sm:self-auto">
+              <div className="flex flex-wrap items-center justify-end gap-2 self-end sm:self-auto">
                 <Tooltip delay={0}>
                   <Button
                     aria-label="Refresh firewall rules"
@@ -2858,12 +3017,29 @@ function AzureInstanceDetails({
                     isIconOnly
                     size="sm"
                     variant="outline"
-                    onPress={() => void loadRules()}
+                    onPress={() => void Promise.allSettled([
+                      loadRules(),
+                      currentEgressIpv4.refresh(),
+                    ])}
                   >
                     <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoadingRules ? "animate-spin" : ""} />
                   </Button>
                   <Tooltip.Content>Refresh firewall rules</Tooltip.Content>
                 </Tooltip>
+                {canAllowCurrentEgressIpv4 && currentEgressCidr ? (
+                  <Button
+                    aria-label={`Allow current IP ${currentEgressCidr}`}
+                    className="text-success"
+                    isDisabled={pendingMutation !== null}
+                    isPending={pendingMutation === "current-ip"}
+                    size="sm"
+                    variant="outline"
+                    onPress={() => void allowCurrentEgressIpv4()}
+                  >
+                    <FontAwesomeIcon aria-hidden icon={faShieldHalved} />
+                    Allow my IP
+                  </Button>
+                ) : null}
                 <Button
                   isDisabled={!firewall || isLoadingRules || pendingMutation !== null}
                   size="sm"
@@ -3009,7 +3185,7 @@ function AzureFirewallRulesContent({
       {rulesError ? <InlineMessage tone="warning" title="Refresh failed" detail={`${rulesError} The last loaded rules remain visible.`} /> : null}
       <DataGrid
         aria-label={`${directionLabel(direction)} firewall rules`}
-        className="[&_tbody_tr]:cursor-[var(--cursor-interactive)]"
+        className="firewall-rules-grid [&_tbody_tr]:cursor-[var(--cursor-interactive)]"
         columns={columns}
         contentClassName="min-w-[1050px]"
         data={[...rules]}
@@ -3191,12 +3367,14 @@ function AzureFirewallRuleSheet({
 }
 
 function azureFirewallColumns({
+  currentEgressAddress,
   deploymentId,
   direction,
   isPending,
   onDelete,
   onEdit,
 }: {
+  readonly currentEgressAddress: string | null;
   readonly deploymentId: string;
   readonly direction: AzureFirewallDirection;
   readonly isPending: boolean;
@@ -3210,7 +3388,10 @@ function azureFirewallColumns({
       isRowHeader: true,
       minWidth: 190,
       cell: (rule) => (
-        <div className="flex min-w-0 flex-col items-start gap-1">
+        <div
+          className="flex min-w-0 flex-col items-start gap-1"
+          data-firewall-rule-accent={azureFirewallRuleAccent(rule, currentEgressAddress) ?? undefined}
+        >
           <span className="max-w-48 truncate font-mono text-xs" title={rule.name}>{rule.name}</span>
           <div className="flex flex-wrap gap-1">
             <Chip size="sm" variant="soft">{rule.isDefault ? "Azure default" : azureFirewallRuleProtectionReason(rule, deploymentId) ? "Sliver GUI baseline" : rule.managed ? "Sliver GUI" : "Azure"}</Chip>
@@ -3232,7 +3413,9 @@ function azureFirewallColumns({
         <AzureFirewallEndpoint
           addressPrefixes={rule.sourceAddressPrefixes}
           applicationSecurityGroupIds={rule.sourceApplicationSecurityGroupIds}
+          currentEgressAddress={currentEgressAddress}
           portRanges={rule.sourcePortRanges}
+          ruleAccent={azureFirewallRuleAccent(rule, currentEgressAddress)}
         />
       ),
     },
@@ -3244,7 +3427,9 @@ function azureFirewallColumns({
         <AzureFirewallEndpoint
           addressPrefixes={rule.destinationAddressPrefixes}
           applicationSecurityGroupIds={rule.destinationApplicationSecurityGroupIds}
+          currentEgressAddress={currentEgressAddress}
           portRanges={rule.destinationPortRanges}
+          ruleAccent={azureFirewallRuleAccent(rule, currentEgressAddress)}
         />
       ),
     },
@@ -3295,21 +3480,115 @@ function azureFirewallColumns({
 function AzureFirewallEndpoint({
   addressPrefixes,
   applicationSecurityGroupIds,
+  currentEgressAddress,
   portRanges,
+  ruleAccent,
 }: {
   readonly addressPrefixes: readonly string[];
   readonly applicationSecurityGroupIds: readonly string[];
+  readonly currentEgressAddress: string | null;
   readonly portRanges: readonly string[];
+  readonly ruleAccent: FirewallIpv4Accent;
 }): React.JSX.Element {
   return (
     <div className="flex min-w-0 flex-col gap-1 font-mono text-xs">
-      {addressPrefixes.map((prefix, index) => <span key={`prefix-${index}-${prefix}`}>{prefix}</span>)}
+      {addressPrefixes.map((prefix, index) => (
+        <FirewallIpv4Cidr
+          accent={firewallIpv4ValueAccent(prefix, ruleAccent, currentEgressAddress)}
+          key={`prefix-${index}-${prefix}`}
+          value={prefix}
+        />
+      ))}
       {applicationSecurityGroupIds.map((id, index) => (
         <span className="max-w-72 truncate" key={`asg-${index}-${id}`} title={id}>ASG · {id}</span>
       ))}
       <span className="text-muted">Ports · {portRanges.join(", ")}</span>
     </div>
   );
+}
+
+function FirewallIpv4Cidr({
+  accent,
+  value,
+}: {
+  readonly accent: FirewallIpv4Accent;
+  readonly value: string;
+}): React.JSX.Element {
+  return (
+    <span className="inline-flex w-fit flex-wrap items-center gap-1.5">
+      <span>{value}</span>
+      {accent ? (
+        <Chip color={accent} size="sm" variant="soft">
+          {accent === "danger" ? "Any IPv4" : "Current IP"}
+        </Chip>
+      ) : null}
+    </span>
+  );
+}
+
+function firewallIpv4ValueAccent(
+  cidr: string,
+  ruleAccent: FirewallIpv4Accent,
+  currentEgressAddress: string | null,
+): FirewallIpv4Accent {
+  if (ruleAccent === "danger") return isAnyIpv4Cidr(cidr) ? "danger" : null;
+  if (
+    ruleAccent === "success" &&
+    currentEgressAddress !== null &&
+    ipv4RangeContainsAddress(cidr, currentEgressAddress)
+  ) {
+    return "success";
+  }
+  return null;
+}
+
+function awsFirewallRuleAccent(
+  rule: AwsFirewallRule,
+  currentEgressAddress: string | null,
+): FirewallIpv4Accent {
+  return firewallIpv4Accent(
+    rule.peerType === "ipv4" ? [rule.peer] : [],
+    currentEgressAddress,
+  );
+}
+
+function azureFirewallRuleAccent(
+  rule: AzureFirewallRule,
+  currentEgressAddress: string | null,
+): FirewallIpv4Accent {
+  return firewallIpv4Accent(
+    [...rule.sourceAddressPrefixes, ...rule.destinationAddressPrefixes],
+    currentEgressAddress,
+  );
+}
+
+function awsFirewallHasSpecificIngressRangeFor(
+  rules: readonly AwsFirewallRule[],
+  currentEgressAddress: string,
+): boolean {
+  return rules.some((rule) => (
+    rule.direction === "ingress" &&
+    rule.peerType === "ipv4" &&
+    !isAnyIpv4Cidr(rule.peer) &&
+    ipv4CidrContainsAddress(rule.peer, currentEgressAddress)
+  ));
+}
+
+function azureFirewallHasSpecificIngressRangeFor(
+  rules: readonly AzureFirewallRule[],
+  currentEgressAddress: string,
+): boolean {
+  return rules.some((rule) => (
+    rule.direction === "ingress" &&
+    rule.access === "allow" &&
+    rule.sourceAddressPrefixes.some((cidr) => (
+      !isAnyIpv4Cidr(cidr) && ipv4RangeContainsAddress(cidr, currentEgressAddress)
+    ))
+  ));
+}
+
+function appendUniqueCidr(cidrs: readonly string[], cidr: string): readonly string[] {
+  return cidrs.includes(cidr) ? cidrs : [...cidrs, cidr];
 }
 
 function azureFirewallRuleProtectionReason(rule: AzureFirewallRule, deploymentId: string): string | null {
@@ -3490,7 +3769,7 @@ function AwsFirewallRulesContent({
       {rulesError ? <InlineMessage tone="warning" title="Refresh failed" detail={`${rulesError} The last loaded rules remain visible.`} /> : null}
       <DataGrid
         aria-label={`${directionLabel(direction)} firewall rules`}
-        className="[&_tbody_tr]:cursor-[var(--cursor-interactive)]"
+        className="firewall-rules-grid [&_tbody_tr]:cursor-[var(--cursor-interactive)]"
         columns={columns}
         contentClassName="min-w-[900px]"
         data={[...rules]}
@@ -3677,11 +3956,13 @@ function AwsFirewallRuleSheet({
 }
 
 function awsFirewallColumns({
+  currentEgressAddress,
   direction,
   isPending,
   onDelete,
   onEdit,
 }: {
+  readonly currentEgressAddress: string | null;
   readonly direction: AwsFirewallDirection;
   readonly isPending: boolean;
   readonly onDelete: (rule: AwsFirewallRule) => void;
@@ -3694,7 +3975,10 @@ function awsFirewallColumns({
       isRowHeader: true,
       minWidth: 180,
       cell: (rule) => (
-        <div className="flex min-w-0 flex-col items-start gap-1">
+        <div
+          className="flex min-w-0 flex-col items-start gap-1"
+          data-firewall-rule-accent={awsFirewallRuleAccent(rule, currentEgressAddress) ?? undefined}
+        >
           <span className="max-w-44 truncate font-mono text-xs" title={rule.id}>{rule.id}</span>
           <Chip size="sm" variant="soft">{rule.managed ? "Sliver GUI" : "AWS"}</Chip>
         </div>
@@ -3729,7 +4013,16 @@ function awsFirewallColumns({
       header: direction === "ingress" ? "Source" : "Destination",
       minWidth: 180,
       cellClassName: "font-mono text-xs",
-      accessorKey: "peer",
+      cell: (rule) => (
+        <FirewallIpv4Cidr
+          accent={firewallIpv4ValueAccent(
+            rule.peer,
+            awsFirewallRuleAccent(rule, currentEgressAddress),
+            currentEgressAddress,
+          )}
+          value={rule.peer}
+        />
+      ),
     },
     {
       id: "actions",

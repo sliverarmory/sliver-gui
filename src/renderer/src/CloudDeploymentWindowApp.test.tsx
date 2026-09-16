@@ -2701,6 +2701,253 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("button", { name: "Edit firewall for range-control" })).toBeInTheDocument();
   });
 
+  it("accents the current IPv4 CIDR and gives public IPv4 rules danger precedence", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "203.0.113.42", cidr: "203.0.113.42/32" },
+    });
+    currentSnapshot = runningCloudSnapshot();
+    currentFirewallSnapshot = {
+      ...firewallSnapshot,
+      rules: [
+        { ...firewallSnapshot.rules[0]!, peer: "203.0.113.0/24" },
+        firewallSnapshot.rules[1]!,
+      ],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    const currentIpRow = within(inboundGrid).getByText("sgr-11111111111111111").closest('[role="row"]');
+    if (!(currentIpRow instanceof HTMLElement)) throw new Error("Expected current IP firewall row");
+    expect(currentIpRow.querySelector('[data-firewall-rule-accent="success"]')).toBeInTheDocument();
+    expect(within(currentIpRow).getByText("Current IP")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Allow current IP/u })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /Outbound/u }));
+    const outboundGrid = await screen.findByRole("grid", { name: "Outbound firewall rules" });
+    const publicRow = within(outboundGrid).getByText("sgr-22222222222222222").closest('[role="row"]');
+    if (!(publicRow instanceof HTMLElement)) throw new Error("Expected public IPv4 firewall row");
+    expect(publicRow.querySelector('[data-firewall-rule-accent="danger"]')).toBeInTheDocument();
+    expect(publicRow.querySelector('[data-firewall-rule-accent="success"]')).not.toBeInTheDocument();
+    expect(within(publicRow).getByText("Any IPv4")).toBeInTheDocument();
+    expect(within(outboundGrid).getByText("0.0.0.0/0")).toBeInTheDocument();
+  });
+
+  it("offers a one-click managed access update when the current IP has no inbound coverage", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "198.51.100.77", cidr: "198.51.100.77/32" },
+    });
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    const allowCurrentIp = await screen.findByRole("button", {
+      name: "Allow current IP 198.51.100.77/32",
+    });
+    await user.click(allowCurrentIp);
+
+    await waitFor(() => expect(api.updateFirewall).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 9,
+      sshCidrs: ["203.0.113.8/32", "198.51.100.77/32"],
+      operatorCidrs: ["203.0.113.8/32", "198.51.100.77/32"],
+    }));
+    expect(await screen.findByText("Current IP allowed")).toBeInTheDocument();
+    expect(screen.getByText(/198\.51\.100\.77\/32 was added to the managed SSH and operator access ranges/u)).toBeInTheDocument();
+    expect(api.createFirewallRule).not.toHaveBeenCalled();
+  });
+
+  it("offers the current-IP action when an unrelated public HTTP rule is present", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "198.51.100.77", cidr: "198.51.100.77/32" },
+    });
+    currentSnapshot = runningCloudSnapshot();
+    currentFirewallSnapshot = {
+      ...firewallSnapshot,
+      rules: [
+        firewallSnapshot.rules[0]!,
+        {
+          id: "sgr-33333333333333333",
+          managed: false,
+          direction: "ingress",
+          protocol: "tcp",
+          fromPort: 80,
+          toPort: 80,
+          peerType: "ipv4",
+          peer: "0.0.0.0/0",
+          description: "Public HTTP",
+        },
+        {
+          id: "sgr-44444444444444444",
+          managed: true,
+          direction: "ingress",
+          protocol: "tcp",
+          fromPort: 31_337,
+          toPort: 31_337,
+          peerType: "ipv4",
+          peer: "203.0.113.8/32",
+          description: "Operator multiplayer",
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    const publicHttpRow = within(inboundGrid).getByText("sgr-33333333333333333").closest('[role="row"]');
+    if (!(publicHttpRow instanceof HTMLElement)) throw new Error("Expected public HTTP firewall row");
+    expect(publicHttpRow.querySelector('[data-firewall-rule-accent="danger"]')).toBeInTheDocument();
+    expect(await screen.findByRole("button", {
+      name: "Allow current IP 198.51.100.77/32",
+    })).toBeInTheDocument();
+  });
+
+  it("offers the Azure current-IP action when only a public IPv4 source contains it", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "198.51.100.77", cidr: "198.51.100.77/32" },
+    });
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
+    };
+    currentFirewallSnapshot = {
+      ...azureFirewallSnapshot,
+      rules: [
+        azureFirewallSnapshot.rules[0]!,
+        {
+          ...azureFirewallSnapshot.rules[0]!,
+          id: `${runningAzureDeployment.runtime.networkSecurityGroupId}/securityRules/allow-public-http`,
+          name: "allow-public-http",
+          priority: 1_250,
+          sourceAddressPrefixes: ["0.0.0.0/0"],
+          destinationPortRanges: ["80"],
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for azure-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    const publicHttpRow = within(inboundGrid).getByText("allow-public-http").closest('[role="row"]');
+    if (!(publicHttpRow instanceof HTMLElement)) throw new Error("Expected Azure public HTTP firewall row");
+    expect(publicHttpRow.querySelector('[data-firewall-rule-accent="danger"]')).toBeInTheDocument();
+    expect(await screen.findByRole("button", {
+      name: "Allow current IP 198.51.100.77/32",
+    })).toBeInTheDocument();
+  });
+
+  it("keeps the current-IP action usable when the managed firewall update fails", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "198.51.100.77", cidr: "198.51.100.77/32" },
+    });
+    vi.mocked(api.updateFirewall).mockResolvedValueOnce({
+      ok: false,
+      error: "Provider rejected the managed firewall update.",
+    });
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for range-control" }));
+    const allowCurrentIp = await screen.findByRole("button", {
+      name: "Allow current IP 198.51.100.77/32",
+    });
+    await user.click(allowCurrentIp);
+
+    expect(await screen.findByText("Current IP rule failed")).toBeInTheDocument();
+    expect(screen.getByText("Provider rejected the managed firewall update.")).toBeInTheDocument();
+    expect(allowCurrentIp).toBeEnabled();
+    expect(api.listFirewallRules).toHaveBeenCalledTimes(2);
+  });
+
+  it("adds the current /32 to Azure managed SSH and operator access in one click", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "198.51.100.77", cidr: "198.51.100.77/32" },
+    });
+    vi.mocked(api.updateFirewall).mockResolvedValueOnce({
+      ok: true,
+      value: runningAzureDeployment,
+    });
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
+    };
+    currentFirewallSnapshot = azureFirewallSnapshot;
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for azure-control" }));
+    await user.click(await screen.findByRole("button", {
+      name: "Allow current IP 198.51.100.77/32",
+    }));
+
+    await waitFor(() => expect(api.updateFirewall).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: AZURE_DEPLOYMENT_ID,
+      expectedRevision: 14,
+      sshCidrs: ["203.0.113.8/32", "198.51.100.77/32"],
+      operatorCidrs: ["203.0.113.8/32", "198.51.100.77/32"],
+    }));
+    expect(await screen.findByText("Current IP allowed")).toBeInTheDocument();
+  });
+
+  it("applies the same CIDR accents to Azure rules with danger winning within a multi-prefix rule", async () => {
+    detectCurrentEgressIpv4.mockResolvedValueOnce({
+      ok: true,
+      value: { address: "203.0.113.42", cidr: "203.0.113.42/32" },
+    });
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
+    };
+    currentFirewallSnapshot = {
+      ...azureFirewallSnapshot,
+      rules: [
+        {
+          ...azureFirewallSnapshot.rules[0]!,
+          sourceAddressPrefixes: ["203.0.113.42"],
+        },
+        {
+          ...azureFirewallSnapshot.rules[0]!,
+          id: `${runningAzureDeployment.runtime.networkSecurityGroupId}/securityRules/allow-public`,
+          name: "allow-public",
+          priority: 1_250,
+          sourceAddressPrefixes: ["0.0.0.0/0", "203.0.113.42/32"],
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Edit firewall for azure-control" }));
+    const inboundGrid = await screen.findByRole("grid", { name: "Inbound firewall rules" });
+    const currentIpRow = within(inboundGrid).getByText("allow-admin").closest('[role="row"]');
+    const publicRow = within(inboundGrid).getByText("allow-public").closest('[role="row"]');
+    if (!(currentIpRow instanceof HTMLElement) || !(publicRow instanceof HTMLElement)) {
+      throw new Error("Expected Azure firewall rows");
+    }
+    expect(currentIpRow.querySelector('[data-firewall-rule-accent="success"]')).toBeInTheDocument();
+    expect(within(currentIpRow).getByText("Current IP")).toBeInTheDocument();
+    expect(publicRow.querySelector('[data-firewall-rule-accent="danger"]')).toBeInTheDocument();
+    expect(publicRow.querySelector('[data-firewall-rule-accent="success"]')).not.toBeInTheDocument();
+    expect(within(publicRow).getByText("Any IPv4")).toBeInTheDocument();
+    expect(within(publicRow).queryByText("Current IP")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Allow current IP/u })).not.toBeInTheDocument();
+  });
+
   it("opens rule editing from accessible row actions without bubbling nested delete actions", async () => {
     currentSnapshot = runningCloudSnapshot();
     const user = userEvent.setup();

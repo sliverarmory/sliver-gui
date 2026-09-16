@@ -122,6 +122,22 @@
 }
 
 @layer components {
+  .firewall-rules-grid.table-root--secondary .table__row:has([data-firewall-rule-accent="success"]) > .table__cell {
+    background-color: color-mix(in srgb, var(--color-success-soft) 82%, transparent);
+  }
+
+  .firewall-rules-grid.table-root--secondary .table__row:has([data-firewall-rule-accent="success"]) > .table__cell:first-child {
+    box-shadow: inset 3px 0 var(--color-success);
+  }
+
+  .firewall-rules-grid.table-root--secondary .table__row:has([data-firewall-rule-accent="danger"]) > .table__cell {
+    background-color: color-mix(in srgb, var(--color-danger-soft) 82%, transparent);
+  }
+
+  .firewall-rules-grid.table-root--secondary .table__row:has([data-firewall-rule-accent="danger"]) > .table__cell:first-child {
+    box-shadow: inset 3px 0 var(--color-danger);
+  }
+
   .auxiliary-window-frame[data-titlebar-style="hiddenInset"] {
     --auxiliary-window-content-top: 1rem;
   }
