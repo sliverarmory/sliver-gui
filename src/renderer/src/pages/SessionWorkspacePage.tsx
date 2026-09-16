@@ -22,6 +22,7 @@ import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faApple, faLinux, faWindows } from "@fortawesome/free-brands-svg-icons";
 import {
   faArrowLeft,
   faArrowUpRightFromSquare,
@@ -65,6 +66,13 @@ import {
 import { defaultSessionWorkspacePanels } from "./session-workbench-panels";
 import { SessionTerminalPanel } from "./SessionTerminalPanel";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
+
+const sessionOperatingSystemIcons = new Map([
+  ["windows", faWindows],
+  ["linux", faLinux],
+  ["darwin", faApple],
+  ["macos", faApple],
+]);
 
 export interface SessionWorkspaceRoute {
   sessionId: string;
@@ -493,23 +501,27 @@ export function SessionWorkspacePage({
         onSelectSession={onSessionChange ? (option) => void requestSessionSwitch(option) : undefined}
       />
 
-      <header className="flex flex-col gap-5 rounded-2xl bg-surface p-5 sm:p-6 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex min-w-0 items-start gap-4">
-          <span className="section-icon mt-0.5"><FontAwesomeIcon aria-hidden icon={faComputer} /></span>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="truncate text-xl font-semibold text-foreground sm:text-2xl" id="session-workspace-heading">
+      <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-2xl bg-surface px-4 py-3">
+        <div className="flex min-w-0 flex-1 basis-80 items-center gap-3">
+          <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-default text-muted">
+            <FontAwesomeIcon aria-hidden icon={sessionOperatingSystemIcons.get(currentSession.os.trim().toLowerCase()) ?? faComputer} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <h1 className="truncate text-base font-semibold text-foreground" id="session-workspace-heading" title={currentSession.name || currentSession.hostname || "Unnamed session"}>
                 {currentSession.name || currentSession.hostname || "Unnamed session"}
               </h1>
-              <Chip color={status.color} size="sm" variant="soft">{status.label}</Chip>
+              <Chip className="shrink-0" color={status.color} size="sm" variant="soft">{status.label}</Chip>
             </div>
-            <p className="mt-1 truncate font-mono text-xs text-muted">{currentSession.id}</p>
-            <p className="mt-2 text-sm text-muted">
-              {currentSession.username || "Unknown user"} on {currentSession.hostname || "unknown host"}
-            </p>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+              <p className="min-w-0 truncate" title={`${currentSession.username || "Unknown user"} on ${currentSession.hostname || "unknown host"}`}>
+                {currentSession.username || "Unknown user"} on {currentSession.hostname || "unknown host"}
+              </p>
+              <p className="min-w-0 truncate font-mono text-[11px]" title={currentSession.id}>{currentSession.id}</p>
+            </div>
           </div>
         </div>
-        <dl className="grid shrink-0 grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+        <dl className="flex max-w-full flex-wrap items-center gap-x-5 gap-y-2">
           <CompactDetail label="Platform" value={`${currentSession.os || "unknown"}/${currentSession.arch || "unknown"}`} mono />
           <CompactDetail label="Process" value={currentSession.pid === undefined ? "Not reported" : String(currentSession.pid)} mono />
           <CompactDetail label="Last check-in" value={formatTimestamp(currentSession.lastCheckinAt)} />

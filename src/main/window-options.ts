@@ -211,6 +211,7 @@ export function interactionWindowOptions(
     show: false,
     title: "Interact",
     backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     webPreferences: secureWebPreferences(preload),
   };

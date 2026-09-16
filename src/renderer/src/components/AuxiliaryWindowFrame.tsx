@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 
 /** Keeps auxiliary window content below the macOS hiddenInset controls. */
-export function AuxiliaryWindowFrame({ children, className = "" }: {
+export function AuxiliaryWindowFrame({ children, className = "", ariaLabel }: {
   readonly children: ReactNode;
   readonly className?: string;
+  readonly ariaLabel?: string;
 }): React.JSX.Element {
   const inset = globalThis.navigator?.platform.startsWith("Mac") ?? false;
   return (
@@ -12,7 +13,7 @@ export function AuxiliaryWindowFrame({ children, className = "" }: {
       data-titlebar-style={inset ? "hiddenInset" : "default"}
     >
       {inset ? <div aria-hidden="true" className="auxiliary-window-titlebar" /> : null}
-      <main className={`min-h-0 flex-1 ${className}`}>{children}</main>
+      <main aria-label={ariaLabel} className={`min-h-0 flex-1 ${className}`}>{children}</main>
     </div>
   );
 }

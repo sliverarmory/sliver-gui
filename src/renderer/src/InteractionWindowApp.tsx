@@ -15,6 +15,7 @@ import {
   type SessionWorkspaceRoute,
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
+import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 
 let pendingInteractionLaunchContext: Promise<OperationResult<WindowLaunchContext>> | undefined;
 
@@ -108,9 +109,9 @@ export function InteractionWindowApp(): React.JSX.Element {
   }
 
   return (
-    <main className="app-main interaction-window" aria-label="Dedicated interaction window">
+    <AuxiliaryWindowFrame className="app-main interaction-window" ariaLabel="Dedicated interaction window">
       <div className="interaction-window__content">{content}</div>
-    </main>
+    </AuxiliaryWindowFrame>
   );
 }
 
