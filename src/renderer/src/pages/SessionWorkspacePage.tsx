@@ -14,6 +14,7 @@ import {
   Description,
   Dropdown,
   Label,
+  ScrollShadow,
   Tabs,
   Tooltip,
   toast,
@@ -113,6 +114,7 @@ export interface SessionWorkspacePageProps {
   onBack?: () => void;
   onSessionChange?: (snapshot: SliverSnapshot, route: SessionWorkspaceRoute) => void;
   allowPopOut?: boolean;
+  presentation?: "embedded" | "dedicated";
   panels?: SessionWorkspacePanels;
 }
 
@@ -124,6 +126,7 @@ export function SessionWorkspacePage({
   onBack,
   onSessionChange,
   allowPopOut = true,
+  presentation = "embedded",
   panels = {},
 }: SessionWorkspacePageProps): React.JSX.Element {
   const routeIdentity = sessionWorkspaceRouteIdentity(route);
@@ -148,6 +151,7 @@ export function SessionWorkspacePage({
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [terminalVisitedRouteIdentity, setTerminalVisitedRouteIdentity] = useState<string>();
+  const [selectedPanel, setSelectedPanel] = useState("overview");
   const [pendingSessionSwitch, setPendingSessionSwitch] = useState<PendingSessionSwitch>();
   const [isCheckingSessionShells, setIsCheckingSessionShells] = useState(false);
   const [isSwitchingSession, setIsSwitchingSession] = useState(false);
@@ -489,7 +493,7 @@ export function SessionWorkspacePage({
     : undefined;
 
   return (
-    <section className="page-stack" aria-labelledby="session-workspace-heading">
+    <section className="page-stack session-workspace" data-presentation={presentation} aria-labelledby="session-workspace-heading">
       <WorkspaceTrail
         currentSessionId={route.sessionId}
         isSessionMenuBusy={isCheckingSessionShells || isSwitchingSession}
@@ -529,9 +533,11 @@ export function SessionWorkspacePage({
       </header>
 
       <Tabs
+        className="session-workspace__tabs"
         defaultSelectedKey="overview"
         variant="secondary"
         onSelectionChange={(key) => {
+          setSelectedPanel(String(key));
           if (String(key) === "terminal") setTerminalVisitedRouteIdentity(routeIdentity);
         }}
       >
@@ -548,115 +554,117 @@ export function SessionWorkspacePage({
           </Tabs.List>
         </Tabs.ListContainer>
 
-        <Tabs.Panel className="pt-6" id="overview">
-          {renderPanel(resolvedPanels.overview, context, {
-            icon: faComputer,
-            title: "Session overview unavailable",
-            description: "Identity and network details are not available for this workspace adapter.",
-          })}
-          <div className="mt-6 grid items-start gap-6 xl:grid-cols-2">
-            <section className="rounded-2xl bg-surface p-5 sm:p-6" aria-label="Quick actions">
-              <OperationComposer
-                active={currentSession}
+        <WorkspacePanelViewport presentation={presentation} scrollKey={`${routeIdentity}:${selectedPanel}`}>
+          <Tabs.Panel className="pt-6" id="overview">
+            {renderPanel(resolvedPanels.overview, context, {
+              icon: faComputer,
+              title: "Session overview unavailable",
+              description: "Identity and network details are not available for this workspace adapter.",
+            })}
+            <div className="mt-6 grid items-start gap-6 xl:grid-cols-2">
+              <section className="rounded-2xl bg-surface p-5 sm:p-6" aria-label="Quick actions">
+                <OperationComposer
+                  active={currentSession}
+                  capabilities={snapshot.targetContext.capabilities}
+                  targetIdentity={routeIdentity}
+                  onSubmitted={(operation) => {
+                    if (routeIdentity !== routeIdentityRef.current) return false;
+                    mergeOperation(operation);
+                    return true;
+                  }}
+                />
+              </section>
+              <SessionLifecycleActions
                 capabilities={snapshot.targetContext.capabilities}
-                targetIdentity={routeIdentity}
-                onSubmitted={(operation) => {
-                  if (routeIdentity !== routeIdentityRef.current) return false;
-                  mergeOperation(operation);
-                  return true;
-                }}
+                isBusy={isPreparingAction}
+                onPrepare={(actionId) => void prepareAction(actionId)}
               />
-            </section>
-            <SessionLifecycleActions
-              capabilities={snapshot.targetContext.capabilities}
-              isBusy={isPreparingAction}
-              onPrepare={(actionId) => void prepareAction(actionId)}
-            />
-          </div>
-        </Tabs.Panel>
+            </div>
+          </Tabs.Panel>
 
-        <Tabs.Panel className="pt-6" id="files">
-          {renderPanel(resolvedPanels.files, context, {
-            icon: faFolderOpen,
-            title: "No file inventory loaded",
-            description: "Browse a directory to inspect bounded remote filesystem results for this session.",
-          })}
-        </Tabs.Panel>
-        <Tabs.Panel className="pt-6" id="processes">
-          {renderPanel(resolvedPanels.processes, context, {
-            icon: faMicrochip,
-            title: "No process inventory loaded",
-            description: "Process details and filters will appear here after the session returns an inventory.",
-          })}
-        </Tabs.Panel>
-        <Tabs.Panel className="pt-6" id="execution">
-          {resolvedPanels.execution
-            ? resolvedPanels.execution(context)
-            : activeSessionRef
-              ? <TargetExecutionWorkbench expectedTarget={activeSessionRef} targetIdentity={routeIdentity} />
-              : renderPanel(undefined, context, {
-                  icon: faTriangleExclamation,
-                  title: "Execution workbench unavailable",
-                  description: "The exact main-issued target reference is no longer available.",
-                })}
-        </Tabs.Panel>
-        <Tabs.Panel className="pt-6" id="environment">
-          {renderPanel(resolvedPanels.environment, context, {
-            icon: faCode,
-            title: "No environment inventory loaded",
-            description: "Environment names and protected values will appear here when requested.",
-          })}
-        </Tabs.Panel>
-        {isWindows ? (
-          <Tabs.Panel className="pt-6" id="registry">
-            {renderPanel(resolvedPanels.registry, context, {
-              icon: faList,
-              title: "No registry location loaded",
-              description: "Choose a hive and path to inspect Windows registry values for this session.",
+          <Tabs.Panel className="pt-6" id="files">
+            {renderPanel(resolvedPanels.files, context, {
+              icon: faFolderOpen,
+              title: "No file inventory loaded",
+              description: "Browse a directory to inspect bounded remote filesystem results for this session.",
             })}
           </Tabs.Panel>
-        ) : null}
-        <Tabs.Panel
-          shouldForceMount
-          className="pt-6 data-[inert=true]:hidden"
-          id="terminal"
-        >
-          {terminalVisitedRouteIdentity === routeIdentity
-            ? resolvedPanels.terminal
-              ? resolvedPanels.terminal(context)
-              : (
-                  <SessionTerminalPanel
-                    route={route}
-                    session={currentSession}
-                    onPopOut={popOutManagedShells}
-                  />
-                )
-            : null}
-        </Tabs.Panel>
-        <Tabs.Panel className="pt-6" id="activity">
-          <SessionActivity
-            error={operationsError}
-            isLoading={isLoadingOperations}
-            isLoadingMore={isLoadingMoreOperations}
-            nextCursor={nextOperationCursor}
-            operations={operations}
-            onLoadMore={(cursor) => void loadOperations(cursor)}
-            onOpen={(operation) => {
-              const expectedRouteIdentity = routeIdentity;
-              const requestSequence = ++operationDetailRequestSequence.current;
-              void openOperationDetail(
-                operation,
-                (detail) => {
-                  setSelectedOperationRouteIdentity(expectedRouteIdentity);
-                  setSelectedOperation(detail);
-                },
-                () => expectedRouteIdentity === routeIdentityRef.current &&
-                  requestSequence === operationDetailRequestSequence.current,
-              );
-            }}
-          />
-          {resolvedPanels.activity ? <div className="mt-6">{resolvedPanels.activity(context)}</div> : null}
-        </Tabs.Panel>
+          <Tabs.Panel className="pt-6" id="processes">
+            {renderPanel(resolvedPanels.processes, context, {
+              icon: faMicrochip,
+              title: "No process inventory loaded",
+              description: "Process details and filters will appear here after the session returns an inventory.",
+            })}
+          </Tabs.Panel>
+          <Tabs.Panel className="pt-6" id="execution">
+            {resolvedPanels.execution
+              ? resolvedPanels.execution(context)
+              : activeSessionRef
+                ? <TargetExecutionWorkbench expectedTarget={activeSessionRef} targetIdentity={routeIdentity} />
+                : renderPanel(undefined, context, {
+                    icon: faTriangleExclamation,
+                    title: "Execution workbench unavailable",
+                    description: "The exact main-issued target reference is no longer available.",
+                  })}
+          </Tabs.Panel>
+          <Tabs.Panel className="pt-6" id="environment">
+            {renderPanel(resolvedPanels.environment, context, {
+              icon: faCode,
+              title: "No environment inventory loaded",
+              description: "Environment names and protected values will appear here when requested.",
+            })}
+          </Tabs.Panel>
+          {isWindows ? (
+            <Tabs.Panel className="pt-6" id="registry">
+              {renderPanel(resolvedPanels.registry, context, {
+                icon: faList,
+                title: "No registry location loaded",
+                description: "Choose a hive and path to inspect Windows registry values for this session.",
+              })}
+            </Tabs.Panel>
+          ) : null}
+          <Tabs.Panel
+            shouldForceMount
+            className="pt-6 data-[inert=true]:hidden"
+            id="terminal"
+          >
+            {terminalVisitedRouteIdentity === routeIdentity
+              ? resolvedPanels.terminal
+                ? resolvedPanels.terminal(context)
+                : (
+                    <SessionTerminalPanel
+                      route={route}
+                      session={currentSession}
+                      onPopOut={popOutManagedShells}
+                    />
+                  )
+              : null}
+          </Tabs.Panel>
+          <Tabs.Panel className="pt-6" id="activity">
+            <SessionActivity
+              error={operationsError}
+              isLoading={isLoadingOperations}
+              isLoadingMore={isLoadingMoreOperations}
+              nextCursor={nextOperationCursor}
+              operations={operations}
+              onLoadMore={(cursor) => void loadOperations(cursor)}
+              onOpen={(operation) => {
+                const expectedRouteIdentity = routeIdentity;
+                const requestSequence = ++operationDetailRequestSequence.current;
+                void openOperationDetail(
+                  operation,
+                  (detail) => {
+                    setSelectedOperationRouteIdentity(expectedRouteIdentity);
+                    setSelectedOperation(detail);
+                  },
+                  () => expectedRouteIdentity === routeIdentityRef.current &&
+                    requestSequence === operationDetailRequestSequence.current,
+                );
+              }}
+            />
+            {resolvedPanels.activity ? <div className="mt-6">{resolvedPanels.activity(context)}</div> : null}
+          </Tabs.Panel>
+        </WorkspacePanelViewport>
       </Tabs>
 
       <OperationDetailModal
@@ -697,6 +705,47 @@ export function SessionWorkspacePage({
         }}
       />
     </section>
+  );
+}
+
+function WorkspacePanelViewport({ children, presentation, scrollKey }: {
+  children: ReactNode;
+  presentation: "embedded" | "dedicated";
+  scrollKey: string;
+}): React.JSX.Element {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    // HeroUI observes the viewport; panel changes can resize only its contents.
+    const observer = new ResizeObserver(() => viewport.dispatchEvent(new Event("scroll")));
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [presentation]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = 0;
+    viewport.dispatchEvent(new Event("scroll"));
+  }, [presentation, scrollKey]);
+
+  if (presentation === "embedded") return <>{children}</>;
+  return (
+    <ScrollShadow
+      ref={viewportRef}
+      aria-label="Session interaction content"
+      className="session-workspace__viewport min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      hideScrollBar={false}
+      role="region"
+      size={32}
+      tabIndex={0}
+    >
+      <div ref={contentRef} className="flow-root pb-12 sm:pb-20">{children}</div>
+    </ScrollShadow>
   );
 }
 

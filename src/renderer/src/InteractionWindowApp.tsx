@@ -77,6 +77,7 @@ export function InteractionWindowApp(): React.JSX.Element {
     content = (
       <SessionWorkspacePage
         allowPopOut={false}
+        presentation="dedicated"
         route={launchTarget.route}
         session={snapshot.targetContext.activeTargetSummary?.mode === "session"
           ? snapshot.targetContext.activeTargetSummary
