@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   IPC,
   IPC_INVOKE,
+  SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
   type IpcInvokeArgs,
   type SliverDesktopAPI,
 } from "../shared/contracts.js";
@@ -314,21 +315,7 @@ describe("sandboxed preload bridge", () => {
 
     expect(Object.keys(exposed).sort()).toEqual([
       ...Object.keys(IPC_INVOKE),
-      "onSnapshotChanged",
-      "onOperationChanged",
-      "onBeaconTasksInvalidated",
-      "onSessionShellsChanged",
-      "onReleaseDownloadChanged",
-      "onApplicationUpdateChanged",
-      "onApplicationSettingsChanged",
-      "onApplicationIconChanged",
-      "onCommandPaletteRequested",
-      "onConsoleNewTabRequested",
-      "onConsoleCloseTabRequested",
-      "onConsoleSelectTabRequested",
-      "onConsoleSettingsRequested",
-      "openStream",
-      "openConsoleStream",
+      ...SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
     ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
       electronMocks.invoke.mockClear();
@@ -358,21 +345,7 @@ describe("sandboxed preload bridge", () => {
 
     expect(Object.keys(exposed).sort()).toEqual([
       ...Object.keys(IPC_INVOKE),
-      "onSnapshotChanged",
-      "onOperationChanged",
-      "onBeaconTasksInvalidated",
-      "onSessionShellsChanged",
-      "onReleaseDownloadChanged",
-      "onApplicationUpdateChanged",
-      "onApplicationSettingsChanged",
-      "onApplicationIconChanged",
-      "onCommandPaletteRequested",
-      "onConsoleNewTabRequested",
-      "onConsoleCloseTabRequested",
-      "onConsoleSelectTabRequested",
-      "onConsoleSettingsRequested",
-      "openStream",
-      "openConsoleStream",
+      ...SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
     ].sort());
     expect(exposed).not.toHaveProperty("ipcRenderer");
     expect(exposed).not.toHaveProperty("send");

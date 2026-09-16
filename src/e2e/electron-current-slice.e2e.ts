@@ -7,7 +7,13 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-import { IPC, IPC_INVOKE, type SliverDesktopAPI, type SliverSnapshot } from "../shared/contracts.js";
+import {
+  IPC,
+  IPC_INVOKE,
+  SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
+  type SliverDesktopAPI,
+  type SliverSnapshot,
+} from "../shared/contracts.js";
 import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
@@ -1084,20 +1090,7 @@ async function invokeApplicationMenuItem(
 async function assertRendererSecurity(electronApplication: ElectronApplication, page: Page): Promise<void> {
   const expectedApiKeys = [
     ...Object.keys(IPC_INVOKE),
-    "openConsoleStream",
-    "openStream",
-    "onSnapshotChanged",
-    "onOperationChanged",
-    "onBeaconTasksInvalidated",
-    "onSessionShellsChanged",
-    "onReleaseDownloadChanged",
-    "onApplicationUpdateChanged",
-    "onApplicationSettingsChanged",
-    "onCommandPaletteRequested",
-    "onConsoleNewTabRequested",
-    "onConsoleCloseTabRequested",
-    "onConsoleSelectTabRequested",
-    "onConsoleSettingsRequested",
+    ...SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {
@@ -3910,6 +3903,9 @@ async function verifyM3ManagedShellPopout(
       name: "Interactive shell for m1-session",
       exact: true,
     }).waitFor();
+    await sourcePage
+      .locator('[data-shell-terminal-resource-id]:not([inert]) [data-terminal-state="ready"]')
+      .waitFor();
     await sourcePage.getByText("Attached", { exact: true }).first().waitFor();
   } finally {
     electronApplication.off("window", observeWindow);

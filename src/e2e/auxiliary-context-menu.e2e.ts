@@ -7,6 +7,9 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { ApplicationContextMenuAPI } from "../shared/application-context-menu-contracts.js";
+import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
+
+const APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS = 5_000;
 
 test("Armory, Network, and Cloud Deployment use native context menus in isolated windows", { timeout: 90_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -14,6 +17,8 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   let application: ElectronApplication | undefined;
   let originalClipboard: string | undefined;
+  let testFailed = false;
+  let testFailure: unknown;
   const rendererErrors: string[] = [];
   const observedPages = new Set<Page>();
 
@@ -104,14 +109,57 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     const methods = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.methods);
     assert.equal(methods.some((method) => /^start(?:PortForward|ReversePortForward|Socks5Proxy)$/u.test(method)), false);
     assert.deepEqual(rendererErrors, []);
+  } catch (error) {
+    testFailed = true;
+    testFailure = error;
+    throw error;
   } finally {
+    const cleanupFailures: unknown[] = [];
     if (application && originalClipboard !== undefined) {
-      await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), originalClipboard).catch(() => undefined);
+      await restoreClipboardWithin(application, originalClipboard, APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS)
+        .catch((error) => cleanupFailures.push(error));
     }
-    await application?.close().catch(() => undefined);
-    await rm(temporaryRoot, { recursive: true, force: true });
+    if (application) {
+      await cleanupOwnedApplication(
+        application,
+        "auxiliary context-menu",
+        APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS,
+      ).catch((error) => cleanupFailures.push(error));
+    }
+    await rm(temporaryRoot, { recursive: true, force: true }).catch((error) => cleanupFailures.push(error));
+    if (cleanupFailures.length > 0) {
+      const cleanupError = new AggregateError(cleanupFailures, "Auxiliary context-menu E2E cleanup failed");
+      if (testFailed) {
+        attachCleanupFailure(testFailure, cleanupError);
+        console.error("Failed to clean auxiliary context-menu E2E resources", cleanupError);
+      } else {
+        throw cleanupError;
+      }
+    }
   }
 });
+
+async function restoreClipboardWithin(
+  application: ElectronApplication,
+  text: string,
+  timeoutMs: number,
+): Promise<void> {
+  const timedOut = Symbol("clipboard restore timeout");
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const restoration = application.evaluate(({ clipboard }, value) => clipboard.writeText(value), text).then(
+    () => ({ ok: true } as const),
+    (error: unknown) => ({ error, ok: false } as const),
+  );
+  const result = await Promise.race([
+    restoration,
+    new Promise<typeof timedOut>((resolveTimeout) => {
+      timeout = setTimeout(() => resolveTimeout(timedOut), timeoutMs);
+    }),
+  ]);
+  if (timeout) clearTimeout(timeout);
+  if (result === timedOut) throw new Error(`Clipboard restoration timed out after ${timeoutMs}ms`);
+  if (!result.ok) throw result.error;
+}
 
 async function assertBridge(page: Page): Promise<void> {
   const bridge = await page.evaluate(() => {

@@ -936,6 +936,43 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onConsoleSettingsRequested: (listener: () => void) => () => void;
 };
 
+type SliverDesktopNonInvokeAPIKey = Exclude<keyof SliverDesktopAPI, keyof SliverDesktopInvokeAPI>;
+
+function defineSliverDesktopNonInvokeAPIKeys<
+  const Keys extends readonly SliverDesktopNonInvokeAPIKey[],
+>(
+  keys: Keys & (
+    Exclude<SliverDesktopNonInvokeAPIKey, Keys[number]> extends never
+      ? unknown
+      : readonly ["Missing SliverDesktopAPI keys", Exclude<SliverDesktopNonInvokeAPIKey, Keys[number]>]
+  ),
+): Keys {
+  return keys;
+}
+
+/**
+ * Explicit security allowlist for preload capabilities that do not use invoke IPC.
+ * The helper makes additions to SliverDesktopAPI fail typechecking until this list
+ * is deliberately reviewed and updated.
+ */
+export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAPIKeys([
+  "openStream",
+  "openConsoleStream",
+  "onSnapshotChanged",
+  "onOperationChanged",
+  "onBeaconTasksInvalidated",
+  "onSessionShellsChanged",
+  "onReleaseDownloadChanged",
+  "onApplicationUpdateChanged",
+  "onApplicationSettingsChanged",
+  "onApplicationIconChanged",
+  "onCommandPaletteRequested",
+  "onConsoleNewTabRequested",
+  "onConsoleCloseTabRequested",
+  "onConsoleSelectTabRequested",
+  "onConsoleSettingsRequested",
+] as const);
+
 export function disconnectedSnapshot(error?: string): SliverSnapshot {
   const emptyDomain = <T>(): DomainCollection<T> => ({
     status: "idle",

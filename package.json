@@ -17,7 +17,7 @@
   "type": "module",
   "packageManager": "npm@11.19.0",
   "engines": {
-    "node": ">=24",
+    "node": "^24.15.0 || >=26.0.0",
     "npm": ">=11.19.0"
   },
   "scripts": {
@@ -30,7 +30,7 @@
     "build": "npm run typecheck && electron-vite build",
     "pretest": "npm run prepare:node-pty",
     "test": "vitest run",
-    "test:e2e:electron": "npm run build:e2e-app && node --test --test-concurrency=1 .e2e-dist/src/e2e/application-protocol.e2e.js .e2e-dist/src/e2e/application-navigation.e2e.js .e2e-dist/src/e2e/electron-current-slice.e2e.js .e2e-dist/src/e2e/network-window.e2e.js .e2e-dist/src/e2e/armory-window.e2e.js .e2e-dist/src/e2e/auxiliary-context-menu.e2e.js",
+    "test:e2e:electron": "npm run build:e2e-app && node --test --test-concurrency=1 .e2e-dist/src/e2e/application-protocol.e2e.js .e2e-dist/src/e2e/application-navigation.e2e.js .e2e-dist/src/e2e/application-icon.e2e.js .e2e-dist/src/e2e/electron-current-slice.e2e.js .e2e-dist/src/e2e/network-window.e2e.js .e2e-dist/src/e2e/armory-window.e2e.js .e2e-dist/src/e2e/auxiliary-context-menu.e2e.js",
     "test:e2e:navigation": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/application-navigation.e2e.js",
     "test:e2e:protocol": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/application-protocol.e2e.js",
     "test:e2e:icons": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/application-icon.e2e.js",

@@ -8,8 +8,10 @@ import { _electron as electron, type ElectronApplication, type Page } from "play
 
 import type { ApplicationIcon } from "../shared/application-settings-contracts.js";
 import type { SliverDesktopAPI } from "../shared/contracts.js";
+import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
+const APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS = 5_000;
 
 test("app icon settings apply, follow system appearance and survive restart", { timeout: 60_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "sliver-gui-icons-"));
@@ -18,6 +20,8 @@ test("app icon settings apply, follow system appearance and survive restart", { 
   await Promise.all(["saved", "managed", "client", "user-data"].map((name) => mkdir(join(root, name))));
   await mkdir(artifacts, { recursive: true });
   let application: ElectronApplication | undefined;
+  let testFailed = false;
+  let testFailure: unknown;
   const launch = () => electron.launch({
     args: [
       "--enable-sandbox",
@@ -69,7 +73,8 @@ test("app icon settings apply, follow system appearance and survive restart", { 
     await page.screenshot({ path: join(artifacts, "settings-dark.png"), animations: "disabled" });
     const persisted = JSON.parse(await readFile(join(userData, "application-settings.json"), "utf8"));
     assert.equal(persisted.appIcon, "passion");
-    await application.close();
+    await cleanupOwnedApplication(application, "application icon restart", APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS);
+    application = undefined;
     application = await launch();
     page = await application.firstWindow();
     await openSettings(page);
@@ -80,18 +85,45 @@ test("app icon settings apply, follow system appearance and survive restart", { 
     await assertNativeIcon(application, "icon1a-light.png");
     const connections = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.configFactoryCalls);
     assert.equal(connections, 0, "icon smoke must never connect to an operator server");
+  } catch (error) {
+    testFailed = true;
+    testFailure = error;
+    throw error;
   } finally {
-    await application?.close();
-    await rm(root, { recursive: true, force: true });
+    const cleanupFailures: unknown[] = [];
+    if (application) {
+      await cleanupOwnedApplication(
+        application,
+        "application icon",
+        APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS,
+      ).catch((error) => cleanupFailures.push(error));
+    }
+    await rm(root, { recursive: true, force: true }).catch((error) => cleanupFailures.push(error));
+    if (cleanupFailures.length > 0) {
+      const cleanupError = new AggregateError(cleanupFailures, "Application icon E2E cleanup failed");
+      if (testFailed) {
+        attachCleanupFailure(testFailure, cleanupError);
+        console.error("Failed to clean application icon E2E resources", cleanupError);
+      } else {
+        throw cleanupError;
+      }
+    }
   }
 });
 
 async function openSettings(page: Page): Promise<void> {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+  const savedConfigurations = page.getByRole("dialog", { name: "Saved configurations" });
+  await savedConfigurations.waitFor();
   await page.keyboard.press("Escape");
+  await savedConfigurations.waitFor({ state: "hidden" });
   await page.getByRole("button", { name: "Application menu, offline" }).click();
-  await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+  const applicationMenu = page.locator(
+    '[role="menu"][aria-label="Application and current server actions"]',
+  );
+  await applicationMenu.waitFor();
+  await applicationMenu.getByRole("menuitem", { name: "Settings", exact: true }).click();
+  await applicationMenu.waitFor({ state: "hidden" });
   await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
 }
 
@@ -115,8 +147,15 @@ async function chooseIcon(page: Page, value: ApplicationIcon): Promise<void> {
 }
 
 async function assertNativeIcon(application: ElectronApplication, name: string): Promise<void> {
-  const paths = await application.evaluate(() => (globalThis as unknown as { iconPaths: string[] }).iconPaths);
-  assert.equal(basename(paths.at(-1) ?? ""), name);
+  const deadline = Date.now() + 5_000;
+  let actualName = "";
+  while (Date.now() < deadline) {
+    const paths = await application.evaluate(() => (globalThis as unknown as { iconPaths: string[] }).iconPaths);
+    actualName = basename(paths.at(-1) ?? "");
+    if (actualName === name) break;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+  }
+  assert.equal(actualName, name);
   const page = await application.firstWindow();
   await page.waitForFunction((expected) => {
     const document = (globalThis as unknown as {

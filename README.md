@@ -169,8 +169,9 @@ metadata remain in their native formats. Dependencies and generated `dist` and
 `release` outputs are ignored and are not part of the GUI's TypeScript source
 project.
 
-Requirements: Node.js 24 or newer, npm 11.19 or newer, and a HeroUI Pro
-license. Native console/distribution builds additionally require Go 1.27.1;
+Requirements: Node.js 24.15 or newer on the 24.x line, or Node.js 26 or
+newer; npm 11.19 or newer; and a HeroUI Pro license. Native
+console/distribution builds additionally require Go 1.27.1;
 universal macOS builds use the system `/usr/bin/lipo`. Set `HEROUI_AUTH_TOKEN`
 for automated installs, or authenticate with the HeroUI Pro CLI and install its
 artifacts before building locally.
@@ -226,11 +227,11 @@ npm run test:m0
 ```
 
 `npm run protocol:check` is authoritative under the locked CI toolchain: Node
-24.0.0, npm 11.19.0, and Go 1.27.1. `npm run test:m0` retains the
+24.15.0, npm 11.19.0, and Go 1.27.1. `npm run test:m0` retains the
 M0 current-platform regression gate. `npm run test:e2e:electron` exercises the
-M1 target/task path, the dedicated session-first M2 workbench, and the
-deterministic M3 managed-shell and M4 execution paths through the production
-renderer, frozen preload, trusted IPC, and an injected Sliver client;
+application-icon lifecycle, M1 target/task path, the dedicated session-first M2
+workbench, and the deterministic M3 managed-shell and M4 execution paths through
+the production renderer, frozen preload, trusted IPC, and an injected Sliver client;
 `npm run test:e2e:m1` remains an alias for that current-slice lane.
 Opt-in actual-server package tests remain separate because they require an
 authorized disposable server and operator configuration.
