@@ -1,5 +1,17 @@
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
+  getLocalTimeZone,
+  parseAbsolute,
+  parseDateTime,
+  toZoned,
+  type DateValue,
+  type ZonedDateTime,
+} from "@internationalized/date";
+import {
+  Button,
+  Calendar,
+  DateField,
+  DatePicker,
   Description,
   FieldError,
   Input,
@@ -8,6 +20,7 @@ import {
   Select,
   TextArea,
   TextField,
+  TimeField,
 } from "@heroui/react";
 import { CellSwitch } from "@heroui-pro/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -21,13 +34,141 @@ interface FieldProps {
   description?: string;
   error?: string | undefined;
   placeholder?: string;
-  type?: "text" | "number" | "password" | "datetime-local";
+  type?: "text" | "number" | "password";
   min?: number;
   max?: number;
   required?: boolean;
   disabled?: boolean;
   mono?: boolean;
   name?: string;
+}
+
+export function parseAbsoluteDateTimeValue(value: string): ZonedDateTime | null {
+  const normalized = value.trim();
+  if (!normalized) return null;
+
+  try {
+    return parseAbsolute(normalized, getLocalTimeZone());
+  } catch {
+    // Preserve legacy values produced by the former datetime-local input. New
+    // selections are always serialized as absolute RFC 3339 timestamps.
+    try {
+      return toZoned(parseDateTime(normalized), getLocalTimeZone());
+    } catch {
+      return null;
+    }
+  }
+}
+
+export function serializeAbsoluteDateTimeValue(value: DateValue | null): string {
+  if (!value) return "";
+  return toZoned(value, getLocalTimeZone()).toAbsoluteString();
+}
+
+interface DateTimePickerFieldProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  description?: string;
+  error?: string | undefined;
+  disabled?: boolean;
+  name?: string;
+}
+
+export function DateTimePickerField({
+  label,
+  value,
+  onChange,
+  description,
+  error,
+  disabled,
+  name,
+}: DateTimePickerFieldProps) {
+  const dateValue = parseAbsoluteDateTimeValue(value);
+
+  return (
+    <DatePicker
+      className="w-full"
+      granularity="minute"
+      name={name ?? label.toLowerCase().replaceAll(" ", "-")}
+      value={dateValue}
+      isInvalid={Boolean(error)}
+      {...(disabled ? { isDisabled: true } : {})}
+      onChange={(nextValue) => onChange(serializeAbsoluteDateTimeValue(nextValue))}
+    >
+      {({ state }) => (
+        <>
+          <Label>{label}</Label>
+          <DateField.Group fullWidth variant="secondary">
+            <DateField.Input>
+              {(segment) => <DateField.Segment segment={segment} />}
+            </DateField.Input>
+            <DateField.Suffix>
+              <DatePicker.Trigger>
+                <DatePicker.TriggerIndicator />
+              </DatePicker.Trigger>
+            </DateField.Suffix>
+          </DateField.Group>
+          {description ? <Description>{description}</Description> : null}
+          {error ? <FieldError>{error}</FieldError> : null}
+          <DatePicker.Popover>
+            <Calendar aria-label={`${label} calendar`}>
+              <Calendar.Header>
+                <Calendar.YearPickerTrigger>
+                  <Calendar.YearPickerTriggerHeading />
+                  <Calendar.YearPickerTriggerIndicator />
+                </Calendar.YearPickerTrigger>
+                <Calendar.NavButton slot="previous" />
+                <Calendar.NavButton slot="next" />
+              </Calendar.Header>
+              <Calendar.Grid>
+                <Calendar.GridHeader>
+                  {(day) => <Calendar.HeaderCell>{day}</Calendar.HeaderCell>}
+                </Calendar.GridHeader>
+                <Calendar.GridBody>
+                  {(date) => <Calendar.Cell date={date} />}
+                </Calendar.GridBody>
+              </Calendar.Grid>
+              <Calendar.YearPickerGrid>
+                <Calendar.YearPickerGridBody>
+                  {({ year, formattedYear }) => (
+                    <Calendar.YearPickerCell year={year}>{formattedYear}</Calendar.YearPickerCell>
+                  )}
+                </Calendar.YearPickerGridBody>
+              </Calendar.YearPickerGrid>
+            </Calendar>
+            <div className="flex items-end justify-between gap-3 border-t border-separator p-3">
+              <TimeField
+                className="min-w-0"
+                granularity="minute"
+                value={state.timeValue}
+                onChange={(nextValue) => {
+                  if (nextValue) state.setTimeValue(nextValue);
+                }}
+              >
+                <Label>Time</Label>
+                <TimeField.Group variant="secondary">
+                  <TimeField.Input>
+                    {(segment) => <TimeField.Segment segment={segment} />}
+                  </TimeField.Input>
+                </TimeField.Group>
+              </TimeField>
+              <Button
+                size="sm"
+                variant="ghost"
+                onPress={() => {
+                  state.setValue(null);
+                  state.setOpen(false);
+                }}
+              >
+                Clear
+              </Button>
+            </div>
+          </DatePicker.Popover>
+        </>
+      )}
+    </DatePicker>
+  );
 }
 
 export function Field({

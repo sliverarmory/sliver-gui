@@ -46,6 +46,7 @@ import {
 import { CommandPaletteShortcutKbd } from "./components/CommandPaletteShortcut";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
+import { ConnectionProvider } from "./components/ConnectionProvider";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { LootPage } from "./pages/LootPage";
@@ -160,6 +161,7 @@ export function App() {
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
   const [savedConfigError, setSavedConfigError] = useState<string>();
   const savedConfigLoadRef = useRef<Promise<void> | null>(null);
+  const snapshotEventGenerationRef = useRef(0);
   const wasConnectedRef = useRef(false);
   const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -209,11 +211,16 @@ export function App() {
 
   useEffect(() => {
     let mounted = true;
+    let receivedEvent = false;
     const unsubscribe = window.sliver.onSnapshotChanged((next) => {
-      if (mounted) setSnapshot(next);
+      receivedEvent = true;
+      if (mounted) {
+        snapshotEventGenerationRef.current += 1;
+        setSnapshot(next);
+      }
     });
     void window.sliver.getSnapshot().then((next) => {
-      if (mounted) {
+      if (mounted && !receivedEvent) {
         setSnapshot(next);
         if (isUsableConnection(next.connection.status)) setIsConfigSelectorOpen(false);
       }
@@ -229,6 +236,7 @@ export function App() {
   }, [loadSavedConfigs]);
 
   const connect = useCallback(async (): Promise<void> => {
+    const eventGeneration = snapshotEventGenerationRef.current;
     setIsConnecting(true);
     try {
       const result = await window.sliver.chooseConfig();
@@ -238,7 +246,7 @@ export function App() {
         }
         return;
       }
-      setSnapshot(result.value);
+      if (snapshotEventGenerationRef.current === eventGeneration) setSnapshot(result.value);
       setIsConfigSelectorOpen(false);
       toast.success("Connected", { description: result.value.connection.server });
     } catch (error) {
@@ -251,6 +259,7 @@ export function App() {
   }, []);
 
   const connectSavedConfig = useCallback(async (config: SavedConfigSummary): Promise<void> => {
+    const eventGeneration = snapshotEventGenerationRef.current;
     setIsConnecting(true);
     try {
       const result = await window.sliver.connectSavedConfig(config.id);
@@ -258,7 +267,7 @@ export function App() {
         toast.danger("Connection failed", { description: result.error });
         return;
       }
-      setSnapshot(result.value);
+      if (snapshotEventGenerationRef.current === eventGeneration) setSnapshot(result.value);
       setIsConfigSelectorOpen(false);
       toast.success("Connected", { description: result.value.connection.server });
     } catch (error) {
@@ -290,21 +299,23 @@ export function App() {
   }, [loadSavedConfigs]);
 
   const disconnect = useCallback(async () => {
+    const eventGeneration = snapshotEventGenerationRef.current;
     const result = await window.sliver.disconnect();
     if (!result.ok || !result.value) {
       toast.danger("Could not disconnect", { description: result.error });
       return;
     }
-    setSnapshot(result.value);
+    if (snapshotEventGenerationRef.current === eventGeneration) setSnapshot(result.value);
   }, []);
 
   const refreshServer = useCallback(async (): Promise<void> => {
+    const eventGeneration = snapshotEventGenerationRef.current;
     const result = await window.sliver.refresh();
     if (!result.ok || !result.value) {
       toast.danger("Could not refresh server", { description: result.error });
       return;
     }
-    setSnapshot(result.value);
+    if (snapshotEventGenerationRef.current === eventGeneration) setSnapshot(result.value);
   }, []);
 
   async function openWindow(inheritConnection: boolean) {
@@ -561,7 +572,7 @@ export function App() {
     },
   ];
 
-  return (
+  const content = (
     <Sidebar.Provider collapsible="icon" defaultOpen>
       <Sidebar className="app-sidebar">
         <NavigationContent
@@ -770,6 +781,8 @@ export function App() {
       </Sidebar.Main>
     </Sidebar.Provider>
   );
+
+  return <ConnectionProvider connection={snapshot.connection}>{content}</ConnectionProvider>;
 }
 
 export function NavigationContent({

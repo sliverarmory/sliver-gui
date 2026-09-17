@@ -79,14 +79,20 @@ describe("native certificate capabilities", () => {
 
     const selection = await registry.chooseCertificatePair(sender(1));
     if (!selection.ok) throw new Error(selection.error);
-    const started = await registry.startListener(1, httpsInput(selection.value.token));
+    const started = await registry.startListener(1, {
+      listener: httpsInput(selection.value.token),
+      addManagedFirewallRule: false,
+    });
 
     expect(started).toMatchObject({ ok: true });
     expect(fake.startHTTPSListenerWithOptions).toHaveBeenCalledOnce();
     const options = fake.startHTTPSListenerWithOptions.mock.calls[0]?.[0] as { cert: Buffer; key: Buffer };
     expect(options.cert.every((byte) => byte === 0)).toBe(true);
     expect(options.key.every((byte) => byte === 0)).toBe(true);
-    await expect(registry.startListener(1, httpsInput(selection.value.token))).resolves.toMatchObject({
+    await expect(registry.startListener(1, {
+      listener: httpsInput(selection.value.token),
+      addManagedFirewallRule: false,
+    })).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/no longer available/),
     });
@@ -104,7 +110,10 @@ describe("native certificate capabilities", () => {
     if (!selection.ok) throw new Error(selection.error);
     now += 5 * 60_000 + 1;
 
-    await expect(registry.startListener(1, httpsInput(selection.value.token))).resolves.toMatchObject({
+    await expect(registry.startListener(1, {
+      listener: httpsInput(selection.value.token),
+      addManagedFirewallRule: false,
+    })).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/no longer available/),
     });

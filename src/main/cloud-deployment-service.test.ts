@@ -8,6 +8,7 @@ import { join } from "node:path";
 import ssh2 from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CLOUD_DEPLOYMENT_STATUSES } from "../shared/cloud-deployment-contracts.js";
 import type {
   AwsConsoleLoginSession,
   AwsFirewallRule,
@@ -87,6 +88,74 @@ afterEach(async () => {
 });
 
 describe("CloudDeploymentService", () => {
+  it("resolves managed provenance from current local state without credentials, snapshots, or provider calls", async () => {
+    const { store, safeStorage, vault } = await dependencies();
+    const awsProviderFactory = vi.fn(() => { throw new Error("Unexpected AWS provider access"); });
+    const azureProviderFactory = vi.fn(() => { throw new Error("Unexpected Azure provider access"); });
+    const listProfiles = vi.fn(async () => []);
+    const credentialProvider = vi.fn(async () => { throw new Error("Unexpected profile access"); });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      awsProviderFactory,
+      azureProviderFactory,
+      awsProfileSource: { list: listProfiles, credentialProvider },
+      provisioner: fakeProvisioner(),
+    });
+    const getSnapshot = vi.spyOn(service, "getSnapshot");
+    const listCredentials = vi.spyOn(vault, "list");
+    const readCredential = vi.spyOn(vault, "withCredential");
+    const configDigest = "a".repeat(64);
+
+    try {
+      expect(service.resolveManagedServer(configDigest)).toBeNull();
+      const created = await store.create(awsDeployment());
+      if (!created.ok) throw new Error(created.error);
+      expect(service.resolveManagedServer(configDigest)).toBeNull();
+
+      for (const status of CLOUD_DEPLOYMENT_STATUSES) {
+        const updated = await store.update({
+          expectedRevision: store.getState().revision,
+          deployment: {
+            ...created.value.deployment,
+            name: `Server ${status}`,
+            status,
+            operatorConfigFileName: "private-operator.cfg",
+            operatorConfigDigest: configDigest,
+          },
+        });
+        if (!updated.ok) throw new Error(updated.error);
+        const state = store.getState();
+        expect(service.resolveManagedServer(configDigest)).toEqual({
+          deploymentId: DEPLOYMENT_ID,
+          provider: "aws",
+          name: `Server ${status}`,
+        });
+        expect(store.getState()).toBe(state);
+      }
+
+      const deleted = await store.delete({
+        expectedRevision: store.getState().revision,
+        deploymentId: DEPLOYMENT_ID,
+      });
+      expect(deleted.ok).toBe(true);
+      expect(service.resolveManagedServer(configDigest)).toBeNull();
+      expect(getSnapshot).not.toHaveBeenCalled();
+      expect(listCredentials).not.toHaveBeenCalled();
+      expect(readCredential).not.toHaveBeenCalled();
+      expect(listProfiles).not.toHaveBeenCalled();
+      expect(credentialProvider).not.toHaveBeenCalled();
+      expect(awsProviderFactory).not.toHaveBeenCalled();
+      expect(azureProviderFactory).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+    expect(service.resolveManagedServer(configDigest)).toBeNull();
+  });
+
   it("stages native Azure subscriptions and saves only an owner-bound selected credential", async () => {
     const session = azureAuthSession("initial");
     const login = vi.fn(async () => ({ session, subscriptions: [azureAccount()] }));
@@ -924,6 +993,291 @@ describe("CloudDeploymentService", () => {
       error: expect.stringMatching(/changed in another window/u),
     });
     expect(provider.createFirewallRule).toHaveBeenCalledTimes(createCalls);
+    service.dispose();
+  });
+
+  it("idempotently manages only its exact AWS listener ingress rule and retains manual coverage", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    let current = awsFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule.mockImplementation(async (_resource, rule) => {
+      const created = awsFirewallRule(rule, "sgr-11111111111111111");
+      current = { ...current, rules: [...current.rules, created] };
+      return created;
+    });
+    provider.deleteFirewallRule.mockImplementation(async (_resource, ruleId) => {
+      current = { ...current, rules: current.rules.filter(({ id }) => id !== ruleId) };
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const input = {
+      server: { deploymentId: DEPLOYMENT_ID, provider: "aws" as const, name: "Sliver AWS" },
+      protocol: "tcp" as const,
+      port: 8_888,
+    };
+    const marker = `sliver-gui:${DEPLOYMENT_ID}:listener:tcp:8888`;
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      {
+        direction: "ingress",
+        protocol: "tcp",
+        fromPort: 8_888,
+        toPort: 8_888,
+        peerType: "ipv4",
+        peer: "0.0.0.0/0",
+        description: marker,
+      },
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "sgr-11111111111111111",
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 2);
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "not-found", ruleCount: 0 },
+    });
+
+    const manualRule: AwsFirewallRule = {
+      id: "sgr-22222222222222222",
+      direction: "ingress",
+      protocol: "tcp",
+      fromPort: 8_888,
+      toPort: 8_888,
+      peerType: "ipv4",
+      peer: "0.0.0.0/0",
+      description: "Manual public listener access",
+      managed: false,
+    };
+    current = { ...current, rules: [...current.rules, manualRule] };
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "retained", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("reconciles an ambiguous AWS create response before reporting the listener firewall outcome", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    let current = awsFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule
+      .mockImplementationOnce(async (_resource, rule) => {
+        current = {
+          ...current,
+          rules: [...current.rules, awsFirewallRule(rule, "sgr-33333333333333333")],
+        };
+        throw new Error("AWS accepted secret-cloud-value before the response was lost");
+      })
+      .mockRejectedValueOnce(new Error("AWS rejected secret-cloud-value with an unknown submission state"));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const server = { deploymentId: DEPLOYMENT_ID, provider: "aws" as const, name: "Sliver AWS" };
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress({ server, protocol: "tcp", port: 8_888 })).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+
+    const unknown = await service.ensureIngress({ server, protocol: "tcp", port: 9_999 });
+    expect(unknown).toMatchObject({
+      ok: true,
+      value: {
+        status: "outcome-unknown",
+        ruleCount: 0,
+        error: expect.stringContaining("[redacted]"),
+      },
+    });
+    expect(JSON.stringify(unknown)).not.toContain("secret-cloud-value");
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(4);
+    service.dispose();
+  });
+
+  it("idempotently manages a deterministic Azure listener rule and retains manual coverage", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    let current = azureFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule.mockImplementation(async (_resource, rule) => {
+      const created = azureFirewallRule(rule);
+      current = { ...current, rules: [...current.rules, created] };
+      return created;
+    });
+    provider.deleteFirewallRule.mockImplementation(async (_resource, ruleName) => {
+      current = { ...current, rules: current.rules.filter(({ name }) => name !== ruleName) };
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(azureDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const input = {
+      server: { deploymentId: DEPLOYMENT_ID, provider: "azure" as const, name: "Sliver Azure" },
+      protocol: "udp" as const,
+      port: 53,
+    };
+    const marker = `sliver-gui:${DEPLOYMENT_ID}:listener:udp:53`;
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      {
+        name: "sliver-gui-listener-udp-53",
+        priority: 1_201,
+        direction: "ingress",
+        access: "allow",
+        protocol: "udp",
+        sourceAddressPrefixes: ["0.0.0.0/0"],
+        sourcePortRanges: ["*"],
+        destinationAddressPrefixes: ["*"],
+        destinationPortRanges: ["53"],
+        description: marker,
+      },
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "sliver-gui-listener-udp-53",
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 2);
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "not-found", ruleCount: 0 },
+    });
+
+    const manualRule = azureFirewallRule({
+      name: "manual-public-dns",
+      priority: 1_300,
+      direction: "ingress",
+      access: "allow",
+      protocol: "udp",
+      sourceAddressPrefixes: ["0.0.0.0/0"],
+      sourcePortRanges: ["*"],
+      destinationAddressPrefixes: ["*"],
+      destinationPortRanges: ["53"],
+      description: "Manual public DNS access",
+    });
+    current = { ...current, rules: [...current.rules, manualRule] };
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "retained", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("reconciles an Azure rule that exists after create returns an ambiguous error", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    let current = azureFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule.mockImplementationOnce(async (_resource, rule) => {
+      current = { ...current, rules: [...current.rules, azureFirewallRule(rule)] };
+      throw new Error("Azure accepted azure-cli-token before its response was lost");
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(azureDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress({
+      server: { deploymentId: DEPLOYMENT_ID, provider: "azure", name: "Sliver Azure" },
+      protocol: "udp",
+      port: 53,
+    })).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(2);
     service.dispose();
   });
 
@@ -3350,6 +3704,14 @@ class FakeAwsProvider implements CloudAwsProvider {
     _resource: AwsEc2DeploymentResource,
     _ruleId: string,
   ) => undefined);
+  readonly deleteFirewallRuleIfMatches = vi.fn(async (
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+    _expected: AwsFirewallRuleSpec,
+  ) => {
+    await this.deleteFirewallRule(resource, ruleId);
+    return true;
+  });
   readonly destroy = vi.fn(async (_resource?: unknown) => undefined);
 
   async preflight() {
@@ -3624,7 +3986,18 @@ class FakeAzureProvider implements CloudAzureProvider {
     _ruleId: string,
     rule: AzureFirewallRuleSpec,
   ) => azureFirewallRule(rule));
-  readonly deleteFirewallRule = vi.fn(async () => undefined);
+  readonly deleteFirewallRule = vi.fn(async (
+    _resource: AzureVmDeploymentResource,
+    _ruleId: string,
+  ) => undefined);
+  readonly deleteFirewallRuleIfMatches = vi.fn(async (
+    resource: AzureVmDeploymentResource,
+    ruleId: string,
+    _expected: AzureFirewallRuleSpec,
+  ) => {
+    await this.deleteFirewallRule(resource, ruleId);
+    return true;
+  });
   readonly destroy = vi.fn(async () => undefined);
 
   readonly checkPermissions = vi.fn(async () => {

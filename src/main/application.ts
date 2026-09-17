@@ -79,7 +79,10 @@ import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
 import { ApplicationIconController } from "./application-icon.js";
 import { createSystemIconAppearance } from "./system-icon-appearance.js";
-import { ConnectionRegistry } from "./connection-registry.js";
+import {
+  ConnectionRegistry,
+  type ManagedListenerFirewallController,
+} from "./connection-registry.js";
 import { resolveDownloadsDirectory } from "./download-directory.js";
 import {
   registerIpcHandlers,
@@ -178,7 +181,8 @@ export interface StartApplicationOptions {
   cloudDeploymentController?: ApplicationCloudDeploymentController;
 }
 
-export interface ApplicationCloudDeploymentController extends CloudDeploymentController {
+export interface ApplicationCloudDeploymentController
+  extends CloudDeploymentController, ManagedListenerFirewallController {
   subscribe?(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
   dispose?(): void;
   listSshTargets?(): Promise<OperationResult<readonly ManagedSshTarget[]>>;
@@ -356,7 +360,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   function publishCloudDeploymentChanged(scope: CloudDeploymentChangeScope): void {
     if (shutdown.isStopping) return;
-    if (scope === "snapshot") void refreshCloudDeploymentMenu();
+    if (scope === "snapshot") {
+      registry.refreshManagedServerMetadata();
+      void refreshCloudDeploymentMenu();
+    }
     const window = cloudDeploymentWindow;
     if (
       !window ||
@@ -2445,6 +2452,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     }
   }
   const activeCloudDeploymentController = cloudDeploymentController;
+  registry.setManagedServerResolver((digest) => activeCloudDeploymentController.resolveManagedServer?.(digest) ?? null);
+  registry.setManagedListenerFirewallController(activeCloudDeploymentController);
   sshSessions = new SshSessionRegistry({
     listSshTargets: async () => activeCloudDeploymentController.listSshTargets?.() ?? {
       ok: false,
@@ -2863,6 +2872,8 @@ function unavailableCloudDeploymentController(
     createFirewallRule: () => ({ ok: false, error: message }),
     updateFirewallRule: () => ({ ok: false, error: message }),
     deleteFirewallRule: () => ({ ok: false, error: message }),
+    ensureIngress: async () => ({ ok: false, error: message }),
+    removeIngress: async () => ({ ok: false, error: message }),
     prepareDestroyDeployment: () => ({ ok: false, error: message }),
     executeDestroyDeployment: () => ({ ok: false, error: message }),
   };

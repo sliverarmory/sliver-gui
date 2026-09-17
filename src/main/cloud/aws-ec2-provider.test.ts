@@ -1504,6 +1504,38 @@ describe("AWS EC2 owned lifecycle and firewall operations", () => {
     });
   });
 
+  it("deletes a managed firewall rule only when its current spec still matches", async () => {
+    const expected = firewallRuleSpec({ description: "sliver-gui:listener:tcp:22" });
+    const matchingClient = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [describedFirewallRule(ingressRuleId, expected, managedTags())],
+      },
+    });
+
+    await expect(
+      providerFor(matchingClient).deleteFirewallRuleIfMatches(resource(), ingressRuleId, expected),
+    ).resolves.toBe(true);
+    expect(matchingClient.input("RevokeSecurityGroupIngressCommand")).toEqual({
+      GroupId: securityGroupId,
+      SecurityGroupRuleIds: [ingressRuleId],
+    });
+
+    const changedClient = managedResourceClient({
+      DescribeSecurityGroupRulesCommand: {
+        SecurityGroupRules: [describedFirewallRule(
+          ingressRuleId,
+          { ...expected, fromPort: 8_443, toPort: 8_443 },
+          managedTags(),
+        )],
+      },
+    });
+    await expect(
+      providerFor(changedClient).deleteFirewallRuleIfMatches(resource(), ingressRuleId, expected),
+    ).resolves.toBe(false);
+    expect(changedClient.commandNames()).not.toContain("RevokeSecurityGroupIngressCommand");
+    expect(changedClient.commandNames()).not.toContain("RevokeSecurityGroupEgressCommand");
+  });
+
   it("refuses a rule mutation when the security group ownership does not match", async () => {
     const client = managedResourceClient({
       DescribeSecurityGroupsCommand: securityGroupResponse("5f44a268-802f-47c0-a62e-89c1b3783ba2"),

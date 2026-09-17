@@ -44,6 +44,7 @@ import type {
 } from "./stream-contracts.js";
 import type { SliverReleaseDownloadEvent } from "./release-contracts.js";
 import type { ApplicationUpdateState } from "./application-update-contracts.js";
+import type { CloudProvider } from "./cloud-deployment-contracts.js";
 import type {
   ApplicationSettingsState,
   ApplicationSettingsUpdateInput,
@@ -228,8 +229,16 @@ export interface ServerCapabilitySummary {
   };
 }
 
+export interface ManagedServerReference {
+  readonly deploymentId: string;
+  readonly provider: CloudProvider;
+  readonly name: string;
+}
+
 export interface ConnectionSummary {
   status: ConnectionStatus;
+  /** Local deployment associated with the config used for this connection. */
+  managedServer: ManagedServerReference | null;
   operator?: string;
   server?: string;
   configName?: string;
@@ -283,6 +292,24 @@ export interface JobSummary {
   port: number;
   domains: string[];
   profileName: string;
+}
+
+export type ManagedListenerFirewallProtocol = "tcp" | "udp";
+
+export type ManagedListenerFirewallStatus =
+  | "not-requested"
+  | "applied"
+  | "already-covered"
+  | "removed"
+  | "not-found"
+  | "retained"
+  | "failed"
+  | "outcome-unknown";
+
+export interface ManagedListenerFirewallOutcome {
+  status: ManagedListenerFirewallStatus;
+  ruleCount: number;
+  error?: string;
 }
 
 export type NetworkInterfaceAddressScope = "global" | "private" | "loopback";
@@ -393,10 +420,17 @@ export interface JobStopBackendSummary {
   sharedWindowCount: number;
 }
 
+export interface JobStopManagedFirewallImpact {
+  server: ManagedServerReference;
+  protocol: ManagedListenerFirewallProtocol;
+  port: number;
+}
+
 export interface JobStopImpact {
   backend: JobStopBackendSummary;
   jobs: JobSummary[];
   stopsAll: boolean;
+  managedFirewall: JobStopManagedFirewallImpact | null;
   warning: string;
 }
 
@@ -537,6 +571,27 @@ export type ListenerInput =
   | DNSListenerInput
   | HTTPListenerInput
   | StageListenerInput;
+
+export interface StartListenerRequest {
+  listener: ListenerInput;
+  addManagedFirewallRule: boolean;
+}
+
+export interface StartListenerResult {
+  job: JobSummary;
+  firewall: ManagedListenerFirewallOutcome;
+}
+
+export interface ExecuteJobStopPlanInput {
+  token: string;
+  removeManagedFirewallRule: boolean;
+}
+
+export interface JobStopExecutionResult {
+  stoppedJobIds: number[];
+  failedJobIds: number[];
+  firewall: ManagedListenerFirewallOutcome;
+}
 
 export interface OperationFailure {
   ok: false;
@@ -701,8 +756,8 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     result: OperationResult<CertificatePairSelection>;
   };
   [IPC.startListener]: {
-    args: [input: ListenerInput];
-    result: OperationResult<JobSummary>;
+    args: [input: StartListenerRequest];
+    result: OperationResult<StartListenerResult>;
   };
   [IPC.prepareStopJob]: {
     args: [jobId: number];
@@ -713,8 +768,8 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     result: OperationResult<JobStopPlan>;
   };
   [IPC.executeStopPlan]: {
-    args: [token: string];
-    result: OperationResult;
+    args: [input: ExecuteJobStopPlanInput];
+    result: OperationResult<JobStopExecutionResult>;
   };
   [IPC.generate]: {
     args: [input: GenerateInput];
@@ -981,7 +1036,11 @@ export function disconnectedSnapshot(error?: string): SliverSnapshot {
     page: { limit: 0, total: 0, truncated: false },
   });
   return {
-    connection: error ? { status: "disconnected", error } : { status: "disconnected" },
+    connection: {
+      status: "disconnected",
+      managedServer: null,
+      ...(error ? { error } : {}),
+    },
     eventStream: { status: "stopped", attempt: 0 },
     jobs: [],
     builds: [],

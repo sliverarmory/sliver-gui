@@ -19,6 +19,7 @@ import type {
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
+import * as connectionContext from "./components/ConnectionProvider";
 import { renderWithApplicationContextMenu as render } from "./application-context-menu-test-utils";
 
 beforeAll(() => {
@@ -340,10 +341,121 @@ describe("App startup", () => {
     await waitFor(() => expect(api.connectSavedConfig).toHaveBeenCalledWith(freshImportedConfig.id));
   });
 
+  it("does not replace a newer connection event with the initial snapshot response", async () => {
+    const initialResponse = deferred<SliverSnapshot>();
+    let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      disconnectedSnapshot(),
+      (listener) => { emitSnapshot = listener; },
+    );
+    vi.mocked(api.getSnapshot).mockReturnValue(initialResponse.promise);
+    render(<App />);
+
+    const connected = disconnectedSnapshot();
+    connected.connection = {
+      status: "connected",
+      managedServer: { deploymentId: "deployment-1", provider: "aws", name: "Managed lab" },
+      operator: "new-operator",
+      server: "current.example.test:31337",
+    };
+    act(() => { emitSnapshot?.(connected); });
+    expect(await screen.findAllByRole("button", { name: "Current server: new-operator" })).not.toHaveLength(0);
+
+    await act(async () => { initialResponse.resolve(disconnectedSnapshot()); });
+    expect(screen.getAllByRole("button", { name: "Current server: new-operator" })).not.toHaveLength(0);
+  });
+
+  it.each(["chooseConfig", "connectSavedConfig", "disconnect", "refresh"] as const)(
+    "preserves newer connection metadata when a delayed %s response arrives",
+    async (operation) => {
+      const user = userEvent.setup();
+      const snapshot = disconnectedSnapshot();
+      snapshot.connection = {
+        status: "connected",
+        managedServer: { deploymentId: "deployment-1", provider: "aws", name: "Managed lab" },
+        operator: "alice",
+        server: "current.example.test:31337",
+        incarnation: 4,
+      };
+      const config: SavedConfigSummary = {
+        id: "saved-config",
+        fileName: "operator.cfg",
+        displayName: "Managed lab",
+        operator: "alice",
+        lhost: "current.example.test",
+        lport: 31337,
+        transport: "mtls",
+        modifiedAt: "2026-09-16T12:00:00.000Z",
+        origin: "preexisting",
+        removal: "detach",
+        availability: "available",
+      };
+      let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+      const api = installSliverAPI(
+        vi.fn().mockResolvedValue({ ok: true, value: [config] }),
+        snapshot,
+        (listener) => { emitSnapshot = listener; },
+      );
+      let requestCommandPalette: (() => void) | undefined;
+      vi.mocked(api.onCommandPaletteRequested).mockImplementation((listener) => {
+        requestCommandPalette = listener;
+        return vi.fn();
+      });
+      const response = deferred<OperationResult<SliverSnapshot>>();
+      vi.mocked(api[operation]).mockReturnValue(response.promise);
+      const provider = vi.spyOn(connectionContext, "ConnectionProvider");
+
+      try {
+        render(<App />);
+        await waitFor(() => {
+          expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+          expect(provider.mock.calls.at(-1)?.[0].connection?.managedServer).toEqual(snapshot.connection.managedServer);
+        });
+
+        if (operation === "refresh") {
+          act(() => requestCommandPalette?.());
+          await user.click(await screen.findByRole("menuitem", { name: /Refresh server/u }));
+        } else {
+          await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
+          await user.click(await screen.findByRole("menuitem", {
+            name: operation === "disconnect" ? "Disconnect" : "Switch config",
+          }));
+          if (operation !== "disconnect") {
+            await user.click(await screen.findByRole("button", {
+              name: operation === "chooseConfig" ? "Open file" : "Connect",
+            }));
+          }
+        }
+        await waitFor(() => expect(api[operation]).toHaveBeenCalledOnce());
+
+        const newer: SliverSnapshot = {
+          ...snapshot,
+          connection: {
+            ...snapshot.connection,
+            managedServer: operation === "disconnect"
+              ? { deploymentId: "deployment-2", provider: "azure", name: "New connection" }
+              : null,
+            incarnation: operation === "disconnect" ? 5 : 4,
+          },
+        };
+        act(() => { emitSnapshot?.(newer); });
+        await act(async () => {
+          response.resolve({ ok: true, value: operation === "disconnect" ? disconnectedSnapshot() : snapshot });
+        });
+
+        expect(provider.mock.calls.at(-1)?.[0].connection).toEqual(newer.connection);
+      } finally {
+        provider.mockRestore();
+      }
+    },
+  );
+
   it("keeps an operationally degraded backend usable without showing a compatibility notice", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "degraded",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -375,6 +487,7 @@ describe("App startup", () => {
     const snapshot = disconnectedSnapshot();
     const mismatchReason = "Sliver 1.8.0 is outside the compatible 1.7.x version series and may be incompatible with this client";
     snapshot.connection = {
+      managedServer: null,
       status: "degraded",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -452,6 +565,7 @@ describe("App startup", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -480,6 +594,7 @@ describe("App startup", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -507,6 +622,7 @@ describe("App startup", () => {
     const danger = vi.spyOn(toast, "danger");
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -535,6 +651,7 @@ describe("App startup", () => {
   it("keeps the saved configuration selector closed across a delayed connecting snapshot", async () => {
     const connected = disconnectedSnapshot();
     connected.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -572,6 +689,7 @@ describe("App startup", () => {
   it("reopens the saved configuration selector when connecting ends disconnected", async () => {
     const connected = disconnectedSnapshot();
     connected.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -609,6 +727,7 @@ describe("App startup", () => {
     const user = userEvent.setup();
     const connected = disconnectedSnapshot();
     connected.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -654,6 +773,7 @@ describe("App startup", () => {
     const user = userEvent.setup();
     const connected = disconnectedSnapshot();
     connected.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -698,6 +818,7 @@ describe("Current server menu", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -730,6 +851,7 @@ describe("Current server menu", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "m0-manual-verification",
@@ -850,6 +972,7 @@ describe("Sidebar navigation", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       epoch: 7,
       incarnation: 3,
@@ -940,6 +1063,7 @@ describe("Sidebar navigation", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -1030,6 +1154,7 @@ describe("Sidebar navigation", () => {
     };
     const initial = disconnectedSnapshot();
     initial.connection = {
+      managedServer: null,
       status: "connected",
       server: "127.0.0.1:53137",
       operator: "alice",
@@ -1139,6 +1264,7 @@ describe("Sidebar navigation", () => {
     };
     const initial = disconnectedSnapshot();
     initial.connection = {
+      managedServer: null,
       status: "connected",
       server: "127.0.0.1:53137",
       operator: "alice",
@@ -1217,6 +1343,7 @@ describe("Sidebar navigation", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",
@@ -1272,6 +1399,7 @@ describe("Sidebar navigation", () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "sliver.example.test:31337",
       operator: "alice",

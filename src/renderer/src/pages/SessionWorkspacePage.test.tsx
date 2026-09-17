@@ -129,6 +129,7 @@ const otherRoute: SessionWorkspaceRoute = {
 function workspaceSnapshot(activeSession = session): SliverSnapshot {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
+    managedServer: null,
     status: "connected",
     server: "127.0.0.1:53137",
     operator: "m2-verification",

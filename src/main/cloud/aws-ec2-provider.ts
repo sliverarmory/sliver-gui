@@ -1043,6 +1043,25 @@ export class AwsEc2Provider {
     }
   }
 
+  async deleteFirewallRuleIfMatches(
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+    expected: AwsFirewallRuleSpec,
+  ): Promise<boolean> {
+    const id = requireAwsId(ruleId, "security group rule", AWS_ID_PATTERNS.securityGroupRule);
+    const validated = validateFirewallRuleSpec(expected);
+    await this.describeOwnedSecurityGroup(resource);
+    const current = await this.describeFirewallRule(resource, id);
+    if (!current.managed || !firewallSpecsEqual(current, validated)) return false;
+    const input = { GroupId: resource.securityGroupId, SecurityGroupRuleIds: [id] };
+    if (current.direction === "ingress") {
+      await this.send("delete the matched managed ingress firewall rule", new RevokeSecurityGroupIngressCommand(input));
+    } else {
+      await this.send("delete the matched managed egress firewall rule", new RevokeSecurityGroupEgressCommand(input));
+    }
+    return true;
+  }
+
   async destroy(resource: AwsEc2DestroyResource): Promise<void> {
     this.validateDestroyResource(resource);
     const volumeIds = resource.volumeIds ?? [];

@@ -58,6 +58,7 @@ const secondSession: NetworkSessionEntry = {
 
 const context: NetworkWindowContext = {
   connection: {
+    managedServer: null,
     status: "connected",
     operator: "moloch",
     server: "range.example:31337",

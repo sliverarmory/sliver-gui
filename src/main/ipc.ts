@@ -10,6 +10,7 @@ import {
 import {
   IPC,
   IPC_INVOKE,
+  type ExecuteJobStopPlanInput,
   type GenerateFromProfileInput,
   type GenerateInput,
   type ImportConfigInput,
@@ -23,6 +24,7 @@ import {
   type RemoveSavedConfigInput,
   type SaveProfileInput,
   type SliverSnapshot,
+  type StartListenerRequest,
   type WindowLaunchContext,
 } from "../shared/contracts.js";
 import {
@@ -425,7 +427,7 @@ export function registerIpcHandlers(
   handleTrusted(IPC.chooseCertificatePair, rendererUrl, parseNoArguments, ({ sender }) =>
     registry.chooseCertificatePair(sender),
   );
-  handleTrusted(IPC.startListener, rendererUrl, parseListenerArguments, ({ contentsId }, input) =>
+  handleTrusted(IPC.startListener, rendererUrl, parseStartListenerArguments, ({ contentsId }, input) =>
     registry.startListener(contentsId, input),
   );
   handleTrusted(IPC.prepareStopJob, rendererUrl, parseJobIdArguments, ({ contentsId }, jobId) =>
@@ -434,8 +436,8 @@ export function registerIpcHandlers(
   handleTrusted(IPC.prepareStopAllJobs, rendererUrl, parseNoArguments, ({ contentsId }) =>
     registry.prepareStopAllJobs(contentsId),
   );
-  handleTrusted(IPC.executeStopPlan, rendererUrl, parseOpaqueTokenArguments, ({ contentsId }, token) =>
-    registry.executeStopPlan(contentsId, token),
+  handleTrusted(IPC.executeStopPlan, rendererUrl, parseExecuteJobStopPlanArguments, ({ contentsId }, input) =>
+    registry.executeStopPlan(contentsId, input),
   );
   handleTrusted(IPC.generate, rendererUrl, parseGenerateArguments, ({ sender }, input) =>
     registry.generate(sender, input),
@@ -1160,8 +1162,17 @@ function parseSaveExecutionResultArguments(
   return [parseSaveExecutionResultInput(args[0])];
 }
 
-function parseListenerArguments(args: readonly unknown[]): [input: ListenerInput] {
-  return [parseListenerInput(requireSingleArgument(args, "listener input"))];
+function parseStartListenerArguments(args: readonly unknown[]): [input: StartListenerRequest] {
+  const value = requireRecord(requireSingleArgument(args, "start-listener request"), "start-listener request");
+  requireExactKeys(value, ["listener", "addManagedFirewallRule"], "start-listener request");
+  return [{
+    listener: parseListenerInput(value["listener"]),
+    addManagedFirewallRule: requireBooleanProperty(
+      value,
+      "addManagedFirewallRule",
+      "start-listener request",
+    ),
+  }];
 }
 
 function parseJobIdArguments(args: readonly unknown[]): [jobId: number] {
@@ -1176,6 +1187,20 @@ function parseOpaqueTokenArguments(args: readonly unknown[]): [token: string] {
   const value = requireSingleArgument(args, "operation capability token");
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw invalidArguments("operation capability token");
   return [value];
+}
+
+function parseExecuteJobStopPlanArguments(args: readonly unknown[]): [input: ExecuteJobStopPlanInput] {
+  const value = requireRecord(requireSingleArgument(args, "job-stop execution input"), "job-stop execution input");
+  requireExactKeys(value, ["token", "removeManagedFirewallRule"], "job-stop execution input");
+  const [token] = parseOpaqueTokenArguments([value["token"]]);
+  return [{
+    token,
+    removeManagedFirewallRule: requireBooleanProperty(
+      value,
+      "removeManagedFirewallRule",
+      "job-stop execution input",
+    ),
+  }];
 }
 
 function parseGenerateArguments(args: readonly unknown[]): [input: GenerateInput] {

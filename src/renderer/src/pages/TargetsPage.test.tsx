@@ -162,6 +162,7 @@ const capabilities: TargetCapabilityState[] = [
 function targetSnapshot(active: "session" | "beacon" | "none" = "none"): SliverSnapshot {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
+    managedServer: null,
     status: "connected",
     server: "127.0.0.1:53137",
     operator: "m1-verification",

@@ -1,5 +1,6 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
@@ -20,12 +21,14 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  toast.clear();
+  vi.restoreAllMocks();
 });
 
 describe("OperationsPage listener modal", () => {
   it("keeps stop actions pinned and accessible in a compact fixed column", () => {
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected" };
+    snapshot.connection = { managedServer: null, status: "connected" };
     snapshot.jobs = [
       { id: 4, name: "mtls", description: "mTLS listener", protocol: "mtls", port: 8888, domains: [], profileName: "" },
       { id: 9, name: "https", description: "HTTPS listener", protocol: "https", port: 443, domains: ["c2.example.test"], profileName: "" },
@@ -47,7 +50,7 @@ describe("OperationsPage listener modal", () => {
   it("lays out form sections vertically so the body gap separates each row", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected" };
+    snapshot.connection = { managedServer: null, status: "connected" };
 
     render(<OperationsPage snapshot={snapshot} />);
     await user.click(screen.getByRole("button", { name: "New listener" }));
@@ -77,17 +80,20 @@ describe("OperationsPage listener modal", () => {
   it("accepts complete listener port values through 65535", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected" };
+    snapshot.connection = { managedServer: null, status: "connected" };
     const startListener = vi.fn().mockResolvedValue({
       ok: true,
       value: {
-        id: 7,
-        name: "mtls",
-        description: "mTLS listener",
-        protocol: "mtls",
-        port: 65_535,
-        domains: [],
-        profileName: "",
+        job: {
+          id: 7,
+          name: "mtls",
+          description: "mTLS listener",
+          protocol: "mtls",
+          port: 65_535,
+          domains: [],
+          profileName: "",
+        },
+        firewall: { status: "not-requested", ruleCount: 0 },
       },
     });
     Object.defineProperty(window, "sliver", {
@@ -112,16 +118,20 @@ describe("OperationsPage listener modal", () => {
 
     await user.clear(portField);
     await user.type(portField, "65535");
+    expect(screen.queryByRole("switch", { name: "Add cloud firewall rule" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Start listener" }));
 
     expect(startListener).toHaveBeenCalledOnce();
-    expect(startListener).toHaveBeenCalledWith({ kind: "mtls", host: "0.0.0.0", port: 65_535 });
+    expect(startListener).toHaveBeenCalledWith({
+      listener: { kind: "mtls", host: "0.0.0.0", port: 65_535 },
+      addManagedFirewallRule: false,
+    });
   });
 
   it("preserves and rejects a listener port above 65535 instead of silently clamping it", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected" };
+    snapshot.connection = { managedServer: null, status: "connected" };
     const startListener = vi.fn();
     Object.defineProperty(window, "sliver", {
       configurable: true,
@@ -142,10 +152,192 @@ describe("OperationsPage listener modal", () => {
     expect(startListener).not.toHaveBeenCalled();
   });
 
+  it("offers a default-on cloud firewall rule for a managed listener", async () => {
+    const user = userEvent.setup();
+    const showSuccess = vi.spyOn(toast, "success");
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: { deploymentId: "deployment-1", provider: "aws", name: "team-c2" },
+      status: "connected",
+    };
+    const startListener = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        job: {
+          id: 17,
+          name: "mtls",
+          description: "mTLS listener",
+          protocol: "mtls",
+          port: 8888,
+          domains: [],
+          profileName: "",
+        },
+        firewall: { status: "applied", ruleCount: 1 },
+      },
+    });
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: { startListener } as Partial<SliverDesktopAPI> as SliverDesktopAPI,
+    });
+
+    const view = render(
+      <>
+        <OperationsPage snapshot={snapshot} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+
+    const firewallSwitch = await screen.findByRole("switch", { name: "Add cloud firewall rule" });
+    expect(firewallSwitch).toBeChecked();
+    expect(
+      screen.getByText("Allow internet traffic to TCP port 8888 (0.0.0.0/0) on team-c2."),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Start listener" }));
+
+    expect(startListener).toHaveBeenNthCalledWith(1, {
+      listener: { kind: "mtls", host: "0.0.0.0", port: 8888 },
+      addManagedFirewallRule: true,
+    });
+    expect(showSuccess).toHaveBeenCalledWith(
+      "mTLS listener started as job #17. Cloud firewall rule added.",
+      { timeout: 20_000 },
+    );
+    const successToast = screen.getByText(
+      "mTLS listener started as job #17. Cloud firewall rule added.",
+    );
+    expect(successToast).toBeVisible();
+    expect(view.container.querySelector("section")).not.toContainElement(successToast);
+
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+    const reopenedFirewallSwitch = await screen.findByRole("switch", {
+      name: "Add cloud firewall rule",
+    });
+    expect(reopenedFirewallSwitch).toBeChecked();
+    await user.click(reopenedFirewallSwitch);
+    expect(reopenedFirewallSwitch).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Start listener" }));
+    expect(startListener).toHaveBeenNthCalledWith(2, {
+      listener: { kind: "mtls", host: "0.0.0.0", port: 8888 },
+      addManagedFirewallRule: false,
+    });
+  });
+
+  it("offers removal of the exact app-managed firewall rule for a single stop plan", async () => {
+    const user = userEvent.setup();
+    const showSuccess = vi.spyOn(toast, "success");
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: { deploymentId: "deployment-1", provider: "aws", name: "team-c2" },
+      status: "connected",
+      server: "127.0.0.1:31337",
+      epoch: 7,
+    };
+    const job = {
+      id: 4,
+      name: "mtls",
+      description: "mTLS listener",
+      protocol: "mtls",
+      port: 8888,
+      domains: [],
+      profileName: "",
+    };
+    snapshot.jobs = [job];
+    const plan: JobStopPlan = {
+      token: "managed-plan-token",
+      expiresAt: "2099-08-09T12:00:00.000Z",
+      impact: {
+        backend: {
+          server: "127.0.0.1:31337",
+          operator: "alice",
+          configName: "Production",
+          epoch: 7,
+          sharedWindowCount: 1,
+        },
+        jobs: [job],
+        managedFirewall: {
+          server: snapshot.connection.managedServer!,
+          protocol: "tcp",
+          port: 8888,
+        },
+        stopsAll: false,
+        warning: "This server-owned listener may be shared with other operators.",
+      },
+    };
+    const prepareStopJob = vi.fn().mockResolvedValue({ ok: true, value: plan });
+    const executeStopPlan = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: {
+          stoppedJobIds: [4],
+          failedJobIds: [],
+          firewall: {
+            status: "failed",
+            ruleCount: 0,
+            error: "AWS rejected the change.",
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: {
+          stoppedJobIds: [4],
+          failedJobIds: [],
+          firewall: { status: "not-requested", ruleCount: 0 },
+        },
+      });
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: { prepareStopJob, executeStopPlan } as Partial<SliverDesktopAPI> as SliverDesktopAPI,
+    });
+
+    const view = render(<OperationsPage snapshot={snapshot} />);
+    await user.click(screen.getByRole("button", { name: "Stop job 4" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Stop this reviewed server job?" });
+    const firewallSwitch = within(dialog).getByRole("switch", { name: "Remove cloud firewall rule" });
+    expect(firewallSwitch).toBeChecked();
+    expect(dialog).toHaveTextContent(
+      "Remove the app-managed TCP port 8888 firewall rule from team-c2.",
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Stop job #4" }));
+
+    expect(executeStopPlan).toHaveBeenCalledWith({
+      token: "managed-plan-token",
+      removeManagedFirewallRule: true,
+    });
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    const firewallFailure = screen.getByText(
+      "Job #4 stopped. However, the cloud firewall rule could not be removed. AWS rejected the change.",
+    );
+    expect(firewallFailure).toBeVisible();
+    expect(firewallFailure.closest('[role="alert"]')).not.toBeNull();
+    expect(view.container.querySelector("section")).toContainElement(firewallFailure);
+
+    await user.click(screen.getByRole("button", { name: "Stop job 4" }));
+    const reopenedDialog = await screen.findByRole("alertdialog", {
+      name: "Stop this reviewed server job?",
+    });
+    const reopenedRemovalSwitch = within(reopenedDialog).getByRole("switch", {
+      name: "Remove cloud firewall rule",
+    });
+    expect(reopenedRemovalSwitch).toBeChecked();
+    await user.click(reopenedRemovalSwitch);
+    expect(reopenedRemovalSwitch).not.toBeChecked();
+    await user.click(within(reopenedDialog).getByRole("button", { name: "Stop job #4" }));
+    expect(executeStopPlan).toHaveBeenNthCalledWith(2, {
+      token: "managed-plan-token",
+      removeManagedFirewallRule: false,
+    });
+    expect(showSuccess).toHaveBeenCalledWith("Job #4 stopped.", { timeout: 20_000 });
+  });
+
   it("reviews the exact backend and jobs before executing a stop-all plan", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected", server: "127.0.0.1:31337", epoch: 7 };
+    snapshot.connection = { managedServer: null, status: "connected", server: "127.0.0.1:31337", epoch: 7 };
     snapshot.jobs = [
       { id: 4, name: "mtls", description: "mTLS listener", protocol: "mtls", port: 8888, domains: [], profileName: "" },
       { id: 9, name: "https", description: "HTTPS listener", protocol: "https", port: 443, domains: ["c2.example.test"], profileName: "" },
@@ -162,12 +354,20 @@ describe("OperationsPage listener modal", () => {
           sharedWindowCount: 2,
         },
         jobs: snapshot.jobs,
+        managedFirewall: null,
         stopsAll: true,
         warning: "These server-owned listeners may be shared with other operators.",
       },
     };
     const prepareStopAllJobs = vi.fn().mockResolvedValue({ ok: true, value: plan });
-    const executeStopPlan = vi.fn().mockResolvedValue({ ok: true });
+    const executeStopPlan = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        stoppedJobIds: [4, 9],
+        failedJobIds: [],
+        firewall: { status: "not-requested", ruleCount: 0 },
+      },
+    });
     Object.defineProperty(window, "sliver", {
       configurable: true,
       value: { prepareStopAllJobs, executeStopPlan } as Partial<SliverDesktopAPI> as SliverDesktopAPI,
@@ -187,6 +387,9 @@ describe("OperationsPage listener modal", () => {
     expect(prepareStopAllJobs).toHaveBeenCalledOnce();
 
     await user.click(screen.getByRole("button", { name: "Stop 2 jobs" }));
-    expect(executeStopPlan).toHaveBeenCalledWith("plan-token");
+    expect(executeStopPlan).toHaveBeenCalledWith({
+      token: "plan-token",
+      removeManagedFirewallRule: false,
+    });
   });
 });

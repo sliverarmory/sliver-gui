@@ -48,7 +48,7 @@ import {
   type UpdateCloudFirewallRuleInput,
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
-import type { OperationResult } from "../shared/contracts.js";
+import type { ManagedServerReference, OperationResult } from "../shared/contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import {
   parseSshDeploymentInput,
@@ -69,6 +69,8 @@ import type { TrustedWindowIdentity } from "./ipc.js";
 type MaybePromise<T> = T | Promise<T>;
 
 export interface CloudDeploymentController {
+  /** Main-only lookup of an active config's local deployment provenance. */
+  resolveManagedServer?(configDigest: string): ManagedServerReference | null;
   getSnapshot(): MaybePromise<OperationResult<CloudDeploymentSnapshot>>;
   refreshDeployments(): MaybePromise<OperationResult<CloudDeploymentRefreshResult>>;
   getProvisioningTranscripts(): MaybePromise<OperationResult<CloudProvisioningTranscriptSnapshot>>;

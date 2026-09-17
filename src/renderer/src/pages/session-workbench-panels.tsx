@@ -93,6 +93,7 @@ import type {
   SessionWorkspacePanelContext,
   SessionWorkspacePanels,
 } from "./SessionWorkspacePage";
+import { DateTimePickerField } from "../components/FormControls";
 
 type LoadState<T> =
   | { status: "loading" }
@@ -1730,16 +1731,10 @@ function SessionFileInspector({
                     <div className="flex flex-col gap-4">
                       <div>
                         <h3 className="text-sm font-semibold text-foreground">Remote timestamps</h3>
-                        <p className="mt-1 text-xs text-muted">Provide the exact access and modification time strings accepted by the target.</p>
+                        <p className="mt-1 text-xs text-muted">Choose access and modification times in your local time zone.</p>
                       </div>
-                      <TextField value={accessTime} variant="secondary" onChange={setAccessTime}>
-                        <Label>Access time</Label>
-                        <Input className="font-mono text-xs" placeholder="2026-08-09T00:00:00Z" />
-                      </TextField>
-                      <TextField value={modificationTime} variant="secondary" onChange={setModificationTime}>
-                        <Label>Modification time</Label>
-                        <Input className="font-mono text-xs" placeholder="2026-08-09T00:00:00Z" />
-                      </TextField>
+                      <DateTimePickerField label="Access time" value={accessTime} onChange={setAccessTime} />
+                      <DateTimePickerField label="Modification time" value={modificationTime} onChange={setModificationTime} />
                       <Button className="self-start" isDisabled={!accessTime.trim() || !modificationTime.trim() || actionLocked} isPending={busyAction === "chtimes"} size="sm" onPress={() => void applyTimes()}>
                         Apply timestamps
                       </Button>

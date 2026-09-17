@@ -12,7 +12,7 @@ import { clientpb, sliverpb, type SliverEventStreamState } from "sliver-script";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
-import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT } from "../shared/contracts.js";
+import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedServerReference, type SliverSnapshot } from "../shared/contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -102,6 +102,148 @@ afterEach(async () => {
     await registry.unregisterWindow(3);
   }
   await rm(root, { recursive: true, force: true });
+});
+
+describe("managed server connection metadata", () => {
+  const managedServer: ManagedServerReference = {
+    deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0010",
+    provider: "aws",
+    name: "Managed test server",
+  };
+  const configDigest = createHash("sha256").update(validConfig()).digest("hex");
+
+  it("includes provenance in the first connected event without exposing the config digest", async () => {
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    const resolve = vi.fn((digest: string) => digest === configDigest ? managedServer : null);
+    registry.setManagedServerResolver(resolve);
+    registry.registerWindow(1);
+    expect(registry.snapshot(1).connection.managedServer).toBeNull();
+
+    await connectSaved(registry, 1);
+
+    const snapshots = send.mock.calls
+      .filter(([channel]) => channel === IPC.snapshotChanged)
+      .map(([, snapshot]) => snapshot as SliverSnapshot);
+    const connected = snapshots.filter(({ connection }) => connection.status === "connected");
+    expect(connected.length).toBeGreaterThan(0);
+    expect(connected.every(({ connection }) => connection.managedServer?.deploymentId === managedServer.deploymentId)).toBe(true);
+    expect(snapshots.filter(({ connection }) => connection.status === "connecting")
+      .every(({ connection }) => connection.managedServer === null)).toBe(true);
+    expect(resolve).toHaveBeenCalledWith(configDigest);
+    expect(JSON.stringify(snapshots)).not.toContain(configDigest);
+    expect(registry.networkContext(1)).toMatchObject({ ok: true, value: { connection: { managedServer } } });
+  });
+
+  it("keeps different windows independent and recognizes copied config bytes", async () => {
+    await writeFile(join(externalDirectory, "copy.cfg"), validConfig());
+    await writeFile(join(externalDirectory, "other.cfg"), validConfig({ operator: "other" }));
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.setManagedServerResolver((digest) => digest === configDigest ? managedServer : null);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectNamed(registry, 1, "copy");
+    await connectNamed(registry, 2, "other");
+
+    expect(registry.snapshot(1).connection.managedServer).toEqual(managedServer);
+    expect(registry.snapshot(2).connection.managedServer).toBeNull();
+    await connectNamed(registry, 1, "other");
+    expect(registry.snapshot(1).connection.managedServer).toBeNull();
+  });
+
+  it("inherits provenance and retains it through reconnecting and degraded health", async () => {
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => managedServer);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+
+    client.streamStates.next({ status: "retrying", attempt: 1 });
+    for (const id of [1, 2]) {
+      expect(registry.snapshot(id).connection).toMatchObject({ status: "reconnecting", managedServer });
+    }
+    client.streamStates.next({ status: "stopped", attempt: 1 });
+    expect(registry.snapshot(2).connection).toMatchObject({ status: "degraded", managedServer });
+    await registry.disconnect(1);
+    expect(registry.snapshot(1).connection.managedServer).toBeNull();
+    expect(registry.snapshot(2).connection.managedServer).toEqual(managedServer);
+  });
+
+  it("republishes metadata changes and deletion without reconnecting", async () => {
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    let current: ManagedServerReference | null = managedServer;
+    registry.setManagedServerResolver(() => current);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    send.mockClear();
+
+    registry.refreshManagedServerMetadata();
+    expect(send).not.toHaveBeenCalled();
+    current = { ...managedServer, name: "Renamed" };
+    registry.refreshManagedServerMetadata();
+    expect(send).toHaveBeenCalledWith(IPC.snapshotChanged, expect.objectContaining({
+      connection: expect.objectContaining({ managedServer: current }),
+    }));
+    current = null;
+    registry.refreshManagedServerMetadata();
+    expect(send).toHaveBeenLastCalledWith("sliver:network-forwarding:changed");
+    expect(registry.snapshot(1).connection.managedServer).toBeNull();
+    expect(client.connect).toHaveBeenCalledOnce();
+  });
+
+  it("clears provenance after failure and ignores a superseded connection completion", async () => {
+    await writeFile(join(externalDirectory, "other.cfg"), validConfig({ operator: "other" }));
+    const initialClient = new FakeSliverClient();
+    const nextClient = new FakeSliverClient();
+    const gate = deferred<unknown>();
+    initialClient.connect.mockImplementationOnce(() => gate.promise);
+    const factory = vi.fn().mockReturnValueOnce(initialClient.adapter).mockReturnValue(nextClient.adapter);
+    const registry = createRegistry(factory);
+    registry.setManagedServerResolver((digest) => digest === configDigest ? managedServer : null);
+    registry.registerWindow(1);
+    const listed = await registry.listSavedConfigs(1);
+    if (!listed.ok) throw new Error(listed.error);
+    const managedId = listed.value.find(({ displayName }) => displayName === "operator")!.id;
+    const otherId = listed.value.find(({ displayName }) => displayName === "other")!.id;
+    const pending = registry.connectSavedConfig(1, managedId);
+    await vi.waitFor(() => expect(initialClient.connect).toHaveBeenCalledOnce());
+    expect(registry.snapshot(1).connection.managedServer).toBeNull();
+    expect(await registry.connectSavedConfig(1, otherId)).toMatchObject({ ok: true });
+    gate.resolve(undefined);
+    expect(await pending).toMatchObject({ ok: false });
+    expect(registry.snapshot(1).connection).toMatchObject({ operator: "other", managedServer: null });
+
+    await registry.disconnect(1);
+    nextClient.connect.mockRejectedValueOnce(new Error("Connection failed"));
+    expect(await registry.connectSavedConfig(1, managedId)).toMatchObject({ ok: false });
+    expect(registry.snapshot(1).connection).toMatchObject({ status: "disconnected", managedServer: null });
+  });
+
+  it("treats unavailable metadata as unassociated without failing the connection", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.setManagedServerResolver(() => { throw new Error("Metadata unavailable"); });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    expect(registry.snapshot(1).connection).toMatchObject({ status: "connected", managedServer: null });
+    registry.setManagedServerResolver(() => managedServer);
+    expect(registry.snapshot(1).connection.managedServer).toEqual(managedServer);
+  });
+
+  it("does not infer cloud provenance from imported config ownership", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [join(externalDirectory, "operator.cfg")] });
+    const imported = await registry.importConfig(sender(1), "Imported");
+    expect(imported).toMatchObject({ ok: true, value: { origin: "managed" } });
+    await connectNamed(registry, 1, "Imported");
+    expect(registry.snapshot(1).connection.managedServer).toBeNull();
+  });
 });
 
 describe("connection registry with an injected Sliver client", () => {
@@ -273,18 +415,108 @@ describe("connection registry with an injected Sliver client", () => {
     await connectSaved(registry, 1);
     const baselineCalls = domainCallCounts(client);
 
-    const started = await registry.startListener(1, { kind: "mtls", host: "127.0.0.1", port: 65_535 });
+    const started = await registry.startListener(1, {
+      listener: { kind: "mtls", host: "127.0.0.1", port: 65_535 },
+      addManagedFirewallRule: false,
+    });
 
-    expect(started).toMatchObject({ ok: true, value: { protocol: "mtls", port: 65_535 } });
+    expect(started).toMatchObject({
+      ok: true,
+      value: {
+        job: { protocol: "mtls", port: 65_535 },
+        firewall: { status: "not-requested", ruleCount: 0 },
+      },
+    });
     expect(client.startMTLSListener).toHaveBeenCalledWith("127.0.0.1", 65_535);
     expect(domainCallCounts(client)).toEqual({ ...baselineCalls, jobs: baselineCalls.jobs + 1 });
 
     for (const port of [0, 65_536, 1.5]) {
       await expect(
-        registry.startListener(1, { kind: "mtls", host: "127.0.0.1", port }),
+        registry.startListener(1, {
+          listener: { kind: "mtls", host: "127.0.0.1", port },
+          addManagedFirewallRule: false,
+        }),
       ).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/1 and 65535/) });
     }
     expect(client.startMTLSListener).toHaveBeenCalledOnce();
+  });
+
+  it("adds managed firewall ingress after starting a listener and maps transport protocols", async () => {
+    const client = new FakeSliverClient();
+    const server: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0011",
+      provider: "aws",
+      name: "Managed listener server",
+    };
+    const ensureIngress = vi.fn(async () => ({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    } as const));
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => server);
+    registry.setManagedListenerFirewallController({
+      ensureIngress,
+      removeIngress: vi.fn(async () => ({
+        ok: true,
+        value: { status: "removed", ruleCount: 1 },
+      } as const)),
+    });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    await expect(registry.startListener(1, {
+      listener: { kind: "mtls", host: "0.0.0.0", port: 8888 },
+      addManagedFirewallRule: true,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        job: { protocol: "mtls", port: 8888 },
+        firewall: { status: "applied", ruleCount: 1 },
+      },
+    });
+    await expect(registry.startListener(1, {
+      listener: {
+        kind: "dns",
+        host: "0.0.0.0",
+        port: 53,
+        domains: "example.test",
+        canaries: false,
+        enforceOtp: false,
+      },
+      addManagedFirewallRule: true,
+    })).resolves.toMatchObject({ ok: true });
+
+    expect(ensureIngress).toHaveBeenNthCalledWith(1, { server, protocol: "tcp", port: 8888 });
+    expect(ensureIngress).toHaveBeenNthCalledWith(2, { server, protocol: "udp", port: 53 });
+  });
+
+  it("keeps a started listener successful when managed firewall ingress fails", async () => {
+    const client = new FakeSliverClient();
+    const server: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0012",
+      provider: "azure",
+      name: "Managed listener server",
+    };
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => server);
+    registry.setManagedListenerFirewallController({
+      ensureIngress: vi.fn(async () => ({ ok: false, error: "cloud rule rejected" } as const)),
+      removeIngress: vi.fn(async () => ({ ok: false, error: "unused" } as const)),
+    });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    await expect(registry.startListener(1, {
+      listener: { kind: "mtls", host: "0.0.0.0", port: 8888 },
+      addManagedFirewallRule: true,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        job: { port: 8888 },
+        firewall: { status: "failed", ruleCount: 0, error: "cloud rule rejected" },
+      },
+    });
+    expect(registry.snapshot(1).jobs).toEqual([expect.objectContaining({ port: 8888 })]);
   });
 
   it("does not misclassify a gRPC method path as a local filesystem failure", async () => {
@@ -300,7 +532,10 @@ describe("connection registry with an injected Sliver client", () => {
     await connectSaved(registry, 1);
 
     await expect(
-      registry.startListener(1, { kind: "mtls", host: "127.0.0.1", port: 65_535 }),
+      registry.startListener(1, {
+        listener: { kind: "mtls", host: "127.0.0.1", port: 65_535 },
+        addManagedFirewallRule: false,
+      }),
     ).resolves.toEqual({ ok: false, error: "3 INVALID_ARGUMENT: invalid listener port" });
   });
 
@@ -435,7 +670,10 @@ describe("connection registry with an injected Sliver client", () => {
     });
 
     await expect(
-      registry.startListener(1, { kind: "mtls", host: "127.0.0.1", port: 8888 }),
+      registry.startListener(1, {
+        listener: { kind: "mtls", host: "127.0.0.1", port: 8888 },
+        addManagedFirewallRule: false,
+      }),
     ).resolves.toMatchObject({ ok: true });
     expect(registry.snapshot(1)).toMatchObject({
       connection: { status: "degraded", error: "profile inventory unavailable" },
@@ -466,7 +704,10 @@ describe("connection registry with an injected Sliver client", () => {
     });
 
     await expect(
-      registry.startListener(1, { kind: "mtls", host: "127.0.0.1", port: 8888 }),
+      registry.startListener(1, {
+        listener: { kind: "mtls", host: "127.0.0.1", port: 8888 },
+        addManagedFirewallRule: false,
+      }),
     ).resolves.toMatchObject({ ok: true });
     expect(registry.snapshot(1)).toMatchObject({
       connection: { status: "degraded", error: "profile inventory unavailable" },
@@ -539,21 +780,210 @@ describe("connection registry with an injected Sliver client", () => {
     if (!prepared.ok) throw new Error(prepared.error);
     client.jobState = [job(7, 7001)];
 
-    await expect(registry.executeStopPlan(1, prepared.value.token)).resolves.toMatchObject({
+    await expect(registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: false,
+    })).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/job set changed/),
     });
     expect(client.killJob).not.toHaveBeenCalled();
-    await expect(registry.executeStopPlan(1, prepared.value.token)).resolves.toMatchObject({
+    await expect(registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: false,
+    })).resolves.toMatchObject({
       ok: false,
       error: expect.stringMatching(/expired/),
     });
 
     const current = await registry.prepareStopAllJobs(1);
     if (!current.ok) throw new Error(current.error);
-    await expect(registry.executeStopPlan(1, current.value.token)).resolves.toEqual({ ok: true });
+    await expect(registry.executeStopPlan(1, {
+      token: current.value.token,
+      removeManagedFirewallRule: false,
+    })).resolves.toEqual({
+      ok: true,
+      value: {
+        stoppedJobIds: [7],
+        failedJobIds: [],
+        firewall: { status: "not-requested", ruleCount: 0 },
+      },
+    });
     expect(client.killJob).toHaveBeenCalledWith(7);
     expect(registry.snapshot(1).jobs).toEqual([]);
+  });
+
+  it("captures and removes managed listener firewall ingress after a confirmed stop", async () => {
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000, "wireguard")];
+    const server: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0013",
+      provider: "aws",
+      name: "Managed listener server",
+    };
+    const removeIngress = vi.fn(async () => ({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    } as const));
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => server);
+    registry.setManagedListenerFirewallController({
+      ensureIngress: vi.fn(async () => ({
+        ok: true,
+        value: { status: "applied", ruleCount: 1 },
+      } as const)),
+      removeIngress,
+    });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const prepared = await registry.prepareStopJob(1, 7);
+    expect(prepared).toMatchObject({
+      ok: true,
+      value: { impact: { managedFirewall: { server, protocol: "udp", port: 7000 } } },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    await expect(registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: true,
+    })).resolves.toEqual({
+      ok: true,
+      value: {
+        stoppedJobIds: [7],
+        failedJobIds: [],
+        firewall: { status: "removed", ruleCount: 1 },
+      },
+    });
+    expect(removeIngress).toHaveBeenCalledWith({ server, protocol: "udp", port: 7000 });
+  });
+
+  it("retains managed ingress while another listener uses the same protocol and port", async () => {
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000), job(8, 7000)];
+    const server: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0014",
+      provider: "azure",
+      name: "Managed listener server",
+    };
+    const removeIngress = vi.fn(async () => ({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    } as const));
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => server);
+    registry.setManagedListenerFirewallController({
+      ensureIngress: vi.fn(async () => ({
+        ok: true,
+        value: { status: "applied", ruleCount: 1 },
+      } as const)),
+      removeIngress,
+    });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const prepared = await registry.prepareStopJob(1, 7);
+    if (!prepared.ok) throw new Error(prepared.error);
+    await expect(registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: true,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        stoppedJobIds: [7],
+        failedJobIds: [],
+        firewall: { status: "retained", ruleCount: 0 },
+      },
+    });
+    expect(removeIngress).not.toHaveBeenCalled();
+    expect(registry.snapshot(1).jobs.map(({ id }) => id)).toEqual([8]);
+
+    const stopAll = await registry.prepareStopAllJobs(1);
+    expect(stopAll).toMatchObject({ ok: true, value: { impact: { managedFirewall: null } } });
+  });
+
+  it("does not offer managed firewall cleanup for an unrecognized server job", async () => {
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000, "custom-job")];
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => ({
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0017",
+      provider: "aws",
+      name: "Managed listener server",
+    }));
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    await expect(registry.prepareStopJob(1, 7)).resolves.toMatchObject({
+      ok: true,
+      value: { impact: { managedFirewall: null } },
+    });
+  });
+
+  it("reports managed firewall removal failure after the listener is confirmed stopped", async () => {
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000)];
+    const server: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0015",
+      provider: "aws",
+      name: "Managed listener server",
+    };
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => server);
+    registry.setManagedListenerFirewallController({
+      ensureIngress: vi.fn(async () => ({ ok: false, error: "unused" } as const)),
+      removeIngress: vi.fn(async () => ({ ok: false, error: "cloud delete rejected" } as const)),
+    });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const prepared = await registry.prepareStopJob(1, 7);
+    if (!prepared.ok) throw new Error(prepared.error);
+    await expect(registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: true,
+    })).resolves.toEqual({
+      ok: true,
+      value: {
+        stoppedJobIds: [7],
+        failedJobIds: [],
+        firewall: { status: "failed", ruleCount: 0, error: "cloud delete rejected" },
+      },
+    });
+    expect(registry.snapshot(1).jobs).toEqual([]);
+  });
+
+  it("does not remove managed ingress when the listener stop fails", async () => {
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000)];
+    client.killJob.mockResolvedValueOnce(clientpb.KillJob.create({ ID: 7, Success: false }));
+    const server: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0016",
+      provider: "aws",
+      name: "Managed listener server",
+    };
+    const removeIngress = vi.fn(async () => ({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    } as const));
+    const registry = createRegistry(() => client.adapter);
+    registry.setManagedServerResolver(() => server);
+    registry.setManagedListenerFirewallController({
+      ensureIngress: vi.fn(async () => ({ ok: false, error: "unused" } as const)),
+      removeIngress,
+    });
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const prepared = await registry.prepareStopJob(1, 7);
+    if (!prepared.ok) throw new Error(prepared.error);
+    await expect(registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: true,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/Failed to stop jobs #7/),
+    });
+    expect(removeIngress).not.toHaveBeenCalled();
   });
 
   it("refuses to label a truncated job inventory as a stop-all plan", async () => {
@@ -587,7 +1017,10 @@ describe("connection registry with an injected Sliver client", () => {
     const blockedJobs = deferred<clientpb.Job[]>();
     firstClient.nextJobsPromise = blockedJobs.promise;
 
-    const execution = registry.executeStopPlan(1, prepared.value.token);
+    const execution = registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: false,
+    });
     await Promise.resolve();
     await connectNamed(registry, 1, "backend-b");
     blockedJobs.resolve([job(7, 7000)]);
@@ -600,13 +1033,85 @@ describe("connection registry with an injected Sliver client", () => {
     expect(registry.snapshot(1).connection.server).toBe("localhost:31338");
   });
 
-  it("rejects stale read and mutation results after their window switches backends", async () => {
+  it("reports a confirmed stop when the window switches backends during the kill", async () => {
+    await writeFile(join(externalDirectory, "backend-b.cfg"), validConfig({ lport: 31338, token: "backend-b" }));
+    const firstClient = new FakeSliverClient();
+    firstClient.jobState = [job(7, 7000)];
+    const secondClient = new FakeSliverClient();
+    const clients = [firstClient, secondClient];
+    const removeIngress = vi.fn(async () => ({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    } as const));
+    const registry = createRegistry(() => clients.shift()!.adapter);
+    registry.setManagedServerResolver(() => ({
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0019",
+      provider: "aws",
+      name: "Managed listener server",
+    }));
+    registry.setManagedListenerFirewallController({
+      ensureIngress: vi.fn(async () => ({ ok: false, error: "unused" } as const)),
+      removeIngress,
+    });
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectNamed(registry, 1, "operator");
+    await connectNamed(registry, 2, "operator");
+    const prepared = await registry.prepareStopJob(1, 7);
+    if (!prepared.ok) throw new Error(prepared.error);
+
+    const killStarted = deferred<void>();
+    const killResponse = deferred<clientpb.KillJob>();
+    firstClient.killJob.mockImplementationOnce(async () => {
+      killStarted.resolve(undefined);
+      const response = await killResponse.promise;
+      firstClient.jobState = [];
+      return response;
+    });
+    const execution = registry.executeStopPlan(1, {
+      token: prepared.value.token,
+      removeManagedFirewallRule: true,
+    });
+    await killStarted.promise;
+    await connectNamed(registry, 1, "backend-b");
+    killResponse.resolve(clientpb.KillJob.create({ ID: 7, Success: true }));
+
+    await expect(execution).resolves.toMatchObject({
+      ok: true,
+      value: {
+        stoppedJobIds: [7],
+        failedJobIds: [],
+        firewall: {
+          status: "outcome-unknown",
+          error: expect.stringMatching(/backend changed.*Cloud Deployment/iu),
+        },
+      },
+    });
+    expect(removeIngress).not.toHaveBeenCalled();
+    expect(registry.snapshot(1).connection.server).toBe("localhost:31338");
+  });
+
+  it("rejects stale reads but reports a listener mutation confirmed before a backend switch", async () => {
     await writeFile(join(externalDirectory, "backend-b.cfg"), validConfig({ lport: 31338, token: "backend-b" }));
     const firstClient = new FakeSliverClient();
     const secondClient = new FakeSliverClient();
     const thirdClient = new FakeSliverClient();
     const clients = [firstClient, secondClient, thirdClient];
     const registry = createRegistry(() => clients.shift()!.adapter);
+    const managedServer: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0018",
+      provider: "aws",
+      name: "Managed listener server",
+    };
+    const ensureIngress = vi.fn(async () => ({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    } as const));
+    registry.setManagedServerResolver(() => managedServer);
+    registry.setManagedListenerFirewallController({
+      ensureIngress,
+      removeIngress: vi.fn(async () => ({ ok: false, error: "unused" } as const)),
+    });
     registry.registerWindow(1);
     registry.registerWindow(2);
     await connectNamed(registry, 1, "operator");
@@ -628,14 +1133,25 @@ describe("connection registry with an injected Sliver client", () => {
     await connectNamed(registry, 1, "operator");
     const listener = deferred<clientpb.ListenerJob>();
     firstClient.startMTLSListener.mockImplementationOnce(async () => listener.promise);
-    const staleMutation = registry.startListener(1, { kind: "mtls", host: "127.0.0.1", port: 9999 });
+    const staleMutation = registry.startListener(1, {
+      listener: { kind: "mtls", host: "127.0.0.1", port: 9999 },
+      addManagedFirewallRule: true,
+    });
     await Promise.resolve();
     await connectNamed(registry, 1, "backend-b");
     listener.resolve(clientpb.ListenerJob.create({ JobID: 99 }));
     await expect(staleMutation).resolves.toMatchObject({
-      ok: false,
-      error: expect.stringMatching(/backend connection changed/),
+      ok: true,
+      value: {
+        job: { id: 99, protocol: "mtls", port: 9999 },
+        firewall: {
+          status: "failed",
+          ruleCount: 0,
+          error: expect.stringMatching(/backend connection changed/),
+        },
+      },
     });
+    expect(ensureIngress).not.toHaveBeenCalled();
     expect(registry.snapshot(1).connection.server).toBe("localhost:31338");
   });
 

@@ -1280,6 +1280,37 @@ export class AzureVmProvider {
     );
   }
 
+  async deleteFirewallRuleIfMatches(
+    resource: AzureVmDeploymentResource,
+    ruleName: string,
+    expected: AzureFirewallRuleSpec,
+  ): Promise<boolean> {
+    const name = validateSecurityRuleName(ruleName, false);
+    const validated = validateFirewallRuleSpec(expected, false);
+    if (validated.name !== name) {
+      throw new AzureVmProviderError("The expected Azure firewall rule identity does not match the deletion target.");
+    }
+    const parsed = await this.assertFirewallMutationTarget(resource);
+    const current = await this.requireFirewallRule(resource, parsed, name);
+    if (
+      !current.managed ||
+      current.isDefault ||
+      current.editUnsupportedReason !== null ||
+      !azureFirewallSpecsEqual(current, validated)
+    ) {
+      return false;
+    }
+    await this.call(
+      "delete the matched managed Azure firewall rule",
+      () => this.clients.securityRules.delete(
+        parsed.resourceGroupName,
+        parsed.nameSegments[0]!,
+        name,
+      ),
+    );
+    return true;
+  }
+
   async destroy(resource: AzureVmDestroyResource): Promise<void> {
     this.validateDestroyResource(resource);
     if (resource.virtualMachineId) await this.deleteOwnedVirtualMachine(resource);
@@ -3080,6 +3111,26 @@ function compareAzureOptions(
 
 function compareFirewallRules(left: AzureFirewallRule, right: AzureFirewallRule): number {
   return left.priority - right.priority || left.name.localeCompare(right.name);
+}
+
+function azureFirewallSpecsEqual(
+  left: AzureFirewallRuleSpec,
+  right: AzureFirewallRuleSpec,
+): boolean {
+  return left.name === right.name &&
+    left.priority === right.priority &&
+    left.direction === right.direction &&
+    left.access === right.access &&
+    left.protocol === right.protocol &&
+    sameStringValues(left.sourceAddressPrefixes, right.sourceAddressPrefixes) &&
+    sameStringValues(left.sourcePortRanges, right.sourcePortRanges) &&
+    sameStringValues(left.destinationAddressPrefixes, right.destinationAddressPrefixes) &&
+    sameStringValues(left.destinationPortRanges, right.destinationPortRanges) &&
+    left.description === right.description;
+}
+
+function sameStringValues(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function uniqueBy<T>(values: readonly T[], key: (value: T) => string): T[] {

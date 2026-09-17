@@ -33,7 +33,7 @@ function deferred<T>() {
 
 function readyGenerationSnapshot() {
   const snapshot = disconnectedSnapshot();
-  snapshot.connection = { status: "connected" };
+  snapshot.connection = { managedServer: null, status: "connected" };
   snapshot.domains.compiler = {
     status: "ready",
     revision: 1,
@@ -286,6 +286,7 @@ describe("GeneratePage action footer", () => {
     const user = userEvent.setup();
     const snapshot = readyGenerationSnapshot();
     snapshot.connection = {
+      managedServer: null,
       status: "connected",
       server: "localhost:53137",
       incarnation: 3,
@@ -500,6 +501,12 @@ describe("GeneratePage action footer", () => {
     expect(screen.getByRole("button", { name: /Operating system/i })).toBeDisabled();
     expect(screen.getByRole("spinbutton", { name: "Reconnect delay (seconds)" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Obfuscate symbols" })).toBeDisabled();
+    const datePicker = screen.getByText("Not after").closest('[data-slot="date-picker"]');
+    if (!(datePicker instanceof HTMLElement)) throw new Error("Not after date picker is missing");
+    expect(datePicker).toHaveAttribute("data-disabled", "true");
+    for (const segment of within(datePicker).getAllByRole("spinbutton")) {
+      expect(segment).toHaveAttribute("aria-disabled", "true");
+    }
     expect(screen.getByRole("textbox", { name: "Reusable profile name" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Reset" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled();
@@ -518,7 +525,7 @@ describe("GeneratePage action footer", () => {
 
   it("keeps profile saves disabled when the server inventory is truncated", () => {
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected" };
+    snapshot.connection = { managedServer: null, status: "connected" };
     snapshot.domains.compiler = {
       status: "ready",
       revision: 1,

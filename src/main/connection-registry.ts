@@ -28,14 +28,21 @@ import {
   type BuildSummary,
   type CertificatePairSelection,
   type CompilerTargetSummary,
+  type ConnectionStatus,
   type DomainCollection,
   type DomainStatus,
+  type ExecuteJobStopPlanInput,
   type GenerateFromProfileInput,
   type GenerateInput,
   type HTTPListenerInput,
   type JobSummary,
+  type JobStopExecutionResult,
+  type JobStopManagedFirewallImpact,
   type JobStopPlan,
   type ListenerInput,
+  type ManagedListenerFirewallOutcome,
+  type ManagedListenerFirewallProtocol,
+  type ManagedServerReference,
   type OperationResult,
   type OperationResultWithValue,
   type ProfileSummary,
@@ -44,6 +51,8 @@ import {
   type SavedArtifact,
   type SaveProfileInput,
   type SliverSnapshot,
+  type StartListenerRequest,
+  type StartListenerResult,
   type StageListenerInput,
   type WindowLaunchContext,
   SLIVER_PROTOCOL_BASELINE_COMMIT,
@@ -407,11 +416,32 @@ interface PoolTaskClaim {
 
 export type { SliverClientAdapter, SliverClientFactory } from "./sliver-client-adapter.js";
 
+export interface ManagedListenerFirewallInput {
+  server: ManagedServerReference;
+  protocol: ManagedListenerFirewallProtocol;
+  port: number;
+}
+
+export interface ManagedListenerFirewallController {
+  ensureIngress(input: ManagedListenerFirewallInput): Promise<OperationResult<ManagedListenerFirewallOutcome>>;
+  removeIngress(input: ManagedListenerFirewallInput): Promise<OperationResult<ManagedListenerFirewallOutcome>>;
+}
+
+function unavailableManagedListenerFirewallController(): ManagedListenerFirewallController {
+  const unavailable = async (): Promise<OperationResult<ManagedListenerFirewallOutcome>> => ({
+    ok: false,
+    error: "Managed listener firewall integration is unavailable",
+  });
+  return { ensureIngress: unavailable, removeIngress: unavailable };
+}
+
 export interface ConnectionRegistryOptions {
   savedConfigDirectory?: string;
   managedConfigDirectory?: string;
   clientFactory?: SliverClientFactory;
   now?: () => number;
+  resolveManagedServer?: (configDigest: string) => ManagedServerReference | null;
+  managedListenerFirewall?: ManagedListenerFirewallController;
 }
 
 interface InternalStopPlan {
@@ -423,6 +453,7 @@ interface InternalStopPlan {
   jobs: JobSummary[];
   fingerprints: string[];
   stopsAll: boolean;
+  managedFirewall: JobStopManagedFirewallImpact | null;
 }
 
 interface InternalTargetActionPlan {
@@ -547,6 +578,8 @@ export class ConnectionRegistry {
   private readonly configStore: OperatorConfigStore;
   private readonly clientFactory: SliverClientFactory;
   private readonly now: () => number;
+  private resolveManagedServer: (configDigest: string) => ManagedServerReference | null;
+  private managedListenerFirewall: ManagedListenerFirewallController;
   private nextEpoch = 1;
 
   constructor(options: string | ConnectionRegistryOptions = {}) {
@@ -556,9 +589,57 @@ export class ConnectionRegistry {
     this.configStore = new OperatorConfigStore(externalDirectory, managedDirectory);
     this.clientFactory = normalized.clientFactory ?? createSliverClientAdapter;
     this.now = normalized.now ?? Date.now;
+    this.resolveManagedServer = normalized.resolveManagedServer ?? (() => null);
+    this.managedListenerFirewall = normalized.managedListenerFirewall ?? unavailableManagedListenerFirewallController();
     this.sessionArtifacts = new SessionArtifactStore({ now: this.now });
     this.executionArtifacts = new ExecutionArtifactStore({ now: this.now });
     this.streams = new StreamManager({ now: this.now });
+  }
+
+  /** Read-only local provenance lookup; this never invokes cloud operations. */
+  setManagedServerResolver(resolve: (configDigest: string) => ManagedServerReference | null): void {
+    this.resolveManagedServer = resolve;
+    this.refreshManagedServerMetadata();
+  }
+
+  setManagedListenerFirewallController(controller: ManagedListenerFirewallController): void {
+    this.managedListenerFirewall = controller;
+  }
+
+  refreshManagedServerMetadata(): void {
+    const changedPools = new Set<BackendPool>();
+    for (const context of this.windows.values()) {
+      const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+      const managedServer = this.managedServerForConnection(pool, context.snapshot.connection.status);
+      const previous = context.snapshot.connection.managedServer;
+      if (
+        previous === managedServer ||
+        (previous && managedServer && previous.deploymentId === managedServer.deploymentId &&
+          previous.provider === managedServer.provider && previous.name === managedServer.name)
+      ) continue;
+      context.snapshot = {
+        ...context.snapshot,
+        connection: { ...context.snapshot.connection, managedServer },
+      };
+      this.pushSnapshot(context.contentsId, context.snapshot);
+      if (pool) changedPools.add(pool);
+    }
+    for (const pool of changedPools) this.broadcastNetworkForwardingChanged(pool.key, pool.epoch);
+  }
+
+  private managedServerForConnection(
+    pool: BackendPool | undefined,
+    status: ConnectionStatus,
+  ): ManagedServerReference | null {
+    if (!pool || (status !== "connected" && status !== "degraded" && status !== "reconnecting")) return null;
+    try {
+      // The pool key is the digest of the verified bytes used for this connection.
+      // It is available even for events emitted before connect() has returned.
+      return this.resolveManagedServer(pool.key);
+    } catch {
+      // Unavailable local deployment metadata must not break an operator connection.
+      return null;
+    }
   }
 
   registerWindow(contentsId: number): void {
@@ -4777,9 +4858,13 @@ export class ConnectionRegistry {
     }
   }
 
-  async startListener(contentsId: number, input: ListenerInput): Promise<OperationResult<JobSummary>> {
+  async startListener(contentsId: number, request: StartListenerRequest): Promise<OperationResult<StartListenerResult>> {
     return this.withPool(contentsId, async (pool, assertBinding) => {
+      const input = request.listener;
       validateListener(input);
+      const managedServer = request.addManagedFirewallRule
+        ? this.managedServerForConnection(pool, pool.snapshot.connection.status)
+        : null;
       let jobId: number;
 
       switch (input.kind) {
@@ -4830,20 +4915,71 @@ export class ConnectionRegistry {
         }
       }
 
-      assertBinding();
-      await pool.refreshDomains(["jobs"]);
-      return (
-        pool.snapshot.jobs.find((job) => job.id === jobId) ?? {
-          id: jobId,
-          name: input.kind,
-          description: "Listener starting",
-          protocol: input.kind,
-          port: input.port,
-          domains: [],
-          profileName: input.kind === "stage" ? input.profileName : "",
+      const fallbackJob: JobSummary = {
+        id: jobId,
+        name: input.kind,
+        description: "Listener starting",
+        protocol: input.kind,
+        port: input.port,
+        domains: [],
+        profileName: input.kind === "stage" ? input.profileName : "",
+      };
+      let bindingChanged = false;
+      try {
+        assertBinding();
+      } catch {
+        bindingChanged = true;
+      }
+      if (!bindingChanged) {
+        try {
+          await pool.refreshDomains(["jobs"]);
+        } catch {
+          // JobID confirms the listener mutation. A failed inventory refresh must not invite a duplicate retry.
         }
-      );
-    });
+        try {
+          assertBinding();
+        } catch {
+          bindingChanged = true;
+        }
+      }
+      const job = pool.snapshot.jobs.find((candidate) => candidate.id === jobId) ?? fallbackJob;
+      let firewall: ManagedListenerFirewallOutcome = { status: "not-requested", ruleCount: 0 };
+      if (request.addManagedFirewallRule) {
+        if (bindingChanged) {
+          firewall = {
+            status: "failed",
+            ruleCount: 0,
+            error: "The backend connection changed before the firewall rule could be applied",
+          };
+        } else if (!managedServer) {
+          firewall = {
+            status: "failed",
+            ruleCount: 0,
+            error: "The connected server is not managed by a cloud deployment",
+          };
+        } else {
+          const currentManagedServer = this.managedServerForConnection(pool, pool.snapshot.connection.status);
+          if (!sameManagedServerDeployment(managedServer, currentManagedServer)) {
+            firewall = {
+              status: "failed",
+              ruleCount: 0,
+              error: "The managed server deployment changed before the firewall rule could be applied",
+            };
+          } else {
+            firewall = await invokeManagedListenerFirewall(
+              this.managedListenerFirewall,
+              "ensureIngress",
+              {
+                server: managedServer,
+                protocol: listenerFirewallProtocol(input.kind),
+                port: input.port,
+              },
+            );
+          }
+        }
+      }
+      return { job, firewall };
+    }, false);
   }
 
   async prepareStopJob(contentsId: number, jobId: number): Promise<OperationResult<JobStopPlan>> {
@@ -4868,15 +5004,18 @@ export class ConnectionRegistry {
     });
   }
 
-  async executeStopPlan(contentsId: number, token: string): Promise<OperationResult> {
+  async executeStopPlan(
+    contentsId: number,
+    input: ExecuteJobStopPlanInput,
+  ): Promise<OperationResult<JobStopExecutionResult>> {
     const context = this.requireWindow(contentsId);
     this.pruneStopPlans(context);
-    const plan = context.stopPlans.get(token);
-    context.stopPlans.delete(token);
+    const plan = context.stopPlans.get(input.token);
+    context.stopPlans.delete(input.token);
     if (!plan || plan.contentsId !== contentsId || plan.expiresAt <= this.now()) {
       return { ok: false, error: "The job-stop confirmation expired; review the current resources again" };
     }
-    return this.withPoolWithoutValue(contentsId, async (pool) => {
+    return this.withPool(contentsId, async (pool) => {
       const assertPlanBinding = (): void => {
         if (
           this.windows.get(contentsId) !== context ||
@@ -4902,21 +5041,122 @@ export class ConnectionRegistry {
         throw new Error("The active job set changed; review the current resources again");
       }
 
-      const failures: string[] = [];
+      const confirmedStoppedIds = new Set<number>();
+      const killFailedIds = new Set<number>();
+      let bindingChangedAfterMutation = false;
       for (const job of plan.jobs) {
-        assertPlanBinding();
+        try {
+          assertPlanBinding();
+        } catch (error) {
+          if (confirmedStoppedIds.size === 0 && killFailedIds.size === 0) throw error;
+          bindingChangedAfterMutation = true;
+          break;
+        }
         try {
           const result = await pool.client.killJob(job.id);
-          assertPlanBinding();
-          if (!result.Success) failures.push(`#${job.id}`);
+          if (result.Success) confirmedStoppedIds.add(job.id);
+          else killFailedIds.add(job.id);
         } catch {
-          failures.push(`#${job.id}`);
+          killFailedIds.add(job.id);
+        }
+        try {
+          assertPlanBinding();
+        } catch {
+          bindingChangedAfterMutation = true;
+          break;
         }
       }
-      await pool.refreshDomains(["jobs"]);
-      assertPlanBinding();
-      if (failures.length > 0) throw new Error(`Failed to stop jobs ${failures.join(", ")}`);
-    });
+      const undispatchedIds = plan.jobs
+        .filter((job) => !confirmedStoppedIds.has(job.id) && !killFailedIds.has(job.id))
+        .map((job) => job.id);
+      for (const jobId of undispatchedIds) killFailedIds.add(jobId);
+
+      if (bindingChangedAfterMutation) {
+        if (confirmedStoppedIds.size === 0) {
+          throw new Error("The backend connection changed before any job stop was confirmed");
+        }
+        return {
+          stoppedJobIds: [...confirmedStoppedIds],
+          failedJobIds: [...killFailedIds],
+          firewall: input.removeManagedFirewallRule && plan.managedFirewall
+            ? {
+                status: "outcome-unknown",
+                ruleCount: 0,
+                error:
+                  "The listener stop was confirmed, but the backend changed before its cloud firewall rule could be reviewed. Review the rule in Cloud Deployment.",
+              }
+            : { status: "not-requested", ruleCount: 0 },
+        };
+      }
+
+      try {
+        await pool.refreshDomains(["jobs"]);
+        assertPlanBinding();
+      } catch (error) {
+        if (confirmedStoppedIds.size === 0) throw error;
+        return {
+          stoppedJobIds: [...confirmedStoppedIds],
+          failedJobIds: plan.jobs
+            .filter((job) => !confirmedStoppedIds.has(job.id))
+            .map((job) => job.id),
+          firewall: input.removeManagedFirewallRule && plan.managedFirewall
+            ? {
+                status: "outcome-unknown",
+                ruleCount: 0,
+                error:
+                  "The listener stop was confirmed, but the active jobs could not be refreshed before its cloud firewall rule was reviewed. Review the rule in Cloud Deployment.",
+              }
+            : { status: "not-requested", ruleCount: 0 },
+        };
+      }
+      const remainingIds = new Set(pool.snapshot.jobs.map((job) => job.id));
+      const stoppedJobIds = plan.jobs.filter((job) => !remainingIds.has(job.id)).map((job) => job.id);
+      const failedJobIds = plan.jobs.filter((job) => remainingIds.has(job.id)).map((job) => job.id);
+      if (failedJobIds.length > 0) {
+        if (stoppedJobIds.length > 0) {
+          return {
+            stoppedJobIds,
+            failedJobIds,
+            firewall: input.removeManagedFirewallRule && plan.managedFirewall
+              ? {
+                  status: "retained",
+                  ruleCount: 0,
+                  error: "The cloud firewall rule was retained because the listener stop was only partially successful",
+                }
+              : { status: "not-requested", ruleCount: 0 },
+          };
+        }
+        throw new Error(`Failed to stop jobs ${failedJobIds.map((jobId) => `#${jobId}`).join(", ")}`);
+      }
+
+      let firewall: ManagedListenerFirewallOutcome = input.removeManagedFirewallRule && plan.managedFirewall
+        ? { status: "retained", ruleCount: 0 }
+        : { status: "not-requested", ruleCount: 0 };
+      if (input.removeManagedFirewallRule && plan.managedFirewall) {
+        const stoppedManagedJob = stoppedJobIds.includes(plan.jobs[0]!.id);
+        const tupleStillInUse = pool.snapshot.jobs.some((job) =>
+          sameManagedFirewallTuple(plan.managedFirewall!, managedFirewallImpactForJob(plan.managedFirewall!.server, job))
+        );
+        if (stoppedManagedJob && !tupleStillInUse) {
+          const currentManagedServer = this.managedServerForConnection(pool, pool.snapshot.connection.status);
+          if (!sameManagedServerDeployment(plan.managedFirewall.server, currentManagedServer)) {
+            firewall = {
+              status: "failed",
+              ruleCount: 0,
+              error: "The managed server deployment changed before the firewall rule could be removed",
+            };
+          } else {
+            assertPlanBinding();
+            firewall = await invokeManagedListenerFirewall(
+              this.managedListenerFirewall,
+              "removeIngress",
+              plan.managedFirewall,
+            );
+          }
+        }
+      }
+      return { stoppedJobIds, failedJobIds, firewall };
+    }, false);
   }
 
   private createStopPlan(
@@ -4930,6 +5170,12 @@ export class ConnectionRegistry {
     const token = randomUUID();
     const expiresAt = this.now() + JOB_STOP_PLAN_TTL_MS;
     const safeJobs = jobs.map((job) => ({ ...job, domains: [...job.domains] }));
+    const managedServer = stopsAll
+      ? null
+      : this.managedServerForConnection(pool, pool.snapshot.connection.status);
+    const managedFirewall = managedServer && safeJobs.length === 1
+      ? managedFirewallImpactForJob(managedServer, safeJobs[0]!)
+      : null;
     context.stopPlans.set(token, {
       token,
       expiresAt,
@@ -4939,6 +5185,7 @@ export class ConnectionRegistry {
       jobs: safeJobs,
       fingerprints: safeJobs.map(jobFingerprint),
       stopsAll,
+      managedFirewall,
     });
     const connection = pool.snapshot.connection;
     return {
@@ -4954,6 +5201,7 @@ export class ConnectionRegistry {
         },
         jobs: safeJobs,
         stopsAll,
+        managedFirewall,
         warning:
           "These server-owned listeners may be shared with other operators; stopping them can remove active callback paths.",
       },
@@ -5504,6 +5752,7 @@ export class ConnectionRegistry {
   private async withPool<T>(
     contentsId: number,
     operation: (pool: BackendPool, assertBinding: () => void) => Promise<T>,
+    assertAfterOperation = true,
   ): Promise<OperationResultWithValue<T>> {
     try {
       const context = this.requireWindow(contentsId);
@@ -5526,7 +5775,7 @@ export class ConnectionRegistry {
       };
       assertBinding();
       const value = await operation(pool, assertBinding);
-      assertBinding();
+      if (assertAfterOperation) assertBinding();
       return { ok: true, value };
     } catch (error) {
       return { ok: false, error: errorMessage(error) };
@@ -5588,6 +5837,7 @@ export class ConnectionRegistry {
         ...disconnectedSnapshot(),
         connection: {
           status: "connecting",
+          managedServer: null,
           operator: sanitizeSavedConfigMetadata(config.operator),
           server: `${sanitizeSavedConfigMetadata(config.lhost)}:${config.lport}`,
           configName,
@@ -6026,6 +6276,7 @@ export class ConnectionRegistry {
       targetContext,
       connection: {
         ...snapshot.connection,
+        managedServer: this.managedServerForConnection(pool, snapshot.connection.status),
         incarnation: context.connectionAttempt,
         ...(context.configName ? { configName: context.configName } : {}),
       },
@@ -6096,6 +6347,7 @@ class BackendPool {
       ...disconnectedSnapshot(),
       connection: {
         status: "connecting",
+        managedServer: null,
         operator: sanitizeSavedConfigMetadata(config.operator),
         server: `${sanitizeSavedConfigMetadata(config.lhost)}:${config.lport}`,
         epoch,
@@ -7150,6 +7402,80 @@ function jobFingerprint(job: JobSummary | undefined): string {
       }),
     )
     .digest("hex");
+}
+
+function listenerFirewallProtocol(kind: ListenerInput["kind"]): ManagedListenerFirewallProtocol {
+  return kind === "dns" || kind === "wireguard" ? "udp" : "tcp";
+}
+
+function managedFirewallImpactForJob(
+  server: ManagedServerReference,
+  job: JobSummary,
+): JobStopManagedFirewallImpact | null {
+  if (!isValidPort(job.port)) return null;
+  const name = job.name.trim().toLowerCase();
+  const protocol = job.protocol.trim().toLowerCase();
+  const isDns = name === "dns" || name === "dns-listener" || protocol === "dns";
+  const isWireGuard =
+    name === "wg" ||
+    name === "wireguard" ||
+    name === "wg-listener" ||
+    name === "wireguard-listener" ||
+    protocol === "wg" ||
+    protocol === "wireguard";
+  const isTcpListener =
+    name === "mtls" ||
+    name === "mtls-listener" ||
+    name === "http" ||
+    name === "http-listener" ||
+    name === "https" ||
+    name === "https-listener" ||
+    name === "tcp" ||
+    name === "stage" ||
+    name === "stage-listener" ||
+    protocol === "mtls" ||
+    protocol === "http" ||
+    protocol === "https" ||
+    protocol === "tcp" ||
+    protocol === "stage" ||
+    protocol === "stage-listener";
+  if (!isDns && !isWireGuard && !isTcpListener) return null;
+  return {
+    server: { ...server },
+    protocol: isDns || isWireGuard ? "udp" : "tcp",
+    port: job.port,
+  };
+}
+
+function sameManagedFirewallTuple(
+  left: JobStopManagedFirewallImpact,
+  right: JobStopManagedFirewallImpact | null,
+): boolean {
+  return right !== null && left.protocol === right.protocol && left.port === right.port;
+}
+
+function sameManagedServerDeployment(
+  expected: ManagedServerReference,
+  current: ManagedServerReference | null,
+): boolean {
+  return current !== null &&
+    expected.deploymentId === current.deploymentId &&
+    expected.provider === current.provider;
+}
+
+async function invokeManagedListenerFirewall(
+  controller: ManagedListenerFirewallController,
+  operation: "ensureIngress" | "removeIngress",
+  input: ManagedListenerFirewallInput,
+): Promise<ManagedListenerFirewallOutcome> {
+  try {
+    const result = await controller[operation](input);
+    return result.ok
+      ? result.value
+      : { status: "failed", ruleCount: 0, error: result.error };
+  } catch (error) {
+    return { status: "failed", ruleCount: 0, error: errorMessage(error) };
+  }
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

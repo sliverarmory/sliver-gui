@@ -10,6 +10,7 @@ import type {
   WindowLaunchContext,
 } from "../../shared/contracts";
 import type { SessionSummary } from "../../shared/target-contracts";
+import { ConnectionProvider } from "./components/ConnectionProvider";
 import {
   SessionTerminalPanel,
   type SessionTerminalRoute,
@@ -31,7 +32,9 @@ export function SessionShellWindowApp(): React.JSX.Element {
 
   useEffect(() => {
     let mounted = true;
+    let receivedEvent = false;
     const unsubscribe = window.sliver.onSnapshotChanged((next) => {
+      receivedEvent = true;
       if (mounted) setSnapshot(next);
     });
     void claimLaunchContext().then((result) => {
@@ -41,7 +44,7 @@ export function SessionShellWindowApp(): React.JSX.Element {
         return;
       }
       setLaunchContext(result.value);
-      setSnapshot(result.value.snapshot);
+      if (!receivedEvent) setSnapshot(result.value.snapshot);
       setError(undefined);
     }).catch(() => {
       if (mounted) setError("Managed shells could not be transferred to this window");
@@ -81,16 +84,18 @@ export function SessionShellWindowApp(): React.JSX.Element {
   }
 
   return (
-    <main className="h-screen min-h-0 overflow-hidden bg-background" aria-label="Managed shell window">
-      <SessionTerminalPanel
-        presentation="dedicated"
-        route={ready.route}
-        session={ready.session}
-        {...(ready.preferredResourceId === undefined
-          ? {}
-          : { preferredResourceId: ready.preferredResourceId })}
-      />
-    </main>
+    <ConnectionProvider connection={snapshot.connection}>
+      <main className="h-screen min-h-0 overflow-hidden bg-background" aria-label="Managed shell window">
+        <SessionTerminalPanel
+          presentation="dedicated"
+          route={ready.route}
+          session={ready.session}
+          {...(ready.preferredResourceId === undefined
+            ? {}
+            : { preferredResourceId: ready.preferredResourceId })}
+        />
+      </main>
+    </ConnectionProvider>
   );
 }
 

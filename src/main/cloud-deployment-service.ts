@@ -68,7 +68,11 @@ import {
   type UpdateCloudFirewallRuleInput,
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
-import type { OperationResult } from "../shared/contracts.js";
+import type {
+  ManagedListenerFirewallOutcome,
+  ManagedServerReference,
+  OperationResult,
+} from "../shared/contracts.js";
 import type { ManagedSshTarget, SshHostKeyReview } from "../shared/ssh-contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import type { CloudPermissionEvaluation } from "../shared/cloud-provider-permissions.js";
@@ -82,6 +86,8 @@ import {
 } from "../shared/cloud-provider-inventory.js";
 import { CloudCredentialVault, type CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { CloudDeploymentStore } from "./cloud-deployment-store.js";
+import type { ManagedListenerFirewallInput } from "./connection-registry.js";
+import { resolveManagedServerFromDeployments } from "./managed-server-resolver.js";
 import {
   AwsEc2Provider,
   type AwsEc2CredentialProvider,
@@ -149,6 +155,9 @@ const AZURE_PUBLIC_IP_REFRESH_DELAY_MS = 5_000;
 const SSH_HOST_KEY_STORE_FILE_NAME = "ssh-host-keys.json";
 const OPAQUE_SSH_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const SSH_HOST_KEY_PATTERN = /^SHA256:[A-Za-z0-9+/]{43}$/u;
+const MANAGED_LISTENER_FIREWALL_SOURCE = "0.0.0.0/0";
+const MANAGED_LISTENER_AZURE_PRIORITY_MIN = 1_200;
+const MANAGED_LISTENER_AZURE_PRIORITY_MAX = 4_096;
 
 export type CloudDeploymentChangedListener = (scope: CloudDeploymentChangeScope) => void;
 
@@ -194,6 +203,11 @@ export interface CloudAwsProvider {
     rule: AwsFirewallRuleSpec,
   ): Promise<AwsFirewallRule>;
   deleteFirewallRule(resource: AwsEc2DeploymentResource, ruleId: string): Promise<void>;
+  deleteFirewallRuleIfMatches(
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+    expected: AwsFirewallRuleSpec,
+  ): Promise<boolean>;
   destroy(resource: AwsEc2DestroyResource): Promise<void>;
 }
 
@@ -216,6 +230,11 @@ export interface CloudAzureProvider {
   createFirewallRule(resource: AzureVmDeploymentResource, rule: AzureFirewallRuleSpec): Promise<AzureFirewallRule>;
   updateFirewallRule(resource: AzureVmDeploymentResource, ruleId: string, rule: AzureFirewallRuleSpec): Promise<AzureFirewallRule>;
   deleteFirewallRule(resource: AzureVmDeploymentResource, ruleId: string): Promise<void>;
+  deleteFirewallRuleIfMatches(
+    resource: AzureVmDeploymentResource,
+    ruleId: string,
+    expected: AzureFirewallRuleSpec,
+  ): Promise<boolean>;
   destroy(resource: AzureVmDestroyResource): Promise<void>;
 }
 
@@ -451,6 +470,63 @@ export class CloudDeploymentService {
 
   onChanged(listener: CloudDeploymentChangedListener): () => void {
     return this.subscribe(listener);
+  }
+
+  resolveManagedServer(configDigest: string): ManagedServerReference | null {
+    if (this.#disposed) return null;
+    return resolveManagedServerFromDeployments(configDigest, this.#store.getState().deployments);
+  }
+
+  async ensureIngress(
+    input: ManagedListenerFirewallInput,
+  ): Promise<OperationResult<ManagedListenerFirewallOutcome>> {
+    try {
+      this.#assertActive();
+      const parsed = validateManagedListenerFirewallInput(input);
+      return await this.#serializeDeployment(parsed.server.deploymentId, async () => {
+        try {
+          this.#assertActive();
+          const deployment = this.#managedListenerDeployment(parsed);
+          if (deployment.status === "provisioning" || deployment.status === "deleting") {
+            return { ok: false, error: "The deployment is busy" };
+          }
+          if (deployment.provider === "aws") {
+            return await this.#ensureAwsManagedListenerIngress(deployment, parsed);
+          }
+          return await this.#ensureAzureManagedListenerIngress(deployment, parsed);
+        } catch (error) {
+          return failure(error, "The managed listener firewall rule could not be applied");
+        }
+      });
+    } catch (error) {
+      return failure(error, "The managed listener firewall request was rejected");
+    }
+  }
+
+  async removeIngress(
+    input: ManagedListenerFirewallInput,
+  ): Promise<OperationResult<ManagedListenerFirewallOutcome>> {
+    try {
+      this.#assertActive();
+      const parsed = validateManagedListenerFirewallInput(input);
+      return await this.#serializeDeployment(parsed.server.deploymentId, async () => {
+        try {
+          this.#assertActive();
+          const deployment = this.#managedListenerDeployment(parsed);
+          if (deployment.status === "provisioning" || deployment.status === "deleting") {
+            return { ok: false, error: "The deployment is busy" };
+          }
+          if (deployment.provider === "aws") {
+            return await this.#removeAwsManagedListenerIngress(deployment, parsed);
+          }
+          return await this.#removeAzureManagedListenerIngress(deployment, parsed);
+        } catch (error) {
+          return failure(error, "The managed listener firewall rule could not be removed");
+        }
+      });
+    } catch (error) {
+      return failure(error, "The managed listener firewall request was rejected");
+    }
   }
 
   async getSnapshot(): Promise<OperationResult<CloudDeploymentSnapshot>> {
@@ -2059,6 +2135,306 @@ export class CloudDeploymentService {
     }
   }
 
+  #managedListenerDeployment(input: ManagedListenerFirewallInput): CloudDeploymentRecord {
+    const deployment = this.#requireDeployment(input.server.deploymentId);
+    if (deployment.provider !== input.server.provider) {
+      throw new Error("The managed server provider no longer matches the cloud deployment");
+    }
+    return deployment;
+  }
+
+  async #ensureAwsManagedListenerIngress(
+    deployment: AwsCloudDeploymentRecord,
+    input: ManagedListenerFirewallInput,
+  ): Promise<OperationResult<ManagedListenerFirewallOutcome>> {
+    return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+      try {
+        const provider = this.#awsProviderFactory(
+          await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId),
+        );
+        const resource = awsResourceFromRecord(deployment);
+        const snapshot = await provider.listFirewallRules(resource);
+        const spec = awsManagedListenerFirewallSpec(input);
+        const owned = snapshot.rules.filter((rule) => isOwnedAwsManagedListenerRule(rule, spec));
+        if (owned.length > 0) {
+          return { ok: true, value: managedListenerFirewallOutcome("already-covered", owned.length) };
+        }
+        const covering = snapshot.rules.filter((rule) => awsFirewallAccessMatches(rule, spec));
+        if (covering.length > 0) {
+          return { ok: true, value: managedListenerFirewallOutcome("already-covered", covering.length) };
+        }
+
+        let created: AwsFirewallRule;
+        try {
+          created = await provider.createFirewallRule(resource, spec);
+        } catch (error) {
+          const outcomeError = managedListenerFirewallCreateOutcomeError(
+            "AWS",
+            error,
+            credentialValues(secret),
+          );
+          try {
+            const reconciled = await provider.listFirewallRules(resource);
+            const reconciledOwned = reconciled.rules.filter((rule) =>
+              isOwnedAwsManagedListenerRule(rule, spec)
+            );
+            if (reconciledOwned.length > 0) {
+              await this.#recordManagedListenerFirewallMutation(deployment.id);
+              return {
+                ok: true,
+                value: managedListenerFirewallOutcome("applied", reconciledOwned.length),
+              };
+            }
+            const reconciledCovering = reconciled.rules.filter((rule) =>
+              awsFirewallAccessMatches(rule, spec)
+            );
+            if (reconciledCovering.length > 0) {
+              return {
+                ok: true,
+                value: managedListenerFirewallOutcome("already-covered", reconciledCovering.length),
+              };
+            }
+          } catch {
+            // The create call may have reached AWS even if its response and the
+            // reconciliation read both failed. Report an ambiguous outcome so
+            // callers do not retry a mutation that may already exist.
+          }
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome("outcome-unknown", 0, outcomeError),
+          };
+        }
+        await this.#recordManagedListenerFirewallMutation(deployment.id);
+        if (!isOwnedAwsManagedListenerRule(created, spec)) {
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome(
+              "outcome-unknown",
+              1,
+              "AWS accepted the firewall mutation but did not return the expected managed rule identity",
+            ),
+          };
+        }
+        return { ok: true, value: managedListenerFirewallOutcome("applied", 1) };
+      } catch (error) {
+        return failure(
+          error,
+          "The AWS managed listener firewall rule could not be applied",
+          credentialValues(secret),
+        );
+      }
+    });
+  }
+
+  async #removeAwsManagedListenerIngress(
+    deployment: AwsCloudDeploymentRecord,
+    input: ManagedListenerFirewallInput,
+  ): Promise<OperationResult<ManagedListenerFirewallOutcome>> {
+    return await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+      try {
+        const provider = this.#awsProviderFactory(
+          await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId),
+        );
+        const resource = awsResourceFromRecord(deployment);
+        const snapshot = await provider.listFirewallRules(resource);
+        const spec = awsManagedListenerFirewallSpec(input);
+        const owned = snapshot.rules.filter((rule) => isOwnedAwsManagedListenerRule(rule, spec));
+        if (owned.length === 0) {
+          const retained = snapshot.rules.filter((rule) =>
+            rule.description === spec.description || awsFirewallAccessMatches(rule, spec)
+          );
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome(
+              retained.length > 0 ? "retained" : "not-found",
+              retained.length,
+            ),
+          };
+        }
+
+        let removed = 0;
+        for (const rule of owned) {
+          if (await provider.deleteFirewallRuleIfMatches(resource, rule.id, spec)) removed += 1;
+        }
+        if (removed === 0) {
+          return { ok: true, value: managedListenerFirewallOutcome("retained", owned.length) };
+        }
+        await this.#recordManagedListenerFirewallMutation(deployment.id);
+        if (removed !== owned.length) {
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome(
+              "outcome-unknown",
+              removed,
+              "Some AWS listener firewall rules changed while they were being removed",
+            ),
+          };
+        }
+        return { ok: true, value: managedListenerFirewallOutcome("removed", removed) };
+      } catch (error) {
+        return failure(
+          error,
+          "The AWS managed listener firewall rule could not be removed",
+          credentialValues(secret),
+        );
+      }
+    });
+  }
+
+  async #ensureAzureManagedListenerIngress(
+    deployment: AzureCloudDeploymentRecord,
+    input: ManagedListenerFirewallInput,
+  ): Promise<OperationResult<ManagedListenerFirewallOutcome>> {
+    return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
+      try {
+        const provider = this.#azureProviderFactory(
+          this.#azureConnection(deployment.spec.location, secret, deployment.credentialId),
+        );
+        const resource = azureResourceFromRecord(deployment, secret);
+        const snapshot = await provider.listFirewallRules(resource);
+        const identity = azureManagedListenerFirewallIdentity(input);
+        const owned = snapshot.rules.filter((rule) => isOwnedAzureManagedListenerRule(rule, identity));
+        if (owned.length > 0) {
+          return { ok: true, value: managedListenerFirewallOutcome("already-covered", owned.length) };
+        }
+        const covering = snapshot.rules.filter((rule) => azureFirewallAccessMatches(rule, identity));
+        if (covering.length > 0) {
+          return { ok: true, value: managedListenerFirewallOutcome("already-covered", covering.length) };
+        }
+        if (snapshot.rules.some((rule) => rule.name.toLowerCase() === identity.name.toLowerCase())) {
+          return {
+            ok: false,
+            error: "The reserved Azure firewall rule name is already used by a different rule",
+          };
+        }
+        const priority = firstAvailableAzureManagedListenerPriority(snapshot);
+        if (priority === null) {
+          return { ok: false, error: "No Azure firewall rule priority is available for this listener" };
+        }
+
+        const spec: AzureFirewallRuleSpec = { ...identity, priority };
+        let created: AzureFirewallRule;
+        try {
+          created = await provider.createFirewallRule(resource, spec);
+        } catch (error) {
+          const outcomeError = managedListenerFirewallCreateOutcomeError(
+            "Azure",
+            error,
+            credentialValues(secret),
+          );
+          try {
+            const reconciled = await provider.listFirewallRules(resource);
+            const reconciledOwned = reconciled.rules.filter((rule) =>
+              isOwnedAzureManagedListenerRule(rule, identity)
+            );
+            if (reconciledOwned.length > 0) {
+              await this.#recordManagedListenerFirewallMutation(deployment.id);
+              return {
+                ok: true,
+                value: managedListenerFirewallOutcome("applied", reconciledOwned.length),
+              };
+            }
+            const reconciledCovering = reconciled.rules.filter((rule) =>
+              azureFirewallAccessMatches(rule, identity)
+            );
+            if (reconciledCovering.length > 0) {
+              return {
+                ok: true,
+                value: managedListenerFirewallOutcome("already-covered", reconciledCovering.length),
+              };
+            }
+          } catch {
+            // The create call may have reached Azure even if its response and
+            // the reconciliation read both failed. Preserve that uncertainty.
+          }
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome("outcome-unknown", 0, outcomeError),
+          };
+        }
+        await this.#recordManagedListenerFirewallMutation(deployment.id);
+        if (!isOwnedAzureManagedListenerRule(created, identity)) {
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome(
+              "outcome-unknown",
+              1,
+              "Azure accepted the firewall mutation but did not return the expected managed rule identity",
+            ),
+          };
+        }
+        return { ok: true, value: managedListenerFirewallOutcome("applied", 1) };
+      } catch (error) {
+        return failure(
+          error,
+          "The Azure managed listener firewall rule could not be applied",
+          credentialValues(secret),
+        );
+      }
+    });
+  }
+
+  async #removeAzureManagedListenerIngress(
+    deployment: AzureCloudDeploymentRecord,
+    input: ManagedListenerFirewallInput,
+  ): Promise<OperationResult<ManagedListenerFirewallOutcome>> {
+    return await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
+      try {
+        const provider = this.#azureProviderFactory(
+          this.#azureConnection(deployment.spec.location, secret, deployment.credentialId),
+        );
+        const resource = azureResourceFromRecord(deployment, secret);
+        const snapshot = await provider.listFirewallRules(resource);
+        const identity = azureManagedListenerFirewallIdentity(input);
+        const owned = snapshot.rules.filter((rule) => isOwnedAzureManagedListenerRule(rule, identity));
+        if (owned.length === 0) {
+          const retainedIds = new Set(
+            snapshot.rules
+              .filter((rule) =>
+                rule.name.toLowerCase() === identity.name.toLowerCase() ||
+                rule.description === identity.description ||
+                azureFirewallAccessMatches(rule, identity)
+              )
+              .map(({ id }) => id),
+          );
+          return {
+            ok: true,
+            value: managedListenerFirewallOutcome(
+              retainedIds.size > 0 ? "retained" : "not-found",
+              retainedIds.size,
+            ),
+          };
+        }
+
+        const deleted = await provider.deleteFirewallRuleIfMatches(
+          resource,
+          owned[0]!.name,
+          azureFirewallSpecFromRule(owned[0]!),
+        );
+        if (!deleted) {
+          return { ok: true, value: managedListenerFirewallOutcome("retained", owned.length) };
+        }
+        await this.#recordManagedListenerFirewallMutation(deployment.id);
+        return { ok: true, value: managedListenerFirewallOutcome("removed", 1) };
+      } catch (error) {
+        return failure(
+          error,
+          "The Azure managed listener firewall rule could not be removed",
+          credentialValues(secret),
+        );
+      }
+    });
+  }
+
+  async #recordManagedListenerFirewallMutation(deploymentId: string): Promise<void> {
+    try {
+      await this.#persistPatch(deploymentId, (current) => current);
+    } catch {
+      // The provider mutation is already complete. A local revision-journal
+      // failure cannot safely turn it into a retryable remote mutation.
+    }
+  }
+
   async #mutateAwsFirewall(
     deploymentId: string,
     expectedRevision: number,
@@ -2683,6 +3059,169 @@ function permissionSummary(
     prerequisite,
   ].filter((value): value is string => value !== undefined);
   return `${provider}: ${verified}${qualifiers.length > 0 ? `; ${qualifiers.join("; ")}` : ""}`;
+}
+
+function validateManagedListenerFirewallInput(
+  input: ManagedListenerFirewallInput,
+): ManagedListenerFirewallInput {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    typeof input.server !== "object" ||
+    input.server === null ||
+    !isUuidV4(input.server.deploymentId) ||
+    (input.server.provider !== "aws" && input.server.provider !== "azure") ||
+    typeof input.server.name !== "string" ||
+    input.server.name.length < 1 ||
+    input.server.name.length > 255 ||
+    input.server.name.trim() !== input.server.name ||
+    (input.protocol !== "tcp" && input.protocol !== "udp") ||
+    !Number.isSafeInteger(input.port) ||
+    input.port < 1 ||
+    input.port > 65_535
+  ) {
+    throw new TypeError("Invalid managed listener firewall input");
+  }
+  return Object.freeze({
+    server: Object.freeze({ ...input.server }),
+    protocol: input.protocol,
+    port: input.port,
+  });
+}
+
+function managedListenerFirewallDescription(input: ManagedListenerFirewallInput): string {
+  return `sliver-gui:${input.server.deploymentId}:listener:${input.protocol}:${input.port}`;
+}
+
+function managedListenerFirewallOutcome(
+  status: ManagedListenerFirewallOutcome["status"],
+  ruleCount: number,
+  error?: string,
+): ManagedListenerFirewallOutcome {
+  return Object.freeze({ status, ruleCount, ...(error === undefined ? {} : { error }) });
+}
+
+function managedListenerFirewallCreateOutcomeError(
+  provider: "AWS" | "Azure",
+  error: unknown,
+  secrets: readonly string[],
+): string {
+  const fallback = `${provider} did not confirm whether the listener firewall rule was created`;
+  const detail = cloudErrorMessage(error, fallback, secrets);
+  return detail === fallback
+    ? fallback
+    : cloudErrorMessage(new Error(`${fallback}: ${detail}`), fallback, secrets);
+}
+
+function awsManagedListenerFirewallSpec(
+  input: ManagedListenerFirewallInput,
+): AwsFirewallRuleSpec {
+  return Object.freeze({
+    direction: "ingress",
+    protocol: input.protocol,
+    fromPort: input.port,
+    toPort: input.port,
+    peerType: "ipv4",
+    peer: MANAGED_LISTENER_FIREWALL_SOURCE,
+    description: managedListenerFirewallDescription(input),
+  });
+}
+
+function awsFirewallAccessMatches(
+  rule: AwsFirewallRule,
+  expected: AwsFirewallRuleSpec,
+): boolean {
+  return rule.direction === expected.direction &&
+    rule.protocol === expected.protocol &&
+    rule.fromPort === expected.fromPort &&
+    rule.toPort === expected.toPort &&
+    rule.peerType === expected.peerType &&
+    rule.peer === expected.peer;
+}
+
+function isOwnedAwsManagedListenerRule(
+  rule: AwsFirewallRule,
+  expected: AwsFirewallRuleSpec,
+): boolean {
+  return rule.managed &&
+    rule.description === expected.description &&
+    awsFirewallAccessMatches(rule, expected);
+}
+
+type AzureManagedListenerFirewallIdentity = Omit<AzureFirewallRuleSpec, "priority">;
+
+function azureManagedListenerFirewallIdentity(
+  input: ManagedListenerFirewallInput,
+): AzureManagedListenerFirewallIdentity {
+  return Object.freeze({
+    name: `sliver-gui-listener-${input.protocol}-${input.port}`,
+    direction: "ingress",
+    access: "allow",
+    protocol: input.protocol,
+    sourceAddressPrefixes: Object.freeze([MANAGED_LISTENER_FIREWALL_SOURCE]),
+    sourcePortRanges: Object.freeze(["*"]),
+    destinationAddressPrefixes: Object.freeze(["*"]),
+    destinationPortRanges: Object.freeze([String(input.port)]),
+    description: managedListenerFirewallDescription(input),
+  });
+}
+
+function azureFirewallAccessMatches(
+  rule: AzureFirewallRule,
+  expected: AzureManagedListenerFirewallIdentity,
+): boolean {
+  return rule.direction === expected.direction &&
+    rule.access === expected.access &&
+    rule.protocol === expected.protocol &&
+    sameStringSequence(rule.sourceAddressPrefixes, expected.sourceAddressPrefixes) &&
+    sameStringSequence(rule.sourcePortRanges, expected.sourcePortRanges) &&
+    sameStringSequence(rule.destinationAddressPrefixes, expected.destinationAddressPrefixes) &&
+    sameStringSequence(rule.destinationPortRanges, expected.destinationPortRanges) &&
+    rule.sourceApplicationSecurityGroupIds.length === 0 &&
+    rule.destinationApplicationSecurityGroupIds.length === 0;
+}
+
+function isOwnedAzureManagedListenerRule(
+  rule: AzureFirewallRule,
+  expected: AzureManagedListenerFirewallIdentity,
+): boolean {
+  return rule.managed &&
+    !rule.isDefault &&
+    rule.editUnsupportedReason === null &&
+    rule.name === expected.name &&
+    rule.description === expected.description &&
+    azureFirewallAccessMatches(rule, expected);
+}
+
+function azureFirewallSpecFromRule(rule: AzureFirewallRule): AzureFirewallRuleSpec {
+  return {
+    name: rule.name,
+    priority: rule.priority,
+    direction: rule.direction,
+    access: rule.access,
+    protocol: rule.protocol,
+    sourceAddressPrefixes: rule.sourceAddressPrefixes,
+    sourcePortRanges: rule.sourcePortRanges,
+    destinationAddressPrefixes: rule.destinationAddressPrefixes,
+    destinationPortRanges: rule.destinationPortRanges,
+    description: rule.description,
+  };
+}
+
+function firstAvailableAzureManagedListenerPriority(snapshot: AzureFirewallSnapshot): number | null {
+  const occupied = new Set(snapshot.rules.map(({ priority }) => priority));
+  for (
+    let priority = MANAGED_LISTENER_AZURE_PRIORITY_MIN;
+    priority <= MANAGED_LISTENER_AZURE_PRIORITY_MAX;
+    priority += 1
+  ) {
+    if (!occupied.has(priority)) return priority;
+  }
+  return null;
+}
+
+function sameStringSequence(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function upsertAwsFirewallRule(

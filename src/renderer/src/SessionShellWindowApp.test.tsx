@@ -1,6 +1,7 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useConnection } from "./components/ConnectionProvider";
 
 vi.mock("./pages/SessionTerminalPanel", () => ({
   SessionTerminalPanel: (props: {
@@ -8,21 +9,25 @@ vi.mock("./pages/SessionTerminalPanel", () => ({
     presentation: string;
     route: { sessionId: string; targetFingerprint: string };
     session: { name: string };
-  }) => (
-    <section
-      aria-label="Dedicated terminal panel"
-      data-preferred-resource={props.preferredResourceId}
-      data-presentation={props.presentation}
-      data-session-id={props.route.sessionId}
-      data-target-fingerprint={props.route.targetFingerprint}
-    >
-      {props.session.name}
-    </section>
-  ),
+  }) => {
+    const { managedServer } = useConnection();
+    return (
+      <section
+        aria-label="Dedicated terminal panel"
+        data-preferred-resource={props.preferredResourceId}
+        data-presentation={props.presentation}
+        data-session-id={props.route.sessionId}
+        data-target-fingerprint={props.route.targetFingerprint}
+        data-managed-deployment={managedServer?.deploymentId}
+      >
+        {props.session.name}
+      </section>
+    );
+  },
 }));
 
 import { disconnectedSnapshot } from "../../shared/contracts";
-import type { SliverDesktopAPI, SliverSnapshot } from "../../shared/contracts";
+import type { OperationResult, SliverDesktopAPI, SliverSnapshot, WindowLaunchContext } from "../../shared/contracts";
 import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import {
   SessionShellWindowApp,
@@ -69,6 +74,7 @@ afterEach(() => {
 describe("SessionShellWindowApp", () => {
   it("claims once under StrictMode and renders only the exact dedicated session surface", async () => {
     const snapshot = connectedSnapshot();
+    snapshot.connection.managedServer = { deploymentId: "deployment-1", provider: "aws", name: "Managed lab" };
     const claimSessionShellWindow = vi.fn().mockResolvedValue({
       ok: true,
       value: { kind: "session-shell", snapshot, preferredResourceId: "R".repeat(43) },
@@ -86,8 +92,31 @@ describe("SessionShellWindowApp", () => {
     expect(panel).toHaveAttribute("data-preferred-resource", "R".repeat(43));
     expect(panel).toHaveAttribute("data-session-id", session.id);
     expect(panel).toHaveAttribute("data-target-fingerprint", target.fingerprint);
+    expect(panel).toHaveAttribute("data-managed-deployment", "deployment-1");
     expect(claimSessionShellWindow).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Saved configurations")).not.toBeInTheDocument();
+  });
+
+  it("does not restore stale connection metadata from a delayed window claim", async () => {
+    const snapshot = connectedSnapshot();
+    snapshot.connection.managedServer = { deploymentId: "deleted-deployment", provider: "aws", name: "Deleted lab" };
+    let resolveClaim!: (result: OperationResult<WindowLaunchContext>) => void;
+    const claim = new Promise<OperationResult<WindowLaunchContext>>((resolve) => { resolveClaim = resolve; });
+    let emitSnapshot: ((next: SliverSnapshot) => void) | undefined;
+    installAPI({
+      claimSessionShellWindow: vi.fn().mockReturnValue(claim),
+      onSnapshotChanged: vi.fn((listener) => {
+        emitSnapshot = listener;
+        return vi.fn();
+      }),
+    });
+    render(<SessionShellWindowApp />);
+
+    act(() => { emitSnapshot?.(connectedSnapshot()); });
+    await act(async () => { resolveClaim({ ok: true, value: { kind: "session-shell", snapshot } }); });
+
+    expect(await screen.findByRole("region", { name: "Dedicated terminal panel" }))
+      .not.toHaveAttribute("data-managed-deployment");
   });
 
   it("quarantines the dedicated surface when the exact target disappears", async () => {
@@ -131,6 +160,7 @@ describe("SessionShellWindowApp", () => {
 function connectedSnapshot(): SliverSnapshot {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
+    managedServer: null,
     status: "connected",
     server: "127.0.0.1:53137",
     operator: "operator",

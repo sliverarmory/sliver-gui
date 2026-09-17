@@ -59,6 +59,7 @@ import type {
 } from "../../../shared/contracts";
 import {
   AreaField,
+  DateTimePickerField,
   Field,
   SelectField,
   SwitchRow,
@@ -741,7 +742,12 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
         <div className="advanced-content">
           <SwitchRow label="Require domain membership" description="Run only when the endpoint is joined to a domain." selected={form.limitDomainJoined} onChange={(value) => update("limitDomainJoined", value)} />
           <div className="form-grid mt-5">
-            <Field label="Not after" type="datetime-local" value={form.limitDatetime} onChange={(value) => update("limitDatetime", value)} />
+            <DateTimePickerField
+              label="Not after"
+              value={form.limitDatetime}
+              onChange={(value) => update("limitDatetime", value)}
+              disabled={isGenerating}
+            />
             <Field label="Hostname" value={form.limitHostname} onChange={(value) => update("limitHostname", value)} />
             <Field label="Username" value={form.limitUsername} onChange={(value) => update("limitUsername", value)} />
             <Field label="Required file" value={form.limitFileExists} onChange={(value) => update("limitFileExists", value)} placeholder="C:\\ProgramData\\marker" />

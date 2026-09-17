@@ -15,6 +15,7 @@ import {
   Select,
   TextField,
   Tooltip,
+  toast,
 } from "@heroui/react";
 import {
   faBolt,
@@ -68,9 +69,10 @@ import {
 import { nonBlankJobDomains, normalizedJobProtocol } from "./operations-job";
 
 interface Feedback {
-  tone: "danger" | "success";
   message: string;
 }
+
+const OPERATIONS_SUCCESS_TOAST_TIMEOUT_MS = 20_000;
 
 const EVENT_TIME = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit",
@@ -99,9 +101,11 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
   const [certificatePair, setCertificatePair] = useState<CertificatePairSelection | null>(null);
   const [draft, setDraft] = useState<ListenerDraft>(() => createListenerDraft());
   const [draftErrors, setDraftErrors] = useState<ListenerDraftErrors>({});
+  const [addManagedFirewallRule, setAddManagedFirewallRule] = useState(true);
   const [confirmation, setConfirmation] = useState<JobStopPlan | null>(null);
   const [isPreparingStop, setIsPreparingStop] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const [removeManagedFirewallRule, setRemoveManagedFirewallRule] = useState(true);
 
   const jobs = snapshot.jobs;
   const profiles = snapshot.profiles;
@@ -112,6 +116,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     setDraft(createListenerDraft("mtls", profiles[0]?.name ?? ""));
     setDraftErrors({});
     setCertificatePair(null);
+    setAddManagedFirewallRule(true);
     setFeedback(null);
     setIsCreateOpen(true);
   }, [profiles]);
@@ -122,12 +127,13 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     try {
       const result = await window.sliver.prepareStopJob(job.id);
       if (!result.ok || !result.value) {
-        setFeedback({ tone: "danger", message: result.error ?? `Unable to review job #${job.id}.` });
+        setFeedback({ message: result.error ?? `Unable to review job #${job.id}.` });
         return;
       }
+      setRemoveManagedFirewallRule(true);
       setConfirmation(result.value);
     } catch (error: unknown) {
-      setFeedback({ tone: "danger", message: errorMessage(error) });
+      setFeedback({ message: errorMessage(error) });
     } finally {
       setIsPreparingStop(false);
     }
@@ -139,12 +145,13 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     try {
       const result = await window.sliver.prepareStopAllJobs();
       if (!result.ok || !result.value) {
-        setFeedback({ tone: "danger", message: result.error ?? "Unable to review the active jobs." });
+        setFeedback({ message: result.error ?? "Unable to review the active jobs." });
         return;
       }
+      setRemoveManagedFirewallRule(true);
       setConfirmation(result.value);
     } catch (error: unknown) {
-      setFeedback({ tone: "danger", message: errorMessage(error) });
+      setFeedback({ message: errorMessage(error) });
     } finally {
       setIsPreparingStop(false);
     }
@@ -303,50 +310,110 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
 
     setIsStarting(true);
     try {
-      const result = await window.sliver.startListener(listenerInputFromDraft(draft));
+      const shouldAddManagedFirewallRule =
+        snapshot.connection.managedServer !== null && addManagedFirewallRule;
+      const result = await window.sliver.startListener({
+        listener: listenerInputFromDraft(draft),
+        addManagedFirewallRule: shouldAddManagedFirewallRule,
+      });
       if (!result.ok) {
         setDraftErrors({ form: result.error ?? "The Sliver server did not start the listener." });
         return;
       }
 
-      const jobLabel = result.value ? ` as job #${result.value.id}` : "";
+      const jobLabel = result.value ? ` as job #${result.value.job.id}` : "";
       const protocol = LISTENER_PROTOCOL_BY_KIND[draft.kind].shortLabel;
-      setFeedback({ tone: "success", message: `${protocol} listener started${jobLabel}.` });
       setIsCreateOpen(false);
       setDraftErrors({});
       setCertificatePair(null);
+      if (
+        result.value?.firewall.status === "failed" ||
+        result.value?.firewall.status === "outcome-unknown"
+      ) {
+        const reason = result.value.firewall.error ? ` ${result.value.firewall.error}` : "";
+        const issue = result.value.firewall.status === "outcome-unknown"
+          ? "it is unknown whether the cloud firewall rule was added"
+          : "the cloud firewall rule could not be added";
+        setFeedback({
+          message: `${protocol} listener started${jobLabel}, but ${issue}.${reason}`,
+        });
+      } else {
+        const firewallMessage = startFirewallSuccessMessage(result.value?.firewall.status);
+        setFeedback(null);
+        toast.success(`${protocol} listener started${jobLabel}.${firewallMessage}`, {
+          timeout: OPERATIONS_SUCCESS_TOAST_TIMEOUT_MS,
+        });
+      }
     } catch (error: unknown) {
       setDraftErrors({ form: errorMessage(error) });
     } finally {
       setIsStarting(false);
     }
-  }, [draft]);
+  }, [addManagedFirewallRule, draft, snapshot.connection.managedServer]);
 
   const confirmStop = useCallback(async () => {
     if (!confirmation) return;
     setIsStopping(true);
     setFeedback(null);
     try {
-      const result = await window.sliver.executeStopPlan(confirmation.token);
+      const shouldRemoveManagedFirewallRule =
+        !confirmation.impact.stopsAll &&
+        confirmation.impact.managedFirewall !== null &&
+        removeManagedFirewallRule;
+      const result = await window.sliver.executeStopPlan({
+        token: confirmation.token,
+        removeManagedFirewallRule: shouldRemoveManagedFirewallRule,
+      });
       if (!result.ok) {
-        setFeedback({ tone: "danger", message: result.error ?? "Unable to stop the selected job." });
+        setFeedback({ message: result.error ?? "Unable to stop the selected job." });
+        setConfirmation(null);
         return;
       }
 
-      setFeedback({
-        tone: "success",
-        message:
-          confirmation.impact.stopsAll
-            ? `${confirmation.impact.jobs.length} ${confirmation.impact.jobs.length === 1 ? "job" : "jobs"} stopped.`
-            : `Job #${confirmation.impact.jobs[0]?.id ?? "unknown"} stopped.`,
-      });
+      if (result.value.failedJobIds.length > 0) {
+        const stopped = result.value.stoppedJobIds.map((jobId) => `#${jobId}`).join(", ");
+        const failed = result.value.failedJobIds.map((jobId) => `#${jobId}`).join(", ");
+        setConfirmation(null);
+        setFeedback({
+          message: stopped
+            ? `Stopped ${stopped}, but ${failed} could not be confirmed stopped. Review the active jobs before trying again.`
+            : `${failed} could not be confirmed stopped. Review the active jobs before trying again.`,
+        });
+        return;
+      }
+
+      const stoppedMessage = confirmation.impact.stopsAll
+        ? `${confirmation.impact.jobs.length} ${confirmation.impact.jobs.length === 1 ? "job" : "jobs"} stopped.`
+        : `Job #${confirmation.impact.jobs[0]?.id ?? "unknown"} stopped.`;
       setConfirmation(null);
+      if (
+        result.value?.firewall.status === "failed" ||
+        result.value?.firewall.status === "outcome-unknown"
+      ) {
+        const reason = result.value.firewall.error ? ` ${result.value.firewall.error}` : "";
+        const issue = result.value.firewall.status === "outcome-unknown"
+          ? "it is unknown whether the cloud firewall rule was removed"
+          : "the cloud firewall rule could not be removed";
+        setFeedback({
+          message: `${stoppedMessage} However, ${issue}.${reason}`,
+        });
+        return;
+      }
+
+      setFeedback(null);
+      toast.success(
+        `${stoppedMessage}${stopFirewallSuccessMessage(
+          result.value?.firewall.status,
+          shouldRemoveManagedFirewallRule,
+        )}`,
+        { timeout: OPERATIONS_SUCCESS_TOAST_TIMEOUT_MS },
+      );
     } catch (error: unknown) {
-      setFeedback({ tone: "danger", message: errorMessage(error) });
+      setFeedback({ message: errorMessage(error) });
     } finally {
       setIsStopping(false);
     }
-  }, [confirmation]);
+  }, [confirmation, removeManagedFirewallRule]);
 
   const selectedProtocol = LISTENER_PROTOCOL_BY_KIND[draft.kind];
   const stream = snapshot.eventStream;
@@ -379,16 +446,12 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
       {feedback && (
         <div
           aria-live="polite"
-          className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-sm ${
-            (feedback?.tone ?? "danger") === "danger"
-              ? "border-danger/25 bg-danger-soft text-danger-soft-foreground"
-              : "border-success/25 bg-success-soft text-success-soft-foreground"
-          }`}
-          role={(feedback?.tone ?? "danger") === "danger" ? "alert" : "status"}
+          className="flex items-start gap-2.5 rounded-xl border border-danger/25 bg-danger-soft px-3 py-2.5 text-sm text-danger-soft-foreground"
+          role="alert"
         >
           <FontAwesomeIcon
             aria-hidden
-            icon={(feedback?.tone ?? "danger") === "danger" ? faCircleExclamation : faCircleCheck}
+            icon={faCircleExclamation}
             className="mt-0.5 size-3.5 shrink-0"
           />
           <p>{feedback.message}</p>
@@ -582,6 +645,18 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                 />
               </div>
 
+              {snapshot.connection.managedServer ? (
+                <div className="rounded-xl border border-separator bg-default/40 px-1">
+                  <SwitchRow
+                    description={`Allow internet traffic to ${listenerFirewallProtocol(draft.kind)} port ${draft.port} (0.0.0.0/0) on ${snapshot.connection.managedServer.name}.`}
+                    disabled={isStarting}
+                    label="Add cloud firewall rule"
+                    selected={addManagedFirewallRule}
+                    onChange={setAddManagedFirewallRule}
+                  />
+                </div>
+              ) : null}
+
               <ProtocolFields
                 certificatePair={certificatePair}
                 draft={draft}
@@ -594,11 +669,11 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
             </Modal.Body>
 
             <Modal.Footer className="items-center justify-between gap-3">
-              <p className="hidden text-xs text-muted sm:block">
-                {draft.kind === "stage"
-                  ? "The server generates the selected profile before binding the TCP listener."
-                  : "The new job will appear as soon as the server confirms it."}
-              </p>
+              {draft.kind === "stage" ? (
+                <p className="hidden text-xs text-muted sm:block">
+                  The server generates the selected profile before binding the TCP listener.
+                </p>
+              ) : null}
               <div className="ml-auto flex items-center gap-2">
                 <Button
                   isDisabled={isStarting}
@@ -670,6 +745,17 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                       ))}
                     </ul>
                   </ScrollShadow>
+                  {!confirmation.impact.stopsAll && confirmation.impact.managedFirewall ? (
+                    <div className="rounded-xl border border-separator bg-default/40 px-1">
+                      <SwitchRow
+                        description={`Remove the app-managed ${confirmation.impact.managedFirewall.protocol.toUpperCase()} port ${confirmation.impact.managedFirewall.port} firewall rule from ${confirmation.impact.managedFirewall.server.name}.`}
+                        disabled={isStopping}
+                        label="Remove cloud firewall rule"
+                        selected={removeManagedFirewallRule}
+                        onChange={setRemoveManagedFirewallRule}
+                      />
+                    </div>
+                  ) : null}
                   <p className="text-xs leading-relaxed text-muted">
                     Existing implant sessions are not terminated, but they may lose their callback path. The plan expires at {new Date(confirmation.expiresAt).toLocaleTimeString()} and is rejected if the backend or job set changes.
                   </p>
@@ -1172,6 +1258,25 @@ function protocolColor(protocol: string): "accent" | "default" | "success" | "wa
   if (protocol === "dns" || protocol === "wireguard") return "accent";
   if (protocol === "stage") return "warning";
   return "default";
+}
+
+function listenerFirewallProtocol(kind: ListenerKind): "TCP" | "UDP" {
+  return kind === "dns" || kind === "wireguard" ? "UDP" : "TCP";
+}
+
+function startFirewallSuccessMessage(status: string | undefined): string {
+  if (status === "applied") return " Cloud firewall rule added.";
+  if (status === "already-covered") return " Internet access was already covered by an existing rule.";
+  return "";
+}
+
+function stopFirewallSuccessMessage(status: string | undefined, removalRequested: boolean): string {
+  if (status === "removed") return " Cloud firewall rule removed.";
+  if (status === "not-found") return " No matching app-managed cloud firewall rule remained.";
+  if (status === "retained" && removalRequested) {
+    return " The cloud firewall rule was retained because it is still in use or is not owned by this app.";
+  }
+  return "";
 }
 
 function isUsableConnection(status: ConnectionStatus): boolean {

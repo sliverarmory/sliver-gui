@@ -757,6 +757,34 @@ describe("Azure VM provider", () => {
     expect(fake.securityRules.has(`${nsgId}/securityRules/${initialSpec.name}`)).toBe(false);
   });
 
+  it("deletes a managed Azure firewall rule only while its full spec still matches", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const expected = {
+      ...customFirewallRule(),
+      name: "sliver-gui-listener-tcp-8443",
+      description: `sliver-gui:${guid}:listener:tcp:8443`,
+    };
+    await provider.createFirewallRule(resource, expected);
+    const ruleId = `${nsgId}/securityRules/${expected.name}`;
+    const stored = fake.securityRules.get(ruleId)!;
+    fake.securityRules.set(ruleId, { ...stored, destinationPortRanges: ["9443"] });
+
+    await expect(
+      provider.deleteFirewallRuleIfMatches(resource, expected.name, expected),
+    ).resolves.toBe(false);
+    expect(fake.securityRules.has(ruleId)).toBe(true);
+    expect(fake.mutations).not.toContain("rule.delete");
+
+    fake.securityRules.set(ruleId, stored);
+    await expect(
+      provider.deleteFirewallRuleIfMatches(resource, expected.name, expected),
+    ).resolves.toBe(true);
+    expect(fake.securityRules.has(ruleId)).toBe(false);
+    expect(fake.mutations).toContain("rule.delete");
+  });
+
   it("preserves ASG-backed rules for viewing, blocks unsafe edits, and permits identity-checked deletion", async () => {
     const fake = new FakeAzureClients();
     const provider = providerFor(fake);

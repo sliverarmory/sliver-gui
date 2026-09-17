@@ -445,7 +445,10 @@ async function cleanupThroughApplication(page: Page, jobId: number): Promise<boo
     if (!snapshot.jobs.some((job) => job.id === id)) return true;
     const plan = await api.prepareStopJob(id);
     if (!plan.ok || !plan.value) return false;
-    const stopped = await api.executeStopPlan(plan.value.token);
+    const stopped = await api.executeStopPlan({
+      token: plan.value.token,
+      removeManagedFirewallRule: false,
+    });
     return stopped.ok;
   }, { id: jobId });
 }

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useConnection } from "./components/ConnectionProvider";
 
 import type {
   SliverDesktopAPI,
@@ -33,6 +34,7 @@ vi.mock("./pages/SessionWorkspacePage", () => ({
     snapshot: SliverSnapshot;
     onSessionChange?: (snapshot: SliverSnapshot, route: TestSessionRoute) => void;
   }) => {
+    const { managedServer } = useConnection();
     const active = props.snapshot.targetContext.activeTarget;
     const quarantined = props.session === null ||
       active?.mode !== "session" ||
@@ -43,6 +45,7 @@ vi.mock("./pages/SessionWorkspacePage", () => ({
       <section
         aria-label="Mock session interaction"
         data-allow-popout={String(props.allowPopOut)}
+        data-managed-deployment={managedServer?.deploymentId}
         data-quarantined={String(quarantined)}
         data-session-id={props.route.sessionId}
         data-target-fingerprint={props.route.targetFingerprint}
@@ -187,6 +190,7 @@ afterEach(() => {
 describe("InteractionWindowApp", () => {
   it("routes the exact initial session snapshot into a non-recursive workspace", async () => {
     const snapshot = connectedSnapshot(session, sessionRef);
+    snapshot.connection.managedServer = { deploymentId: "deployment-1", provider: "aws", name: "Managed lab" };
     const api = installAPI(Promise.resolve({
       ok: true,
       value: interactionContext(snapshot, sessionRef),
@@ -202,6 +206,7 @@ describe("InteractionWindowApp", () => {
     expect(workspace).toHaveAttribute("data-session-id", session.id);
     expect(workspace).toHaveAttribute("data-target-fingerprint", sessionRef.fingerprint);
     expect(workspace).toHaveAttribute("data-allow-popout", "false");
+    expect(workspace).toHaveAttribute("data-managed-deployment", "deployment-1");
     expect(workspace).toHaveAttribute("data-quarantined", "false");
     expect(api.claimInteractionWindow).toHaveBeenCalledOnce();
     expect(api.onSnapshotChanged).toHaveBeenCalledTimes(2);
@@ -313,6 +318,7 @@ function connectedSnapshot(
 ): SliverSnapshot {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
+    managedServer: null,
     status: "connected",
     server: "127.0.0.1:53137",
     operator: "operator",

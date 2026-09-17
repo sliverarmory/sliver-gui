@@ -36,6 +36,7 @@ const LOOT: LootSummary = {
 function connectedSnapshot(incarnation = 1): SliverSnapshot {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
+    managedServer: null,
     status: "connected",
     epoch: 7,
     incarnation,

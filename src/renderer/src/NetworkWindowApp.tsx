@@ -61,6 +61,7 @@ import {
 } from "../../shared/network-forwarding-contracts";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
+import { ConnectionProvider } from "./components/ConnectionProvider";
 
 type CreateKind = "port-forward" | "reverse-port-forward" | "socks5";
 type StopTarget =
@@ -202,7 +203,7 @@ export function NetworkWindowApp(): React.JSX.Element {
     }
   };
 
-  return (
+  const content = (
     <AuxiliaryWindowFrame className="overflow-y-auto bg-background">
       <div className="mx-auto flex min-h-full w-full max-w-[1480px] flex-col gap-6 px-5 pb-7 pt-[var(--auxiliary-window-content-top,1.75rem)] sm:px-8 sm:pb-9 sm:pt-[var(--auxiliary-window-content-top,2.25rem)]">
         <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -332,6 +333,8 @@ export function NetworkWindowApp(): React.JSX.Element {
       />
     </AuxiliaryWindowFrame>
   );
+
+  return <ConnectionProvider connection={context?.connection}>{content}</ConnectionProvider>;
 }
 
 function PortForwardPanel({

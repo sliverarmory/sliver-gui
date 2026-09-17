@@ -122,6 +122,7 @@ describe("CredentialsPage", () => {
 function connectedSnapshot() {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
+    managedServer: null,
     status: "connected",
     epoch: 7,
     incarnation: 2,

@@ -383,6 +383,8 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   createFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   deleteFirewallRule: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  ensureIngress: async () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  removeIngress: async () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   prepareDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   executeDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
 };

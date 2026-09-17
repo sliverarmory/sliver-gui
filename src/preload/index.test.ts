@@ -57,10 +57,16 @@ const invokeArguments = {
   createConsoleTab: [],
   closeConsoleTab: ["T".repeat(43)],
   chooseCertificatePair: [],
-  startListener: [{ kind: "mtls", host: "127.0.0.1", port: 8888 }],
+  startListener: [{
+    listener: { kind: "mtls", host: "127.0.0.1", port: 8888 },
+    addManagedFirewallRule: false,
+  }],
   prepareStopJob: [7],
   prepareStopAllJobs: [],
-  executeStopPlan: ["8e577480-5dc2-4dde-aa58-23c8f1770627"],
+  executeStopPlan: [{
+    token: "8e577480-5dc2-4dde-aa58-23c8f1770627",
+    removeManagedFirewallRule: false,
+  }],
   generate: [defaultGenerateInput],
   generateFromProfile: [{ profileName: "default", name: "test" }],
   downloadBuild: ["existing-build"],

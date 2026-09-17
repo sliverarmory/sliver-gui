@@ -2,12 +2,26 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { faApple, faLinux, faWindows } from "@fortawesome/free-brands-svg-icons";
 import { faDice, faListOl } from "@fortawesome/free-solid-svg-icons";
+import {
+  CalendarDateTime,
+  resetLocalTimeZone,
+  setLocalTimeZone,
+} from "@internationalized/date";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { useState } from "react";
 import { Button } from "@heroui/react";
 
-import { AreaField, Field, SelectField, SwitchRow, selectFieldValueFromKey } from "./FormControls";
+import {
+  AreaField,
+  DateTimePickerField,
+  Field,
+  SelectField,
+  SwitchRow,
+  parseAbsoluteDateTimeValue,
+  selectFieldValueFromKey,
+  serializeAbsoluteDateTimeValue,
+} from "./FormControls";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -23,6 +37,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  resetLocalTimeZone();
 });
 
 describe("form field validation", () => {
@@ -68,6 +83,68 @@ describe("form field validation", () => {
 
     expect(screen.getByRole("textbox", { name: "C2 endpoints" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add listener" })).toBeInTheDocument();
+  });
+});
+
+describe("DateTimePickerField", () => {
+  it("displays absolute values in the local zone without changing their instant", () => {
+    setLocalTimeZone("America/Phoenix");
+
+    const value = parseAbsoluteDateTimeValue("2026-09-17T04:05:00Z");
+
+    expect(value).toMatchObject({
+      year: 2026,
+      month: 9,
+      day: 16,
+      hour: 21,
+      minute: 5,
+      timeZone: "America/Phoenix",
+    });
+    expect(serializeAbsoluteDateTimeValue(value)).toBe("2026-09-17T04:05:00.000Z");
+  });
+
+  it("serializes a locally selected date and time as RFC 3339", () => {
+    setLocalTimeZone("America/Phoenix");
+
+    expect(
+      serializeAbsoluteDateTimeValue(new CalendarDateTime(2026, 9, 16, 21, 5)),
+    ).toBe("2026-09-17T04:05:00.000Z");
+  });
+
+  it("renders HeroUI date segments while keeping its form input out of the tab order", () => {
+    const { container } = render(
+      <DateTimePickerField label="Not after" value="" onChange={() => undefined} />,
+    );
+
+    expect(screen.getByText("Not after")).toBeInTheDocument();
+    expect(screen.getAllByRole("spinbutton").length).toBeGreaterThan(1);
+    expect(container.querySelector('input[type="datetime-local"]')).toHaveAttribute(
+      "tabindex",
+      "-1",
+    );
+  });
+
+  it("opens a populated calendar and clears the selected instant", async () => {
+    setLocalTimeZone("America/Phoenix");
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { container } = render(
+      <DateTimePickerField
+        label="Not after"
+        value="2026-09-17T04:05:00Z"
+        onChange={onChange}
+      />,
+    );
+    const trigger = container.querySelector('[data-slot="date-picker-trigger"]');
+    if (!(trigger instanceof HTMLElement)) throw new Error("Date picker trigger is missing");
+
+    await user.click(trigger);
+
+    const cells = Array.from(document.querySelectorAll('[data-slot="calendar-cell"]'));
+    expect(cells.length).toBeGreaterThan(20);
+    expect(cells.some((cell) => cell.textContent?.trim() === "16")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    expect(onChange).toHaveBeenLastCalledWith("");
   });
 });
 

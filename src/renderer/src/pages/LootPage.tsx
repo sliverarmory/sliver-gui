@@ -433,25 +433,27 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
           <h1 id="loot-page-heading">Loot</h1>
           <p>Inspect server-collected files, preview bounded text safely, and save deliberate local copies.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="primary" onPress={() => setIsAddOpen(true)}>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="primary" onPress={() => setIsAddOpen(true)}>
             <FontAwesomeIcon aria-hidden icon={faPlus} /> Add local file
           </Button>
         </div>
       </header>
 
       <Card className="overflow-hidden" variant="secondary">
-        <Card.Header className="flex-col items-stretch gap-4 border-b border-separator px-4 py-4 lg:flex-row lg:items-center">
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxOpen} /></span>
-            <div className="min-w-0">
-              <Card.Title>Server inventory</Card.Title>
-              <Card.Description>Metadata is paged; file contents are fetched only when you inspect or save an item.</Card.Description>
-            </div>
+        <Card.Header className="flex-row items-center gap-3">
+          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxOpen} /></span>
+          <div className="min-w-0 flex-1">
+            <Card.Title>Server inventory</Card.Title>
+            <Card.Description>Metadata is paged; file contents are fetched only when you inspect or save an item.</Card.Description>
           </div>
-          <div className="grid w-full gap-2 sm:grid-cols-[minmax(0,1fr)_190px] lg:max-w-2xl">
+        </Card.Header>
+
+        <Card.Content className="p-0">
+          <div className="flex flex-col gap-3 border-b border-separator px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
             <SearchField
               aria-label="Search loot"
+              className="w-full lg:max-w-md"
               value={query}
               variant="secondary"
               onChange={setQuery}
@@ -467,18 +469,16 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
             </SearchField>
             <LootTypeSelect value={fileType} onChange={setFileType} />
           </div>
-        </Card.Header>
 
-        {inventory.error ? <InlineError message={inventory.error} /> : null}
+          {inventory.error ? <InlineError message={inventory.error} /> : null}
 
-        <Card.Content className="p-0">
           <DataGrid
             aria-label="Sliver loot"
             columns={columns}
             contentClassName="min-w-[860px]"
             data={inventory.items}
             getRowId={(item) => item.id}
-            scrollContainerClassName="max-h-[600px] overflow-auto"
+            scrollContainerClassName="max-h-[620px] overflow-auto"
             variant="secondary"
             onRowAction={(key) => {
               const item = inventory.items.find((candidate) => candidate.id === String(key));
@@ -494,13 +494,11 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
           />
         </Card.Content>
 
-        <Card.Footer className="flex min-h-14 items-center justify-between gap-3 border-t border-separator px-4 py-3">
-          <p className="text-xs text-muted">
-            {inventory.page.total === 0
-              ? "No loot loaded"
-              : `Showing ${inventory.items.length} of ${inventory.page.total} ${inventory.page.total === 1 ? "item" : "items"}`}
-          </p>
-          {inventory.page.nextCursor ? (
+        {inventory.page.nextCursor ? (
+          <Card.Footer className="flex items-center justify-between border-t border-separator px-4 py-3">
+            <p className="text-xs text-muted">
+              Showing {inventory.items.length} of {inventory.page.total} {inventory.page.total === 1 ? "item" : "items"}
+            </p>
             <Button
               isPending={isLoadingMore}
               size="sm"
@@ -509,8 +507,8 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
             >
               Load more
             </Button>
-          ) : null}
-        </Card.Footer>
+          </Card.Footer>
+        ) : null}
       </Card>
 
       <AddLootDialog
@@ -847,6 +845,7 @@ function LootTypeSelect({
   return (
     <Select
       aria-label="Filter loot by file type"
+      className="w-full lg:w-56"
       value={value}
       variant="secondary"
       onChange={(next) => {
@@ -877,7 +876,7 @@ function LootEmptyState({
   loading: boolean;
 }): React.JSX.Element {
   return (
-    <EmptyState className="min-h-64 px-6 py-12" size="sm">
+    <EmptyState className="py-14" size="sm">
       <EmptyState.Media><FontAwesomeIcon aria-hidden icon={loading ? faRotate : error ? faCircleExclamation : faBoxOpen} className={loading ? "animate-spin" : undefined} /></EmptyState.Media>
       <EmptyState.Content>
         <EmptyState.Title>{loading ? "Loading loot" : error ? "Loot unavailable" : filtered ? "No loot matches" : "No loot collected"}</EmptyState.Title>

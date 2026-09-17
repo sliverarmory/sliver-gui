@@ -16,6 +16,7 @@ import {
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
+import { ConnectionProvider } from "./components/ConnectionProvider";
 
 let pendingInteractionLaunchContext: Promise<OperationResult<WindowLaunchContext>> | undefined;
 
@@ -110,9 +111,11 @@ export function InteractionWindowApp(): React.JSX.Element {
   }
 
   return (
-    <AuxiliaryWindowFrame className="app-main interaction-window" ariaLabel="Dedicated interaction window">
-      <div className="interaction-window__content">{content}</div>
-    </AuxiliaryWindowFrame>
+    <ConnectionProvider connection={snapshot?.connection}>
+      <AuxiliaryWindowFrame className="app-main interaction-window" ariaLabel="Dedicated interaction window">
+        <div className="interaction-window__content">{content}</div>
+      </AuxiliaryWindowFrame>
+    </ConnectionProvider>
   );
 }
 

@@ -55,7 +55,7 @@ function profileGenerationSnapshot() {
     implantType: "session" as const,
     c2: ["mtls://127.0.0.1:8888"],
   };
-  snapshot.connection = { status: "connected" };
+  snapshot.connection = { managedServer: null, status: "connected" };
   snapshot.profiles = [profile];
   snapshot.domains.profiles = {
     status: "ready",
@@ -87,7 +87,7 @@ function inventorySnapshot(buildCount: number, profileCount: number): SliverSnap
     c2: ["mtls://127.0.0.1:8888"],
   }));
 
-  snapshot.connection = { status: "connected" };
+  snapshot.connection = { managedServer: null, status: "connected" };
   snapshot.builds = builds;
   snapshot.profiles = profiles;
   snapshot.domains.builds = {
@@ -311,7 +311,7 @@ describe("BuildsPage", () => {
 
   it("keeps replace-all staging controls read-only for a truncated build inventory", () => {
     const snapshot = disconnectedSnapshot();
-    snapshot.connection = { status: "connected" };
+    snapshot.connection = { managedServer: null, status: "connected" };
     snapshot.builds = [
       {
         name: "visible-build",

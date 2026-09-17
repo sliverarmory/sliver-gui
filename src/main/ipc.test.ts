@@ -278,8 +278,8 @@ describe("trusted Electron IPC boundary", () => {
     const snapshot = vi.fn((contentsId: number) => {
       const value = disconnectedSnapshot();
       value.connection = contentsId === 77
-        ? { status: "connected", server: "127.0.0.1:53137" }
-        : { status: "connected", server: "remote.example:53137" };
+        ? { status: "connected", managedServer: null, server: "127.0.0.1:53137" }
+        : { status: "connected", managedServer: null, server: "remote.example:53137" };
       return value;
     });
     registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
@@ -310,7 +310,14 @@ describe("trusted Electron IPC boundary", () => {
     const importConfig = vi.fn(async () => ({ ok: false, error: "import probe" } as const));
     const removeSavedConfig = vi.fn(async () => ({ ok: true } as const));
     const prepareStopJob = vi.fn(async () => ({ ok: false, error: "stop probe" } as const));
-    const executeStopPlan = vi.fn(async () => ({ ok: true } as const));
+    const executeStopPlan = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        stoppedJobIds: [7],
+        failedJobIds: [],
+        firewall: { status: "removed" as const, ruleCount: 1 },
+      },
+    }));
     registerIpcHandlers(
       registryMock({ importConfig, removeSavedConfig, prepareStopJob, executeStopPlan }),
       vi.fn(),
@@ -323,12 +330,18 @@ describe("trusted Electron IPC boundary", () => {
     await electronMocks.handlers.get(IPC.importConfig)?.(event, { displayName: "Local operator" });
     await electronMocks.handlers.get(IPC.removeSavedConfig)?.(event, { id });
     await electronMocks.handlers.get(IPC.prepareStopJob)?.(event, 7);
-    await electronMocks.handlers.get(IPC.executeStopPlan)?.(event, token);
+    await electronMocks.handlers.get(IPC.executeStopPlan)?.(event, {
+      token,
+      removeManagedFirewallRule: true,
+    });
 
     expect(importConfig).toHaveBeenCalledWith(sender, "Local operator");
     expect(removeSavedConfig).toHaveBeenCalledWith(77, id);
     expect(prepareStopJob).toHaveBeenCalledWith(77, 7);
-    expect(executeStopPlan).toHaveBeenCalledWith(77, token);
+    expect(executeStopPlan).toHaveBeenCalledWith(77, {
+      token,
+      removeManagedFirewallRule: true,
+    });
   });
 
   it("rejects malformed saved-config IDs at the central IPC boundary", () => {
@@ -376,9 +389,22 @@ describe("trusted Electron IPC boundary", () => {
       [IPC.openWindow, [{}]],
       [IPC.importConfig, [{ displayName: 7 }]],
       [IPC.removeSavedConfig, [{ id: "invalid" }]],
-      [IPC.startListener, [{ kind: "bogus", host: "127.0.0.1", port: 8888 }]],
+      [IPC.startListener, [{
+        listener: { kind: "bogus", host: "127.0.0.1", port: 8888 },
+        addManagedFirewallRule: true,
+      }]],
+      [IPC.startListener, [{
+        listener: { kind: "mtls", host: "127.0.0.1", port: 8888 },
+        addManagedFirewallRule: true,
+        unexpected: true,
+      }]],
       [IPC.prepareStopJob, ["7"]],
-      [IPC.executeStopPlan, ["invalid"]],
+      [IPC.executeStopPlan, [{ token: "invalid", removeManagedFirewallRule: true }]],
+      [IPC.executeStopPlan, [{
+        token: "8e577480-5dc2-4dde-aa58-23c8f1770627",
+        removeManagedFirewallRule: true,
+        unexpected: true,
+      }]],
       [IPC.generate, [{ name: "incomplete" }]],
       [IPC.generateFromProfile, [{ profileName: 7, name: "test" }]],
       [IPC.downloadBuild, [7]],
@@ -453,11 +479,17 @@ describe("trusted Electron IPC boundary", () => {
     registerIpcHandlers(registryMock({ startListener }), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent("sliver://app/index.html", 77);
 
-    await expect(electronMocks.handlers.get(IPC.startListener)?.(event, listener)).resolves.toEqual({
+    await expect(electronMocks.handlers.get(IPC.startListener)?.(event, {
+      listener,
+      addManagedFirewallRule: true,
+    })).resolves.toEqual({
       ok: false,
       error: "listener probe",
     });
-    expect(startListener).toHaveBeenCalledWith(77, listener);
+    expect(startListener).toHaveBeenCalledWith(77, {
+      listener,
+      addManagedFirewallRule: true,
+    });
   });
 
   it("decodes valid structured operation payloads before forwarding them", async () => {

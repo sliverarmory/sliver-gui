@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ApplicationCloudDeploymentController } from "./application.js";
+import type { ManagedServerReference } from "../shared/contracts.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { NETWORK_FORWARDING_IPC_EVENTS } from "../shared/network-forwarding-contracts.js";
 
@@ -337,6 +338,52 @@ vi.mock("./ssh-ipc.js", () => ({
 }));
 
 describe("application protocol lifecycle", () => {
+  it("wires local managed metadata and refreshes it on deployment changes only", async () => {
+    const { startApplication } = await import("./application.js");
+    const registry = fakeConnectionRegistry();
+    const reference: ManagedServerReference = {
+      deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0010",
+      provider: "aws",
+      name: "Managed test server",
+    };
+    const resolveManagedServer = vi.fn(() => reference);
+    const ensureIngress = vi.fn(async () => ({
+      ok: true as const,
+      value: { status: "applied" as const, ruleCount: 1 },
+    }));
+    const removeIngress = vi.fn(async () => ({
+      ok: true as const,
+      value: { status: "removed" as const, ruleCount: 1 },
+    }));
+    const subscribe = vi.fn((_listener: (scope: "snapshot" | "transcripts") => void) => vi.fn());
+    const controller = {
+      resolveManagedServer,
+      ensureIngress,
+      removeIngress,
+      subscribe,
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const application = await startApplication({ cloudDeploymentController: controller, registry: registry as never });
+    try {
+      const resolve = registry.setManagedServerResolver.mock.calls[0]![0];
+      expect(resolve("config-digest")).toEqual(reference);
+      expect(resolveManagedServer).toHaveBeenCalledWith("config-digest");
+      expect(registry.setManagedListenerFirewallController).toHaveBeenCalledExactlyOnceWith(controller);
+      const changed = subscribe.mock.calls[0]![0];
+      changed("transcripts");
+      expect(registry.refreshManagedServerMetadata).not.toHaveBeenCalled();
+      changed("snapshot");
+      expect(registry.refreshManagedServerMetadata).toHaveBeenCalledOnce();
+      await application.stop();
+      changed("snapshot");
+      expect(registry.refreshManagedServerMetadata).toHaveBeenCalledOnce();
+    } finally {
+      await application.stop();
+    }
+  });
+
   it.each([
     "http://127.0.0.1:5173/",
     "https://example.invalid/renderer",
@@ -1085,6 +1132,9 @@ function failingAttachmentPort() {
 
 function fakeConnectionRegistry() {
   return {
+    setManagedServerResolver: vi.fn((_resolve: (digest: string) => ManagedServerReference | null) => undefined),
+    setManagedListenerFirewallController: vi.fn(),
+    refreshManagedServerMetadata: vi.fn(),
     registerWindow: vi.fn(),
     inheritConnection: vi.fn(),
     snapshot: vi.fn(() => ({
