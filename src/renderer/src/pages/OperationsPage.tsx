@@ -37,6 +37,7 @@ import {
   faWaveSquare,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faAmazon, faMicrosoft } from "@fortawesome/free-brands-svg-icons";
 import {
   useCallback,
   useMemo,
@@ -650,6 +651,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                   <SwitchRow
                     description={`Allow internet traffic to ${listenerFirewallProtocol(draft.kind)} port ${draft.port} (0.0.0.0/0) on ${snapshot.connection.managedServer.name}.`}
                     disabled={isStarting}
+                    icon={snapshot.connection.managedServer.provider === "aws" ? faAmazon : faMicrosoft}
                     label="Add cloud firewall rule"
                     selected={addManagedFirewallRule}
                     onChange={setAddManagedFirewallRule}

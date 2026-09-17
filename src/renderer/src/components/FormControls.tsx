@@ -356,6 +356,7 @@ export function SelectField<Value extends string>({
 interface SwitchRowProps {
   label: string;
   description: string;
+  icon?: IconDefinition;
   selected: boolean;
   onChange: (selected: boolean) => void;
   disabled?: boolean;
@@ -364,6 +365,7 @@ interface SwitchRowProps {
 export function SwitchRow({
   label,
   description,
+  icon,
   selected,
   onChange,
   disabled,
@@ -377,6 +379,7 @@ export function SwitchRow({
       {...(disabled ? { isDisabled: true } : {})}
     >
       <CellSwitch.Trigger className="h-full min-h-14 items-center border-0 bg-transparent px-2 py-2.5 shadow-none data-[hovered=true]:bg-default">
+        {icon ? <FontAwesomeIcon aria-hidden className="size-5 shrink-0 text-muted" icon={icon} /> : null}
         <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-start">
           <span className="text-sm font-medium text-foreground">{label}</span>
           <span className="text-xs leading-5 text-muted">{description}</span>
