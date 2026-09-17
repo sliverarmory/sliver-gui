@@ -815,7 +815,7 @@ function DeploymentsPanel({
             <Button variant="outline" onPress={onShowCredentials}>Manage Credentials</Button>
           </EmptyState.Content>
         </EmptyState>
-      ) : (
+      ) : !showWizard ? (
         <div className="grid gap-4 lg:grid-cols-2">
           {visibleDeployments.map((deployment) => (
             <DeploymentCard
@@ -838,7 +838,7 @@ function DeploymentsPanel({
             />
           ))}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

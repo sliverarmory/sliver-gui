@@ -2829,10 +2829,13 @@ async function verifyM2SessionWorkspace(
 
   await page.getByRole("heading", { name: "Identity", exact: true }).waitFor();
   await page.getByText("m1-session-host", { exact: true }).first().waitFor();
+  await page.getByText("Screenshot unavailable", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "Network", exact: true }).count(), 0);
+
+  await page.getByRole("tab", { name: "Network", exact: true }).click();
   await page.getByRole("heading", { name: "Network", exact: true }).waitFor();
   await page.getByText("en0", { exact: true }).waitFor();
   await page.getByText("ESTABLISHED", { exact: true }).waitFor();
-  await page.getByText("Screenshot unavailable", { exact: true }).waitFor();
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   const filesystemMode = page.getByRole("radiogroup", { name: "Filesystem mode" });

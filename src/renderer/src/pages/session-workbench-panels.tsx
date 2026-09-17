@@ -119,6 +119,7 @@ export const defaultSessionWorkspacePanels: SessionWorkspacePanels = {
   overview: (context) => <SessionOverviewPanel key={workspaceRouteKey(context.route)} {...context} />,
   files: (context) => <SessionFilesPanel key={workspaceRouteKey(context.route)} {...context} />,
   processes: (context) => <SessionProcessesPanel key={workspaceRouteKey(context.route)} {...context} />,
+  network: (context) => <SessionNetworkPanel key={workspaceRouteKey(context.route)} {...context} />,
   environment: (context) => <SessionEnvironmentPanel key={workspaceRouteKey(context.route)} {...context} />,
   registry: (context) => <SessionRegistryPanel key={workspaceRouteKey(context.route)} {...context} />,
 };
@@ -129,17 +130,11 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
   const [identity, setIdentity] = useState<LoadState<SessionIdentityDetail | undefined>>(
     platform === "windows" ? { status: "loading" } : { status: "ready", value: undefined },
   );
-  const [interfaces, setInterfaces] = useState<LoadState<SessionBoundedPage<SessionNetworkInterface>>>({ status: "loading" });
-  const [connections, setConnections] = useState<LoadState<SessionBoundedPage<SessionNetworkConnection>>>({ status: "loading" });
-  const [isLoadingMoreInterfaces, setIsLoadingMoreInterfaces] = useState(false);
-  const [isLoadingMoreConnections, setIsLoadingMoreConnections] = useState(false);
   const [screenshot, setScreenshot] = useState<SessionCapturedArtifactResult>();
   const [isScreenshotSaved, setIsScreenshotSaved] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isSavingScreenshot, setIsSavingScreenshot] = useState(false);
   const identityRequestSequence = useRef(0);
-  const interfaceRequestSequence = useRef(0);
-  const connectionRequestSequence = useRef(0);
   const isCurrent = useLatestIdentity(routeKey);
 
   const loadIdentity = useCallback(async () => {
@@ -158,70 +153,13 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
     }
   }, [isCurrent, platform, routeKey]);
 
-  const loadInterfaces = useCallback(async (cursor?: string) => {
-    const expected = routeKey;
-    const sequence = ++interfaceRequestSequence.current;
-    if (cursor) setIsLoadingMoreInterfaces(true);
-    else setInterfaces({ status: "loading" });
-    try {
-      const result = await runWorkbench({ operationId: "session.network.interfaces", limit: 100, ...(cursor ? { cursor } : {}) });
-      if (!isCurrent(expected) || sequence !== interfaceRequestSequence.current) return;
-      setInterfaces((current) => cursor && current.status === "ready"
-        ? { status: "ready", value: mergePagedResult(result, uniqueNetworkInterfaces([...current.value.items, ...result.items])) }
-        : { status: "ready", value: result });
-    } catch (error) {
-      if (!isCurrent(expected) || sequence !== interfaceRequestSequence.current) return;
-      if (cursor) toast.danger("Could not load more interfaces", { description: errorMessage(error) });
-      else setInterfaces({ status: "error", error: errorMessage(error) });
-    } finally {
-      if (isCurrent(expected) && sequence === interfaceRequestSequence.current) setIsLoadingMoreInterfaces(false);
-    }
-  }, [isCurrent, routeKey]);
-
-  const loadConnections = useCallback(async (cursor?: string) => {
-    const expected = routeKey;
-    const sequence = ++connectionRequestSequence.current;
-    if (cursor) setIsLoadingMoreConnections(true);
-    else setConnections({ status: "loading" });
-    try {
-      const result = await runWorkbench({
-        operationId: "session.network.connections",
-        tcp: true,
-        udp: true,
-        ip4: true,
-        ip6: true,
-        listening: false,
-        limit: 100,
-        ...(cursor ? { cursor } : {}),
-      });
-      if (!isCurrent(expected) || sequence !== connectionRequestSequence.current) return;
-      setConnections((current) => cursor && current.status === "ready"
-        ? { status: "ready", value: mergePagedResult(result, uniqueNetworkConnections([...current.value.items, ...result.items])) }
-        : { status: "ready", value: result });
-    } catch (error) {
-      if (!isCurrent(expected) || sequence !== connectionRequestSequence.current) return;
-      if (cursor) toast.danger("Could not load more connections", { description: errorMessage(error) });
-      else setConnections({ status: "error", error: errorMessage(error) });
-    } finally {
-      if (isCurrent(expected) && sequence === connectionRequestSequence.current) setIsLoadingMoreConnections(false);
-    }
-  }, [isCurrent, routeKey]);
-
   useEffect(() => {
     identityRequestSequence.current += 1;
-    interfaceRequestSequence.current += 1;
-    connectionRequestSequence.current += 1;
     setIdentity(platform === "windows" ? { status: "loading" } : { status: "ready", value: undefined });
-    setInterfaces({ status: "loading" });
-    setConnections({ status: "loading" });
-    setIsLoadingMoreInterfaces(false);
-    setIsLoadingMoreConnections(false);
     setScreenshot(undefined);
     setIsScreenshotSaved(false);
     void loadIdentity();
-    void loadInterfaces();
-    void loadConnections();
-  }, [loadConnections, loadIdentity, loadInterfaces, platform, routeKey]);
+  }, [loadIdentity, platform, routeKey]);
 
   useEffect(() => {
     if (!screenshot) return;
@@ -276,50 +214,6 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
       if (isCurrent(expected)) setIsSavingScreenshot(false);
     }
   }, [isCurrent, routeKey, screenshot]);
-
-  const connectionRows = useMemo(
-    () => connections.status === "ready"
-      ? connections.value.items.map((connection, index) => ({ connection, id: networkConnectionKey(connection, index) }))
-      : [],
-    [connections],
-  );
-  const connectionColumns = useMemo<DataGridColumn<(typeof connectionRows)[number]>[]>(() => [
-    {
-      id: "protocol",
-      header: "Protocol",
-      isRowHeader: true,
-      minWidth: 100,
-      cell: ({ connection }) => <span className="font-mono text-xs uppercase">{connection.protocol}</span>,
-    },
-    {
-      id: "local",
-      header: "Local",
-      minWidth: 200,
-      cell: ({ connection }) => <Address value={connection.local} />,
-    },
-    {
-      id: "remote",
-      header: "Remote",
-      minWidth: 200,
-      cell: ({ connection }) => <Address value={connection.remote} />,
-    },
-    {
-      id: "state",
-      header: "State",
-      minWidth: 120,
-      cell: ({ connection }) => <Chip size="sm" variant="soft">{connection.state || "Unknown"}</Chip>,
-    },
-    {
-      id: "process",
-      header: "Process",
-      minWidth: 180,
-      cell: ({ connection }) => (
-        <span className="text-xs text-muted">
-          {connection.process ? `${connection.process.executable || "Process"} (${connection.process.pid})` : "Not reported"}
-        </span>
-      ),
-    },
-  ], []);
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -392,79 +286,196 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
           <PanelEmpty icon={faCamera} title="No screenshot captured" description="Capture is explicit and the preview remains bound to this window and session." />
         )}
       </PanelShell>
-
-      <PanelShell
-        icon={faNetworkWired}
-        title="Network"
-        description="Bounded interfaces and current socket inventory."
-        action={<RefreshButton label="Refresh network" pending={interfaces.status === "loading" || connections.status === "loading"} onPress={() => { void loadInterfaces(); void loadConnections(); }} />}
-      >
-        <div className="flex min-w-0 flex-col gap-6">
-          <section className="flex min-w-0 flex-col gap-3" aria-labelledby="network-interfaces-heading">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold text-foreground" id="network-interfaces-heading">Interfaces</h3>
-                {interfaces.status === "ready" ? <InventoryCount loaded={interfaces.value.items.length} noun="interfaces" page={interfaces.value.page} /> : null}
-              </div>
-            </div>
-            {interfaces.status === "loading" ? <PanelLoading label="Loading network interfaces" /> : null}
-            {interfaces.status === "error" ? <PanelError message={interfaces.error} onRetry={() => void loadInterfaces()} /> : null}
-            {interfaces.status === "ready" ? (
-              <>
-                {interfaces.value.page.truncated ? <BoundedNotice nextCursor={interfaces.value.page.nextCursor} noun="interfaces" /> : null}
-                {interfaces.value.items.length > 0 ? (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {interfaces.value.items.map((item) => (
-                  <article className="rounded-xl border border-separator bg-default px-4 py-3" key={`${item.index}:${item.name}`}>
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="truncate text-sm font-medium text-foreground">{item.name || `Interface ${item.index}`}</p>
-                      <span className="font-mono text-[11px] text-muted">#{item.index}</span>
-                    </div>
-                    <p className="mt-2 truncate font-mono text-xs text-muted">{item.macAddress || "No MAC address"}</p>
-                    <ul className="mt-2 space-y-1">
-                      {item.addresses.map((address) => <li className="truncate font-mono text-xs" key={address}>{address}</li>)}
-                    </ul>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted">No network interfaces were reported.</p>
-            )}
-                {interfaces.value.page.nextCursor ? (
-                  <div className="flex justify-center"><Button isPending={isLoadingMoreInterfaces} size="sm" variant="tertiary" onPress={() => void loadInterfaces(interfaces.value.page.nextCursor)}>Load more interfaces</Button></div>
-                ) : null}
-              </>
-            ) : null}
-          </section>
-          <section className="flex min-w-0 flex-col gap-3 border-t border-separator pt-5" aria-labelledby="network-connections-heading">
-            <div>
-              <h3 className="text-sm font-semibold text-foreground" id="network-connections-heading">Connections</h3>
-              {connections.status === "ready" ? <InventoryCount loaded={connections.value.items.length} noun="connections" page={connections.value.page} /> : null}
-            </div>
-            {connections.status === "loading" ? <PanelLoading label="Loading network connections" /> : null}
-            {connections.status === "error" ? <PanelError message={connections.error} onRetry={() => void loadConnections()} /> : null}
-            {connections.status === "ready" ? (
-              <>
-                {connections.value.page.truncated ? <BoundedNotice nextCursor={connections.value.page.nextCursor} noun="connections" /> : null}
-            <DataGrid
-              aria-label="Session network connections"
-              columns={connectionColumns}
-              contentClassName="min-w-[820px]"
-              data={connectionRows}
-              getRowId={(row) => row.id}
-              scrollContainerClassName="max-h-[360px] overflow-auto"
-              variant="secondary"
-              renderEmptyState={() => <GridEmpty label="No network connections were reported." />}
-            />
-                {connections.value.page.nextCursor ? (
-                  <div className="flex justify-center"><Button isPending={isLoadingMoreConnections} size="sm" variant="tertiary" onPress={() => void loadConnections(connections.value.page.nextCursor)}>Load more connections</Button></div>
-                ) : null}
-              </>
-            ) : null}
-          </section>
-        </div>
-      </PanelShell>
     </div>
+  );
+}
+
+export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): React.JSX.Element {
+  const routeKey = workspaceRouteKey(route);
+  const [interfaces, setInterfaces] = useState<LoadState<SessionBoundedPage<SessionNetworkInterface>>>({ status: "loading" });
+  const [connections, setConnections] = useState<LoadState<SessionBoundedPage<SessionNetworkConnection>>>({ status: "loading" });
+  const [isLoadingMoreInterfaces, setIsLoadingMoreInterfaces] = useState(false);
+  const [isLoadingMoreConnections, setIsLoadingMoreConnections] = useState(false);
+  const interfaceRequestSequence = useRef(0);
+  const connectionRequestSequence = useRef(0);
+  const isCurrent = useLatestIdentity(routeKey);
+
+  const loadInterfaces = useCallback(async (cursor?: string) => {
+    const expected = routeKey;
+    const sequence = ++interfaceRequestSequence.current;
+    if (cursor) setIsLoadingMoreInterfaces(true);
+    else setInterfaces({ status: "loading" });
+    try {
+      const result = await runWorkbench({ operationId: "session.network.interfaces", limit: 100, ...(cursor ? { cursor } : {}) });
+      if (!isCurrent(expected) || sequence !== interfaceRequestSequence.current) return;
+      setInterfaces((current) => cursor && current.status === "ready"
+        ? { status: "ready", value: mergePagedResult(result, uniqueNetworkInterfaces([...current.value.items, ...result.items])) }
+        : { status: "ready", value: result });
+    } catch (error) {
+      if (!isCurrent(expected) || sequence !== interfaceRequestSequence.current) return;
+      if (cursor) toast.danger("Could not load more interfaces", { description: errorMessage(error) });
+      else setInterfaces({ status: "error", error: errorMessage(error) });
+    } finally {
+      if (isCurrent(expected) && sequence === interfaceRequestSequence.current) setIsLoadingMoreInterfaces(false);
+    }
+  }, [isCurrent, routeKey]);
+
+  const loadConnections = useCallback(async (cursor?: string) => {
+    const expected = routeKey;
+    const sequence = ++connectionRequestSequence.current;
+    if (cursor) setIsLoadingMoreConnections(true);
+    else setConnections({ status: "loading" });
+    try {
+      const result = await runWorkbench({
+        operationId: "session.network.connections",
+        tcp: true,
+        udp: true,
+        ip4: true,
+        ip6: true,
+        listening: false,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      });
+      if (!isCurrent(expected) || sequence !== connectionRequestSequence.current) return;
+      setConnections((current) => cursor && current.status === "ready"
+        ? { status: "ready", value: mergePagedResult(result, uniqueNetworkConnections([...current.value.items, ...result.items])) }
+        : { status: "ready", value: result });
+    } catch (error) {
+      if (!isCurrent(expected) || sequence !== connectionRequestSequence.current) return;
+      if (cursor) toast.danger("Could not load more connections", { description: errorMessage(error) });
+      else setConnections({ status: "error", error: errorMessage(error) });
+    } finally {
+      if (isCurrent(expected) && sequence === connectionRequestSequence.current) setIsLoadingMoreConnections(false);
+    }
+  }, [isCurrent, routeKey]);
+
+  useEffect(() => {
+    interfaceRequestSequence.current += 1;
+    connectionRequestSequence.current += 1;
+    setInterfaces({ status: "loading" });
+    setConnections({ status: "loading" });
+    setIsLoadingMoreInterfaces(false);
+    setIsLoadingMoreConnections(false);
+    void loadInterfaces();
+    void loadConnections();
+  }, [loadConnections, loadInterfaces, routeKey]);
+
+  const connectionRows = useMemo(
+    () => connections.status === "ready"
+      ? connections.value.items.map((connection, index) => ({ connection, id: networkConnectionKey(connection, index) }))
+      : [],
+    [connections],
+  );
+  const connectionColumns = useMemo<DataGridColumn<(typeof connectionRows)[number]>[]>(() => [
+    {
+      id: "protocol",
+      header: "Protocol",
+      isRowHeader: true,
+      minWidth: 100,
+      cell: ({ connection }) => <span className="font-mono text-xs uppercase">{connection.protocol}</span>,
+    },
+    {
+      id: "local",
+      header: "Local",
+      minWidth: 200,
+      cell: ({ connection }) => <Address value={connection.local} />,
+    },
+    {
+      id: "remote",
+      header: "Remote",
+      minWidth: 200,
+      cell: ({ connection }) => <Address value={connection.remote} />,
+    },
+    {
+      id: "state",
+      header: "State",
+      minWidth: 120,
+      cell: ({ connection }) => <Chip size="sm" variant="soft">{connection.state || "Unknown"}</Chip>,
+    },
+    {
+      id: "process",
+      header: "Process",
+      minWidth: 180,
+      cell: ({ connection }) => (
+        <span className="text-xs text-muted">
+          {connection.process ? `${connection.process.executable || "Process"} (${connection.process.pid})` : "Not reported"}
+        </span>
+      ),
+    },
+  ], []);
+
+  return (
+    <PanelShell
+      icon={faNetworkWired}
+      title="Network"
+      description="Bounded interfaces and current socket inventory."
+      action={<RefreshButton label="Refresh network" pending={interfaces.status === "loading" || connections.status === "loading"} onPress={() => { void loadInterfaces(); void loadConnections(); }} />}
+    >
+      <div className="flex min-w-0 flex-col gap-6">
+        <section className="flex min-w-0 flex-col gap-3" aria-labelledby="network-interfaces-heading">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground" id="network-interfaces-heading">Interfaces</h3>
+              {interfaces.status === "ready" ? <InventoryCount loaded={interfaces.value.items.length} noun="interfaces" page={interfaces.value.page} /> : null}
+            </div>
+          </div>
+          {interfaces.status === "loading" ? <PanelLoading label="Loading network interfaces" /> : null}
+          {interfaces.status === "error" ? <PanelError message={interfaces.error} onRetry={() => void loadInterfaces()} /> : null}
+          {interfaces.status === "ready" ? (
+            <>
+              {interfaces.value.page.truncated ? <BoundedNotice nextCursor={interfaces.value.page.nextCursor} noun="interfaces" /> : null}
+              {interfaces.value.items.length > 0 ? (
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {interfaces.value.items.map((item) => (
+                    <article className="rounded-xl border border-separator bg-default px-4 py-3" key={`${item.index}:${item.name}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="truncate text-sm font-medium text-foreground">{item.name || `Interface ${item.index}`}</p>
+                        <span className="font-mono text-[11px] text-muted">#{item.index}</span>
+                      </div>
+                      <p className="mt-2 truncate font-mono text-xs text-muted">{item.macAddress || "No MAC address"}</p>
+                      <ul className="mt-2 space-y-1">
+                        {item.addresses.map((address) => <li className="truncate font-mono text-xs" key={address}>{address}</li>)}
+                      </ul>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted">No network interfaces were reported.</p>
+              )}
+              {interfaces.value.page.nextCursor ? (
+                <div className="flex justify-center"><Button isPending={isLoadingMoreInterfaces} size="sm" variant="tertiary" onPress={() => void loadInterfaces(interfaces.value.page.nextCursor)}>Load more interfaces</Button></div>
+              ) : null}
+            </>
+          ) : null}
+        </section>
+        <section className="flex min-w-0 flex-col gap-3 border-t border-separator pt-5" aria-labelledby="network-connections-heading">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground" id="network-connections-heading">Connections</h3>
+            {connections.status === "ready" ? <InventoryCount loaded={connections.value.items.length} noun="connections" page={connections.value.page} /> : null}
+          </div>
+          {connections.status === "loading" ? <PanelLoading label="Loading network connections" /> : null}
+          {connections.status === "error" ? <PanelError message={connections.error} onRetry={() => void loadConnections()} /> : null}
+          {connections.status === "ready" ? (
+            <>
+              {connections.value.page.truncated ? <BoundedNotice nextCursor={connections.value.page.nextCursor} noun="connections" /> : null}
+              <DataGrid
+                aria-label="Session network connections"
+                columns={connectionColumns}
+                contentClassName="min-w-[820px]"
+                data={connectionRows}
+                getRowId={(row) => row.id}
+                scrollContainerClassName="max-h-[360px] overflow-auto"
+                variant="secondary"
+                renderEmptyState={() => <GridEmpty label="No network connections were reported." />}
+              />
+              {connections.value.page.nextCursor ? (
+                <div className="flex justify-center"><Button isPending={isLoadingMoreConnections} size="sm" variant="tertiary" onPress={() => void loadConnections(connections.value.page.nextCursor)}>Load more connections</Button></div>
+              ) : null}
+            </>
+          ) : null}
+        </section>
+      </div>
+    </PanelShell>
   );
 }
 

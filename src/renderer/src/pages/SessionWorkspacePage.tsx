@@ -35,6 +35,7 @@ import {
   faFolderOpen,
   faList,
   faMicrochip,
+  faNetworkWired,
   faSkullCrossbones,
   faStop,
   faTriangleExclamation,
@@ -86,6 +87,7 @@ export type SessionWorkspacePanelId =
   | "overview"
   | "files"
   | "processes"
+  | "network"
   | "execution"
   | "environment"
   | "terminal"
@@ -544,9 +546,10 @@ export function SessionWorkspacePage({
         <Tabs.ListContainer>
           <Tabs.List aria-label="Session interaction sections">
             <WorkspaceTab id="overview" label="Overview" />
+            <WorkspaceTab id="execution" label="Execution" />
             <WorkspaceTab id="files" label="Files" />
             <WorkspaceTab id="processes" label="Processes" />
-            <WorkspaceTab id="execution" label="Execution" />
+            <WorkspaceTab id="network" label="Network" />
             <WorkspaceTab id="environment" label="Environment" />
             {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
             <WorkspaceTab id="terminal" label="Shell" />
@@ -559,7 +562,7 @@ export function SessionWorkspacePage({
             {renderPanel(resolvedPanels.overview, context, {
               icon: faComputer,
               title: "Session overview unavailable",
-              description: "Identity and network details are not available for this workspace adapter.",
+              description: "Identity and screenshot details are not available for this workspace adapter.",
             })}
             <div className="mt-6 grid items-start gap-6 xl:grid-cols-2">
               <section className="rounded-2xl bg-surface p-5 sm:p-6" aria-label="Quick actions">
@@ -582,6 +585,17 @@ export function SessionWorkspacePage({
             </div>
           </Tabs.Panel>
 
+          <Tabs.Panel className="pt-6" id="execution">
+            {resolvedPanels.execution
+              ? resolvedPanels.execution(context)
+              : activeSessionRef
+                ? <TargetExecutionWorkbench expectedTarget={activeSessionRef} targetIdentity={routeIdentity} />
+                : renderPanel(undefined, context, {
+                    icon: faTriangleExclamation,
+                    title: "Execution workbench unavailable",
+                    description: "The exact main-issued target reference is no longer available.",
+                  })}
+          </Tabs.Panel>
           <Tabs.Panel className="pt-6" id="files">
             {renderPanel(resolvedPanels.files, context, {
               icon: faFolderOpen,
@@ -596,16 +610,12 @@ export function SessionWorkspacePage({
               description: "Process details and filters will appear here after the session returns an inventory.",
             })}
           </Tabs.Panel>
-          <Tabs.Panel className="pt-6" id="execution">
-            {resolvedPanels.execution
-              ? resolvedPanels.execution(context)
-              : activeSessionRef
-                ? <TargetExecutionWorkbench expectedTarget={activeSessionRef} targetIdentity={routeIdentity} />
-                : renderPanel(undefined, context, {
-                    icon: faTriangleExclamation,
-                    title: "Execution workbench unavailable",
-                    description: "The exact main-issued target reference is no longer available.",
-                  })}
+          <Tabs.Panel className="pt-6" id="network">
+            {renderPanel(resolvedPanels.network, context, {
+              icon: faNetworkWired,
+              title: "No network inventory loaded",
+              description: "Network interfaces and current connections will appear here when requested.",
+            })}
           </Tabs.Panel>
           <Tabs.Panel className="pt-6" id="environment">
             {renderPanel(resolvedPanels.environment, context, {

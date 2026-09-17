@@ -294,6 +294,7 @@ describe("SessionWorkspacePage", () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
     const filesPanel = vi.fn(() => <section aria-label="Injected files panel">Remote files</section>);
+    const networkPanel = vi.fn(() => <section aria-label="Injected network panel">Network inventory</section>);
     const executionPanel = vi.fn(() => <section aria-label="Injected execution panel">Execution workbench</section>);
     const terminalUnmounted = vi.fn();
     const TerminalProbe = (): React.JSX.Element => {
@@ -306,7 +307,7 @@ describe("SessionWorkspacePage", () => {
 
     render(
       <SessionWorkspacePage
-        panels={{ execution: executionPanel, files: filesPanel, terminal: terminalPanel }}
+        panels={{ execution: executionPanel, files: filesPanel, network: networkPanel, terminal: terminalPanel }}
         route={route}
         session={session}
         snapshot={snapshot}
@@ -319,6 +320,7 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "Files" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Processes" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Network" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Execution" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Environment" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Shell" })).toBeInTheDocument();
@@ -326,21 +328,34 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByRole("tab", { name: "Activity" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Registry" })).not.toBeInTheDocument();
     const tabs = screen.getAllByRole("tab");
+    const overviewIndex = tabs.findIndex((tab) => tab.textContent?.includes("Overview"));
+    const filesIndex = tabs.findIndex((tab) => tab.textContent?.includes("Files"));
     const processesIndex = tabs.findIndex((tab) => tab.textContent?.includes("Processes"));
+    const networkIndex = tabs.findIndex((tab) => tab.textContent?.includes("Network"));
     const executionIndex = tabs.findIndex((tab) => tab.textContent?.includes("Execution"));
     const environmentIndex = tabs.findIndex((tab) => tab.textContent?.includes("Environment"));
     const terminalIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Shell" || tab.textContent?.includes("Shell"));
     const activityIndex = tabs.findIndex((tab) => tab.getAttribute("aria-label") === "Activity" || tab.textContent?.includes("Activity"));
     expect(terminalIndex).toBeGreaterThanOrEqual(0);
     expect(activityIndex).toBe(terminalIndex + 1);
-    expect(executionIndex).toBe(processesIndex + 1);
-    expect(environmentIndex).toBe(executionIndex + 1);
+    expect(overviewIndex).toBe(0);
+    expect(executionIndex).toBe(overviewIndex + 1);
+    expect(filesIndex).toBe(executionIndex + 1);
+    expect(processesIndex).toBe(filesIndex + 1);
+    expect(networkIndex).toBe(processesIndex + 1);
+    expect(environmentIndex).toBe(networkIndex + 1);
+    expect(screen.queryByRole("region", { name: "Injected network panel" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Files" }));
     expect(screen.getByRole("region", { name: "Injected files panel" })).toHaveTextContent("Remote files");
     expect(filesPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
 
+    await user.click(screen.getByRole("tab", { name: "Network" }));
+    expect(screen.getByRole("region", { name: "Injected network panel" })).toHaveTextContent("Network inventory");
+    expect(networkPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
+
     await user.click(screen.getByRole("tab", { name: "Execution" }));
+    expect(screen.queryByRole("region", { name: "Injected network panel" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Injected execution panel" })).toHaveTextContent("Execution workbench");
     expect(executionPanel).toHaveBeenCalledWith(expect.objectContaining({ route, session, snapshot }));
 

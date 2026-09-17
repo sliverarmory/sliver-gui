@@ -16,6 +16,7 @@ import type { SessionWorkspacePanelContext } from "./SessionWorkspacePage";
 import {
   SessionEnvironmentPanel,
   SessionFilesPanel,
+  SessionNetworkPanel,
   SessionOverviewPanel,
   SessionProcessesPanel,
   SessionRegistryPanel,
@@ -172,16 +173,6 @@ describe("session workbench panels", () => {
     const user = userEvent.setup();
     const api = installAPI((input) => {
       switch (input.operationId) {
-        case "session.network.interfaces":
-          return workbench(input.operationId, {
-            items: [{ index: 2, name: "eth0", macAddress: "00:11:22:33:44:55", addresses: ["10.0.0.8/24"] }],
-            page: { limit: 100, total: 1, truncated: false },
-          });
-        case "session.network.connections":
-          return workbench(input.operationId, {
-            items: [],
-            page: { limit: 100, total: 0, truncated: false },
-          });
         case "session.screenshot.capture":
           return workbench(input.operationId, {
             status: "captured",
@@ -215,9 +206,8 @@ describe("session workbench panels", () => {
     render(<SessionOverviewPanel {...panelContext()} />);
 
     expect(screen.getByText("session-1")).toBeInTheDocument();
-    expect(await screen.findByText("eth0")).toBeInTheDocument();
-    expect(screen.getByText("10.0.0.8/24")).toBeInTheDocument();
-    expect(api.runSessionWorkbench).not.toHaveBeenCalledWith({ operationId: "session.identity.current-token-owner" });
+    expect(screen.queryByRole("heading", { name: "Network" })).not.toBeInTheDocument();
+    expect(api.runSessionWorkbench).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Capture" }));
     expect(await screen.findByRole("img", { name: "Screenshot from payments" })).toHaveAttribute("src", "data:image/png;base64,iVBORw0KGgo=");
@@ -225,7 +215,7 @@ describe("session workbench panels", () => {
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.artifact.save", handle: "A".repeat(43) });
   });
 
-  it("keeps healthy overview resources visible when optional identity fails and pages network inventories independently", async () => {
+  it("keeps overview identity failures separate from independently paged network inventories", async () => {
     const user = userEvent.setup();
     let identityAttempts = 0;
     const api = installAPI((input) => {
@@ -273,18 +263,25 @@ describe("session workbench panels", () => {
       }
     });
 
-    render(<SessionOverviewPanel {...panelContext({ os: "windows", arch: "amd64", hostname: "prod-win" })} />);
+    const context = panelContext({ os: "windows", arch: "amd64", hostname: "prod-win" });
+    const overview = render(<SessionOverviewPanel {...context} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Token owner unavailable");
     expect(screen.getByText("session-1")).toBeInTheDocument();
     expect(screen.getByText("host-1")).toBeInTheDocument();
     expect(screen.getByText("1.7.6")).toBeInTheDocument();
-    expect(await screen.findByText("eth0")).toBeInTheDocument();
-    expect(screen.getAllByText("10.0.0.8:4444")).toHaveLength(2);
-    expect(screen.getByText("Loaded 1 of 2 interfaces · bounded")).toBeInTheDocument();
-    expect(screen.getByText("Loaded 1 of 2 connections · bounded")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Network" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("DOMAIN\\alice")).toBeInTheDocument();
+    overview.unmount();
+    render(<SessionNetworkPanel {...context} />);
+
+    expect(screen.getByRole("heading", { name: "Network" })).toBeInTheDocument();
+    expect(await screen.findByText("eth0")).toBeInTheDocument();
+    expect(screen.getByText("10.0.0.8:4444")).toBeInTheDocument();
+    expect(screen.getByText("Loaded 1 of 2 interfaces · bounded")).toBeInTheDocument();
+    expect(screen.getByText("Loaded 1 of 2 connections · bounded")).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Load more interfaces" }));
     await user.click(screen.getByRole("button", { name: "Load more connections" }));
     expect(await screen.findByText("vpn0")).toBeInTheDocument();
