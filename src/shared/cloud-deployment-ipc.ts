@@ -54,6 +54,7 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
   createDeployment: "sliver:cloud-deployment:create",
+  createOperatorConfig: "sliver:cloud-deployment:operator:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
   updateFirewall: "sliver:cloud-deployment:firewall:update",
   listFirewallRules: "sliver:cloud-deployment:firewall-rules:list",
@@ -171,6 +172,86 @@ export interface ExecuteDestroyCloudDeploymentInput {
   readonly token: string;
 }
 
+export interface CreateCloudOperatorConfigInput {
+  readonly deploymentId: string;
+  readonly expectedRevision: number;
+  readonly operatorName: string;
+  readonly publicIp: string;
+  readonly port: number;
+  readonly permissions: CloudOperatorPermission;
+}
+
+export const CLOUD_OPERATOR_PERMISSIONS = ["all", "builder", "crackstation"] as const;
+export type CloudOperatorPermission = typeof CLOUD_OPERATOR_PERMISSIONS[number];
+
+export type SaveCloudOperatorConfigResult =
+  | {
+      readonly saved: true;
+      readonly fileName: string;
+      readonly mutationState: "created";
+    }
+  | {
+      readonly saved: false;
+      readonly fileName: string;
+      readonly mutationState: "not-started";
+      readonly error?: string;
+    }
+  | {
+      readonly saved: false;
+      readonly fileName: string;
+      readonly mutationState: "unknown" | "created";
+      readonly error: string;
+      readonly remoteRecoveryPath?: string;
+      readonly remoteRecoveryCandidatePath?: string;
+      readonly remoteHandoffCandidatePath?: string;
+    };
+
+const CLOUD_OPERATOR_NAME_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+const CLOUD_OPERATOR_PERMISSION_SET = new Set<string>(CLOUD_OPERATOR_PERMISSIONS);
+const CLOUD_DEPLOYMENT_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+export function parseCreateCloudOperatorConfigInput(
+  value: unknown,
+): CreateCloudOperatorConfigInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Invalid cloud operator configuration request");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== 6 ||
+    !["deploymentId", "expectedRevision", "operatorName", "publicIp", "port", "permissions"].every((key) => Object.hasOwn(record, key)) ||
+    typeof record["deploymentId"] !== "string" ||
+    !CLOUD_DEPLOYMENT_ID_PATTERN.test(record["deploymentId"]) ||
+    !Number.isSafeInteger(record["expectedRevision"]) ||
+    (record["expectedRevision"] as number) < 0 ||
+    typeof record["operatorName"] !== "string" ||
+    !CLOUD_OPERATOR_NAME_PATTERN.test(record["operatorName"]) ||
+    !isCanonicalIpv4Address(record["publicIp"]) ||
+    !Number.isSafeInteger(record["port"]) ||
+    (record["port"] as number) < 1 ||
+    (record["port"] as number) > 65_535 ||
+    typeof record["permissions"] !== "string" ||
+    !CLOUD_OPERATOR_PERMISSION_SET.has(record["permissions"])
+  ) throw new TypeError("Invalid cloud operator configuration request");
+  return Object.freeze({
+    deploymentId: record["deploymentId"],
+    expectedRevision: record["expectedRevision"] as number,
+    operatorName: record["operatorName"],
+    publicIp: record["publicIp"],
+    port: record["port"] as number,
+    permissions: record["permissions"] as CloudOperatorPermission,
+  });
+}
+
+function isCanonicalIpv4Address(value: unknown): value is string {
+  if (typeof value !== "string" || value.length < 7 || value.length > 15) return false;
+  const octets = value.split(".");
+  return octets.length === 4 && octets.every((octet) =>
+    /^(?:0|[1-9]\d{0,2})$/u.test(octet) && Number(octet) <= 255);
+}
+
 export interface CloudDeploymentAPI {
   getSnapshot(): Promise<OperationResult<CloudDeploymentSnapshot>>;
   /** Read provider state; passive change notifications continue to use getSnapshot. */
@@ -194,6 +275,9 @@ export interface CloudDeploymentAPI {
   discoverAzureAccounts(): Promise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): Promise<OperationResult<AzureDeploymentOptions>>;
   createDeployment(input: CreateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
+  createOperatorConfig(
+    input: CreateCloudOperatorConfigInput,
+  ): Promise<OperationResult<SaveCloudOperatorConfigResult>>;
   runLifecycleAction(input: CloudDeploymentActionInput): Promise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): Promise<OperationResult<CloudDeploymentRecord>>;
   listFirewallRules(input: ListCloudFirewallRulesInput): Promise<OperationResult<CloudFirewallSnapshot>>;

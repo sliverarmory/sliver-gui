@@ -5,6 +5,7 @@ import {
   faCheck,
   faCloudArrowUp,
   faCopy,
+  faEllipsisVertical,
   faKey,
   faPen,
   faPlay,
@@ -16,6 +17,7 @@ import {
   faTerminal,
   faTrash,
   faTriangleExclamation,
+  faUserPlus,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -25,6 +27,7 @@ import {
   Card,
   Chip,
   Description,
+  Dropdown,
   FieldError,
   Input,
   Label,
@@ -86,6 +89,7 @@ import type {
   CloudDeploymentNavigationRequest,
   CloudDeploymentSnapshot,
   CloudProvisioningTranscript,
+  CloudOperatorPermission,
   CurrentEgressIpv4,
   DestroyCloudDeploymentPlan,
   SshPrivateKeySelection,
@@ -115,15 +119,30 @@ interface RefreshFailure {
 }
 
 type CloudDeploymentActionRequest = Extract<CloudDeploymentNavigationRequest, { readonly view: "deployments" }>;
-type CloudDeploymentCardAction = Exclude<CloudDeploymentActionRequest["action"], "ssh"> | "reboot";
+type CloudDeploymentCardAction = Exclude<CloudDeploymentActionRequest["action"], "ssh"> | "reboot" | "operator";
 
 interface ActiveCloudDeploymentCardAction {
   readonly deploymentId: string;
   readonly action: CloudDeploymentCardAction;
 }
 
+interface OperatorMutationLock {
+  readonly mutationState: "unknown" | "created";
+  readonly error: string;
+  readonly operatorName: string;
+  readonly publicIp: string;
+  readonly port: string;
+  readonly permissions: CloudOperatorPermission;
+}
+
 const FEEDBACK_TOAST_TIMEOUT_MS = 30_000;
 const CLOUD_PROVIDER_POLL_INTERVAL_MS = 30_000;
+const OPERATOR_NAME_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+const OPERATOR_PERMISSION_OPTIONS = Object.freeze([
+  { value: "all", label: "Full access" },
+  { value: "builder", label: "Remote builder" },
+  { value: "crackstation", label: "Crackstation" },
+] as const satisfies readonly { readonly value: CloudOperatorPermission; readonly label: string }[]);
 
 type EgressIpv4Detection =
   | { readonly status: "loading" }
@@ -283,6 +302,8 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [selectedTab, setSelectedTab] = useState("deployments");
   const [detailsDeploymentId, setDetailsDeploymentId] = useState<string | null>(null);
+  const [operatorDeploymentId, setOperatorDeploymentId] = useState<string | null>(null);
+  const [operatorMutationLocks, setOperatorMutationLocks] = useState<Readonly<Record<string, OperatorMutationLock>>>({});
   const [actionRequest, setActionRequest] = useState<CloudDeploymentActionRequest | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const refreshQueued = useRef<CloudDeploymentChangeScope | null>(null);
@@ -293,6 +314,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const mounted = useRef(true);
   const activeCardAction = useRef<ActiveCloudDeploymentCardAction | null>(null);
   const queuedNavigationRequest = useRef<CloudDeploymentNavigationRequest | null>(null);
+  const pendingOperatorReturnFocus = useRef<string | null>(null);
 
   const api = window.cloudDeployment;
   const showFeedback = useCallback((nextFeedback: Feedback): void => {
@@ -312,6 +334,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const applyNavigationRequest = useCallback((request: CloudDeploymentNavigationRequest): void => {
     setSelectedTab("deployments");
     setFeedback(null);
+    setOperatorDeploymentId(null);
     if (request.view === "firewall") {
       setActionRequest(null);
       setDetailsDeploymentId(request.deploymentId);
@@ -346,6 +369,18 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
     queuedNavigationRequest.current = null;
     if (queued) applyNavigationRequest(queued);
   }, [applyNavigationRequest]);
+  const closeOperatorForm = useCallback((): void => {
+    if (operatorDeploymentId) pendingOperatorReturnFocus.current = operatorDeploymentId;
+    setOperatorDeploymentId(null);
+  }, [operatorDeploymentId]);
+
+  useEffect(() => {
+    if (operatorDeploymentId !== null) return;
+    const deploymentId = pendingOperatorReturnFocus.current;
+    if (!deploymentId) return;
+    pendingOperatorReturnFocus.current = null;
+    document.querySelector<HTMLButtonElement>(`[data-new-operator-trigger="${deploymentId}"]`)?.focus();
+  }, [operatorDeploymentId]);
   const refresh = useCallback((requestedScope: CloudDeploymentChangeScope = "snapshot"): Promise<void> => {
     const initialScope = snapshotRef.current ? requestedScope : "snapshot";
     if (refreshInFlight.current) {
@@ -526,9 +561,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
         detail: `The requested deployment (${actionRequest.deploymentId}) is no longer in the managed inventory.`,
       });
     }
-    if (!detailsDeploymentId) return;
-    const target = snapshot.state.deployments.find(({ id }) => id === detailsDeploymentId);
-    if (!target) {
+    if (detailsDeploymentId && !snapshot.state.deployments.some(({ id }) => id === detailsDeploymentId)) {
       setDetailsDeploymentId(null);
       setFeedback({
         tone: "danger",
@@ -536,12 +569,23 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
         detail: `The requested deployment (${detailsDeploymentId}) is no longer in the managed inventory.`,
       });
     }
-  }, [actionRequest, detailsDeploymentId, snapshot]);
+    if (operatorDeploymentId && !snapshot.state.deployments.some(({ id }) => id === operatorDeploymentId)) {
+      setOperatorDeploymentId(null);
+      setFeedback({
+        tone: "danger",
+        title: "Deployment unavailable",
+        detail: `The requested deployment (${operatorDeploymentId}) is no longer in the managed inventory.`,
+      });
+    }
+  }, [actionRequest, detailsDeploymentId, operatorDeploymentId, snapshot]);
 
   const detailsDeployment = detailsDeploymentId
     ? snapshot?.state.deployments.find(({ id }) => id === detailsDeploymentId)
     : undefined;
-  const showingDetails = detailsDeployment !== undefined;
+  const operatorDeployment = operatorDeploymentId
+    ? snapshot?.state.deployments.find(({ id }) => id === operatorDeploymentId)
+    : undefined;
+  const showingDetails = detailsDeployment !== undefined || operatorDeployment !== undefined;
   const refreshFailureMessage = loadError?.message ?? providerRefreshError;
   const detailsRefreshError = snapshot?.refreshErrors.find(({ deploymentId }) => deploymentId === detailsDeploymentId)?.message;
 
@@ -589,7 +633,22 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           />
         ) : null}
 
-        {snapshot && api && detailsDeployment ? (
+        {snapshot && api && operatorDeployment ? (
+          <NewOperatorForm
+            api={api}
+            deployment={operatorDeployment}
+            key={operatorDeployment.id}
+            mutationLock={operatorMutationLocks[operatorDeployment.id]}
+            revision={snapshot.state.revision}
+            onBeginMutation={() => beginCardAction(operatorDeployment.id, "operator")}
+            onBack={closeOperatorForm}
+            onFeedback={showFeedback}
+            onFinishMutation={() => finishCardAction(operatorDeployment.id, "operator")}
+            onMutationBlocked={(lock) => {
+              setOperatorMutationLocks((current) => ({ ...current, [operatorDeployment.id]: lock }));
+            }}
+          />
+        ) : snapshot && api && detailsDeployment ? (
           detailsDeployment.provider === "aws" ? (
             <AwsInstanceDetails
               api={api}
@@ -671,7 +730,14 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                 onFeedback={showFeedback}
                 onOpenDetails={(deploymentId) => {
                   setFeedback(null);
+                  setOperatorDeploymentId(null);
                   setDetailsDeploymentId(deploymentId);
+                }}
+                onOpenNewOperator={(deploymentId) => {
+                  setActionRequest(null);
+                  setFeedback(null);
+                  setDetailsDeploymentId(null);
+                  setOperatorDeploymentId(deploymentId);
                 }}
                 onRefresh={refresh}
                 onShowCredentials={() => setSelectedTab("credentials")}
@@ -701,6 +767,7 @@ function DeploymentsPanel({
   onFinishCardAction,
   onFeedback,
   onOpenDetails,
+  onOpenNewOperator,
   onRefresh,
   onShowCredentials,
 }: {
@@ -712,6 +779,7 @@ function DeploymentsPanel({
   readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onOpenDetails: (deploymentId: string) => void;
+  readonly onOpenNewOperator: (deploymentId: string) => void;
   readonly onRefresh: () => Promise<void>;
   readonly onShowCredentials: () => void;
 }): React.JSX.Element {
@@ -774,6 +842,7 @@ function DeploymentsPanel({
           onBeginCardAction={onBeginCardAction}
           onFinishCardAction={onFinishCardAction}
           onOpenDetails={() => onOpenDetails(resumedDeployment.id)}
+          onOpenNewOperator={() => onOpenNewOperator(resumedDeployment.id)}
           onRefresh={onRefresh}
         />
       ) : null}
@@ -830,6 +899,7 @@ function DeploymentsPanel({
               onBeginCardAction={onBeginCardAction}
               onFinishCardAction={onFinishCardAction}
               onOpenDetails={() => onOpenDetails(deployment.id)}
+              onOpenNewOperator={() => onOpenNewOperator(deployment.id)}
               onRefresh={onRefresh}
             />
           ))}
@@ -1843,6 +1913,7 @@ function DeploymentCard({
   onFinishCardAction,
   onFeedback,
   onOpenDetails,
+  onOpenNewOperator,
   onRefresh,
   onTerminated,
 }: {
@@ -1860,6 +1931,7 @@ function DeploymentCard({
   readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onOpenDetails?: () => void;
+  readonly onOpenNewOperator?: () => void;
   readonly onRefresh: () => Promise<void>;
   readonly onTerminated?: () => void;
 }): React.JSX.Element {
@@ -1868,11 +1940,23 @@ function DeploymentCard({
   const [sshHostKeyReview, setSshHostKeyReview] = useState<SshHostKeyReview | null>(null);
   const [sshHostKeyReviewError, setSshHostKeyReviewError] = useState<string | null>(null);
   const [isOpeningSsh, setIsOpeningSsh] = useState(false);
+  const [serverActionsOpen, setServerActionsOpen] = useState(false);
   const handledActionRequest = useRef<CloudDeploymentActionRequest | null>(null);
   const actionInFlight = useRef(false);
   const destroyExecutionInFlight = useRef(false);
   const sshRequestInFlight = useRef(false);
+  const restoreServerActionsFocus = useRef(false);
+  const serverActionsTrigger = useRef<HTMLButtonElement | null>(null);
   const runtimeIsStable = hasStableDeploymentRuntime(deployment);
+
+  useEffect(() => {
+    if (!serverActionsOpen) return undefined;
+    const rememberEscapeClose = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") restoreServerActionsFocus.current = true;
+    };
+    document.addEventListener("keydown", rememberEscapeClose, true);
+    return () => document.removeEventListener("keydown", rememberEscapeClose, true);
+  }, [serverActionsOpen]);
 
   const lifecycle = useCallback(async (action: "start" | "stop" | "reboot"): Promise<void> => {
     if ((deployment.status === "running" || deployment.status === "stopped") && !runtimeIsStable) {
@@ -2040,6 +2124,14 @@ function DeploymentCard({
     : pendingAction !== null
       ? `Wait for the current ${deployment.name} server action to finish.`
       : sshUnavailableReason;
+  const operatorUnavailableReason = deploymentOperatorUnavailableReason(deployment, hasSshCredential);
+  const operatorActionDisabledReason = !onOpenNewOperator
+    ? "Finish deployment setup before adding an operator."
+    : isOpeningSsh
+      ? `Wait for the ${deployment.name} SSH session to finish opening before adding an operator.`
+      : pendingAction !== null
+        ? `Wait for the current ${deployment.name} server action to finish before adding an operator.`
+        : operatorUnavailableReason;
   const loginCredential = canLoginCloudCredential(credential) ? credential : undefined;
   const cloudLogin = useCloudLoginActionController({
     api,
@@ -2120,28 +2212,21 @@ function DeploymentCard({
         ) : null}
       </Card.Content>
       <Card.Footer className="flex w-full flex-wrap items-center gap-2">
-        <div aria-label={`Connection actions for ${deployment.name}`} className="flex flex-wrap items-center gap-2" role="group">
+        <div aria-label={`Access and operator actions for ${deployment.name}`} className="flex flex-wrap items-center gap-2" role="group">
           <Tooltip delay={0}>
-            <Tooltip.Trigger
-              {...(sshActionDisabledReason
-                ? {
-                    "aria-label": `SSH action unavailable for ${deployment.name}: ${sshActionDisabledReason}`,
-                    tabIndex: 0,
-                  }
-                : { tabIndex: -1 })}
-              className="inline-flex"
+            <Button
+              aria-disabled={sshActionDisabledReason !== undefined}
+              aria-label={`SSH to ${deployment.name}`}
+              className={sshActionDisabledReason ? "cursor-not-allowed opacity-50" : ""}
+              isPending={isOpeningSsh}
+              size="sm"
+              variant="outline"
+              onPress={() => {
+                if (!sshActionDisabledReason) void openSsh();
+              }}
             >
-              <Button
-                aria-label={`SSH to ${deployment.name}`}
-                isDisabled={sshActionDisabledReason !== undefined}
-                isPending={isOpeningSsh}
-                size="sm"
-                variant="outline"
-                onPress={() => void openSsh()}
-              >
-                <FontAwesomeIcon aria-hidden icon={faTerminal} /> SSH
-              </Button>
-            </Tooltip.Trigger>
+              <FontAwesomeIcon aria-hidden icon={faTerminal} /> SSH
+            </Button>
             <Tooltip.Content>
               {sshActionDisabledReason ?? `Open an SSH session for ${deployment.name}`}
             </Tooltip.Content>
@@ -2155,39 +2240,90 @@ function DeploymentCard({
           >
             <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
           </Button>
-        </div>
-        <div aria-label={`Lifecycle actions for ${deployment.name}`} className="ml-auto flex flex-wrap items-center justify-end gap-2" role="group">
-          <Button
-            aria-label={`${lifecycleLabel} ${deployment.name}`}
-            {...(lifecycleAction === "stop"
-              ? { className: "bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" }
-              : {})}
-            isDisabled={lifecycleAction === null || pendingAction !== null}
-            size="sm"
-            variant={lifecycleAction === "stop" ? "tertiary" : "outline"}
-            onPress={() => {
-              if (lifecycleAction) void lifecycle(lifecycleAction);
-            }}
-          >
-            <FontAwesomeIcon aria-hidden icon={lifecycleAction === "stop" ? faStop : faPlay} /> {lifecycleLabel}
-          </Button>
-          <Button aria-label={`Reboot ${deployment.name}`} className="bg-warning-soft text-warning-soft-foreground hover:bg-warning-soft-hover" isDisabled={deployment.status !== "running" || !runtimeIsStable || pendingAction !== null} size="sm" variant="tertiary" onPress={() => void lifecycle("reboot")}>
-            <FontAwesomeIcon aria-hidden icon={faRotate} /> Reboot
-          </Button>
           <Tooltip delay={0}>
             <Button
-              aria-label={`Terminate ${deployment.name}`}
-              isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
-              isIconOnly
-              isPending={pendingAction === "prepare-destroy"}
+              aria-label={`New Operator for ${deployment.name}`}
+              aria-disabled={operatorActionDisabledReason !== undefined}
+              className={operatorActionDisabledReason ? "cursor-not-allowed opacity-50" : ""}
+              data-new-operator-trigger={deployment.id}
               size="sm"
-              variant="danger-soft"
-              onPress={() => void prepareDestroy()}
+              variant="outline"
+              onPress={() => {
+                if (!operatorActionDisabledReason) onOpenNewOperator?.();
+              }}
             >
-              <FontAwesomeIcon aria-hidden icon={faTrash} />
+              <FontAwesomeIcon aria-hidden icon={faUserPlus} /> New Operator
             </Button>
-            <Tooltip.Content>Terminate</Tooltip.Content>
+            <Tooltip.Content>
+              {operatorActionDisabledReason ?? `Add an operator to ${deployment.name}`}
+            </Tooltip.Content>
           </Tooltip>
+        </div>
+        <div aria-label={`Lifecycle actions for ${deployment.name}`} className="ml-auto flex flex-wrap items-center justify-end gap-2" role="group">
+          <Dropdown
+            isOpen={serverActionsOpen}
+            onOpenChange={(isOpen) => {
+              setServerActionsOpen(isOpen);
+              if (!isOpen && restoreServerActionsFocus.current) {
+                restoreServerActionsFocus.current = false;
+                queueMicrotask(() => serverActionsTrigger.current?.focus());
+              }
+            }}
+          >
+            <Tooltip delay={0}>
+              <Button
+                aria-label={`Server actions for ${deployment.name}`}
+                isIconOnly
+                isPending={pendingAction === "prepare-destroy"}
+                ref={serverActionsTrigger}
+                size="sm"
+                variant="ghost"
+              >
+                <FontAwesomeIcon aria-hidden icon={faEllipsisVertical} />
+              </Button>
+              <Tooltip.Content>Server actions</Tooltip.Content>
+            </Tooltip>
+            <Dropdown.Popover className="min-w-52" placement="bottom end">
+              <Dropdown.Menu
+                aria-label={`Server actions for ${deployment.name}`}
+                onAction={(key) => {
+                  const action = String(key);
+                  if (action === "terminate") void prepareDestroy();
+                  else if (action === "start" || action === "stop" || action === "reboot") void lifecycle(action);
+                }}
+              >
+                <Dropdown.Item
+                  id={lifecycleAction ?? "start"}
+                  isDisabled={lifecycleAction === null || pendingAction !== null}
+                  textValue={lifecycleLabel}
+                >
+                  <FontAwesomeIcon
+                    aria-hidden
+                    className={`size-3.5 ${lifecycleAction === "stop" ? "text-warning" : "text-muted"}`}
+                    icon={lifecycleAction === "stop" ? faStop : faPlay}
+                  />
+                  <Label>{lifecycleLabel}</Label>
+                </Dropdown.Item>
+                <Dropdown.Item
+                  id="reboot"
+                  isDisabled={deployment.status !== "running" || !runtimeIsStable || pendingAction !== null}
+                  textValue="Reboot"
+                >
+                  <FontAwesomeIcon aria-hidden className="size-3.5 text-warning" icon={faRotate} />
+                  <Label>Reboot</Label>
+                </Dropdown.Item>
+                <Dropdown.Item
+                  id="terminate"
+                  isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
+                  textValue="Terminate"
+                  variant="danger"
+                >
+                  <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faTrash} />
+                  <Label>Terminate</Label>
+                </Dropdown.Item>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
         </div>
       </Card.Footer>
 
@@ -2295,6 +2431,281 @@ function DeploymentCard({
 
       <LifecycleProgressModal action={pendingAction} deploymentName={deployment.name} />
     </Card>
+  );
+}
+
+function NewOperatorForm({
+  api,
+  deployment,
+  mutationLock,
+  revision,
+  onBeginMutation,
+  onBack,
+  onFeedback,
+  onFinishMutation,
+  onMutationBlocked,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly deployment: CloudDeploymentRecord;
+  readonly mutationLock: OperatorMutationLock | undefined;
+  readonly revision: number;
+  readonly onBeginMutation: () => boolean;
+  readonly onBack: () => void;
+  readonly onFeedback: (feedback: Feedback) => void;
+  readonly onFinishMutation: () => void;
+  readonly onMutationBlocked: (lock: OperatorMutationLock) => void;
+}): React.JSX.Element {
+  const [operatorName, setOperatorName] = useState(mutationLock?.operatorName ?? "");
+  const [publicIp, setPublicIp] = useState(
+    mutationLock?.publicIp ?? deployment.runtime.publicIpAddress ?? "",
+  );
+  const [port, setPort] = useState(mutationLock?.port ?? String(deployment.spec.multiplayerPort));
+  const [permissions, setPermissions] = useState<CloudOperatorPermission>(
+    mutationLock?.permissions ?? "all",
+  );
+  const [error, setError] = useState<string | null>(mutationLock?.error ?? null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [mutationState, setMutationState] = useState<"not-started" | "unknown" | "created">(
+    mutationLock?.mutationState ?? "not-started",
+  );
+  const operatorNameError = operatorName.length === 0
+    ? null
+    : OPERATOR_NAME_PATTERN.test(operatorName)
+      ? null
+      : "Use 1–128 letters, numbers, underscores, or hyphens.";
+  const publicIpError = publicIp.length === 0
+    ? null
+    : validIpv4Address(publicIp.trim())
+      ? null
+      : "Enter a valid public IPv4 address.";
+  const portError = port.length === 0
+    ? null
+    : validOperatorPort(port)
+      ? null
+      : "Enter a TCP port from 1 to 65535.";
+  const isValid = OPERATOR_NAME_PATTERN.test(operatorName) &&
+    validIpv4Address(publicIp.trim()) &&
+    validOperatorPort(port);
+  const retryBlocked = mutationState !== "not-started";
+  const blockRetry = (nextMutationState: "unknown" | "created", nextError: string): void => {
+    const lock = Object.freeze({
+      mutationState: nextMutationState,
+      error: nextError,
+      operatorName,
+      publicIp: publicIp.trim(),
+      port,
+      permissions,
+    });
+    setMutationState(nextMutationState);
+    setError(nextError);
+    onMutationBlocked(lock);
+  };
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!isValid || isSaving || retryBlocked || !onBeginMutation()) return;
+    setIsSaving(true);
+    setError(null);
+    setSaveNotice(null);
+    try {
+      const result = await api.createOperatorConfig({
+        deploymentId: deployment.id,
+        expectedRevision: revision,
+        operatorName,
+        publicIp: publicIp.trim(),
+        port: Number(port),
+        permissions,
+      });
+      if (!result.ok || !result.value) {
+        blockRetry("unknown", result.error ?? "The operator configuration could not be created.");
+        return;
+      }
+      if (!result.value.saved) {
+        if (result.value.mutationState === "not-started") {
+          if (result.value.error) setError(result.value.error);
+          else setSaveNotice("The save dialog was closed before a configuration file was saved.");
+        } else {
+          blockRetry(result.value.mutationState, result.value.error);
+        }
+        return;
+      }
+      onBack();
+      onFeedback({
+        tone: "success",
+        title: "Operator config saved",
+        detail: `${operatorName} now has ${operatorPermissionAccessLabel(permissions)} on ${deployment.name}. ${result.value.fileName} was saved to disk.`,
+      });
+    } catch (caught) {
+      blockRetry("unknown", errorMessage(caught));
+    } finally {
+      setIsSaving(false);
+      onFinishMutation();
+    }
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header
+        aria-label="New operator header"
+        className="sticky top-0 z-20 shrink-0 space-y-3 bg-background pb-4"
+      >
+        <div>
+          <Button
+            aria-label="Back to managed servers"
+            autoFocus={mutationLock !== undefined}
+            isDisabled={isSaving}
+            size="sm"
+            variant="ghost"
+            onPress={onBack}
+          >
+            <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+            Back to managed servers
+          </Button>
+        </div>
+        <section aria-labelledby="new-operator-heading">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
+              <FontAwesomeIcon aria-hidden className="size-5" icon={faUserPlus} />
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted">Operator management</p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight" id="new-operator-heading">New Operator</h1>
+              <p className="mt-1 truncate text-sm text-muted">{deployment.name} · {providerLabel(deployment.provider)}</p>
+            </div>
+          </div>
+        </section>
+      </header>
+
+      <ScrollShadow
+        aria-label="New operator form content"
+        className="min-h-0 flex-1 overflow-y-auto pb-12"
+        orientation="vertical"
+        role="region"
+        size={48}
+      >
+        <form aria-label={`New Operator for ${deployment.name}`} className="mx-auto w-full max-w-2xl" onSubmit={(event) => void submit(event)}>
+          <Card variant="secondary">
+            <Card.Header>
+              <Card.Title>Create an operator configuration</Card.Title>
+              <Card.Description>
+                First choose where to save the configuration. The app then connects over SSH and uses the Sliver server CLI to create and retrieve the operator profile.
+              </Card.Description>
+            </Card.Header>
+            <Card.Content className="space-y-5">
+              {error ? (
+                <InlineMessage
+                  detail={error}
+                  title={mutationState === "created"
+                    ? "Operator created — recovery required"
+                    : mutationState === "unknown"
+                      ? "Operator outcome requires review"
+                      : "Operator not created"}
+                  tone="danger"
+                />
+              ) : null}
+              {saveNotice ? <InlineMessage detail={saveNotice} title="Configuration not saved" tone="info" /> : null}
+              <TextField
+                fullWidth
+                isDisabled={isSaving || retryBlocked}
+                isInvalid={operatorNameError !== null}
+                isRequired
+                value={operatorName}
+                variant="secondary"
+                onChange={(value) => {
+                  setOperatorName(value);
+                  setError(null);
+                  setSaveNotice(null);
+                }}
+              >
+                <Label>Operator Name</Label>
+                <Input
+                  autoComplete="off"
+                  autoFocus={mutationLock === undefined}
+                  maxLength={128}
+                  pattern="[A-Za-z0-9_-]{1,128}"
+                  placeholder="operator_name"
+                  spellCheck={false}
+                />
+                {operatorNameError
+                  ? <FieldError>{operatorNameError}</FieldError>
+                  : <Description>1–128 letters, numbers, underscores, or hyphens.</Description>}
+              </TextField>
+              <CloudNativeSelect
+                description={operatorPermissionDescription(permissions)}
+                isDisabled={isSaving || retryBlocked}
+                label="Permissions"
+                options={OPERATOR_PERMISSION_OPTIONS}
+                value={permissions}
+                onChange={(value) => {
+                  if (!isCloudOperatorPermission(value)) return;
+                  setPermissions(value);
+                  setError(null);
+                  setSaveNotice(null);
+                }}
+              />
+              <div className="grid items-start gap-4 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                <TextField
+                  fullWidth
+                  isDisabled={isSaving || retryBlocked}
+                  isInvalid={publicIpError !== null}
+                  isRequired
+                  value={publicIp}
+                  variant="secondary"
+                  onChange={(value) => {
+                    setPublicIp(value);
+                    setError(null);
+                    setSaveNotice(null);
+                  }}
+                >
+                  <Label>Public IP</Label>
+                  <Input
+                    autoComplete="off"
+                    inputMode="decimal"
+                    maxLength={15}
+                    placeholder="203.0.113.10"
+                    spellCheck={false}
+                  />
+                  {publicIpError
+                    ? <FieldError>{publicIpError}</FieldError>
+                    : <Description>Address embedded in the saved operator configuration.</Description>}
+                </TextField>
+                <TextField
+                  fullWidth
+                  isDisabled={isSaving || retryBlocked}
+                  isInvalid={portError !== null}
+                  isRequired
+                  value={port}
+                  variant="secondary"
+                  onChange={(value) => {
+                    setPort(value);
+                    setError(null);
+                    setSaveNotice(null);
+                  }}
+                >
+                  <Label>Port</Label>
+                  <Input
+                    autoComplete="off"
+                    inputMode="numeric"
+                    maxLength={5}
+                    pattern="[0-9]{1,5}"
+                    placeholder="31337"
+                    spellCheck={false}
+                  />
+                  {portError ? <FieldError>{portError}</FieldError> : <Description>TCP port.</Description>}
+                </TextField>
+              </div>
+            </Card.Content>
+            <Card.Footer className="flex flex-wrap justify-end gap-2">
+              <Button isDisabled={isSaving} type="button" variant="tertiary" onPress={onBack}>Cancel</Button>
+              <Button isDisabled={!isValid || isSaving || retryBlocked} isPending={isSaving} type="submit" variant="primary">
+                Create Operator
+              </Button>
+            </Card.Footer>
+          </Card>
+        </form>
+      </ScrollShadow>
+    </div>
   );
 }
 
@@ -6253,6 +6664,30 @@ function validPort(value: string): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
+function validOperatorPort(value: string): boolean {
+  return /^(?:[1-9]\d{0,4})$/u.test(value) && Number(value) <= 65_535;
+}
+
+function isCloudOperatorPermission(value: string): value is CloudOperatorPermission {
+  return value === "all" || value === "builder" || value === "crackstation";
+}
+
+function operatorPermissionDescription(permissions: CloudOperatorPermission): string {
+  switch (permissions) {
+    case "all": return "Full access to every Sliver gRPC API.";
+    case "builder": return "Restricted to remote builder RPCs.";
+    case "crackstation": return "Restricted to crackstation RPCs.";
+  }
+}
+
+function operatorPermissionAccessLabel(permissions: CloudOperatorPermission): string {
+  switch (permissions) {
+    case "all": return "full access";
+    case "builder": return "remote builder access";
+    case "crackstation": return "crackstation access";
+  }
+}
+
 function firstCredentialId(credentials: readonly CloudCredentialSummary[], provider: CloudProvider): string {
   return credentials.find((credential) => credential.provider === provider)?.id ?? "";
 }
@@ -6393,6 +6828,22 @@ function deploymentSshUnavailableReason(
   if (deployment.status === "failed") return "Resolve this server's deployment error before opening SSH.";
   if (!hasSshCredential) return "No stored SSH private key is available for this server.";
   if (!hasDeploymentSshHost(deployment)) return "This server does not have an SSH address yet.";
+  return undefined;
+}
+
+function deploymentOperatorUnavailableReason(
+  deployment: CloudDeploymentRecord,
+  hasSshCredential: boolean,
+): string | undefined {
+  if ((deployment.status === "running" || deployment.status === "stopped") && !hasStableDeploymentRuntime(deployment)) {
+    return "Wait until the provider confirms this server is running before adding an operator.";
+  }
+  if (deployment.status === "stopped") return "Start this server before adding an operator.";
+  if (deployment.status === "provisioning") return "Wait for provisioning to finish before adding an operator.";
+  if (deployment.status === "deleting") return "This server is being terminated; operators cannot be added.";
+  if (deployment.status === "failed") return "Resolve this server's deployment error before adding an operator.";
+  if (!hasSshCredential) return "No stored SSH private key is available for operator creation.";
+  if (!hasDeploymentSshHost(deployment)) return "This server does not have an SSH address for operator creation.";
   return undefined;
 }
 

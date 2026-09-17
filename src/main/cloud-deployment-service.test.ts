@@ -41,6 +41,7 @@ import {
   type CloudAzureBrowserLogin,
   type CloudAzureProvider,
   type CloudPrivateKeyCapabilities,
+  type CloudOperatorDirectoryClient,
   type CloudSshTerminalStarter,
   type CloudSliverProvisioner,
   type CloudDeploymentServiceOptions,
@@ -51,6 +52,7 @@ import { SshTerminalStartError } from "./ssh-terminal-runtime.js";
 import type { AwsEc2Credentials, AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
 import type { AzureVmDeploymentResource, AzureVmProviderConnection } from "./cloud/azure-vm-provider.js";
 import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
+import { SliverOperatorCreationError } from "./cloud/sliver-provisioner.js";
 
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_DEPLOYMENT_ID = "55555555-5555-4555-8555-555555555555";
@@ -521,6 +523,7 @@ describe("CloudDeploymentService", () => {
     await vault.create(awsCredential());
     const provider = new FakeAwsProvider();
     const provisioner = fakeProvisioner();
+    const operatorDirectoryClient = fakeOperatorDirectoryClient();
     const service = await CloudDeploymentService.create({
       rootDirectory,
       operatorConfigDirectory,
@@ -529,6 +532,7 @@ describe("CloudDeploymentService", () => {
       vault,
       privateKeyCapabilities: fakePrivateKeys(),
       provisioner,
+      operatorDirectoryClientFactory: () => operatorDirectoryClient,
       awsProviderFactory: () => provider,
       idFactory: () => DESTROY_TOKEN,
       now: () => NOW.getTime(),
@@ -673,6 +677,113 @@ describe("CloudDeploymentService", () => {
     }
     expect(changed).toHaveBeenCalled();
 
+    const revisionBeforeOperator = store.getState().revision;
+    const generatedOperator = await service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-2",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "builder",
+    });
+    expect(generatedOperator).toMatchObject({
+      ok: true,
+      value: {
+        operatorName: "red-team-2",
+        publicIp: "198.51.100.70",
+        port: 44_331,
+        permissions: "builder",
+        data: expect.any(Buffer),
+      },
+    });
+    expect(provisioner.createOperator).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      deploymentId: DEPLOYMENT_ID,
+      operatorEndpointHost: "198.51.100.70",
+      multiplayerPort: 44_331,
+      operatorName: "red-team-2",
+      permissions: "builder",
+      ssh: expect.objectContaining({
+        host: "203.0.113.20",
+        username: "ubuntu",
+        hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      }),
+    }));
+    expect(store.getState().revision).toBe(revisionBeforeOperator);
+    if (!generatedOperator.ok) throw new Error(generatedOperator.error);
+    expect(JSON.parse(generatedOperator.value.data.toString("utf8"))).toMatchObject({
+      operator: "red-team-2",
+      lhost: "198.51.100.70",
+      lport: 44_331,
+    });
+    generatedOperator.value.data.fill(0);
+
+    const recoveryPath = `/var/lib/sliver-gui/${DEPLOYMENT_ID}/operator-export/operator-bbbbbbbbbbbbbbbb.cfg`;
+    const handoffPath = `/tmp/.sliver-gui-${DEPLOYMENT_ID}-dddddddddddddddd.operator.cfg`;
+    provisioner.createOperator.mockRejectedValueOnce(new SliverOperatorCreationError(
+      "remote-transfer-failed",
+      "The generated operator configuration could not be retrieved",
+      "created",
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      recoveryPath,
+      handoffPath,
+    ));
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-recovery",
+      publicIp: "203.0.113.20",
+      port: 31_337,
+      permissions: "all",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The generated operator configuration could not be retrieved",
+      mutationState: "created",
+      remoteRecoveryPath: recoveryPath,
+      remoteHandoffCandidatePath: handoffPath,
+    });
+
+    const recoveryCandidatePath =
+      `/var/lib/sliver-gui/${DEPLOYMENT_ID}/operator-export/operator-cccccccccccccccc.cfg`;
+    provisioner.createOperator.mockRejectedValueOnce(new SliverOperatorCreationError(
+      "operator-outcome-unknown",
+      "The operator command outcome is unknown; refusing an automatic retry",
+      "unknown",
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      recoveryCandidatePath,
+    ));
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-unknown",
+      publicIp: "203.0.113.20",
+      port: 31_337,
+      permissions: "crackstation",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The operator command outcome is unknown; refusing an automatic retry",
+      mutationState: "unknown",
+      remoteRecoveryCandidatePath: recoveryCandidatePath,
+    });
+
+    provisioner.createOperator.mockRejectedValueOnce(new SliverOperatorCreationError(
+      "operator-outcome-unknown",
+      "A previous operator attempt must be reconciled before retrying",
+      "unknown",
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ));
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-marker-only",
+      publicIp: "203.0.113.20",
+      port: 31_337,
+      permissions: "all",
+    })).resolves.toEqual({
+      ok: false,
+      error: "A previous operator attempt must be reconciled before retrying",
+      mutationState: "unknown",
+    });
+
     const stopped = await service.runLifecycleAction({
       deploymentId: DEPLOYMENT_ID,
       expectedRevision: store.getState().revision,
@@ -731,6 +842,95 @@ describe("CloudDeploymentService", () => {
       ok: false,
       error: expect.stringMatching(/invalid or expired/u),
     });
+    service.dispose();
+  });
+
+  it("rejects a server-side duplicate operator name before Sliver creates another profile", async () => {
+    const operatorDirectoryClient = fakeOperatorDirectoryClient(["manual-operator"]);
+    const operatorDirectoryClientFactory = vi.fn(() => operatorDirectoryClient);
+    const { service, store, provisioner } = await operatorGenerationFixture(
+      operatorDirectoryClientFactory,
+    );
+
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      operatorName: "manual-operator",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "builder",
+    })).resolves.toEqual({
+      ok: false,
+      error: "That operator already exists on this managed server",
+      mutationState: "not-started",
+    });
+
+    expect(operatorDirectoryClientFactory).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      operator: "operator",
+      lhost: "203.0.113.20",
+      lport: 31_337,
+    }));
+    expect(operatorDirectoryClient.connect).toHaveBeenCalledOnce();
+    expect(operatorDirectoryClient.getOperators).toHaveBeenCalledOnce();
+    expect(operatorDirectoryClient.disconnect).toHaveBeenCalledOnce();
+    expect(provisioner.createOperator).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("fails closed before operator creation when the authoritative operator lookup cannot connect", async () => {
+    const operatorDirectoryClient = fakeOperatorDirectoryClient([], {
+      connect: vi.fn(async () => { throw new Error("private lookup detail"); }),
+    });
+    const { service, store, provisioner } = await operatorGenerationFixture(
+      () => operatorDirectoryClient,
+    );
+
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      operatorName: "new-operator",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "all",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The managed server operator list could not be verified",
+      mutationState: "not-started",
+    });
+
+    expect(operatorDirectoryClient.getOperators).not.toHaveBeenCalled();
+    expect(operatorDirectoryClient.disconnect).toHaveBeenCalledOnce();
+    expect(provisioner.createOperator).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("refuses a changed managed operator profile before parsing or connecting it", async () => {
+    const operatorDirectoryClient = fakeOperatorDirectoryClient();
+    const operatorDirectoryClientFactory = vi.fn(() => operatorDirectoryClient);
+    const { service, store, provisioner } = await operatorGenerationFixture(
+      operatorDirectoryClientFactory,
+    );
+    await writeFile(
+      join(operatorConfigDirectory, `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`),
+      Buffer.from("changed private operator profile", "utf8"),
+    );
+
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      operatorName: "new-operator",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "crackstation",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The managed server operator list could not be verified",
+      mutationState: "not-started",
+    });
+
+    expect(operatorDirectoryClientFactory).not.toHaveBeenCalled();
+    expect(operatorDirectoryClient.connect).not.toHaveBeenCalled();
+    expect(provisioner.createOperator).toHaveBeenCalledOnce();
     service.dispose();
   });
 
@@ -3589,7 +3789,65 @@ function inspectStoredSshKey(secret: { readonly sshPrivateKey: string; readonly 
   };
 }
 
-function fakeProvisioner(): CloudSliverProvisioner & { provision: ReturnType<typeof vi.fn> } {
+async function operatorGenerationFixture(
+  operatorDirectoryClientFactory: NonNullable<
+    CloudDeploymentServiceOptions["operatorDirectoryClientFactory"]
+  >,
+): Promise<{
+  readonly service: CloudDeploymentService;
+  readonly store: CloudDeploymentStore;
+  readonly provisioner: ReturnType<typeof fakeProvisioner>;
+}> {
+  const { safeStorage, store, vault } = await dependencies();
+  await vault.create(awsCredential());
+  const provisioner = fakeProvisioner();
+  const service = await CloudDeploymentService.create({
+    rootDirectory,
+    operatorConfigDirectory,
+    safeStorage,
+    store,
+    vault,
+    privateKeyCapabilities: fakePrivateKeys(),
+    provisioner,
+    operatorDirectoryClientFactory,
+    awsProviderFactory: () => new FakeAwsProvider(),
+  });
+  const created = await service.createDeployment(awsDeployment());
+  if (!created.ok) throw new Error(created.error);
+
+  const deployment = store.getState().deployments.find(({ id }) => id === DEPLOYMENT_ID);
+  if (!deployment?.operatorConfigFileName) throw new Error("Expected a managed operator profile");
+  const staleConfig = Buffer.from(JSON.stringify({
+    operator: deployment.spec.operatorName,
+    // Prove the duplicate lookup replaces stale saved endpoints with current
+    // provider state and never uses the renderer-editable endpoint.
+    lhost: "192.0.2.200",
+    lport: 31_338,
+    ca_certificate: "MANAGED-SLIVER-CA",
+    certificate: "CLIENT-CERTIFICATE",
+    private_key: "CLIENT-PRIVATE-KEY",
+    token: "token",
+  }));
+  try {
+    await writeFile(join(operatorConfigDirectory, deployment.operatorConfigFileName), staleConfig);
+    const updated = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: {
+        ...deployment,
+        operatorConfigDigest: createHash("sha256").update(staleConfig).digest("hex"),
+      },
+    });
+    if (!updated.ok) throw new Error(updated.error);
+  } finally {
+    staleConfig.fill(0);
+  }
+  return { service, store, provisioner };
+}
+
+function fakeProvisioner(): CloudSliverProvisioner & {
+  provision: ReturnType<typeof vi.fn>;
+  createOperator: ReturnType<typeof vi.fn>;
+} {
   return {
     provision: vi.fn(async (input) => {
       input.onOutput?.({ type: "stage", label: "Installing the Sliver server" });
@@ -3615,6 +3873,51 @@ function fakeProvisioner(): CloudSliverProvisioner & { provision: ReturnType<typ
         operatorConfigSha256: createHash("sha256").update(operatorConfig).digest("hex"),
       };
     }),
+    createOperator: vi.fn(async (input) => {
+      await input.assertOperatorNameAvailable();
+      const operatorConfig = Buffer.from(JSON.stringify({
+        operator: input.operatorName,
+        lhost: input.operatorEndpointHost,
+        lport: input.multiplayerPort ?? 31_337,
+        ca_certificate: "MANAGED-SLIVER-CA",
+        certificate: "CLIENT-CERTIFICATE",
+        private_key: "CLIENT-PRIVATE-KEY",
+        token: "token",
+      }));
+      return {
+        deploymentId: input.deploymentId,
+        operatorName: input.operatorName,
+        operatorEndpointHost: input.operatorEndpointHost,
+        multiplayerPort: input.multiplayerPort ?? 31_337,
+        permissions: input.permissions,
+        hostKeySha256: input.ssh.hostKeySha256,
+        operatorConfig,
+        operatorConfigSha256: createHash("sha256").update(operatorConfig).digest("hex"),
+        remoteRecoveryPath: `/var/lib/sliver-gui/${input.deploymentId}/operator-export/operator-aaaaaaaaaaaaaaaa.cfg`,
+      };
+    }),
+  };
+}
+
+function fakeOperatorDirectoryClient(
+  names: readonly string[] = [],
+  overrides: Partial<CloudOperatorDirectoryClient> = {},
+): CloudOperatorDirectoryClient & {
+  connect: ReturnType<typeof vi.fn>;
+  getOperators: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+} {
+  return {
+    connect: vi.fn(async () => undefined),
+    getOperators: vi.fn(async () => ({
+      Operators: names.map((Name) => ({ Name })),
+    })),
+    disconnect: vi.fn(async () => undefined),
+    ...overrides,
+  } as CloudOperatorDirectoryClient & {
+    connect: ReturnType<typeof vi.fn>;
+    getOperators: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
   };
 }
 

@@ -1,6 +1,9 @@
 // @vitest-environment node
 
 import { EventEmitter } from "node:events";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type {
   BrowserWindow,
@@ -17,6 +20,7 @@ import {
 import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
   type CloudDeploymentSnapshot,
+  type CreateCloudOperatorConfigInput,
 } from "../shared/cloud-deployment-ipc.js";
 import {
   registerCloudDeploymentIpcHandlers,
@@ -29,12 +33,14 @@ const electronMocks = vi.hoisted(() => ({
   handle: vi.fn(),
   removeHandler: vi.fn(),
   fromWebContents: vi.fn(),
+  showSaveDialog: vi.fn(),
   writeText: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
   clipboard: { writeText: electronMocks.writeText },
+  dialog: { showSaveDialog: electronMocks.showSaveDialog },
   ipcMain: {
     handle: electronMocks.handle,
     removeHandler: electronMocks.removeHandler,
@@ -50,6 +56,21 @@ const OTHER_WINDOW = { marker: "stale-cloud-window" } as unknown as BrowserWindo
 const REJECTED = { ok: false, error: "The Cloud Deployment request was rejected" };
 const AWS_AUTHORIZATION_URL = "https://us-west-2.signin.aws.amazon.com/v1/authorize?state=test-state&code_challenge=test-challenge";
 
+function operatorInput(
+  operatorName: string,
+  overrides: Partial<CreateCloudOperatorConfigInput> = {},
+): CreateCloudOperatorConfigInput {
+  return {
+    deploymentId: CREDENTIAL_ID,
+    expectedRevision: 2,
+    operatorName,
+    publicIp: "203.0.113.80",
+    port: 44_331,
+    permissions: "all",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   electronMocks.handlers.clear();
   electronMocks.handle.mockReset();
@@ -64,6 +85,8 @@ beforeEach(() => {
   });
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue(CURRENT_WINDOW);
+  electronMocks.showSaveDialog.mockReset();
+  electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
   electronMocks.writeText.mockReset();
 });
 
@@ -624,6 +647,309 @@ describe("Cloud Deployment IPC boundary", () => {
     expect(detectCurrentEgressIpv4).toHaveBeenCalledExactlyOnceWith();
   });
 
+  it("does not create an operator when the native save dialog is canceled", async () => {
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>();
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(
+      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+      event,
+      operatorInput("red-team-2"),
+    )).resolves.toEqual({
+      ok: true,
+      value: { saved: false, fileName: "red-team-2.cfg", mutationState: "not-started" },
+    });
+    expect(electronMocks.showSaveDialog).toHaveBeenCalledExactlyOnceWith(CURRENT_WINDOW, {
+      title: "Save red-team-2 operator config",
+      defaultPath: "red-team-2.cfg",
+      filters: [{ name: "Sliver operator config", extensions: ["cfg"] }],
+    });
+    expect(generateOperatorConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps save-dialog and controller preflight failures explicitly retryable", async () => {
+    const destination = join(tmpdir(), "red-team-preflight.cfg");
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>(async () => ({
+      ok: false,
+      error: "That operator already exists on this managed server",
+      mutationState: "not-started",
+    }));
+    electronMocks.showSaveDialog
+      .mockRejectedValueOnce(new Error("dialog unavailable"))
+      .mockResolvedValueOnce({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const input = operatorInput("red-team-preflight");
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, event, input)).resolves.toEqual({
+      ok: true,
+      value: {
+        saved: false,
+        fileName: "red-team-preflight.cfg",
+        mutationState: "not-started",
+        error: "The operator configuration save dialog could not be opened",
+      },
+    });
+    expect(generateOperatorConfig).not.toHaveBeenCalled();
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, event, input)).resolves.toEqual({
+      ok: true,
+      value: {
+        saved: false,
+        fileName: "red-team-preflight.cfg",
+        mutationState: "not-started",
+        error: "That operator already exists on this managed server",
+      },
+    });
+    expect(generateOperatorConfig).toHaveBeenCalledExactlyOnceWith(input);
+  });
+
+  it("treats an unexpected controller exception as an unknown non-retryable outcome", async () => {
+    const destination = join(tmpdir(), "red-team-interrupted.cfg");
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>(async () => {
+      throw new Error("unexpected controller failure");
+    });
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(
+      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+      event,
+      operatorInput("red-team-interrupted"),
+    )).resolves.toEqual({
+      ok: true,
+      value: {
+        saved: false,
+        fileName: "red-team-interrupted.cfg",
+        mutationState: "unknown",
+        error: "The operator request ended without a confirmed server outcome. Do not retry until you reconcile the operator list on the managed server.",
+      },
+    });
+  });
+
+  it("does not disclose a post-mutation recovery result to a revoked renderer", async () => {
+    const destination = join(tmpdir(), "red-team-revoked-failure.cfg");
+    const authorize = vi.fn(authorizeCurrentWindow);
+    const recoveryPath = `/var/lib/sliver-gui/${CREDENTIAL_ID}/operator-export/operator-aaaaaaaaaaaaaaaa.cfg`;
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>(async () => {
+      authorize.mockReturnValue(false);
+      return {
+        ok: false,
+        error: "The remote handoff failed",
+        mutationState: "created",
+        remoteRecoveryPath: recoveryPath,
+      };
+    });
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorize,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(
+      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+      event,
+      operatorInput("red-team-revoked-failure"),
+    )).resolves.toEqual(REJECTED);
+  });
+
+  it("creates an operator only after file selection and saves a private config without exposing bytes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sliver-gui-operator-save-"));
+    const destination = join(directory, "red-team.cfg");
+    const generatedBytes = Buffer.from("operator-config-secret", "utf8");
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>(async () => ({
+      ok: true,
+      value: {
+        operatorName: "red-team",
+        publicIp: "203.0.113.80",
+        port: 44_331,
+        permissions: "builder",
+        data: generatedBytes,
+        remoteRecoveryPath: `/var/lib/sliver-gui/${CREDENTIAL_ID}/operator-export/operator-aaaaaaaaaaaaaaaa.cfg`,
+      },
+    }));
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    try {
+      const input = operatorInput("red-team", { permissions: "builder" });
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, event, input)).resolves.toEqual({
+        ok: true,
+        value: { saved: true, fileName: "red-team.cfg", mutationState: "created" },
+      });
+      expect(generateOperatorConfig).toHaveBeenCalledExactlyOnceWith(input);
+      expect(await readFile(destination, "utf8")).toBe("operator-config-secret");
+      if (process.platform !== "win32") expect((await lstat(destination)).mode & 0o777).toBe(0o600);
+      expect(generatedBytes.every((byte) => byte === 0)).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an unknown server mutation outcome and refuses an automatic retry", async () => {
+    const destination = join(tmpdir(), "red-team-unknown.cfg");
+    const remoteRecoveryCandidatePath =
+      `/var/lib/sliver-gui/${CREDENTIAL_ID}/operator-export/operator-bbbbbbbbbbbbbbbb.cfg`;
+    const remoteHandoffCandidatePath =
+      `/tmp/.sliver-gui-${CREDENTIAL_ID}-cccccccccccccccc.operator.cfg`;
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: "The operator command outcome is unknown.",
+        mutationState: "unknown",
+        remoteRecoveryCandidatePath,
+        remoteHandoffCandidatePath,
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: "A previous operator attempt must be reconciled.",
+        mutationState: "unknown",
+      });
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(
+      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+      event,
+      operatorInput("red-team-unknown"),
+    )).resolves.toEqual({
+      ok: true,
+      value: {
+        saved: false,
+        fileName: "red-team-unknown.cfg",
+        mutationState: "unknown",
+        error: `The operator command outcome is unknown. Do not retry until you reconcile the operator list on the managed server. Inspect ${remoteRecoveryCandidatePath} over SSH; it is only a candidate path and the file may not exist. A private temporary handoff may remain at ${remoteHandoffCandidatePath}; remove it over SSH if it still exists.`,
+        remoteRecoveryCandidatePath,
+        remoteHandoffCandidatePath,
+      },
+    });
+
+    await expect(invoke(
+      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+      event,
+      operatorInput("red-team-marker-only"),
+    )).resolves.toEqual({
+      ok: true,
+      value: {
+        saved: false,
+        fileName: "red-team-marker-only.cfg",
+        mutationState: "unknown",
+        error: "A previous operator attempt must be reconciled. Do not retry until you reconcile the operator list on the managed server.",
+      },
+    });
+  });
+
+  it("reports a created operator and its recovery path when the local save fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sliver-gui-operator-failed-save-"));
+    const destination = join(directory, "missing-parent", "red-team.cfg");
+    const generatedBytes = Buffer.from("operator-config-secret", "utf8");
+    const remoteRecoveryPath = `/var/lib/sliver-gui/${CREDENTIAL_ID}/operator-export/operator-aaaaaaaaaaaaaaaa.cfg`;
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>(async () => ({
+      ok: true,
+      value: {
+        operatorName: "red-team",
+        publicIp: "203.0.113.80",
+        port: 44_331,
+        permissions: "all",
+        data: generatedBytes,
+        remoteRecoveryPath,
+      },
+    }));
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    try {
+      await expect(invoke(
+        CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+        event,
+        operatorInput("red-team"),
+      )).resolves.toEqual({
+        ok: true,
+        value: {
+          saved: false,
+          fileName: "red-team.cfg",
+          mutationState: "created",
+          error: `The operator was created, but its configuration could not be saved at the selected location. Do not retry creation. Recover the root-only configuration over SSH from ${remoteRecoveryPath}.`,
+          remoteRecoveryPath,
+        },
+      });
+      expect(generatedBytes.every((byte) => byte === 0)).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("zeroes generated operator bytes when the requesting window is revoked before saving", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "sliver-gui-operator-revoked-save-"));
+    const destination = join(directory, "red-team.cfg");
+    const generatedBytes = Buffer.from("operator-config-secret", "utf8");
+    const authorize = vi.fn(authorizeCurrentWindow);
+    const generateOperatorConfig = vi.fn<CloudDeploymentController["generateOperatorConfig"]>(async () => {
+      authorize.mockReturnValue(false);
+      return {
+        ok: true,
+        value: {
+          operatorName: "red-team",
+          publicIp: "203.0.113.80",
+          port: 44_331,
+          permissions: "all",
+          data: generatedBytes,
+          remoteRecoveryPath: `/var/lib/sliver-gui/${CREDENTIAL_ID}/operator-export/operator-aaaaaaaaaaaaaaaa.cfg`,
+        },
+      };
+    });
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: false, filePath: destination });
+    registerCloudDeploymentIpcHandlers(
+      controllerMock({ generateOperatorConfig }),
+      CLOUD_RENDERER_URL,
+      authorize,
+    );
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    try {
+      await expect(invoke(
+        CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+        event,
+        operatorInput("red-team"),
+      )).resolves.toEqual(REJECTED);
+      expect(generatedBytes.every((byte) => byte === 0)).toBe(true);
+      await expect(lstat(destination)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unexpected argument counts and malformed inputs before controller dispatch", async () => {
     const controller = controllerMock();
     registerCloudDeploymentIpcHandlers(controller, CLOUD_RENDERER_URL, authorizeCurrentWindow);
@@ -658,6 +984,43 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, [{ credentialId: CREDENTIAL_ID, location: "West US 2" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createDeployment, [{}]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("valid-name"),
+        operatorName: "not an operator name",
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        deploymentId: CREDENTIAL_ID,
+        expectedRevision: 1,
+        operatorName: "missing-endpoint",
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("extra-field"),
+        unexpected: true,
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("bad-ip"),
+        publicIp: "999.0.0.1",
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("zero-port"),
+        port: 0,
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("large-port"),
+        port: 65_536,
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("fractional-port"),
+        port: 31_337.5,
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("string-port"),
+        port: "31337",
+      }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
+        ...operatorInput("bad-permission"),
+        permissions: "administrator",
+      }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.runLifecycleAction, [{
         deploymentId: CREDENTIAL_ID,
         expectedRevision: 0,
@@ -972,6 +1335,11 @@ function controllerMock(
     discoverAzureAccounts: vi.fn(unavailable),
     discoverAzureOptions: vi.fn(unavailable),
     createDeployment: vi.fn(unavailable),
+    generateOperatorConfig: vi.fn(async () => ({
+      ok: false as const,
+      error: "not implemented",
+      mutationState: "not-started" as const,
+    })),
     runLifecycleAction: vi.fn(unavailable),
     updateFirewall: vi.fn(unavailable),
     listFirewallRules: vi.fn(unavailable),

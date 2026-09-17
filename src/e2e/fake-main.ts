@@ -373,6 +373,11 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
     };
   },
   createDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  generateOperatorConfig: () => ({
+    ok: false,
+    error: "Cloud mutations are disabled in this E2E fixture",
+    mutationState: "not-started",
+  }),
   runLifecycleAction: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewall: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   listFirewallRules: ({ deploymentId }) => {

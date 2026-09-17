@@ -76,6 +76,7 @@ describe("Cloud Deployment preload bridge", () => {
       "discoverAzureAccounts",
       "discoverAzureOptions",
       "createDeployment",
+      "createOperatorConfig",
       "runLifecycleAction",
       "updateFirewall",
       "listFirewallRules",
@@ -186,6 +187,23 @@ describe("Cloud Deployment preload bridge", () => {
     const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
     await api.copyInstanceId(input);
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, input);
+  });
+
+  it("creates an operator config through only its fixed narrow channel", async () => {
+    const api = exposedApi();
+    const input = {
+      deploymentId: "22222222-2222-4222-8222-222222222222",
+      expectedRevision: 7,
+      operatorName: "red-team-2",
+      publicIp: "203.0.113.80",
+      port: 44_331,
+      permissions: "crackstation" as const,
+    };
+    await api.createOperatorConfig(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(
+      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+      input,
+    );
   });
 
   it.each(["public", "private"] as const)("copies a %s IP using only its deployment reference and address kind", async (kind) => {

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -465,6 +465,10 @@ const api: CloudDeploymentAPI = {
     capturedDeployment = structuredClone(input);
     return { ok: true as const, value: input.provider === "azure" ? runningAzureDeployment : runningDeployment };
   }),
+  createOperatorConfig: vi.fn(async () => ({
+    ok: true as const,
+    value: { saved: true as const, fileName: "new-operator.cfg", mutationState: "created" as const },
+  })),
   runLifecycleAction: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
   updateFirewall: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
   listFirewallRules: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
@@ -575,6 +579,11 @@ beforeEach(() => {
   vi.mocked(api.discoverAzureOptions).mockClear();
   vi.mocked(api.discoverAzureOptions).mockResolvedValue({ ok: true, value: azureDeploymentOptions });
   vi.mocked(api.createDeployment).mockClear();
+  vi.mocked(api.createOperatorConfig).mockReset();
+  vi.mocked(api.createOperatorConfig).mockResolvedValue({
+    ok: true,
+    value: { saved: true, fileName: "new-operator.cfg", mutationState: "created" },
+  });
   vi.mocked(api.runLifecycleAction).mockClear();
   vi.mocked(api.updateFirewall).mockClear();
   vi.mocked(api.listFirewallRules).mockClear();
@@ -608,6 +617,14 @@ function renderCloudDeploymentApp(): ReturnType<typeof render> {
       <Toast.Provider maxVisibleToasts={4} placement="bottom" />
     </>,
   );
+}
+
+async function openServerActions(
+  user: ReturnType<typeof userEvent.setup>,
+  deploymentName: string,
+): Promise<HTMLElement> {
+  await user.click(await screen.findByRole("button", { name: `Server actions for ${deploymentName}` }));
+  return screen.findByRole("menu", { name: `Server actions for ${deploymentName}` });
 }
 
 describe("CloudDeploymentWindowApp", () => {
@@ -688,7 +705,9 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("textbox", { name: "Label" })).toBe(labelInput);
     expect(labelInput).toHaveValue("Unsaved credential");
     await user.click(screen.getByRole("tab", { name: /Deployments/i }));
-    expect(screen.getByRole("button", { name: "Start range-control" })).toBeEnabled();
+    const serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
+    await user.keyboard("{Escape}");
     expect(screen.getByText(/198\.51\.100\.25/u)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Edit firewall for range-control" }));
     await user.click(await screen.findByRole("button", { name: "Add rule" }));
@@ -753,13 +772,15 @@ describe("CloudDeploymentWindowApp", () => {
     await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledTimes(2));
     expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
     expect(screen.queryByText("Last operation failed")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop range-control" })).toBeEnabled();
+    const serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Stop" })).toBeEnabled();
   });
 
   it("does not let an older provider response overwrite a newer snapshot or its same-revision read errors", async () => {
     currentSnapshot = { ...runningCloudSnapshot(), refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "Expired session" }] };
     const provider = deferred<Awaited<ReturnType<CloudDeploymentAPI["refreshDeployments"]>>>();
     vi.mocked(api.refreshDeployments).mockReturnValueOnce(provider.promise);
+    const user = userEvent.setup();
     renderCloudDeploymentApp();
     await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledOnce());
     const stale = currentSnapshot;
@@ -778,9 +799,12 @@ describe("CloudDeploymentWindowApp", () => {
       ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
     }] } };
     act(() => changedListener?.("snapshot"));
-    expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
+    let serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
+    await user.keyboard("{Escape}");
     await act(async () => olderProvider.resolve({ ok: true, value: { state: stale.state, refreshErrors: stale.refreshErrors } }));
-    expect(screen.getByRole("button", { name: "Start range-control" })).toBeEnabled();
+    serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
     expect(screen.queryByText("Expired session")).not.toBeInTheDocument();
   });
 
@@ -798,9 +822,13 @@ describe("CloudDeploymentWindowApp", () => {
       ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
     }] } };
     act(() => window.dispatchEvent(new Event("focus")));
-    expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
+    let serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
+    await user.keyboard("{Escape}");
     await act(async () => local.resolve({ ok: true, value: stale }));
-    expect(screen.getByRole("button", { name: "Start range-control" })).toBeEnabled();
+    serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
+    await user.keyboard("{Escape}");
     await user.click(screen.getByRole("tab", { name: /Credentials/i }));
     expect(screen.getByText("Production AWS")).toBeInTheDocument();
   });
@@ -822,7 +850,8 @@ describe("CloudDeploymentWindowApp", () => {
     const refreshMessage = screen.getByText("The AWS login expired.").closest<HTMLElement>('[role="status"]');
     if (!refreshMessage) throw new Error("Expected the AWS refresh error status");
     await user.click(within(refreshMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
-    expect(await screen.findByRole("button", { name: "Start range-control" })).toBeEnabled();
+    const serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
     expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
     expect(screen.queryByText(/Provider refresh connection failed/u)).not.toBeInTheDocument();
     expect(screen.queryByText(/retry the previous operation/u)).not.toBeInTheDocument();
@@ -867,11 +896,19 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 9, deployments: [{
       ...runningDeployment, runtime: { ...runningDeployment.runtime, instanceState },
     }] } };
+    const user = userEvent.setup();
     renderCloudDeploymentApp();
     expect(await screen.findByText(instanceState.charAt(0).toUpperCase() + instanceState.slice(1))).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "SSH to range-control" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Start range-control" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Reboot range-control" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "SSH to range-control" })).toHaveAttribute("aria-disabled", "true");
+    const serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(within(serverActions).getByRole("menuitem", { name: "Reboot" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
     act(() => navigationListener?.({ view: "deployments", deploymentId: DEPLOYMENT_ID, action: "stop" }));
     expect(await screen.findByText("Cloud action unavailable")).toBeInTheDocument();
     expect(api.runLifecycleAction).not.toHaveBeenCalled();
@@ -1883,11 +1920,23 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.queryByRole("heading", { name: "New Deployment" })).not.toBeInTheDocument();
     expect(screen.getAllByText("range-control")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Deployment in progress" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Start range-control" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Stop range-control" })).not.toBeInTheDocument();
+    const serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(within(serverActions).queryByRole("menuitem", { name: "Stop" })).not.toBeInTheDocument();
+    expect(within(serverActions).getByRole("menuitem", { name: "Terminate" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await user.keyboard("{Escape}");
     expect(screen.getByText("0/2 checks passed")).toBeInTheDocument();
     expect(screen.getByText("Waiting for SSH")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Terminate range-control" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New Operator for range-control" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
     expect(screen.getByRole("button", { name: "Edit firewall for range-control" })).toBeDisabled();
 
     const readyForSsh: AwsCloudDeploymentRecord = {
@@ -2052,10 +2101,14 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
 
     expect(await screen.findByText("range-control")).toBeInTheDocument();
-    const stopButton = screen.getByRole("button", { name: "Stop range-control" });
-    expect(screen.queryByRole("button", { name: "Start range-control" })).not.toBeInTheDocument();
-    expect(stopButton.querySelector('svg[data-icon="stop"]')).toBeInTheDocument();
-    await user.click(stopButton);
+    const trigger = screen.getByRole("button", { name: "Server actions for range-control" });
+    expect(trigger).not.toHaveTextContent("Server actions");
+    expect(trigger.querySelector('svg[data-icon="ellipsis-vertical"]')).toBeInTheDocument();
+    let serverActions = await openServerActions(user, "range-control");
+    const stopItem = within(serverActions).getByRole("menuitem", { name: "Stop" });
+    expect(within(serverActions).queryByRole("menuitem", { name: "Start" })).not.toBeInTheDocument();
+    expect(stopItem.querySelector('svg[data-icon="stop"]')).toBeInTheDocument();
+    await user.click(stopItem);
     await waitFor(() => expect(api.runLifecycleAction).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9, action: "stop" }));
 
     await user.click(screen.getByRole("button", { name: "Edit firewall for range-control" }));
@@ -2063,13 +2116,10 @@ describe("CloudDeploymentWindowApp", () => {
     await waitFor(() => expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID }));
     await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
 
-    const terminateButton = screen.getByRole("button", { name: "Terminate range-control" });
-    expect(terminateButton).not.toHaveTextContent("Terminate");
-    expect(terminateButton.querySelector('svg[data-icon="trash"]')).toBeInTheDocument();
-    await user.hover(terminateButton);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Terminate");
-    await user.unhover(terminateButton);
-    await user.click(terminateButton);
+    serverActions = await openServerActions(user, "range-control");
+    const terminateItem = within(serverActions).getByRole("menuitem", { name: "Terminate" });
+    expect(terminateItem.querySelector('svg[data-icon="trash"]')).toBeInTheDocument();
+    await user.click(terminateItem);
     expect(await screen.findByRole("alertdialog", { name: "Terminate range-control?" })).toBeInTheDocument();
     expect(api.prepareDestroyDeployment).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9 });
     await user.click(screen.getByRole("button", { name: "Terminate Instance" }));
@@ -2095,7 +2145,9 @@ describe("CloudDeploymentWindowApp", () => {
     const user = userEvent.setup();
     renderCloudDeploymentApp();
 
-    await user.click(await screen.findByRole("button", { name: "Terminate azure-control" }));
+    await screen.findByRole("heading", { name: "azure-control" });
+    const serverActions = await openServerActions(user, "azure-control");
+    await user.click(within(serverActions).getByRole("menuitem", { name: "Terminate" }));
 
     const confirmation = await screen.findByRole("alertdialog", { name: "Terminate azure-control?" });
     expect(within(confirmation).getByText(/Azure will recursively delete the dedicated resource group/u))
@@ -2106,9 +2158,10 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("groups connection actions on the left and lifecycle actions on the right", async () => {
     currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
     renderCloudDeploymentApp();
 
-    const connectionActions = await screen.findByRole("group", { name: "Connection actions for range-control" });
+    const connectionActions = await screen.findByRole("group", { name: "Access and operator actions for range-control" });
     const lifecycleActions = screen.getByRole("group", { name: "Lifecycle actions for range-control" });
 
     const connectionLabels = within(connectionActions)
@@ -2120,16 +2173,341 @@ describe("CloudDeploymentWindowApp", () => {
       .map((button) => button.getAttribute("aria-label"))
       .filter((label): label is string => label !== null);
 
+    expect(within(connectionActions).getAllByRole("button")).toHaveLength(3);
     expect(connectionLabels).toEqual([
       "SSH to range-control",
       "Edit firewall for range-control",
+      "New Operator for range-control",
     ]);
-    expect(lifecycleLabels).toEqual([
-      "Stop range-control",
-      "Reboot range-control",
-      "Terminate range-control",
-    ]);
+    expect(lifecycleLabels).toEqual(["Server actions for range-control"]);
     expect(lifecycleActions).toHaveClass("ml-auto");
+    const serverActions = await openServerActions(user, "range-control");
+    expect(within(serverActions).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Stop",
+      "Reboot",
+      "Terminate",
+    ]);
+    expect(within(serverActions).getByRole("menuitem", { name: "Terminate" })).toHaveClass("menu-item--danger");
+  });
+
+  it("supports keyboard navigation and focus restoration for the icon-only server menu", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    const trigger = await screen.findByRole("button", { name: "Server actions for range-control" });
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    const menu = await screen.findByRole("menu", { name: "Server actions for range-control" });
+    const stop = within(menu).getByRole("menuitem", { name: "Stop" });
+    const reboot = within(menu).getByRole("menuitem", { name: "Reboot" });
+    const terminate = within(menu).getByRole("menuitem", { name: "Terminate" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await waitFor(() => expect(stop).toHaveFocus());
+    await user.keyboard("{ArrowDown}");
+    expect(reboot).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(terminate).toHaveFocus();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu", {
+      name: "Server actions for range-control",
+    })).not.toBeInTheDocument());
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("opens a validated operator form with editable endpoint and permission controls", async () => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: {
+        v: 1,
+        revision: 9,
+        deployments: [{ ...runningDeployment, remoteHost: "198.51.100.99" }],
+      },
+    };
+    const creation = deferred<Awaited<ReturnType<CloudDeploymentAPI["createOperatorConfig"]>>>();
+    vi.mocked(api.createOperatorConfig).mockReturnValueOnce(creation.promise);
+    const successToast = vi.spyOn(toast, "success");
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    const newOperator = await screen.findByRole("button", { name: "New Operator for range-control" });
+    expect(newOperator).toHaveTextContent("New Operator");
+    expect(newOperator).toBeEnabled();
+    newOperator.focus();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add an operator to range-control");
+    newOperator.blur();
+    await user.click(newOperator);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "New Operator" })).toBeInTheDocument();
+    expect(screen.queryByText("Full server permissions")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back to managed servers" })).toBeInTheDocument();
+    const form = screen.getByRole("form", { name: "New Operator for range-control" });
+    const operatorName = within(form).getByRole("textbox", { name: "Operator Name" });
+    const publicIp = within(form).getByRole("textbox", { name: "Public IP" });
+    const port = within(form).getByRole("textbox", { name: "Port" });
+    const permissions = within(form).getByRole("combobox", { name: "Permissions" });
+    const submit = within(form).getByRole("button", { name: "Create Operator" });
+    expect(publicIp).toHaveValue("198.51.100.24");
+    expect(port).toHaveValue("31337");
+    expect(permissions).toHaveValue("all");
+    expect(within(permissions).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Full access",
+      "Remote builder",
+      "Crackstation",
+    ]);
+    expect(submit).toBeDisabled();
+
+    await user.type(operatorName, "invalid operator");
+    expect(within(form).getByText("Use 1–128 letters, numbers, underscores, or hyphens.")).toBeInTheDocument();
+    expect(submit).toBeDisabled();
+    await user.clear(operatorName);
+    await user.type(operatorName, "alice_ops-1");
+    await user.clear(publicIp);
+    await user.type(publicIp, "999.0.0.1");
+    expect(within(form).getByText("Enter a valid public IPv4 address.")).toBeInTheDocument();
+    expect(submit).toBeDisabled();
+    await user.clear(publicIp);
+    await user.type(publicIp, "203.0.113.80");
+    await user.clear(port);
+    await user.type(port, "65536");
+    expect(within(form).getByText("Enter a TCP port from 1 to 65535.")).toBeInTheDocument();
+    expect(submit).toBeDisabled();
+    await user.clear(port);
+    await user.type(port, "44331");
+    await user.selectOptions(permissions, "builder");
+    expect(within(form).getByText("Restricted to remote builder RPCs.")).toBeInTheDocument();
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+
+    expect(api.createOperatorConfig).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 9,
+      operatorName: "alice_ops-1",
+      publicIp: "203.0.113.80",
+      port: 44_331,
+      permissions: "builder",
+    });
+    expect(submit).toHaveAttribute("data-pending", "true");
+    expect(screen.getByRole("button", { name: "Back to managed servers" })).toBeDisabled();
+
+    await act(async () => {
+      creation.resolve({
+        ok: true,
+        value: { saved: true, fileName: "alice_ops-1.cfg", mutationState: "created" },
+      });
+      await creation.promise;
+    });
+
+    expect(await screen.findByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1, name: "New Operator" })).not.toBeInTheDocument();
+    expect(successToast).toHaveBeenCalledWith("Operator config saved", {
+      description: "alice_ops-1 now has remote builder access on range-control. alice_ops-1.cfg was saved to disk.",
+      timeout: 30_000,
+    });
+    successToast.mockRestore();
+  });
+
+  it("queues native navigation until an in-flight operator request finishes", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const creation = deferred<Awaited<ReturnType<CloudDeploymentAPI["createOperatorConfig"]>>>();
+    vi.mocked(api.createOperatorConfig).mockReturnValueOnce(creation.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "New Operator for range-control" }));
+    const form = screen.getByRole("form", { name: "New Operator for range-control" });
+    await user.type(within(form).getByRole("textbox", { name: "Operator Name" }), "pending_operator");
+    await user.click(within(form).getByRole("button", { name: "Create Operator" }));
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
+
+    act(() => navigationListener?.({ view: "firewall", deploymentId: DEPLOYMENT_ID }));
+    expect(screen.getByRole("heading", { level: 1, name: "New Operator" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Firewall rules" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      creation.resolve({
+        ok: true,
+        value: { saved: false, fileName: "pending_operator.cfg", mutationState: "not-started" },
+      });
+      await creation.promise;
+    });
+
+    expect(await screen.findByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1, name: "New Operator" })).not.toBeInTheDocument();
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Back to managed servers", "Cancel"] as const)(
+    "restores focus to the New Operator trigger after %s",
+    async (navigationLabel) => {
+      currentSnapshot = runningCloudSnapshot();
+      const user = userEvent.setup();
+      renderCloudDeploymentApp();
+
+      const trigger = await screen.findByRole("button", { name: "New Operator for range-control" });
+      await user.click(trigger);
+      expect(await screen.findByRole("textbox", { name: "Operator Name" })).toHaveFocus();
+      await user.click(screen.getByRole("button", { name: navigationLabel }));
+
+      expect(await screen.findByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByRole("button", {
+        name: "New Operator for range-control",
+      })).toHaveFocus());
+    },
+  );
+
+  it("keeps the operator form retryable when the native save is canceled or creation has not started", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.createOperatorConfig)
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { saved: false, fileName: "canceled.cfg", mutationState: "not-started" },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: {
+          saved: false,
+          fileName: "duplicate_operator.cfg",
+          mutationState: "not-started",
+          error: "The remote operator already exists.",
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { saved: true, fileName: "duplicate_operator.cfg", mutationState: "created" },
+      });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "New Operator for range-control" }));
+    const operatorName = screen.getByRole("textbox", { name: "Operator Name" });
+    const submit = screen.getByRole("button", { name: "Create Operator" });
+    await user.type(operatorName, "duplicate_operator");
+    await user.click(submit);
+
+    expect(await screen.findByText("Configuration not saved")).toBeInTheDocument();
+    expect(screen.getByText(/save dialog was closed/u)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "New Operator" })).toBeInTheDocument();
+    expect(operatorName).toBeEnabled();
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+    expect(await screen.findByText("Operator not created")).toBeInTheDocument();
+    expect(screen.getByText("The remote operator already exists.")).toBeInTheDocument();
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(2);
+    expect(operatorName).toBeEnabled();
+    expect(submit).toBeEnabled();
+
+    await user.click(submit);
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(3);
+    expect(await screen.findByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      mutationState: "unknown" as const,
+      title: "Operator outcome requires review",
+      error: "The server CLI may have created the operator. Review the managed server before trying again.",
+    },
+    {
+      mutationState: "created" as const,
+      title: "Operator created — recovery required",
+      error: "The operator exists, but the local save failed. Recover the config from /var/lib/sliver-gui/range/operator-export/operator-aaaaaaaaaaaaaaaa.cfg.",
+      remoteRecoveryPath: "/var/lib/sliver-gui/range/operator-export/operator-aaaaaaaaaaaaaaaa.cfg",
+    },
+  ])("blocks another operator request after a $mutationState mutation outcome", async ({
+    mutationState,
+    title,
+    error,
+    remoteRecoveryPath,
+  }) => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.createOperatorConfig).mockResolvedValueOnce({
+      ok: true,
+      value: {
+        saved: false,
+        fileName: "locked-operator.cfg",
+        mutationState,
+        error,
+        ...(remoteRecoveryPath ? { remoteRecoveryPath } : {}),
+      },
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "New Operator for range-control" }));
+    const form = screen.getByRole("form", { name: "New Operator for range-control" });
+    const operatorName = within(form).getByRole("textbox", { name: "Operator Name" });
+    const publicIp = within(form).getByRole("textbox", { name: "Public IP" });
+    const port = within(form).getByRole("textbox", { name: "Port" });
+    const permissions = within(form).getByRole("combobox", { name: "Permissions" });
+    const submit = within(form).getByRole("button", { name: "Create Operator" });
+    await user.type(operatorName, "locked_operator");
+    await user.clear(publicIp);
+    await user.type(publicIp, "203.0.113.90");
+    await user.clear(port);
+    await user.type(port, "44332");
+    await user.selectOptions(permissions, "crackstation");
+    await user.click(submit);
+
+    expect(await within(form).findByText(title)).toBeInTheDocument();
+    expect(within(form).getByText(error)).toBeInTheDocument();
+    expect(operatorName).toBeDisabled();
+    expect(publicIp).toBeDisabled();
+    expect(port).toBeDisabled();
+    expect(permissions).toBeDisabled();
+    expect(submit).toBeDisabled();
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
+
+    await user.click(submit);
+    fireEvent.submit(form);
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
+
+    await user.click(within(form).getByRole("button", { name: "Cancel" }));
+    await user.click(await screen.findByRole("button", { name: "New Operator for range-control" }));
+    const reopenedForm = screen.getByRole("form", { name: "New Operator for range-control" });
+    expect(await within(reopenedForm).findByText(title)).toBeInTheDocument();
+    expect(within(reopenedForm).getByRole("textbox", { name: "Operator Name" })).toHaveValue("locked_operator");
+    expect(within(reopenedForm).getByRole("textbox", { name: "Operator Name" })).toBeDisabled();
+    expect(within(reopenedForm).getByRole("textbox", { name: "Public IP" })).toHaveValue("203.0.113.90");
+    expect(within(reopenedForm).getByRole("textbox", { name: "Public IP" })).toBeDisabled();
+    expect(within(reopenedForm).getByRole("textbox", { name: "Port" })).toHaveValue("44332");
+    expect(within(reopenedForm).getByRole("textbox", { name: "Port" })).toBeDisabled();
+    expect(within(reopenedForm).getByRole("combobox", { name: "Permissions" })).toHaveValue("crackstation");
+    expect(within(reopenedForm).getByRole("combobox", { name: "Permissions" })).toBeDisabled();
+    expect(within(reopenedForm).getByRole("button", { name: "Create Operator" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Back to managed servers" })).toHaveFocus();
+    fireEvent.submit(reopenedForm);
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["returned", "thrown"] as const)("blocks retry after an opaque IPC failure is %s", async (failureKind) => {
+    currentSnapshot = runningCloudSnapshot();
+    if (failureKind === "returned") {
+      vi.mocked(api.createOperatorConfig).mockResolvedValueOnce({
+        ok: false,
+        error: "The Cloud Deployment request was rejected",
+      });
+    } else {
+      vi.mocked(api.createOperatorConfig).mockRejectedValueOnce(new Error("The operator request was interrupted"));
+    }
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "New Operator for range-control" }));
+    const form = screen.getByRole("form", { name: "New Operator for range-control" });
+    const operatorName = within(form).getByRole("textbox", { name: "Operator Name" });
+    const submit = within(form).getByRole("button", { name: "Create Operator" });
+    await user.type(operatorName, "opaque_failure");
+    await user.click(submit);
+
+    expect(await within(form).findByText("Operator outcome requires review")).toBeInTheDocument();
+    expect(operatorName).toBeDisabled();
+    expect(submit).toBeDisabled();
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
+    fireEvent.submit(form);
+    expect(api.createOperatorConfig).toHaveBeenCalledTimes(1);
   });
 
   it("opens SSH through the dedicated bridge and requires explicit first-use host-key approval", async () => {
@@ -2142,7 +2520,7 @@ describe("CloudDeploymentWindowApp", () => {
     const sshButton = await screen.findByRole("button", { name: "SSH to range-control" });
     expect(sshButton.querySelector('svg[data-icon="terminal"]')).toBeInTheDocument();
     await user.click(sshButton);
-    expect(sshButton).toBeDisabled();
+    expect(sshButton).toHaveAttribute("aria-disabled", "true");
     expect(api.openSshWindow).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID });
 
     await act(async () => {
@@ -2300,26 +2678,27 @@ describe("CloudDeploymentWindowApp", () => {
       screen.getByRole("button", { name: "SSH to missing-azure-public-server" }),
     ];
     for (const button of unavailableButtons) {
-      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-disabled", "true");
       await user.click(button);
     }
-    const stoppedReason = screen.getByLabelText(
-      "SSH action unavailable for stopped-server: Start this server before opening SSH.",
-    );
-    const missingKeyReason = screen.getByLabelText(
-      "SSH action unavailable for missing-key-server: No stored SSH private key is available for this server.",
-    );
-    const missingHostReason = screen.getByLabelText(
-      "SSH action unavailable for missing-host-server: This server does not have an SSH address yet.",
-    );
-    const missingAzurePublicReason = screen.getByLabelText(
-      "SSH action unavailable for missing-azure-public-server: This server does not have an SSH address yet.",
-    );
-    for (const reason of [stoppedReason, missingKeyReason, missingHostReason, missingAzurePublicReason]) {
-      expect(reason).toHaveAttribute("tabindex", "0");
-    }
+    for (const reason of unavailableButtons) expect(reason).toHaveAttribute("tabindex", "0");
+    const stoppedReason = unavailableButtons[0]!;
     await user.hover(stoppedReason);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Start this server before opening SSH.");
+    await user.unhover(stoppedReason);
+
+    const stoppedOperator = screen.getByRole("button", { name: "New Operator for stopped-server" });
+    const missingKeyOperator = screen.getByRole("button", { name: "New Operator for missing-key-server" });
+    const missingHostOperator = screen.getByRole("button", { name: "New Operator for missing-host-server" });
+    const missingAzureOperator = screen.getByRole("button", { name: "New Operator for missing-azure-public-server" });
+    for (const button of [stoppedOperator, missingKeyOperator, missingHostOperator, missingAzureOperator]) {
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      expect(button).toHaveAttribute("tabindex", "0");
+      await user.click(button);
+    }
+    await user.hover(stoppedOperator);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Start this server before adding an operator.");
+    expect(api.createOperatorConfig).not.toHaveBeenCalled();
     expect(api.openSshWindow).not.toHaveBeenCalled();
   });
 
@@ -2342,7 +2721,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(detail.textContent?.length).toBe(512);
   });
 
-  it("reuses one lifecycle button across stopped, pending, and running states", async () => {
+  it("reuses one lifecycle menu item across stopped, pending, and running states", async () => {
     const stoppedDeployment: AwsCloudDeploymentRecord = {
       ...runningDeployment,
       status: "stopped",
@@ -2363,13 +2742,12 @@ describe("CloudDeploymentWindowApp", () => {
     const user = userEvent.setup();
     renderCloudDeploymentApp();
 
-    const startButton = await screen.findByRole("button", { name: "Start range-control" });
-    expect(screen.queryByRole("button", { name: "Stop range-control" })).not.toBeInTheDocument();
-    expect(startButton.querySelector('svg[data-icon="play"]')).toBeInTheDocument();
-    expect(startButton).not.toHaveClass("bg-warning-soft");
+    let serverActions = await openServerActions(user, "range-control");
+    const startItem = within(serverActions).getByRole("menuitem", { name: "Start" });
+    expect(within(serverActions).queryByRole("menuitem", { name: "Stop" })).not.toBeInTheDocument();
+    expect(startItem.querySelector('svg[data-icon="play"]')).toBeInTheDocument();
 
-    await user.click(startButton);
-    expect(startButton).toBeDisabled();
+    await user.click(startItem);
     expect(api.runLifecycleAction).toHaveBeenCalledWith({
       deploymentId: DEPLOYMENT_ID,
       expectedRevision: 10,
@@ -2384,14 +2762,10 @@ describe("CloudDeploymentWindowApp", () => {
     });
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Starting range-control" })).not.toBeInTheDocument());
-    const stopButton = screen.getByRole("button", { name: "Stop range-control" });
-    expect(screen.queryByRole("button", { name: "Start range-control" })).not.toBeInTheDocument();
-    expect(stopButton.querySelector('svg[data-icon="stop"]')).toBeInTheDocument();
-    expect(stopButton).toHaveClass(
-      "bg-warning-soft",
-      "text-warning-soft-foreground",
-      "hover:bg-warning-soft-hover",
-    );
+    serverActions = await openServerActions(user, "range-control");
+    const stopItem = within(serverActions).getByRole("menuitem", { name: "Stop" });
+    expect(within(serverActions).queryByRole("menuitem", { name: "Start" })).not.toBeInTheDocument();
+    expect(stopItem.querySelector('svg[data-icon="stop"]')).toHaveClass("text-warning");
   });
 
   it("handles a native stop request on the deployments tab with a modal for the full pending duration", async () => {
@@ -2428,16 +2802,10 @@ describe("CloudDeploymentWindowApp", () => {
     act(() => navigationListener?.({ view: "firewall", deploymentId: DEPLOYMENT_ID }));
     expect(screen.getByRole("dialog", { name: "Stopping range-control" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Firewall rules" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop range-control", hidden: true })).toHaveClass(
-      "bg-warning-soft",
-      "text-warning-soft-foreground",
-      "hover:bg-warning-soft-hover",
-    );
-    expect(screen.getByRole("button", { name: "Reboot range-control", hidden: true })).toHaveClass(
-      "bg-warning-soft",
-      "text-warning-soft-foreground",
-      "hover:bg-warning-soft-hover",
-    );
+    const actionsTrigger = screen.getByRole("button", { name: "Server actions for range-control", hidden: true });
+    expect(actionsTrigger).not.toHaveTextContent("Stop");
+    expect(actionsTrigger).not.toHaveTextContent("Reboot");
+    expect(actionsTrigger.querySelector('svg[data-icon="ellipsis-vertical"]')).toBeInTheDocument();
 
     await act(async () => {
       lifecycleResult.resolve({ ok: true, value: runningDeployment });

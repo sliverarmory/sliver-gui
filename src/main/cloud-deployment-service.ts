@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { BrowserWindow } from "electron";
 import type { TokenCredential } from "@azure/identity";
-import { parseConfig } from "sliver-script";
+import { SliverClient, parseConfig, type SliverClientConfig } from "sliver-script";
 import ssh2 from "ssh2";
 
 import type {
@@ -16,12 +16,14 @@ import type {
   CloudDeploymentRefreshError,
   CloudProvisioningTranscript,
   CloudProvisioningTranscriptSnapshot,
+  CreateCloudOperatorConfigInput,
   CurrentEgressIpv4,
   DestroyCloudDeploymentPlan,
   ExecuteDestroyCloudDeploymentInput,
   PrepareDestroyCloudDeploymentInput,
   SshPrivateKeySelection,
 } from "../shared/cloud-deployment-ipc.js";
+import { parseCreateCloudOperatorConfigInput } from "../shared/cloud-deployment-ipc.js";
 import {
   isUuidV4,
   parseCloudDeploymentActionInput,
@@ -122,11 +124,19 @@ import {
   type AzureVmProviderConnection,
 } from "./cloud/azure-vm-provider.js";
 import {
+  SliverOperatorCreationError,
+  SliverProvisionError,
   SliverProvisioner,
+  type CreateSliverOperatorInput,
   type ProvisionSliverServerInput,
+  type SliverOperatorConfigResult,
   type SliverProvisionOutputEvent,
   type SliverProvisionResult,
 } from "./cloud/sliver-provisioner.js";
+import type {
+  CloudOperatorMutationState,
+  GenerateCloudOperatorConfigResult,
+} from "./cloud-deployment-ipc.js";
 import { loadTerminalRuntime } from "./terminal-runtime.js";
 import { readBoundedRegularFile, writePrivateFileExclusiveAtomic } from "./secure-file.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
@@ -175,6 +185,7 @@ export type CloudSshTerminalStarter = (
 
 export interface CloudSliverProvisioner {
   provision(input: ProvisionSliverServerInput): Promise<SliverProvisionResult>;
+  createOperator(input: CreateSliverOperatorInput): Promise<SliverOperatorConfigResult>;
 }
 
 export interface CloudAwsProvider {
@@ -291,6 +302,18 @@ export interface CloudAzureAccountSource {
   list(): Promise<readonly AzureCliAccountSummary[]>;
 }
 
+export interface CloudOperatorDirectoryClient {
+  connect(): Promise<unknown>;
+  getOperators(): Promise<{
+    readonly Operators: readonly { readonly Name: string }[];
+  }>;
+  disconnect(): Promise<void>;
+}
+
+export type CloudOperatorDirectoryClientFactory = (
+  config: SliverClientConfig,
+) => CloudOperatorDirectoryClient;
+
 export interface CloudDeploymentServiceOptions {
   /** Expected production value: ~/.sliver-client/gui/cloud-deployment/v1. */
   readonly rootDirectory: string;
@@ -303,6 +326,8 @@ export interface CloudDeploymentServiceOptions {
   readonly sshKeyGenerator?: CloudSshKeyGenerator;
   readonly egressIpv4Detector?: CloudEgressIpv4Detector;
   readonly provisioner?: CloudSliverProvisioner;
+  /** Main-process-only authoritative operator-name lookup. */
+  readonly operatorDirectoryClientFactory?: CloudOperatorDirectoryClientFactory;
   readonly awsProviderFactory?: CloudAwsProviderFactory;
   readonly awsPermissionCheckerFactory?: CloudAwsPermissionCheckerFactory;
   readonly awsProfileSource?: CloudAwsProfileSource;
@@ -364,6 +389,7 @@ export class CloudDeploymentService {
   readonly #sshKeyGenerator: CloudSshKeyGenerator;
   readonly #egressIpv4Detector: CloudEgressIpv4Detector;
   readonly #provisioner: CloudSliverProvisioner;
+  readonly #operatorDirectoryClientFactory: CloudOperatorDirectoryClientFactory;
   readonly #awsProviderFactory: CloudAwsProviderFactory;
   readonly #awsPermissionCheckerFactory: CloudAwsPermissionCheckerFactory;
   readonly #awsProfiles: CloudAwsProfileSource;
@@ -416,6 +442,9 @@ export class CloudDeploymentService {
     this.#privateKeys = options.privateKeyCapabilities ?? new PrivateKeyCapabilities();
     this.#sshKeyGenerator = options.sshKeyGenerator ?? generateEd25519SshKeyPair;
     this.#egressIpv4Detector = options.egressIpv4Detector ?? detectCurrentEgressIpv4;
+    this.#operatorDirectoryClientFactory = options.operatorDirectoryClientFactory ?? (
+      (config) => new SliverClient(config)
+    );
     this.#awsProviderFactory = options.awsProviderFactory ?? ((connection) => new AwsEc2Provider(connection));
     this.#awsPermissionCheckerFactory = options.awsPermissionCheckerFactory ?? (
       (connection) => new AwsEc2PermissionChecker(connection)
@@ -1356,6 +1385,166 @@ export class CloudDeploymentService {
     }
   }
 
+  async generateOperatorConfig(
+    input: CreateCloudOperatorConfigInput,
+  ): Promise<GenerateCloudOperatorConfigResult> {
+    try {
+      this.#assertActive();
+      const parsed = parseCreateCloudOperatorConfigInput(input);
+      return await this.#serializeDeployment(parsed.deploymentId, async () => {
+        try {
+          const deployment = this.#requireDeploymentAtRevision(
+            parsed.deploymentId,
+            parsed.expectedRevision,
+          );
+          if (!hasStableRunningRuntime(deployment)) {
+            return operatorGenerationFailure("The managed server must be running before adding an operator");
+          }
+          if (deployment.operatorConfigFileName === null || deployment.operatorConfigDigest === null) {
+            return operatorGenerationFailure("The managed server operator endpoint is not ready");
+          }
+          if (parsed.operatorName === deployment.spec.operatorName) {
+            return operatorGenerationFailure("That operator already exists on this managed server");
+          }
+          const hostKeySha256 = this.#sshHostKeys.get(deployment.id);
+          if (!hostKeySha256) {
+            return operatorGenerationFailure("The managed server SSH host key is unavailable");
+          }
+          const credentialId = deployment.credentialId;
+          const assertOperatorNameAvailable = async (): Promise<void> => {
+            await this.#assertOperatorNameAvailable(deployment, parsed.operatorName);
+          };
+          const generated = deployment.provider === "aws"
+            ? await this.#vault.withCredential(credentialId, "aws", async (secret, summary) => {
+                try {
+                  const target = this.#requireCurrentSshTarget(
+                    deployment.id,
+                    credentialId,
+                    summary,
+                    managedSshTarget(deployment, summary),
+                  );
+                  return await this.#provisioner.createOperator({
+                    deploymentId: deployment.id,
+                    operatorEndpointHost: parsed.publicIp,
+                    multiplayerPort: parsed.port,
+                    operatorName: parsed.operatorName,
+                    permissions: parsed.permissions,
+                    assertOperatorNameAvailable,
+                    ssh: {
+                      ...sshTerminalTarget(target, secret, hostKeySha256),
+                      hostKeySha256,
+                    },
+                  });
+                } catch (error) {
+                  if (error instanceof SliverOperatorCreationError) throw error;
+                  throw new Error(cloudErrorMessage(
+                    error,
+                    "The managed server operator could not be created",
+                    credentialValues(secret),
+                  ));
+                }
+              })
+            : await this.#vault.withCredential(credentialId, "azure", async (secret, summary) => {
+                try {
+                  const target = this.#requireCurrentSshTarget(
+                    deployment.id,
+                    credentialId,
+                    summary,
+                    managedSshTarget(deployment, summary),
+                  );
+                  return await this.#provisioner.createOperator({
+                    deploymentId: deployment.id,
+                    operatorEndpointHost: parsed.publicIp,
+                    multiplayerPort: parsed.port,
+                    operatorName: parsed.operatorName,
+                    permissions: parsed.permissions,
+                    assertOperatorNameAvailable,
+                    ssh: {
+                      ...sshTerminalTarget(target, secret, hostKeySha256),
+                      hostKeySha256,
+                    },
+                  });
+                } catch (error) {
+                  if (error instanceof SliverOperatorCreationError) throw error;
+                  throw new Error(cloudErrorMessage(
+                    error,
+                    "The managed server operator could not be created",
+                    credentialValues(secret),
+                  ));
+                }
+              });
+          const validRecoveryPath = isManagedOperatorRecoveryPath(
+            deployment.id,
+            generated.remoteRecoveryPath,
+          );
+          if (
+            !validRecoveryPath ||
+            generated.deploymentId !== deployment.id ||
+            generated.operatorName !== parsed.operatorName ||
+            generated.operatorEndpointHost !== parsed.publicIp ||
+            generated.multiplayerPort !== parsed.port ||
+            generated.permissions !== parsed.permissions ||
+            generated.hostKeySha256 !== hostKeySha256 ||
+            createHash("sha256").update(generated.operatorConfig).digest("hex") !==
+              generated.operatorConfigSha256
+          ) {
+            generated.operatorConfig.fill(0);
+            return operatorGenerationFailure(
+              "The generated operator configuration failed verification",
+              "created",
+              validRecoveryPath ? generated.remoteRecoveryPath : undefined,
+            );
+          }
+          return {
+            ok: true,
+            value: Object.freeze({
+              operatorName: parsed.operatorName,
+              publicIp: parsed.publicIp,
+              port: parsed.port,
+              permissions: parsed.permissions,
+              data: generated.operatorConfig,
+              remoteRecoveryPath: generated.remoteRecoveryPath,
+            }),
+          };
+        } catch (error) {
+          if (error instanceof SliverOperatorCreationError) {
+            const remoteRecoveryPath = error.mutationState === "created" &&
+                isManagedOperatorRecoveryPath(parsed.deploymentId, error.remoteRecoveryPath)
+              ? error.remoteRecoveryPath
+              : undefined;
+            const remoteRecoveryCandidatePath = error.mutationState === "unknown" &&
+                isManagedOperatorRecoveryPath(parsed.deploymentId, error.remoteRecoveryCandidatePath)
+              ? error.remoteRecoveryCandidatePath
+              : undefined;
+            const remoteHandoffCandidatePath = isManagedOperatorHandoffPath(
+              parsed.deploymentId,
+              error.remoteHandoffCandidatePath,
+            )
+              ? error.remoteHandoffCandidatePath
+              : undefined;
+            return operatorGenerationFailure(
+              error,
+              error.mutationState,
+              remoteRecoveryPath,
+              remoteRecoveryCandidatePath,
+              undefined,
+              remoteHandoffCandidatePath,
+            );
+          }
+          return operatorGenerationFailure(error, "not-started");
+        }
+      });
+    } catch (error) {
+      return operatorGenerationFailure(
+        error,
+        "not-started",
+        undefined,
+        undefined,
+        "The managed server operator request was rejected",
+      );
+    }
+  }
+
   async updateFirewall(
     input: UpdateCloudFirewallInput,
   ): Promise<OperationResult<CloudDeploymentRecord>> {
@@ -2132,6 +2321,67 @@ export class CloudDeploymentService {
       await unlink(path);
     } catch (error) {
       if (!isMissingFile(error)) throw error;
+    }
+  }
+
+  async #assertOperatorNameAvailable(
+    deployment: CloudDeploymentRecord,
+    operatorName: string,
+  ): Promise<void> {
+    const expectedFileName = operatorConfigFileName(deployment.id);
+    let client: CloudOperatorDirectoryClient | undefined;
+    let configBytes: Buffer | undefined;
+    try {
+      if (
+        deployment.operatorConfigFileName !== expectedFileName ||
+        deployment.operatorConfigDigest === null
+      ) {
+        throw operatorDirectoryUnavailable();
+      }
+      const loaded = await readBoundedRegularFile(
+        join(this.#operatorConfigDirectory, expectedFileName),
+        {
+          label: "Cloud operator configuration",
+          maxBytes: MAX_OPERATOR_CONFIG_BYTES,
+          requirePrivateMode: true,
+        },
+      );
+      configBytes = loaded.data;
+      const actualDigest = createHash("sha256").update(configBytes).digest("hex");
+      if (actualDigest !== deployment.operatorConfigDigest) {
+        throw operatorDirectoryUnavailable();
+      }
+      const config = parseConfig(configBytes);
+      if (config.operator !== deployment.spec.operatorName) {
+        throw operatorDirectoryUnavailable();
+      }
+      client = this.#operatorDirectoryClientFactory({
+        ...config,
+        // The saved profile can outlive an instance's original address. The
+        // directory lookup must use current managed state, never the editable
+        // endpoint supplied by the renderer for the new profile.
+        lhost: managedOperatorDirectoryHost(deployment),
+        lport: deployment.spec.multiplayerPort,
+      });
+      await client.connect();
+      const operators = await client.getOperators();
+      if (operators.Operators.some((operator) => operator.Name === operatorName)) {
+        throw new SliverProvisionError(
+          "provisioning-failed",
+          "That operator already exists on this managed server",
+        );
+      }
+    } catch (error) {
+      if (error instanceof SliverProvisionError) throw error;
+      throw operatorDirectoryUnavailable();
+    } finally {
+      try {
+        await client?.disconnect();
+      } catch {
+        throw operatorDirectoryUnavailable();
+      } finally {
+        configBytes?.fill(0);
+      }
     }
   }
 
@@ -2960,6 +3210,32 @@ function managedSshTarget(
     ? deployment.spec.sshUsername ?? credential.sshUsername
     : deployment.spec.sshUsername;
   return managedSshTargetWithUsername(deployment, username);
+}
+
+function hasStableRunningRuntime(deployment: CloudDeploymentRecord): boolean {
+  return deployment.status === "running" && deployment.runtime.instanceState === "running";
+}
+
+function managedOperatorDirectoryHost(deployment: CloudDeploymentRecord): string {
+  const host = deployment.provider === "azure"
+    ? azureConnectionAddress(deployment.spec.usePublicIp, deployment.runtime)
+    : deployment.runtime.publicIpAddress ??
+      deployment.runtime.privateIpAddress ??
+      deployment.remoteHost;
+  if (!host) throw operatorDirectoryUnavailable();
+  return host;
+}
+
+function isManagedOperatorRecoveryPath(deploymentId: string, value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const prefix = `/var/lib/sliver-gui/${deploymentId}/operator-export/operator-`;
+  return value.startsWith(prefix) && /^[0-9a-f]{16,64}\.cfg$/u.test(value.slice(prefix.length));
+}
+
+function isManagedOperatorHandoffPath(deploymentId: string, value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const prefix = `/tmp/.sliver-gui-${deploymentId}-`;
+  return value.startsWith(prefix) && /^[0-9a-f]{16,64}\.operator\.cfg$/u.test(value.slice(prefix.length));
 }
 
 function managedSshTargetWithUsername(
@@ -4269,6 +4545,32 @@ function validateAzureLoginSubscriptions(
     throw new Error("Azure Login returned an invalid subscription list");
   }
   return Object.freeze(subscriptions);
+}
+
+function operatorGenerationFailure(
+  error: unknown,
+  mutationState: CloudOperatorMutationState = "not-started",
+  remoteRecoveryPath?: string,
+  remoteRecoveryCandidatePath?: string,
+  fallback = "The managed server operator could not be created",
+  remoteHandoffCandidatePath?: string,
+): Extract<GenerateCloudOperatorConfigResult, { readonly ok: false }> {
+  const message = typeof error === "string" ? error : cloudErrorMessage(error, fallback);
+  return Object.freeze({
+    ok: false,
+    error: message,
+    mutationState,
+    ...(remoteRecoveryPath === undefined ? {} : { remoteRecoveryPath }),
+    ...(remoteRecoveryCandidatePath === undefined ? {} : { remoteRecoveryCandidatePath }),
+    ...(remoteHandoffCandidatePath === undefined ? {} : { remoteHandoffCandidatePath }),
+  });
+}
+
+function operatorDirectoryUnavailable(): SliverProvisionError {
+  return new SliverProvisionError(
+    "provisioning-failed",
+    "The managed server operator list could not be verified",
+  );
 }
 
 function failure<T = never>(

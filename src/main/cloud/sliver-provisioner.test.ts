@@ -11,6 +11,7 @@ import type { Client, ClientChannel, ConnectConfig, SFTPWrapper, Stats } from "s
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  SliverOperatorCreationError,
   SliverProvisionError,
   SliverProvisioner,
   type SliverProvisionOutputEvent,
@@ -1042,6 +1043,459 @@ describe("SliverProvisioner", () => {
     expect(ssh.commands.some((value) => value.includes("'rm' '-f' '--'") && value.includes(".operator.cfg"))).toBe(true);
     expect([...ssh.files.keys()].some((path) => path.includes(".operator.cfg"))).toBe(false);
   });
+
+  it("creates an additional operator once and resumes a matching recovery after a crash", async () => {
+    const ssh = new FakeSshHost({ operatorStdout: "operator output must stay private\n" });
+    const provisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("dddddddddddddddddddddddddddddddd")
+        .mockReturnValueOnce("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+        .mockReturnValueOnce("ffffffffffffffffffffffffffffffff"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+
+    const result = await provisioner.createOperator(createOperatorInput());
+
+    expect(result).toMatchObject({
+      deploymentId,
+      operatorName: "secondoperator",
+      operatorEndpointHost: "server.example.test",
+      multiplayerPort: 44_331,
+      permissions: "builder",
+      hostKeySha256,
+      remoteRecoveryPath: `${deploymentRoot}/operator-export/operator-dddddddddddddddddddddddddddddddd.cfg`,
+    });
+    expect(JSON.parse(result.operatorConfig.toString("utf8"))).toMatchObject({
+      operator: "secondoperator",
+      lhost: "server.example.test",
+      lport: 44_331,
+    });
+    expect(result.operatorConfigSha256).toBe(createHash("sha256").update(result.operatorConfig).digest("hex"));
+
+    const operatorCommands = ssh.commands.filter((value) => value.includes("'operator'"));
+    expect(operatorCommands).toHaveLength(1);
+    expect(operatorCommands[0]).toContain(`'SLIVER_ROOT_DIR=${deploymentRoot}/server'`);
+    expect(operatorCommands[0]).toContain(`'SLIVER_CLIENT_ROOT_DIR=${deploymentRoot}/client-runtime'`);
+    expect(operatorCommands[0]).toContain(`'${binaryPath}' 'operator'`);
+    expect(operatorCommands[0]).toContain("'--permissions' 'builder'");
+    expect(operatorCommands[0]).toContain(`'--save' '${result.remoteRecoveryPath}'`);
+
+    const recovery = ssh.files.get(result.remoteRecoveryPath);
+    expect((recovery?.mode ?? 0) & 0o777).toBe(0o600);
+    expect(recovery?.uid).toBe(0);
+    expect(recovery?.gid).toBe(0);
+    expect(ssh.sftpReadPaths).toEqual([
+      `/tmp/.sliver-gui-${deploymentId}-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.operator.cfg`,
+    ]);
+    const handoffInstall = ssh.commands.find((value) =>
+      value.includes(result.remoteRecoveryPath) && value.includes("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.operator.cfg")
+    );
+    expect(handoffInstall).toContain("'install' '-m' '0600' '-o' '1000' '-g' '1000'");
+    expect([...ssh.files.keys()].filter((path) => path.startsWith("/tmp/"))).toEqual([]);
+    expect(ssh.files.has(result.remoteRecoveryPath)).toBe(true);
+    expect(ssh.ended).toBe(true);
+    expect(ssh.sftpEnded).toBe(true);
+
+    result.operatorConfig.fill(0);
+
+    const lockPath = `${deploymentRoot}/operator-export/operator-lock-${createHash("sha256")
+      .update("secondoperator", "utf8")
+      .digest("hex")}`;
+    expect(ssh.directories.has(lockPath)).toBe(true);
+    const lockMetadata = ssh.files.get(`${lockPath}/recovery-path`);
+    expect(lockMetadata?.data.toString("utf8")).toBe(`${result.remoteRecoveryPath}\n`);
+    expect((lockMetadata?.mode ?? 0) & 0o777).toBe(0o600);
+    expect(lockMetadata?.uid).toBe(0);
+    expect(lockMetadata?.gid).toBe(0);
+    const requestMetadata = ssh.files.get(`${lockPath}/request-sha256`);
+    expect(requestMetadata?.data.toString("utf8")).toMatch(/^[0-9a-f]{64}\n$/u);
+    expect((requestMetadata?.mode ?? 0) & 0o777).toBe(0o600);
+    expect(requestMetadata?.uid).toBe(0);
+    expect(requestMetadata?.gid).toBe(0);
+    const stateMetadata = ssh.files.get(`${lockPath}/state`);
+    expect(stateMetadata?.data.toString("utf8")).toBe("created\n");
+    expect((stateMetadata?.mode ?? 0) & 0o777).toBe(0o600);
+    expect(stateMetadata?.uid).toBe(0);
+    expect(stateMetadata?.gid).toBe(0);
+
+    // Simulate a process crash after Sliver wrote the canonical config but
+    // before the marker's final state transition reached disk.
+    if (stateMetadata) stateMetadata.data = Buffer.from("reserved\n", "utf8");
+    const recoveryProvisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("11111111111111111111111111111111")
+        .mockReturnValueOnce("22222222222222222222222222222222"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+    const recoveryAvailabilityCheck = vi.fn(async () => undefined);
+    const recovered = await recoveryProvisioner.createOperator({
+      ...createOperatorInput(),
+      assertOperatorNameAvailable: recoveryAvailabilityCheck,
+    });
+    expect(recovered).toMatchObject({
+      operatorName: "secondoperator",
+      permissions: "builder",
+      hostKeySha256,
+      remoteRecoveryPath: result.remoteRecoveryPath,
+    });
+    expect(recovered.operatorConfig.equals(ssh.files.get(result.remoteRecoveryPath)?.data ?? Buffer.alloc(0)))
+      .toBe(true);
+    expect(ssh.files.get(`${lockPath}/state`)?.data.toString("utf8")).toBe("created\n");
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(1);
+    expect(recoveryAvailabilityCheck).not.toHaveBeenCalled();
+    recovered.operatorConfig.fill(0);
+  });
+
+  it.each(["all", "builder", "crackstation"] as const)(
+    "passes the supported %s permission preset to the Sliver CLI",
+    async (permissions) => {
+      const ssh = new FakeSshHost();
+      const provisioner = new SliverProvisioner({
+        createSshClient: () => ssh.asClient(),
+        createNonce: vi.fn()
+          .mockReturnValueOnce("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+          .mockReturnValueOnce("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        wait: async () => undefined,
+        connectTimeoutMs: 100,
+        commandTimeoutMs: 100,
+        transferTimeoutMs: 100,
+      });
+
+      const result = await provisioner.createOperator({
+        ...createOperatorInput(),
+        operatorName: `operator-${permissions}`,
+        permissions,
+      });
+
+      expect(result.permissions).toBe(permissions);
+      expect(ssh.commands.find((command) => command.includes("'operator'")))
+        .toContain(`'--permissions' '${permissions}'`);
+      result.operatorConfig.fill(0);
+    },
+  );
+
+  it("does not recover an existing operator config for a different permission request", async () => {
+    const ssh = new FakeSshHost();
+    const initialProvisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("33333333333333333333333333333333")
+        .mockReturnValueOnce("44444444444444444444444444444444"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+    const created = await initialProvisioner.createOperator(createOperatorInput());
+    const retryProvisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: () => "55555555555555555555555555555555",
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+
+    const retryAvailabilityCheck = vi.fn(async () => undefined);
+    const failure = await captureFailure(retryProvisioner.createOperator({
+      ...createOperatorInput(),
+      permissions: "all",
+      assertOperatorNameAvailable: retryAvailabilityCheck,
+    }));
+
+    expect(failure).toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({
+      code: "operator-outcome-unknown",
+      hostKeySha256,
+      mutationState: "unknown",
+      remoteRecoveryCandidatePath: created.remoteRecoveryPath,
+    });
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(1);
+    expect(retryAvailabilityCheck).not.toHaveBeenCalled();
+    created.operatorConfig.fill(0);
+  });
+
+  it("treats an existing replay marker without valid recovery metadata as unknown", async () => {
+    const ssh = new FakeSshHost();
+    const lockPath = `${deploymentRoot}/operator-export/operator-lock-${createHash("sha256")
+      .update("secondoperator", "utf8")
+      .digest("hex")}`;
+    ssh.directories.add(lockPath);
+    ssh.files.set(
+      `${lockPath}/recovery-path`,
+      remoteFile(Buffer.from("/etc/shadow\n", "utf8"), 0o600, 0),
+    );
+    const provisioner = new SliverProvisioner({ createSshClient: () => ssh.asClient() });
+
+    const failure = await captureFailure(provisioner.createOperator(createOperatorInput()));
+
+    expect(failure).toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({
+      code: "operator-outcome-unknown",
+      hostKeySha256,
+      mutationState: "unknown",
+    });
+    expect((failure as SliverOperatorCreationError).remoteRecoveryCandidatePath).toBeUndefined();
+    expect(failure.message).toContain(`remove the recovery marker at ${lockPath}`);
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(0);
+  });
+
+  it("runs the availability preflight before reserving a fresh operator mutation", async () => {
+    const ssh = new FakeSshHost();
+    const availabilityFailure = new SliverProvisionError(
+      "provisioning-failed",
+      "That operator already exists on this managed server",
+    );
+    const assertOperatorNameAvailable = vi.fn(async () => {
+      expect([...ssh.directories].some((path) => path.includes("operator-lock-"))).toBe(false);
+      expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(0);
+      throw availabilityFailure;
+    });
+    const provisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: () => "66666666666666666666666666666666",
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+
+    const failure = await captureFailure(provisioner.createOperator({
+      ...createOperatorInput(),
+      assertOperatorNameAvailable,
+    }));
+
+    expect(failure).not.toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({
+      code: "provisioning-failed",
+      message: "That operator already exists on this managed server",
+      hostKeySha256,
+    });
+    expect(assertOperatorNameAvailable).toHaveBeenCalledOnce();
+    expect([...ssh.directories].some((path) => path.includes("operator-lock-"))).toBe(false);
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(0);
+  });
+
+  it("rejects additional operator creation before connecting when the SSH host key is not pinned", async () => {
+    const ssh = new FakeSshHost();
+    const createSshClient = vi.fn(() => ssh.asClient());
+    const provisioner = new SliverProvisioner({ createSshClient });
+
+    const failure = await captureFailure(provisioner.createOperator({
+      ...createOperatorInput(),
+      ssh: {
+        ...createOperatorInput().ssh,
+        hostKeySha256: undefined as never,
+      },
+    }));
+
+    expect(failure).toMatchObject({ code: "invalid-input" });
+    expect(createSshClient).not.toHaveBeenCalled();
+    expect(ssh.commands).toEqual([]);
+  });
+
+  it("rejects unsupported operator permissions before connecting", async () => {
+    const ssh = new FakeSshHost();
+    const createSshClient = vi.fn(() => ssh.asClient());
+    const provisioner = new SliverProvisioner({ createSshClient });
+
+    const failure = await captureFailure(provisioner.createOperator({
+      ...createOperatorInput(),
+      permissions: "administrator" as never,
+    }));
+
+    expect(failure).toMatchObject({ code: "invalid-input", message: "The operator permissions are invalid" });
+    expect(createSshClient).not.toHaveBeenCalled();
+    expect(ssh.commands).toEqual([]);
+  });
+
+  it("keeps an SFTP-open timeout retryable because the operator command never started", async () => {
+    const ssh = new FakeSshHost({ hangSftpOpen: true });
+    const provisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 10,
+    });
+
+    const failure = await captureFailure(provisioner.createOperator(createOperatorInput()));
+
+    expect(failure).not.toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({ code: "remote-transfer-timeout", hostKeySha256 });
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(0);
+    expect(ssh.destroyed).toBe(true);
+  });
+
+  it("does not retry an additional operator when Sliver reports success without writing the recovery config", async () => {
+    const ssh = new FakeSshHost({ generateOperatorConfig: false });
+    const createSshClient = vi.fn(() => ssh.asClient());
+    const provisioner = new SliverProvisioner({
+      createSshClient,
+      createNonce: () => "dddddddddddddddddddddddddddddddd",
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+
+    const failure = await captureFailure(provisioner.createOperator(createOperatorInput()));
+
+    expect(failure).toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({
+      code: "operator-outcome-unknown",
+      hostKeySha256,
+      mutationState: "unknown",
+      remoteRecoveryCandidatePath:
+        `${deploymentRoot}/operator-export/operator-dddddddddddddddddddddddddddddddd.cfg`,
+    });
+    expect(createSshClient).toHaveBeenCalledOnce();
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(1);
+    expect([...ssh.files.keys()].filter((path) => path.startsWith("/tmp/"))).toEqual([]);
+    expect(ssh.sftpEnded).toBe(true);
+
+    const lockPath = `${deploymentRoot}/operator-export/operator-lock-${createHash("sha256")
+      .update("secondoperator", "utf8")
+      .digest("hex")}`;
+    expect(ssh.files.get(`${lockPath}/state`)?.data.toString("utf8")).toBe("reserved\n");
+    const retryFailure = await captureFailure(provisioner.createOperator(createOperatorInput()));
+    expect(retryFailure).toBeInstanceOf(SliverOperatorCreationError);
+    expect(retryFailure).toMatchObject({
+      code: "operator-outcome-unknown",
+      mutationState: "unknown",
+      remoteRecoveryCandidatePath:
+        `${deploymentRoot}/operator-export/operator-dddddddddddddddddddddddddddddddd.cfg`,
+    });
+    expect(ssh.commands.filter((value) => value.includes("'operator'"))).toHaveLength(1);
+  });
+
+  it("rejects a tampered operator handoff, zeroes the retrieved bytes, and keeps the canonical recovery config", async () => {
+    const ssh = new FakeSshHost({ handoffDataTampered: true });
+    const provisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("dddddddddddddddddddddddddddddddd")
+        .mockReturnValueOnce("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+
+    const failure = await captureFailure(provisioner.createOperator(createOperatorInput()));
+
+    const recoveryPath = `${deploymentRoot}/operator-export/operator-dddddddddddddddddddddddddddddddd.cfg`;
+    expect(failure).toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({
+      code: "operator-config-invalid",
+      hostKeySha256,
+      mutationState: "created",
+      remoteRecoveryPath: recoveryPath,
+    });
+    expect(ssh.lastReadBuffer).toBeDefined();
+    expect(ssh.lastReadBuffer?.every((value) => value === 0)).toBe(true);
+    expect(ssh.files.has(recoveryPath)).toBe(true);
+    expect([...ssh.files.keys()].filter((path) => path.startsWith("/tmp/"))).toEqual([]);
+  });
+
+  it("surfaces the temporary path when a timed-out handoff cannot be cleaned up", async () => {
+    const ssh = new FakeSshHost({
+      failPrivilegedHandoffCleanup: true,
+      hangHandoffRead: true,
+    });
+    const provisioner = new SliverProvisioner({
+      createSshClient: () => ssh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("dddddddddddddddddddddddddddddddd")
+        .mockReturnValueOnce("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 10,
+    });
+
+    const failure = await captureFailure(provisioner.createOperator(createOperatorInput()));
+
+    const recoveryPath = `${deploymentRoot}/operator-export/operator-dddddddddddddddddddddddddddddddd.cfg`;
+    const handoffPath = `/tmp/.sliver-gui-${deploymentId}-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.operator.cfg`;
+    expect(failure).toBeInstanceOf(SliverOperatorCreationError);
+    expect(failure).toMatchObject({
+      code: "remote-transfer-timeout",
+      hostKeySha256,
+      mutationState: "created",
+      remoteRecoveryPath: recoveryPath,
+      remoteHandoffCandidatePath: handoffPath,
+    });
+    expect(ssh.destroyed).toBe(true);
+    expect(ssh.sftpEnded).toBe(true);
+    expect(ssh.files.has(recoveryPath)).toBe(true);
+    expect([...ssh.files.keys()].filter((path) => path.startsWith("/tmp/"))).toEqual([handoffPath]);
+    expect(ssh.lastReadBuffer?.every((value) => value === 0)).toBe(true);
+
+    ssh.releasePendingRead();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ssh.lastReadBuffer?.every((value) => value === 0)).toBe(true);
+  });
+
+  it("rejects non-direct-mTLS operator configs and bounds the SFTP read", async () => {
+    const nonMtlsSsh = new FakeSshHost({ operatorConfigOverrides: { wg: { server_public_key: "wg-key" } } });
+    const nonMtlsProvisioner = new SliverProvisioner({
+      createSshClient: () => nonMtlsSsh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("dddddddddddddddddddddddddddddddd")
+        .mockReturnValueOnce("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+    });
+
+    const nonMtlsFailure = await captureFailure(nonMtlsProvisioner.createOperator(createOperatorInput()));
+
+    expect(nonMtlsFailure).toMatchObject({
+      code: "operator-config-invalid",
+      hostKeySha256,
+      mutationState: "created",
+    });
+    expect(nonMtlsSsh.lastReadBuffer?.every((value) => value === 0)).toBe(true);
+
+    const oversizedSsh = new FakeSshHost();
+    const boundedProvisioner = new SliverProvisioner({
+      createSshClient: () => oversizedSsh.asClient(),
+      createNonce: vi.fn()
+        .mockReturnValueOnce("ffffffffffffffffffffffffffffffff")
+        .mockReturnValueOnce("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+      wait: async () => undefined,
+      connectTimeoutMs: 100,
+      commandTimeoutMs: 100,
+      transferTimeoutMs: 100,
+      operatorConfigLimitBytes: 64,
+    });
+
+    const oversizedFailure = await captureFailure(boundedProvisioner.createOperator(createOperatorInput()));
+
+    expect(oversizedFailure).toMatchObject({
+      code: "operator-config-invalid",
+      hostKeySha256,
+      mutationState: "created",
+    });
+    expect(oversizedFailure).toBeInstanceOf(SliverOperatorCreationError);
+    expect((oversizedFailure as SliverOperatorCreationError).remoteHandoffCandidatePath).toBeUndefined();
+    expect(oversizedSsh.lastReadBuffer).toBeUndefined();
+    expect([...oversizedSsh.files.keys()].filter((path) => path.startsWith("/tmp/"))).toEqual([]);
+    expect(oversizedSsh.files.has(
+      `${deploymentRoot}/operator-export/operator-ffffffffffffffffffffffffffffffff.cfg`,
+    )).toBe(true);
+  });
 });
 
 function provisionInput(pinnedHostKey: string) {
@@ -1054,6 +1508,23 @@ function provisionInput(pinnedHostKey: string) {
       username: "ubuntu",
       privateKey: Buffer.from("private SSH key that must not leak", "utf8"),
       hostKeySha256: pinnedHostKey,
+    },
+  } as const;
+}
+
+function createOperatorInput() {
+  return {
+    deploymentId,
+    operatorEndpointHost: "server.example.test",
+    multiplayerPort: 44_331,
+    operatorName: "secondoperator",
+    permissions: "builder",
+    assertOperatorNameAvailable: async () => undefined,
+    ssh: {
+      host: "192.0.2.10",
+      username: "ubuntu",
+      privateKey: Buffer.from("private SSH key that must not leak", "utf8"),
+      hostKeySha256,
     },
   } as const;
 }
@@ -1080,6 +1551,7 @@ interface FakeSshHostOptions {
   readonly architecture?: "x86_64" | "aarch64";
   readonly cloudInitPresent?: boolean;
   readonly failHandoffRead?: boolean;
+  readonly failPrivilegedHandoffCleanup?: boolean;
   readonly generateOperatorConfig?: boolean;
   readonly handoffDataTampered?: boolean;
   readonly handoffGid?: number;
@@ -1088,6 +1560,7 @@ interface FakeSshHostOptions {
   readonly hangHandoffRead?: boolean;
   readonly hangCloudInit?: boolean;
   readonly hangSftpClose?: boolean;
+  readonly hangSftpOpen?: boolean;
   readonly hangSftpUnlink?: boolean;
   readonly hangUnitWrite?: boolean;
   readonly activeSwapPaths?: readonly string[];
@@ -1113,6 +1586,7 @@ interface FakeSshHostOptions {
   readonly swaponSucceedsWithoutActivation?: boolean;
   readonly activeSwapKiB?: number;
   readonly operatorStdout?: string;
+  readonly operatorConfigOverrides?: Readonly<Record<string, unknown>>;
   readonly remoteGid?: number;
   readonly remoteUid?: number;
   readonly swaponFailureActivates?: boolean;
@@ -1121,12 +1595,14 @@ interface FakeSshHostOptions {
 
 class FakeSshHost extends EventEmitter {
   readonly files = new Map<string, FakeRemoteFile>();
+  readonly directories = new Set<string>();
   readonly commands: string[] = [];
   readonly sftpReadPaths: string[] = [];
   readonly hostKey = hostKey;
   readonly architecture: "x86_64" | "aarch64";
   readonly cloudInitPresent: boolean;
   readonly failHandoffRead: boolean;
+  readonly failPrivilegedHandoffCleanup: boolean;
   readonly generateOperatorConfig: boolean;
   readonly handoffDataTampered: boolean;
   readonly handoffGid: number | undefined;
@@ -1135,10 +1611,12 @@ class FakeSshHost extends EventEmitter {
   readonly hangHandoffRead: boolean;
   readonly hangCloudInit: boolean;
   readonly hangSftpClose: boolean;
+  readonly hangSftpOpen: boolean;
   readonly hangSftpUnlink: boolean;
   readonly hangUnitWrite: boolean;
   readonly unameOutput: string;
   readonly operatorStdout: string;
+  readonly operatorConfigOverrides: Readonly<Record<string, unknown>>;
   readonly installerDigest: string;
   readonly installerExitCode: number;
   readonly installerStdout: string;
@@ -1181,6 +1659,7 @@ class FakeSshHost extends EventEmitter {
     this.architecture = options.architecture ?? "x86_64";
     this.cloudInitPresent = options.cloudInitPresent ?? true;
     this.failHandoffRead = options.failHandoffRead ?? false;
+    this.failPrivilegedHandoffCleanup = options.failPrivilegedHandoffCleanup ?? false;
     this.generateOperatorConfig = options.generateOperatorConfig ?? true;
     this.handoffDataTampered = options.handoffDataTampered ?? false;
     this.handoffGid = options.handoffGid;
@@ -1189,10 +1668,12 @@ class FakeSshHost extends EventEmitter {
     this.hangHandoffRead = options.hangHandoffRead ?? false;
     this.hangCloudInit = options.hangCloudInit ?? false;
     this.hangSftpClose = options.hangSftpClose ?? false;
+    this.hangSftpOpen = options.hangSftpOpen ?? false;
     this.hangSftpUnlink = options.hangSftpUnlink ?? false;
     this.hangUnitWrite = options.hangUnitWrite ?? false;
     this.unameOutput = options.unameOutput ?? "Linux";
     this.operatorStdout = options.operatorStdout ?? "";
+    this.operatorConfigOverrides = options.operatorConfigOverrides ?? {};
     this.installerDigest = options.installerDigest ?? officialInstallerSha256;
     this.installerExitCode = options.installerExitCode ?? 0;
     this.installerStdout = options.installerStdout ?? "";
@@ -1260,7 +1741,7 @@ class FakeSshHost extends EventEmitter {
 
   sftp(callback: (error: Error | undefined, sftp: SFTPWrapper) => void): this {
     this.sftpCalls += 1;
-    queueMicrotask(() => callback(undefined, this.sftpObject()));
+    if (!this.hangSftpOpen) queueMicrotask(() => callback(undefined, this.sftpObject()));
     return this;
   }
 
@@ -1315,6 +1796,31 @@ class FakeSshHost extends EventEmitter {
     }
     if (shellScript?.includes("command -v minisign")) {
       return stdout(this.minisignPresent ? "present" : "absent");
+    }
+    if (args.includes("sliver-gui-operator-lock-read")) {
+      const markerIndex = args.indexOf("sliver-gui-operator-lock-read");
+      const path = args[markerIndex + 1] ?? "";
+      return stdout(`${this.directories.has(path) ? "exists" : "missing"}\n${["recovery-path", "request-sha256", "state"]
+        .map((name) => this.files.get(`${path}/${name}`)?.data.toString("utf8") ?? "absent\n")
+        .join("")}`);
+    }
+    if (args.includes("sliver-gui-operator-lock")) {
+      const markerIndex = args.indexOf("sliver-gui-operator-lock");
+      const path = args[markerIndex + 1] ?? "";
+      const recoveryPath = args[markerIndex + 2] ?? "";
+      const requestSha256 = args[markerIndex + 3] ?? "";
+      if (this.directories.has(path)) return stdout("exists");
+      this.directories.add(path);
+      this.files.set(`${path}/recovery-path`, remoteFile(Buffer.from(`${recoveryPath}\n`, "utf8"), 0o600, 0));
+      this.files.set(`${path}/request-sha256`, remoteFile(Buffer.from(`${requestSha256}\n`, "utf8"), 0o600, 0));
+      this.files.set(`${path}/state`, remoteFile(Buffer.from("reserved\n", "utf8"), 0o600, 0));
+      return stdout("created");
+    }
+    if (args.includes("sliver-gui-operator-lock-created")) {
+      const markerIndex = args.indexOf("sliver-gui-operator-lock-created");
+      const path = args[markerIndex + 1] ?? "";
+      this.files.set(`${path}/state`, remoteFile(Buffer.from("created\n", "utf8"), 0o600, 0));
+      return stdout();
     }
     if (args.includes("sliver-gui-managed-swap")) {
       if (this.failSwapCommand === "persist") {
@@ -1514,6 +2020,9 @@ class FakeSshHost extends EventEmitter {
     const rmIndex = args.indexOf("rm");
     if (rmIndex >= 0 && args[rmIndex + 1] === "-f") {
       const path = args.at(-1) ?? "";
+      if (this.failPrivilegedHandoffCleanup && path.endsWith(".operator.cfg")) {
+        return { stdout: Buffer.alloc(0), stderr: Buffer.from("cleanup failed"), exitCode: 1 };
+      }
       this.files.delete(path);
       this.swapFileSizes.delete(path);
       return stdout();
@@ -1537,6 +2046,7 @@ class FakeSshHost extends EventEmitter {
           ca_certificate: "ca-certificate",
           certificate: "operator-certificate",
           private_key: "private-key-material",
+          ...this.operatorConfigOverrides,
         }));
         this.files.set(savePath, remoteFile(config, 0o600, 0));
       }

@@ -84,6 +84,21 @@ export interface ProvisionSliverServerInput {
   readonly onOutput?: SliverProvisionOutputHandler;
 }
 
+export interface CreateSliverOperatorInput {
+  readonly deploymentId: string;
+  /** Stable address written into the generated operator configuration. */
+  readonly operatorEndpointHost: string;
+  readonly multiplayerPort?: number;
+  readonly operatorName: string;
+  readonly permissions: SliverOperatorPermission;
+  /** Main-process duplicate-name check that must complete before mutation. */
+  readonly assertOperatorNameAvailable: () => Promise<void>;
+  /** Operator creation is allowed only through an already-pinned SSH target. */
+  readonly ssh: SliverProvisionSshTarget & { readonly hostKeySha256: string };
+}
+
+export type SliverOperatorPermission = "all" | "builder" | "crackstation";
+
 export type SliverProvisionOutputEvent =
   | { readonly type: "stage"; readonly label: string }
   | { readonly type: "stdout"; readonly chunk: Uint8Array };
@@ -117,6 +132,19 @@ export interface SliverProvisionResult {
   readonly operatorConfigSha256: string;
 }
 
+export interface SliverOperatorConfigResult {
+  readonly deploymentId: string;
+  readonly operatorName: string;
+  readonly operatorEndpointHost: string;
+  readonly multiplayerPort: number;
+  readonly permissions: SliverOperatorPermission;
+  readonly hostKeySha256: string;
+  readonly operatorConfig: Buffer;
+  readonly operatorConfigSha256: string;
+  /** Root-owned 0600 recovery copy retained on the managed server. */
+  readonly remoteRecoveryPath: string;
+}
+
 export type SliverProvisionErrorCode =
   | "invalid-input"
   | "host-key-mismatch"
@@ -142,6 +170,35 @@ export class SliverProvisionError extends Error {
     this.name = "SliverProvisionError";
     this.code = code;
     if (hostKeySha256 !== undefined) this.hostKeySha256 = hostKeySha256;
+  }
+}
+
+export type SliverOperatorMutationState = "not-started" | "unknown" | "created";
+
+export class SliverOperatorCreationError extends SliverProvisionError {
+  readonly mutationState: SliverOperatorMutationState;
+  readonly remoteRecoveryPath?: string;
+  readonly remoteRecoveryCandidatePath?: string;
+  readonly remoteHandoffCandidatePath?: string;
+
+  constructor(
+    code: SliverProvisionErrorCode,
+    message: string,
+    mutationState: SliverOperatorMutationState,
+    hostKeySha256?: string,
+    remoteRecoveryPath?: string,
+    remoteHandoffCandidatePath?: string,
+  ) {
+    super(code, message, hostKeySha256);
+    this.name = "SliverOperatorCreationError";
+    this.mutationState = mutationState;
+    if (remoteRecoveryPath !== undefined) {
+      if (mutationState === "created") this.remoteRecoveryPath = remoteRecoveryPath;
+      else if (mutationState === "unknown") this.remoteRecoveryCandidatePath = remoteRecoveryPath;
+    }
+    if (remoteHandoffCandidatePath !== undefined) {
+      this.remoteHandoffCandidatePath = remoteHandoffCandidatePath;
+    }
   }
 }
 
@@ -174,6 +231,13 @@ interface NumericIdentity {
 
 interface ManagedSwapMetadata {
   readonly sizeBytes: number;
+}
+
+interface OperatorCreationLockMetadata {
+  readonly exists: boolean;
+  readonly recoveryPath?: string;
+  readonly requestSha256?: string;
+  readonly state?: "reserved" | "created";
 }
 
 export class SliverProvisioner {
@@ -213,6 +277,375 @@ export class SliverProvisioner {
     this.transferTimeoutMs = boundedInteger(options.transferTimeoutMs ?? DEFAULT_TRANSFER_TIMEOUT_MS, 10, 60 * 60_000, "transfer timeout");
     this.outputLimitBytes = boundedInteger(options.outputLimitBytes ?? DEFAULT_OUTPUT_LIMIT_BYTES, 64, 1024 * 1024, "output limit");
     this.operatorConfigLimitBytes = boundedInteger(options.operatorConfigLimitBytes ?? DEFAULT_CONFIG_LIMIT_BYTES, 64, 16 * 1024 * 1024, "operator config limit");
+  }
+
+  async createOperator(input: CreateSliverOperatorInput): Promise<SliverOperatorConfigResult> {
+    if (typeof input.operatorName !== "string") invalidInput("An operator name is required");
+    if (input.ssh.hostKeySha256 === undefined) {
+      invalidInput("A pinned SSH host-key fingerprint is required");
+    }
+    const normalized = normalizeOperatorInput(input);
+    const paths = deploymentPaths(normalized.deploymentId);
+    let remoteRecoveryPath = `${paths.exportRoot}/operator-${safeNonce(this.createNonce())}.cfg`;
+    const remoteCreationLockPath = `${paths.exportRoot}/operator-lock-${createHash("sha256")
+      .update(normalized.operatorName, "utf8")
+      .digest("hex")}`;
+    const creationRequestSha256 = operatorCreationRequestSha256(normalized);
+    let connected: ConnectedSsh | undefined;
+    let sftp: SFTPWrapper | undefined;
+    let operatorConfig: Buffer | undefined;
+    let mutationState: SliverOperatorMutationState = "not-started";
+    let remoteRecoveryCandidatePath: string | undefined;
+    let remoteHandoffCandidatePath: string | undefined;
+    let pendingFailure: SliverProvisionError | undefined;
+    let pendingFailureHostKeySha256: string | undefined;
+    let transferTerminated = false;
+    const remoteTemporaryPaths = new Set<string>();
+    const privilegedTemporaryPaths = new Set<string>();
+    const markTemporaryPathRemoved = (path: string): void => {
+      remoteTemporaryPaths.delete(path);
+      privilegedTemporaryPaths.delete(path);
+      if (remoteHandoffCandidatePath === path) remoteHandoffCandidatePath = undefined;
+    };
+    const terminateTransfer = (): void => {
+      if (transferTerminated) return;
+      transferTerminated = true;
+      endSftpSafely(sftp);
+      try {
+        connected?.client.destroy();
+      } catch {
+        // The transfer timeout remains the authoritative failure.
+      }
+    };
+
+    try {
+      connected = await this.connect(normalized.ssh);
+      sftp = await withTimeout(
+        openSftp(connected.client),
+        this.transferTimeoutMs,
+        "remote-transfer-timeout",
+        "Opening the SSH file-transfer channel timed out",
+        {
+          onTimeout: terminateTransfer,
+          disposeLateValue: endSftpSafely,
+        },
+      );
+
+      let metadata = await this.readOperatorCreationLockMetadata(
+        connected.client,
+        normalized.ssh.username,
+        remoteCreationLockPath,
+        normalized.deploymentId,
+      );
+      let createOperator = false;
+      if (!metadata.exists) {
+        if (await this.privateRootFileExists(
+          connected.client,
+          normalized.ssh.username,
+          remoteRecoveryPath,
+        )) {
+          throw new SliverProvisionError(
+            "provisioning-failed",
+            "Could not reserve a unique Sliver operator recovery path",
+          );
+        }
+
+        // This main-process check is deliberately the final read-only step.
+        // A resumable marker bypasses it, while a fresh creation must prove the
+        // requested name is absent immediately before reserving the mutation.
+        await normalized.assertOperatorNameAvailable();
+        // The reservation command itself can complete remotely even when the
+        // SSH response is lost, so every outcome from this point requires
+        // explicit reconciliation before another creation attempt.
+        mutationState = "unknown";
+        remoteRecoveryCandidatePath = remoteRecoveryPath;
+        const creationLockState = await this.reserveOperatorCreationLock(
+          connected.client,
+          normalized.ssh.username,
+          remoteCreationLockPath,
+          remoteRecoveryPath,
+          creationRequestSha256,
+        );
+        if (creationLockState === "created") {
+          createOperator = true;
+        } else {
+          // Another process won the reservation race after the preflight. Do
+          // not run the mutating CLI; reconcile the marker it created instead.
+          remoteRecoveryCandidatePath = undefined;
+          metadata = await this.readOperatorCreationLockMetadata(
+            connected.client,
+            normalized.ssh.username,
+            remoteCreationLockPath,
+            normalized.deploymentId,
+          ).catch(() => ({ exists: true }));
+        }
+      } else {
+        mutationState = "unknown";
+      }
+      if (!createOperator) {
+        remoteRecoveryCandidatePath = metadata?.recoveryPath;
+        const requestMatches = metadata?.requestSha256 !== undefined &&
+          constantTimeEqual(metadata.requestSha256, creationRequestSha256);
+        const recoveryExists = metadata?.recoveryPath !== undefined &&
+          requestMatches &&
+          metadata.state !== undefined &&
+          await this.privateRootFileExists(
+            connected.client,
+            normalized.ssh.username,
+            metadata.recoveryPath,
+          ).catch(() => false);
+        if (!recoveryExists || metadata?.recoveryPath === undefined) {
+          throw new SliverProvisionError(
+            "operator-outcome-unknown",
+            `An operator creation with this name was already attempted. Reconcile the managed server before retrying; remove the recovery marker at ${remoteCreationLockPath} only after confirming no operator exists.`,
+          );
+        }
+        // The request identity (including permissions) matches, and the
+        // canonical recovery config exists. Resume the non-mutating handoff
+        // instead of invoking Sliver's operator command a second time.
+        remoteRecoveryPath = metadata.recoveryPath;
+        mutationState = "created";
+      }
+      remoteRecoveryCandidatePath = remoteRecoveryPath;
+
+      if (createOperator) {
+        // Sliver may persist the operator before it writes the configuration or
+        // reports a failure. From this point onward the mutation is not safely
+        // retryable until the server-side operator list is reconciled.
+        try {
+          await this.execQuiet(
+            connected.client,
+            "generating the Sliver operator configuration",
+            privileged(normalized.ssh.username, [
+              "env",
+              `SLIVER_ROOT_DIR=${paths.serverRoot}`,
+              `SLIVER_CLIENT_ROOT_DIR=${paths.clientRoot}`,
+              paths.binaryPath,
+              "operator",
+              "--name", normalized.operatorName,
+              "--lhost", normalized.operatorEndpointHost,
+              "--lport", String(normalized.multiplayerPort),
+              "--permissions", normalized.permissions,
+              "--save", remoteRecoveryPath,
+            ]),
+            this.commandTimeoutMs,
+            undefined,
+            false,
+          );
+        } catch {
+          // Sliver persists an operator before saving its profile, and some CLI
+          // failures still exit zero. Never retry after invocation unless a
+          // human first reconciles the server-side operator record.
+          if (!(await this.privateRootFileExists(
+            connected.client,
+            normalized.ssh.username,
+            remoteRecoveryPath,
+          ).catch(() => false))) {
+            throw new SliverProvisionError(
+              "operator-outcome-unknown",
+              "The operator command outcome is unknown; refusing an automatic retry",
+            );
+          }
+        }
+        if (!(await this.privateRootFileExists(
+          connected.client,
+          normalized.ssh.username,
+          remoteRecoveryPath,
+        ).catch(() => false))) {
+          throw new SliverProvisionError(
+            "operator-outcome-unknown",
+            "Sliver did not produce an operator configuration; refusing an automatic retry",
+          );
+        }
+        mutationState = "created";
+      }
+      await this.markOperatorCreationLockCreated(
+        connected.client,
+        normalized.ssh.username,
+        remoteCreationLockPath,
+      );
+
+      await this.execQuiet(
+        connected.client,
+        "securing the Sliver operator recovery configuration",
+        privileged(normalized.ssh.username, [
+          "chown", "--no-dereference", "--", "root:root", remoteRecoveryPath,
+        ]),
+      );
+      await this.execQuiet(
+        connected.client,
+        "setting private Sliver operator recovery permissions",
+        privileged(normalized.ssh.username, ["chmod", "0600", "--", remoteRecoveryPath]),
+      );
+
+      const handoffIdentity = await this.resolveNumericIdentity(
+        connected.client,
+        normalized.ssh.username,
+      );
+      const canonicalOperatorConfigSha256 = await this.readRemoteSha256(
+        connected.client,
+        remoteRecoveryPath,
+        normalized.ssh.username,
+        "hashing the canonical Sliver operator configuration",
+      );
+      const operatorHandoffPath = `/tmp/.sliver-gui-${normalized.deploymentId}-${safeNonce(this.createNonce())}.operator.cfg`;
+      remoteHandoffCandidatePath = operatorHandoffPath;
+      remoteTemporaryPaths.add(operatorHandoffPath);
+      privilegedTemporaryPaths.add(operatorHandoffPath);
+      await this.execQuiet(
+        connected.client,
+        "preparing the private operator configuration handoff",
+        privileged(normalized.ssh.username, [
+          "install", "-m", "0600", "-o", String(handoffIdentity.uid), "-g", String(handoffIdentity.gid),
+          remoteRecoveryPath, operatorHandoffPath,
+        ]),
+      );
+
+      const readController = new AbortController();
+      operatorConfig = await withTimeout(
+        readRemotePrivateFile(
+          sftp,
+          operatorHandoffPath,
+          this.operatorConfigLimitBytes,
+          handoffIdentity,
+          readController.signal,
+        ),
+        this.transferTimeoutMs,
+        "remote-transfer-timeout",
+        "Retrieving the Sliver operator configuration timed out",
+        {
+          onTimeout: () => {
+            readController.abort();
+            terminateTransfer();
+          },
+          disposeLateValue: (lateConfig) => lateConfig.fill(0),
+        },
+      );
+      await withTimeout(
+        unlinkRemote(sftp, operatorHandoffPath),
+        this.transferTimeoutMs,
+        "remote-transfer-timeout",
+        "Removing the operator configuration handoff timed out",
+        { onTimeout: terminateTransfer },
+      );
+      remoteTemporaryPaths.delete(operatorHandoffPath);
+      privilegedTemporaryPaths.delete(operatorHandoffPath);
+      remoteHandoffCandidatePath = undefined;
+
+      const operatorConfigSha256 = createHash("sha256").update(operatorConfig).digest("hex");
+      if (!constantTimeEqual(operatorConfigSha256, canonicalOperatorConfigSha256)) {
+        throw new SliverProvisionError(
+          "operator-config-invalid",
+          "The retrieved Sliver operator configuration did not match the canonical remote configuration",
+        );
+      }
+      validateOperatorConfig(operatorConfig, {
+        operator: normalized.operatorName,
+        lhost: normalized.operatorEndpointHost,
+        lport: normalized.multiplayerPort,
+      });
+
+      const result: SliverOperatorConfigResult = {
+        deploymentId: normalized.deploymentId,
+        operatorName: normalized.operatorName,
+        operatorEndpointHost: normalized.operatorEndpointHost,
+        multiplayerPort: normalized.multiplayerPort,
+        permissions: normalized.permissions,
+        hostKeySha256: connected.hostKeySha256,
+        operatorConfig,
+        operatorConfigSha256,
+        remoteRecoveryPath,
+      };
+      operatorConfig = undefined;
+      return result;
+    } catch (error) {
+      pendingFailure = error instanceof SliverProvisionError
+        ? error
+        : new SliverProvisionError(
+            "provisioning-failed",
+            "An unexpected error interrupted Sliver operator creation",
+          );
+      pendingFailureHostKeySha256 = pendingFailure.hostKeySha256 ?? connected?.hostKeySha256;
+    } finally {
+      operatorConfig?.fill(0);
+      if (connected && !transferTerminated) {
+        await Promise.all([...privilegedTemporaryPaths].map(async (path) => {
+          try {
+            await this.removePrivilegedTemporaryPath(
+              connected!.client,
+              normalized.ssh.username,
+              path,
+              undefined,
+            );
+            markTemporaryPathRemoved(path);
+          } catch {
+            // The SFTP cleanup below may still remove the handoff.
+          }
+        }));
+      }
+      if (transferTerminated && privilegedTemporaryPaths.size > 0) {
+        let cleanupConnection: ConnectedSsh | undefined;
+        try {
+          // A timed-out SFTP channel forces the original transport closed. Use
+          // a fresh connection with the same pinned host key so a 0600 handoff
+          // containing full operator credentials is not abandoned in /tmp.
+          cleanupConnection = await this.connect(normalized.ssh);
+          await Promise.all([...privilegedTemporaryPaths].map(async (path) => {
+            try {
+              await this.removePrivilegedTemporaryPath(
+                cleanupConnection!.client,
+                normalized.ssh.username,
+                path,
+                undefined,
+              );
+              markTemporaryPathRemoved(path);
+            } catch {
+              // Keep the path in the structured recovery error.
+            }
+          }));
+        } catch {
+          // Preserve the primary mutation/recovery error. The randomized path
+          // is still tracked in the error state for explicit reconciliation.
+        } finally {
+          cleanupConnection?.client.end();
+        }
+      }
+      if (sftp && !transferTerminated) {
+        await withTimeout(
+          Promise.all([...remoteTemporaryPaths].map(async (path) => {
+            try {
+              await unlinkRemote(sftp!, path);
+              markTemporaryPathRemoved(path);
+            } catch {
+              // Keep the path in the structured recovery error.
+            }
+          })),
+          Math.min(this.transferTimeoutMs, DEFAULT_SFTP_CLEANUP_TIMEOUT_MS),
+          "remote-transfer-timeout",
+          "Cleaning up the temporary operator handoff timed out",
+          { onTimeout: terminateTransfer },
+        ).catch(() => undefined);
+        endSftpSafely(sftp);
+      }
+      connected?.client.end();
+    }
+
+    const failure = pendingFailure ?? new SliverProvisionError(
+      "provisioning-failed",
+      "An unexpected error interrupted Sliver operator creation",
+    );
+    if (mutationState !== "not-started") {
+      throw new SliverOperatorCreationError(
+        failure.code,
+        failure.message,
+        mutationState,
+        pendingFailureHostKeySha256,
+        mutationState === "created" ? remoteRecoveryPath : remoteRecoveryCandidatePath,
+        remoteHandoffCandidatePath,
+      );
+    }
+    if (failure.hostKeySha256 !== undefined || pendingFailureHostKeySha256 === undefined) throw failure;
+    throw new SliverProvisionError(failure.code, failure.message, pendingFailureHostKeySha256);
   }
 
   async provision(input: ProvisionSliverServerInput): Promise<SliverProvisionResult> {
@@ -1426,6 +1859,94 @@ export class SliverProvisioner {
     throw new SliverProvisionError("remote-command-failed", "Could not inspect the private operator configuration");
   }
 
+  private async reserveOperatorCreationLock(
+    client: Client,
+    username: string,
+    path: string,
+    remoteRecoveryPath: string,
+    requestSha256: string,
+  ): Promise<"created" | "exists"> {
+    const result = await this.execChecked(
+      client,
+      "reserving the Sliver operator name",
+      privileged(username, [
+        "sh",
+        "-c",
+        "umask 077; if mkdir -- \"$1\"; then printf '%s\\n' \"$2\" > \"$1/recovery-path\" && printf '%s\\n' \"$3\" > \"$1/request-sha256\" && printf 'reserved\\n' > \"$1/state\" && chmod 0700 -- \"$1\" && chmod 0600 -- \"$1/recovery-path\" \"$1/request-sha256\" \"$1/state\" && printf created; elif test -d \"$1\" && test ! -L \"$1\"; then printf exists; else exit 1; fi",
+        "sliver-gui-operator-lock",
+        path,
+        remoteRecoveryPath,
+        requestSha256,
+      ]),
+      this.commandTimeoutMs,
+      undefined,
+      false,
+    );
+    const state = consumeText(result.stdout);
+    if (state === "created" || state === "exists") return state;
+    throw new SliverProvisionError(
+      "remote-command-failed",
+      "Could not reserve the managed operator name",
+    );
+  }
+
+  private async readOperatorCreationLockMetadata(
+    client: Client,
+    username: string,
+    path: string,
+    deploymentId: string,
+  ): Promise<OperatorCreationLockMetadata> {
+    const result = await this.execChecked(
+      client,
+      "reading the Sliver operator recovery marker",
+      privileged(username, [
+        "sh",
+        "-c",
+        "if test -d \"$1\" && test ! -L \"$1\"; then printf 'exists\\n'; else printf 'missing\\n'; fi; for name in recovery-path request-sha256 state; do if test -f \"$1/$name\" && test ! -L \"$1/$name\"; then cat -- \"$1/$name\"; else printf 'absent\\n'; fi; done",
+        "sliver-gui-operator-lock-read",
+        path,
+      ]),
+      this.commandTimeoutMs,
+      undefined,
+      false,
+    );
+    const [availability, recoveryPath, requestSha256, state, ...extra] = consumeText(result.stdout).split("\n");
+    if (extra.length > 0 || (availability !== "exists" && availability !== "missing")) {
+      return { exists: true };
+    }
+    return {
+      exists: availability === "exists",
+      ...(recoveryPath !== undefined && isManagedOperatorRecoveryPath(deploymentId, recoveryPath)
+        ? { recoveryPath }
+        : {}),
+      ...(requestSha256 !== undefined && /^[0-9a-f]{64}$/u.test(requestSha256)
+        ? { requestSha256 }
+        : {}),
+      ...(state === "reserved" || state === "created" ? { state } : {}),
+    };
+  }
+
+  private async markOperatorCreationLockCreated(
+    client: Client,
+    username: string,
+    path: string,
+  ): Promise<void> {
+    await this.execQuiet(
+      client,
+      "recording the completed Sliver operator creation",
+      privileged(username, [
+        "sh",
+        "-c",
+        "umask 077; temporary=\"$1/.state.$$\"; trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; printf 'created\\n' > \"$temporary\" && chmod 0600 -- \"$temporary\" && mv -f -- \"$temporary\" \"$1/state\"; status=$?; rm -f -- \"$temporary\"; trap - EXIT HUP INT TERM; exit \"$status\"",
+        "sliver-gui-operator-lock-created",
+        path,
+      ]),
+      this.commandTimeoutMs,
+      undefined,
+      false,
+    );
+  }
+
   private async assertRemoteSha256(
     client: Client,
     path: string,
@@ -1579,6 +2100,11 @@ interface NormalizedInput {
   readonly onOutput?: SliverProvisionOutputHandler;
 }
 
+interface NormalizedOperatorInput extends NormalizedInput {
+  readonly permissions: SliverOperatorPermission;
+  readonly assertOperatorNameAvailable: () => Promise<void>;
+}
+
 interface RequiredNormalizedSshTarget {
   readonly host: string;
   readonly port: number;
@@ -1590,6 +2116,32 @@ interface RequiredNormalizedSshTarget {
 }
 
 type RequiredNormalizedInput = NormalizedInput;
+
+function normalizeOperatorInput(input: CreateSliverOperatorInput): NormalizedOperatorInput {
+  const normalized = normalizeInput(input);
+  if (typeof input.assertOperatorNameAvailable !== "function") {
+    invalidInput("An operator availability check is required");
+  }
+  if (
+    input.permissions !== "all" &&
+    input.permissions !== "builder" &&
+    input.permissions !== "crackstation"
+  ) invalidInput("The operator permissions are invalid");
+  return {
+    ...normalized,
+    permissions: input.permissions,
+    assertOperatorNameAvailable: input.assertOperatorNameAvailable,
+  };
+}
+
+function operatorCreationRequestSha256(input: NormalizedOperatorInput): string {
+  return createHash("sha256").update(JSON.stringify([
+    input.operatorName,
+    input.operatorEndpointHost,
+    input.multiplayerPort,
+    input.permissions,
+  ])).digest("hex");
+}
 
 function normalizeInput(input: ProvisionSliverServerInput): NormalizedInput {
   const deploymentId = input.deploymentId.toLowerCase();
@@ -1643,6 +2195,11 @@ function deploymentPaths(deploymentId: string): ProvisioningPaths {
     serviceName,
     servicePath: `/etc/systemd/system/${serviceName}`,
   };
+}
+
+function isManagedOperatorRecoveryPath(deploymentId: string, value: string): boolean {
+  const prefix = `/var/lib/sliver-gui/${deploymentId}/operator-export/operator-`;
+  return value.startsWith(prefix) && /^[0-9a-f]{16,64}\.cfg$/u.test(value.slice(prefix.length));
 }
 
 function systemdUnit(paths: ProvisioningPaths, multiplayerPort: number): string {

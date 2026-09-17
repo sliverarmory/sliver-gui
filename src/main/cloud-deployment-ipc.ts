@@ -1,6 +1,9 @@
+import { basename } from "node:path";
+
 import {
   BrowserWindow,
   clipboard,
+  dialog,
   ipcMain,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -10,6 +13,8 @@ import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
   type CloudCredentialIdInput,
   type CloudCredentialTestResult,
+  type CloudOperatorPermission,
+  type CreateCloudOperatorConfigInput,
   type CloudDeploymentSnapshot,
   type CloudDeploymentRefreshResult,
   type CopyCloudInstanceIdInput,
@@ -20,6 +25,8 @@ import {
   type ExecuteDestroyCloudDeploymentInput,
   type PrepareDestroyCloudDeploymentInput,
   type SshPrivateKeySelection,
+  type SaveCloudOperatorConfigResult,
+  parseCreateCloudOperatorConfigInput,
 } from "../shared/cloud-deployment-ipc.js";
 import {
   isUuidV4,
@@ -64,9 +71,35 @@ import {
   type DiscoverAzureOptionsInput,
 } from "../shared/cloud-provider-inventory.js";
 import { isSameRendererDocument } from "./security.js";
+import { writePrivateArtifactFileAtomic } from "./secure-file.js";
 import type { TrustedWindowIdentity } from "./ipc.js";
 
 type MaybePromise<T> = T | Promise<T>;
+
+const MAX_OPERATOR_CONFIG_BYTES = 4 * 1024 * 1024;
+
+export interface GeneratedCloudOperatorConfig {
+  readonly operatorName: string;
+  readonly publicIp: string;
+  readonly port: number;
+  readonly permissions: CloudOperatorPermission;
+  readonly data: Buffer;
+  readonly remoteRecoveryPath: string;
+}
+
+export type CloudOperatorMutationState = "not-started" | "unknown" | "created";
+
+export type GenerateCloudOperatorConfigResult =
+  | { readonly ok: true; readonly value: GeneratedCloudOperatorConfig; readonly error?: never }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly mutationState: CloudOperatorMutationState;
+      readonly remoteRecoveryPath?: string;
+      readonly remoteRecoveryCandidatePath?: string;
+      readonly remoteHandoffCandidatePath?: string;
+      readonly value?: never;
+    };
 
 export interface CloudDeploymentController {
   /** Main-only lookup of an active config's local deployment provenance. */
@@ -88,6 +121,9 @@ export interface CloudDeploymentController {
   discoverAzureAccounts(): MaybePromise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): MaybePromise<OperationResult<AzureDeploymentOptions>>;
   createDeployment(input: CreateCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
+  generateOperatorConfig(
+    input: CreateCloudOperatorConfigInput,
+  ): MaybePromise<GenerateCloudOperatorConfigResult>;
   runLifecycleAction(input: CloudDeploymentActionInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   listFirewallRules(input: ListCloudFirewallRulesInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
@@ -327,6 +363,143 @@ export function registerCloudDeploymentIpcHandlers(
     (_sender, input) => controller.createDeployment(input),
   );
   handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCreateCloudOperatorConfigInput(requireSingleArgument(args))),
+    async (cloudSender, input): Promise<OperationResult<SaveCloudOperatorConfigResult>> => {
+      const defaultFileName = `${input.operatorName}.cfg`;
+      let selection;
+      try {
+        selection = await dialog.showSaveDialog(cloudSender.window, {
+          title: `Save ${input.operatorName} operator config`,
+          defaultPath: defaultFileName,
+          filters: [{ name: "Sliver operator config", extensions: ["cfg"] }],
+        });
+      } catch {
+        return {
+          ok: true,
+          value: {
+            saved: false,
+            fileName: defaultFileName,
+            mutationState: "not-started",
+            error: "The operator configuration save dialog could not be opened",
+          },
+        };
+      }
+      requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+      if (selection.canceled || !selection.filePath) {
+        return {
+          ok: true,
+          value: { saved: false, fileName: defaultFileName, mutationState: "not-started" },
+        };
+      }
+
+      let generated: GenerateCloudOperatorConfigResult;
+      try {
+        generated = await controller.generateOperatorConfig(input);
+      } catch {
+        requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+        return {
+          ok: true,
+          value: postMutationSaveFailure(
+            defaultFileName,
+            "unknown",
+            "The operator request ended without a confirmed server outcome.",
+          ),
+        };
+      }
+      if (!generated.ok) {
+        requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+        if (generated.mutationState === "not-started") {
+          return {
+            ok: true,
+            value: {
+              saved: false,
+              fileName: defaultFileName,
+              mutationState: "not-started",
+              error: generated.error,
+            },
+          };
+        }
+        const remoteRecoveryPath = generated.mutationState === "created" &&
+            isManagedOperatorRecoveryPath(input.deploymentId, generated.remoteRecoveryPath)
+          ? generated.remoteRecoveryPath
+          : undefined;
+        const remoteRecoveryCandidatePath = generated.mutationState === "unknown" &&
+            isManagedOperatorRecoveryPath(input.deploymentId, generated.remoteRecoveryCandidatePath)
+          ? generated.remoteRecoveryCandidatePath
+          : undefined;
+        const remoteHandoffCandidatePath = isManagedOperatorHandoffPath(
+          input.deploymentId,
+          generated.remoteHandoffCandidatePath,
+        )
+          ? generated.remoteHandoffCandidatePath
+          : undefined;
+        return {
+          ok: true,
+          value: postMutationSaveFailure(
+            defaultFileName,
+            generated.mutationState,
+            generated.error,
+            remoteRecoveryPath,
+            remoteRecoveryCandidatePath,
+            remoteHandoffCandidatePath,
+          ),
+        };
+      }
+      const { data, remoteRecoveryPath } = generated.value;
+      const validRecoveryPath = isManagedOperatorRecoveryPath(input.deploymentId, remoteRecoveryPath);
+      try {
+        requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+        if (
+          generated.value.operatorName !== input.operatorName ||
+          generated.value.publicIp !== input.publicIp ||
+          generated.value.port !== input.port ||
+          generated.value.permissions !== input.permissions ||
+          !Buffer.isBuffer(data) ||
+          data.length < 1 ||
+          data.length > MAX_OPERATOR_CONFIG_BYTES ||
+          !validRecoveryPath
+        ) {
+          return {
+            ok: true,
+            value: postMutationSaveFailure(
+              defaultFileName,
+              "created",
+              "The generated operator configuration failed local verification.",
+              validRecoveryPath ? remoteRecoveryPath : undefined,
+            ),
+          };
+        }
+        await writePrivateArtifactFileAtomic(selection.filePath, data, () => {
+          requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+        });
+        return {
+          ok: true,
+          value: {
+            saved: true,
+            fileName: safeSavedFileName(selection.filePath, defaultFileName),
+            mutationState: "created",
+          },
+        };
+      } catch (error) {
+        if (error instanceof CloudSenderRevokedError) throw error;
+        return {
+          ok: true,
+          value: postMutationSaveFailure(
+            defaultFileName,
+            "created",
+            "The operator was created, but its configuration could not be saved at the selected location.",
+            validRecoveryPath ? remoteRecoveryPath : undefined,
+          ),
+        };
+      } finally {
+        if (Buffer.isBuffer(data)) data.fill(0);
+      }
+    },
+  );
+  handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.runLifecycleAction,
     exactRendererUrl,
     authorizeWindow,
@@ -491,12 +664,14 @@ interface CloudSender {
   readonly window: BrowserWindow;
 }
 
+class CloudSenderRevokedError extends Error {}
+
 function requireCurrentCloudSender(
   { identity, sender, window }: CloudSender,
   exactRendererUrl: string,
   authorizeWindow: CloudWindowAuthorizer,
 ): void {
-  if (sender.isDestroyed()) throw new Error("Untrusted cloud renderer");
+  if (sender.isDestroyed()) throw new CloudSenderRevokedError("Untrusted cloud renderer");
   const frame = sender.mainFrame;
   if (
     frame.isDestroyed() ||
@@ -505,7 +680,7 @@ function requireCurrentCloudSender(
     !isSameRendererDocument(sender.getURL(), exactRendererUrl) ||
     !isSameRendererDocument(frame.url, exactRendererUrl) ||
     !authorizeWindow(identity, window)
-  ) throw new Error("Untrusted cloud renderer");
+  ) throw new CloudSenderRevokedError("Untrusted cloud renderer");
 }
 
 function handleCloud<Args extends readonly unknown[], Result>(
@@ -609,6 +784,55 @@ function parseExecuteDestroyInput(value: unknown): ExecuteDestroyCloudDeployment
     throw new TypeError("Invalid cloud deployment deletion plan");
   }
   return Object.freeze({ token: value["token"] });
+}
+
+function safeSavedFileName(path: string, fallback: string): string {
+  const fileName = basename(path).normalize("NFC");
+  return fileName.length >= 1 && fileName.length <= 255 &&
+    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(fileName)
+    ? fileName
+    : fallback;
+}
+
+function isManagedOperatorRecoveryPath(deploymentId: string, value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const prefix = `/var/lib/sliver-gui/${deploymentId}/operator-export/operator-`;
+  return value.startsWith(prefix) && /^[0-9a-f]{16,64}\.cfg$/u.test(value.slice(prefix.length));
+}
+
+function isManagedOperatorHandoffPath(deploymentId: string, value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const prefix = `/tmp/.sliver-gui-${deploymentId}-`;
+  return value.startsWith(prefix) && /^[0-9a-f]{16,64}\.operator\.cfg$/u.test(value.slice(prefix.length));
+}
+
+function postMutationSaveFailure(
+  fileName: string,
+  mutationState: "unknown" | "created",
+  error: string,
+  remoteRecoveryPath?: string,
+  remoteRecoveryCandidatePath?: string,
+  remoteHandoffCandidatePath?: string,
+): Extract<SaveCloudOperatorConfigResult, { readonly saved: false; readonly mutationState: "unknown" | "created" }> {
+  const guidance = mutationState === "unknown"
+    ? remoteRecoveryCandidatePath
+      ? `Do not retry until you reconcile the operator list on the managed server. Inspect ${remoteRecoveryCandidatePath} over SSH; it is only a candidate path and the file may not exist.`
+      : "Do not retry until you reconcile the operator list on the managed server."
+    : remoteRecoveryPath
+      ? `Do not retry creation. Recover the root-only configuration over SSH from ${remoteRecoveryPath}.`
+      : "Do not retry creation until you reconcile the operator on the managed server.";
+  const handoffGuidance = remoteHandoffCandidatePath
+    ? ` A private temporary handoff may remain at ${remoteHandoffCandidatePath}; remove it over SSH if it still exists.`
+    : "";
+  return Object.freeze({
+    saved: false,
+    fileName,
+    mutationState,
+    error: `${error} ${guidance}${handoffGuidance}`,
+    ...(remoteRecoveryPath === undefined ? {} : { remoteRecoveryPath }),
+    ...(remoteRecoveryCandidatePath === undefined ? {} : { remoteRecoveryCandidatePath }),
+    ...(remoteHandoffCandidatePath === undefined ? {} : { remoteHandoffCandidatePath }),
+  });
 }
 
 function hasExactKeys<const Key extends string>(

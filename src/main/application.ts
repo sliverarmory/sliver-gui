@@ -2866,6 +2866,7 @@ function unavailableCloudDeploymentController(
     discoverAzureAccounts: () => ({ ok: false, error: message }),
     discoverAzureOptions: () => ({ ok: false, error: message }),
     createDeployment: () => ({ ok: false, error: message }),
+    generateOperatorConfig: () => ({ ok: false, error: message, mutationState: "not-started" }),
     runLifecycleAction: () => ({ ok: false, error: message }),
     updateFirewall: () => ({ ok: false, error: message }),
     listFirewallRules: () => ({ ok: false, error: message }),

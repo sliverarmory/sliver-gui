@@ -570,6 +570,7 @@ async function verifyCloudDeploymentWindow(
   await waitForWindowCount(electronApplication, initialWindowCount + 1);
   const firstCloudPage = await cloudDeploymentPage(electronApplication);
   await assertCloudDeploymentSurface(electronApplication, firstCloudPage);
+  await verifyManagedServerOperatorControls(firstCloudPage, artifactDirectory);
   await verifyAzureLoginForm(firstCloudPage, artifactDirectory);
   await invokeApplicationMenuItem(
     electronApplication,
@@ -621,6 +622,66 @@ async function verifyCloudDeploymentWindow(
   assert.notEqual(await cloudDeploymentWindowId(electronApplication), reopenedWindowId);
   await recoveredCloudPage.close();
   await waitForWindowCount(electronApplication, initialWindowCount);
+}
+
+async function verifyManagedServerOperatorControls(
+  cloudPage: Page,
+  artifactDirectory: string,
+): Promise<void> {
+  await cloudPage.getByRole("button", {
+    name: `Server actions for ${E2E_AWS_DEPLOYMENT_NAME}`,
+    exact: true,
+  }).click();
+  const actions = cloudPage.getByRole("menu", {
+    name: `Server actions for ${E2E_AWS_DEPLOYMENT_NAME}`,
+    exact: true,
+  });
+  await actions.waitFor();
+  assert.deepEqual(await actions.getByRole("menuitem").allTextContents(), [
+    "Stop",
+    "Reboot",
+    "Terminate",
+  ]);
+  await cloudPage.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "cloud-managed-server-actions.png"),
+    fullPage: true,
+  });
+  await cloudPage.keyboard.press("Escape");
+  await actions.waitFor({ state: "hidden" });
+
+  await cloudPage.getByRole("button", {
+    name: `New Operator for ${E2E_AWS_DEPLOYMENT_NAME}`,
+    exact: true,
+  }).click();
+  await cloudPage.getByRole("heading", { level: 1, name: "New Operator", exact: true }).waitFor();
+  const form = cloudPage.getByRole("form", {
+    name: `New Operator for ${E2E_AWS_DEPLOYMENT_NAME}`,
+    exact: true,
+  });
+  const permissions = form.getByRole("combobox", { name: "Permissions", exact: true });
+  const publicIp = form.getByLabel("Public IP", { exact: true });
+  const port = form.getByLabel("Port", { exact: true });
+  assert.equal(await permissions.inputValue(), "all");
+  assert.deepEqual(await permissions.getByRole("option").allTextContents(), [
+    "Full access",
+    "Remote builder",
+    "Crackstation",
+  ]);
+  assert.equal(await publicIp.inputValue(), "198.51.100.24");
+  assert.equal(await port.inputValue(), "31337");
+  await form.getByRole("textbox", { name: "Operator Name" }).fill("e2e_operator");
+  await permissions.selectOption("builder");
+  await publicIp.fill("203.0.113.80");
+  await port.fill("44331");
+  assert.equal(await form.getByRole("button", { name: "Create Operator", exact: true }).isEnabled(), true);
+  await cloudPage.screenshot({
+    animations: "disabled",
+    path: join(artifactDirectory, "cloud-new-operator.png"),
+    fullPage: true,
+  });
+  await cloudPage.getByRole("button", { name: "Back to managed servers", exact: true }).click();
+  await cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor();
 }
 
 async function verifyAzureLoginForm(cloudPage: Page, artifactDirectory: string): Promise<void> {
