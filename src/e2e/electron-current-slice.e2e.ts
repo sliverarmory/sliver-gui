@@ -2464,7 +2464,8 @@ async function verifyM1TargetsAndOperations(
     assert.match(closePlan.value?.impact.warning ?? "", /interactive connection without killing the remote process/i);
     assert.ok(closePlan.value?.token, "destructive action review must issue a one-use confirmation token");
 
-    await secondPage.getByRole("button", { name: "Close session", exact: true }).click();
+    await secondPage.getByRole("button", { name: "Session actions", exact: true }).click();
+    await secondPage.getByRole("menuitem", { name: "Close Session", exact: true }).click();
     const closeReview = secondPage.getByRole("dialog", { name: /review close session/i });
     await closeReview.waitFor();
     const closeReviewText = await closeReview.innerText();

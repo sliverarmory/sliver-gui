@@ -497,6 +497,8 @@ export function SessionWorkspacePage({
   const activeSessionRef = snapshot.targetContext.activeTarget?.mode === "session"
     ? snapshot.targetContext.activeTarget
     : undefined;
+  const terminate = capabilityFor(snapshot.targetContext.capabilities, "target.terminate");
+  const close = capabilityFor(snapshot.targetContext.capabilities, "session.close");
 
   return (
     <section className="page-stack session-workspace" data-presentation={presentation} aria-labelledby="session-workspace-heading">
@@ -537,12 +539,16 @@ export function SessionWorkspacePage({
           <CompactDetail label="Last check-in" value={formatTimestamp(currentSession.lastCheckinAt)} />
         </dl>
         <Dropdown>
-          <Button aria-label="Session actions" className="shrink-0" size="sm" variant="ghost">
-            Actions <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
-          </Button>
+          <Tooltip delay={250}>
+            <Button aria-label="Session actions" className="shrink-0" isIconOnly size="sm" variant="ghost">
+              <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
+            </Button>
+            <Tooltip.Content>Session actions</Tooltip.Content>
+          </Tooltip>
           <Dropdown.Popover placement="bottom end">
             <Dropdown.Menu aria-label="Session actions" onAction={(key) => {
               if (key === "rename") setRenameRouteIdentity(routeIdentity);
+              if (key === "target.kill" || key === "session.close") void prepareAction(key);
             }}>
               <Dropdown.Item
                 id="rename"
@@ -551,6 +557,24 @@ export function SessionWorkspacePage({
               >
                 <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faPen} />
                 <Label>Rename</Label>
+              </Dropdown.Item>
+              <Dropdown.Item
+                id="target.kill"
+                isDisabled={isPreparingAction || isExecutingAction || terminate?.available !== true}
+                textValue="Kill Session"
+                variant="danger"
+              >
+                <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faSkullCrossbones} />
+                <Label>Kill Session</Label>
+              </Dropdown.Item>
+              <Dropdown.Item
+                id="session.close"
+                isDisabled={isPreparingAction || isExecutingAction || close?.available !== true}
+                textValue="Close Session"
+                variant="danger"
+              >
+                <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faStop} />
+                <Label>Close Session</Label>
               </Dropdown.Item>
             </Dropdown.Menu>
           </Dropdown.Popover>
@@ -602,25 +626,18 @@ export function SessionWorkspacePage({
               title: "Session overview unavailable",
               description: "Identity and screenshot details are not available for this workspace adapter.",
             })}
-            <div className="mt-6 grid items-start gap-6 xl:grid-cols-2">
-              <section className="rounded-2xl bg-surface p-5 sm:p-6" aria-label="Quick actions">
-                <OperationComposer
-                  active={currentSession}
-                  capabilities={snapshot.targetContext.capabilities}
-                  targetIdentity={routeIdentity}
-                  onSubmitted={(operation) => {
-                    if (routeIdentity !== routeIdentityRef.current) return false;
-                    mergeOperation(operation);
-                    return true;
-                  }}
-                />
-              </section>
-              <SessionLifecycleActions
+            <section className="mt-6 rounded-2xl bg-surface p-5 sm:p-6" aria-label="Quick actions">
+              <OperationComposer
+                active={currentSession}
                 capabilities={snapshot.targetContext.capabilities}
-                isBusy={isPreparingAction}
-                onPrepare={(actionId) => void prepareAction(actionId)}
+                targetIdentity={routeIdentity}
+                onSubmitted={(operation) => {
+                  if (routeIdentity !== routeIdentityRef.current) return false;
+                  mergeOperation(operation);
+                  return true;
+                }}
               />
-            </div>
+            </section>
           </Tabs.Panel>
 
           <Tabs.Panel className="pt-6" id="execution">
@@ -1016,49 +1033,6 @@ function WorkspaceTab({ id, label }: { id: SessionWorkspacePanelId; label: strin
       {label}
       <Tabs.Indicator />
     </Tabs.Tab>
-  );
-}
-
-function SessionLifecycleActions({
-  capabilities,
-  isBusy,
-  onPrepare,
-}: {
-  capabilities: SliverSnapshot["targetContext"]["capabilities"];
-  isBusy: boolean;
-  onPrepare: (actionId: "target.kill" | "session.close") => void;
-}): React.JSX.Element {
-  const terminate = capabilityFor(capabilities, "target.terminate");
-  const close = capabilityFor(capabilities, "session.close");
-  return (
-    <section className="rounded-2xl bg-surface p-5 sm:p-6" aria-labelledby="session-controls-heading">
-      <h2 className="text-sm font-semibold text-foreground" id="session-controls-heading">Session Controls</h2>
-      <p className="mt-1 text-xs leading-relaxed text-muted">Destructive actions require a main-owned impact review before execution.</p>
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Tooltip delay={250}>
-          <Button
-            isDisabled={isBusy || terminate?.available !== true}
-            size="sm"
-            variant="danger-soft"
-            onPress={() => onPrepare("target.kill")}
-          >
-            <FontAwesomeIcon aria-hidden icon={faSkullCrossbones} /> Kill target
-          </Button>
-          <Tooltip.Content>{terminate?.available ? "Kill target" : terminate?.reason?.message ?? "Target termination is unavailable"}</Tooltip.Content>
-        </Tooltip>
-        <Tooltip delay={250}>
-          <Button
-            isDisabled={isBusy || close?.available !== true}
-            size="sm"
-            variant="danger-soft"
-            onPress={() => onPrepare("session.close")}
-          >
-            <FontAwesomeIcon aria-hidden icon={faStop} /> Close session
-          </Button>
-          <Tooltip.Content>{close?.available ? "Close session" : close?.reason?.message ?? "Session close is unavailable"}</Tooltip.Content>
-        </Tooltip>
-      </div>
-    </section>
   );
 }
 

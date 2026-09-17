@@ -931,6 +931,87 @@ describe("TargetsPage", () => {
     expect(onOpenSession).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { label: "Kill Session", actionId: "target.kill" as const, review: "Review kill target" },
+    { label: "Close Session", actionId: "session.close" as const, review: "Review close session" },
+  ])("reviews $label for the right-clicked session without opening its workspace or executing", async ({ label, actionId, review }) => {
+    const user = userEvent.setup();
+    const secondSession: SessionSummary = { ...session, id: "session-2", name: "secondary" };
+    const secondRef: TargetRef = { ...sessionRef, id: secondSession.id, fingerprint: "c".repeat(64) };
+    const initial = targetSnapshot("session");
+    initial.sessions = [session, secondSession];
+    initial.domains.sessions.items = [session, secondSession];
+    initial.domains.sessions.page.total = 2;
+    initial.targetContext.selectableTargets.push(secondRef);
+    const selected: SliverSnapshot = {
+      ...initial,
+      targetContext: { ...initial.targetContext, activeTarget: secondRef, activeTargetSummary: secondSession },
+    };
+    const plan: TargetActionPlan = {
+      token: "session-row-plan",
+      expiresAt: "2026-08-09T20:10:00.000Z",
+      impact: {
+        actionId,
+        backend: { ...executionBackend, sharedWindowCount: 1 },
+        targets: [secondSession],
+        totalTargets: 1,
+        truncated: false,
+        warning: "Review the selected session before continuing.",
+      },
+    };
+    const api = installAPI({
+      selectTarget: vi.fn().mockResolvedValue({ ok: true, value: selected }),
+      prepareTargetAction: vi.fn().mockResolvedValue({ ok: true, value: plan }),
+    });
+    const onOpenSession = vi.fn();
+    const onSnapshot = (next: SliverSnapshot) => rendered.rerender(
+      <TargetsPage mode="session" snapshot={next} onSnapshot={onSnapshot} onOpenSession={onOpenSession} />,
+    );
+    const rendered = render(
+      <TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} onOpenSession={onOpenSession} />,
+    );
+
+    fireEvent.contextMenu(screen.getByRole("row", { name: /secondary/i }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
+    expect(api.selectTarget).not.toHaveBeenCalled();
+    await user.click(within(menu).getByRole("menuitem", { name: label }));
+
+    const dialog = await screen.findByRole("dialog", { name: review });
+    expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(secondRef);
+    expect(api.prepareTargetAction).toHaveBeenCalledExactlyOnceWith({ actionId });
+    expect(within(dialog).getByText(/secondary/)).toBeInTheDocument();
+    expect(api.executeTargetActionPlan).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "Kill Session", capabilityId: "target.terminate" },
+    { label: "Close Session", capabilityId: "session.close" },
+  ])("disables $label when unavailable and rechecks capabilities after row selection", async ({ label, capabilityId }) => {
+    const user = userEvent.setup();
+    const unavailable = targetSnapshot("session");
+    unavailable.targetContext.capabilities = capabilities.map((capability) => capability.id === capabilityId
+      ? { id: capability.id, available: false, reason: { code: "target-dead", message: "The session is no longer interactive" } }
+      : capability);
+    const api = installAPI({ selectTarget: vi.fn().mockResolvedValue({ ok: true, value: unavailable }) });
+    const rendered = render(<TargetsPage mode="session" snapshot={unavailable} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    rendered.contextMenu.emit();
+    expect(await screen.findByRole("menuitem", { name: label })).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+    rendered.rerender(<TargetsPage mode="session" snapshot={targetSnapshot()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: label }));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+    expect(api.prepareTargetAction).not.toHaveBeenCalled();
+    expect(api.executeTargetActionPlan).not.toHaveBeenCalled();
+  });
+
   it("cancels a session rename opened from a table cell without submitting", async () => {
     const user = userEvent.setup();
     const snapshot = targetSnapshot("session");
@@ -947,7 +1028,7 @@ describe("TargetsPage", () => {
     expect(api.submitTargetOperation).not.toHaveBeenCalled();
   });
 
-  it("does not retain a row rename action on the table header or background", async () => {
+  it("does not retain row session actions on the table header or background", async () => {
     const user = userEvent.setup();
     installAPI();
     const rendered = render(<TargetsPage mode="session" snapshot={targetSnapshot("session")} onSnapshot={vi.fn()} />);
@@ -961,28 +1042,28 @@ describe("TargetsPage", () => {
     fireEvent.contextMenu(screen.getByRole("columnheader", { name: "Host & user" }));
     rendered.contextMenu.emit();
     const headerMenu = await screen.findByRole("menu", { name: "Application context menu" });
-    expect(within(headerMenu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+    expect(within(headerMenu).queryByRole("menuitem", { name: /Rename|Kill Session|Close Session/ })).not.toBeInTheDocument();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
 
     fireEvent.contextMenu(screen.getByRole("heading", { name: "Live sessions" }));
     rendered.contextMenu.emit();
     const backgroundMenu = await screen.findByRole("menu", { name: "Application context menu" });
-    expect(within(backgroundMenu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+    expect(within(backgroundMenu).queryByRole("menuitem", { name: /Rename|Kill Session|Close Session/ })).not.toBeInTheDocument();
   });
 
-  it("discards a row rename selection reply after a reconnect", async () => {
+  it.each(["Rename", "Kill Session", "Close Session"])("discards a row %s selection reply after a reconnect", async (label) => {
     const user = userEvent.setup();
     const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
     const selectTarget = vi.fn().mockImplementation(() => gate.promise);
-    installAPI({ selectTarget });
+    const api = installAPI({ selectTarget });
     const onSnapshot = vi.fn();
     const initial = targetSnapshot("session");
     initial.connection.incarnation = 1;
     const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} />);
     fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
     rendered.contextMenu.emit();
-    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await user.click(await screen.findByRole("menuitem", { name: label }));
     await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
 
     const reconnected = targetSnapshot("session");
@@ -993,20 +1074,21 @@ describe("TargetsPage", () => {
       await gate.promise;
     });
     expect(onSnapshot).not.toHaveBeenCalled();
+    expect(api.prepareTargetAction).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument();
   });
 
-  it("discards a row rename selection reply after the catalog unmounts", async () => {
+  it.each(["Rename", "Kill Session", "Close Session"])("discards a row %s selection reply after the catalog unmounts", async (label) => {
     const user = userEvent.setup();
     const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
     const selectTarget = vi.fn().mockImplementation(() => gate.promise);
-    installAPI({ selectTarget });
+    const api = installAPI({ selectTarget });
     const onSnapshot = vi.fn();
     const snapshot = targetSnapshot("session");
     const rendered = render(<TargetsPage mode="session" snapshot={snapshot} onSnapshot={onSnapshot} />);
     fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
     rendered.contextMenu.emit();
-    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await user.click(await screen.findByRole("menuitem", { name: label }));
     await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
 
     rendered.unmount();
@@ -1015,22 +1097,24 @@ describe("TargetsPage", () => {
       await gate.promise;
     });
     expect(onSnapshot).not.toHaveBeenCalled();
+    expect(api.prepareTargetAction).not.toHaveBeenCalled();
   });
 
-  it("rejects a row rename response that confirms a replacement session", async () => {
+  it.each(["Rename", "Kill Session", "Close Session"])("rejects a row %s response that confirms a replacement session", async (label) => {
     const user = userEvent.setup();
     const initial = targetSnapshot("session");
     const replacement = targetSnapshot("session");
     replacement.targetContext.activeTarget = { ...sessionRef, fingerprint: "e".repeat(64) };
     const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: replacement });
-    installAPI({ selectTarget });
+    const api = installAPI({ selectTarget });
     const onSnapshot = vi.fn();
     const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} />);
     fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
     rendered.contextMenu.emit();
-    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await user.click(await screen.findByRole("menuitem", { name: label }));
     await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
     expect(onSnapshot).not.toHaveBeenCalled();
+    expect(api.prepareTargetAction).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument();
   });
 
@@ -1569,13 +1653,15 @@ describe("TargetsPage", () => {
     expect(within(dialog).queryByRole("button", { name: "Cancel operation" })).not.toBeInTheDocument();
   });
 
-  it("updates lifecycle actions from authoritative capabilities without restarting the page", () => {
+  it("updates lifecycle actions from authoritative capabilities without restarting the page", async () => {
+    const user = userEvent.setup();
     installAPI();
     const initial = targetSnapshot("session");
     const { rerender } = render(sessionWorkspace(initial));
 
-    expect(screen.getByRole("button", { name: "Kill target" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Close session" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    expect(screen.getByRole("menuitem", { name: "Kill Session" })).not.toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("menuitem", { name: "Close Session" })).not.toHaveAttribute("aria-disabled", "true");
 
     const unavailable = targetSnapshot("session");
     unavailable.targetContext.capabilities = unavailable.targetContext.capabilities.map((capability) =>
@@ -1589,8 +1675,8 @@ describe("TargetsPage", () => {
     );
     rerender(sessionWorkspace(unavailable));
 
-    expect(screen.getByRole("button", { name: "Kill target" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Close session" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "Kill Session" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("menuitem", { name: "Close Session" })).toHaveAttribute("aria-disabled", "true");
   });
 
   it("loads additional operation history with the opaque cursor and retains prior pages", async () => {

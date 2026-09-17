@@ -707,7 +707,27 @@ export function TargetsPage({
     if (renameSessionTarget && !renameSessionIsCurrent) setRenameSessionTarget(undefined);
   }, [renameSessionIsCurrent, renameSessionTarget]);
 
-  const renameSession = useCallback(async (ref: TargetRef) => {
+  const prepareAction = useCallback(async (actionId: DestructiveTargetActionId) => {
+    setIsPreparingAction(true);
+    setActionResult(undefined);
+    try {
+      const result = await window.sliver.prepareTargetAction({ actionId });
+      if (!result.ok || !result.value) {
+        toast.danger("Could not review action", { description: result.error });
+        return;
+      }
+      setReviewPlan(result.value);
+    } catch (error) {
+      toast.danger("Could not review action", { description: errorMessage(error) });
+    } finally {
+      setIsPreparingAction(false);
+    }
+  }, []);
+
+  const runSessionRowAction = useCallback(async (
+    ref: TargetRef,
+    actionId: "target.rename" | "target.kill" | "session.close",
+  ) => {
     const expectedIncarnation = backendIncarnationRef.current;
     const requestSequence = ++targetSelectionRequestSequence.current;
     setIsSelecting(true);
@@ -736,7 +756,19 @@ export function TargetsPage({
         return;
       }
       onSnapshot(result.value);
-      setRenameSessionTarget({ ref: selectedRef, backendIncarnation: expectedIncarnation });
+      if (actionId === "target.rename") {
+        setRenameSessionTarget({ ref: selectedRef, backendIncarnation: expectedIncarnation });
+        return;
+      }
+      const capability = capabilityFor(
+        result.value.targetContext.capabilities,
+        actionId === "target.kill" ? "target.terminate" : "session.close",
+      );
+      if (!capability?.available) {
+        toast.warning("Session action unavailable", { description: capability?.reason?.message });
+        return;
+      }
+      await prepareAction(actionId);
     } catch (error) {
       if (
         requestSequence === targetSelectionRequestSequence.current &&
@@ -748,7 +780,7 @@ export function TargetsPage({
         expectedIncarnation === backendIncarnationRef.current
       ) setIsSelecting(false);
     }
-  }, [onSnapshot]);
+  }, [onSnapshot, prepareAction]);
 
   const selectTarget = useCallback(async (target: TargetSummary) => {
     const ref = presentedTargetInventory.refs[targetRowKey(target)];
@@ -881,23 +913,6 @@ export function TargetsPage({
       toast.danger("Could not refresh targets", { description: errorMessage(error) });
     }
   }, [onSnapshot]);
-
-  const prepareAction = useCallback(async (actionId: DestructiveTargetActionId) => {
-    setIsPreparingAction(true);
-    setActionResult(undefined);
-    try {
-      const result = await window.sliver.prepareTargetAction({ actionId });
-      if (!result.ok || !result.value) {
-        toast.danger("Could not review action", { description: result.error });
-        return;
-      }
-      setReviewPlan(result.value);
-    } catch (error) {
-      toast.danger("Could not review action", { description: errorMessage(error) });
-    } finally {
-      setIsPreparingAction(false);
-    }
-  }, []);
 
   const executeAction = useCallback(async () => {
     if (!reviewPlan) return;
@@ -1124,11 +1139,13 @@ export function TargetsPage({
           )}
           <TargetTableContextMenu
             key={backendIncarnation}
-            disabled={isSelecting}
+            disabled={isSelecting || isPreparingAction || isExecutingAction}
             targets={filteredTargets}
             targetRefs={presentedTargetInventory.refs}
-            onRename={(ref) => {
-              if (backendIncarnation === backendIncarnationRef.current) void renameSession(ref);
+            activeTarget={activeRef}
+            capabilities={snapshot.targetContext.capabilities}
+            onAction={(ref, actionId) => {
+              if (backendIncarnation === backendIncarnationRef.current) void runSessionRowAction(ref, actionId);
             }}
           >
             <DataGrid
@@ -1622,22 +1639,42 @@ function TargetTableContextMenu({
   disabled,
   targets,
   targetRefs,
-  onRename,
+  activeTarget,
+  capabilities,
+  onAction,
 }: {
   children: ReactNode;
   disabled: boolean;
   targets: readonly TargetSummary[];
   targetRefs: Readonly<Record<string, TargetRef>>;
-  onRename: (target: TargetRef) => void;
+  activeTarget: TargetRef | null;
+  capabilities: SliverSnapshot["targetContext"]["capabilities"];
+  onAction: (target: TargetRef, actionId: "target.rename" | "target.kill" | "session.close") => void;
 }): React.JSX.Element {
   const [contextTarget, setContextTarget] = useState<TargetRef>();
+  const hasCurrentCapabilities = Boolean(contextTarget) &&
+    targetRefIdentity(contextTarget) === targetRefIdentity(activeTarget);
   const scope = useApplicationContextMenuScope({
     actions: contextTarget ? [{
       id: "session.rename",
       label: "Rename",
       icon: faPen,
       isDisabled: disabled,
-      onAction: () => onRename(contextTarget),
+      onAction: () => onAction(contextTarget, "target.rename"),
+    }, {
+      id: "session.kill",
+      label: "Kill Session",
+      icon: faSkullCrossbones,
+      variant: "danger",
+      isDisabled: disabled || (hasCurrentCapabilities && !capabilityFor(capabilities, "target.terminate")?.available),
+      onAction: () => onAction(contextTarget, "target.kill"),
+    }, {
+      id: "session.close",
+      label: "Close Session",
+      icon: faStop,
+      variant: "danger",
+      isDisabled: disabled || (hasCurrentCapabilities && !capabilityFor(capabilities, "session.close")?.available),
+      onAction: () => onAction(contextTarget, "session.close"),
     }] : [],
   });
 

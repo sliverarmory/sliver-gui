@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
-import type { SessionSummary, TargetRef } from "../../../shared/target-contracts";
+import type { SessionSummary, TargetActionPlan, TargetRef } from "../../../shared/target-contracts";
 import type { TargetOperationRecord } from "../../../shared/operation-contracts";
 import {
   SessionWorkspacePage,
@@ -311,6 +311,7 @@ describe("SessionWorkspacePage", () => {
     );
 
     const actions = screen.getByRole("button", { name: "Session actions" });
+    expect(actions).toHaveTextContent("");
     expect(actions.closest("header")).toContainElement(screen.getByRole("heading", { name: session.name }));
     await user.click(actions);
     await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
@@ -342,6 +343,48 @@ describe("SessionWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Ping" }));
     expect(screen.queryByRole("menuitemradio", { name: "Rename" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["Kill Session", "target.kill", "Review kill target"],
+    ["Close Session", "session.close", "Review close session"],
+  ] as const)("opens the existing review before %s from the header menu", async (label, actionId, heading) => {
+    const user = userEvent.setup();
+    installAPI();
+    const plan: TargetActionPlan = {
+      token: "session-review-token",
+      expiresAt: "2026-08-09T20:10:00.000Z",
+      impact: {
+        actionId,
+        backend: {
+          server: "127.0.0.1:53137",
+          operator: "m2-verification",
+          configName: "M2 test",
+          epoch: 7,
+          sharedWindowCount: 1,
+        },
+        targets: [session],
+        totalTargets: 1,
+        truncated: false,
+        warning: "Review the selected session before continuing.",
+      },
+    };
+    const prepareTargetAction = vi.fn().mockResolvedValue({ ok: true, value: plan });
+    const executeTargetActionPlan = vi.fn();
+    Object.assign(window.sliver, { prepareTargetAction, executeTargetActionPlan });
+    render(<SessionWorkspacePage route={route} session={session} snapshot={workspaceSnapshot()} onSnapshot={vi.fn()} />);
+
+    expect(screen.queryByRole("heading", { name: "Session Controls" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: label }));
+
+    const review = await screen.findByRole("dialog", { name: heading });
+    expect(prepareTargetAction).toHaveBeenCalledExactlyOnceWith({ actionId });
+    expect(within(review).getByText(session.name)).toBeInTheDocument();
+    expect(executeTargetActionPlan).not.toHaveBeenCalled();
+    await user.click(within(review).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: heading })).not.toBeInTheDocument();
+    expect(executeTargetActionPlan).not.toHaveBeenCalled();
   });
 
   it("renders a clean responsive session workspace and exposes typed panel seams", async () => {
