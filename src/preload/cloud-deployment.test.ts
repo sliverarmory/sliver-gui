@@ -57,6 +57,8 @@ describe("Cloud Deployment preload bridge", () => {
     expect(Object.keys(api)).toEqual([
       "getSnapshot",
       "refreshDeployments",
+      "copyInstanceId",
+      "copyIpAddress",
       "getProvisioningTranscripts",
       "getTerminalRuntime",
       "detectCurrentEgressIpv4",
@@ -177,6 +179,20 @@ describe("Cloud Deployment preload bridge", () => {
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink);
     await api.cancelAwsLogin();
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin);
+  });
+
+  it("copies an instance ID using only its deployment reference and fixed channel", async () => {
+    const api = exposedApi();
+    const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
+    await api.copyInstanceId(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, input);
+  });
+
+  it.each(["public", "private"] as const)("copies a %s IP using only its deployment reference and address kind", async (kind) => {
+    const api = exposedApi();
+    const input = { deploymentId: "22222222-2222-4222-8222-222222222222", kind };
+    await api.copyIpAddress(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, input);
   });
 
   it("exposes only fixed Azure login and subscription-selection channels", async () => {

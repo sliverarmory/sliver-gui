@@ -440,6 +440,8 @@ const api: CloudDeploymentAPI = {
   loginAwsCredential: vi.fn(async () => ({ ok: true as const, value: { ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN } })),
   cancelAwsLogin: vi.fn(async () => ({ ok: true as const })),
   copyAwsLoginLink: vi.fn(async () => ({ ok: true as const })),
+  copyInstanceId: vi.fn(async () => ({ ok: true as const })),
+  copyIpAddress: vi.fn(async () => ({ ok: true as const })),
   beginAzureLogin: vi.fn(async () => ({ ok: true as const, value: {
     token: AZURE_LOGIN_TOKEN,
     expiresAt: "2026-09-08T20:00:00.000Z",
@@ -554,6 +556,10 @@ beforeEach(() => {
   vi.mocked(api.loginAwsCredential).mockClear();
   vi.mocked(api.cancelAwsLogin).mockClear();
   vi.mocked(api.copyAwsLoginLink).mockClear();
+  vi.mocked(api.copyInstanceId).mockReset();
+  vi.mocked(api.copyInstanceId).mockResolvedValue({ ok: true });
+  vi.mocked(api.copyIpAddress).mockReset();
+  vi.mocked(api.copyIpAddress).mockResolvedValue({ ok: true });
   vi.mocked(api.beginAzureLogin).mockClear();
   vi.mocked(api.loginAzureCredential).mockClear();
   vi.mocked(api.cancelAzureLogin).mockClear();
@@ -613,7 +619,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("tab", { name: /Credentials/i })).toBeInTheDocument();
     expect(screen.getByText("No Managed Servers")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Deployment" })).toBeInTheDocument();
-    expect(screen.getByText("Encrypted credentials")).toBeInTheDocument();
+    expect(screen.queryByText("Encrypted credentials")).not.toBeInTheDocument();
     expect(document.title).toBe("Cloud Deployment");
 
     act(() => themeListener?.(false));
@@ -2617,6 +2623,7 @@ describe("CloudDeploymentWindowApp", () => {
     };
     currentFirewallSnapshot = azureFirewallSnapshot;
     const dangerToast = vi.spyOn(toast, "danger");
+    const user = userEvent.setup();
     renderCloudDeploymentApp();
 
     await screen.findByRole("heading", { name: "azure-control" });
@@ -2626,12 +2633,19 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: AZURE_DEPLOYMENT_ID });
     expect(dangerToast).not.toHaveBeenCalled();
 
+    for (const kind of ["public", "private"] as const) {
+      const label = kind === "public" ? "Public IP" : "Private IP";
+      await user.click(screen.getByRole("button", { name: `Copy ${label}` }));
+      expect(api.copyIpAddress).toHaveBeenLastCalledWith({ deploymentId: AZURE_DEPLOYMENT_ID, kind });
+      expect(await screen.findByText(`${label} copied`)).toBeInTheDocument();
+    }
+
     act(() => navigationListener?.({
       view: "deployments",
       deploymentId: DEPLOYMENT_ID,
       action: "start",
     }));
-    const staleAlert = await screen.findByRole("alert");
+    const staleAlert = await within(screen.getByRole("main")).findByRole("alert");
     expect(staleAlert).toHaveTextContent("Cloud action unavailable");
     expect(staleAlert).toHaveTextContent("is no longer in the managed inventory");
     expect(dangerToast).not.toHaveBeenCalled();
@@ -2664,7 +2678,17 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.queryByRole("heading", { name: "Cloud Deployment" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /^Deployments/u })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /^Credentials/u })).not.toBeInTheDocument();
-    expect(within(scrollRegion).getByRole("heading", { name: "Instance summary" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Instance summary" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Compute and network identifiers for this managed server.")).not.toBeInTheDocument();
+    await user.click(within(scrollRegion).getByRole("button", { name: "Copy Instance ID" }));
+    expect(api.copyInstanceId).toHaveBeenCalledExactlyOnceWith({ deploymentId: DEPLOYMENT_ID });
+    expect(await screen.findByText("Instance ID copied")).toBeInTheDocument();
+    for (const kind of ["public", "private"] as const) {
+      const label = kind === "public" ? "Public IP" : "Private IP";
+      await user.click(within(scrollRegion).getByRole("button", { name: `Copy ${label}` }));
+      expect(api.copyIpAddress).toHaveBeenLastCalledWith({ deploymentId: DEPLOYMENT_ID, kind });
+      expect(await screen.findByText(`${label} copied`)).toBeInTheDocument();
+    }
     expect(within(scrollRegion).getByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
     expect(screen.getByText("sg-abc123")).toBeInTheDocument();
     expect(screen.queryByText(/Managed provenance identifies/u)).not.toBeInTheDocument();

@@ -35,6 +35,8 @@ import type {
 export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   getSnapshot: "sliver:cloud-deployment:snapshot:get",
   refreshDeployments: "sliver:cloud-deployment:status:refresh",
+  copyInstanceId: "sliver:cloud-deployment:instance-id:copy",
+  copyIpAddress: "sliver:cloud-deployment:ip-address:copy",
   getProvisioningTranscripts: "sliver:cloud-deployment:transcripts:get",
   getTerminalRuntime: "sliver:cloud-deployment:terminal-runtime:get",
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
@@ -105,6 +107,15 @@ export interface CloudDeploymentRefreshResult {
   readonly refreshErrors: readonly CloudDeploymentRefreshError[];
 }
 
+export interface CopyCloudInstanceIdInput {
+  readonly deploymentId: string;
+}
+
+export interface CopyCloudIpAddressInput {
+  readonly deploymentId: string;
+  readonly kind: "public" | "private";
+}
+
 export interface CloudProvisioningTranscriptChunk {
   readonly sequence: number;
   readonly bytes: Uint8Array;
@@ -164,6 +175,8 @@ export interface CloudDeploymentAPI {
   getSnapshot(): Promise<OperationResult<CloudDeploymentSnapshot>>;
   /** Read provider state; passive change notifications continue to use getSnapshot. */
   refreshDeployments(): Promise<OperationResult<CloudDeploymentRefreshResult>>;
+  copyInstanceId(input: CopyCloudInstanceIdInput): Promise<OperationResult>;
+  copyIpAddress(input: CopyCloudIpAddressInput): Promise<OperationResult>;
   getProvisioningTranscripts(): Promise<OperationResult<CloudProvisioningTranscriptSnapshot>>;
   getTerminalRuntime(): Promise<OperationResult<TerminalRuntimeAsset>>;
   detectCurrentEgressIpv4(): Promise<OperationResult<CurrentEgressIpv4>>;

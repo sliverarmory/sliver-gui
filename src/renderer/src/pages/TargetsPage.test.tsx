@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +20,7 @@ import type {
 } from "../../../shared/execution-contracts";
 import { SessionWorkspacePage } from "./SessionWorkspacePage";
 import { TargetsPage } from "./TargetsPage";
+import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -878,6 +879,160 @@ describe("TargetsPage", () => {
     expect(onOpenSession).toHaveBeenCalledOnce();
   });
 
+  it("renames the right-clicked session without opening its interaction workspace", async () => {
+    const user = userEvent.setup();
+    const secondSession: SessionSummary = { ...session, id: "session-2", name: "secondary" };
+    const secondRef: TargetRef = { ...sessionRef, id: secondSession.id, fingerprint: "c".repeat(64) };
+    const initial = targetSnapshot("session");
+    initial.sessions = [session, secondSession];
+    initial.domains.sessions.items = [session, secondSession];
+    initial.domains.sessions.page.total = 2;
+    initial.targetContext.selectableTargets.push(secondRef);
+    const selected: SliverSnapshot = {
+      ...initial,
+      targetContext: { ...initial.targetContext, activeTarget: secondRef, activeTargetSummary: secondSession },
+    };
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: selected });
+    const submitTargetOperation = vi.fn().mockResolvedValue({
+      ok: true,
+      value: operationRecord({ operationId: "target.rename", target: secondRef, targetName: secondSession.name }),
+    });
+    installAPI({ selectTarget, submitTargetOperation });
+    const onOpenSession = vi.fn();
+    const onSnapshot = (next: SliverSnapshot) => rendered.rerender(
+      <TargetsPage mode="session" snapshot={next} onSnapshot={onSnapshot} onOpenSession={onOpenSession} />,
+    );
+    const rendered = render(
+      <TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} onOpenSession={onOpenSession} />,
+    );
+
+    const row = screen.getByRole("row", { name: /secondary/i });
+    await user.pointer({ target: row, keys: "[MouseRight]" });
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(selectTarget).not.toHaveBeenCalled();
+    await user.click(within(menu).getByRole("menuitem", { name: "Rename" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Rename session" });
+    expect(selectTarget).toHaveBeenCalledExactlyOnceWith(secondRef);
+    expect(onOpenSession).not.toHaveBeenCalled();
+    const input = within(dialog).getByRole("textbox", { name: "Session name" });
+    expect(input).toHaveValue("secondary");
+    await user.clear(input);
+    await user.type(input, "secondary-renamed");
+    await user.click(within(dialog).getByRole("button", { name: "Rename" }));
+
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledExactlyOnceWith({
+      operationId: "target.rename",
+      name: "secondary-renamed",
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument());
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it("cancels a session rename opened from a table cell without submitting", async () => {
+    const user = userEvent.setup();
+    const snapshot = targetSnapshot("session");
+    const api = installAPI({ selectTarget: vi.fn().mockResolvedValue({ ok: true, value: snapshot }) });
+    const rendered = render(<TargetsPage mode="session" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const row = screen.getByRole("row", { name: /payments/i });
+    fireEvent.contextMenu(within(row).getByRole("gridcell", { name: /prod-mac/i }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename session" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument());
+    expect(api.submitTargetOperation).not.toHaveBeenCalled();
+  });
+
+  it("does not retain a row rename action on the table header or background", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const rendered = render(<TargetsPage mode="session" snapshot={targetSnapshot("session")} onSnapshot={vi.fn()} />);
+    const row = screen.getByRole("row", { name: /payments/i });
+    fireEvent.contextMenu(row);
+    rendered.contextMenu.emit();
+    expect(await screen.findByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(screen.getByRole("columnheader", { name: "Host & user" }));
+    rendered.contextMenu.emit();
+    const headerMenu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(headerMenu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(screen.getByRole("heading", { name: "Live sessions" }));
+    rendered.contextMenu.emit();
+    const backgroundMenu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(backgroundMenu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+  });
+
+  it("discards a row rename selection reply after a reconnect", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    const selectTarget = vi.fn().mockImplementation(() => gate.promise);
+    installAPI({ selectTarget });
+    const onSnapshot = vi.fn();
+    const initial = targetSnapshot("session");
+    initial.connection.incarnation = 1;
+    const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+
+    const reconnected = targetSnapshot("session");
+    reconnected.connection.incarnation = 2;
+    rendered.rerender(<TargetsPage mode="session" snapshot={reconnected} onSnapshot={onSnapshot} />);
+    await act(async () => {
+      gate.resolve({ ok: true, value: initial });
+      await gate.promise;
+    });
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument();
+  });
+
+  it("discards a row rename selection reply after the catalog unmounts", async () => {
+    const user = userEvent.setup();
+    const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    const selectTarget = vi.fn().mockImplementation(() => gate.promise);
+    installAPI({ selectTarget });
+    const onSnapshot = vi.fn();
+    const snapshot = targetSnapshot("session");
+    const rendered = render(<TargetsPage mode="session" snapshot={snapshot} onSnapshot={onSnapshot} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+
+    rendered.unmount();
+    await act(async () => {
+      gate.resolve({ ok: true, value: snapshot });
+      await gate.promise;
+    });
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("rejects a row rename response that confirms a replacement session", async () => {
+    const user = userEvent.setup();
+    const initial = targetSnapshot("session");
+    const replacement = targetSnapshot("session");
+    replacement.targetContext.activeTarget = { ...sessionRef, fingerprint: "e".repeat(64) };
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: replacement });
+    installAPI({ selectTarget });
+    const onSnapshot = vi.fn();
+    const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument();
+  });
+
   it("opens an already-selected session through the explicit interaction action", async () => {
     const user = userEvent.setup();
     const selected = targetSnapshot("session");
@@ -1243,11 +1398,12 @@ describe("TargetsPage", () => {
     initial.connection.incarnation = 1;
     const { rerender } = render(sessionWorkspace(initial));
 
-    await user.click(screen.getByRole("button", { name: "Ping" }));
-    await user.click(await screen.findByRole("menuitemradio", { name: "Rename" }));
-    const nameInput = screen.getByRole("textbox", { name: "New target name" });
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    const nameInput = screen.getByRole("textbox", { name: "Session name" });
+    await user.clear(nameInput);
     await user.type(nameInput, "keep-this-draft");
-    await user.click(screen.getByRole("button", { name: "Run rename" }));
+    await user.click(screen.getByRole("button", { name: "Rename" }));
     await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledWith({
       operationId: "target.rename",
       name: "keep-this-draft",
@@ -1256,17 +1412,18 @@ describe("TargetsPage", () => {
     reconnected.connection.incarnation = 2;
     rerender(sessionWorkspace(reconnected));
     await waitFor(() => expect(screen.getByRole("button", { name: "Run ping" })).toBeEnabled());
-    expect(screen.queryByRole("textbox", { name: "New target name" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Session name" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Ping" }));
-    await user.click(await screen.findByRole("menuitemradio", { name: "Rename" }));
-    await user.type(screen.getByRole("textbox", { name: "New target name" }), "current-incarnation-draft");
-    await user.click(screen.getByRole("button", { name: "Run rename" }));
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await user.clear(screen.getByRole("textbox", { name: "Session name" }));
+    await user.type(screen.getByRole("textbox", { name: "Session name" }), "current-incarnation-draft");
+    await user.click(screen.getByRole("button", { name: "Rename" }));
     await waitFor(() => expect(submitTargetOperation).toHaveBeenNthCalledWith(2, {
       operationId: "target.rename",
       name: "current-incarnation-draft",
     }));
-    expect(screen.getByRole("button", { name: "Run rename" })).toHaveAttribute("data-pending", "true");
+    expect(screen.getByRole("button", { name: "Rename" })).toHaveAttribute("data-pending", "true");
 
     await act(async () => {
       staleSubmitGate.resolve({ ok: true, value: operationRecord({ operationId: "target.rename" }) });
@@ -1275,8 +1432,8 @@ describe("TargetsPage", () => {
 
     expect(screen.queryByText("Operation submitted")).not.toBeInTheDocument();
     expect(screen.queryByRole("row", { name: /request-1/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("current-incarnation-draft");
-    expect(screen.getByRole("button", { name: "Run rename" })).toHaveAttribute("data-pending", "true");
+    expect(screen.getByRole("textbox", { name: "Session name" })).toHaveValue("current-incarnation-draft");
+    expect(screen.getByRole("button", { name: "Rename" })).toHaveAttribute("data-pending", "true");
 
     await act(async () => {
       currentSubmitGate.resolve({
@@ -1285,7 +1442,7 @@ describe("TargetsPage", () => {
       });
       await currentSubmitGate.promise;
     });
-    expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument());
     await user.click(screen.getByRole("tab", { name: "Activity" }));
     expect(await screen.findByRole("row", { name: /request-2/i })).toBeInTheDocument();
   });
@@ -1297,9 +1454,10 @@ describe("TargetsPage", () => {
     initial.connection.incarnation = 1;
     const { rerender } = render(sessionWorkspace(initial));
 
-    await user.click(screen.getByRole("button", { name: "Ping" }));
-    await user.click(await screen.findByRole("menuitemradio", { name: "Rename" }));
-    await user.type(screen.getByRole("textbox", { name: "New target name" }), "revision-safe-draft");
+    await user.click(screen.getByRole("button", { name: "Session actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await user.clear(screen.getByRole("textbox", { name: "Session name" }));
+    await user.type(screen.getByRole("textbox", { name: "Session name" }), "revision-safe-draft");
 
     const refreshed = targetSnapshot("session");
     refreshed.connection.incarnation = 1;
@@ -1309,8 +1467,8 @@ describe("TargetsPage", () => {
     refreshed.targetContext.selectableTargets = [refreshedRef, beaconRef];
     rerender(sessionWorkspace(refreshed));
 
-    expect(screen.getByRole("textbox", { name: "New target name" })).toHaveValue("revision-safe-draft");
-    expect(screen.getByRole("button", { name: "Run rename" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "Session name" })).toHaveValue("revision-safe-draft");
+    expect(screen.getByRole("button", { name: "Rename" })).toBeEnabled();
 
     const changed = targetSnapshot("session");
     changed.connection.incarnation = 1;
@@ -1325,7 +1483,7 @@ describe("TargetsPage", () => {
     rerender(sessionWorkspace(changed));
 
     expect(screen.getByRole("heading", { name: "Session workspace unavailable" })).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "New target name" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Session name" })).not.toBeInTheDocument();
   });
 
   it("keeps a task modal across domain revisions and closes it for fingerprint or incarnation changes", async () => {

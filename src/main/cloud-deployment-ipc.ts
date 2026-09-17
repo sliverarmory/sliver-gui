@@ -12,6 +12,8 @@ import {
   type CloudCredentialTestResult,
   type CloudDeploymentSnapshot,
   type CloudDeploymentRefreshResult,
+  type CopyCloudInstanceIdInput,
+  type CopyCloudIpAddressInput,
   type CloudProvisioningTranscriptSnapshot,
   type CurrentEgressIpv4,
   type DestroyCloudDeploymentPlan,
@@ -127,6 +129,41 @@ export function registerCloudDeploymentIpcHandlers(
     authorizeWindow,
     parseNoArguments,
     () => controller.refreshDeployments(),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCopyInstanceIdInput(requireSingleArgument(args))),
+    async (cloudSender, input): Promise<OperationResult> => {
+      const result = await controller.getSnapshot();
+      if (!result.ok) return { ok: false, error: "The instance ID could not be loaded." };
+      const deployment = result.value.state.deployments.find(({ id }) => id === input.deploymentId);
+      if (deployment?.provider !== "aws" || !deployment.runtime.instanceId) {
+        return { ok: false, error: "No instance ID is available for this deployment." };
+      }
+      requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+      clipboard.writeText(deployment.runtime.instanceId);
+      return { ok: true };
+    },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCopyIpAddressInput(requireSingleArgument(args))),
+    async (cloudSender, input): Promise<OperationResult> => {
+      const result = await controller.getSnapshot();
+      if (!result.ok) return { ok: false, error: "The IP address could not be loaded." };
+      const deployment = result.value.state.deployments.find(({ id }) => id === input.deploymentId);
+      const address = input.kind === "public"
+        ? deployment?.runtime.publicIpAddress
+        : deployment?.runtime.privateIpAddress;
+      if (!address) return { ok: false, error: `No ${input.kind} IP address is available for this deployment.` };
+      requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+      clipboard.writeText(address);
+      return { ok: true };
+    },
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts,
@@ -452,6 +489,23 @@ interface CloudSender {
   readonly window: BrowserWindow;
 }
 
+function requireCurrentCloudSender(
+  { identity, sender, window }: CloudSender,
+  exactRendererUrl: string,
+  authorizeWindow: CloudWindowAuthorizer,
+): void {
+  if (sender.isDestroyed()) throw new Error("Untrusted cloud renderer");
+  const frame = sender.mainFrame;
+  if (
+    frame.isDestroyed() ||
+    frame.processId !== identity.rendererProcessId ||
+    frame.frameToken !== identity.rendererFrameToken ||
+    !isSameRendererDocument(sender.getURL(), exactRendererUrl) ||
+    !isSameRendererDocument(frame.url, exactRendererUrl) ||
+    !authorizeWindow(identity, window)
+  ) throw new Error("Untrusted cloud renderer");
+}
+
 function handleCloud<Args extends readonly unknown[], Result>(
   channel: string,
   exactRendererUrl: string,
@@ -518,6 +572,22 @@ function parseCredentialIdInput(value: unknown): CloudCredentialIdInput {
     throw new TypeError("Invalid cloud credential ID");
   }
   return Object.freeze({ credentialId: value["credentialId"] });
+}
+
+function parseCopyInstanceIdInput(value: unknown): CopyCloudInstanceIdInput {
+  if (!hasExactKeys(value, ["deploymentId"]) || !isUuidV4(value["deploymentId"])) {
+    throw new TypeError("Invalid cloud deployment ID");
+  }
+  return Object.freeze({ deploymentId: value["deploymentId"] });
+}
+
+function parseCopyIpAddressInput(value: unknown): CopyCloudIpAddressInput {
+  if (
+    !hasExactKeys(value, ["deploymentId", "kind"]) ||
+    !isUuidV4(value["deploymentId"]) ||
+    (value["kind"] !== "public" && value["kind"] !== "private")
+  ) throw new TypeError("Invalid cloud IP address request");
+  return Object.freeze({ deploymentId: value["deploymentId"], kind: value["kind"] });
 }
 
 function parsePrepareDestroyInput(value: unknown): PrepareDestroyCloudDeploymentInput {

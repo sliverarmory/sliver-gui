@@ -36,6 +36,7 @@ import {
   faList,
   faMicrochip,
   faNetworkWired,
+  faPen,
   faSkullCrossbones,
   faStop,
   faTriangleExclamation,
@@ -68,6 +69,7 @@ import {
 import { defaultSessionWorkspacePanels } from "./session-workbench-panels";
 import { SessionTerminalPanel } from "./SessionTerminalPanel";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
+import { RenameSessionModal } from "../components/RenameSessionModal";
 
 const sessionOperatingSystemIcons = new Map([
   ["windows", faWindows],
@@ -154,6 +156,7 @@ export function SessionWorkspacePage({
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [terminalVisitedRouteIdentity, setTerminalVisitedRouteIdentity] = useState<string>();
   const [selectedPanel, setSelectedPanel] = useState("overview");
+  const [renameRouteIdentity, setRenameRouteIdentity] = useState<string>();
   const [pendingSessionSwitch, setPendingSessionSwitch] = useState<PendingSessionSwitch>();
   const [isCheckingSessionShells, setIsCheckingSessionShells] = useState(false);
   const [isSwitchingSession, setIsSwitchingSession] = useState(false);
@@ -236,6 +239,7 @@ export function SessionWorkspacePage({
     setPendingSessionSwitch(undefined);
     setIsCheckingSessionShells(false);
     setIsPoppingOutInteraction(false);
+    setRenameRouteIdentity(undefined);
     if (isCurrent) void loadOperations();
   }, [isCurrent, loadOperations, routeIdentity]);
 
@@ -532,7 +536,41 @@ export function SessionWorkspacePage({
           <CompactDetail label="Process" value={currentSession.pid === undefined ? "Not reported" : String(currentSession.pid)} mono />
           <CompactDetail label="Last check-in" value={formatTimestamp(currentSession.lastCheckinAt)} />
         </dl>
+        <Dropdown>
+          <Button aria-label="Session actions" className="shrink-0" size="sm" variant="ghost">
+            Actions <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
+          </Button>
+          <Dropdown.Popover placement="bottom end">
+            <Dropdown.Menu aria-label="Session actions" onAction={(key) => {
+              if (key === "rename") setRenameRouteIdentity(routeIdentity);
+            }}>
+              <Dropdown.Item
+                id="rename"
+                isDisabled={!capabilityFor(snapshot.targetContext.capabilities, "target.rename")?.available}
+                textValue="Rename"
+              >
+                <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faPen} />
+                <Label>Rename</Label>
+              </Dropdown.Item>
+            </Dropdown.Menu>
+          </Dropdown.Popover>
+        </Dropdown>
       </header>
+
+      {renameRouteIdentity === routeIdentity ? (
+        <RenameSessionModal
+          key={routeIdentity}
+          capabilities={snapshot.targetContext.capabilities}
+          session={currentSession}
+          targetIdentity={routeIdentity}
+          onClose={() => setRenameRouteIdentity(undefined)}
+          onSubmitted={(operation) => {
+            if (!isCurrentRef.current || routeIdentity !== routeIdentityRef.current || !operationBelongsToRoute(operation, route)) return false;
+            mergeOperation(operation);
+            return true;
+          }}
+        />
+      ) : null}
 
       <Tabs
         className="session-workspace__tabs"

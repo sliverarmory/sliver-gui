@@ -10,7 +10,14 @@ import type {
 } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CLOUD_DEPLOYMENT_IPC_INVOKE } from "../shared/cloud-deployment-ipc.js";
+import {
+  E2E_AWS_DEPLOYMENT,
+  E2E_AZURE_DEPLOYMENT,
+} from "../e2e/cloud-deployment-fixture.js";
+import {
+  CLOUD_DEPLOYMENT_IPC_INVOKE,
+  type CloudDeploymentSnapshot,
+} from "../shared/cloud-deployment-ipc.js";
 import {
   registerCloudDeploymentIpcHandlers,
   unregisterCloudDeploymentIpcHandlers,
@@ -63,6 +70,125 @@ beforeEach(() => {
 afterEach(() => unregisterCloudDeploymentIpcHandlers());
 
 describe("Cloud Deployment IPC boundary", () => {
+  it("copies the requested managed AWS instance ID from the current snapshot", async () => {
+    const deployment = {
+      ...E2E_AWS_DEPLOYMENT,
+      id: CREDENTIAL_ID,
+      runtime: { ...E2E_AWS_DEPLOYMENT.runtime, instanceId: "i-currentmanagedinstance" },
+    };
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>(async () => ({
+      ok: true,
+      value: snapshotWithDeployments([E2E_AWS_DEPLOYMENT, deployment]),
+    }));
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, invokeEvent(CLOUD_RENDERER_URL, 77).event, {
+      deploymentId: CREDENTIAL_ID,
+    })).resolves.toEqual({ ok: true });
+    expect(getSnapshot).toHaveBeenCalledExactlyOnceWith();
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith("i-currentmanagedinstance");
+  });
+
+  it.each([
+    ["missing deployment", []],
+    ["pending instance", [{ ...E2E_AWS_DEPLOYMENT, runtime: { ...E2E_AWS_DEPLOYMENT.runtime, instanceId: null } }]],
+    ["Azure deployment", [{ ...E2E_AZURE_DEPLOYMENT, id: E2E_AWS_DEPLOYMENT.id }]],
+  ] as const)("does not copy an unavailable ID for a %s", async (_label, deployments) => {
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>(async () => ({
+      ok: true,
+      value: snapshotWithDeployments(deployments),
+    }));
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, invokeEvent(CLOUD_RENDERER_URL, 77).event, {
+      deploymentId: E2E_AWS_DEPLOYMENT.id,
+    })).resolves.toEqual({ ok: false, error: "No instance ID is available for this deployment." });
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["AWS public", E2E_AWS_DEPLOYMENT, "public"],
+    ["AWS private", E2E_AWS_DEPLOYMENT, "private"],
+    ["Azure public", E2E_AZURE_DEPLOYMENT, "public"],
+    ["Azure private", E2E_AZURE_DEPLOYMENT, "private"],
+  ] as const)("copies the requested %s IP from the managed snapshot", async (_label, deployment, kind) => {
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>(async () => ({
+      ok: true,
+      value: snapshotWithDeployments([E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT]),
+    }));
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, invokeEvent(CLOUD_RENDERER_URL, 77).event, {
+      deploymentId: deployment.id, kind,
+    })).resolves.toEqual({ ok: true });
+    const expected = kind === "public" ? deployment.runtime.publicIpAddress : deployment.runtime.privateIpAddress;
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(expected);
+  });
+
+  it.each(["public", "private"] as const)("does not copy a missing %s IP or an unknown deployment", async (kind) => {
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>(async () => ({
+      ok: true,
+      value: snapshotWithDeployments([{
+        ...E2E_AWS_DEPLOYMENT,
+        runtime: { ...E2E_AWS_DEPLOYMENT.runtime, publicIpAddress: null, privateIpAddress: null },
+      }]),
+    }));
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    for (const deploymentId of [E2E_AWS_DEPLOYMENT.id, CREDENTIAL_ID]) {
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, invokeEvent(CLOUD_RENDERER_URL, 77).event, {
+        deploymentId, kind,
+      })).resolves.toEqual({ ok: false, error: `No ${kind} IP address is available for this deployment.` });
+    }
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, { deploymentId: E2E_AWS_DEPLOYMENT.id }],
+    [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, { deploymentId: E2E_AWS_DEPLOYMENT.id, kind: "public" }],
+  ])("rejects %s from another surface or revoked window before reading state", async (channel, input) => {
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>();
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    for (const event of [invokeEvent("sliver://app/index.html", 77).event, invokeEvent(CLOUD_RENDERER_URL, 78).event]) {
+      await expect(invoke(channel, event, input)).resolves.toEqual(REJECTED);
+    }
+    expect(getSnapshot).not.toHaveBeenCalled();
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, { deploymentId: E2E_AWS_DEPLOYMENT.id }],
+    [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, { deploymentId: E2E_AWS_DEPLOYMENT.id, kind: "private" }],
+  ])("does not dispatch %s when the requesting window is revoked while reading state", async (channel, input) => {
+    let resolveSnapshot!: (snapshot: Awaited<ReturnType<CloudDeploymentController["getSnapshot"]>>) => void;
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>(() => new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    const authorize = vi.fn(authorizeCurrentWindow);
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorize);
+    const pending = invoke(channel, invokeEvent(CLOUD_RENDERER_URL, 77).event, input);
+    authorize.mockReturnValue(false);
+    resolveSnapshot({ ok: true, value: snapshotWithDeployments([E2E_AWS_DEPLOYMENT]) });
+
+    await expect(pending).resolves.toEqual(REJECTED);
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, { deploymentId: E2E_AWS_DEPLOYMENT.id }, "The instance ID could not be loaded."],
+    [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, { deploymentId: E2E_AWS_DEPLOYMENT.id, kind: "public" }, "The IP address could not be loaded."],
+  ])("reports %s failures without returning clipboard contents", async (channel, input, message) => {
+    const getSnapshot = vi.fn<CloudDeploymentController["getSnapshot"]>()
+      .mockResolvedValueOnce({ ok: false, error: "snapshot unavailable" })
+      .mockResolvedValueOnce({ ok: true, value: snapshotWithDeployments([E2E_AWS_DEPLOYMENT]) });
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSnapshot }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const { event } = invokeEvent(CLOUD_RENDERER_URL, 77);
+    await expect(invoke(channel, event, input))
+      .resolves.toEqual({ ok: false, error: message });
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("private clipboard failure"); });
+    await expect(invoke(channel, event, input)).resolves.toEqual(REJECTED);
+  });
+
   it("binds Azure subscription selection to its window until saved or discarded", async () => {
     const selection = { token: PRIVATE_KEY_TOKEN, expiresAt: "2026-09-09T00:00:00.000Z", subscriptions: [] };
     const beginAzureLogin = vi.fn<CloudDeploymentController["beginAzureLogin"]>(async () => ({ ok: true, value: selection }));
@@ -505,6 +631,16 @@ describe("Cloud Deployment IPC boundary", () => {
     const malformedRequests: ReadonlyArray<readonly [string, readonly unknown[]]> = [
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot, [{ unexpected: true }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments, [null]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, []],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, [{ deploymentId: "not-a-uuid" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, [{ deploymentId: CREDENTIAL_ID, instanceId: "arbitrary clipboard content" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, [{ deploymentId: CREDENTIAL_ID }, "extra"]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, []],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, [{ deploymentId: "invalid", kind: "public" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, [{ deploymentId: CREDENTIAL_ID }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, [{ deploymentId: CREDENTIAL_ID, kind: "arbitrary" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, [{ deploymentId: CREDENTIAL_ID, kind: "private", address: "arbitrary clipboard content" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, [{ deploymentId: CREDENTIAL_ID, kind: "public" }, "extra"]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime, ["ghostty-vt.wasm"]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.detectCurrentEgressIpv4, [null]],
@@ -799,6 +935,20 @@ describe("Cloud Deployment IPC boundary", () => {
     expect(immutableCredential.accessKeyId).toBe("immutable-access-key");
   });
 });
+
+function snapshotWithDeployments(deployments: CloudDeploymentSnapshot["state"]["deployments"]): CloudDeploymentSnapshot {
+  return {
+    state: { v: 1, revision: 0, deployments },
+    refreshErrors: [],
+    credentials: [],
+    secureCredentialStorage: true,
+    awsProfiles: [],
+    awsProfileDiscoveryError: null,
+    azureAccounts: [],
+    azureAccountDiscoveryError: null,
+    provisioningTranscripts: [],
+  };
+}
 
 function controllerMock(
   overrides: Partial<CloudDeploymentController> = {},

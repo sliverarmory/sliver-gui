@@ -33,7 +33,11 @@ export function renderWithApplicationContextMenu(children: ReactNode): Applicati
   const rendered = render(
     <ApplicationContextMenu api={api}>{children}</ApplicationContextMenu>,
   );
+  const rerender = rendered.rerender;
   return Object.assign(rendered, {
+    rerender: (nextChildren: ReactNode) => rerender(
+      <ApplicationContextMenu api={api}>{nextChildren}</ApplicationContextMenu>,
+    ),
     contextMenu: {
       api,
       emit: (items: readonly ApplicationContextMenuItem[] = inspectItems()) => {

@@ -4,6 +4,7 @@ import {
   faArrowsRotate,
   faCheck,
   faCloudArrowUp,
+  faCopy,
   faKey,
   faPen,
   faPlay,
@@ -561,11 +562,6 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {snapshot ? (
-                <Chip color={snapshot.secureCredentialStorage ? "success" : "warning"} size="sm" variant="soft">
-                  {snapshot.secureCredentialStorage ? "Encrypted credentials" : "Session-only credentials"}
-                </Chip>
-              ) : null}
               <Tooltip delay={0}>
                 <Button
                   aria-label="Refresh cloud deployments"
@@ -2362,6 +2358,16 @@ function AwsInstanceDetails({
   const [pendingMutation, setPendingMutation] = useState<"create" | "update" | "delete" | "current-ip" | null>(null);
   const loadGeneration = useRef(0);
 
+  const copyInstanceId = async (): Promise<void> => {
+    try {
+      const result = await api.copyInstanceId({ deploymentId: deployment.id });
+      if (!result.ok) throw new Error(result.error ?? "The instance ID could not be copied.");
+      toast.success("Instance ID copied");
+    } catch (error) {
+      toast.danger("Could not copy instance ID", { description: errorMessage(error) });
+    }
+  };
+
   const loadRules = useCallback(async (): Promise<void> => {
     const generation = ++loadGeneration.current;
     setIsLoadingRules(true);
@@ -2527,7 +2533,7 @@ function AwsInstanceDetails({
     <div className="flex min-h-0 flex-1 flex-col">
       <header
         aria-label="Instance details header"
-        className="sticky top-0 z-20 shrink-0 space-y-6 bg-background pb-6"
+        className="sticky top-0 z-20 shrink-0 space-y-3 bg-background pb-4"
         data-testid="aws-instance-sticky-header"
       >
         <div>
@@ -2553,7 +2559,7 @@ function AwsInstanceDetails({
                 <p className="mt-1 truncate text-sm text-muted">AWS EC2 · {deployment.runtime.instanceId ?? "Instance pending"}</p>
               </div>
             </div>
-            <Chip color={statusColor(deployment.status)} size="sm" variant="soft">
+            <Chip color={statusColor(deployment.status)} variant="soft">
               {deployment.status === "deleting" ? "Terminating" : titleCase(deployment.status)}
             </Chip>
           </div>
@@ -2571,17 +2577,28 @@ function AwsInstanceDetails({
           {notices}
 
           <Card variant="secondary">
-            <Card.Header>
-              <Card.Title>Instance summary</Card.Title>
-              <Card.Description>Compute and network identifiers for this managed server.</Card.Description>
-            </Card.Header>
             <Card.Content>
               <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
-                <DeploymentDetail label="Instance ID" value={deployment.runtime.instanceId ?? "Pending"} mono />
+                <DeploymentDetail
+                  label="Instance ID"
+                  value={deployment.runtime.instanceId ?? "Pending"}
+                  mono
+                  onCopy={deployment.runtime.instanceId ? () => { void copyInstanceId(); } : undefined}
+                />
                 <DeploymentDetail label="Instance type" value={deployment.spec.instanceType} mono />
                 <DeploymentDetail label="Availability Zone" value={deployment.runtime.availabilityZone ?? "Pending"} mono />
-                <DeploymentDetail label="Public IP" value={deployment.runtime.publicIpAddress ?? "None"} mono />
-                <DeploymentDetail label="Private IP" value={deployment.runtime.privateIpAddress ?? "Pending"} mono />
+                <DeploymentDetail
+                  label="Public IP"
+                  value={deployment.runtime.publicIpAddress ?? "None"}
+                  mono
+                  onCopy={deployment.runtime.publicIpAddress ? () => { void copyCloudIpAddress(api, deployment.id, "public"); } : undefined}
+                />
+                <DeploymentDetail
+                  label="Private IP"
+                  value={deployment.runtime.privateIpAddress ?? "Pending"}
+                  mono
+                  onCopy={deployment.runtime.privateIpAddress ? () => { void copyCloudIpAddress(api, deployment.id, "private"); } : undefined}
+                />
                 <DeploymentDetail label="VPC" value={firewall?.vpcId ?? deployment.runtime.vpcId ?? deployment.spec.vpcId ?? "Pending"} mono />
                 <DeploymentDetail label="Subnet" value={deployment.runtime.subnetId ?? deployment.spec.subnetId ?? "Pending"} mono />
                 <DeploymentDetail label="Security group" value={securityGroupId} mono />
@@ -2943,7 +2960,7 @@ function AzureInstanceDetails({
     <div className="flex min-h-0 flex-1 flex-col">
       <header
         aria-label="Virtual machine details header"
-        className="sticky top-0 z-20 shrink-0 space-y-6 bg-background pb-6"
+        className="sticky top-0 z-20 shrink-0 space-y-3 bg-background pb-4"
         data-testid="azure-instance-sticky-header"
       >
         <div>
@@ -2964,7 +2981,7 @@ function AzureInstanceDetails({
                 <p className="mt-1 truncate text-sm text-muted">Microsoft Azure · {deployment.runtime.vmName ?? "VM pending"}</p>
               </div>
             </div>
-            <Chip color={statusColor(deployment.status)} size="sm" variant="soft">
+            <Chip color={statusColor(deployment.status)} variant="soft">
               {deployment.status === "deleting" ? "Terminating" : titleCase(deployment.status)}
             </Chip>
           </div>
@@ -2991,8 +3008,18 @@ function AzureInstanceDetails({
                 <DeploymentDetail label="VM size" value={deployment.spec.vmSize} mono />
                 <DeploymentDetail label="Location" value={deployment.spec.location} mono />
                 <DeploymentDetail label="Resource group" value={firewall?.resourceGroupName ?? deployment.runtime.resourceGroupName ?? "Pending"} mono />
-                <DeploymentDetail label="Public IP" value={deployment.runtime.publicIpAddress ?? "None"} mono />
-                <DeploymentDetail label="Private IP" value={deployment.runtime.privateIpAddress ?? "Pending"} mono />
+                <DeploymentDetail
+                  label="Public IP"
+                  value={deployment.runtime.publicIpAddress ?? "None"}
+                  mono
+                  onCopy={deployment.runtime.publicIpAddress ? () => { void copyCloudIpAddress(api, deployment.id, "public"); } : undefined}
+                />
+                <DeploymentDetail
+                  label="Private IP"
+                  value={deployment.runtime.privateIpAddress ?? "Pending"}
+                  mono
+                  onCopy={deployment.runtime.privateIpAddress ? () => { void copyCloudIpAddress(api, deployment.id, "private"); } : undefined}
+                />
                 <DeploymentDetail label="VNet" value={deployment.runtime.vnetId ?? deployment.spec.vnetId ?? "Pending"} mono />
                 <DeploymentDetail label="Subnet" value={deployment.runtime.subnetId ?? deployment.spec.subnetId ?? "Pending"} mono />
                 <DeploymentDetail label="Network security group" value={nsgId} mono />
@@ -5530,11 +5557,46 @@ function CloudRichSelect<Value extends string | number>({
   );
 }
 
-function DeploymentDetail({ label, value, mono = false }: { readonly label: string; readonly value: string; readonly mono?: boolean }): React.JSX.Element {
+async function copyCloudIpAddress(api: CloudDeploymentAPI, deploymentId: string, kind: "public" | "private"): Promise<void> {
+  const label = kind === "public" ? "Public IP" : "Private IP";
+  try {
+    const result = await api.copyIpAddress({ deploymentId, kind });
+    if (!result.ok) throw new Error(result.error ?? `The ${label.toLowerCase()} could not be copied.`);
+    toast.success(`${label} copied`);
+  } catch (error) {
+    toast.danger(`Could not copy ${label.toLowerCase()}`, { description: errorMessage(error) });
+  }
+}
+
+function DeploymentDetail({ label, value, mono = false, onCopy }: {
+  readonly label: string;
+  readonly value: string;
+  readonly mono?: boolean;
+  readonly onCopy?: (() => void) | undefined;
+}): React.JSX.Element {
   return (
     <div className="min-w-0">
       <dt className="text-xs text-muted">{label}</dt>
-      <dd className={`mt-1 truncate ${mono ? "font-mono text-xs" : "font-medium"}`} title={value}>{value}</dd>
+      <dd className={`mt-1 ${onCopy ? "flex items-center gap-1" : "truncate"} ${mono ? "font-mono text-xs" : "font-medium"}`} title={value}>
+        {onCopy ? (
+          <>
+            <span className="min-w-0 truncate">{value}</span>
+            <Tooltip delay={0}>
+              <Button
+                aria-label={`Copy ${label}`}
+                className="size-6 min-w-0 shrink-0 p-0"
+                isIconOnly
+                size="sm"
+                variant="ghost"
+                onPress={onCopy}
+              >
+                <FontAwesomeIcon aria-hidden className="size-3" icon={faCopy} />
+              </Button>
+              <Tooltip.Content>Copy {label}</Tooltip.Content>
+            </Tooltip>
+          </>
+        ) : value}
+      </dd>
     </div>
   );
 }

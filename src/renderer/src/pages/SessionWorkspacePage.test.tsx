@@ -290,6 +290,59 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
 }
 
 describe("SessionWorkspacePage", () => {
+  it.each(["embedded", "dedicated"] as const)("renames a session from the %s header using the shared dialog", async (presentation) => {
+    const user = userEvent.setup();
+    installAPI();
+    const submitTargetOperation = vi.fn().mockResolvedValue({
+      ok: true,
+      value: operation({ operationId: "target.rename" }),
+    });
+    Object.assign(window.sliver, { submitTargetOperation });
+    const onSnapshot = vi.fn();
+    const view = render(
+      <SessionWorkspacePage
+        presentation={presentation}
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onSnapshot={onSnapshot}
+      />,
+    );
+
+    const actions = screen.getByRole("button", { name: "Session actions" });
+    expect(actions.closest("header")).toContainElement(screen.getByRole("heading", { name: session.name }));
+    await user.click(actions);
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    const firstDialog = await screen.findByRole("dialog", { name: "Rename session" });
+    expect(within(firstDialog).getByRole("textbox", { name: "Session name" })).toHaveValue(session.name);
+    await user.click(within(firstDialog).getByRole("button", { name: "Cancel" }));
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+
+    await user.click(actions);
+    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename session" });
+    await user.clear(within(dialog).getByRole("textbox", { name: "Session name" }));
+    await user.type(within(dialog).getByRole("textbox", { name: "Session name" }), "payments-new");
+    await user.click(within(dialog).getByRole("button", { name: "Rename" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument());
+    expect(submitTargetOperation).toHaveBeenCalledExactlyOnceWith({ operationId: "target.rename", name: "payments-new" });
+    const renamed = { ...session, name: "payments-new" };
+    view.rerender(
+      <SessionWorkspacePage
+        presentation={presentation}
+        route={route}
+        session={renamed}
+        snapshot={workspaceSnapshot(renamed)}
+        onSnapshot={onSnapshot}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "payments-new" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Ping" }));
+    expect(screen.queryByRole("menuitemradio", { name: "Rename" })).not.toBeInTheDocument();
+  });
+
   it("renders a clean responsive session workspace and exposes typed panel seams", async () => {
     const user = userEvent.setup();
     const onBack = vi.fn();

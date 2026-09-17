@@ -648,7 +648,7 @@ async function assertAwsFirewallDetails(cloudPage: Page, artifactDirectory?: str
     name: E2E_AWS_DEPLOYMENT_NAME,
     exact: true,
   }).waitFor();
-  await cloudPage.getByRole("heading", { name: "Instance summary", exact: true }).waitFor();
+  await cloudPage.getByRole("button", { name: "Copy Instance ID", exact: true }).waitFor();
   await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
   const firewallGrid = cloudPage.getByRole("grid", { name: "Inbound firewall rules" });
   await firewallGrid.waitFor();
@@ -859,7 +859,6 @@ async function assertCloudDeploymentSurface(
     cloudPage.getByRole("heading", { name: E2E_AZURE_DEPLOYMENT_NAME, exact: true }).waitFor(),
     newDeploymentButtons.first().waitFor(),
     cloudPage.getByRole("button", { name: "Refresh cloud deployments", exact: true }).waitFor(),
-    cloudPage.getByText("Encrypted credentials", { exact: true }).waitFor(),
   ]);
   assert.ok(await newDeploymentButtons.count() >= 1, "expected the deployment dashboard to offer creation");
   assert.equal(

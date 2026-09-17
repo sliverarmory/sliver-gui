@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApplicationContextMenuItem } from "../../../shared/application-context-menu-contracts";
 import { renderWithApplicationContextMenu } from "../application-context-menu-test-utils";
-import { ApplicationContextMenu } from "./ApplicationContextMenu";
 import { GhosttyTerminalClipboard } from "./GhosttyTerminalClipboard";
 
 const toastMocks = vi.hoisted(() => ({ danger: vi.fn() }));
@@ -274,7 +273,7 @@ function renderClipboard(options: { selection?: string; canPaste?: boolean; plat
     writeText,
     update: (next: Partial<typeof state>) => {
       state = { ...state, ...next };
-      rendered.rerender(<ApplicationContextMenu api={rendered.contextMenu.api}>{content()}</ApplicationContextMenu>);
+      rendered.rerender(content());
     },
     keyDown: (key: string, modifiers: KeyboardEventInit) => {
       const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key, ...modifiers });

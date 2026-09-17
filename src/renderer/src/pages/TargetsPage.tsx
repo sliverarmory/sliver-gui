@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Key } from "react-aria-components";
 import {
   Button,
@@ -72,6 +72,8 @@ import type {
   TargetOperationRecord,
 } from "../../../shared/operation-contracts";
 import { AreaField, Field } from "../components/FormControls";
+import { useApplicationContextMenuScope } from "../components/ApplicationContextMenu";
+import { RenameSessionModal } from "../components/RenameSessionModal";
 import {
   beaconTaskCountLabel,
   capabilityFor,
@@ -181,6 +183,7 @@ export function TargetsPage({
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [executionSheetTarget, setExecutionSheetTarget] = useState<ExecutionSheetTarget>();
   const [showDedicatedExecution, setShowDedicatedExecution] = useState(false);
+  const [renameSessionTarget, setRenameSessionTarget] = useState<ExecutionSheetTarget>();
   const targetInventoryIdentity = targetCatalogIdentity(snapshot, mode);
   const normalizedTargetQuery = normalizeTargetCatalogQuery(query);
   const targetSearchIdentity = `${targetInventoryIdentity}\0${mode}\0${normalizedTargetQuery}`;
@@ -240,12 +243,18 @@ export function TargetsPage({
   selectedOperationIdRef.current = selectedOperation?.requestId;
   const selectedTaskIdRef = useRef(selectedTask?.taskId);
   selectedTaskIdRef.current = selectedTask?.taskId;
-  const backendIncarnation = snapshot.connection.epoch === undefined
-    ? "disconnected"
-    : `${snapshot.connection.epoch}:${snapshot.connection.incarnation ?? 0}:${snapshot.connection.server ?? ""}:${snapshot.connection.configName ?? ""}`;
+  const backendIncarnation = targetBackendIncarnation(snapshot);
   const backendIncarnationRef = useRef(backendIncarnation);
   backendIncarnationRef.current = backendIncarnation;
   const activeExecutionIdentity = exactTargetRefIdentity(activeRef);
+  const renameSessionIsCurrent = presentation === "catalog" &&
+    mode === "session" &&
+    snapshot.targetContext.status === "selected" &&
+    active?.mode === "session" &&
+    activeRef?.mode === "session" &&
+    active.id === activeRef.id &&
+    renameSessionTarget?.backendIncarnation === backendIncarnation &&
+    targetRefIdentity(renameSessionTarget.ref) === activeIdentity;
   const executionSheetIsCurrent = presentation === "catalog" &&
     mode === "beacon" &&
     active?.mode === "beacon" &&
@@ -267,6 +276,10 @@ export function TargetsPage({
   const pageLabelLower = mode === "session" ? "sessions" : "beacons";
   const pageIcon = mode === "session" ? faComputer : faSatellite;
   const pageTotal = mode === "session" ? targetInventory.sessionPage.total : targetInventory.beaconPage.total;
+
+  useEffect(() => () => {
+    targetSelectionRequestSequence.current += 1;
+  }, []);
 
   const mergeOperation = useCallback((operation: TargetOperationRecord) => {
     if (operation.backend.epoch !== backendEpochRef.current) return;
@@ -690,6 +703,53 @@ export function TargetsPage({
     if (executionSheetTarget && !executionSheetIsCurrent) setExecutionSheetTarget(undefined);
   }, [executionSheetIsCurrent, executionSheetTarget]);
 
+  useEffect(() => {
+    if (renameSessionTarget && !renameSessionIsCurrent) setRenameSessionTarget(undefined);
+  }, [renameSessionIsCurrent, renameSessionTarget]);
+
+  const renameSession = useCallback(async (ref: TargetRef) => {
+    const expectedIncarnation = backendIncarnationRef.current;
+    const requestSequence = ++targetSelectionRequestSequence.current;
+    setIsSelecting(true);
+    try {
+      const result = await window.sliver.selectTarget(ref);
+      if (
+        requestSequence !== targetSelectionRequestSequence.current ||
+        expectedIncarnation !== backendIncarnationRef.current
+      ) return;
+      if (!result.ok || !result.value) {
+        toast.danger("Could not select session", { description: result.error });
+        return;
+      }
+      const selectedRef = result.value.targetContext.activeTarget;
+      const selectedSummary = result.value.targetContext.activeTargetSummary;
+      if (
+        targetBackendIncarnation(result.value) !== expectedIncarnation ||
+        selectedRef?.mode !== "session" ||
+        targetRefIdentity(selectedRef) !== targetRefIdentity(ref) ||
+        selectedSummary?.mode !== "session" ||
+        selectedSummary.id !== ref.id
+      ) {
+        toast.warning("Session changed", {
+          description: "The server did not confirm the selected session. Return to the live inventory and select it again.",
+        });
+        return;
+      }
+      onSnapshot(result.value);
+      setRenameSessionTarget({ ref: selectedRef, backendIncarnation: expectedIncarnation });
+    } catch (error) {
+      if (
+        requestSequence === targetSelectionRequestSequence.current &&
+        expectedIncarnation === backendIncarnationRef.current
+      ) toast.danger("Could not select session", { description: errorMessage(error) });
+    } finally {
+      if (
+        requestSequence === targetSelectionRequestSequence.current &&
+        expectedIncarnation === backendIncarnationRef.current
+      ) setIsSelecting(false);
+    }
+  }, [onSnapshot]);
+
   const selectTarget = useCallback(async (target: TargetSummary) => {
     const ref = presentedTargetInventory.refs[targetRowKey(target)];
     if (!ref) {
@@ -1062,50 +1122,60 @@ export function TargetsPage({
                 : presentedTargetInventory.beaconPage.truncated}
             />
           )}
-          <DataGrid
-            aria-label={`Sliver ${pageLabelLower}`}
-            columns={targetColumns}
-            contentClassName={mode === "session" ? "min-w-[850px]" : "min-w-[980px]"}
-            data={filteredTargets}
-            disabledKeys={isSelecting ? filteredTargets.map(targetRowKey) : []}
-            getRowId={targetRowKey}
-            selectedKeys={selectedKeys}
-            selectionBehavior="replace"
-            selectionMode="single"
-            scrollContainerClassName="max-h-[520px] overflow-auto"
-            variant="secondary"
-            onRowAction={selectTargetByKey}
-            onSelectionChange={(selection) => {
-              if (selection === "all") return;
-              const key = [...selection][0];
-              if (key !== undefined) selectTargetByKey(key);
+          <TargetTableContextMenu
+            key={backendIncarnation}
+            disabled={isSelecting}
+            targets={filteredTargets}
+            targetRefs={presentedTargetInventory.refs}
+            onRename={(ref) => {
+              if (backendIncarnation === backendIncarnationRef.current) void renameSession(ref);
             }}
-            renderEmptyState={() => (
-              <EmptyState className="min-h-64 px-6 py-12" size="sm">
-                <EmptyState.Media><FontAwesomeIcon aria-hidden icon={pageIcon} /></EmptyState.Media>
-                <EmptyState.Content>
-                  <EmptyState.Title>
-                    {isSearchingTargets
-                      ? `Searching ${pageLabelLower}`
-                      : normalizedTargetQuery
-                        ? `No ${pageLabelLower} match`
-                        : allTargets.length === 0
-                          ? `No ${pageLabelLower} connected`
-                          : `No ${pageLabelLower} match`}
-                  </EmptyState.Title>
-                  <EmptyState.Description>
-                    {isSearchingTargets
-                      ? "Searching the complete bounded server catalog…"
-                      : normalizedTargetQuery
-                        ? "Clear the search or try another query."
-                        : allTargets.length === 0
-                          ? `${pageLabel} appear here as the server reports them.`
-                          : "Try another query."}
-                  </EmptyState.Description>
-                </EmptyState.Content>
-              </EmptyState>
-            )}
-          />
+          >
+            <DataGrid
+              aria-label={`Sliver ${pageLabelLower}`}
+              columns={targetColumns}
+              contentClassName={mode === "session" ? "min-w-[850px]" : "min-w-[980px]"}
+              data={filteredTargets}
+              disabledKeys={isSelecting ? filteredTargets.map(targetRowKey) : []}
+              getRowId={targetRowKey}
+              selectedKeys={selectedKeys}
+              selectionBehavior="replace"
+              selectionMode="single"
+              scrollContainerClassName="max-h-[520px] overflow-auto"
+              variant="secondary"
+              onRowAction={selectTargetByKey}
+              onSelectionChange={(selection) => {
+                if (selection === "all") return;
+                const key = [...selection][0];
+                if (key !== undefined) selectTargetByKey(key);
+              }}
+              renderEmptyState={() => (
+                <EmptyState className="min-h-64 px-6 py-12" size="sm">
+                  <EmptyState.Media><FontAwesomeIcon aria-hidden icon={pageIcon} /></EmptyState.Media>
+                  <EmptyState.Content>
+                    <EmptyState.Title>
+                      {isSearchingTargets
+                        ? `Searching ${pageLabelLower}`
+                        : normalizedTargetQuery
+                          ? `No ${pageLabelLower} match`
+                          : allTargets.length === 0
+                            ? `No ${pageLabelLower} connected`
+                            : `No ${pageLabelLower} match`}
+                    </EmptyState.Title>
+                    <EmptyState.Description>
+                      {isSearchingTargets
+                        ? "Searching the complete bounded server catalog…"
+                        : normalizedTargetQuery
+                          ? "Clear the search or try another query."
+                          : allTargets.length === 0
+                            ? `${pageLabel} appear here as the server reports them.`
+                            : "Try another query."}
+                    </EmptyState.Description>
+                  </EmptyState.Content>
+                </EmptyState>
+              )}
+            />
+          </TargetTableContextMenu>
           <TargetCatalogPaging
             filter={mode}
             sessionsLoaded={presentedTargetInventory.sessions.length}
@@ -1226,6 +1296,25 @@ export function TargetsPage({
           onLoadMore={(cursor) => void loadTasks(cursor)}
           onOpen={selectTaskDetail}
           onRefresh={() => void loadTasks()}
+        />
+      ) : null}
+
+      {renameSessionIsCurrent && active?.mode === "session" ? (
+        <RenameSessionModal
+          key={`${backendIncarnation}:${activeIdentity}`}
+          session={active}
+          targetIdentity={`${backendIncarnation}:${activeIdentity}`}
+          capabilities={snapshot.targetContext.capabilities}
+          onClose={() => setRenameSessionTarget(undefined)}
+          onSubmitted={(operation) => {
+            if (
+              backendIncarnation !== backendIncarnationRef.current ||
+              activeIdentity !== activeIdentityRef.current ||
+              targetRefIdentity(operation.target) !== activeIdentity
+            ) return false;
+            mergeOperation(operation);
+            return true;
+          }}
         />
       ) : null}
 
@@ -1528,6 +1617,49 @@ function BeaconExecutionSheet({
   );
 }
 
+function TargetTableContextMenu({
+  children,
+  disabled,
+  targets,
+  targetRefs,
+  onRename,
+}: {
+  children: ReactNode;
+  disabled: boolean;
+  targets: readonly TargetSummary[];
+  targetRefs: Readonly<Record<string, TargetRef>>;
+  onRename: (target: TargetRef) => void;
+}): React.JSX.Element {
+  const [contextTarget, setContextTarget] = useState<TargetRef>();
+  const scope = useApplicationContextMenuScope({
+    actions: contextTarget ? [{
+      id: "session.rename",
+      label: "Rename",
+      icon: faPen,
+      isDisabled: disabled,
+      onAction: () => onRename(contextTarget),
+    }] : [],
+  });
+
+  return (
+    <div
+      {...scope}
+      onContextMenuCapture={(event) => {
+        const row = event.target instanceof Element
+          ? event.target.closest<HTMLElement>('[role="row"][data-key]')
+          : null;
+        const key = row?.dataset["key"];
+        const target = key && event.currentTarget.contains(row)
+          ? targets.find((candidate) => targetRowKey(candidate) === key)
+          : undefined;
+        setContextTarget(target?.mode === "session" && key ? targetRefs[key] : undefined);
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function OperationComposer({
   active,
   targetIdentity,
@@ -1546,7 +1678,7 @@ export function OperationComposer({
   targetIdentityRef.current = targetIdentity;
   const availableOperations = useMemo<TargetOperationId[]>(() => active.mode === "beacon"
     ? ["target.ping", "target.rename", "target.env-set", "target.env-unset", "beacon.reconfigure", "beacon.open-session"]
-    : ["target.ping", "target.rename", "target.env-set", "target.env-unset"], [active.mode]);
+    : ["target.ping", "target.env-set", "target.env-unset"], [active.mode]);
   const capability = capabilityFor(capabilities, OPERATION_CAPABILITIES[draft.operationId]);
 
   useEffect(() => {
@@ -2645,6 +2777,12 @@ function targetActionLabel(action: DestructiveTargetActionId): string {
     "sessions.prune-dead": "Prune dead sessions",
     "beacons.prune-overdue": "Prune overdue beacons",
   } as const)[action];
+}
+
+function targetBackendIncarnation(snapshot: SliverSnapshot): string {
+  return snapshot.connection.epoch === undefined
+    ? "disconnected"
+    : `${snapshot.connection.epoch}:${snapshot.connection.incarnation ?? 0}:${snapshot.connection.server ?? ""}:${snapshot.connection.configName ?? ""}`;
 }
 
 function targetRefIdentity(target: TargetRef | null | undefined): string | undefined {

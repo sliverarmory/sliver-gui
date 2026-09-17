@@ -21,6 +21,8 @@ import type {
 const CHANNELS = Object.freeze({
   getSnapshot: "sliver:cloud-deployment:snapshot:get",
   refreshDeployments: "sliver:cloud-deployment:status:refresh",
+  copyInstanceId: "sliver:cloud-deployment:instance-id:copy",
+  copyIpAddress: "sliver:cloud-deployment:ip-address:copy",
   getProvisioningTranscripts: "sliver:cloud-deployment:transcripts:get",
   getTerminalRuntime: "sliver:cloud-deployment:terminal-runtime:get",
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
@@ -113,6 +115,8 @@ ipcRenderer.on(CHANNELS.navigationRequested, (_event, ...payload: unknown[]) => 
 const api: CloudDeploymentAPI = {
   getSnapshot: () => ipcRenderer.invoke(CHANNELS.getSnapshot),
   refreshDeployments: () => ipcRenderer.invoke(CHANNELS.refreshDeployments),
+  copyInstanceId: (input) => ipcRenderer.invoke(CHANNELS.copyInstanceId, input),
+  copyIpAddress: (input) => ipcRenderer.invoke(CHANNELS.copyIpAddress, input),
   getProvisioningTranscripts: () => ipcRenderer.invoke(CHANNELS.getProvisioningTranscripts),
   getTerminalRuntime: () => ipcRenderer.invoke(CHANNELS.getTerminalRuntime),
   detectCurrentEgressIpv4: () => ipcRenderer.invoke(CHANNELS.detectCurrentEgressIpv4),

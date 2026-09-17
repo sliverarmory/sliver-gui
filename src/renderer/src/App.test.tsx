@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { toast } from "@heroui/react";
@@ -19,6 +19,7 @@ import type {
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
+import { renderWithApplicationContextMenu as render } from "./application-context-menu-test-utils";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
