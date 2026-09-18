@@ -50,7 +50,7 @@ import type {
   TargetActionPlan,
   TargetRef,
 } from "../../../shared/target-contracts";
-import type { TargetOperationRecord } from "../../../shared/operation-contracts";
+import type { TargetOperationId, TargetOperationRecord } from "../../../shared/operation-contracts";
 import {
   capabilityFor,
   formatTimestamp,
@@ -78,6 +78,8 @@ const sessionOperatingSystemIcons = new Map([
   ["macos", faApple],
 ]);
 
+const OVERVIEW_OPERATION_IDS = ["target.ping"] as const satisfies readonly TargetOperationId[];
+
 export interface SessionWorkspaceRoute {
   sessionId: string;
   backendEpoch: number;
@@ -101,6 +103,8 @@ export interface SessionWorkspacePanelContext {
   session: SessionSummary;
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
+  onOperationSubmitted: (operation: TargetOperationRecord) => boolean;
+  isTargetTransitionPending: boolean;
 }
 
 export type SessionWorkspacePanelRenderer = (context: SessionWorkspacePanelContext) => ReactNode;
@@ -161,6 +165,7 @@ export function SessionWorkspacePage({
   const [isCheckingSessionShells, setIsCheckingSessionShells] = useState(false);
   const [isSwitchingSession, setIsSwitchingSession] = useState(false);
   const [isPoppingOutInteraction, setIsPoppingOutInteraction] = useState(false);
+  const isTargetTransitionPending = isCheckingSessionShells || isSwitchingSession;
   const operationsRequestSequence = useRef(0);
   const operationDetailRequestSequence = useRef(0);
   const shellPreflightRequestSequence = useRef(0);
@@ -177,6 +182,17 @@ export function SessionWorkspacePage({
     });
     setSelectedOperation((current) => current?.requestId === operation.requestId ? operation : current);
   }, [route.backendEpoch, route.sessionId, route.targetFingerprint]);
+
+  const acceptSubmittedOperation = useCallback((operation: TargetOperationRecord): boolean => {
+    if (
+      !isCurrentRef.current ||
+      isTargetTransitionPending ||
+      routeIdentity !== routeIdentityRef.current ||
+      !operationBelongsToRoute(operation, route)
+    ) return false;
+    mergeOperation(operation);
+    return true;
+  }, [isTargetTransitionPending, mergeOperation, route.backendEpoch, route.sessionId, route.targetFingerprint, routeIdentity]);
 
   const loadOperations = useCallback(async (cursor?: string) => {
     if (!isCurrentRef.current) return;
@@ -491,6 +507,8 @@ export function SessionWorkspacePage({
     session: currentSession,
     snapshot,
     onSnapshot,
+    onOperationSubmitted: acceptSubmittedOperation,
+    isTargetTransitionPending,
   };
   const resolvedPanels = { ...defaultSessionWorkspacePanels, ...panels };
   const isWindows = currentSession.os.toLocaleLowerCase().includes("windows");
@@ -501,10 +519,16 @@ export function SessionWorkspacePage({
   const close = capabilityFor(snapshot.targetContext.capabilities, "session.close");
 
   return (
-    <section className="page-stack session-workspace" data-presentation={presentation} aria-labelledby="session-workspace-heading">
+    <section
+      aria-busy={isTargetTransitionPending || undefined}
+      aria-labelledby="session-workspace-heading"
+      className="page-stack session-workspace"
+      data-presentation={presentation}
+      inert={isTargetTransitionPending ? true : undefined}
+    >
       <WorkspaceTrail
         currentSessionId={route.sessionId}
-        isSessionMenuBusy={isCheckingSessionShells || isSwitchingSession}
+        isSessionMenuBusy={isTargetTransitionPending}
         isPoppingOutInteraction={isPoppingOutInteraction}
         sessionMenu={sessionMenu}
         sessionName={currentSession.name || currentSession.hostname || currentSession.id}
@@ -588,11 +612,7 @@ export function SessionWorkspacePage({
           session={currentSession}
           targetIdentity={routeIdentity}
           onClose={() => setRenameRouteIdentity(undefined)}
-          onSubmitted={(operation) => {
-            if (!isCurrentRef.current || routeIdentity !== routeIdentityRef.current || !operationBelongsToRoute(operation, route)) return false;
-            mergeOperation(operation);
-            return true;
-          }}
+          onSubmitted={acceptSubmittedOperation}
         />
       ) : null}
 
@@ -628,14 +648,12 @@ export function SessionWorkspacePage({
             })}
             <section className="mt-6 rounded-2xl bg-surface p-5 sm:p-6" aria-label="Quick actions">
               <OperationComposer
+                key={`${routeIdentity}:overview`}
                 active={currentSession}
                 capabilities={snapshot.targetContext.capabilities}
+                operationIds={OVERVIEW_OPERATION_IDS}
                 targetIdentity={routeIdentity}
-                onSubmitted={(operation) => {
-                  if (routeIdentity !== routeIdentityRef.current) return false;
-                  mergeOperation(operation);
-                  return true;
-                }}
+                onSubmitted={acceptSubmittedOperation}
               />
             </section>
           </Tabs.Panel>

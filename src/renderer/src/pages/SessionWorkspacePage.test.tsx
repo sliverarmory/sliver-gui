@@ -341,8 +341,131 @@ describe("SessionWorkspacePage", () => {
     );
     expect(screen.getByRole("heading", { name: "payments-new" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Ping" }));
+    expect(screen.getByRole("heading", { name: "Ping" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ping" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitemradio", { name: "Rename" })).not.toBeInTheDocument();
+  });
+
+  it("adds, edits, and clears environment variables from the compact Environment flow", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const submitTargetOperation = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        value: operation({ requestId: "environment-add", operationId: "target.env-set" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: operation({ requestId: "environment-edit", operationId: "target.env-set" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        value: operation({ requestId: "environment-clear", operationId: "target.env-unset" }),
+      });
+    let environmentLoads = 0;
+    const runSessionWorkbench = vi.fn(async (input: Parameters<SliverDesktopAPI["runSessionWorkbench"]>[0]) => {
+      if (input.operationId !== "session.environment.list") {
+        throw new Error(`Unexpected operation ${input.operationId}`);
+      }
+      environmentLoads += 1;
+      const proxyValue = environmentLoads === 2
+        ? "http://127.0.0.1:8080"
+        : environmentLoads === 3
+          ? "http://127.0.0.1:9090"
+          : undefined;
+      const items = [
+        { name: "PATH", value: "/usr/bin", sensitive: false, redacted: false },
+        ...(proxyValue
+          ? [{ name: "HTTP_PROXY", value: proxyValue, sensitive: false, redacted: false }]
+          : []),
+      ];
+      return {
+        ok: true as const,
+        value: {
+          status: "completed" as const,
+          result: {
+            operationId: "session.environment.list" as const,
+            value: {
+              items,
+              page: { limit: 100, total: items.length, truncated: false },
+            },
+          },
+        },
+      };
+    });
+    Object.assign(window.sliver, { runSessionWorkbench, submitTargetOperation });
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Ping" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ping" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Environment" }));
+    expect(await screen.findByRole("row", { name: /PATH/u })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Environment actions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Variable name" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Variable value" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "New variable" }));
+    const addDialog = await screen.findByRole("dialog", { name: "Add environment variable" });
+    await user.type(within(addDialog).getByRole("textbox", { name: "Variable name" }), "HTTP_PROXY");
+    await user.type(within(addDialog).getByRole("textbox", { name: "Variable value" }), "http://127.0.0.1:8080");
+    await user.click(within(addDialog).getByRole("button", { name: "Add variable" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenNthCalledWith(1, {
+      operationId: "target.env-set",
+      name: "HTTP_PROXY",
+      value: "http://127.0.0.1:8080",
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add environment variable" })).not.toBeInTheDocument());
+
+    let proxyRow = await screen.findByRole("row", { name: /HTTP_PROXY/u });
+    expect(within(proxyRow).getByText("http://127.0.0.1:8080")).toBeInTheDocument();
+    const environmentGrid = screen.getByRole("grid", { name: "Session environment variables" });
+    const editProxy = within(proxyRow).getByRole("button", { name: "Edit HTTP_PROXY" });
+    const clearProxy = within(proxyRow).getByRole("button", { name: "Clear HTTP_PROXY" });
+    expect(environmentGrid.closest('[data-slot="data-grid"]')).toHaveClass("[--background:var(--surface)]");
+    expect(editProxy).toHaveClass("button--icon-only");
+    expect(editProxy).not.toHaveTextContent("Edit");
+    expect(clearProxy).toHaveClass("button--icon-only");
+    expect(clearProxy).not.toHaveTextContent("Clear");
+    expect(editProxy.closest('[role="gridcell"]')).toHaveAttribute("data-pinned", "end");
+    await user.click(editProxy);
+    const editDialog = await screen.findByRole("dialog", { name: "Edit environment variable" });
+    expect(within(editDialog).getByRole("textbox", { name: "Variable name" })).toHaveValue("HTTP_PROXY");
+    const value = within(editDialog).getByRole("textbox", { name: "Variable value" });
+    expect(value).toHaveValue("http://127.0.0.1:8080");
+    await user.clear(value);
+    await user.type(value, "http://127.0.0.1:9090");
+    await user.click(within(editDialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenNthCalledWith(2, {
+      operationId: "target.env-set",
+      name: "HTTP_PROXY",
+      value: "http://127.0.0.1:9090",
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit environment variable" })).not.toBeInTheDocument());
+
+    proxyRow = await screen.findByRole("row", { name: /HTTP_PROXY/u });
+    expect(within(proxyRow).getByText("http://127.0.0.1:9090")).toBeInTheDocument();
+    await user.click(within(proxyRow).getByRole("button", { name: "Clear HTTP_PROXY" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenNthCalledWith(3, {
+      operationId: "target.env-unset",
+      name: "HTTP_PROXY",
+    }));
+    expect(await screen.findByText("Loaded 1 of 1 environment variables")).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /HTTP_PROXY/u })).not.toBeInTheDocument();
+    expect(runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.environment.list")).toHaveLength(4);
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByRole("row", { name: /environment-add/u })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /environment-edit/u })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /environment-clear/u })).toBeInTheDocument();
   });
 
   it.each([
@@ -510,6 +633,62 @@ describe("SessionWorkspacePage", () => {
       connectionIncarnation: 4,
       targetFingerprint: otherSessionRef.fingerprint,
     });
+  });
+
+  it("blocks environment mutations while an exact session selection is pending", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const selection = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    vi.mocked(api.selectTarget).mockReturnValue(selection.promise);
+    const submitTargetOperation = vi.fn();
+    const runSessionWorkbench = vi.fn(async (input: Parameters<SliverDesktopAPI["runSessionWorkbench"]>[0]) => ({
+      ok: true as const,
+      value: {
+        status: "completed" as const,
+        result: {
+          operationId: input.operationId,
+          value: {
+            items: [{ name: "PATH", value: "/usr/bin", sensitive: false, redacted: false }],
+            page: { limit: 100, total: 1, truncated: false },
+          },
+        },
+      },
+    }));
+    Object.assign(window.sliver, { runSessionWorkbench, submitTargetOperation });
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={switchableWorkspaceSnapshot()}
+        onBack={vi.fn()}
+        onSessionChange={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Environment" }));
+    const pathRow = await screen.findByRole("row", { name: /PATH/u });
+    const newVariable = screen.getByRole("button", { name: "New variable" });
+    await user.click(screen.getByRole("button", { name: "Sessions, switch session" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /analytics/i }));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(otherSessionRef));
+
+    const workspace = screen.getByRole("heading", { name: "payments" }).closest("section");
+    expect(workspace).toHaveAttribute("inert");
+    expect(newVariable).toBeDisabled();
+    expect(within(pathRow).getByRole("button", { name: "Edit PATH" })).toBeDisabled();
+    expect(within(pathRow).getByRole("button", { name: "Clear PATH" })).toBeDisabled();
+    newVariable.click();
+    within(pathRow).getByRole("button", { name: "Clear PATH" }).click();
+    expect(screen.queryByRole("dialog", { name: "Add environment variable" })).not.toBeInTheDocument();
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+
+    await act(async () => {
+      selection.resolve({ ok: false, error: "Switch canceled" });
+      await selection.promise;
+    });
+    await waitFor(() => expect(newVariable).toBeEnabled());
   });
 
   it("mounts the execution workbench with the exact active session reference", async () => {

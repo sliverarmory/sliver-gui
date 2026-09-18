@@ -89,6 +89,8 @@ function panelContext(overrides: Partial<SessionSummary> = {}): SessionWorkspace
     session: { ...session, ...overrides },
     snapshot: disconnectedSnapshot(),
     onSnapshot: vi.fn(),
+    onOperationSubmitted: vi.fn(() => true),
+    isTargetTransitionPending: false,
   };
 }
 
@@ -982,7 +984,7 @@ describe("session workbench panels", () => {
     render(<SessionEnvironmentPanel {...panelContext()} />);
     expect(await screen.findByText("/usr/bin")).toBeInTheDocument();
     expect(screen.queryByText("super-secret")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Reveal" }));
+    await user.click(screen.getByRole("button", { name: "Reveal API_TOKEN" }));
     expect(await screen.findByText("super-secret")).toBeInTheDocument();
   });
 
@@ -1018,7 +1020,7 @@ describe("session workbench panels", () => {
     });
 
     render(<SessionEnvironmentPanel {...panelContext()} />);
-    await user.click(await screen.findByRole("button", { name: "Reveal" }));
+    await user.click(await screen.findByRole("button", { name: "Reveal API_TOKEN" }));
     expect(await screen.findByText("super-secret")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Load more variables" }));
     expect(await screen.findByText("/usr/bin")).toBeInTheDocument();

@@ -1701,34 +1701,42 @@ export function OperationComposer({
   active,
   targetIdentity,
   capabilities,
+  operationIds,
   onSubmitted,
 }: {
   active: TargetSummary;
   targetIdentity: string;
   capabilities: SliverSnapshot["targetContext"]["capabilities"];
+  operationIds?: readonly [TargetOperationId, ...TargetOperationId[]];
   onSubmitted: (operation: TargetOperationRecord) => boolean;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<OperationDraft>(DEFAULT_OPERATION_DRAFT);
+  const availableOperations = useMemo<TargetOperationId[]>(() => operationIds
+    ? [...operationIds]
+    : active.mode === "beacon"
+      ? ["target.ping", "target.rename", "target.env-set", "target.env-unset", "beacon.reconfigure", "beacon.open-session"]
+      : ["target.ping", "target.env-set", "target.env-unset"], [active.mode, operationIds]);
+  const firstOperationId = availableOperations[0] ?? "target.ping";
+  const [draft, setDraft] = useState<OperationDraft>(() => ({
+    ...DEFAULT_OPERATION_DRAFT,
+    operationId: firstOperationId,
+  }));
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   const targetIdentityRef = useRef(targetIdentity);
   targetIdentityRef.current = targetIdentity;
-  const availableOperations = useMemo<TargetOperationId[]>(() => active.mode === "beacon"
-    ? ["target.ping", "target.rename", "target.env-set", "target.env-unset", "beacon.reconfigure", "beacon.open-session"]
-    : ["target.ping", "target.env-set", "target.env-unset"], [active.mode]);
   const capability = capabilityFor(capabilities, OPERATION_CAPABILITIES[draft.operationId]);
 
   useEffect(() => {
     if (!availableOperations.includes(draft.operationId)) {
-      setDraft({ ...DEFAULT_OPERATION_DRAFT, operationId: availableOperations[0] ?? "target.ping" });
+      setDraft({ ...DEFAULT_OPERATION_DRAFT, operationId: firstOperationId });
     }
-  }, [availableOperations, draft.operationId]);
+  }, [availableOperations, draft.operationId, firstOperationId]);
 
   useEffect(() => {
-    setDraft(DEFAULT_OPERATION_DRAFT);
+    setDraft({ ...DEFAULT_OPERATION_DRAFT, operationId: firstOperationId });
     setError(undefined);
     setIsSubmitting(false);
-  }, [targetIdentity]);
+  }, [firstOperationId, targetIdentity]);
 
   const submit = useCallback(async () => {
     const submittedTargetIdentity = targetIdentity;
@@ -1765,32 +1773,36 @@ export function OperationComposer({
     <div>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-xs font-semibold text-foreground">Run operation</h3>
+          <h3 className="text-xs font-semibold text-foreground">
+            {availableOperations.length === 1 ? operationLabel(draft.operationId) : "Run operation"}
+          </h3>
           <p className="mt-0.5 text-[11px] text-muted">The main process binds this request to the selected target.</p>
         </div>
-        <Dropdown>
-          <Button size="sm" variant="tertiary">
-            {operationLabel(draft.operationId)} <FontAwesomeIcon aria-hidden icon={faChevronDown} />
-          </Button>
-          <Dropdown.Popover className="min-w-64" placement="bottom end">
-            <Dropdown.Menu
-              aria-label="Target operation"
-              selectionMode="single"
-              selectedKeys={new Set([draft.operationId])}
-              onAction={(key) => {
-                setDraft({ ...DEFAULT_OPERATION_DRAFT, operationId: String(key) as TargetOperationId });
-                setError(undefined);
-              }}
-            >
-              {availableOperations.map((operationId) => (
-                <Dropdown.Item id={operationId} key={operationId} textValue={operationLabel(operationId)}>
-                  <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={operationIcon(operationId)} />
-                  <Label>{operationLabel(operationId)}</Label>
-                </Dropdown.Item>
-              ))}
-            </Dropdown.Menu>
-          </Dropdown.Popover>
-        </Dropdown>
+        {availableOperations.length > 1 ? (
+          <Dropdown>
+            <Button size="sm" variant="tertiary">
+              {operationLabel(draft.operationId)} <FontAwesomeIcon aria-hidden icon={faChevronDown} />
+            </Button>
+            <Dropdown.Popover className="min-w-64" placement="bottom end">
+              <Dropdown.Menu
+                aria-label="Target operation"
+                selectionMode="single"
+                selectedKeys={new Set([draft.operationId])}
+                onAction={(key) => {
+                  setDraft({ ...DEFAULT_OPERATION_DRAFT, operationId: String(key) as TargetOperationId });
+                  setError(undefined);
+                }}
+              >
+                {availableOperations.map((operationId) => (
+                  <Dropdown.Item id={operationId} key={operationId} textValue={operationLabel(operationId)}>
+                    <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={operationIcon(operationId)} />
+                    <Label>{operationLabel(operationId)}</Label>
+                  </Dropdown.Item>
+                ))}
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
+        ) : null}
       </div>
 
       <div className="mt-3 flex flex-col gap-3">

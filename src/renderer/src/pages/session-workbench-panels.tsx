@@ -50,6 +50,7 @@ import {
   faNetworkWired,
   faPen,
   faPlay,
+  faPlus,
   faRotate,
   faShieldHalved,
   faStop,
@@ -89,11 +90,16 @@ import {
   type SessionWorkbenchInput,
   type SessionWorkbenchResultFor,
 } from "../../../shared/session-contracts";
+import {
+  parseTargetOperationInput,
+  type TargetOperationRecord,
+} from "../../../shared/operation-contracts";
 import type {
   SessionWorkspacePanelContext,
   SessionWorkspacePanels,
 } from "./SessionWorkspacePage";
 import { DateTimePickerField } from "../components/FormControls";
+import { EnvironmentVariableModal } from "../components/EnvironmentVariableModal";
 
 type LoadState<T> =
   | { status: "loading" }
@@ -111,6 +117,10 @@ interface RegistryListing {
   subkeysPage: SessionPageSummary;
   valuesPage: SessionPageSummary;
 }
+
+type EnvironmentVariableEditor =
+  | { mode: "add" }
+  | { mode: "edit"; entry: SessionEnvironmentEntry };
 
 type RegistryEditorMode = "create-key" | "write-value";
 
@@ -2158,15 +2168,30 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
   );
 }
 
-export function SessionEnvironmentPanel({ route }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionEnvironmentPanel({
+  route,
+  snapshot,
+  onOperationSubmitted,
+  isTargetTransitionPending,
+}: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const [state, setState] = useState<LoadState<SessionBoundedPage<SessionEnvironmentEntry>>>({ status: "loading" });
   const [revealed, setRevealed] = useState<Record<string, SessionEnvironmentRevealResult>>({});
   const [revealingName, setRevealingName] = useState<string>();
+  const [editor, setEditor] = useState<EnvironmentVariableEditor>();
+  const [clearingName, setClearingName] = useState<string>();
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const listRequestSequence = useRef(0);
   const revealRequestSequence = useRef(0);
+  const clearingNameRef = useRef<string | undefined>(undefined);
   const isCurrent = useLatestIdentity(routeKey);
+  const writeCapability = snapshot.targetContext.capabilities.find((capability) => capability.id === "target.environment.write");
+  const writeUnavailableReason = writeCapability?.available
+    ? undefined
+    : writeCapability?.reason?.message ?? "Environment changes are unavailable for this session.";
+  const mutationUnavailableReason = isTargetTransitionPending
+    ? "Wait for the session switch to finish before changing environment variables."
+    : writeUnavailableReason;
 
   const load = useCallback(async (cursor?: string) => {
     const expected = routeKey;
@@ -2199,9 +2224,16 @@ export function SessionEnvironmentPanel({ route }: SessionWorkspacePanelContext)
     setState({ status: "loading" });
     setRevealed({});
     setRevealingName(undefined);
+    setEditor(undefined);
+    clearingNameRef.current = undefined;
+    setClearingName(undefined);
     setIsLoadingMore(false);
     void load();
   }, [load, routeKey]);
+
+  useEffect(() => {
+    if (isTargetTransitionPending) setEditor(undefined);
+  }, [isTargetTransitionPending]);
 
   useEffect(() => {
     const expirationTimes = Object.values(revealed).map((entry) => Date.parse(entry.expiresAt)).filter(Number.isFinite);
@@ -2227,6 +2259,47 @@ export function SessionEnvironmentPanel({ route }: SessionWorkspacePanelContext)
       if (isCurrent(expected) && sequence === revealRequestSequence.current) setRevealingName(undefined);
     }
   }, [isCurrent, routeKey]);
+
+  const acceptMutation = useCallback((operation: TargetOperationRecord): boolean => {
+    if (!isCurrent(routeKey) || !onOperationSubmitted(operation)) return false;
+    void load();
+    return true;
+  }, [isCurrent, load, onOperationSubmitted, routeKey]);
+
+  const clear = useCallback(async (name: string): Promise<void> => {
+    if (mutationUnavailableReason || clearingNameRef.current) return;
+    const expected = routeKey;
+    clearingNameRef.current = name;
+    setClearingName(name);
+    try {
+      const input = parseTargetOperationInput({ operationId: "target.env-unset", name });
+      const result = await window.sliver.submitTargetOperation(input);
+      if (!isCurrent(expected) || clearingNameRef.current !== name) return;
+      if (!result.ok || !result.value) {
+        toast.danger("Could not clear environment variable", {
+          description: result.error ?? "The environment update was rejected.",
+        });
+        return;
+      }
+      if (!acceptMutation(result.value)) return;
+      if (["failed", "canceled", "partial", "outcome-unknown", "target-disappeared"].includes(result.value.state)) {
+        toast.danger("Could not clear environment variable", {
+          description: result.value.message ?? "The environment update did not complete.",
+        });
+        return;
+      }
+      toast.success("Environment variable cleared", { description: name });
+    } catch (error) {
+      if (isCurrent(expected) && clearingNameRef.current === name) {
+        toast.danger("Could not clear environment variable", { description: errorMessage(error) });
+      }
+    } finally {
+      if (isCurrent(expected) && clearingNameRef.current === name) {
+        clearingNameRef.current = undefined;
+        setClearingName(undefined);
+      }
+    }
+  }, [acceptMutation, isCurrent, mutationUnavailableReason, routeKey]);
 
   const columns = useMemo<DataGridColumn<SessionEnvironmentEntry>[]>(() => [
     {
@@ -2260,47 +2333,108 @@ export function SessionEnvironmentPanel({ route }: SessionWorkspacePanelContext)
       },
     },
     {
-      id: "action",
-      header: "Action",
+      id: "actions",
+      header: "Actions",
       align: "end",
-      minWidth: 110,
-      cell: (entry) => entry.redacted ? (
-        <Button isPending={revealingName === entry.name} size="sm" variant="tertiary" onPress={() => void reveal(entry.name)}>
-          <FontAwesomeIcon aria-hidden icon={faEye} /> Reveal
-        </Button>
-      ) : null,
+      width: 200,
+      minWidth: 200,
+      maxWidth: 200,
+      pinned: "end",
+      cell: (entry) => (
+        <div className="flex justify-end gap-1">
+          {entry.redacted ? (
+            <Button
+              aria-label={`Reveal ${entry.name}`}
+              isPending={revealingName === entry.name}
+              size="sm"
+              variant="tertiary"
+              onPress={() => void reveal(entry.name)}
+            >
+              <FontAwesomeIcon aria-hidden icon={faEye} /> Reveal
+            </Button>
+          ) : null}
+          <IconButton
+            label={`Edit ${entry.name}`}
+            icon={faPen}
+            isDisabled={Boolean(mutationUnavailableReason) || Boolean(clearingName)}
+            onPress={() => setEditor({ mode: "edit", entry })}
+          />
+          <IconButton
+            danger
+            label={`Clear ${entry.name}`}
+            icon={faTrash}
+            isDisabled={Boolean(mutationUnavailableReason) || (Boolean(clearingName) && clearingName !== entry.name)}
+            isPending={clearingName === entry.name}
+            onPress={() => void clear(entry.name)}
+          />
+        </div>
+      ),
     },
-  ], [reveal, revealed, revealingName]);
+  ], [clear, clearingName, mutationUnavailableReason, reveal, revealed, revealingName]);
 
   return (
-    <PanelShell
-      icon={faTerminal}
-      title="Environment"
-      description="Sensitive values stay redacted until explicitly revealed and automatically hide at expiry."
-      action={<RefreshButton label="Refresh environment" pending={state.status === "loading"} onPress={() => void load()} />}
-    >
-      {state.status === "loading" ? <PanelLoading label="Loading environment" /> : null}
-      {state.status === "error" ? <PanelError message={state.error} onRetry={() => void load()} /> : null}
-      {state.status === "ready" ? (
-        <div className="flex min-w-0 flex-col gap-3">
-          <InventoryCount loaded={state.value.items.length} noun="environment variables" page={state.value.page} />
-          {state.value.page.truncated ? <BoundedNotice nextCursor={state.value.page.nextCursor} noun="environment variables" /> : null}
-          <DataGrid
-            aria-label="Session environment variables"
-            columns={columns}
-            contentClassName="min-w-[760px]"
-            data={state.value.items}
-            getRowId={(entry) => entry.name}
-            scrollContainerClassName="max-h-[600px] overflow-auto"
-            variant="secondary"
-            renderEmptyState={() => <GridEmpty label="No environment variables were reported." />}
-          />
-          {state.value.page.nextCursor ? (
-            <div className="flex justify-center"><Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => void load(state.value.page.nextCursor)}>Load more variables</Button></div>
-          ) : null}
-        </div>
+    <>
+      <PanelShell
+        icon={faTerminal}
+        title="Environment"
+        description={`Sensitive values stay redacted until explicitly revealed and automatically hide at expiry.${mutationUnavailableReason ? ` ${mutationUnavailableReason}` : ""}`}
+        action={(
+          <div className="flex items-center gap-2">
+            <Button
+              isDisabled={Boolean(mutationUnavailableReason) || Boolean(clearingName)}
+              size="sm"
+              onPress={() => setEditor({ mode: "add" })}
+            >
+              <FontAwesomeIcon aria-hidden icon={faPlus} /> New variable
+            </Button>
+            <RefreshButton label="Refresh environment" pending={state.status === "loading"} onPress={() => void load()} />
+          </div>
+        )}
+      >
+        {state.status === "loading" ? <PanelLoading label="Loading environment" /> : null}
+        {state.status === "error" ? <PanelError message={state.error} onRetry={() => void load()} /> : null}
+        {state.status === "ready" ? (
+          <div className="flex min-w-0 flex-col gap-3">
+            <InventoryCount loaded={state.value.items.length} noun="environment variables" page={state.value.page} />
+            {state.value.page.truncated ? <BoundedNotice nextCursor={state.value.page.nextCursor} noun="environment variables" /> : null}
+            <DataGrid
+              aria-label="Session environment variables"
+              className="[--background:var(--surface)]"
+              columns={columns}
+              contentClassName="min-w-[800px]"
+              data={state.value.items}
+              getRowId={(entry) => entry.name}
+              scrollContainerClassName="max-h-[600px] overflow-auto"
+              variant="secondary"
+              renderEmptyState={() => <GridEmpty label="No environment variables were reported." />}
+            />
+            {state.value.page.nextCursor ? (
+              <div className="flex justify-center"><Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => void load(state.value.page.nextCursor)}>Load more variables</Button></div>
+            ) : null}
+          </div>
+        ) : null}
+      </PanelShell>
+      {!isTargetTransitionPending && editor?.mode === "edit" ? (
+        <EnvironmentVariableModal
+          key={`${routeKey}:edit:${editor.entry.name}`}
+          capabilities={snapshot.targetContext.capabilities}
+          entry={editor.entry}
+          mode="edit"
+          targetIdentity={routeKey}
+          onClose={() => setEditor(undefined)}
+          onSubmitted={acceptMutation}
+        />
+      ) : !isTargetTransitionPending && editor?.mode === "add" ? (
+        <EnvironmentVariableModal
+          key={`${routeKey}:add`}
+          capabilities={snapshot.targetContext.capabilities}
+          mode="add"
+          targetIdentity={routeKey}
+          onClose={() => setEditor(undefined)}
+          onSubmitted={acceptMutation}
+        />
       ) : null}
-    </PanelShell>
+    </>
   );
 }
 
