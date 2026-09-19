@@ -124,7 +124,9 @@ export function CommandPaletteShortcutKbd({
         }
         return <Kbd.Abbr key="shift" keyValue="shift" />;
       })}
-      <Kbd.Content>{shortcutKeyLabel(key)}</Kbd.Content>
+      {key === "ArrowLeft" || key === "ArrowRight" ? (
+        <Kbd.Abbr keyValue={key === "ArrowLeft" ? "left" : "right"} />
+      ) : <Kbd.Content>{shortcutKeyLabel(key)}</Kbd.Content>}
     </Kbd>
   );
 }
@@ -164,5 +166,7 @@ export function isApplePlatform(platform = globalThis.navigator?.platform ?? "")
 }
 
 function shortcutKeyLabel(value: string): string {
+  if (value === "ArrowLeft") return "Left Arrow";
+  if (value === "ArrowRight") return "Right Arrow";
   return value.toUpperCase();
 }

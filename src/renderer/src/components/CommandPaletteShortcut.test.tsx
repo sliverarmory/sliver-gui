@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CommandPaletteShortcutRecorder,
+  CommandPaletteShortcutKbd,
   commandPaletteShortcutFromKeyboardEvent,
   formatCommandPaletteShortcut,
 } from "./CommandPaletteShortcut";
@@ -56,6 +57,14 @@ describe("command palette shortcuts", () => {
   it("formats the primary modifier for Apple and non-Apple platforms", () => {
     expect(formatCommandPaletteShortcut("mod+alt+k", true)).toBe("Command + Option + K");
     expect(formatCommandPaletteShortcut("mod+alt+k", false)).toBe("Ctrl + Alt + K");
+  });
+
+  it("renders navigation arrow shortcuts with symbols and readable labels", () => {
+    render(<CommandPaletteShortcutKbd shortcut="alt+ArrowLeft" />);
+    expect(formatCommandPaletteShortcut("alt+ArrowLeft", false)).toBe("Alt + Left Arrow");
+    expect(formatCommandPaletteShortcut("alt+ArrowRight", false)).toBe("Alt + Right Arrow");
+    expect(screen.getByLabelText("Alt + Left Arrow")).toHaveTextContent("←");
+    expect(screen.queryByText("ARROWLEFT")).not.toBeInTheDocument();
   });
 
   it("records, resets, and cancels without leaking the keystroke", async () => {

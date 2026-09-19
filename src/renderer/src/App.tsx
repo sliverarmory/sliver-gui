@@ -4,7 +4,8 @@ import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { Heading } from "react-aria-components";
 import {
-  faBars,
+  faArrowLeft,
+  faArrowRight,
   faBolt,
   faBoxOpen,
   faBoxesStacked,
@@ -22,6 +23,8 @@ import {
   faRotate,
   faSatellite,
   faSatelliteDish,
+  faServer,
+  faTableColumns,
   faTerminal,
   faTriangleExclamation,
   faWindowRestore,
@@ -29,6 +32,8 @@ import {
 import { disconnectedSnapshot, SLIVER_PROTOCOL_COMPATIBILITY } from "../../shared/contracts";
 import type { EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
 import { isUsableConnection } from "./connection-status";
+import { useNavigationHistory } from "./use-navigation-history";
+import { navigationShortcuts, useNavigationShortcuts } from "./navigation-shortcuts";
 import {
   APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
@@ -157,7 +162,11 @@ export function App() {
     DEFAULT_APPLICATION_SETTINGS_STATE,
   );
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
-  const [view, setView] = useState<ViewId>("overview");
+  const connected = isUsableConnection(snapshot.connection.status);
+  const isViewAvailable = useCallback((entry: ViewId) =>
+    entry === "overview" || entry === "settings" || connected, [connected]);
+  const { current: view, navigate: setView, goBack, goForward, canGoBack, canGoForward } =
+    useNavigationHistory<ViewId>("overview", isViewAvailable);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
@@ -355,7 +364,6 @@ export function App() {
     }
   }
 
-  const connected = isUsableConnection(snapshot.connection.status);
   const connectionInProgress = snapshot.connection.status === "connecting";
 
   useEffect(() => {
@@ -393,7 +401,25 @@ export function App() {
     setSessionWorkspaceRoute(undefined);
     setBeaconWorkspaceRoute(undefined);
     setView(nextView);
-  }, []);
+  }, [setView]);
+  const navigateBack = useCallback(() => {
+    if (!canGoBack) return;
+    setSessionWorkspaceRoute(undefined);
+    setBeaconWorkspaceRoute(undefined);
+    goBack();
+  }, [canGoBack, goBack]);
+  const navigateForward = useCallback(() => {
+    if (!canGoForward) return;
+    setSessionWorkspaceRoute(undefined);
+    setBeaconWorkspaceRoute(undefined);
+    goForward();
+  }, [canGoForward, goForward]);
+  useNavigationShortcuts({
+    canGoBack,
+    canGoForward,
+    goBack: navigateBack,
+    goForward: navigateForward,
+  });
   const updateSettings = useCallback((
     updater: (current: ApplicationSettingsValues) => ApplicationSettingsValues,
   ): void => {
@@ -432,7 +458,7 @@ export function App() {
     });
     setBeaconWorkspaceRoute(undefined);
     setView("sessions");
-  }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
+  }, [setView, snapshot.connection.epoch, snapshot.connection.incarnation]);
   const changeSessionWorkspace = useCallback((next: SliverSnapshot, route: SessionWorkspaceRoute) => {
     setSnapshot(next);
     setSessionWorkspaceRoute(route);
@@ -454,7 +480,7 @@ export function App() {
     });
     setSessionWorkspaceRoute(undefined);
     setView("beacons");
-  }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
+  }, [setView, snapshot.connection.epoch, snapshot.connection.incarnation]);
 
   useEffect(() => {
     if (!sessionWorkspaceRoute) return;
@@ -485,6 +511,7 @@ export function App() {
   ]);
 
   const settings = applicationSettings?.settings ?? standaloneSettings;
+  const historyShortcuts = navigationShortcuts();
   const navigationCommands = [
     overviewNavItem,
     ...infrastructureNavItems,
@@ -514,6 +541,28 @@ export function App() {
         setIsConfigSelectorOpen(false);
         changeView("settings");
       },
+    },
+    {
+      id: "navigate-back",
+      group: "Navigate",
+      icon: faArrowLeft,
+      label: "Go back",
+      description: "Return to the previous page.",
+      keywords: ["previous", "history"],
+      shortcut: historyShortcuts.back.shortcut,
+      isDisabled: !canGoBack,
+      onAction: navigateBack,
+    },
+    {
+      id: "navigate-forward",
+      group: "Navigate",
+      icon: faArrowRight,
+      label: "Go forward",
+      description: "Return to the next page in navigation history.",
+      keywords: ["next", "history"],
+      shortcut: historyShortcuts.forward.shortcut,
+      isDisabled: !canGoForward,
+      onAction: navigateForward,
     },
     {
       id: "server-switch-config",
@@ -584,7 +633,12 @@ export function App() {
   ];
 
   const content = (
-    <Sidebar.Provider collapsible="icon" defaultOpen>
+    <Sidebar.Provider
+      className="app-shell"
+      collapsible="icon"
+      data-platform={globalThis.navigator?.platform.startsWith("Mac") ? "mac" : "other"}
+      defaultOpen
+    >
       <Sidebar className="app-sidebar">
         <NavigationContent
           snapshot={snapshot}
@@ -616,10 +670,9 @@ export function App() {
       </Sidebar.Mobile>
       <Sidebar.Main className="app-main min-w-0">
         <header className="app-header">
+          <div aria-hidden="true" className="app-header-drag-region" />
           <div className="flex min-w-0 items-center gap-3">
-            <Sidebar.Trigger aria-label="Toggle navigation">
-              <FontAwesomeIcon icon={faBars} />
-            </Sidebar.Trigger>
+            <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-muted" icon={faServer} />
             <div className="hidden min-w-0 sm:block">
               <p className="truncate text-sm font-medium text-foreground">
                 {connected ? snapshot.connection.server : "No server connected"}
@@ -791,10 +844,62 @@ export function App() {
           onOpenChange={setIsCommandPaletteOpen}
         />
       </Sidebar.Main>
+      <WindowNavigation
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onBack={navigateBack}
+        onForward={navigateForward}
+      />
     </Sidebar.Provider>
   );
 
   return <ConnectionProvider connection={snapshot.connection}>{content}</ConnectionProvider>;
+}
+
+function WindowNavigation({ canGoBack, canGoForward, onBack, onForward }: {
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onBack: () => void;
+  onForward: () => void;
+}) {
+  const { isMobile, isMobileOpen, isOpen, toggleSidebar } = useSidebar();
+  const sidebarLabel = (isMobile ? isMobileOpen : isOpen) ? "Collapse sidebar" : "Expand sidebar";
+  const shortcuts = navigationShortcuts();
+  const actions = [
+    { id: "sidebar", label: sidebarLabel, icon: faTableColumns, onPress: toggleSidebar, isDisabled: false, shortcut: undefined },
+    { id: "back", label: "Go back", icon: faArrowLeft, onPress: onBack, isDisabled: !canGoBack, shortcut: shortcuts.back },
+    { id: "forward", label: "Go forward", icon: faArrowRight, onPress: onForward, isDisabled: !canGoForward, shortcut: shortcuts.forward },
+  ];
+
+  return (
+    <nav aria-label="Window navigation" className="window-navigation">
+      {actions.map(({ id, label, icon, onPress, isDisabled, shortcut }) => (
+        <Tooltip delay={250} key={id}>
+          <Button
+            aria-label={label}
+            {...(id === "sidebar" ? { "aria-expanded": isMobile ? isMobileOpen : isOpen } : {})}
+            className="window-navigation__button"
+            isDisabled={isDisabled}
+            isIconOnly
+            size="sm"
+            variant="ghost"
+            render={(props) => (
+              <button {...props} {...(shortcut ? { "aria-keyshortcuts": shortcut.ariaKeyShortcuts } : {})} />
+            )}
+            onPress={onPress}
+          >
+            <FontAwesomeIcon aria-hidden icon={icon} />
+          </Button>
+          <Tooltip.Content placement="bottom">
+            <span className="flex items-center gap-2">
+              {label}
+              {shortcut ? <CommandPaletteShortcutKbd className="text-xs" shortcut={shortcut.shortcut} /> : null}
+            </span>
+          </Tooltip.Content>
+        </Tooltip>
+      ))}
+    </nav>
+  );
 }
 
 export function NavigationContent({

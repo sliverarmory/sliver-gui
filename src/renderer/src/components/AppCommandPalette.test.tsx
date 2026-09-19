@@ -8,6 +8,8 @@ import {
   AppCommandPalette,
   type AppCommandPaletteCommand,
 } from "./AppCommandPalette";
+import { navigationShortcuts } from "../navigation-shortcuts";
+import { formatCommandPaletteShortcut } from "./CommandPaletteShortcut";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -58,6 +60,43 @@ describe("AppCommandPalette", () => {
     expect(onGenerate).not.toHaveBeenCalled();
 
     await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
+  });
+
+  it("exposes navigation shortcuts and runs history commands from search", async () => {
+    const user = userEvent.setup();
+    const onBack = vi.fn();
+    const shortcuts = navigationShortcuts();
+    const available: AppCommandPaletteCommand[] = [{
+      id: "navigate-back",
+      group: "Navigate",
+      icon: faBolt,
+      label: "Go back",
+      description: "Return to the previous page.",
+      shortcut: shortcuts.back.shortcut,
+      onAction: onBack,
+    }, {
+      id: "navigate-forward",
+      group: "Navigate",
+      icon: faBolt,
+      label: "Go forward",
+      description: "Visit the next page in history.",
+      shortcut: shortcuts.forward.shortcut,
+      isDisabled: true,
+      onAction: vi.fn(),
+    }];
+    render(<PaletteHarness commands={available} shortcut="mod+k" />);
+
+    await user.click(screen.getByRole("button", { name: "Open test palette" }));
+    const back = await screen.findByRole("menuitem", { name: /Go back/u });
+    const forward = screen.getByRole("menuitem", { name: /Go forward/u });
+    expect(back).toHaveTextContent("Go back");
+    expect(forward).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByLabelText(formatCommandPaletteShortcut(shortcuts.back.shortcut))).toBeInTheDocument();
+
+    await user.type(screen.getByRole("searchbox", { name: "Search commands" }), "go back");
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(onBack).toHaveBeenCalledOnce();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
   });
 });

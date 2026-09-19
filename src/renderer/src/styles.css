@@ -158,6 +158,8 @@
   .sidebar.app-sidebar {
     --sidebar-width: 248px;
     --sidebar-width-collapsed: 56px;
+    /* Keep the draggable brand below the window navigation controls. */
+    padding-block-start: 2.5rem;
     border-color: color-mix(in srgb, var(--color-border) 42%, transparent);
     background-color: color-mix(in srgb, var(--color-surface) 22%, transparent);
     background-image: linear-gradient(
@@ -254,7 +256,8 @@
 
   .sidebar.app-sidebar > .brand-block {
     -webkit-app-region: drag;
-    padding-block-start: 2rem;
+    min-height: 0;
+    padding-block-start: 0;
   }
 
   .sidebar.app-sidebar[data-state="collapsed"] > .brand-block {
@@ -371,8 +374,69 @@
     pointer-events: auto;
   }
 
-  .app-header {
+  .app-shell {
+    --window-controls-inset: 0.75rem;
+    --window-navigation-end: calc(var(--window-controls-inset) + 6.5rem);
+  }
+
+  .app-shell[data-platform="mac"] {
+    --window-controls-inset: 5.5rem;
+  }
+
+  .window-navigation {
+    position: fixed;
+    inset-block-start: 0;
+    inset-inline-start: calc(var(--window-controls-inset) - 0.25rem);
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    height: 2.25rem;
+    padding: 0.125rem 0.25rem;
+    -webkit-app-region: no-drag;
+  }
+
+  .window-navigation__button {
+    -webkit-app-region: no-drag;
+    border-radius: var(--radius-sm);
+    color: var(--color-muted);
+  }
+
+  .app-shell[data-state="collapsed"] .app-header {
+    padding-inline-start: max(1.25rem, calc(var(--window-navigation-end) + 1.25rem - 56px));
+  }
+
+  .app-header-drag-region {
+    /* Native drag hit testing needs separate rectangles, regardless of z-index. */
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
     -webkit-app-region: drag;
+  }
+
+  .app-shell[data-state="collapsed"] .app-header-drag-region {
+    inset-inline-start: max(0px, calc(var(--window-navigation-end) + 0.25rem - 56px));
+  }
+
+  @media (max-width: 768px) {
+    .app-shell[data-state] .app-header {
+      min-height: 108px;
+      padding-block-start: 2.75rem;
+      padding-inline-start: 1.25rem;
+    }
+
+    .app-shell .app-content {
+      height: calc(100vh - 108px);
+    }
+
+    .app-shell[data-state] .app-header-drag-region {
+      inset-block-start: 2.5rem;
+      inset-inline-start: 0;
+    }
+  }
+
+  .app-header {
+    -webkit-app-region: no-drag;
     position: sticky;
     top: 0;
     z-index: 30;

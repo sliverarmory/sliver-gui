@@ -21,6 +21,7 @@ import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 import * as connectionContext from "./components/ConnectionProvider";
 import { renderWithApplicationContextMenu as render } from "./application-context-menu-test-utils";
+import { navigationShortcuts } from "./navigation-shortcuts";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -175,7 +176,58 @@ function installSliverAPI(
 }
 
 describe("App startup", () => {
-  it("starts on Overview and returns from another page through the command palette", async () => {
+  it("shares history between keyboard shortcuts and palette commands with matching boundaries", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+    const apple = navigationShortcuts().back.shortcut.startsWith("mod+");
+    const backKeys = apple ? "{Meta>}[BracketLeft]{/Meta}" : "{Alt>}{ArrowLeft}{/Alt}";
+    const forwardKeys = apple ? "{Meta>}[BracketRight]{/Meta}" : "{Alt>}{ArrowRight}{/Alt}";
+    render(<App />);
+    await screen.findByRole("heading", { name: "Overview" });
+
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const initialPalette = await screen.findByRole("dialog", { name: "Command palette" });
+    expect(within(initialPalette).getByRole("menuitem", { name: /^Go back/u })).toHaveAttribute("aria-disabled", "true");
+    expect(within(initialPalette).getByRole("menuitem", { name: /^Go forward/u })).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("row", { name: "Jobs & listeners" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.click(await screen.findByRole("menuitem", { name: /^Settings/u }));
+    await screen.findByRole("heading", { name: "Settings" });
+    await user.keyboard(backKeys);
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await user.keyboard(forwardKeys);
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const search = await screen.findByRole("searchbox", { name: "Search commands" });
+    await user.keyboard(backKeys);
+    expect(screen.getByRole("heading", { name: "Settings", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    await user.type(search, "go back");
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const forward = await screen.findByRole("menuitem", { name: /^Go forward/u });
+    expect(forward).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(forward);
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Go forward" })).toBeDisabled();
+  });
+
+  it("shares back and forward history across the sidebar and command palette", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -193,6 +245,11 @@ describe("App startup", () => {
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.getByRole("row", { name: "Overview" })).toHaveAttribute("data-current", "true");
     expect(screen.queryByRole("heading", { name: "Jobs & listeners" })).not.toBeInTheDocument();
+    const navigation = within(screen.getByRole("navigation", { name: "Window navigation" }));
+    const back = navigation.getByRole("button", { name: "Go back" });
+    const forward = navigation.getByRole("button", { name: "Go forward" });
+    expect(back).toBeDisabled();
+    expect(forward).toBeDisabled();
 
     await user.click(screen.getByRole("row", { name: "Jobs & listeners" }));
     expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
@@ -206,6 +263,44 @@ describe("App startup", () => {
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.getByRole("row", { name: "Overview" })).toHaveAttribute("data-current", "true");
     expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+    expect(back).toBeEnabled();
+    expect(forward).toBeDisabled();
+
+    await user.click(back);
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: "Jobs & listeners" })).toHaveAttribute("data-current", "true");
+    expect(forward).toBeEnabled();
+    await user.click(forward);
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(forward).toBeDisabled();
+
+    await user.click(back);
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const reopenedPalette = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(reopenedPalette).getByRole("menuitem", { name: /^Settings/u }));
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(forward).toBeDisabled();
+    await user.click(back);
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await user.click(forward);
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(forward).toBeDisabled();
+  });
+
+  it("keeps the window navigation accessible when the sidebar is collapsed", async () => {
+    const user = userEvent.setup();
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    render(<App />);
+    await screen.findByText("No saved configurations");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    const navigation = within(screen.getByRole("navigation", { name: "Window navigation" }));
+    await user.click(navigation.getByRole("button", { name: "Collapse sidebar" }));
+    expect(navigation.getByRole("button", { name: "Expand sidebar" })).toBeVisible();
+    expect(navigation.getByRole("button", { name: "Go back" })).toBeVisible();
+    expect(navigation.getByRole("button", { name: "Go forward" })).toBeVisible();
+    await user.click(navigation.getByRole("button", { name: "Expand sidebar" }));
+    expect(navigation.getByRole("button", { name: "Collapse sidebar" })).toBeVisible();
   });
 
   it("opens the saved configuration selector immediately and keeps a dismissal closed", async () => {

@@ -16,6 +16,7 @@ export interface AppCommandPaletteCommand {
   readonly label: string;
   readonly description: string;
   readonly keywords?: readonly string[];
+  readonly shortcut?: string;
   readonly isCurrent?: boolean;
   readonly isDisabled?: boolean;
   readonly onAction: () => void;
@@ -106,6 +107,12 @@ export function AppCommandPalette({
                         </span>
                         {command.isCurrent ? (
                           <span className="text-muted shrink-0 text-xs">Current</span>
+                        ) : null}
+                        {command.shortcut ? (
+                          <CommandPaletteShortcutKbd
+                            className="shrink-0 text-xs"
+                            shortcut={command.shortcut}
+                          />
                         ) : null}
                       </Command.Item>
                     ))}
