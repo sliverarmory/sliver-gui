@@ -1,0 +1,148 @@
+import type { TopologyDocument, TopologyEdge, TopologyFreshness, TopologyNode, TopologyStatus } from "../../../shared/topology-contracts";
+
+export const TOPOLOGY_COLLECTION_THRESHOLD = 12;
+
+export interface TopologyFilters {
+  query: string;
+  kind: string;
+  status: string;
+  expanded: ReadonlySet<string>;
+}
+
+function aggregateFreshness(items: readonly { freshness: TopologyFreshness }[]): TopologyFreshness {
+  if (items.every((item) => item.freshness === "current")) return "current";
+  return items.some((item) => item.freshness === "stale") ? "stale" : "unknown";
+}
+
+function aggregateStatus(members: readonly TopologyNode[]): TopologyStatus {
+  if (members.some((node) => node.status === "warning")) return "warning";
+  if (members.every((node) => node.status === "healthy")) return "healthy";
+  if (members.every((node) => node.status === "inactive")) return "inactive";
+  return "unknown";
+}
+
+/** View-only projection: never mutates source identities or invents routes. */
+export function projectTopology(source: TopologyDocument, filters: TopologyFilters): {
+  document: TopologyDocument;
+  groups: ReadonlyMap<string, readonly TopologyNode[]>;
+  matchCount: number;
+} {
+  const query = filters.query.trim().toLocaleLowerCase();
+  const byId = new Map(source.nodes.map((node) => [node.id, node]));
+  const filtering = Boolean(query || filters.kind !== "all" || filters.status !== "all");
+  const matches = source.nodes.filter((node) =>
+    (filters.kind === "all" || node.kind === filters.kind)
+    && (filters.status === "all" || node.status === filters.status)
+    && (!query || [node.label, node.subtitle, node.kind, node.provider,
+      ...node.properties.map((property) => `${property.label} ${property.value ?? ""}`)]
+      .join(" ").toLocaleLowerCase().includes(query)));
+  const matchedIds = new Set(matches.map((node) => node.id));
+  const included = new Set((filtering ? matches : source.nodes).map((node) => node.id));
+  // Matching an enclosure retains its contents, but those contents do not
+  // become new filter matches or recursively pull in unrelated neighbors.
+  if (filtering) for (const node of source.nodes) {
+    let parent = node.parentId;
+    const seen = new Set<string>();
+    while (parent && !seen.has(parent)) {
+      seen.add(parent);
+      if (matchedIds.has(parent)) { included.add(node.id); break; }
+      parent = byId.get(parent)?.parentId;
+    }
+  }
+  // Retain one hop of connection context, then ancestor enclosures.
+  if (filtering) for (const edge of source.edges) {
+    if (matchedIds.has(edge.source) || matchedIds.has(edge.target)) {
+      included.add(edge.source);
+      included.add(edge.target);
+    }
+  }
+  for (const id of [...included]) {
+    let parent = byId.get(id)?.parentId;
+    const seen = new Set<string>();
+    while (parent && !seen.has(parent)) {
+      seen.add(parent);
+      included.add(parent);
+      parent = byId.get(parent)?.parentId;
+    }
+  }
+  const nodes = source.nodes.filter((node) => included.has(node.id));
+  const edges = source.edges.filter((edge) => included.has(edge.source) && included.has(edge.target));
+  const groups = new Map<string, readonly TopologyNode[]>();
+  if (filtering) return { document: { ...source, nodes, edges }, groups, matchCount: matches.length };
+
+  const buckets = new Map<string, TopologyNode[]>();
+  const linksByNode = new Map<string, TopologyEdge[]>();
+  for (const edge of edges) {
+    for (const id of new Set([edge.source, edge.target])) {
+      const links = linksByNode.get(id) ?? [];
+      links.push(edge);
+      linksByNode.set(id, links);
+    }
+  }
+  const parents = new Set(nodes.map((node) => node.parentId));
+  for (const node of nodes) {
+    if (node.role === "group" || parents.has(node.id)) continue;
+    const links = linksByNode.get(node.id) ?? [];
+    if (links.length !== 1) continue;
+    const edge = links[0]!;
+    const peer = edge.source === node.id ? edge.target : edge.source;
+    const direction = edge.source === node.id ? "outgoing" : "incoming";
+    const id = `collection:${JSON.stringify([node.kind, node.icon, node.provider, node.parentId, peer, direction, edge.role, edge.kind, edge.transport, edge.label])}`;
+    const bucket = buckets.get(id) ?? [];
+    bucket.push(node);
+    buckets.set(id, bucket);
+  }
+  const replacements = new Map<string, string>();
+  const aggregates: TopologyNode[] = [];
+  for (const [id, members] of buckets) {
+    if (members.length <= TOPOLOGY_COLLECTION_THRESHOLD || filters.expanded.has(id)) continue;
+    groups.set(id, members);
+    members.forEach((node) => replacements.set(node.id, id));
+    const first = members[0]!;
+    const warnings = members.filter((node) => node.status === "warning").length;
+    aggregates.push({
+      id, kind: first.kind, role: "resource", icon: first.icon,
+      ...(first.parentId ? { parentId: first.parentId } : {}),
+      label: `${members.length} ${first.kind === "beacon" ? "beacons" : first.kind === "session" ? "sessions" : "resources"}`,
+      subtitle: "Select to expand this collection",
+      status: aggregateStatus(members),
+      statusLabel: warnings ? `${warnings} need attention` : "Grouped resources",
+      freshness: aggregateFreshness(members),
+      properties: [
+        { label: "Resources", value: members.length }, { label: "Kind", value: first.kind },
+        { label: "Healthy", value: members.filter((node) => node.status === "healthy").length },
+        { label: "Warning", value: warnings },
+        { label: "Inactive", value: members.filter((node) => node.status === "inactive").length },
+        { label: "Unknown", value: members.filter((node) => node.status === "unknown").length },
+      ],
+    });
+  }
+  const projectedEdges = new Map<string, TopologyEdge>();
+  const aggregateMembers = new Map<string, TopologyEdge[]>();
+  for (const edge of edges) {
+    const sourceId = replacements.get(edge.source) ?? edge.source;
+    const targetId = replacements.get(edge.target) ?? edge.target;
+    const grouped = sourceId !== edge.source || targetId !== edge.target;
+    if (!grouped) { projectedEdges.set(edge.id, edge); continue; }
+    const id = `collection-edge:${JSON.stringify([sourceId, targetId, edge.role, edge.kind, edge.transport])}`;
+    const members = aggregateMembers.get(id) ?? [];
+    members.push(edge);
+    aggregateMembers.set(id, members);
+    projectedEdges.set(id, {
+      id, source: sourceId, target: targetId, kind: edge.kind, role: edge.role,
+      label: edge.label,
+      ...(edge.transport ? { transport: edge.transport } : {}),
+      state: members.every((item) => item.state === members[0]!.state) ? members[0]!.state : "unknown",
+      freshness: aggregateFreshness(members),
+      description: `Grouped ${edge.role === "communication" ? "reported communication links" : "resource relationships"}. Expand the collection to inspect each link.`,
+      properties: [
+        { label: "Relationship", value: edge.role === "communication" ? "Grouped communication" : "Grouped association" },
+        { label: "Links", value: members.length },
+      ],
+    });
+  }
+  return {
+    document: { ...source, nodes: [...nodes.filter((node) => !replacements.has(node.id)), ...aggregates], edges: [...projectedEdges.values()] },
+    groups, matchCount: matches.length,
+  };
+}

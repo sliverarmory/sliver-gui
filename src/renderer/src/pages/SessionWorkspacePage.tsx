@@ -583,15 +583,6 @@ export function SessionWorkspacePage({
                 <Label>Rename</Label>
               </Dropdown.Item>
               <Dropdown.Item
-                id="target.kill"
-                isDisabled={isPreparingAction || isExecutingAction || terminate?.available !== true}
-                textValue="Kill Session"
-                variant="danger"
-              >
-                <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faSkullCrossbones} />
-                <Label>Kill Session</Label>
-              </Dropdown.Item>
-              <Dropdown.Item
                 id="session.close"
                 isDisabled={isPreparingAction || isExecutingAction || close?.available !== true}
                 textValue="Close Session"
@@ -599,6 +590,15 @@ export function SessionWorkspacePage({
               >
                 <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faStop} />
                 <Label>Close Session</Label>
+              </Dropdown.Item>
+              <Dropdown.Item
+                id="target.kill"
+                isDisabled={isPreparingAction || isExecutingAction || terminate?.available !== true}
+                textValue="Kill Session"
+                variant="danger"
+              >
+                <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faSkullCrossbones} />
+                <Label>Kill Session</Label>
               </Dropdown.Item>
             </Dropdown.Menu>
           </Dropdown.Popover>

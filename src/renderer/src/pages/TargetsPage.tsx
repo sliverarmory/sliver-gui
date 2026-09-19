@@ -74,6 +74,7 @@ import type {
 import { AreaField, Field } from "../components/FormControls";
 import { useApplicationContextMenuScope } from "../components/ApplicationContextMenu";
 import { RenameSessionModal } from "../components/RenameSessionModal";
+import { sessionContextMenuActions } from "../components/session-context-menu-actions";
 import {
   beaconTaskCountLabel,
   capabilityFor,
@@ -1652,30 +1653,8 @@ function TargetTableContextMenu({
   onAction: (target: TargetRef, actionId: "target.rename" | "target.kill" | "session.close") => void;
 }): React.JSX.Element {
   const [contextTarget, setContextTarget] = useState<TargetRef>();
-  const hasCurrentCapabilities = Boolean(contextTarget) &&
-    targetRefIdentity(contextTarget) === targetRefIdentity(activeTarget);
   const scope = useApplicationContextMenuScope({
-    actions: contextTarget ? [{
-      id: "session.rename",
-      label: "Rename",
-      icon: faPen,
-      isDisabled: disabled,
-      onAction: () => onAction(contextTarget, "target.rename"),
-    }, {
-      id: "session.kill",
-      label: "Kill Session",
-      icon: faSkullCrossbones,
-      variant: "danger",
-      isDisabled: disabled || (hasCurrentCapabilities && !capabilityFor(capabilities, "target.terminate")?.available),
-      onAction: () => onAction(contextTarget, "target.kill"),
-    }, {
-      id: "session.close",
-      label: "Close Session",
-      icon: faStop,
-      variant: "danger",
-      isDisabled: disabled || (hasCurrentCapabilities && !capabilityFor(capabilities, "session.close")?.available),
-      onAction: () => onAction(contextTarget, "session.close"),
-    }] : [],
+    actions: sessionContextMenuActions({ target: contextTarget, activeTarget, capabilities, disabled, onAction }),
   });
 
   return (

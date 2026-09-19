@@ -146,6 +146,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       name: /choose.*file|open file|connect (?:from |external )file/i,
     }).click();
 
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Jobs & listeners"]:visible').click();
     await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
     assert.equal(await page.getByRole("dialog", { name: "Server version mismatch" }).count(), 0);
     await page.getByText("#41", { exact: true }).waitFor();
@@ -2479,7 +2481,7 @@ async function verifyM1TargetsAndOperations(
   await page.getByRole("button", { name: "New window options" }).click();
   await page.getByRole("menuitem", { name: "Same server" }).click();
   const secondPage = await waitForAdditionalWindow(electronApplication, windowCount, page);
-  await secondPage.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
+  await secondPage.getByRole("heading", { name: "Overview", exact: true }).waitFor();
   try {
     const secondSnapshot = await rendererSnapshot(secondPage);
     const secondSessionRef = requireTargetRef(secondSnapshot, "session");

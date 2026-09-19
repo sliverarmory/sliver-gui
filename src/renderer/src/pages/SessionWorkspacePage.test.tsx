@@ -314,7 +314,13 @@ describe("SessionWorkspacePage", () => {
     expect(actions).toHaveTextContent("");
     expect(actions.closest("header")).toContainElement(screen.getByRole("heading", { name: session.name }));
     await user.click(actions);
-    await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    const actionMenu = await screen.findByRole("menu", { name: "Session actions" });
+    expect(within(actionMenu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Rename",
+      "Close Session",
+      "Kill Session",
+    ]);
+    await user.click(within(actionMenu).getByRole("menuitem", { name: "Rename" }));
     const firstDialog = await screen.findByRole("dialog", { name: "Rename session" });
     expect(within(firstDialog).getByRole("textbox", { name: "Session name" })).toHaveValue(session.name);
     await user.click(within(firstDialog).getByRole("button", { name: "Cancel" }));

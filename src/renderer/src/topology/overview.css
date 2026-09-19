@@ -1,0 +1,87 @@
+.app-content.app-content--overview { padding: 0; overflow: hidden; }
+.app-content--overview > .overview-page { max-width: none; margin: 0; }
+.overview-page { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+.overview-page__heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.5rem 1.5rem 1rem; }
+.overview-page__heading h1 { font-size: 1.5rem; line-height: 1.25; font-weight: 650; letter-spacing: -.025em; }
+.overview-page__heading p { color: var(--color-muted); font-size: .8125rem; margin-top: .375rem; }
+.overview-page__summary { display: flex; gap: .75rem; align-items: center; color: var(--color-muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.overview-toolbar { display: flex; align-items: center; gap: .625rem; padding: 0 1.5rem 1rem; flex-wrap: wrap; }
+.overview-search { width: clamp(180px, 25vw, 320px); }
+.overview-filter { width: 156px; }
+.overview-view-controls { display: flex; gap: .25rem; margin-left: auto; }
+.overview-filter-summary { display: flex; align-items: center; gap: .75rem; padding: 0 1.5rem .5rem; font-size: .75rem; color: var(--color-muted); }
+.overview-notices { display: flex; flex-wrap: wrap; gap: .375rem 1rem; max-height: 88px; overflow: auto; padding: .625rem 1.5rem; background: var(--color-surface-secondary); color: var(--color-muted); font-size: .75rem; }
+.overview-notices p[data-severity="warning"] { color: var(--color-warning); }
+.overview-workspace { display: flex; flex: 1; min-height: 0; position: relative; border-top: 1px solid var(--color-separator); }
+.overview-workspace__view { flex: 1; min-width: 0; position: relative; }
+.topology-graph { position: absolute; inset: 0; background: var(--color-background); --xy-background-color: var(--color-background); --xy-background-pattern-dots-color: color-mix(in srgb, var(--color-muted) 22%, transparent); --xy-edge-stroke: var(--color-muted); --xy-edge-stroke-selected: var(--color-accent); --xy-minimap-background-color: var(--color-surface); }
+.topology-graph .react-flow__node { border: none; border-radius: 14px; color: var(--color-foreground); }
+.topology-graph .react-flow__node:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 4px; }
+.topology-node { width: 100%; height: 100%; padding: 14px 16px; border-radius: 14px; background: var(--color-surface); border: 1px solid var(--color-separator); box-shadow: 0 3px 12px color-mix(in srgb, var(--color-foreground) 5%, transparent); cursor: var(--cursor-interactive, pointer); }
+.topology-node[data-selected="true"], .topology-enclosure[data-selected="true"] { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.topology-node__identity { display: flex; align-items: center; gap: 10px; }
+.topology-node__icon { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 9px; background: var(--color-surface-secondary); color: var(--color-muted); font-size: 18px; }
+.topology-node__text { min-width: 0; flex: 1; }
+.topology-node__kind { display: block; color: var(--color-muted); font-size: 10px; text-transform: capitalize; line-height: 1.1; margin-bottom: 4px; }
+.topology-node__text strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 1.2; font-weight: 600; }
+.topology-node__subtitle { margin-top: 9px; color: var(--color-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topology-node__status { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-top: 7px; color: var(--color-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.topology-status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--color-muted); flex: none; }
+.topology-node[data-status="healthy"][data-freshness="current"] .topology-status-dot { background: var(--color-success); }
+.topology-node[data-status="warning"][data-freshness="current"] .topology-status-dot { background: var(--color-warning); }
+.topology-node[data-freshness="stale"] { background: var(--color-surface-secondary); border-style: dashed; }
+.topology-node[data-compact="true"] .topology-node__subtitle, .topology-node[data-compact="true"] .topology-node__kind { display: none; }
+.topology-node[data-compact="true"] .topology-node__text strong { font-size: 18px; }
+.topology-node[data-compact="true"] .topology-node__identity { margin-top: 12px; }
+.topology-graph .react-flow__handle { width: 5px; height: 5px; border: none; background: var(--color-muted); pointer-events: none; opacity: .5; }
+.topology-enclosure { height: 100%; width: 100%; border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-separator)); border-radius: 22px; background: color-mix(in srgb, var(--color-accent) 3%, transparent); }
+.topology-enclosure__heading { padding: 20px 24px; display: flex; align-items: center; gap: 12px; }
+.topology-enclosure__icon { display: grid; place-items: center; width: 36px; height: 36px; color: var(--color-accent); background: var(--color-surface); border-radius: 10px; font-size: 22px; }
+.topology-enclosure__heading strong { font-size: 13px; }
+.topology-enclosure__heading > div { min-width: 0; }
+.topology-enclosure__heading strong, .topology-enclosure__heading p { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topology-enclosure__heading p { margin-top: 3px; color: var(--color-muted); font-size: 11px; }
+.topology-enclosure[data-provider="aws"] .topology-enclosure__icon { color: light-dark(#9c5900, #f5b14c); }
+.topology-enclosure[data-provider="azure"] .topology-enclosure__icon { color: light-dark(#0065ac, #65b8f5); }
+.topology-graph .topology-edge { stroke: color-mix(in srgb, var(--color-muted) 70%, transparent); stroke-width: 1.5; }
+.topology-graph .topology-edge--periodic { stroke-dasharray: 5 5; }
+.topology-graph .topology-edge--unknown { stroke-dasharray: 2 5; }
+.topology-graph .topology-edge--association { stroke-dasharray: 1 5; stroke-linecap: round; }
+.topology-graph .topology-edge--inactive, .topology-relationship--stale { opacity: .55; }
+.topology-graph .react-flow__edge.selected .topology-edge { stroke: var(--color-accent); stroke-width: 2.5; }
+.topology-graph .react-flow__edge-textbg { fill: var(--color-background); }
+.topology-graph .react-flow__edge-text { fill: var(--color-muted); font-size: 10px; font-weight: 500; }
+.topology-graph .topology-edge--pulse { animation: topology-activity 1.4s ease-out; }
+@keyframes topology-activity { 0%, 25% { stroke: var(--color-accent); stroke-width: 3; } 100% { stroke-width: 1.5; } }
+html[data-reduce-motion="true"] .topology-graph .topology-edge--pulse { animation: none; }
+@media (prefers-reduced-motion: reduce) { .topology-graph .topology-edge--pulse { animation: none; } }
+.topology-graph__controls { position: absolute; bottom: 20px; left: 20px; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; border-radius: 12px; background: var(--color-surface); box-shadow: 0 2px 10px color-mix(in srgb, var(--color-foreground) 8%, transparent); }
+.topology-graph__message { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); max-width: 90%; padding: 10px 16px; border-radius: 10px; font-size: 13px; color: var(--color-muted); background: var(--color-surface); text-align: center; }
+.overview-inspector { width: 340px; flex: none; overflow: auto; padding: 20px; background: var(--color-surface); border-left: 1px solid var(--color-separator); display: flex; flex-direction: column; gap: 20px; }
+.overview-inspector__heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.overview-inspector__heading h2 { font-size: 12px; font-weight: 600; color: var(--color-muted); }
+.overview-inspector__identity { display: flex; align-items: center; gap: 12px; }
+.overview-inspector__identity > span { flex: none; font-size: 24px; color: var(--color-accent); }
+.overview-inspector__identity p { font-size: 11px; color: var(--color-muted); }
+.overview-inspector h3 { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.overview-inspector__description { color: var(--color-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.overview-properties { display: grid; gap: 14px; font-size: 12px; }
+.overview-properties dt { color: var(--color-muted); margin-bottom: 4px; }
+.overview-properties dd { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.overview-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 10px 24px; font-size: 10px; color: var(--color-muted); border-top: 1px solid var(--color-separator); }
+.overview-footer > span:last-child { margin-left: auto; font-variant-numeric: tabular-nums; }
+.overview-legend { display: flex; flex-wrap: wrap; gap: 12px; }
+.overview-legend > span { display: inline-flex; gap: 6px; align-items: center; }
+.overview-legend__line { display: inline-block; width: 20px; border-top: 1px solid var(--color-muted); }
+.overview-legend__line--periodic { border-top-style: dashed; }
+.overview-legend__line--association { border-top-style: dotted; }
+.overview-list { height: 100%; overflow: auto; padding: 12px 24px 24px; }
+.overview-list table { border-collapse: collapse; width: 100%; text-align: left; font-size: 12px; }
+.overview-list th { color: var(--color-muted); font-weight: 500; padding: 12px 8px; }
+.overview-list td { padding: 6px 8px; border-top: 1px solid var(--color-separator); }
+.overview-list tr[data-selected="true"] { background: var(--color-surface-secondary); }
+.overview-list__connections { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 24px; }
+.overview-list__connections h2 { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.overview-list__empty { color: var(--color-muted); text-align: center; padding: 32px; }
+@media (max-width: 1200px) { .overview-inspector { position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; max-width: 90%; box-shadow: -8px 0 24px color-mix(in srgb, var(--color-foreground) 8%, transparent); } }
+@media (max-width: 760px) { .overview-page__heading { padding: 1rem; }.overview-toolbar { padding: 0 1rem .75rem; gap: .5rem; }.overview-page__summary > span { display: none; }.overview-search { flex: 1; min-width: 180px; }.overview-filter { width: 132px; }.overview-footer { padding-inline: 1rem; }.overview-legend { gap: 8px; }.topology-graph__controls { left: 8px; bottom: 8px; } }

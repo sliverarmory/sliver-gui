@@ -135,6 +135,15 @@ describe("CloudDeploymentService", () => {
           deploymentId: DEPLOYMENT_ID,
           provider: "aws",
           name: `Server ${status}`,
+          overview: {
+            region: "us-west-2",
+            size: "t3.small",
+            instanceState: "unknown",
+            health: "unknown",
+            publicIpAddress: null,
+            privateIpAddress: null,
+            updatedAt: updated.value.deployment.updatedAt,
+          },
         });
         expect(store.getState()).toBe(state);
       }

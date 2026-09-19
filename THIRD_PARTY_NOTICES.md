@@ -36,6 +36,13 @@ License. Its retained package license and the complete MIT text are included in
 the native package and generated dependency inventory. Source:
 https://github.com/microsoft/node-pty
 
+The Overview renderer bundles React Flow (`@xyflow/react` 12.11.6), copyright
+webkid GmbH, under the MIT License. Its automatic layout uses `elkjs` 0.12.0,
+whose Eclipse Public License 2.0 and secondary-license notice are preserved in
+the generated `dist/THIRD_PARTY_LICENSES.txt`. Exact versions and package
+integrities are recorded in `package-lock.json`. Upstream source:
+https://github.com/xyflow/xyflow and https://github.com/kieler/elkjs.
+
 The renderer embeds the following unmodified terminal font files under the SIL
 Open Font License, Version 1.1. The complete OFL text is reproduced in
 `LICENSES/OFL-1.1.txt`, and exact source tags, commits, URLs, sizes, and SHA-256

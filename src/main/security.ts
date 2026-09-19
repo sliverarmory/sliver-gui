@@ -20,7 +20,8 @@ export function productionContentSecurityPolicy(): string {
     "form-action 'none'",
     "frame-src 'none'",
     "frame-ancestors 'none'",
-    "worker-src 'none'",
+    // Dedicated layout workers are emitted as local renderer assets by Vite.
+    "worker-src 'self'",
   ].join("; ");
 }
 
@@ -42,7 +43,7 @@ export function developmentContentSecurityPolicy(devServerUrl: string): string {
     "form-action 'none'",
     "frame-src 'none'",
     "frame-ancestors 'none'",
-    "worker-src 'none'",
+    "worker-src 'self'",
   ].join("; ");
 }
 

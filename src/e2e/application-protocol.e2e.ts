@@ -206,6 +206,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
       assert.ok(response.csp);
       assert.deepEqual(response.csp.match(/'[^']*unsafe[^']*'/gu), ["'wasm-unsafe-eval'"]);
     }
+    await assertPackagedModuleWorker(application, temporaryRoot);
 
     for (const renderer of [page, cloudPage]) {
       const violations = await renderer.evaluate(() => (
@@ -262,4 +263,74 @@ async function assertStrictPolicy(page: Page): Promise<void> {
   assert.deepEqual(csp.match(/'[^']*unsafe[^']*'/gu), ["'wasm-unsafe-eval'"]);
   assert.match(csp, /(?:^|;)\s*connect-src 'none'(?:;|$)/u);
   assert.match(csp, /(?:^|;)\s*style-src 'self'(?: 'sha256-[A-Za-z0-9+/=]+')*(?:;|$)/u);
+  assert.match(csp, /(?:^|;)\s*worker-src 'self'(?:;|$)/u);
+}
+
+async function assertPackagedModuleWorker(application: ElectronApplication, temporaryRoot: string): Promise<void> {
+  const rendererDirectory = join(temporaryRoot, "worker-renderer");
+  const archive = join(temporaryRoot, "worker-renderer.asar");
+  await mkdir(rendererDirectory);
+  await Promise.all([
+    writeFile(join(rendererDirectory, "index.html"),
+      '<!doctype html><title>Worker fixture</title><pre>Waiting</pre><script type="module" src="./entry.mjs"></script>'),
+    writeFile(join(rendererDirectory, "entry.mjs"), `
+      const worker = new Worker(new URL("./layout.worker.mjs", import.meta.url), { type: "module" });
+      worker.onmessage = ({ data }) => {
+        document.querySelector("pre").textContent = JSON.stringify(data);
+        worker.terminate();
+      };
+      worker.onerror = (event) => { document.querySelector("pre").textContent = event.message; };
+      worker.postMessage([2, 3]);
+    `),
+    writeFile(join(rendererDirectory, "layout.worker.mjs"), `
+      import { sum } from "./sum.mjs";
+      self.onmessage = ({ data }) => self.postMessage({
+        result: sum(data),
+        origin: self.location.origin,
+        nodeIntegration: typeof require !== "undefined" || typeof process !== "undefined",
+      });
+    `),
+    writeFile(join(rendererDirectory, "sum.mjs"),
+      "export const sum = (values) => values.reduce((total, value) => total + value, 0);"),
+  ]);
+  await createPackage(rendererDirectory, archive);
+
+  const windowOpened = application.waitForEvent("window");
+  const windowId = await application.evaluate(async ({ BrowserWindow, net, session }, archivePath) => {
+    const workerSession = session.fromPartition("sliver-protocol-worker-e2e");
+    workerSession.protocol.handle("sliver", globalThis.__SLIVER_GUI_PROTOCOL_E2E_HANDLER__(
+      archivePath,
+      (url) => net.fetch(url),
+    ));
+    const window = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        session: workerSession,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        nodeIntegrationInWorker: false,
+      },
+    });
+    await window.loadURL("sliver://app/index.html");
+    return window.id;
+  }, archive);
+  try {
+    const page = await windowOpened;
+    await page.locator("pre").filter({ hasText: '"result":5' }).waitFor({ timeout: 10_000 });
+    assert.deepEqual(JSON.parse(await page.locator("pre").innerText()), {
+      result: 5,
+      origin: "sliver://app",
+      nodeIntegration: false,
+    });
+    const violations = await page.evaluate(() => (
+      globalThis as unknown as ProtocolBrowser
+    ).__protocolViolations);
+    assert.deepEqual(violations, [], "packaged module workers must load without relaxing the script or connection policy");
+  } finally {
+    await application.evaluate(({ BrowserWindow, session }, id) => {
+      BrowserWindow.fromId(id)?.destroy();
+      session.fromPartition("sliver-protocol-worker-e2e").protocol.unhandle("sliver");
+    }, windowId);
+  }
 }

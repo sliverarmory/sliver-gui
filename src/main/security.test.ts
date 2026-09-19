@@ -51,7 +51,9 @@ function expectStrictContentSecurityPolicy(policy: string): void {
   expect(directives.get("style-src")).toEqual(["'self'", `'sha256-${pressableStyleHash}'`]);
   expect(directives.get("font-src")).toEqual(["'self'"]);
   expect(scriptValues.every((value) => !value.startsWith("data:"))).toBe(true);
-  expect(directives.get("worker-src")).toEqual(["'none'"]);
+  // A worker must be an ordinary same-origin asset: blob, data, remote URLs,
+  // and unsafe evaluation remain unavailable.
+  expect(directives.get("worker-src")).toEqual(["'self'"]);
 }
 
 describe("Electron content security policy", () => {

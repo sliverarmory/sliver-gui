@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import type { CloudProvider } from "../shared/cloud-deployment-contracts.js";
+import { E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT } from "../e2e/cloud-deployment-fixture.js";
+import type { AwsDeploymentHealth, CloudProvider } from "../shared/cloud-deployment-contracts.js";
 import { resolveManagedServerFromDeployments } from "./managed-server-resolver.js";
 
 const CONFIG_BYTES = Buffer.from('{"operator":"alice","lhost":"203.0.113.20"}');
@@ -64,6 +65,69 @@ describe("resolveManagedServerFromDeployments", () => {
       name: renamed.name,
     });
     expect(resolveManagedServerFromDeployments(CONFIG_DIGEST, [unrelated])).toBeNull();
+  });
+
+  it("projects only cached display metadata from AWS records", () => {
+    const deployment = { ...E2E_AWS_DEPLOYMENT, operatorConfigDigest: CONFIG_DIGEST };
+    const result = resolveManagedServerFromDeployments(CONFIG_DIGEST, [deployment]);
+
+    expect(result).toEqual({
+      deploymentId: deployment.id,
+      provider: "aws",
+      name: deployment.name,
+      overview: {
+        region: "us-west-2",
+        size: "t3.small",
+        instanceState: "running",
+        health: "ok",
+        publicIpAddress: "198.51.100.24",
+        privateIpAddress: "10.0.0.24",
+        updatedAt: deployment.updatedAt,
+      },
+    });
+    expect(Object.isFrozen(result?.overview)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(deployment.credentialId);
+    expect(JSON.stringify(result)).not.toContain(CONFIG_DIGEST);
+    expect(JSON.stringify(result)).not.toContain(deployment.operatorConfigFileName);
+  });
+
+  it("normalizes Azure location and size without inventing health or missing addresses", () => {
+    const deployment = {
+      ...E2E_AZURE_DEPLOYMENT,
+      operatorConfigDigest: CONFIG_DIGEST,
+      runtime: { ...E2E_AZURE_DEPLOYMENT.runtime, publicIpAddress: null, privateIpAddress: null },
+    };
+    const result = resolveManagedServerFromDeployments(CONFIG_DIGEST, [deployment]);
+
+    expect(result).toEqual({
+      deploymentId: deployment.id,
+      provider: "azure",
+      name: deployment.name,
+      overview: {
+        region: deployment.spec.location,
+        size: deployment.spec.vmSize,
+        instanceState: deployment.runtime.instanceState,
+        publicIpAddress: null,
+        privateIpAddress: null,
+        updatedAt: deployment.updatedAt,
+      },
+    });
+    expect(Object.isFrozen(result?.overview)).toBe(true);
+  });
+
+  it.each<[AwsDeploymentHealth, AwsDeploymentHealth, AwsDeploymentHealth]>([
+    ["ok", "unknown", "unknown"],
+    ["unknown", "ok", "unknown"],
+    ["ok", "initializing", "initializing"],
+    ["impaired", "ok", "impaired"],
+    ["initializing", "impaired", "impaired"],
+  ])("reports AWS checks %s / %s as %s", (instanceHealth, systemHealth, expected) => {
+    const deployment = {
+      ...E2E_AWS_DEPLOYMENT,
+      operatorConfigDigest: CONFIG_DIGEST,
+      runtime: { ...E2E_AWS_DEPLOYMENT.runtime, instanceHealth, systemHealth },
+    };
+    expect(resolveManagedServerFromDeployments(CONFIG_DIGEST, [deployment])?.overview?.health).toBe(expected);
   });
 });
 

@@ -35,6 +35,7 @@ import {
   type SliverClientAdapter,
 } from "../main/connection-registry.js";
 import { loadTerminalRuntime } from "../main/terminal-runtime.js";
+import { resolveManagedServerFromDeployments } from "../main/managed-server-resolver.js";
 import {
   E2E_AWS_CREDENTIAL_ID,
   E2E_AWS_DEPLOYMENT,
@@ -116,7 +117,7 @@ interface FakeMainState {
 }
 
 interface FakeMainControl {
-  setEventStreamStatus(status: "connected" | "retrying"): void;
+  setEventStreamStatus(status: "connected" | "retrying" | "stopped"): void;
   completeTask(taskId: string, emitEvent?: boolean): void;
   holdNextConsoleExit(): void;
   releaseConsoleExitHold(): void;
@@ -175,6 +176,19 @@ globalThis.__SLIVER_GUI_PROTOCOL_E2E_HANDLER__ = createAppProtocolHandler;
 let holdNextConsoleExit = false;
 let heldConsoleExit: (() => void) | undefined;
 const consoleClientRootDirectory = requiredArgument("--console-client-root-directory=");
+// Optional display-only provenance for the dedicated Overview journey. Existing
+// E2E callers keep the unassociated fixture and never load cloud credentials.
+const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
+const overviewCloudRecord = overviewCloudArgument === "--overview-cloud-fixture=aws"
+  ? E2E_AWS_DEPLOYMENT
+  : overviewCloudArgument === "--overview-cloud-fixture=azure" ? E2E_AZURE_DEPLOYMENT : null;
+if (overviewCloudArgument && !overviewCloudRecord) throw new Error("Unknown Overview cloud fixture");
+const overviewCloudDeployment = overviewCloudRecord ? {
+  ...overviewCloudRecord,
+  operatorConfigDigest: createHash("sha256").update(readFileSync(
+    join(requiredArgument("--saved-config-directory="), "overview-fixture.cfg"),
+  )).digest("hex"),
+} : null;
 
 const registry = new ConnectionRegistry({
   savedConfigDirectory: requiredArgument("--saved-config-directory="),
@@ -191,6 +205,9 @@ const registry = new ConnectionRegistry({
 });
 
 const cloudDeploymentController: ApplicationCloudDeploymentController = {
+  ...(overviewCloudDeployment ? {
+    resolveManagedServer: (digest: string) => resolveManagedServerFromDeployments(digest, [overviewCloudDeployment]),
+  } : {}),
   listSshTargets: async () => ({
     ok: true,
     value: [fakeSshTarget(E2E_AWS_DEPLOYMENT_ID), fakeSshTarget(E2E_AZURE_DEPLOYMENT_ID)],
@@ -648,7 +665,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     setEventStreamStatus(status) {
       eventStreamState.next(status === "connected"
         ? { status: "connected", attempt: 0 }
-        : { status: "retrying", attempt: 1, error: "Injected event stream interruption" });
+        : { status, attempt: 1, error: "Injected event stream interruption" });
     },
     completeTask(taskId, emitEvent = true) {
       const task = tasks.get(taskId);

@@ -615,7 +615,14 @@ export class ConnectionRegistry {
       if (
         previous === managedServer ||
         (previous && managedServer && previous.deploymentId === managedServer.deploymentId &&
-          previous.provider === managedServer.provider && previous.name === managedServer.name)
+          previous.provider === managedServer.provider && previous.name === managedServer.name &&
+          previous.overview?.region === managedServer.overview?.region &&
+          previous.overview?.size === managedServer.overview?.size &&
+          previous.overview?.instanceState === managedServer.overview?.instanceState &&
+          previous.overview?.health === managedServer.overview?.health &&
+          previous.overview?.publicIpAddress === managedServer.overview?.publicIpAddress &&
+          previous.overview?.privateIpAddress === managedServer.overview?.privateIpAddress &&
+          previous.overview?.updatedAt === managedServer.overview?.updatedAt)
       ) continue;
       context.snapshot = {
         ...context.snapshot,

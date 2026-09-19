@@ -1,0 +1,246 @@
+import { describe, expect, it } from "vitest";
+
+import { disconnectedSnapshot } from "../../../shared/contracts";
+import type { DomainCollection, SliverSnapshot } from "../../../shared/contracts";
+import type { BeaconSummary, SessionSummary } from "../../../shared/target-contracts";
+import type { TopologyNode } from "../../../shared/topology-contracts";
+import {
+  createOverviewTopology,
+  DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS,
+  overviewTopologyScopeId,
+} from "./overview-topology";
+import type { TopologyContributor } from "./overview-topology";
+
+const timestamp = "2026-09-18T12:00:00.000Z";
+
+const session: SessionSummary = {
+  mode: "session",
+  id: "shared-target-id",
+  name: "workstation",
+  hostname: "office-windows",
+  hostId: "host-1",
+  username: "operator",
+  os: "windows",
+  arch: "amd64",
+  transport: "mtls",
+  remoteAddress: "192.0.2.20:4444",
+  activeC2: "mtls://example.test:8888",
+  executable: "client.exe",
+  version: "1.7.6",
+  locale: "en-US",
+  integrity: "Medium",
+  burned: false,
+  liveness: "active",
+  lastCheckinAt: timestamp,
+};
+
+const beacon: BeaconSummary = {
+  ...session,
+  mode: "beacon",
+  hostname: "office-linux",
+  os: "linux",
+  transport: "https",
+  checkinStatus: "on-time",
+  nextCheckinAt: "2026-09-18T12:01:00.000Z",
+};
+
+function domain<T>(items: T[]): DomainCollection<T> {
+  return { status: items.length ? "ready" : "empty", revision: 1, updatedAt: timestamp, items, page: { limit: 500, total: items.length, truncated: false } };
+}
+
+function snapshot(): SliverSnapshot {
+  const value = disconnectedSnapshot();
+  value.connection = { status: "connected", server: "example.test:31337", configName: "office.cfg", operator: "operator", epoch: 12, incarnation: 3, managedServer: null };
+  value.eventStream = { status: "connected", attempt: 0 };
+  value.lastUpdated = timestamp;
+  value.domains.sessions = domain([session]);
+  value.domains.beacons = domain([beacon]);
+  value.domains.jobs = domain([{ id: 4, name: "HTTPS", description: "HTTP listener", protocol: "tcp", port: 443, domains: ["example.test"], profileName: "" }]);
+  value.sessions = value.domains.sessions.items;
+  value.beacons = value.domains.beacons.items;
+  value.jobs = value.domains.jobs.items;
+  return value;
+}
+
+function byKind(nodes: readonly TopologyNode[], kind: string): TopologyNode {
+  const node = nodes.find((candidate) => candidate.kind === kind);
+  expect(node).toBeDefined();
+  return node!;
+}
+
+describe("overview topology adapter", () => {
+  it("produces a JSON document using only bounded, safe display fields", () => {
+    const source = snapshot();
+    source.connection.error = "private diagnostic not needed by graph";
+    source.domains.sessions.items = [{ ...session, activeC2: "https://user:private-password@example.test/?token=private-token" }];
+    const document = createOverviewTopology(source);
+    const json = JSON.stringify(document);
+    expect(JSON.parse(json)).toEqual(document);
+    expect(document.schemaVersion).toBe(1);
+    expect(document.updatedAt).toBe(timestamp);
+    expect(json).not.toContain("private-password");
+    expect(json).not.toContain("private-token");
+    expect(json).not.toContain("private diagnostic");
+    expect(document.nodes.map((node) => node.kind)).toEqual(["client", "server", "session", "beacon"]);
+    expect(document.nodes.every((node) => node.properties.every(({ value }) => value === null || ["string", "number", "boolean"].includes(typeof value)))).toBe(true);
+  });
+
+  it("uses stable identities across updates, reorderings, and reconnect epochs", () => {
+    const source = snapshot();
+    const first = createOverviewTopology(source);
+    source.connection.epoch = 13;
+    source.connection.incarnation = 4;
+    source.lastUpdated = "2026-09-18T12:02:00.000Z";
+    source.domains.sessions.items = [{ ...session, hostname: "renamed-host", lastCheckinAt: source.lastUpdated }];
+    const next = createOverviewTopology(source);
+    expect(next.scope.id).toBe(first.scope.id);
+    expect(next.nodes.map(({ id }) => id)).toEqual(first.nodes.map(({ id }) => id));
+    expect(next.edges.map(({ id }) => id)).toEqual(first.edges.map(({ id }) => id));
+    expect(byKind(next.nodes, "session").label).toBe("renamed-host");
+    expect(byKind(next.nodes, "session").id).not.toBe(byKind(next.nodes, "beacon").id);
+  });
+
+  it("scopes identities to the server and config rather than target ids alone", () => {
+    const first = snapshot();
+    const otherServer = snapshot();
+    otherServer.connection.server = "other.example.test:31337";
+    const otherConfig = snapshot();
+    otherConfig.connection.configName = "other.cfg";
+    expect(overviewTopologyScopeId(first)).not.toBe(overviewTopologyScopeId(otherServer));
+    expect(overviewTopologyScopeId(first)).not.toBe(overviewTopologyScopeId(otherConfig));
+    expect(byKind(createOverviewTopology(first).nodes, "session").id).not.toBe(byKind(createOverviewTopology(otherServer).nodes, "session").id);
+  });
+
+  it("represents cloud hosting as containment and keeps cached provider health separate from connectivity", () => {
+    const source = snapshot();
+    source.connection.managedServer = {
+      provider: "aws", deploymentId: "deployment-1", name: "Office infrastructure",
+      overview: { region: "us-west-2", size: "t3.small", instanceState: "running", health: "ok", publicIpAddress: "203.0.113.10", privateIpAddress: "10.0.0.10", updatedAt: timestamp },
+    };
+    const document = createOverviewTopology(source);
+    const cloud = byKind(document.nodes, "cloud");
+    const server = byKind(document.nodes, "server");
+    expect(cloud).toMatchObject({ role: "group", provider: "aws", icon: "aws", label: "Office infrastructure", subtitle: "AWS · us-west-2", freshness: "unknown", statusLabel: "Last known: running" });
+    expect(server).toMatchObject({ parentId: cloud.id, status: "healthy", statusLabel: "Connected" });
+    expect(cloud.properties).toContainEqual({ label: "Cloud metadata updated", value: timestamp });
+    expect(document.edges.every((edge) => edge.source !== cloud.id && edge.target !== cloud.id)).toBe(true);
+  });
+
+  it("renders associated deployments with missing cloud metadata and unmanaged hosting honestly", () => {
+    const source = snapshot();
+    expect(byKind(createOverviewTopology(source).nodes, "server").subtitle).toBe("Hosting unknown");
+    source.connection.managedServer = { provider: "azure", deploymentId: "azure-1", name: "Imported Azure deployment" };
+    const cloud = byKind(createOverviewTopology(source).nodes, "cloud");
+    expect(cloud).toMatchObject({ provider: "azure", subtitle: "Azure", statusLabel: "Managed deployment" });
+    expect(cloud.properties).toEqual([{ label: "Provider", value: "Azure" }]);
+  });
+
+  it("keeps listener inventory as metadata and never invents listener attribution or pivot hops", () => {
+    const source = snapshot();
+    source.domains.sessions.items = [{ ...session, transport: "tcppivot" }];
+    const document = createOverviewTopology(source);
+    const server = byKind(document.nodes, "server");
+    const remote = byKind(document.nodes, "session");
+    expect(server.properties).toContainEqual({ label: "Listener 4", value: "HTTPS · port 443 · example.test" });
+    expect(document.nodes.some((node) => node.kind === "listener")).toBe(false);
+    expect(document.edges.find((edge) => edge.target === remote.id)).toMatchObject({ source: server.id, label: "TCP pivot", role: "communication", description: expect.stringContaining("Intermediate hops and listener attribution are unknown") });
+    expect(document.edges.every((edge) => !Object.hasOwn(edge, "bandwidth") && !Object.hasOwn(edge, "latency"))).toBe(true);
+  });
+
+  it("distinguishes active, dead, periodic, and overdue reports without inferring traffic rates", () => {
+    const source = snapshot();
+    let document = createOverviewTopology(source);
+    expect(document.edges.find((edge) => edge.target === byKind(document.nodes, "session").id)?.state).toBe("live");
+    expect(document.edges.find((edge) => edge.target === byKind(document.nodes, "beacon").id)).toMatchObject({ state: "periodic", activityAt: timestamp });
+    source.domains.sessions.items = [{ ...session, liveness: "dead" }];
+    source.domains.beacons.items = [{ ...beacon, checkinStatus: "overdue" }];
+    document = createOverviewTopology(source);
+    expect(byKind(document.nodes, "session")).toMatchObject({ status: "inactive", statusLabel: "Dead" });
+    expect(byKind(document.nodes, "beacon")).toMatchObject({ status: "warning", statusLabel: "Overdue" });
+    expect(document.edges.find((edge) => edge.target === byKind(document.nodes, "session").id)?.state).toBe("inactive");
+  });
+
+  it.each(["disconnected", "reconnecting", "incompatible"] as const)("marks retained data stale when %s without asserting remote death", (status) => {
+    const source = snapshot();
+    source.connection.status = status;
+    const document = createOverviewTopology(source);
+    expect(document.scope.connected).toBe(false);
+    expect(byKind(document.nodes, "session")).toMatchObject({ status: "unknown", freshness: "stale", statusLabel: "Last known: active" });
+    expect(byKind(document.nodes, "beacon")).toMatchObject({ status: "unknown", freshness: "stale", statusLabel: "Last known: on time" });
+    expect(document.edges.every((edge) => edge.state === "unknown" && edge.freshness === "stale")).toBe(true);
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "connection:stale" }));
+  });
+
+  it("uses domain and event freshness independently from server connectivity", () => {
+    const source = snapshot();
+    source.domains.sessions.status = "error";
+    let document = createOverviewTopology(source);
+    expect(byKind(document.nodes, "server").status).toBe("healthy");
+    expect(byKind(document.nodes, "session").freshness).toBe("stale");
+    expect(byKind(document.nodes, "beacon").freshness).toBe("current");
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "sessions:error" }));
+    source.eventStream.status = "retrying";
+    document = createOverviewTopology(source);
+    expect(byKind(document.nodes, "beacon").freshness).toBe("stale");
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "events:stale" }));
+  });
+
+  it("reports partial, loading, and unsupported inventories", () => {
+    const source = snapshot();
+    source.domains.sessions.page = { limit: 1, total: 42, truncated: true };
+    source.domains.sessions.status = "loading";
+    source.domains.beacons = { ...domain<BeaconSummary>([]), status: "unsupported" };
+    const document = createOverviewTopology(source);
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "sessions:partial", message: "Showing 1 of 42 sessions; this inventory is partial." }));
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "sessions:loading" }));
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "beacons:unsupported" }));
+    expect(byKind(document.nodes, "session").freshness).toBe("stale");
+    expect(document.nodes.some((node) => node.kind === "beacon")).toBe(false);
+  });
+
+  it("does not carry target data into a disconnected snapshot without a server identity", () => {
+    const source = disconnectedSnapshot();
+    source.domains.sessions = domain([session]);
+    const document = createOverviewTopology(source);
+    expect(document.scope).toEqual({ id: "disconnected", label: "No server connected", connected: false });
+    expect(document.nodes.map(({ kind }) => kind)).toEqual(["client"]);
+    expect(document.edges).toEqual([]);
+    expect(document.updatedAt).toBeNull();
+  });
+});
+
+describe("topology contributions", () => {
+  const futureContributor: TopologyContributor = ({ ids, scopeId }) => ({
+    nodes: [{
+      id: `${scopeId}/future-resource`, kind: "future-resource", role: "resource",
+      label: "New infrastructure", icon: "future-icon", status: "unknown", statusLabel: "Unknown",
+      freshness: "unknown", properties: [{ label: "Display field", value: "Preserved" }],
+    }],
+    edges: [{
+      id: `${scopeId}/future-relationship`, kind: "future-link", role: "relationship",
+      source: ids.server, target: `${scopeId}/future-resource`, label: "Associated resource",
+      state: "unknown", freshness: "unknown", description: "A metadata relationship; no traffic implied.", properties: [],
+    }],
+  });
+
+  it("preserves unknown kinds and icon keys as generic renderable display data", () => {
+    const document = createOverviewTopology(snapshot(), { contributors: [...DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS, futureContributor] });
+    expect(byKind(document.nodes, "future-resource")).toMatchObject({ label: "New infrastructure", icon: "future-icon", role: "resource" });
+    expect(document.edges.find(({ kind }) => kind === "future-link")?.role).toBe("relationship");
+    expect(JSON.parse(JSON.stringify(document))).toEqual(document);
+  });
+
+  it("rejects colliding contribution identities and missing references before rendering", () => {
+    expect(() => createOverviewTopology(snapshot(), { contributors: [...DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS, futureContributor, futureContributor] })).toThrow("Duplicate topology node");
+    expect(() => createOverviewTopology(snapshot(), { contributors: [futureContributor] })).toThrow("Missing topology endpoint");
+    const invalidParent: TopologyContributor = (context) => ({ nodes: futureContributor(context).nodes!.map((node) => ({ ...node, parentId: "missing-group" })) });
+    expect(() => createOverviewTopology(snapshot(), { contributors: [...DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS, invalidParent] })).toThrow("Invalid topology parent");
+  });
+
+  it("rejects containment cycles and non-group parents", () => {
+    const cyclic: TopologyContributor = (context) => ({ nodes: futureContributor(context).nodes!.map((node) => ({ ...node, role: "group", parentId: node.id })) });
+    expect(() => createOverviewTopology(snapshot(), { contributors: [...DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS, cyclic] })).toThrow("Cyclic topology containment");
+    const nonGroup: TopologyContributor = (context) => ({ nodes: futureContributor(context).nodes!.map((node) => ({ ...node, parentId: context.ids.server })) });
+    expect(() => createOverviewTopology(snapshot(), { contributors: [...DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS, nonGroup] })).toThrow("Invalid topology parent");
+  });
+});

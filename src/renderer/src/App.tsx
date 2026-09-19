@@ -15,6 +15,7 @@ import {
   faLink,
   faLinkSlash,
   faMagnifyingGlass,
+  faNetworkWired,
   faKey,
   faPlus,
   faPowerOff,
@@ -52,6 +53,7 @@ import { GeneratePage } from "./pages/GeneratePage";
 import { LootPage } from "./pages/LootPage";
 import { CredentialsPage } from "./pages/CredentialsPage";
 import { OperationsPage } from "./pages/OperationsPage";
+import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import {
   SessionWorkspacePage,
@@ -59,7 +61,7 @@ import {
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
+type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
 
 const sidebarIcons = {
   dark: sliverDarkIcon,
@@ -71,6 +73,8 @@ interface BeaconWorkspaceRoute {
   target: TargetRef;
   connectionIncarnation: number;
 }
+
+const overviewNavItem = { id: "overview" as const, label: "Overview", description: "Explore infrastructure and reported connections.", icon: faNetworkWired };
 
 const infrastructureNavItems = [
   { id: "generate" as const, label: "Generate", description: "Create implant artifacts.", icon: faBolt },
@@ -99,6 +103,7 @@ const dataNavItems = [
 ];
 
 type NavigationItem =
+  | typeof overviewNavItem
   | (typeof infrastructureNavItems)[number]
   | (typeof interactNavItems)[number]
   | (typeof dataNavItems)[number];
@@ -151,7 +156,7 @@ export function App() {
     DEFAULT_APPLICATION_SETTINGS_STATE,
   );
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
-  const [view, setView] = useState<ViewId>("operations");
+  const [view, setView] = useState<ViewId>("overview");
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
@@ -476,6 +481,7 @@ export function App() {
 
   const settings = applicationSettings?.settings ?? standaloneSettings;
   const navigationCommands = [
+    overviewNavItem,
     ...infrastructureNavItems,
     ...interactNavItems,
     ...dataNavItems,
@@ -486,7 +492,7 @@ export function App() {
     label: item.label,
     description: item.description,
     isCurrent: view === item.id,
-    isDisabled: !connected,
+    isDisabled: item.id !== "overview" && !connected,
     onAction: () => changeView(item.id),
   }));
   const commandPaletteCommands: readonly AppCommandPaletteCommand[] = [
@@ -668,11 +674,11 @@ export function App() {
           </div>
         </header>
         <div
-          className={view === "generate" && connected
+          className={view === "overview" ? "app-content app-content--overview" : view === "generate" && connected
             ? "app-content app-content--generate"
             : "app-content"}
         >
-          {view === "settings" ? (
+          {view === "overview" ? <OverviewPage snapshot={snapshot} onSnapshot={setSnapshot} onNavigate={changeView} /> : view === "settings" ? (
             <SettingsPage
               isSaving={applicationSettings
                 ? !applicationSettings.isReady || applicationSettings.isSaving
@@ -839,6 +845,12 @@ export function NavigationContent({
         </div>
       </Sidebar.Header>
       <Sidebar.Content>
+        <Sidebar.Group>
+          <Sidebar.Menu aria-label="Overview navigation" showGuideLines={false}>
+            <SidebarNavigationItem item={overviewNavItem} isCurrent={view === "overview"}
+              isDisabled={false} onAction={() => navigate("overview")} />
+          </Sidebar.Menu>
+        </Sidebar.Group>
         <Sidebar.Group>
           <Sidebar.GroupLabel>Infrastructure</Sidebar.GroupLabel>
           <Sidebar.Menu aria-label="Infrastructure navigation" showGuideLines={false}>

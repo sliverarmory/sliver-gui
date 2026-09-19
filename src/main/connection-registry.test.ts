@@ -197,6 +197,50 @@ describe("managed server connection metadata", () => {
     expect(client.connect).toHaveBeenCalledOnce();
   });
 
+  it("publishes cached cloud display updates to shared windows without reconnecting", async () => {
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    let current: ManagedServerReference = {
+      ...managedServer,
+      overview: {
+        region: "us-west-2",
+        size: "t3.small",
+        instanceState: "running",
+        health: "ok",
+        publicIpAddress: "198.51.100.24",
+        privateIpAddress: "10.0.0.24",
+        updatedAt: "2026-09-18T12:00:00.000Z",
+      },
+    };
+    registry.setManagedServerResolver(() => current);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+    send.mockClear();
+
+    current = { ...current, overview: { ...current.overview! } };
+    registry.refreshManagedServerMetadata();
+    expect(send).not.toHaveBeenCalled();
+
+    current = {
+      ...current,
+      overview: { ...current.overview!, instanceState: "stopped", updatedAt: "2026-09-18T12:01:00.000Z" },
+    };
+    registry.refreshManagedServerMetadata();
+    expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(2);
+    for (const id of [1, 2]) expect(registry.snapshot(id).connection.managedServer).toEqual(current);
+
+    send.mockClear();
+    current = managedServer;
+    registry.refreshManagedServerMetadata();
+    expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(2);
+    for (const id of [1, 2]) expect(registry.snapshot(id).connection.managedServer).toEqual(managedServer);
+    expect(client.connect).toHaveBeenCalledOnce();
+  });
+
   it("clears provenance after failure and ignores a superseded connection completion", async () => {
     await writeFile(join(externalDirectory, "other.cfg"), validConfig({ operator: "other" }));
     const initialClient = new FakeSliverClient();

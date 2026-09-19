@@ -76,6 +76,7 @@ describe("application asset protocol", () => {
 
   it.each([
     ["application.js", "export const ready = true;", /^(?:application|text)\/javascript(?:;|$)/u],
+    ["layout.worker.mjs", "self.onmessage = ({ data }) => self.postMessage(data);", /^(?:application|text)\/javascript(?:;|$)/u],
     ["application.css", "body { color: white; }", /^text\/css(?:;|$)/u],
     ["terminal.wasm", "wasm fixture", /^application\/wasm(?:;|$)/u],
     ["terminal.woff2", "font fixture", /^font\/woff2(?:;|$)/u],
@@ -88,6 +89,7 @@ describe("application asset protocol", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toMatch(mimeType);
+    expect(response.headers.get("content-security-policy")).toBe(productionContentSecurityPolicy());
     expect(await response.text()).toBe(body);
   });
 

@@ -229,10 +229,23 @@ export interface ServerCapabilitySummary {
   };
 }
 
+/** Cached display metadata; reading it never refreshes a cloud provider. */
+export interface ManagedServerOverview {
+  readonly region: string;
+  readonly size: string;
+  readonly instanceState: string;
+  readonly health?: string;
+  readonly publicIpAddress: string | null;
+  readonly privateIpAddress: string | null;
+  /** Time the local deployment record changed, not a live provider observation. */
+  readonly updatedAt: string;
+}
+
 export interface ManagedServerReference {
   readonly deploymentId: string;
   readonly provider: CloudProvider;
   readonly name: string;
+  readonly overview?: ManagedServerOverview;
 }
 
 export interface ConnectionSummary {

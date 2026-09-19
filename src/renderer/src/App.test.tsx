@@ -175,6 +175,39 @@ function installSliverAPI(
 }
 
 describe("App startup", () => {
+  it("starts on Overview and returns from another page through the command palette", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+      version: "1.7.6",
+    };
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: "Overview" })).toHaveAttribute("data-current", "true");
+    expect(screen.queryByRole("heading", { name: "Jobs & listeners" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("row", { name: "Jobs & listeners" }));
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    const overview = within(palette).getByRole("menuitem", { name: /^Overview/u });
+    expect(within(palette).getAllByRole("menuitem")[0]).toBe(overview);
+    expect(overview).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(overview);
+
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: "Overview" })).toHaveAttribute("data-current", "true");
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+  });
+
   it("opens the saved configuration selector immediately and keeps a dismissal closed", async () => {
     const user = userEvent.setup();
     const initialCatalog = deferred<OperationResult<SavedConfigSummary[]>>();
@@ -248,6 +281,9 @@ describe("App startup", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     act(() => requestCommandPalette?.());
 
+    const overview = await screen.findByRole("menuitem", { name: /^Overview/u });
+    expect(overview).not.toHaveAttribute("aria-disabled", "true");
+    expect(overview).toHaveTextContent("Current");
     const cloudDeployment = await screen.findByRole("menuitem", { name: /Cloud Deployment/u });
     expect(cloudDeployment).not.toHaveAttribute("aria-disabled", "true");
     await user.click(cloudDeployment);
@@ -467,7 +503,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Server version mismatch" })).not.toBeInTheDocument();
     expect(screen.queryByText("Backend degraded")).not.toBeInTheDocument();
     await waitFor(() => {
@@ -577,7 +613,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -667,7 +703,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -682,7 +718,7 @@ describe("App startup", () => {
     expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
 
     act(() => { emitSnapshot?.(connected); });
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
   });
 
@@ -705,7 +741,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -743,7 +779,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -789,7 +825,7 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -967,6 +1003,23 @@ describe("Sidebar navigation", () => {
     );
     return onViewChange;
   }
+
+  it.each([true, false])("places an available Overview first while disconnected (expanded=%s)", async (open) => {
+    const user = userEvent.setup();
+    const onViewChange = renderNavigation(open);
+
+    const menus = screen.getAllByRole("treegrid");
+    expect(menus.map((menu) => menu.getAttribute("aria-label"))).toEqual([
+      "Overview navigation",
+      "Infrastructure navigation",
+      "Interact navigation",
+      "Data navigation",
+    ]);
+    const overview = within(menus[0]!).getByRole("row", { name: "Overview" });
+    expect(overview).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(overview);
+    expect(onViewChange).toHaveBeenCalledExactlyOnceWith("overview");
+  });
 
   it("opens the loot and credential stores from the shared Data navigation", async () => {
     const user = userEvent.setup();

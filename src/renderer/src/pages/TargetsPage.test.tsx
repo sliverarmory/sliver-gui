@@ -912,6 +912,14 @@ describe("TargetsPage", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu", { name: "Application context menu" });
     expect(selectTarget).not.toHaveBeenCalled();
+    const sessionActions = within(menu).getAllByRole("menuitem")
+      .map((item) => item.textContent)
+      .filter((label) => label === "Rename" || label === "Close Session" || label === "Kill Session");
+    expect(sessionActions).toEqual([
+      "Rename",
+      "Close Session",
+      "Kill Session",
+    ]);
     await user.click(within(menu).getByRole("menuitem", { name: "Rename" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Rename session" });
