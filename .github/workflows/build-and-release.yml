@@ -100,6 +100,8 @@ jobs:
           path: |
             artifacts/e2e/
             artifacts/app-icons/
+            artifacts/window-navigation/
+            artifacts/keyboard-shortcuts/
           if-no-files-found: warn
           retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
 

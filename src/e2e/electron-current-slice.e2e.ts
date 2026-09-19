@@ -1254,9 +1254,10 @@ async function assertRendererSecurity(electronApplication: ElectronApplication, 
 async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Promise<void> {
   const sidebar = page.locator(".sidebar.app-sidebar").first();
   const appHeader = page.locator(".app-header");
-  const toggle = page.getByRole("button", { name: "Toggle navigation" });
+  const navigation = page.getByRole("navigation", { name: "Window navigation" });
 
-  await toggle.click();
+  await navigation.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+  await page.locator('.sidebar.app-sidebar[data-state="collapsed"]').first().waitFor();
   assert.equal(await sidebar.getAttribute("data-state"), "collapsed");
   await waitForSidebarWidth(page, "--sidebar-width-collapsed");
 
@@ -1266,12 +1267,12 @@ async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Pr
   const sessionsContent = sessions.locator('[data-slot="sidebar-menu-item-content"]');
   const applicationMenu = sidebar.getByRole("button", { name: /^Current server:/i });
   const applicationMenuIcon = applicationMenu.locator(".connection-summary__menu-icon");
-  const [sidebarBox, brandBox, brandHeaderBox, appHeaderBox, sessionsBox, sessionsContentBox, menuBox, menuIconBox] =
+  const [sidebarBox, brandBox, brandHeaderBox, navigationBox, sessionsBox, sessionsContentBox, menuBox, menuIconBox] =
     await Promise.all([
       sidebar.boundingBox(),
       brand.boundingBox(),
       brandHeader.boundingBox(),
-      appHeader.boundingBox(),
+      navigation.boundingBox(),
       sessions.boundingBox(),
       sessionsContent.boundingBox(),
       applicationMenu.boundingBox(),
@@ -1281,7 +1282,7 @@ async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Pr
   assert.ok(sidebarBox, "collapsed sidebar must have measurable geometry");
   assert.ok(brandBox, "collapsed brand mark must have measurable geometry");
   assert.ok(brandHeaderBox, "collapsed brand header must have measurable geometry");
-  assert.ok(appHeaderBox, "application header must have measurable geometry");
+  assert.ok(navigationBox, "window navigation must have measurable geometry");
   assert.ok(sessionsBox, "collapsed Sessions row must have measurable geometry");
   assert.ok(sessionsContentBox, "collapsed Sessions content must have measurable geometry");
   assert.ok(menuBox, "collapsed application menu must have measurable geometry");
@@ -1296,9 +1297,10 @@ async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Pr
     Math.abs(brandBox.x + brandBox.width / 2 - sidebarCenter) <= 0.5,
     "collapsed brand mark must be horizontally centered",
   );
+  const brandNavigationGap = brandHeaderBox.y - (navigationBox.y + navigationBox.height);
   assert.ok(
-    Math.abs(brandHeaderBox.height - appHeaderBox.height) <= 1.5,
-    "sidebar brand block and application header must stay aligned",
+    brandNavigationGap >= -0.5 && brandNavigationGap <= 8.5,
+    `sidebar brand block must stay immediately below the window navigation controls (${brandNavigationGap}px gap)`,
   );
   assert.ok(
     Math.abs(sessionsContentBox.width - sessionsContentBox.height) <= 0.5,
@@ -1363,7 +1365,10 @@ async function verifyCollapsedSidebar(page: Page, artifactDirectory: string): Pr
   await page.keyboard.press("Escape");
   await applicationActions.waitFor({ state: "hidden" });
 
-  await toggle.click();
+  const expandSidebar = navigation.getByRole("button", { name: "Expand sidebar", exact: true });
+  await expandSidebar.waitFor();
+  await expandSidebar.click();
+  await page.locator('.sidebar.app-sidebar[data-state="expanded"]').first().waitFor();
   assert.equal(await sidebar.getAttribute("data-state"), "expanded");
   await waitForSidebarWidth(page, "--sidebar-width");
 }
@@ -1479,9 +1484,12 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    15,
+    18,
     "the connected workspace should expose the bounded app command catalog",
   );
+  await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
+  await commandPalette.getByRole("menuitem", { name: /^Go back\b/u }).waitFor();
+  await commandPalette.getByRole("menuitem", { name: /^Go forward\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /Cloud Deployment/u }).waitFor();
   await page.keyboard.press("Escape");
   await commandPalette.waitFor({ state: "hidden" });
@@ -1508,7 +1516,7 @@ async function verifyApplicationSettings(
     animations: "disabled",
     path: join(artifactDirectory, "command-palette.png"),
   });
-  await page.keyboard.press("Escape");
+  await sendNativeApplicationShortcut(electronApplication, page, "P", { shift: true });
   await commandPalette.waitFor({ state: "hidden" });
 
   await page.getByRole("tab", { name: "Terminal" }).click();
@@ -3038,7 +3046,10 @@ async function verifyM2SessionWorkspace(
   await sensitiveRow.waitFor();
   await sensitiveRow.getByText("Sensitive", { exact: true }).waitFor();
   assert.equal(await page.getByText(M2_ENV_SECRET, { exact: true }).count(), 0);
-  await sensitiveRow.getByRole("button", { name: "Reveal", exact: true }).click();
+  await sensitiveRow.getByRole("button", {
+    name: "Reveal SLIVER_GUI_M2_API_TOKEN",
+    exact: true,
+  }).click();
   await sensitiveRow.getByText(M2_ENV_SECRET, { exact: true }).waitFor();
 
   await page.getByRole("tab", { name: "Overview", exact: true }).click();

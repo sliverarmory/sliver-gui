@@ -233,7 +233,7 @@ async function openSettings(page: Page): Promise<void> {
 }
 
 async function openPalette(page: Page): Promise<void> {
-  await page.getByLabel("Open command palette", { exact: true }).click();
+  await page.locator('.app-header button[aria-label="Open command palette"]').click();
   await page.getByRole("dialog", { name: "Command palette" }).waitFor();
 }
 

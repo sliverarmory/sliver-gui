@@ -11,7 +11,7 @@ import type { SliverDesktopAPI } from "../shared/contracts.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
-const artifacts = join(process.platform === "darwin" ? "/private/tmp" : tmpdir(), "sliver-gui-keyboard-shortcuts-artifacts");
+const artifacts = join(repositoryRoot, "artifacts", "keyboard-shortcuts");
 
 test("keyboard shortcuts can be searched, recorded, persisted and reset without connecting", {
   timeout: 90_000,

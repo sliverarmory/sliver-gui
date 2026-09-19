@@ -40,7 +40,6 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
         `--console-client-root-directory=${join(temporaryRoot, "client")}`],
       cwd: repositoryRoot, bypassCSP: false, chromiumSandbox: true,
     } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
-    originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
     const observe = (page: Page): void => {
       if (observedPages.has(page)) return;
       observedPages.add(page);
@@ -54,6 +53,7 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     for (const page of application.windows()) observe(page);
     const workspace = await application.firstWindow();
     await workspace.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
 
     // Each form is local and discarded. The injected cloud controller rejects mutations.
     await workspace.getByRole("button", { name: "Cloud Deployment", exact: true }).click();
@@ -92,6 +92,8 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     // The connection uses fake-main's in-process client; no sockets or forwards are started.
     await workspace.getByRole("dialog", { name: "Saved configurations" })
       .getByRole("button", { name: "Connect", exact: true }).click();
+    await workspace.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await workspace.locator('[aria-label="Jobs & listeners"]:visible').click();
     await workspace.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
     await invokeMenu(application, workspace, "network.socks5");
     const network = await surfacePage(application, "network");
