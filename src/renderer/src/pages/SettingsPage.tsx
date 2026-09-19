@@ -43,6 +43,20 @@ export function SettingsPage({
   const [terminalDraft, setTerminalDraft] = useState<ConsoleTerminalSettings>(() =>
     copyTerminalSettings(settings.terminal));
   const previousSavedTerminal = useRef<ConsoleTerminalSettings>(settings.terminal);
+  const scrollMarker = useRef<HTMLDivElement>(null);
+  const [shortcutToolbar, setShortcutToolbar] = useState<HTMLDivElement | null>(null);
+  const [isScrolled, setIsScrolled] = useState(false);
+
+  useEffect(() => {
+    const marker = scrollMarker.current;
+    const viewport = marker?.closest(".app-content");
+    if (!marker || !viewport) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry) setIsScrolled(entry.boundingClientRect.top < (entry.rootBounds?.top ?? 0));
+    }, { root: viewport, threshold: [0, 1] });
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const previous = previousSavedTerminal.current;
@@ -64,14 +78,18 @@ export function SettingsPage({
         </div>
       </header>
 
-      <Tabs defaultSelectedKey="general" variant="secondary">
-        <Tabs.ListContainer className="w-fit max-w-full">
-          <Tabs.List aria-label="Settings sections">
-            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">General</Tabs.Tab>
-            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">Keyboard Shortcuts</Tabs.Tab>
-            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">Terminal</Tabs.Tab>
-          </Tabs.List>
-        </Tabs.ListContainer>
+      <Tabs className="settings-page__tabs" defaultSelectedKey="general" variant="secondary">
+        <div aria-hidden="true" className="settings-page__scroll-marker" ref={scrollMarker} />
+        <div className="settings-page__controls tabs--secondary" data-orientation="horizontal" data-scrolled={isScrolled}>
+          <Tabs.ListContainer className="w-fit max-w-full">
+            <Tabs.List aria-label="Settings sections">
+              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">General</Tabs.Tab>
+              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">Keyboard Shortcuts</Tabs.Tab>
+              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">Terminal</Tabs.Tab>
+            </Tabs.List>
+          </Tabs.ListContainer>
+          <div ref={setShortcutToolbar} />
+        </div>
 
         <Tabs.Panel className="space-y-6 pt-6" id="general">
           <Card variant="secondary">
@@ -149,8 +167,8 @@ export function SettingsPage({
           </Card>
         </Tabs.Panel>
 
-        <Tabs.Panel className="pt-6" id="keyboard">
-          <KeyboardShortcutsSettings settings={settings} isSaving={isSaving}
+        <Tabs.Panel className="settings-page__keyboard-panel" id="keyboard">
+          <KeyboardShortcutsSettings settings={settings} isSaving={isSaving} toolbarContainer={shortcutToolbar}
             onShortcutChange={onKeyboardShortcutChange} onReset={onResetKeyboardShortcuts} />
         </Tabs.Panel>
 

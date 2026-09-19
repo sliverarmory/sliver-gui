@@ -556,6 +556,55 @@
     gap: 1.5rem;
   }
 
+  .app-content:has(> .settings-page) {
+    padding-top: 0;
+  }
+
+  .settings-page {
+    padding-top: 2rem;
+  }
+
+  .settings-page__tabs {
+    gap: 0;
+  }
+
+  .settings-page__scroll-marker {
+    height: 1px;
+    margin-bottom: -1px;
+    pointer-events: none;
+  }
+
+  .settings-page__controls {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    padding-block: 0.75rem;
+    background: var(--color-background);
+  }
+
+  .settings-page__controls::after {
+    position: absolute;
+    inset: 100% 0 auto;
+    height: 1.5rem;
+    background: linear-gradient(to bottom, color-mix(in srgb, var(--color-background) 90%, transparent), transparent);
+    content: "";
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .settings-page__controls[data-scrolled="true"]::after {
+    opacity: 1;
+  }
+
+  .settings-page__controls .keyboard-shortcuts__toolbar {
+    padding: 1.5rem 0.5rem 0.25rem;
+  }
+
+  .settings-page__tabs > .settings-page__keyboard-panel {
+    margin-top: 0;
+    padding-top: 0.5rem;
+  }
+
   .page-heading {
     display: flex;
     align-items: flex-start;

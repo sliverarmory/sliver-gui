@@ -26,6 +26,11 @@ import { isApplePlatform } from "./components/CommandPaletteShortcut";
 import { OPEN_CONSOLE_SHORTCUT } from "./window-shortcuts";
 
 beforeAll(() => {
+  vi.stubGlobal("IntersectionObserver", class IntersectionObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
     observe() {}
     unobserve() {}

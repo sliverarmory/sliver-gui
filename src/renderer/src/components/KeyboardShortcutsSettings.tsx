@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { Button, Card, SearchField, Tooltip } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faMagnifyingGlass, faPen, faRotateLeft } from "@fortawesome/free-solid-svg-icons";
@@ -19,9 +20,10 @@ export interface KeyboardShortcutsSettingsProps {
   readonly isSaving: boolean;
   readonly onShortcutChange: (action: KeyboardShortcutAction, shortcut: string | undefined) => void;
   readonly onReset: () => void;
+  readonly toolbarContainer?: HTMLElement | null;
 }
 
-export function KeyboardShortcutsSettings({ settings, isSaving, onShortcutChange, onReset }: KeyboardShortcutsSettingsProps) {
+export function KeyboardShortcutsSettings({ settings, isSaving, onShortcutChange, onReset, toolbarContainer }: KeyboardShortcutsSettingsProps) {
   const [query, setQuery] = useState("");
   const [recording, setRecording] = useState<KeyboardShortcutAction>();
   const [starting, setStarting] = useState<KeyboardShortcutAction>();
@@ -107,8 +109,8 @@ export function KeyboardShortcutsSettings({ settings, isSaving, onShortcutChange
   const customized = KEYBOARD_SHORTCUT_DEFINITIONS.some(({ id }) =>
     resolveKeyboardShortcut(id, settings, apple) !== defaultKeyboardShortcut(id, apple));
 
-  return (
-    <section aria-labelledby="keyboard-shortcuts-heading" className="space-y-5">
+  const toolbar = (
+    <div className="keyboard-shortcuts__toolbar space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 id="keyboard-shortcuts-heading" className="text-lg font-medium">Keyboard Shortcuts</h2>
         <Button size="sm" variant="tertiary" isDisabled={isSaving || !customized} onPress={() => {
@@ -127,6 +129,12 @@ export function KeyboardShortcutsSettings({ settings, isSaving, onShortcutChange
           <SearchField.ClearButton />
         </SearchField.Group>
       </SearchField>
+    </div>
+  );
+
+  return (
+    <section aria-labelledby="keyboard-shortcuts-heading" className="space-y-5">
+      {toolbarContainer === undefined ? toolbar : toolbarContainer ? createPortal(toolbar, toolbarContainer) : null}
       {groups.map((group) => (
         <Card key={group} variant="secondary">
           <Card.Header><Card.Title>{group}</Card.Title></Card.Header>

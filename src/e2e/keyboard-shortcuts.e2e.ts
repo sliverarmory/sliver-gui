@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
@@ -127,6 +127,7 @@ test("keyboard shortcuts can be searched, recorded, persisted and reset without 
 
     await application.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)?.setSize(1440, 1020), windowId);
     await page.screenshot({ path: join(artifacts, "keyboard-shortcuts-desktop.png"), animations: "disabled" });
+    await assertStickySettingsControls(page, "keyboard-shortcuts-desktop-scrolled.png");
     await application.evaluate(({ BrowserWindow }, id) => {
       const window = BrowserWindow.fromId(id);
       // The production workspace minimum is 960 px. Temporarily reduce only
@@ -138,6 +139,14 @@ test("keyboard shortcuts can be searched, recorded, persisted and reset without 
     await page.screenshot({ path: join(artifacts, "keyboard-shortcuts-narrow.png"), animations: "disabled" });
     const overflow = await shortcutSettings.evaluate((element) => element.scrollWidth > element.clientWidth + 1);
     assert.equal(overflow, false, "shortcut settings should fit the narrow viewport");
+    await assertStickySettingsControls(page, "keyboard-shortcuts-narrow-scrolled.png");
+
+    await application.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)?.setSize(1440, 1020), windowId);
+    await page.getByRole("tab", { name: "General", exact: true }).click();
+    await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: "Light", exact: true }).click();
+    await page.locator("html.light").waitFor();
+    await page.getByRole("tab", { name: "Keyboard Shortcuts", exact: true }).click();
+    await assertStickySettingsControls(page, "keyboard-shortcuts-light-scrolled.png");
     const calls = await application.evaluate(() => ({
       connections: globalThis.__SLIVER_GUI_E2E_STATE__.configFactoryCalls,
       methods: globalThis.__SLIVER_GUI_E2E_STATE__.methods,
@@ -145,6 +154,7 @@ test("keyboard shortcuts can be searched, recorded, persisted and reset without 
     }));
     assert.deepEqual(calls, { connections: 0, methods: [], consoles: 0 });
     context.diagnostic(`Offline counters: ${JSON.stringify(calls)}; screenshots: ${artifacts}`);
+    context.diagnostic("Sticky settings geometry, scroll shadow, search, and tab switching verified at desktop and 820 px, with dark and light screenshots.");
     context.diagnostic("Native menu accelerators and exact registered callbacks verified; OS-level menu key dispatch is outside synthetic Electron input coverage.");
   } catch (error) {
     testFailure = error;
@@ -163,6 +173,101 @@ test("keyboard shortcuts can be searched, recorded, persisted and reset without 
     }
   }
 });
+
+type Rectangle = { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+
+async function boundingBox(locator: Locator): Promise<Rectangle> {
+  const rectangle = await locator.boundingBox();
+  assert.ok(rectangle, "expected a rendered settings element");
+  return rectangle;
+}
+
+async function scrollSettings(page: Page, top: number): Promise<void> {
+  await page.locator(".app-content").evaluate(async (element, requestedTop) => {
+    element.scrollTop = requestedTop;
+    const view = element.ownerDocument.defaultView!;
+    await new Promise<void>((resolvePaint) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolvePaint())));
+  }, top);
+}
+
+async function settingsScrollGeometry(page: Page) {
+  const [viewport, title, subtitle, controls, tabs, heading, search, reset, firstRow] = await Promise.all([
+    boundingBox(page.locator(".app-content")),
+    boundingBox(page.locator("#settings-page-heading")),
+    boundingBox(page.locator(".settings-page .page-heading p")),
+    boundingBox(page.locator(".settings-page__controls")),
+    boundingBox(page.getByRole("tablist", { name: "Settings sections" })),
+    boundingBox(page.getByRole("heading", { name: "Keyboard Shortcuts", exact: true })),
+    boundingBox(page.getByRole("searchbox", { name: "Search shortcuts" })),
+    boundingBox(page.getByRole("button", { name: "Reset all to defaults", exact: true })),
+    boundingBox(page.getByRole("group", { name: "Open command palette", exact: true })),
+  ]);
+  const scrollTop = await page.locator(".app-content").evaluate((element) => element.scrollTop);
+  return { viewport, title, subtitle, controls, tabs, heading, search, reset, firstRow, scrollTop };
+}
+
+async function assertScrollShadow(page: Page, visible: boolean): Promise<void> {
+  const controls = page.locator(`.settings-page__controls[data-scrolled="${String(visible)}"]`);
+  await controls.waitFor();
+  const readShadow = () => controls.evaluate((element) => {
+    const style = element.ownerDocument.defaultView!.getComputedStyle(element, "::after");
+    return { opacity: Number(style.opacity), background: style.backgroundImage, height: Number.parseFloat(style.height) };
+  });
+  let shadow = await readShadow();
+  const deadline = Date.now() + 2_000;
+  while (shadow.opacity !== (visible ? 1 : 0) && Date.now() < deadline) {
+    await delay(25);
+    shadow = await readShadow();
+  }
+  assert.equal(shadow.opacity, visible ? 1 : 0, "scroll shadow should follow the pinned controls");
+  assert.match(shadow.background, /linear-gradient/u);
+  assert.ok(shadow.height > 0, "scroll shadow should have a visible fade area");
+}
+
+async function assertStickySettingsControls(page: Page, screenshot: string): Promise<void> {
+  await scrollSettings(page, 0);
+  await assertScrollShadow(page, false);
+  await scrollSettings(page, 620);
+  await assertScrollShadow(page, true);
+  const first = await settingsScrollGeometry(page);
+  assert.ok(first.scrollTop >= 600, "the application content should be the active scrollport");
+  assert.ok(Math.abs(first.controls.y - first.viewport.y) <= 1, "pinned controls should meet the app header without exposing list rows above them");
+  assert.ok(first.title.y + first.title.height <= first.viewport.y + 1, "Settings title should scroll out of view");
+  assert.ok(first.subtitle.y + first.subtitle.height <= first.viewport.y + 1, "Settings subtitle should scroll out of view");
+  for (const name of ["tabs", "heading", "search", "reset"] as const) {
+    const rectangle = first[name];
+    assert.ok(rectangle.y >= first.viewport.y - 1, `${name} should remain below the application bar`);
+    assert.ok(rectangle.y + rectangle.height <= first.viewport.y + first.viewport.height + 1, `${name} should remain visible`);
+    assert.ok(rectangle.x >= first.viewport.x - 1 && rectangle.x + rectangle.width <= first.viewport.x + first.viewport.width + 1,
+      `${name} should fit the viewport width`);
+  }
+  await scrollSettings(page, 900);
+  const further = await settingsScrollGeometry(page);
+  assert.ok(further.scrollTop - first.scrollTop >= 250, "the shortcut list should continue scrolling beneath the controls");
+  for (const name of ["controls", "tabs", "heading", "search", "reset"] as const) {
+    assert.ok(Math.abs(further[name].y - first[name].y) <= 1, `${name} should remain pinned during more list scrolling`);
+  }
+  assert.ok(further.firstRow.y <= first.firstRow.y - 250, "shortcut rows should move underneath the pinned controls");
+  await page.screenshot({ path: join(artifacts, screenshot), animations: "disabled" });
+
+  // The portaled controls must retain their behavior while pinned, including
+  // when filtering shrinks the list and clamps its current scroll position.
+  const search = page.getByRole("searchbox", { name: "Search shortcuts" });
+  await search.fill("terminal tab 10");
+  await page.getByRole("group", { name: "Select terminal tab 10", exact: true }).waitFor();
+  assert.equal(await page.getByRole("group", { name: "New window", exact: true }).count(), 0);
+  await search.fill("");
+  await scrollSettings(page, 620);
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  await page.getByText("Terminal Appearance", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("searchbox", { name: "Search shortcuts" }).count(), 0);
+  await page.getByRole("tab", { name: "Keyboard Shortcuts", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search shortcuts" }).waitFor();
+  await scrollSettings(page, 0);
+  await assertScrollShadow(page, false);
+  const restored = await settingsScrollGeometry(page);
+  assert.ok(restored.title.y >= restored.viewport.y, "Settings title should return at the top of the page");
+}
 
 async function openSettings(page: Page): Promise<void> {
   const configurations = page.getByRole("dialog", { name: "Saved configurations" });
