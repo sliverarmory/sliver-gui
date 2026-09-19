@@ -65,6 +65,14 @@ test("window navigation supports pointer, keyboard and palette actions without d
     await openSettings(page);
     await expectHistory(page, true, false);
 
+    // Native drag regions must exclude the controls throughout the ordinary
+    // sidebar animation, not only once its final width has settled.
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    for (const label of ["Collapse sidebar", "Expand sidebar"] as const) {
+      await assertSidebarAnimationExcludesNavigation(page, navigation.getByRole("button", { name: label }));
+    }
+    await page.emulateMedia({ reducedMotion: "reduce" });
+
     // Exercise the SVG and the button edges in both sidebar layouts. These
     // renderer input events verify the action handlers, not native hit testing.
     // The separate geometry assertion guards against overlapping native drag
@@ -248,11 +256,52 @@ async function clickAt(page: Page, button: Locator, target: "icon" | "edge" | "c
   );
 }
 
+interface NavigationDragInspection {
+  readonly region: string;
+  readonly overlaps: readonly unknown[];
+  readonly sidebarBounds: { readonly width: number };
+}
+
 async function assertDragRegionsExcludeNavigation(page: Page): Promise<void> {
-  // Electron's native drag rectangles do not respect DOM stacking. Inspect
-  // every visible drag rectangle, including those behind the toolbar, rather
-  // than treating Playwright's successful renderer click as native proof.
-  const result = await page.evaluate<{ region: string; overlaps: string[] }>(`(() => {
+  const result = await page.evaluate<NavigationDragInspection>(inspectNavigationDragRegions);
+  assertNoDragOverlap(result);
+}
+
+async function assertSidebarAnimationExcludesNavigation(page: Page, toggle: Locator): Promise<void> {
+  const sampling = page.evaluate<NavigationDragInspection[]>(`(async () => {
+    const frames = [];
+    const start = performance.now();
+    do {
+      frames.push(${inspectNavigationDragRegions});
+      await new Promise(requestAnimationFrame);
+    } while (performance.now() - start < 500);
+    return frames;
+  })()`);
+  await clickAt(page, toggle, "icon");
+  const frames = await sampling;
+  for (const frame of frames) assertNoDragOverlap(frame);
+  const widths = frames.map((frame) => frame.sidebarBounds.width);
+  const minimum = Math.min(...widths);
+  const maximum = Math.max(...widths);
+  assert.ok(
+    widths.some((width) => width > minimum + 0.1 && width < maximum - 0.1),
+    `ordinary-motion check must sample intermediate sidebar widths: ${JSON.stringify(widths)}`,
+  );
+}
+
+function assertNoDragOverlap(result: NavigationDragInspection): void {
+  assert.equal(result.region, "no-drag", "the complete toolbar must accept native pointer events");
+  assert.deepEqual(
+    result.overlaps,
+    [],
+    `native drag rectangles must not overlap the navigation toolbar: ${JSON.stringify(result)}`,
+  );
+}
+
+// Electron's native drag rectangles do not respect DOM stacking. Inspect
+// every visible drag rectangle, including those behind the toolbar, rather
+// than treating Playwright's successful renderer click as native proof.
+const inspectNavigationDragRegions = `(() => {
     const navigation = document.querySelector('.window-navigation');
     if (!navigation) throw new Error('Window navigation is missing');
     const navigationBounds = navigation.getBoundingClientRect();
@@ -264,10 +313,29 @@ async function assertDragRegionsExcludeNavigation(page: Page): Promise<void> {
       const intersects = bounds.width > 0 && bounds.height > 0 &&
         bounds.left < navigationBounds.right && bounds.right > navigationBounds.left &&
         bounds.top < navigationBounds.bottom && bounds.bottom > navigationBounds.top;
-      return intersects ? [element.tagName.toLowerCase() + '.' + element.className] : [];
+      return intersects ? [{
+        element: element.tagName.toLowerCase() + '.' + element.className,
+        bounds: bounds.toJSON(),
+        overlapWidth: Math.min(bounds.right, navigationBounds.right) - Math.max(bounds.left, navigationBounds.left),
+        overlapHeight: Math.min(bounds.bottom, navigationBounds.bottom) - Math.max(bounds.top, navigationBounds.top),
+      }] : [];
     });
-    return { region: getComputedStyle(navigation).getPropertyValue('-webkit-app-region'), overlaps };
-  })()`);
-  assert.equal(result.region, "no-drag", "the complete toolbar must accept native pointer events");
-  assert.deepEqual(result.overlaps, [], "native drag rectangles must not overlap the navigation toolbar");
-}
+    return {
+      region: getComputedStyle(navigation).getPropertyValue('-webkit-app-region'),
+      overlaps,
+      navigationBounds: navigationBounds.toJSON(),
+      sidebarBounds: document.querySelector('.sidebar.app-sidebar')?.getBoundingClientRect().toJSON(),
+      sidebarState: document.querySelector('.app-shell')?.getAttribute('data-state'),
+      dragRegion: (() => {
+        const drag = document.querySelector('.app-header-drag-region');
+        if (!drag) return null;
+        const style = getComputedStyle(drag);
+        return {
+          bounds: drag.getBoundingClientRect().toJSON(),
+          insetInlineStart: style.insetInlineStart,
+          left: style.left,
+          transition: style.transition,
+        };
+      })(),
+    };
+  })()`;

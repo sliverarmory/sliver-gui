@@ -671,7 +671,7 @@ export function App() {
       <Sidebar.Main className="app-main min-w-0">
         <header className="app-header">
           <div aria-hidden="true" className="app-header-drag-region" />
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="header-server">
             <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-muted" icon={faServer} />
             <div className="hidden min-w-0 sm:block">
               <p className="truncate text-sm font-medium text-foreground">
@@ -708,18 +708,16 @@ export function App() {
             </Tooltip>
             <WindowMenu connected={connected} onOpenWindow={openWindow} />
             <Tooltip delay={250}>
-              <Tooltip.Trigger>
-                <Button
-                  aria-label="Open Sliver console"
-                  isDisabled={!connected}
-                  size="sm"
-                  variant="ghost"
-                  onPress={() => void openConsole()}
-                >
-                  <FontAwesomeIcon aria-hidden icon={faTerminal} />
-                  <span className="hidden xl:inline">Console</span>
-                </Button>
-              </Tooltip.Trigger>
+              <Button
+                aria-label="Open Sliver console"
+                isDisabled={!connected}
+                isIconOnly
+                size="sm"
+                variant="ghost"
+                onPress={() => void openConsole()}
+              >
+                <FontAwesomeIcon aria-hidden icon={faTerminal} />
+              </Button>
               <Tooltip.Content placement="bottom">
                 {connected ? "Open console for the active server" : "Connect to a server first"}
               </Tooltip.Content>
@@ -1109,29 +1107,31 @@ export function WindowMenu({
   onOpenWindow: (inherit: boolean) => Promise<void>;
 }) {
   return (
-    <Dropdown>
-      <Button aria-label="New window options" size="sm" variant="ghost">
-        <FontAwesomeIcon aria-hidden icon={faWindowRestore} />
-        <span className="hidden xl:inline">New window</span>
-      </Button>
-      <Dropdown.Popover className="min-w-52">
-        <Dropdown.Menu
-          aria-label="New window"
-          onAction={(key) => void onOpenWindow(String(key) === "same-server")}
-        >
-          {connected ? (
-            <Dropdown.Item id="same-server" textValue="Same server">
-              <FontAwesomeIcon aria-hidden icon={faWindowRestore} className="size-3.5 shrink-0 text-muted" />
-              <Label>Same server</Label>
+    <Tooltip delay={250}>
+      <Dropdown>
+        <Button aria-label="New window options" isIconOnly size="sm" variant="ghost">
+          <FontAwesomeIcon aria-hidden icon={faWindowRestore} />
+        </Button>
+        <Dropdown.Popover className="min-w-52">
+          <Dropdown.Menu
+            aria-label="New window"
+            onAction={(key) => void onOpenWindow(String(key) === "same-server")}
+          >
+            {connected ? (
+              <Dropdown.Item id="same-server" textValue="Same server">
+                <FontAwesomeIcon aria-hidden icon={faWindowRestore} className="size-3.5 shrink-0 text-muted" />
+                <Label>Same server</Label>
+              </Dropdown.Item>
+            ) : null}
+            <Dropdown.Item id="different-server" textValue="Different server">
+              <FontAwesomeIcon aria-hidden icon={faPlus} className="size-3.5 shrink-0 text-muted" />
+              <Label>Different server</Label>
             </Dropdown.Item>
-          ) : null}
-          <Dropdown.Item id="different-server" textValue="Different server">
-            <FontAwesomeIcon aria-hidden icon={faPlus} className="size-3.5 shrink-0 text-muted" />
-            <Label>Different server</Label>
-          </Dropdown.Item>
-        </Dropdown.Menu>
-      </Dropdown.Popover>
-    </Dropdown>
+          </Dropdown.Menu>
+        </Dropdown.Popover>
+      </Dropdown>
+      <Tooltip.Content placement="bottom">New window</Tooltip.Content>
+    </Tooltip>
   );
 }
 

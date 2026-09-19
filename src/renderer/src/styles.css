@@ -410,12 +410,11 @@
     /* Native drag hit testing needs separate rectangles, regardless of z-index. */
     position: absolute;
     inset: 0;
+    /* Follow the actual sidebar width throughout collapse/expand animations. */
+    inset-inline-start: max(0px, calc(100% - 100vw + var(--window-navigation-end) + 0.25rem));
     pointer-events: none;
     -webkit-app-region: drag;
-  }
-
-  .app-shell[data-state="collapsed"] .app-header-drag-region {
-    inset-inline-start: max(0px, calc(var(--window-navigation-end) + 0.25rem - 56px));
+    transition-property: none;
   }
 
   @media (max-width: 768px) {
@@ -456,9 +455,19 @@
     backdrop-filter: blur(18px);
   }
 
+  .header-server {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+  }
+
   .header-actions {
     -webkit-app-region: no-drag;
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     gap: 0.375rem;
   }
