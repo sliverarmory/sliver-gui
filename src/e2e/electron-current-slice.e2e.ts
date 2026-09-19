@@ -1693,7 +1693,7 @@ async function verifySliverConsoleWindow(
   const initialState = await readFakeState(electronApplication);
   const initialSpawnCount = initialState.console.spawns.length;
   const initialKillCount = initialState.console.kills;
-  const shortcutModifier = process.platform === "darwin" ? "Command" : "Control";
+  const shortcutLabelModifier = process.platform === "darwin" ? "Command" : "Ctrl";
   const shortcutKeyModifier = process.platform === "darwin" ? "Meta" : "Control";
 
   await sourcePage.locator('button[aria-label="Open Sliver console"]').click();
@@ -1821,10 +1821,10 @@ async function verifySliverConsoleWindow(
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id]").count(), 2);
     assert.equal(await consolePage.locator("[data-console-terminal-tab-id][inert]").count(), 1);
     await consolePage.getByRole("tab", {
-      name: new RegExp(`Console 1.*shortcut ${shortcutModifier}\\+1`, "iu"),
+      name: new RegExp(`Console 1.*shortcut ${shortcutLabelModifier}\\+1`, "iu"),
     }).waitFor();
     await consolePage.getByRole("tab", {
-      name: new RegExp(`Console 2.*shortcut ${shortcutModifier}\\+2`, "iu"),
+      name: new RegExp(`Console 2.*shortcut ${shortcutLabelModifier}\\+2`, "iu"),
     }).waitFor();
 
     const secondTerminal = consolePage.getByRole("textbox", {
@@ -1880,10 +1880,10 @@ async function verifySliverConsoleWindow(
 
     const processStateBeforeRename = await readFakeState(electronApplication);
     const firstTabBeforeRename = consolePage.getByRole("tab", {
-      name: new RegExp(`Console 1.*shortcut ${shortcutModifier}\\+1`, "iu"),
+      name: new RegExp(`Console 1.*shortcut ${shortcutLabelModifier}\\+1`, "iu"),
     });
     const secondTabBeforeRename = consolePage.getByRole("tab", {
-      name: new RegExp(`Console 2.*shortcut ${shortcutModifier}\\+2`, "iu"),
+      name: new RegExp(`Console 2.*shortcut ${shortcutLabelModifier}\\+2`, "iu"),
     });
     const contextMenu = consolePage.getByRole("menu", { name: "Application context menu" });
     await firstTabBeforeRename.click({ button: "right" });
@@ -1910,7 +1910,7 @@ async function verifySliverConsoleWindow(
     await renameDialog.waitFor({ state: "hidden" });
 
     const renamedFirstTab = consolePage.getByRole("tab", {
-      name: new RegExp(`Primary console.*shortcut ${shortcutModifier}\\+1`, "iu"),
+      name: new RegExp(`Primary console.*shortcut ${shortcutLabelModifier}\\+1`, "iu"),
     });
     await renamedFirstTab.waitFor();
     assert.equal(await renamedFirstTab.getAttribute("aria-selected"), "false");
@@ -2047,7 +2047,7 @@ async function verifySliverConsoleWindow(
     }
     assert.equal(await consolePage.getByRole("tab").count(), CONSOLE_MAX_TABS_PER_WINDOW);
     await consolePage.getByRole("tab", {
-      name: new RegExp(`Console ${lastTabOrdinalAtCap}.*shortcut ${shortcutModifier}\\+0`, "iu"),
+      name: new RegExp(`Console ${lastTabOrdinalAtCap}.*shortcut ${shortcutLabelModifier}\\+0`, "iu"),
     }).waitFor();
     const lastTerminal = consolePage.getByRole("textbox", {
       name: `Sliver client Console ${lastTabOrdinalAtCap} using chosen-m0-operator.cfg`,
