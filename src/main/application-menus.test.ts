@@ -405,6 +405,7 @@ describe("application menu templates", () => {
       `cloud.azure.${azureId}.terminate`,
       `cloud.azure.${azureId}.ssh`,
       `cloud.azure.${azureId}.firewall`,
+      `cloud.azure.${azureId}.operator`,
     ]);
 
     const running = nestedMenuItems(aws, "operator-control");
@@ -417,6 +418,7 @@ describe("application menu templates", () => {
       { type: "separator" },
       { label: "SSH", enabled: true },
       { label: "Firewall", enabled: true },
+      { label: "Add Operator", enabled: true },
     ]);
     expect(running.find(({ label }) => label === "SSH")).toMatchObject({
       id: `cloud.aws.${runningId}.ssh`,
@@ -425,6 +427,12 @@ describe("application menu templates", () => {
     clickItem(running.find(({ label }) => label === "Terminate"));
     clickItem(running.find(({ label }) => label === "SSH"));
     clickItem(running.find(({ label }) => label === "Firewall"));
+    const awsOperator = running.find(({ label }) => label === "Add Operator");
+    expect(awsOperator).toMatchObject({ id: `cloud.aws.${runningId}.operator` });
+    clickItem(awsOperator);
+    const azureOperator = nestedMenuItems(azure, "azure-control").find(({ label }) => label === "Add Operator");
+    expect(azureOperator).toMatchObject({ id: `cloud.azure.${azureId}.operator`, enabled: true });
+    clickItem(azureOperator);
 
     const stopped = nestedMenuItems(aws, "i-00000000000000002");
     expect(stopped.map((item) => item.type === "separator"
@@ -436,6 +444,7 @@ describe("application menu templates", () => {
       { type: "separator" },
       { label: "SSH", enabled: false },
       { label: "Firewall", enabled: false },
+      { label: "Add Operator", enabled: false },
     ]);
     clickItem(stopped.find(({ label }) => label === "Start"));
 
@@ -448,11 +457,17 @@ describe("application menu templates", () => {
       enabled: false,
     });
     expect(missingSsh.find(({ label }) => label === "Firewall")).toMatchObject({ enabled: true });
+    expect(missingSsh.find(({ label }) => label === "Add Operator")).toMatchObject({
+      id: `cloud.aws.${missingSshId}.operator`,
+      enabled: false,
+    });
     expect(openCloudDeployment.mock.calls).toEqual([
       [{ view: "deployments", deploymentId: runningId, action: "stop" }],
       [{ view: "deployments", deploymentId: runningId, action: "terminate" }],
       [{ view: "deployments", deploymentId: runningId, action: "ssh" }],
       [{ view: "firewall", deploymentId: runningId }],
+      [{ view: "deployments", deploymentId: runningId, action: "operator" }],
+      [{ view: "deployments", deploymentId: azureId, action: "operator" }],
       [{ view: "deployments", deploymentId: stoppedId, action: "start" }],
     ]);
   });

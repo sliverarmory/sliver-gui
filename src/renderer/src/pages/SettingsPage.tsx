@@ -83,9 +83,18 @@ export function SettingsPage({
         <div className="settings-page__controls tabs--secondary" data-orientation="horizontal" data-scrolled={isScrolled}>
           <Tabs.ListContainer className="w-fit max-w-full">
             <Tabs.List aria-label="Settings sections">
-              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">General</Tabs.Tab>
-              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">Keyboard Shortcuts</Tabs.Tab>
-              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">Terminal</Tabs.Tab>
+              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">
+                General
+                <Tabs.Indicator />
+              </Tabs.Tab>
+              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">
+                Keyboard Shortcuts
+                <Tabs.Indicator />
+              </Tabs.Tab>
+              <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">
+                Terminal
+                <Tabs.Indicator />
+              </Tabs.Tab>
             </Tabs.List>
           </Tabs.ListContainer>
           <div ref={setShortcutToolbar} />

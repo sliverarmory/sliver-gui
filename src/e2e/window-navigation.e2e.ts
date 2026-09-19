@@ -149,7 +149,7 @@ test("window navigation supports pointer, keyboard and palette actions without d
     await expectView(page, "Settings");
     assert.equal(await shortcutRecorder.getAttribute("aria-pressed"), "true");
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Saved configurations", exact: true }).click();
+    await page.getByRole("button", { name: "Connect", exact: true }).click();
     await configurations.waitFor();
     await page.keyboard.press(backShortcut);
     assert.equal(await configurations.isVisible(), true);

@@ -458,6 +458,7 @@ const api: CloudDeploymentAPI = {
       permissions: { required: [], verified: [], missing: [], unverifiable: [] },
     },
   })),
+  copyAwsPermissionsTerraform: vi.fn(async () => ({ ok: true as const })),
   discoverAwsOptions,
   discoverAzureAccounts: vi.fn(async () => ({ ok: true as const, value: [azureAccount] })),
   discoverAzureOptions: vi.fn(async () => ({ ok: true as const, value: azureDeploymentOptions })),
@@ -564,6 +565,8 @@ beforeEach(() => {
   vi.mocked(api.copyInstanceId).mockResolvedValue({ ok: true });
   vi.mocked(api.copyIpAddress).mockReset();
   vi.mocked(api.copyIpAddress).mockResolvedValue({ ok: true });
+  vi.mocked(api.copyAwsPermissionsTerraform).mockReset();
+  vi.mocked(api.copyAwsPermissionsTerraform).mockResolvedValue({ ok: true });
   vi.mocked(api.beginAzureLogin).mockClear();
   vi.mocked(api.loginAzureCredential).mockClear();
   vi.mocked(api.cancelAzureLogin).mockClear();
@@ -1611,7 +1614,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByRole("button", { name: "Azure Login for Production Azure" })).toBeEnabled();
   });
 
-  it("reports incomplete and missing provider permissions without treating them as success", async () => {
+  it("verifies the connection when resource-specific permissions are inconclusive and preserves actual denials", async () => {
     currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
     vi.mocked(api.testCredential).mockResolvedValueOnce({
       ok: true,
@@ -1632,11 +1635,14 @@ describe("CloudDeploymentWindowApp", () => {
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.click(screen.getByRole("button", { name: "Test connection for Production AWS" }));
 
-    expect(await screen.findAllByText("Permission review incomplete")).toHaveLength(2);
-    expect(screen.getByText(/1 could not be verified safely: ec2:TerminateInstances/u)).toBeInTheDocument();
-    expect(screen.queryByText("Connection verified")).not.toBeInTheDocument();
+    expect(await screen.findByText("Connection verified")).toBeInTheDocument();
+    expect(screen.getByText(/1 permission could not be verified safely: ec2:TerminateInstances/u)).toBeInTheDocument();
+    expect(screen.getByText("Some permissions remain unverified")).toBeInTheDocument();
+    expect(screen.queryByText("Permissions verified")).not.toBeInTheDocument();
+    expect(screen.queryByText("Permission review incomplete")).not.toBeInTheDocument();
     expect(screen.getByText("0 verified · 0 missing · 1 unverified")).toBeInTheDocument();
     await user.click(screen.getByText("Review permission IDs"));
+    expect(screen.getByText(/AWS evaluates administrator and wildcard grants, including \* and ec2:\*, automatically/u)).toBeVisible();
     expect(screen.getByText("ec2:TerminateInstances").closest("li")).toHaveTextContent(
       "ec2:TerminateInstances — Terminate managed instances · could not verify safely",
     );
@@ -1659,6 +1665,81 @@ describe("CloudDeploymentWindowApp", () => {
     expect(await screen.findByText("Required permissions missing")).toBeInTheDocument();
     expect(screen.getByText(/1 missing: ec2:RunInstances/u)).toBeInTheDocument();
     expect(screen.getByText("Permissions missing")).toBeInTheDocument();
+  });
+
+  it("copies the AWS permissions as Terraform and only shows success after the clipboard reply", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
+    const copy = deferred<OperationResult>();
+    vi.mocked(api.copyAwsPermissionsTerraform).mockReturnValueOnce(copy.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    expect(screen.queryByRole("button", { name: "Copy as Terraform" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Test connection for Production AWS" }));
+    const button = await screen.findByRole("button", { name: "Copy as Terraform" });
+    await user.click(button);
+
+    expect(api.copyAwsPermissionsTerraform).toHaveBeenCalledExactlyOnceWith();
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    await user.click(button);
+    expect(api.copyAwsPermissionsTerraform).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Terraform copied to clipboard")).not.toBeInTheDocument();
+    await act(async () => copy.resolve({ ok: true }));
+    expect(await screen.findByText("Terraform copied to clipboard")).toBeInTheDocument();
+    expect(button).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it.each(["failure", "rejection"])("reports a Terraform clipboard %s without a success toast", async (kind) => {
+    currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
+    if (kind === "failure") {
+      vi.mocked(api.copyAwsPermissionsTerraform).mockResolvedValueOnce({ ok: false, error: "Clipboard unavailable" });
+    } else {
+      vi.mocked(api.copyAwsPermissionsTerraform).mockRejectedValueOnce(new Error("Clipboard unavailable"));
+    }
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "Test connection for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Copy as Terraform" }));
+
+    expect(await screen.findByText("Could not copy Terraform")).toBeInTheDocument();
+    expect(screen.getByText("Clipboard unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Terraform copied to clipboard")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy as Terraform" })).toBeEnabled();
+  });
+
+  it("hides a permission report and shows fresh results on the next connection test", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [awsCredential] };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "Test connection for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Hide" }));
+
+    expect(screen.queryByText("Permissions verified")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy as Terraform" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Test connection for Production AWS" }));
+    expect(await screen.findByText("Permissions verified")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy as Terraform" })).toBeEnabled();
+  });
+
+  it("allows hiding Azure permission results without offering the AWS Terraform policy", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [azureCredential] };
+    vi.mocked(api.testCredential).mockResolvedValueOnce({
+      ok: true,
+      value: {
+        provider: "azure",
+        summary: "Azure permissions verified.",
+        permissions: { required: [], verified: [], missing: [], unverifiable: [] },
+      },
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "Test connection for Production Azure" }));
+    expect(await screen.findByRole("button", { name: "Hide" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Copy as Terraform" })).not.toBeInTheDocument();
+    expect(api.copyAwsPermissionsTerraform).not.toHaveBeenCalled();
   });
 
   it("automatically adds the detected egress IPv4 to both new-deployment source lists", async () => {
@@ -2766,6 +2847,75 @@ describe("CloudDeploymentWindowApp", () => {
     const stopItem = within(serverActions).getByRole("menuitem", { name: "Stop" });
     expect(within(serverActions).queryByRole("menuitem", { name: "Start" })).not.toBeInTheDocument();
     expect(stopItem.querySelector('svg[data-icon="stop"]')).toHaveClass("text-warning");
+  });
+
+  it.each([
+    ["AWS", runningDeployment, awsCredential],
+    ["Azure", runningAzureDeployment, azureCredential],
+  ] as const)("opens the existing %s operator form from native navigation without creating an operator", async (_provider, deployment, credential) => {
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 9, deployments: [deployment] },
+      credentials: [credential],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/u }));
+    act(() => navigationListener?.({ view: "deployments", deploymentId: deployment.id, action: "operator" }));
+
+    const form = await screen.findByRole("form", { name: `New Operator for ${deployment.name}` });
+    expect(within(form).getByRole("textbox", { name: "Operator Name" })).toHaveValue("");
+    expect(screen.getByRole("heading", { level: 1, name: "New Operator" })).toBeInTheDocument();
+    expect(api.createOperatorConfig).not.toHaveBeenCalled();
+    expect(api.openSshWindow).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
+    expect(await screen.findByRole("button", { name: `New Operator for ${deployment.name}` })).toHaveFocus();
+  });
+
+  it("opens the operator form from native navigation while idle deployment setup is open", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "New Deployment" }));
+    expect(screen.getByRole("button", { name: "Close Setup" })).toBeInTheDocument();
+    act(() => navigationListener?.({ view: "deployments", deploymentId: DEPLOYMENT_ID, action: "operator" }));
+
+    expect(await screen.findByRole("form", { name: "New Operator for range-control" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close Setup" })).not.toBeInTheDocument();
+    expect(api.createOperatorConfig).not.toHaveBeenCalled();
+  });
+
+  it("retains an Add Operator navigation request while the initial inventory loads", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const initial = deferred<OperationResult<CloudDeploymentSnapshot>>();
+    vi.mocked(api.getSnapshot).mockReturnValueOnce(initial.promise);
+    renderCloudDeploymentApp();
+    act(() => navigationListener?.({ view: "deployments", deploymentId: DEPLOYMENT_ID, action: "operator" }));
+    expect(screen.queryByRole("heading", { name: "New Operator" })).not.toBeInTheDocument();
+
+    await act(async () => initial.resolve({ ok: true, value: currentSnapshot }));
+    expect(await screen.findByRole("form", { name: "New Operator for range-control" })).toBeInTheDocument();
+    expect(api.createOperatorConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(["stopped", "missing SSH credential", "unstable runtime"])("rechecks Add Operator availability when native menu state is stale: %s", async (reason) => {
+    const deployment: AwsCloudDeploymentRecord = reason === "stopped"
+      ? { ...runningDeployment, status: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" } }
+      : reason === "unstable runtime"
+        ? { ...runningDeployment, runtime: { ...runningDeployment.runtime, instanceState: "pending" } }
+        : runningDeployment;
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: { v: 1, revision: 9, deployments: [deployment] },
+      credentials: reason === "missing SSH credential" ? [] : [awsCredential],
+    };
+    renderCloudDeploymentApp();
+    await screen.findByText("range-control");
+    act(() => navigationListener?.({ view: "deployments", deploymentId: DEPLOYMENT_ID, action: "operator" }));
+
+    expect(await screen.findByText("Operator creation unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "New Operator for range-control" })).not.toBeInTheDocument();
+    expect(api.createOperatorConfig).not.toHaveBeenCalled();
   });
 
   it("handles a native stop request on the deployments tab with a modal for the full pending duration", async () => {

@@ -17,6 +17,7 @@ import {
   E2E_AWS_DEPLOYMENT,
   E2E_AZURE_DEPLOYMENT,
 } from "../e2e/cloud-deployment-fixture.js";
+import { awsRequiredPermissionsTerraform } from "../shared/cloud-permission-terraform.js";
 import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
   type CloudDeploymentSnapshot,
@@ -93,6 +94,32 @@ beforeEach(() => {
 afterEach(() => unregisterCloudDeploymentIpcHandlers());
 
 describe("Cloud Deployment IPC boundary", () => {
+  it("copies the required AWS Terraform policy without reading credentials or provider state", async () => {
+    const controller = controllerMock();
+    registerCloudDeploymentIpcHandlers(controller, CLOUD_RENDERER_URL, authorizeCurrentWindow);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event)).resolves.toEqual({ ok: true });
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(awsRequiredPermissionsTerraform());
+    expect(controller.getSnapshot).not.toHaveBeenCalled();
+    expect(controller.testCredential).not.toHaveBeenCalled();
+  });
+
+  it("rejects Terraform copying from other surfaces and revoked windows", async () => {
+    registerCloudDeploymentIpcHandlers(controllerMock(), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    for (const event of [invokeEvent("sliver://app/index.html", 77).event, invokeEvent(CLOUD_RENDERER_URL, 78).event]) {
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform, event)).resolves.toEqual(REJECTED);
+    }
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("reports Terraform clipboard failures without returning private error contents", async () => {
+    registerCloudDeploymentIpcHandlers(controllerMock(), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("private clipboard failure"); });
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event)).resolves.toEqual(REJECTED);
+  });
+
   it("copies the requested managed AWS instance ID from the current snapshot", async () => {
     const deployment = {
       ...E2E_AWS_DEPLOYMENT,
@@ -980,6 +1007,8 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin, [CREDENTIAL_ID]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteCredential, [{ credentialId: "not-a-uuid" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.testCredential, [{ credentialId: CREDENTIAL_ID }, "extra"]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform, ["arbitrary clipboard content"]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform, [{ actions: ["*"] }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAwsOptions, [{ credentialId: CREDENTIAL_ID, region: "invalid" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, [{ credentialId: CREDENTIAL_ID, location: "West US 2" }]],

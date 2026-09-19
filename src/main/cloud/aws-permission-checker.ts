@@ -117,6 +117,9 @@ export interface AwsEc2PermissionCheckerDependencies {
 /**
  * Performs only read operations and EC2 DryRun authorization probes. It never
  * creates, changes, starts, stops, or deletes an AWS resource.
+ * AWS evaluates the effective permissions, including administrator policies,
+ * wildcard grants (* and ec2:*), and explicit denies. Do not infer access from
+ * policy names or treat an inconclusive resource probe as a missing grant.
  */
 export class AwsEc2PermissionChecker {
   private readonly client: AwsEc2ClientLike;

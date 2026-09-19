@@ -72,6 +72,7 @@ describe("Cloud Deployment preload bridge", () => {
       "cancelAzureLogin",
       "deleteCredential",
       "testCredential",
+      "copyAwsPermissionsTerraform",
       "discoverAwsOptions",
       "discoverAzureAccounts",
       "discoverAzureOptions",
@@ -180,6 +181,12 @@ describe("Cloud Deployment preload bridge", () => {
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink);
     await api.cancelAwsLogin();
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin);
+  });
+
+  it("requests the fixed Terraform policy without forwarding renderer-supplied content", async () => {
+    const api = exposedApi();
+    await api.copyAwsPermissionsTerraform();
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform);
   });
 
   it("copies an instance ID using only its deployment reference and fixed channel", async () => {
@@ -388,6 +395,35 @@ describe("Cloud Deployment preload bridge", () => {
 
     handler({}, { view: "firewall", deploymentId });
     expect(listener).toHaveBeenLastCalledWith({ view: "firewall", deploymentId });
+    unsubscribe();
+  });
+
+  it("replays exact operator navigation requests and rejects extra fields or payloads", async () => {
+    const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
+      event: unknown,
+      ...payload: unknown[]
+    ) => void;
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const request = { view: "deployments", deploymentId, action: "operator" };
+    const listener = vi.fn();
+
+    handler({}, request);
+    handler({}, { ...request, operatorName: "unexpected" });
+    const unsubscribe = exposedApi().onNavigationRequested(listener);
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledExactlyOnceWith(request);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+
+    handler({}, { ...request, operatorName: "unexpected" });
+    handler({}, { ...request, view: "firewall" });
+    handler({}, { ...request, deploymentId: "not-a-deployment" });
+    handler({}, request, "extra");
+    expect(listener).toHaveBeenCalledOnce();
+
+    const nextRequest = { ...request, deploymentId: "33333333-3333-4333-8333-333333333333" };
+    handler({}, nextRequest);
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenLastCalledWith(nextRequest);
     unsubscribe();
   });
 

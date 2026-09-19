@@ -36,6 +36,7 @@ const CHANNELS = Object.freeze({
   cancelAzureLogin: "sliver:cloud-deployment:azure:login:cancel",
   deleteCredential: "sliver:cloud-deployment:credential:delete",
   testCredential: "sliver:cloud-deployment:credential:test",
+  copyAwsPermissionsTerraform: "sliver:cloud-deployment:aws:permissions:copy-terraform",
   discoverAwsOptions: "sliver:cloud-deployment:aws:options:discover",
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
@@ -131,6 +132,7 @@ const api: CloudDeploymentAPI = {
   cancelAzureLogin: () => ipcRenderer.invoke(CHANNELS.cancelAzureLogin),
   deleteCredential: (input) => ipcRenderer.invoke(CHANNELS.deleteCredential, input),
   testCredential: (input) => ipcRenderer.invoke(CHANNELS.testCredential, input),
+  copyAwsPermissionsTerraform: () => ipcRenderer.invoke(CHANNELS.copyAwsPermissionsTerraform),
   discoverAwsOptions: (input) => ipcRenderer.invoke(CHANNELS.discoverAwsOptions, input),
   discoverAzureAccounts: () => ipcRenderer.invoke(CHANNELS.discoverAzureAccounts),
   discoverAzureOptions: (input) => ipcRenderer.invoke(CHANNELS.discoverAzureOptions, input),
@@ -462,7 +464,8 @@ function parseNavigationRequest(payload: readonly unknown[]): CloudDeploymentNav
     (request["action"] === "start" ||
       request["action"] === "stop" ||
       request["action"] === "terminate" ||
-      request["action"] === "ssh")
+      request["action"] === "ssh" ||
+      request["action"] === "operator")
   ) {
     return Object.freeze({
       view: "deployments",

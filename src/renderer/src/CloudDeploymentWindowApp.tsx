@@ -24,6 +24,7 @@ import {
   Alert,
   AlertDialog,
   Button,
+  ButtonGroup,
   Card,
   Chip,
   Description,
@@ -798,6 +799,12 @@ function DeploymentsPanel({
     !(showWizard && wizardBusy && activeDeploymentId === null && deployment.status === "provisioning")
   );
   const deploymentInProgress = wizardBusy || resumedDeployment !== undefined;
+
+  useEffect(() => {
+    if (actionRequest?.action !== "operator" || !showWizard || wizardBusy) return;
+    setShowWizard(false);
+    setActiveDeploymentId(null);
+  }, [actionRequest, showWizard, wizardBusy]);
 
   const closeWizard = (): void => {
     setShowWizard(false);
@@ -2098,19 +2105,6 @@ function DeploymentCard({
     }
   };
 
-  useEffect(() => {
-    if (
-      !actionRequest ||
-      actionRequest.deploymentId !== deployment.id ||
-      handledActionRequest.current === actionRequest
-    ) return;
-    handledActionRequest.current = actionRequest;
-    onActionRequestHandled?.(actionRequest);
-    if (actionRequest.action === "ssh") void openSsh();
-    else if (actionRequest.action === "terminate") void prepareDestroy();
-    else void lifecycle(actionRequest.action);
-  }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, openSsh, prepareDestroy]);
-
   const progress = phaseProgress(deployment.phase);
   const lifecycleAction = deployment.status === "running" && runtimeIsStable
     ? "stop"
@@ -2132,6 +2126,26 @@ function DeploymentCard({
       : pendingAction !== null
         ? `Wait for the current ${deployment.name} server action to finish before adding an operator.`
         : operatorUnavailableReason;
+
+  useEffect(() => {
+    if (
+      !actionRequest ||
+      actionRequest.deploymentId !== deployment.id ||
+      handledActionRequest.current === actionRequest
+    ) return;
+    handledActionRequest.current = actionRequest;
+    onActionRequestHandled?.(actionRequest);
+    if (actionRequest.action === "operator") {
+      if (operatorActionDisabledReason) {
+        onFeedback({ tone: "danger", title: "Operator creation unavailable", detail: operatorActionDisabledReason });
+      } else {
+        onOpenNewOperator?.();
+      }
+    } else if (actionRequest.action === "ssh") void openSsh();
+    else if (actionRequest.action === "terminate") void prepareDestroy();
+    else void lifecycle(actionRequest.action);
+  }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, onFeedback, onOpenNewOperator, openSsh, operatorActionDisabledReason, prepareDestroy]);
+
   const loginCredential = canLoginCloudCredential(credential) ? credential : undefined;
   const cloudLogin = useCloudLoginActionController({
     api,
@@ -5433,9 +5447,7 @@ function CredentialCard({
               : `${azureCredentialAuthenticationLabel(credential)} · ${credential.defaultLocation}`}
           </Card.Description>
         </div>
-        <Chip color={credential.persistence === "secure" ? "success" : "warning"} size="sm" variant="soft">
-          {credential.persistence === "secure" ? "Encrypted" : "Session"}
-        </Chip>
+        {credential.persistence === "session" ? <Chip color="warning" size="sm" variant="soft">Session</Chip> : null}
       </Card.Header>
       <Card.Content>
         <dl className="grid grid-cols-2 gap-4 text-sm">
@@ -5452,19 +5464,35 @@ function CredentialCard({
           <DeploymentDetail label="Added" value={new Date(credential.createdAt).toLocaleDateString()} />
           <DeploymentDetail label="Credential ID" value={credential.id} mono />
         </dl>
-        {testResult ? <CredentialPermissionSummary result={testResult} /> : null}
-        {canLoginCloudCredential(credential) ? (
+        {testResult ? <CredentialPermissionSummary api={api} result={testResult} onHide={() => setTestResult(null)} /> : null}
+        {loginCredential && (cloudLogin.isPending || cloudLogin.error) ? (
           <div className="mt-4">
             <CloudLoginAction
               controller={cloudLogin}
-              credential={credential}
+              credential={loginCredential}
               isDisabled={pending !== null}
+              showLoginButton={false}
             />
           </div>
         ) : null}
       </Card.Content>
-      <Card.Footer className="flex gap-2">
-        <Button aria-label={`Test connection for ${credential.label}`} isDisabled={pending !== null} isPending={pending === "test"} size="sm" variant="outline" onPress={() => void test()}>Test Connection</Button>
+      <Card.Footer className="flex flex-wrap items-center gap-2">
+        <ButtonGroup aria-label={`Connection actions for ${credential.label}`} size="sm" variant="outline">
+          {loginCredential ? (
+            <Button
+              aria-label={`${credential.provider === "aws" ? "AWS Login" : "Azure Login"} for ${credential.label}`}
+              isDisabled={pending !== null && !cloudLogin.isPending}
+              isPending={cloudLogin.isPending}
+              onPress={() => void cloudLogin.login()}
+            >
+              {credential.provider === "aws" ? "AWS Login" : "Azure Login"}
+            </Button>
+          ) : null}
+          <Button aria-label={`Test connection for ${credential.label}`} isDisabled={pending !== null} isPending={pending === "test"} onPress={() => void test()}>
+            {loginCredential ? <ButtonGroup.Separator /> : null}
+            Test Connection
+          </Button>
+        </ButtonGroup>
         <Button aria-label={`Delete ${credential.label}`} className="ml-auto" isDisabled={pending !== null} size="sm" variant="danger-soft" onPress={() => setConfirmDelete(true)}>Delete</Button>
       </Card.Footer>
 
@@ -5707,12 +5735,14 @@ function CloudLoginAction({
   isDisabled,
   isEmbedded = false,
   showDetails = true,
+  showLoginButton = true,
 }: {
   readonly controller: CloudLoginActionController;
   readonly credential: CloudCredentialSummary;
   readonly isDisabled: boolean;
   readonly isEmbedded?: boolean;
   readonly showDetails?: boolean;
+  readonly showLoginButton?: boolean;
 }): React.JSX.Element {
   const loginName = credential.provider === "aws" ? "AWS Login" : "Azure Login";
 
@@ -5733,8 +5763,8 @@ function CloudLoginAction({
           Complete {loginName} in your browser, then return here.
         </p>
       ) : null}
-      <div className="flex flex-wrap gap-2">
-        <Button
+      {showLoginButton || (showDetails && controller.isPending) ? <div className="flex flex-wrap gap-2">
+        {showLoginButton ? <Button
           aria-label={`${loginName} for ${credential.label}${isEmbedded ? " from error message" : ""}`}
           isDisabled={(isDisabled && !controller.isPending) || (controller.isPending && !showDetails)}
           isPending={controller.isPending && showDetails}
@@ -5743,7 +5773,7 @@ function CloudLoginAction({
           onPress={() => void controller.login()}
         >
           {loginName}
-        </Button>
+        </Button> : null}
         {showDetails && controller.isPending ? (
           <>
             <Button isPending={controller.isCancelling} size="sm" variant="tertiary" onPress={() => void controller.cancel()}>
@@ -5756,24 +5786,51 @@ function CloudLoginAction({
             ) : null}
           </>
         ) : null}
-      </div>
+      </div> : null}
     </div>
   );
 }
 
-function CredentialPermissionSummary({ result }: { readonly result: CloudCredentialTestResult }): React.JSX.Element {
+function CredentialPermissionSummary({
+  api,
+  result,
+  onHide,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly result: CloudCredentialTestResult;
+  readonly onHide: () => void;
+}): React.JSX.Element {
+  const [isCopying, setIsCopying] = useState(false);
   const { missing, required, unverifiable, verified } = result.permissions;
   const issueIds = [...missing, ...unverifiable];
   const labels = new Map(required.map(({ id, label }) => [id, label]));
   const missingIds = new Set(missing);
   const unverifiableIds = new Set(unverifiable);
   const verifiedIds = new Set(verified);
-  const tone = missing.length > 0 ? "danger" : unverifiable.length > 0 ? "warning" : "success";
+  const tone = missing.length > 0 ? "danger" : unverifiable.length > 0 ? "info" : "success";
+
+  const copyTerraform = async (): Promise<void> => {
+    if (isCopying) return;
+    setIsCopying(true);
+    try {
+      const copied = await api.copyAwsPermissionsTerraform();
+      if (!copied.ok) {
+        toast.danger("Could not copy Terraform", { description: copied.error ?? "The clipboard could not be updated." });
+        return;
+      }
+      toast.success("Terraform copied to clipboard");
+    } catch (error) {
+      toast.danger("Could not copy Terraform", { description: errorMessage(error) });
+    } finally {
+      setIsCopying(false);
+    }
+  };
+
   return (
     <div className={`mt-4 rounded-2xl px-4 py-3 ${feedbackToneClass(tone)}`} role="status">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm font-semibold">
-          {missing.length > 0 ? "Permissions missing" : unverifiable.length > 0 ? "Permission review incomplete" : "Permissions verified"}
+          {missing.length > 0 ? "Permissions missing" : unverifiable.length > 0 ? "Some permissions remain unverified" : "Permissions verified"}
         </p>
         <span className="text-xs tabular-nums opacity-80">
           {verified.length} verified · {missing.length} missing · {unverifiable.length} unverified
@@ -5781,11 +5838,16 @@ function CredentialPermissionSummary({ result }: { readonly result: CloudCredent
       </div>
       {issueIds.length === 0 ? (
         <p className="mt-1 text-xs opacity-80">All required provider capabilities were confirmed.</p>
+      ) : unverifiable.length > 0 ? (
+        <p className="mt-1 text-xs opacity-80">Unverified permissions need additional context or resource-specific checks.</p>
       ) : null}
       <details className="mt-2 text-xs">
         <summary className="cursor-[var(--cursor-interactive)] font-medium">
           {issueIds.length > 0 ? "Review permission IDs" : `View all ${required.length} required permissions`}
         </summary>
+        {result.provider === "aws" ? (
+          <p className="mt-2 opacity-80">AWS evaluates administrator and wildcard grants, including * and ec2:*, automatically. Explicit denials still apply.</p>
+        ) : null}
         <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto pl-4">
           {required.map(({ id }) => {
             const status = missingIds.has(id)
@@ -5803,6 +5865,12 @@ function CredentialPermissionSummary({ result }: { readonly result: CloudCredent
           })}
         </ul>
       </details>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {result.provider === "aws" ? (
+          <Button isPending={isCopying} size="sm" variant="outline" onPress={() => void copyTerraform()}>Copy as Terraform</Button>
+        ) : null}
+        <Button className="ml-auto" size="sm" variant="ghost" onPress={onHide}>Hide</Button>
+      </div>
     </div>
   );
 }
@@ -6170,9 +6238,9 @@ function permissionTestFeedback(result: CloudCredentialTestResult): Feedback {
   }
   if (unverifiable.length > 0) {
     return {
-      tone: "warning",
-      title: "Permission review incomplete",
-      detail: `${unverifiable.length} could not be verified safely: ${summarizePermissionIds(unverifiable)}`,
+      tone: "success",
+      title: "Connection verified",
+      detail: `${unverifiable.length} permission${unverifiable.length === 1 ? "" : "s"} could not be verified safely: ${summarizePermissionIds(unverifiable)}. See the permission details for checks that need additional context or specific resources.`,
     };
   }
   return { tone: "success", title: "Connection verified", detail: result.summary };

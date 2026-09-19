@@ -71,6 +71,7 @@ import {
   type DiscoverAzureOptionsInput,
 } from "../shared/cloud-provider-inventory.js";
 import { isSameRendererDocument } from "./security.js";
+import { awsRequiredPermissionsTerraform } from "../shared/cloud-permission-terraform.js";
 import { writePrivateArtifactFileAtomic } from "./secure-file.js";
 import type { TrustedWindowIdentity } from "./ipc.js";
 
@@ -200,6 +201,16 @@ export function registerCloudDeploymentIpcHandlers(
       if (!address) return { ok: false, error: `No ${input.kind} IP address is available for this deployment.` };
       requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
       clipboard.writeText(address);
+      return { ok: true };
+    },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    (): OperationResult => {
+      clipboard.writeText(awsRequiredPermissionsTerraform());
       return { ok: true };
     },
   );

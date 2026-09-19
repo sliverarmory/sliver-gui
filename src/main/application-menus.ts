@@ -440,6 +440,16 @@ function buildCloudDeploymentMenu(
           deploymentId: deployment.id,
         }),
       },
+      {
+        id: `cloud.${deployment.provider}.${deployment.id}.operator`,
+        label: "Add Operator",
+        enabled: deployment.status === "running" && deployment.hasSsh,
+        click: () => openCloudDeployment({
+          view: "deployments",
+          deploymentId: deployment.id,
+          action: "operator",
+        }),
+      },
     ],
   };
 }

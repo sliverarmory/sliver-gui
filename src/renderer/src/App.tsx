@@ -740,7 +740,7 @@ export function App() {
             </Tooltip>
             {!connected ? (
               <Button size="sm" isPending={isConnecting} onPress={() => setIsConfigSelectorOpen(true)}>
-                <FontAwesomeIcon icon={faLink} /> Saved configurations
+                <FontAwesomeIcon icon={faLink} /> Connect
               </Button>
             ) : null}
           </div>

@@ -50,6 +50,7 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   cancelAzureLogin: "sliver:cloud-deployment:azure:login:cancel",
   deleteCredential: "sliver:cloud-deployment:credential:delete",
   testCredential: "sliver:cloud-deployment:credential:test",
+  copyAwsPermissionsTerraform: "sliver:cloud-deployment:aws:permissions:copy-terraform",
   discoverAwsOptions: "sliver:cloud-deployment:aws:options:discover",
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
@@ -77,7 +78,7 @@ export type CloudDeploymentNavigationRequest =
   | {
       readonly view: "deployments";
       readonly deploymentId: string;
-      readonly action: "start" | "stop" | "terminate" | "ssh";
+      readonly action: "start" | "stop" | "terminate" | "ssh" | "operator";
     }
   | {
       readonly view: "firewall";
@@ -271,6 +272,8 @@ export interface CloudDeploymentAPI {
   cancelAzureLogin(): Promise<OperationResult>;
   deleteCredential(input: CloudCredentialIdInput): Promise<OperationResult>;
   testCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialTestResult>>;
+  /** Copy the app's required AWS IAM policy as Terraform, without credential data. */
+  copyAwsPermissionsTerraform(): Promise<OperationResult>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): Promise<OperationResult<AwsDeploymentOptions>>;
   discoverAzureAccounts(): Promise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): Promise<OperationResult<AzureDeploymentOptions>>;

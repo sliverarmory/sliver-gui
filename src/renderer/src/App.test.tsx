@@ -339,7 +339,7 @@ describe("App startup", () => {
     await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Saved configurations" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
   });
 
   it("opens the app-wide command palette and immediately adopts its saved shortcut", async () => {
