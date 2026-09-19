@@ -1,6 +1,8 @@
 import type { DomainCollection, SliverSnapshot } from "../../../shared/contracts";
 import type { TargetSummary } from "../../../shared/target-contracts";
 import { TOPOLOGY_SCHEMA_VERSION } from "../../../shared/topology-contracts";
+import { operatorTopologyContributor } from "./operator-topology";
+import { createPivotTopology } from "./pivot-topology";
 import type {
   TopologyDocument,
   TopologyEdge,
@@ -52,7 +54,10 @@ function isConnected(snapshot: SliverSnapshot): boolean {
 }
 
 function domainFreshness(context: TopologyContext, domain: DomainCollection<unknown>): TopologyFreshness {
-  if (!context.connected || context.snapshot.eventStream.status !== "connected") return "stale";
+  const eventStatus = context.snapshot.eventStream.status;
+  // The client remains "connecting" until the first event arrives. A quiet
+  // initial stream does not invalidate successfully refreshed inventory.
+  if (!context.connected || eventStatus === "retrying" || eventStatus === "stopped") return "stale";
   if (domain.status === "ready" || domain.status === "empty") return "current";
   return domain.items.length > 0 || domain.updatedAt ? "stale" : "unknown";
 }
@@ -195,6 +200,8 @@ export const connectionTopologyContributor: TopologyContributor = (context) => {
   });
   if (!connected) {
     notices.push({ id: "connection:stale", severity: "warning", message: "Server connection is unavailable. Displayed infrastructure is last known; remote state is not confirmed." });
+  } else if (snapshot.eventStream.status === "connecting") {
+    notices.push({ id: "events:pending", severity: "info", message: "Waiting for the first live event. Inventory continues to refresh periodically." });
   } else if (snapshot.eventStream.status !== "connected") {
     notices.push({ id: "events:stale", severity: "warning", message: "Live updates are unavailable. Target relationships are last known until the event stream reconnects." });
   }
@@ -214,6 +221,10 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
   const edges: TopologyEdge[] = [];
   const notices: TopologyNotice[] = [];
   if (!context.hasServer) return { nodes, edges, notices };
+  const pivots = createPivotTopology(context);
+  nodes.push(...pivots.nodes);
+  edges.push(...pivots.edges);
+  notices.push(...pivots.notices);
   const domains = [
     { name: "sessions", domain: context.snapshot.domains.sessions },
     { name: "beacons", domain: context.snapshot.domains.beacons },
@@ -249,6 +260,7 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
         ],
         resource: { kind: target.mode, id: target.id },
       });
+      if (target.mode === "session" && pivots.mappedSessionIds.has(target.id)) continue;
       edges.push({
         id: scopedId(context.scopeId, "communication", `${target.mode}:${target.id}`),
         kind: "target-communication",
@@ -275,6 +287,7 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
 
 export const DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS: readonly TopologyContributor[] = [
   connectionTopologyContributor,
+  operatorTopologyContributor,
   targetTopologyContributor,
 ];
 

@@ -1033,7 +1033,7 @@ export function WindowMenu({
 function EventStatus({ status }: { status: EventStreamStatus }) {
   const metadata = {
     connected: { label: "Live", color: "success" as const },
-    connecting: { label: "Syncing", color: "accent" as const },
+    connecting: { label: "Awaiting events", color: "accent" as const },
     retrying: { label: "Reconnecting", color: "warning" as const },
     stopped: { label: "Events offline", color: "danger" as const },
   }[status];

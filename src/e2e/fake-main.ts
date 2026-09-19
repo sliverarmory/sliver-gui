@@ -117,7 +117,7 @@ interface FakeMainState {
 }
 
 interface FakeMainControl {
-  setEventStreamStatus(status: "connected" | "retrying" | "stopped"): void;
+  setEventStreamStatus(status: "connecting" | "connected" | "retrying" | "stopped"): void;
   completeTask(taskId: string, emitEvent?: boolean): void;
   holdNextConsoleExit(): void;
   releaseConsoleExitHold(): void;
@@ -179,6 +179,7 @@ const consoleClientRootDirectory = requiredArgument("--console-client-root-direc
 // Optional display-only provenance for the dedicated Overview journey. Existing
 // E2E callers keep the unassociated fixture and never load cloud credentials.
 const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
+const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
 const overviewCloudRecord = overviewCloudArgument === "--overview-cloud-fixture=aws"
   ? E2E_AWS_DEPLOYMENT
   : overviewCloudArgument === "--overview-cloud-fixture=azure" ? E2E_AZURE_DEPLOYMENT : null;
@@ -590,8 +591,8 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       ProfileName: "",
     },
   ];
-  let sessions = [seedSession(testState.sessionName)];
-  let beacons = [seedBeacon(testState.beaconName)];
+  let sessions = overviewPivotFixture ? seedOverviewPivotSessions() : [seedSession(testState.sessionName)];
+  let beacons = overviewPivotFixture ? [] : [seedBeacon(testState.beaconName)];
   let lootStore: clientpb.Loot[] = [
     clientpb.Loot.create({
       ID: "591a16d2-e138-4a21-b38f-f166aa23e044",
@@ -663,8 +664,8 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
 
   globalThis.__SLIVER_GUI_E2E_CONTROL__ = {
     setEventStreamStatus(status) {
-      eventStreamState.next(status === "connected"
-        ? { status: "connected", attempt: 0 }
+      eventStreamState.next(status === "connected" || status === "connecting"
+        ? { status, attempt: 0 }
         : { status, attempt: 1, error: "Injected event stream interruption" });
     },
     completeTask(taskId, emitEvent = true) {
@@ -991,7 +992,11 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async getOperators() {
       record("getOperators");
       return clientpb.Operators.create({
-        Operators: [
+        Operators: overviewPivotFixture ? [
+          { Name: config.operator, Online: true },
+          { Name: "overview-online-observer", Online: true },
+          { Name: "overview-offline-observer", Online: false },
+        ] : [
           { Name: config.operator, Online: true },
           { Name: "m1-read-only-observer", Online: true },
         ],
@@ -1000,6 +1005,10 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async getSessions() {
       record("getSessions");
       return clientpb.Sessions.create({ Sessions: sessions.map(cloneSession) });
+    },
+    async getPivotGraph() {
+      record("getPivotGraph");
+      return overviewPivotFixture ? seedOverviewPivotGraph(sessions) : clientpb.PivotGraph.create({ Children: [] });
     },
     async getBeacons() {
       record("getBeacons");
@@ -2086,6 +2095,37 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   function fakeEvent(eventType: string): clientpb.Event {
     return clientpb.Event.create({ EventType: eventType, Data: Buffer.from("FAKE_EVENT_SECRET_M0_DO_NOT_RENDER") });
   }
+}
+
+function seedOverviewPivotSessions(): clientpb.Session[] {
+  return ["relay-a", "relay-b", "relay-c", "deepest", "branch"].map((name, index) => ({
+    ...seedSession(name),
+    ID: `overview_${name}`,
+    Hostname: `overview-${name}`,
+    UUID: `overview-${name}-host-id`,
+    Transport: index === 0 ? "mtls" : "tcppivot",
+    ActiveC2: index === 0 ? "mtls://192.0.2.1:31337" : `tcppivot://192.0.2.${index + 1}:31337`,
+  }));
+}
+
+function seedOverviewPivotGraph(sessions: readonly clientpb.Session[]): clientpb.PivotGraph {
+  const withSession = (peerId: string, name: string, children: clientpb.PivotGraphEntry[] = []): clientpb.PivotGraphEntry => {
+    const session = sessions.find((candidate) => candidate.ID === `overview_${name}`);
+    if (!session) throw new Error("Missing synthetic Overview session");
+    return clientpb.PivotGraphEntry.create({ PeerID: peerId, Name: name, Session: cloneSession(session), Children: children });
+  };
+  return clientpb.PivotGraph.create({
+    Children: [withSession("101", "relay-a", [
+      withSession("102", "relay-b", [
+        clientpb.PivotGraphEntry.create({
+          PeerID: "103",
+          Name: "Sessionless relay",
+          Children: [withSession("104", "relay-c", [withSession("105", "deepest")])],
+        }),
+        withSession("106", "branch"),
+      ]),
+    ])],
+  });
 }
 
 function seedSession(name: string): clientpb.Session {

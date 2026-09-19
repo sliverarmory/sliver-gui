@@ -147,6 +147,55 @@ describe("overview topology adapter", () => {
     expect(document.edges.every((edge) => !Object.hasOwn(edge, "bandwidth") && !Object.hasOwn(edge, "latency"))).toBe(true);
   });
 
+  it("combines operator presence and nested routes without duplicate server shortcuts or relay actions", () => {
+    const source = snapshot();
+    const nested = [
+      { ...session, id: "entry", hostname: "entry-host" },
+      { ...session, id: "middle", hostname: "middle-host", transport: "tcppivot" as const },
+      { ...session, id: "deep", hostname: "deep-host", transport: "namedpipe" as const },
+      { ...session, id: "branch", hostname: "branch-host", transport: "tcppivot" as const },
+    ];
+    source.domains.sessions = domain(nested);
+    source.domains.operators = domain([
+      { id: "operator-a", name: "alice", online: true },
+      { id: "operator-b", name: "bob", online: true },
+      { id: "operator-c", name: "carol", online: false },
+    ]);
+    source.pivotTopology = {
+      status: "ready", revision: 1, updatedAt: timestamp, truncated: false,
+      entries: [
+        { peerId: "1", parentPeerId: null, sessionId: "entry", name: "entry" },
+        { peerId: "2", parentPeerId: "1", name: "unavailable relay" },
+        { peerId: "3", parentPeerId: "2", sessionId: "middle", name: "middle" },
+        { peerId: "4", parentPeerId: "3", sessionId: "deep", name: "deep" },
+        { peerId: "5", parentPeerId: "1", sessionId: "branch", name: "branch" },
+      ],
+    };
+    const document = createOverviewTopology(source);
+    const server = byKind(document.nodes, "server");
+    const relay = byKind(document.nodes, "relay");
+    const sessionNode = (id: string) => document.nodes.find((node) => node.resource?.kind === "session" && node.resource.id === id)!;
+    expect(document.nodes.filter((node) => node.kind === "operator")).toHaveLength(3);
+    expect(document.nodes.filter((node) => node.kind === "client")).toHaveLength(1);
+    expect(document.edges.filter((edge) => edge.kind === "operator-presence")).toHaveLength(3);
+    expect(relay).not.toHaveProperty("resource");
+    const hops = document.edges.filter((edge) => edge.kind === "pivot-hop");
+    expect(hops.map(({ source, target }) => [source, target])).toEqual([
+      [server.id, sessionNode("entry").id],
+      [sessionNode("entry").id, relay.id],
+      [relay.id, sessionNode("middle").id],
+      [sessionNode("middle").id, sessionNode("deep").id],
+      [sessionNode("entry").id, sessionNode("branch").id],
+    ]);
+    for (const target of nested) {
+      expect(document.edges.filter((edge) => edge.target === sessionNode(target.id).id)).toHaveLength(1);
+    }
+    expect(document.edges.find((edge) => edge.target === byKind(document.nodes, "beacon").id)).toMatchObject({
+      source: server.id, description: expect.stringContaining("Intermediate hops and listener attribution are unknown"),
+    });
+    expect(JSON.parse(JSON.stringify(document))).toEqual(document);
+  });
+
   it("distinguishes active, dead, periodic, and overdue reports without inferring traffic rates", () => {
     const source = snapshot();
     let document = createOverviewTopology(source);
@@ -183,6 +232,35 @@ describe("overview topology adapter", () => {
     document = createOverviewTopology(source);
     expect(byKind(document.nodes, "beacon").freshness).toBe("stale");
     expect(document.notices).toContainEqual(expect.objectContaining({ id: "events:stale" }));
+  });
+
+  it("keeps refreshed inventory current while a quiet initial stream awaits its first event", () => {
+    const source = snapshot();
+    source.eventStream = { status: "connecting", attempt: 0 };
+    let document = createOverviewTopology(source);
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "events:pending", severity: "info" }));
+    expect(document.notices.some((notice) => notice.id === "events:stale")).toBe(false);
+    expect(byKind(document.nodes, "session")).toMatchObject({ freshness: "current", statusLabel: "Active" });
+    expect(byKind(document.nodes, "beacon")).toMatchObject({ freshness: "current", statusLabel: "On time" });
+
+    source.domains.sessions.status = "error";
+    document = createOverviewTopology(source);
+    expect(byKind(document.nodes, "session").freshness).toBe("stale");
+    expect(byKind(document.nodes, "beacon").freshness).toBe("current");
+
+    source.eventStream.status = "connected";
+    document = createOverviewTopology(source);
+    expect(document.notices.some((notice) => notice.id.startsWith("events:"))).toBe(false);
+  });
+
+  it.each(["retrying", "stopped"] as const)("still warns and marks inventory stale when events are %s", (status) => {
+    const source = snapshot();
+    source.eventStream = { status, attempt: 1, error: "Stream interrupted" };
+    const document = createOverviewTopology(source);
+    expect(document.notices).toContainEqual(expect.objectContaining({ id: "events:stale", severity: "warning" }));
+    expect(document.notices.some((notice) => notice.id === "events:pending")).toBe(false);
+    expect(byKind(document.nodes, "session").freshness).toBe("stale");
+    expect(byKind(document.nodes, "beacon").freshness).toBe("stale");
   });
 
   it("reports partial, loading, and unsupported inventories", () => {

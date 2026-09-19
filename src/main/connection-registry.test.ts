@@ -104,6 +104,151 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+describe("passive pivot topology inventory", () => {
+  function graph(childPeer = "3"): clientpb.PivotGraph {
+    return clientpb.PivotGraph.create({ Children: [{
+      PeerID: "1", Name: "parent", Session: { ID: "session-parent", Name: "parent" },
+      Children: [{ PeerID: "2", Name: "relay", Children: [{
+        PeerID: childPeer, Name: "child", Session: { ID: "session-child", Name: "child", ProxyURL: "https://user:private-topology-secret@example.invalid" },
+      }] }],
+    }] });
+  }
+
+  it("publishes normalized server hierarchy during inventory refresh without creating selectable targets", async () => {
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    const getPivotGraph = vi.fn().mockResolvedValue(graph());
+    client.adapter.getPivotGraph = getPivotGraph;
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+
+    await connectSaved(registry, 1);
+
+    expect(getPivotGraph).toHaveBeenCalledExactlyOnceWith();
+    const snapshot = registry.snapshot(1);
+    expect(snapshot.pivotTopology).toEqual({
+      status: "ready", revision: 1, updatedAt: expect.any(String), truncated: false,
+      entries: [
+        { peerId: "1", parentPeerId: null, sessionId: "session-parent", name: "parent" },
+        { peerId: "2", parentPeerId: "1", name: "relay" },
+        { peerId: "3", parentPeerId: "2", sessionId: "session-child", name: "child" },
+      ],
+    });
+    expect(snapshot.targetContext.selectableTargets).toEqual([]);
+    expect(send).toHaveBeenCalledWith(IPC.snapshotChanged, expect.objectContaining({ pivotTopology: snapshot.pivotTopology }));
+    expect(JSON.stringify(snapshot)).not.toContain("private-topology-secret");
+    expect(client.pingSession).not.toHaveBeenCalled();
+    expect(client.pingBeacon).not.toHaveBeenCalled();
+
+    getPivotGraph.mockResolvedValue(graph("4"));
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    expect(getPivotGraph).toHaveBeenCalledTimes(2);
+    expect(registry.snapshot(1).pivotTopology).toMatchObject({ status: "ready", revision: 2,
+      entries: expect.arrayContaining([expect.objectContaining({ peerId: "4", parentPeerId: "2" })]) });
+  });
+
+  it("refreshes passive topology when a session event invalidates the inventory", async () => {
+    vi.useFakeTimers();
+    const client = new FakeSliverClient();
+    const getPivotGraph = vi.fn().mockResolvedValue(graph());
+    client.adapter.getPivotGraph = getPivotGraph;
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const sessionsBefore = client.getSessions.mock.calls.length;
+    getPivotGraph.mockResolvedValue(graph("4"));
+
+    client.events.next(clientpb.Event.create({ EventType: "session-updated", Session: { ID: "session-child" } }));
+    await vi.advanceTimersByTimeAsync(101);
+
+    expect(client.getSessions).toHaveBeenCalledTimes(sessionsBefore + 1);
+    expect(getPivotGraph).toHaveBeenCalledTimes(2);
+    expect(registry.snapshot(1).pivotTopology).toMatchObject({ status: "ready", revision: 2,
+      entries: expect.arrayContaining([expect.objectContaining({ peerId: "4", parentPeerId: "2" })]) });
+  });
+
+  it.each(["failed-query", "invalid-graph"])("retains last known topology with an explicit error after %s", async (failure) => {
+    const client = new FakeSliverClient();
+    const getPivotGraph = vi.fn().mockResolvedValue(graph());
+    client.adapter.getPivotGraph = getPivotGraph;
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const previous = registry.snapshot(1).pivotTopology!;
+    const sessionReads = client.getSessions.mock.calls.length;
+    if (failure === "failed-query") getPivotGraph.mockRejectedValueOnce(new Error("Pivot inventory is temporarily unavailable"));
+    else getPivotGraph.mockResolvedValueOnce(clientpb.PivotGraph.create({ Children: [{ PeerID: "1" }, { PeerID: "1" }] }));
+
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+
+    expect(registry.snapshot(1).pivotTopology).toEqual({ ...previous, status: "error", error: expect.any(String) });
+    expect(registry.snapshot(1).connection.status).toBe("degraded");
+    expect(client.getSessions).toHaveBeenCalledTimes(sessionReads + 1);
+    expect(registry.snapshot(1).domains.sessions).toMatchObject({ status: "empty", items: [] });
+    getPivotGraph.mockResolvedValue(graph("4"));
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    expect(registry.snapshot(1).pivotTopology).toMatchObject({ status: "ready", revision: previous.revision + 1 });
+    expect(registry.snapshot(1).pivotTopology).not.toHaveProperty("error");
+  });
+
+  it("treats an unimplemented passive graph RPC as unsupported without degrading other inventory", async () => {
+    const client = new FakeSliverClient();
+    const getPivotGraph = vi.fn().mockRejectedValue(Object.assign(new Error("UNIMPLEMENTED"), { code: 12 }));
+    client.adapter.getPivotGraph = getPivotGraph;
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+
+    await connectSaved(registry, 1);
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+
+    expect(registry.snapshot(1).pivotTopology).toEqual({ status: "unsupported", revision: 0, entries: [], truncated: false });
+    expect(registry.snapshot(1).connection.status).toBe("connected");
+    expect(registry.snapshot(1).domains.sessions.status).toBe("empty");
+  });
+
+  it("supports adapters without the optional passive graph method", async () => {
+    const client = new FakeSliverClient();
+    expect(client.adapter.getPivotGraph).toBeUndefined();
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    expect(registry.snapshot(1).pivotTopology).toMatchObject({ status: "unsupported", entries: [] });
+    expect(registry.snapshot(1).connection.status).toBe("connected");
+  });
+
+  it("discards a graph reply from a disconnected backend after another connection is established", async () => {
+    const first = new FakeSliverClient();
+    const second = new FakeSliverClient();
+    const getPivotGraph = vi.fn().mockResolvedValue(graph());
+    first.adapter.getPivotGraph = getPivotGraph;
+    second.adapter.getPivotGraph = vi.fn().mockResolvedValue(clientpb.PivotGraph.create({ Children: [{ PeerID: "99", Name: "new-server" }] }));
+    const clients = [first, second];
+    const registry = createRegistry(() => clients.shift()!.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const oldEpoch = registry.snapshot(1).connection.epoch;
+    const pending = deferred<clientpb.PivotGraph>();
+    getPivotGraph.mockReturnValueOnce(pending.promise);
+    const refresh = registry.refresh(1);
+    await vi.waitFor(() => expect(getPivotGraph).toHaveBeenCalledTimes(2));
+
+    await registry.disconnect(1);
+    expect(registry.snapshot(1).pivotTopology).toBeUndefined();
+    await connectSaved(registry, 1);
+    const current = registry.snapshot(1);
+    expect(current.connection.epoch).toBeGreaterThan(oldEpoch ?? 0);
+    expect(current.pivotTopology).toMatchObject({ status: "ready", entries: [{ peerId: "99", parentPeerId: null, name: "new-server" }] });
+    pending.resolve(graph("4"));
+    await expect(refresh).resolves.toMatchObject({ ok: false });
+    await Promise.resolve();
+
+    expect(registry.snapshot(1).connection.epoch).toBe(current.connection.epoch);
+    expect(registry.snapshot(1).pivotTopology).toEqual(current.pivotTopology);
+    expect(first.disconnect).toHaveBeenCalledOnce();
+  });
+});
+
 describe("managed server connection metadata", () => {
   const managedServer: ManagedServerReference = {
     deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0010",

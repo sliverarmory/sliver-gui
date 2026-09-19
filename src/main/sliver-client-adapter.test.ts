@@ -8,6 +8,27 @@ import {
   type SliverClientAdapter,
 } from "./sliver-client-adapter.js";
 
+describe("SliverClientAdapter passive topology inventory", () => {
+  it("queries only the server pivot graph with an empty request and bounded signal", async () => {
+    const graph = { Children: [] };
+    const pivotGraph = vi.fn().mockResolvedValue(graph);
+    const pivotSessionListeners = vi.fn();
+    const interactSession = vi.fn();
+    const interactBeacon = vi.fn();
+    const client = { rpc: { pivotGraph, pivotSessionListeners }, interactSession, interactBeacon } as unknown as SliverClient;
+    const adapter = adaptSliverClient(client);
+
+    await expect(adapter.getPivotGraph!()).resolves.toBe(graph);
+
+    expect(pivotGraph).toHaveBeenCalledExactlyOnceWith({}, { signal: expect.any(AbortSignal) });
+    expect(pivotSessionListeners).not.toHaveBeenCalled();
+    expect(interactSession).not.toHaveBeenCalled();
+    expect(interactBeacon).not.toHaveBeenCalled();
+    expectTypeOf<Parameters<NonNullable<SliverClientAdapter["getPivotGraph"]>>>().toEqualTypeOf<[]>();
+    expectTypeOf<SliverClientAdapter>().not.toHaveProperty("rpc");
+  });
+});
+
 describe("SliverClientAdapter beacon reads", () => {
   it("exposes only narrow enqueue wrappers and preserves the raw ls acknowledgement", async () => {
     const ls = vi.fn(async () => ({

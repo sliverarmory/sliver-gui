@@ -86,6 +86,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   }, [selection, selectedNode, selectedEdge]);
 
   const filtering = Boolean(query || kind !== "all" || status !== "all");
+  const visibleNotices = document.notices.filter((notice) => notice.severity === "warning");
   const resourceCount = document.nodes.filter((node) => node.role === "resource").length;
   const updated = document.updatedAt ? new Date(document.updatedAt) : null;
   const updatedLabel = updated && Number.isFinite(updated.getTime()) ? updated.toLocaleTimeString() : "Not yet observed";
@@ -116,8 +117,8 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
       <span>{projection.matchCount} matches · connection context included</span>
       <Button size="sm" variant="ghost" onPress={() => { setQuery(""); setKind("all"); setStatus("all"); }}>Clear filters</Button>
     </div> : null}
-    {document.notices.length ? <div className="overview-notices" aria-label="Topology data status">
-      {document.notices.map((notice) => <p key={notice.id} data-severity={notice.severity}>{notice.message}</p>)}
+    {visibleNotices.length ? <div className="overview-notices" aria-label="Topology data status">
+      {visibleNotices.map((notice) => <p key={notice.id} data-severity={notice.severity}>{notice.message}</p>)}
     </div> : null}
     <div className="overview-workspace">
       <div className="overview-workspace__view">

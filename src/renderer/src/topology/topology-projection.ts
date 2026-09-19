@@ -29,6 +29,23 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
 } {
   const query = filters.query.trim().toLocaleLowerCase();
   const byId = new Map(source.nodes.map((node) => [node.id, node]));
+  const unresolved = new Set<string>();
+  const communicationSources = new Set<string>();
+  const incomingCommunication = new Map<string, string[]>();
+  const knownEdges = source.edges.filter((edge) => {
+    if (edge.role === "communication") communicationSources.add(edge.source);
+    if (!byId.has(edge.source) || !byId.has(edge.target)) {
+      unresolved.add(edge.source);
+      unresolved.add(edge.target);
+      return false;
+    }
+    if (edge.role === "communication") {
+      const upstream = incomingCommunication.get(edge.target) ?? [];
+      upstream.push(edge.source);
+      incomingCommunication.set(edge.target, upstream);
+    }
+    return true;
+  });
   const filtering = Boolean(query || filters.kind !== "all" || filters.status !== "all");
   const matches = source.nodes.filter((node) =>
     (filters.kind === "all" || node.kind === filters.kind)
@@ -49,24 +66,39 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
       parent = byId.get(parent)?.parentId;
     }
   }
-  // Retain one hop of connection context, then ancestor enclosures.
-  if (filtering) for (const edge of source.edges) {
-    if (matchedIds.has(edge.source) || matchedIds.has(edge.target)) {
-      included.add(edge.source);
-      included.add(edge.target);
+  if (filtering) {
+    // Keep immediate neighbors, then every reported upstream communication
+    // path to an actual match. Context nodes do not expand unrelated branches.
+    for (const edge of knownEdges) {
+      if (matchedIds.has(edge.source) || matchedIds.has(edge.target)) {
+        included.add(edge.source);
+        included.add(edge.target);
+      }
+    }
+    const visited = new Set(matchedIds);
+    const pending = [...matchedIds];
+    for (let index = 0; index < pending.length; index += 1) {
+      for (const upstream of incomingCommunication.get(pending[index]!) ?? []) {
+        included.add(upstream);
+        if (visited.has(upstream)) continue;
+        visited.add(upstream);
+        pending.push(upstream);
+      }
     }
   }
+  // Preserve visual enclosures for the complete path without inventing
+  // containment or bridging a missing node in a partial document.
   for (const id of [...included]) {
     let parent = byId.get(id)?.parentId;
     const seen = new Set<string>();
-    while (parent && !seen.has(parent)) {
+    while (parent && byId.has(parent) && !seen.has(parent)) {
       seen.add(parent);
       included.add(parent);
       parent = byId.get(parent)?.parentId;
     }
   }
   const nodes = source.nodes.filter((node) => included.has(node.id));
-  const edges = source.edges.filter((edge) => included.has(edge.source) && included.has(edge.target));
+  const edges = knownEdges.filter((edge) => included.has(edge.source) && included.has(edge.target));
   const groups = new Map<string, readonly TopologyNode[]>();
   if (filtering) return { document: { ...source, nodes, edges }, groups, matchCount: matches.length };
 
@@ -81,7 +113,10 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
   }
   const parents = new Set(nodes.map((node) => node.parentId));
   for (const node of nodes) {
-    if (node.role === "group" || parents.has(node.id)) continue;
+    // Only terminal communication targets can form a leaf collection. Keep
+    // roots, relays, and resources with unresolved links explicit, even when
+    // the currently visible inventory leaves them with a single known edge.
+    if (node.role === "group" || parents.has(node.id) || communicationSources.has(node.id) || unresolved.has(node.id)) continue;
     const links = linksByNode.get(node.id) ?? [];
     if (links.length !== 1) continue;
     const edge = links[0]!;

@@ -21,6 +21,8 @@ import {
   type SliverEventStreamState,
 } from "sliver-script";
 import type { Subscription } from "rxjs";
+import { normalizePivotTopology } from "./pivot-topology.js";
+import type { PivotTopologySnapshot } from "../shared/topology-contracts.js";
 
 import {
   IPC,
@@ -6304,7 +6306,7 @@ export class ConnectionRegistry {
   }
 }
 
-type DomainName = "jobs" | "builds" | "profiles" | "compiler" | TargetDomainName;
+type DomainName = "jobs" | "builds" | "profiles" | "compiler" | "pivots" | TargetDomainName;
 
 class BackendPool {
   private readonly windowIds = new Set<number>();
@@ -6582,14 +6584,18 @@ class BackendPool {
   }
 
   async refreshAll(): Promise<void> {
-    return this.refreshDomains(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators"]);
+    return this.refreshDomains(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "pivots"]);
   }
 
   async refreshDomains(domains: readonly DomainName[]): Promise<void> {
     this.assertCurrent();
     const unique = [...new Set(domains)];
     const results = await Promise.allSettled(unique.map((domain) => this.refreshDomain(domain)));
-    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    this.assertCurrent();
+    // Optional display metadata retains its own error/health state without
+    // invalidating successful authoritative inventories.
+    const failures = results.filter((result, index): result is PromiseRejectedResult =>
+      result.status === "rejected" && unique[index] !== "pivots");
     if (failures.length > 0) {
       this.setHealth("degraded", boundedText(errorMessage(failures[0]!.reason), MAX_SUMMARY_TEXT));
       throw new AggregateError(failures.map((failure) => failure.reason), "One or more Sliver state domains failed to refresh");
@@ -6634,6 +6640,30 @@ class BackendPool {
     this.markDomainLoading(domain);
     try {
       switch (domain) {
+        case "pivots": {
+          if (!this.client.getPivotGraph) {
+            this.replacePivotTopology({ status: "unsupported", revision: 0, entries: [], truncated: false });
+            break;
+          }
+          try {
+            const graph = await abortable(this.client.getPivotGraph(), this.lifetime.signal);
+            this.assertCurrent();
+            const normalized = normalizePivotTopology(graph);
+            this.replacePivotTopology({
+              ...normalized, status: normalized.entries.length ? "ready" : "empty",
+              revision: (this.snapshot.pivotTopology?.revision ?? 0) + 1,
+              updatedAt: new Date(this.now()).toISOString(),
+            });
+          } catch (error) {
+            if (error && typeof error === "object" && "code" in error && error.code === 12) {
+              this.assertCurrent();
+              this.replacePivotTopology({ status: "unsupported", revision: 0, entries: [], truncated: false });
+              break;
+            }
+            throw error;
+          }
+          break;
+        }
         case "jobs": {
           const jobs = await abortable(this.client.jobs(), this.lifetime.signal);
           this.assertCurrent();
@@ -6702,6 +6732,9 @@ class BackendPool {
 
   private markDomainLoading(domain: DomainName): void {
     switch (domain) {
+      case "pivots":
+        this.replacePivotTopology({ revision: 0, entries: [], truncated: false, ...this.snapshot.pivotTopology, status: "loading" });
+        break;
       case "jobs":
         this.replaceDomains({ ...this.snapshot.domains, jobs: loadingDomain(this.snapshot.domains.jobs) });
         break;
@@ -6726,6 +6759,9 @@ class BackendPool {
   private markDomainError(domain: DomainName, error: string): void {
     const safeError = boundedText(error, MAX_SUMMARY_TEXT);
     switch (domain) {
+      case "pivots":
+        this.replacePivotTopology({ revision: 0, entries: [], truncated: false, ...this.snapshot.pivotTopology, status: "error", error: safeError });
+        break;
       case "jobs":
         this.replaceDomains({ ...this.snapshot.domains, jobs: domainWithStatus(this.snapshot.domains.jobs, "error", safeError) });
         break;
@@ -6749,6 +6785,11 @@ class BackendPool {
 
   private commitJobs(items: JobSummary[]): void {
     this.replaceDomains({ ...this.snapshot.domains, jobs: committedDomain(this.snapshot.domains.jobs, items) });
+  }
+
+  private replacePivotTopology(pivotTopology: PivotTopologySnapshot): void {
+    this.snapshot = { ...this.snapshot, pivotTopology };
+    this.onSnapshot(this.snapshot);
   }
 
   private commitBuilds(items: BuildSummary[]): void {
@@ -6904,7 +6945,8 @@ class BackendPool {
   }
 
   private runBackgroundRefresh(domains: readonly DomainName[]): void {
-    void this.refreshDomains(domains).catch(() => undefined);
+    const inventories = domains.includes("sessions") ? [...domains, "pivots" as const] : domains;
+    void this.refreshDomains(inventories).catch(() => undefined);
   }
 
   private markEventStreamFailure(error: unknown): void {
@@ -6938,6 +6980,9 @@ class BackendPool {
         status: "degraded",
         error: this.snapshot.eventStream.error ?? "The server event stream is stopped",
       };
+    }
+    if (this.snapshot.pivotTopology?.error || this.snapshot.pivotTopology?.status === "error") {
+      return { status: "degraded", error: this.snapshot.pivotTopology.error ?? "Pivot topology could not be refreshed" };
     }
     const failedDomain = Object.values(this.snapshot.domains).find((domain) => Boolean(domain.error));
     if (failedDomain) {

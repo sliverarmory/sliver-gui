@@ -179,15 +179,21 @@ describe("Overview document rendering", () => {
     expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
   });
 
-  it("filters metadata, clears a hidden selection, and keeps partial-inventory notices visible", async () => {
+  it("filters metadata, clears a hidden selection, and shows only warning notices", async () => {
     const user = userEvent.setup();
     const source = topology();
-    render(<OverviewDocument document={{ ...source, notices: [{ id: "partial", severity: "info", message: "Showing 1 of 30 resources; this inventory is partial." }] }} />);
+    const partialNotice = { id: "partial", severity: "info" as const, message: "Showing 1 of 30 resources; this inventory is partial." };
+    const { rerender } = render(<OverviewDocument document={{ ...source, notices: [partialNotice] }} />);
+    expect(screen.queryByLabelText("Topology data status")).not.toBeInTheDocument();
+    rerender(<OverviewDocument document={{ ...source, notices: [partialNotice,
+      { id: "sessions:error", severity: "warning", message: "Sessions could not be refreshed." },
+    ] }} />);
     await user.click(screen.getByRole("button", { name: "Regional queue" }));
     await user.type(screen.getByRole("searchbox", { name: "Search infrastructure" }), "missing");
     expect(screen.getByText(/0 matches/)).toBeInTheDocument();
     expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
-    expect(screen.getByText(/Showing 1 of 30/)).toBeInTheDocument();
+    expect(screen.queryByText(/Showing 1 of 30/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Topology data status")).toHaveTextContent("Sessions could not be refreshed.");
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
     await user.type(screen.getByRole("searchbox", { name: "Search infrastructure" }), "west");
     expect(screen.getByRole("button", { name: "Regional queue" })).toBeInTheDocument();

@@ -74,4 +74,28 @@ describe("real ELK topology layout", () => {
     expect(find(result, "empty-cloud").height).toBeGreaterThanOrEqual(112);
     expect(find(result, "standalone")).toMatchObject({ width: 236, height: 112 });
   });
+
+  it("lays out a multi-hop communication chain and its branching path without dropping intermediate nodes", async () => {
+    const input: TopologyLayoutInput = {
+      nodes: ["root", "a", "b", "c", "leaf", "branch", "branch-leaf"].map((id) => ({ id, role: "resource" })),
+      edges: [
+        { id: "root-a", source: "root", target: "a" },
+        { id: "a-b", source: "a", target: "b" },
+        { id: "b-c", source: "b", target: "c" },
+        { id: "c-leaf", source: "c", target: "leaf" },
+        { id: "a-branch", source: "a", target: "branch" },
+        { id: "branch-leaf", source: "branch", target: "branch-leaf" },
+      ],
+    };
+    const result = await layoutTopology(input);
+    expect(new Set(result.map(({ id }) => id))).toEqual(new Set(input.nodes.map(({ id }) => id)));
+    for (const edge of input.edges) {
+      const from = find(result, edge.source);
+      const to = find(result, edge.target);
+      expect(to.x).toBeGreaterThan(from.x + from.width);
+    }
+    const b = find(result, "b");
+    const branch = find(result, "branch");
+    expect(b.y + b.height <= branch.y || branch.y + branch.height <= b.y).toBe(true);
+  });
 });

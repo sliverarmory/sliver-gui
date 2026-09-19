@@ -410,6 +410,8 @@ export interface RecentEventSummary {
 }
 
 export interface SliverSnapshot {
+  /** Bounded display-only hierarchy reported by the server's passive graph RPC. */
+  pivotTopology?: import("./topology-contracts.js").PivotTopologySnapshot;
   connection: ConnectionSummary;
   eventStream: EventStreamSummary;
   jobs: JobSummary[];

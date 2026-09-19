@@ -14,6 +14,10 @@ function edge(id: string, source: string, target: string, values: Partial<Topolo
   return { id, kind: "future-link", role: "relationship", source, target, label: "Related", state: "live", freshness: "current", description: "Verified relationship", activityAt: "2026-09-18T12:00:00.000Z", properties: [], ...values };
 }
 
+function communication(id: string, source: string, target: string): TopologyEdge {
+  return edge(id, source, target, { role: "communication", label: "Reported channel" });
+}
+
 function document(nodes: TopologyNode[], edges: TopologyEdge[]): TopologyDocument {
   return { schemaVersion: 1, scope: { id: "scope", label: "test", connected: true }, updatedAt: null, nodes, edges, notices: [] };
 }
@@ -97,7 +101,7 @@ describe("topology projection", () => {
     expect(projectTopology({ ...source, nodes: [...source.nodes, extra], edges }, defaults).groups.size).toBe(0);
   });
 
-  it("filters using generic properties and retains only one-hop and ancestor context", () => {
+  it("filters using generic properties and retains one-hop relationship and ancestor context", () => {
     const source = document([
       node("outer", { role: "group" }),
       node("cloud", { role: "group", parentId: "outer" }),
@@ -110,6 +114,140 @@ describe("topology projection", () => {
     expect(result.document.nodes.map(({ id }) => id)).toEqual(["outer", "cloud", "server", "match"]);
     expect(result.document.edges.map(({ id }) => id)).toEqual(["first"]);
     expect(result.groups.size).toBe(0);
+  });
+
+  it.each([false, true])("retains every upstream communication hop and its enclosures independent of edge order (reverse=%s)", (reverse) => {
+    const links = [
+      communication("operator", "client", "root"),
+      communication("first-hop", "root", "relay-a"),
+      communication("second-hop", "relay-a", "relay-b"),
+      communication("third-hop", "relay-b", "match"),
+      communication("other-branch", "relay-a", "other"),
+    ];
+    const source = document([
+      node("outer", { role: "group" }),
+      node("cloud", { role: "group", parentId: "outer" }),
+      node("client"), node("root", { parentId: "cloud" }),
+      node("relay-a"), node("relay-b"),
+      node("match", { status: "warning", properties: [{ label: "Location", value: "Needle" }] }),
+      node("other"),
+    ], reverse ? [...links].reverse() : links);
+    const before = JSON.stringify(source);
+    const result = projectTopology(source, { ...defaults, query: "needle", status: "warning" });
+    expect(result.matchCount).toBe(1);
+    expect(result.document.nodes.map(({ id }) => id)).toEqual(["outer", "cloud", "client", "root", "relay-a", "relay-b", "match"]);
+    expect(new Set(result.document.edges.map(({ id }) => id))).toEqual(new Set(["operator", "first-hop", "second-hop", "third-hop"]));
+    expect(result.document.edges.every((item) => source.edges.includes(item))).toBe(true);
+    expect(result.groups.size).toBe(0);
+    expect(JSON.stringify(source)).toBe(before);
+  });
+
+  it("keeps every reported upstream branch to a match without pulling in unrelated downstream branches", () => {
+    const source = document([
+      node("root"), node("relay"), node("left"), node("right"),
+      node("match", { label: "Needle" }), node("unrelated"),
+      node("immediate-child"), node("deeper-child"),
+    ], [
+      communication("first", "root", "relay"),
+      communication("left-branch", "relay", "left"),
+      communication("right-branch", "relay", "right"),
+      communication("left-route", "left", "match"),
+      communication("right-route", "right", "match"),
+      communication("unrelated-route", "left", "unrelated"),
+      communication("child", "match", "immediate-child"),
+      communication("grandchild", "immediate-child", "deeper-child"),
+    ]);
+    const result = projectTopology(source, { ...defaults, query: "needle" });
+    expect(result.document.nodes.map(({ id }) => id)).toEqual(["root", "relay", "left", "right", "match", "immediate-child"]);
+    expect(result.document.edges.map(({ id }) => id)).toEqual(["first", "left-branch", "right-branch", "left-route", "right-route", "child"]);
+    expect(result.matchCount).toBe(1);
+  });
+
+  it("terminates upstream filtering through communication cycles and self-links", () => {
+    const source = document([
+      node("root"), node("a"), node("b"), node("match", { label: "Needle" }), node("other"),
+    ], [
+      communication("root-a", "root", "a"), communication("a-b", "a", "b"),
+      communication("b-match", "b", "match"), communication("cycle", "match", "a"),
+      communication("self", "match", "match"), communication("other", "b", "other"),
+    ]);
+    const result = projectTopology(source, { ...defaults, query: "needle" });
+    expect(result.document.nodes.map(({ id }) => id)).toEqual(["root", "a", "b", "match"]);
+    expect(result.document.edges.map(({ id }) => id)).toEqual(["root-a", "a-b", "b-match", "cycle", "self"]);
+    expect(result.matchCount).toBe(1);
+  });
+
+  it("omits missing endpoints without inventing a route across the gap", () => {
+    const source = document([node("root"), node("relay"), node("match", { label: "Needle" })], [
+      communication("known", "root", "relay"),
+      communication("missing-child", "relay", "missing"),
+      communication("missing-parent", "missing", "match"),
+      communication("other-missing", "match", "also-missing"),
+    ]);
+    const result = projectTopology(source, { ...defaults, query: "needle" });
+    expect(result.document.nodes.map(({ id }) => id)).toEqual(["match"]);
+    expect(result.document.edges).toEqual([]);
+    expect(projectTopology(source, defaults).document.edges.map(({ id }) => id)).toEqual(["known"]);
+  });
+
+  it("collapses terminal children separately at each parent while retaining the relay chain", () => {
+    const count = TOPOLOGY_COLLECTION_THRESHOLD + 1;
+    const rootLeaves = Array.from({ length: count }, (_, i) => node(`root-leaf-${i}`));
+    const relayLeaves = Array.from({ length: count }, (_, i) => node(`relay-leaf-${i}`));
+    const chain = [communication("first", "root", "relay-a"), communication("second", "relay-a", "relay-b")];
+    const source = document([node("root"), node("relay-a"), node("relay-b"), ...rootLeaves, ...relayLeaves], [
+      ...chain,
+      ...rootLeaves.map((item) => communication(`edge-${item.id}`, "root", item.id)),
+      ...relayLeaves.map((item) => communication(`edge-${item.id}`, "relay-b", item.id)),
+    ]);
+    const result = projectTopology(source, defaults);
+    expect(result.groups.size).toBe(2);
+    expect(result.document.nodes).toHaveLength(5);
+    expect(result.document.nodes.slice(0, 3)).toEqual(source.nodes.slice(0, 3));
+    expect(result.document.edges.slice(0, 2)).toEqual(chain);
+    expect(result.document.edges).toHaveLength(4);
+    for (const [id, members] of result.groups) {
+      const peer = members[0]!.id.startsWith("root-") ? "root" : "relay-b";
+      expect(members).toEqual(peer === "root" ? rootLeaves : relayLeaves);
+      expect(result.document.edges.find((item) => item.target === id)?.source).toBe(peer);
+    }
+    const expanded = projectTopology(source, { ...defaults, expanded: new Set(result.groups.keys()) });
+    expect(expanded.document.nodes).toEqual(source.nodes);
+    expect(expanded.document.edges).toEqual(source.edges);
+  });
+
+  it("never combines upstream roots that each have one outgoing communication link", () => {
+    const roots = Array.from({ length: TOPOLOGY_COLLECTION_THRESHOLD + 1 }, (_, i) => node(`root-${i}`));
+    const source = document([...roots, node("destination")], roots.map((item) => communication(`edge-${item.id}`, item.id, "destination")));
+    const result = projectTopology(source, defaults);
+    expect(result.groups.size).toBe(0);
+    expect(result.document.nodes).toEqual(source.nodes);
+    expect(result.document.edges).toEqual(source.edges);
+  });
+
+  it("keeps intermediate branching resources explicit even when they have the same presentation as leaves", () => {
+    const relays = Array.from({ length: TOPOLOGY_COLLECTION_THRESHOLD + 1 }, (_, i) => node(`relay-${i}`));
+    const source = document([node("root"), ...relays, node("destination")], relays.flatMap((item) => [
+      communication(`incoming-${item.id}`, "root", item.id),
+      communication(`outgoing-${item.id}`, item.id, "destination"),
+    ]));
+    const result = projectTopology(source, defaults);
+    expect(result.groups.size).toBe(0);
+    expect(result.document.nodes).toEqual(source.nodes);
+    expect(result.document.edges).toEqual(source.edges);
+  });
+
+  it("does not treat partially known relays as terminal collection members", () => {
+    const relays = Array.from({ length: TOPOLOGY_COLLECTION_THRESHOLD + 1 }, (_, i) => node(`relay-${i}`));
+    const knownLinks = relays.map((item) => communication(`incoming-${item.id}`, "root", item.id));
+    const source = document([node("root"), ...relays], [
+      ...knownLinks,
+      ...relays.map((item) => communication(`outgoing-${item.id}`, item.id, `missing-${item.id}`)),
+    ]);
+    const result = projectTopology(source, defaults);
+    expect(result.groups.size).toBe(0);
+    expect(result.document.nodes).toEqual(source.nodes);
+    expect(result.document.edges).toEqual(knownLinks);
   });
 
   it("retains descendants of matching groups without recursively adding their network peers", () => {

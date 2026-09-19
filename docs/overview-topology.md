@@ -50,9 +50,24 @@ relationships explicitly and document their source.
   Its cached region, size, instance state, and addresses are display metadata;
   they are not live provider-health measurements. An unmanaged server has
   unknown hosting. Server connectivity and cached VM state remain separate.
-- Session and beacon edges represent server-reported logical communication.
-  Intermediate hops and exact listener attribution are not inferred, including
-  for pivot transports. Listener inventory remains server metadata.
+- Every reported operator has a separate presence node, including offline
+  operators. The local client remains distinct because a matching display name
+  does not establish roster identity. Presence edges are associations, not
+  traffic measurements or target ownership.
+- Session routes use the server's passive pivot graph when available. Exact
+  parent/child peers become edges, including nested relays and branches. Peers
+  missing a current session record remain visible as non-actionable relay
+  placeholders. The client does not infer hops from transport or address text.
+  Beacon routes and sessions absent from the pivot inventory retain explicitly
+  labeled logical relationships to the server; their intermediate hops remain
+  unknown. Listener inventory remains server metadata.
+- Pivot inventory refreshes with full inventory and background session updates,
+  and is bounded to 500 entries. An optional route refresh failure does not fail
+  otherwise successful session inventory reads. The
+  renderer and normalizer have no fixed hop count; transport decoding limits
+  still apply. A truncated graph reports partial inventory, and failed refreshes retain
+  last-known routes. Malformed graphs are rejected rather than guessed. Reading
+  this inventory never creates, changes, or removes a pivot.
 - An active session is `live`; a dead session is `inactive`; a beacon is
   `periodic`. Overdue beacons carry a warning on their node. Reported activity
   timestamps are available for brief observed-activity indicators. There are no
@@ -73,9 +88,12 @@ for additional trusted adapters.
 
 `OverviewDocument` consumes a `TopologyDocument` with an optional node decorator. Search, type/status
 filters, the inspector, and the accessible list all use that document. The
-projection preserves one hop of context and parent enclosures while filtering.
+projection preserves the complete upstream communication path and parent
+enclosures while filtering, with cycle-safe traversal. Other associations retain
+one hop of context.
 Large homogeneous leaf collections collapse into summaries, with their
-individual records available on expansion. Unknown kinds retain a generic card
+individual records available on expansion. Intermediate relays and branching
+nodes stay explicit. Unknown kinds retain a generic card
 and icon; the renderer does not require a switch case for each infrastructure
 type.
 
@@ -108,6 +126,13 @@ These views share the application's connection-usability rule. Retained nodes
 after disconnect, or nodes without a current reference while inventory refreshes,
 keep the same menu with disabled actions; display IDs never grant action authority.
 
+The event client reports `connecting` until its first event arrives, even on a
+quiet connection. Overview labels this as awaiting events and keeps successfully
+refreshed inventory current. A stopped or retrying stream still produces a
+warning and marks relationships as last known.
+The notice area appears only for warnings; informational notices stay in the
+topology document without displaying a banner.
+
 ## Validation
 
 - `npm run typecheck`
@@ -116,10 +141,15 @@ keep the same menu with disabled actions; display IDs never grant action authori
 - `npm run test:e2e:overview`
 - `npm run test:e2e:protocol`
 
-The Overview Electron test uses synthetic unmanaged, AWS, and Azure records,
+The Overview Electron tests use synthetic unmanaged, AWS, and Azure records,
 the actual bundled ELK worker, and the production CSP. It exercises graph/list
 switching, filters, inspection, layout controls, and both interaction navigation
 paths for sessions and beacons. It checks that no target
 commands or cloud actions occur. Screenshots are written to
 `artifacts/overview-e2e/`. The protocol test also verifies a same-origin module
 worker and its static import from an ASAR archive.
+
+The separate topology journey supplies three operators and a branched five-hop
+route with a sessionless relay. It checks the rendered parent edges, complete
+upstream context when filtering the deepest session, and the existing session
+menu. It audits fixture calls to ensure only passive inventory is read.

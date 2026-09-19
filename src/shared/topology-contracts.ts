@@ -4,7 +4,26 @@
  * objects. Unknown kinds and icon keys intentionally remain valid; renderers
  * display them using a generic resource card and icon.
  */
+import type { DomainStatus } from "./contracts.js";
+
 export const TOPOLOGY_SCHEMA_VERSION = 1 as const;
+
+/** Passive server-reported routing inventory; no target action authority. */
+export interface PivotTopologyEntry {
+  readonly peerId: string;
+  readonly parentPeerId: string | null;
+  readonly sessionId?: string;
+  readonly name: string;
+}
+
+export interface PivotTopologySnapshot {
+  readonly status: DomainStatus;
+  readonly revision: number;
+  readonly updatedAt?: string;
+  readonly error?: string;
+  readonly entries: PivotTopologyEntry[];
+  readonly truncated: boolean;
+}
 
 export type TopologyStatus = "healthy" | "warning" | "inactive" | "unknown";
 export type TopologyFreshness = "current" | "stale" | "unknown";

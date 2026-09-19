@@ -121,12 +121,31 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       await page.keyboard.press("Escape");
       await contextMenu.waitFor({ state: "hidden" });
       if (hosting === "unmanaged") {
+        // The real client waits for its first event before reporting connected.
+        // Successful inventory reads remain current during that quiet period.
+        await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("connecting"));
+        const awaitingEvents = page.getByText("Awaiting events", { exact: true });
+        const notices = page.locator('[aria-label="Topology data status"]');
+        await awaitingEvents.waitFor();
+        assert.equal(await notices.count(), 0, "routine event-stream status must not render a notice area");
+        assert.equal(await page.getByText("Waiting for the first live event. Inventory continues to refresh periodically.", { exact: true }).count(), 0);
+        assert.equal(await page.getByText(/Live updates are unavailable/u).count(), 0);
+        assert.equal(await sessionNode.getAttribute("data-freshness"), "current");
+        assert.equal(await beaconNode.getAttribute("data-freshness"), "current");
+        await page.screenshot({ path: join(artifactDirectory, "overview-awaiting-first-event.png"), animations: "disabled" });
+        await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("connected"));
+        await awaitingEvents.waitFor({ state: "hidden" });
+        await page.getByText("Live", { exact: true }).waitFor();
+
         // A stopped event stream keeps the real registry connection degraded
         // and the main-issued session reference valid while graph data is stale.
         await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("stopped"));
         const staleSession = page.locator('[data-testid="topology-node"][data-freshness="stale"]')
           .filter({ hasText: /m1-session(?:-host)?/u });
         await staleSession.waitFor();
+        await notices.waitFor();
+        assert.equal(await notices.isVisible(), true, "a stopped event stream must keep its warning notice visible");
+        assert.ok(await notices.locator('[data-severity="warning"]').count() > 0);
         assert.match(await staleSession.innerText(), /Last known: active.*stale/iu);
         const degradedStatus = await page.evaluate(async () =>
           (await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot()).connection.status);
@@ -291,7 +310,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       }));
       const allowedMethods = new Set([
         "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
-        "getOperators", "getSessions", "getBeacons", ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
+        "getOperators", "getSessions", "getBeacons", "getPivotGraph", ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
       ]);
       assert.deepEqual(state.methods.filter((method) => !allowedMethods.has(method)), [],
         "Overview navigation must only read inventory and the selected workspace's existing task list");

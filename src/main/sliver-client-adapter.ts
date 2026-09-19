@@ -4,6 +4,7 @@ import {
   withTimeoutSignal,
   type SliverClientConfig,
   type sliverpb,
+  type clientpb,
 } from "sliver-script";
 
 /**
@@ -155,6 +156,8 @@ export type SliverClientAdapter = Pick<
   Exclude<SliverClientMethod, "connect"> | "event$" | "eventStreamState$"
 > & {
   connect(): Promise<unknown>;
+  /** Server inventory only; does not query or operate an individual target. */
+  getPivotGraph?(): Promise<clientpb.PivotGraph>;
   pwdBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Pwd>;
   lsBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
   psBeacon(beaconId: string, fullInfo: boolean, timeoutSeconds: number): Promise<sliverpb.Ps>;
@@ -169,6 +172,7 @@ export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAd
  */
 export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
   return Object.assign(client, {
+    getPivotGraph: () => withTimeoutSignal(10, (signal) => client.rpc.pivotGraph({}, { signal })),
     pwdBeacon: (beaconId: string, timeoutSeconds: number) =>
       client.interactBeacon(beaconId).pwd(timeoutSeconds),
     // InteractiveBeacon.lsTask intentionally exposes only {id, wait}; it
