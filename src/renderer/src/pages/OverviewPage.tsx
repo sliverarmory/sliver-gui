@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Label, ListBox, SearchField, Select } from "@heroui/react";
 import type { SliverSnapshot } from "../../../shared/contracts";
+import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyEdge, TopologyNode, TopologyProperty } from "../../../shared/topology-contracts";
 import { ApplicationContextMenuScope } from "../components/ApplicationContextMenu";
 import { useSessionContextActions } from "../components/useSessionContextActions";
+import { sessionContextMenuActions } from "../components/session-context-menu-actions";
+import { isUsableConnection } from "../connection-status";
 import { createOverviewTopology, overviewTopologyScopeId } from "../topology/overview-topology";
 import { projectTopology } from "../topology/topology-projection";
 import { TopologyGraph, type TopologySelection } from "../topology/TopologyGraph";
@@ -13,10 +16,16 @@ interface OverviewPageProps {
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
   onNavigate: (view: "operations" | "sessions" | "beacons") => void;
+  onOpenSession?: (session: SessionSummary, target: TargetRef) => void;
+  onOpenBeacon?: (beacon: BeaconSummary, target: TargetRef) => void;
 }
 
-export function OverviewPage({ snapshot, onSnapshot, onNavigate }: OverviewPageProps) {
-  const { actionsForTarget, dialogs } = useSessionContextActions({ snapshot, onSnapshot });
+export function OverviewPage({ snapshot, onSnapshot, onNavigate, onOpenSession, onOpenBeacon }: OverviewPageProps) {
+  const { actionsForTarget, dialogs } = useSessionContextActions({
+    snapshot, onSnapshot,
+    ...(onOpenSession ? { onOpenSession } : {}),
+    ...(onOpenBeacon ? { onOpenBeacon } : {}),
+  });
   const previous = useRef<SliverSnapshot | null>(null);
   const source = useMemo(() => {
     if (overviewTopologyScopeId(snapshot) !== "disconnected") {
@@ -34,14 +43,19 @@ export function OverviewPage({ snapshot, onSnapshot, onNavigate }: OverviewPageP
   const decorateNode = useCallback((node: TopologyNode, content: ReactNode): ReactNode => {
     // Resolve display identities against the current main-issued inventory. The
     // JSON model never carries action capabilities, including in retained views.
-    // Stale event telemetry does not revoke a session's main-issued reference.
-    if (node.kind !== "session" || node.resource?.kind !== "session" ||
-      overviewTopologyScopeId(snapshot) !== topology.scope.id ||
-      !["connected", "degraded"].includes(snapshot.connection.status)) return content;
-    const target = snapshot.targetContext.selectableTargets.find((ref) =>
-      ref.mode === "session" && ref.id === node.resource?.id && ref.backendEpoch === snapshot.connection.epoch);
-    if (!target) return content;
-    return <ApplicationContextMenuScope actions={actionsForTarget(target)}>{content}</ApplicationContextMenuScope>;
+    // Stale event telemetry does not revoke a target's main-issued reference.
+    if ((node.kind !== "session" && node.kind !== "beacon") ||
+      (node.resource?.kind !== "session" && node.resource?.kind !== "beacon")) return content;
+    const mode = node.resource.kind;
+    const target = overviewTopologyScopeId(snapshot) === topology.scope.id && isUsableConnection(snapshot.connection.status)
+      ? snapshot.targetContext.selectableTargets.find((ref) =>
+          ref.mode === mode && ref.id === node.resource?.id && ref.backendEpoch === snapshot.connection.epoch)
+      : undefined;
+    const actions = target ? actionsForTarget(target) : [];
+    return <ApplicationContextMenuScope actions={actions.length ? actions : sessionContextMenuActions({
+      target: undefined, mode, activeTarget: null, capabilities: [], disabled: true,
+      showUnavailable: true, onAction: () => undefined,
+    })}>{content}</ApplicationContextMenuScope>;
   }, [actionsForTarget, snapshot, topology.scope.id]);
   return <>
     <OverviewDocument key={topology.scope.id} document={topology} onNavigate={onNavigate} decorateNode={decorateNode} />

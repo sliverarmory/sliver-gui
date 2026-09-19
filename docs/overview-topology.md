@@ -95,13 +95,18 @@ The first completed layout fits the measured graph to the viewport. Subsequent
 status updates preserve the viewport, and the zoom controls retain accessible
 names while displaying `+` and `−`.
 
-The application decorates eligible session nodes with the shared session-table
-context menu. It resolves the display resource ID against current main-issued
-session references outside the JSON model. Rename and lifecycle review dialogs
-reuse the existing UI; right-clicking alone never selects or changes a session.
+The application decorates session and beacon nodes with the shared target-table
+context menu. Both start with **Interact** in the current window and **Interact**
+with the pop-out icon for a standalone interaction window. The latter has the
+accessible name **Interact in new window**. It resolves the display resource ID
+against current main-issued target references outside the JSON model and confirms
+the exact target before navigation. Session Rename and lifecycle review dialogs
+reuse the existing UI; right-clicking alone never selects or changes a target.
 Stale event telemetry does not hide these actions when the backend remains
-connected or degraded and still issues a matching session reference. Retained
-nodes after disconnect do not receive session actions.
+connected, degraded, or reconnecting and still issues a matching target reference.
+These views share the application's connection-usability rule. Retained nodes
+after disconnect, or nodes without a current reference while inventory refreshes,
+keep the same menu with disabled actions; display IDs never grant action authority.
 
 ## Validation
 
@@ -113,7 +118,8 @@ nodes after disconnect do not receive session actions.
 
 The Overview Electron test uses synthetic unmanaged, AWS, and Azure records,
 the actual bundled ELK worker, and the production CSP. It exercises graph/list
-switching, filters, inspection, and layout controls, and checks that no target
+switching, filters, inspection, layout controls, and both interaction navigation
+paths for sessions and beacons. It checks that no target
 commands or cloud actions occur. Screenshots are written to
 `artifacts/overview-e2e/`. The protocol test also verifies a same-origin module
 worker and its static import from an ASAR archive.

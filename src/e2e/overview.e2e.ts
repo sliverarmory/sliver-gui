@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
+const SESSION_MENU_LABELS = ["Interact", "Interact in new window", "Rename", "Close Session", "Kill Session"] as const;
 
 for (const hosting of ["unmanaged", "aws", "azure"] as const) {
   test(`Overview renders ${hosting} infrastructure with its real layout worker and read-only inspection`, {
@@ -114,7 +115,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       await sessionNode.click({ button: "right" });
       const contextMenu = page.getByRole("menu", { name: "Application context menu" });
       await contextMenu.waitFor();
-      for (const name of ["Rename", "Close Session", "Kill Session"]) {
+      for (const name of SESSION_MENU_LABELS) {
         assert.equal(await contextMenu.getByRole("menuitem", { name, exact: true }).isVisible(), true);
       }
       await page.keyboard.press("Escape");
@@ -132,7 +133,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
         assert.equal(degradedStatus, "degraded");
         await staleSession.click({ button: "right" });
         await contextMenu.waitFor();
-        for (const name of ["Rename", "Close Session", "Kill Session"]) {
+        for (const name of SESSION_MENU_LABELS) {
           assert.equal(await contextMenu.getByRole("menuitem", { name, exact: true }).isVisible(), true,
             `a stale display label must not hide ${name} for a valid degraded session reference`);
         }
@@ -140,23 +141,53 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
         await page.keyboard.press("Escape");
         await contextMenu.waitFor({ state: "hidden" });
 
-        // Reconnecting still quarantines session actions. Only open and dismiss
-        // menus in this journey; the final backend audit forbids target calls.
+        // The event stream retry does not invalidate the registry's existing
+        // usable connection or main-issued session reference. Open and dismiss
+        // menus only; the final backend audit forbids target commands.
         await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("retrying"));
         await page.getByText("Last known state", { exact: true }).waitFor();
+        const reconnectingStatus = await page.evaluate(async () =>
+          (await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot()).connection.status);
+        assert.equal(reconnectingStatus, "reconnecting");
         await staleSession.click({ button: "right" });
         await contextMenu.waitFor();
-        for (const name of ["Rename", "Close Session", "Kill Session"]) {
-          assert.equal(await contextMenu.getByRole("menuitem", { name, exact: true }).count(), 0);
+        for (const name of SESSION_MENU_LABELS) {
+          const entry = contextMenu.getByRole("menuitem", { name, exact: true });
+          assert.equal(await entry.isVisible(), true,
+            `event-stream retry must not hide ${name} for a retained main-issued session reference`);
+          assert.equal(await entry.isEnabled(), true,
+            `event-stream retry must retain the valid main-issued authority for ${name}`);
         }
+        await page.screenshot({ path: join(artifactDirectory, "overview-unmanaged-reconnecting-menu.png"), animations: "disabled" });
         await page.keyboard.press("Escape");
         await contextMenu.waitFor({ state: "hidden" });
+        const hitTargets = [
+          { label: "title", locator: staleSession.locator("strong") },
+          { label: "icon", locator: staleSession.locator(".topology-node__icon") },
+          { label: "status", locator: staleSession.locator(".topology-node__status") },
+          { label: "subtitle", locator: staleSession.locator(".topology-node__subtitle") },
+          { label: "background", locator: staleSession, position: { x: 10, y: 10 } },
+        ];
+        for (const hit of hitTargets) {
+          await hit.locator.click({ button: "right", ...("position" in hit ? { position: hit.position } : {}) });
+          await contextMenu.waitFor();
+          for (const name of SESSION_MENU_LABELS) {
+            const entry = contextMenu.getByRole("menuitem", { name, exact: true });
+            assert.equal(await entry.isVisible(), true,
+              `right-clicking the session ${hit.label} must retain the ${name} entry`);
+            assert.equal(await entry.isEnabled(), true,
+              `right-clicking the session ${hit.label} must retain valid authority for ${name}`);
+          }
+          await page.keyboard.press("Escape");
+          await contextMenu.waitFor({ state: "hidden" });
+        }
         await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.setEventStreamStatus("connected"));
         await page.locator('[data-testid="topology-node"][data-freshness="current"]')
           .filter({ hasText: /m1-session(?:-host)?/u }).waitFor();
       }
       await beaconNode.click({ button: "right" });
       await contextMenu.waitFor();
+      await assertInteractionEntries(contextMenu);
       assert.equal(await contextMenu.getByRole("menuitem", { name: "Rename", exact: true }).count(), 0,
         "session actions must not leak onto other infrastructure nodes");
       await page.keyboard.press("Escape");
@@ -222,19 +253,52 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       await sessionNode.waitFor();
       await beaconNode.waitFor();
 
+      if (hosting === "unmanaged") {
+        if (await inspector.isVisible()) await inspector.getByRole("button", { name: "Close", exact: true }).click();
+        await verifyInteractionNavigation(application, page, "session", artifactDirectory, rendererErrors);
+        await verifyInteractionNavigation(application, page, "beacon", artifactDirectory, rendererErrors);
+        // Disconnect only this in-process fake adapter. The retained display
+        // retains menu labels but must not carry usable session capabilities.
+        const disconnected = await page.evaluate(() =>
+          (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.disconnect());
+        assert.ok(disconnected.ok);
+        assert.equal(disconnected.value.connection.status, "disconnected");
+        const savedConfigurations = page.getByRole("dialog", { name: "Saved configurations" });
+        await savedConfigurations.getByRole("button", { name: "Cancel", exact: true }).click();
+        await savedConfigurations.waitFor({ state: "hidden" });
+        await page.getByText("Last known state", { exact: true }).waitFor();
+        await sessionNode.click({ button: "right" });
+        await contextMenu.waitFor();
+        for (const name of SESSION_MENU_LABELS) {
+          const entry = contextMenu.getByRole("menuitem", { name, exact: true });
+          assert.equal(await entry.isVisible(), true,
+            `the disconnected retained graph must keep the ${name} label`);
+          assert.equal(await entry.isEnabled(), false,
+            `the disconnected retained graph must disable ${name}`);
+        }
+        await page.keyboard.press("Escape");
+        await contextMenu.waitFor({ state: "hidden" });
+      }
+
       const state = await application.evaluate(() => ({
         methods: globalThis.__SLIVER_GUI_E2E_STATE__.methods,
+        disconnects: globalThis.__SLIVER_GUI_E2E_STATE__.disconnects,
         tasks: globalThis.__SLIVER_GUI_E2E_STATE__.tasks,
+        openSessionRequests: globalThis.__SLIVER_GUI_E2E_STATE__.openSessionRequests,
+        executionCalls: globalThis.__SLIVER_GUI_E2E_STATE__.m4Audit.callCounts,
         consoles: globalThis.__SLIVER_GUI_E2E_STATE__.console.spawns.length,
         sshSessions: globalThis.__SLIVER_GUI_E2E_STATE__.ssh.length,
       }));
       const allowedMethods = new Set([
         "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
-        "getOperators", "getSessions", "getBeacons",
+        "getOperators", "getSessions", "getBeacons", ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
       ]);
       assert.deepEqual(state.methods.filter((method) => !allowedMethods.has(method)), [],
-        "Overview must only read the existing connection inventory");
+        "Overview navigation must only read inventory and the selected workspace's existing task list");
       assert.deepEqual(state.tasks, []);
+      assert.deepEqual(state.openSessionRequests, []);
+      assert.deepEqual(state.executionCalls, {});
+      assert.equal(state.disconnects, hosting === "unmanaged" ? 1 : 0);
       assert.equal(state.consoles, 0);
       assert.equal(state.sshSessions, 0);
       assert.deepEqual(rendererErrors, []);
@@ -266,6 +330,98 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       }
     }
   });
+}
+
+async function assertInteractionEntries(menu: Locator): Promise<void> {
+  const entries = menu.getByRole("menuitem");
+  assert.equal(await entries.nth(0).innerText(), "Interact");
+  assert.equal(await entries.nth(1).innerText(), "Interact");
+  assert.equal(await entries.nth(1).getAttribute("aria-label"), "Interact in new window");
+  for (const name of ["Interact", "Interact in new window"]) {
+    assert.equal(await menu.getByRole("menuitem", { name, exact: true }).isEnabled(), true);
+  }
+}
+
+async function verifyInteractionNavigation(
+  application: ElectronApplication,
+  page: Page,
+  mode: "session" | "beacon",
+  artifactDirectory: string,
+  rendererErrors: string[],
+): Promise<void> {
+  const snapshot = await page.evaluate(() => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot());
+  const summary = (mode === "session" ? snapshot.domains.sessions.items : snapshot.domains.beacons.items)[0];
+  assert.ok(summary);
+  const expected = snapshot.targetContext.selectableTargets.find((target) => target.mode === mode && target.id === summary.id);
+  assert.ok(expected, "the fixture must provide an exact main-issued selectable target");
+  const node = page.getByTestId("topology-node").filter({ hasText: summary.hostname });
+  const menu = page.getByRole("menu", { name: "Application context menu" });
+  const originalWindows = application.windows().length;
+
+  // These entries navigate only. Leave every operation form and action alone.
+  await node.click({ button: "right" });
+  await menu.waitFor();
+  await assertInteractionEntries(menu);
+  await menu.getByRole("menuitem", { name: "Interact", exact: true }).click();
+  await assertInteractionWorkspace(page, mode, summary.name);
+  assert.equal(application.windows().length, originalWindows, "Interact must reuse the current window");
+  const current = await page.evaluate(() => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot());
+  assert.deepEqual(current.targetContext.activeTarget, expected);
+  await page.locator('[aria-label="Overview navigation"]').getByRole("row", { name: "Overview", exact: true }).click();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await node.waitFor();
+
+  const observePopout = (candidate: Page): void => {
+    candidate.on("pageerror", (error) => rendererErrors.push(error.message));
+    candidate.on("console", (message) => {
+      if (message.type() === "error" || /Content Security Policy|Refused to.*worker/iu.test(message.text())) {
+        rendererErrors.push(message.text());
+      }
+    });
+  };
+  application.on("window", observePopout);
+  let popout: Page | undefined;
+  try {
+    await node.click({ button: "right" });
+    await menu.waitFor();
+    await assertInteractionEntries(menu);
+    await page.screenshot({ path: join(artifactDirectory, `overview-${mode}-interact-menu.png`), animations: "disabled" });
+    [popout] = await Promise.all([
+      application.waitForEvent("window", { timeout: 15_000 }),
+      menu.getByRole("menuitem", { name: "Interact in new window", exact: true }).click(),
+    ]);
+    popout.setDefaultTimeout(15_000);
+    await popout.waitForURL(/\?surface=interaction$/u);
+    await popout.locator('[aria-label="Dedicated interaction window"]').waitFor();
+    await assertInteractionWorkspace(popout, mode, summary.name);
+    assert.equal(application.windows().length, originalWindows + 1);
+    const destination = await popout.evaluate(() => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot());
+    assert.deepEqual(destination.targetContext.activeTarget, expected);
+    assert.equal(new URL(popout.url()).search, "?surface=interaction");
+    assert.equal(new URL(popout.url()).hash, "");
+    assert.equal(await popout.locator('[aria-label="Overview navigation"]').count(), 0);
+    assert.equal(await popout.getByRole("button", { name: "Pop out interaction", exact: true }).count(), 0);
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await popout.screenshot({ path: join(artifactDirectory, `overview-${mode}-interact-window.png`), animations: "disabled" });
+  } finally {
+    application.off("window", observePopout);
+    await popout?.close();
+  }
+  await page.bringToFront();
+  assert.equal(application.windows().length, originalWindows);
+}
+
+async function assertInteractionWorkspace(page: Page, mode: "session" | "beacon", name: string): Promise<void> {
+  if (mode === "session") {
+    await page.getByRole("heading", { name, exact: true }).first().waitFor();
+    await page.getByRole("navigation", { name: "Session workspace breadcrumbs", exact: true }).waitFor();
+    await page.getByRole("tablist", { name: "Session interaction sections", exact: true }).waitFor();
+    assert.equal(await page.getByRole("tab", { name: "Overview", exact: true }).getAttribute("aria-selected"), "true");
+  } else {
+    await page.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
+  }
 }
 
 async function chooseFilter(page: Page, label: string, option: string): Promise<void> {

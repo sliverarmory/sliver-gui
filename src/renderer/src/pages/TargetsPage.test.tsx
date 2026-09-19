@@ -102,6 +102,20 @@ const beaconRef: TargetRef = {
   fingerprint: "b".repeat(64),
 };
 
+const rowInteractionCases = [
+  { mode: "session", label: "Interact", destination: "current" },
+  { mode: "session", label: "Interact in new window", destination: "popout" },
+  { mode: "beacon", label: "Interact", destination: "current" },
+  { mode: "beacon", label: "Interact in new window", destination: "popout" },
+] as const;
+
+const rowActionRaceCases = [
+  { mode: "session", label: "Rename" },
+  { mode: "session", label: "Kill Session" },
+  { mode: "session", label: "Close Session" },
+  ...rowInteractionCases,
+] as const;
+
 const executionBackend = {
   configId: "config-1",
   configName: "M1 test",
@@ -880,6 +894,71 @@ describe("TargetsPage", () => {
     expect(onOpenSession).toHaveBeenCalledOnce();
   });
 
+  it.each(rowInteractionCases)("confirms the exact right-clicked $mode before $destination interaction", async ({ mode, label, destination }) => {
+    const user = userEvent.setup();
+    const secondTarget = mode === "session"
+      ? { ...session, id: "session-secondary", name: "secondary-session" }
+      : { ...beacon, id: "beacon-secondary", name: "secondary-beacon" };
+    const secondRef: TargetRef = { ...(mode === "session" ? sessionRef : beaconRef), id: secondTarget.id, fingerprint: "c".repeat(64) };
+    const initial = targetSnapshot(mode);
+    if (secondTarget.mode === "session") {
+      initial.sessions = [session, secondTarget];
+      initial.domains.sessions.items = initial.sessions;
+      initial.domains.sessions.page.total = 2;
+    } else {
+      initial.beacons = [beacon, secondTarget];
+      initial.domains.beacons.items = initial.beacons;
+      initial.domains.beacons.page.total = 2;
+    }
+    initial.targetContext.selectableTargets = [...initial.targetContext.selectableTargets, secondRef];
+    const confirmedTarget = { ...secondTarget, name: "confirmed-secondary" };
+    const selected: SliverSnapshot = {
+      ...initial,
+      targetContext: { ...initial.targetContext, activeTarget: secondRef, activeTargetSummary: confirmedTarget },
+    };
+    const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    const events: string[] = [];
+    const selectTarget = vi.fn(() => { events.push("select"); return gate.promise; });
+    const openInteractionWindow = vi.fn(async () => { events.push("popout"); return { ok: true as const }; });
+    const onSnapshot = vi.fn((_snapshot: SliverSnapshot) => { events.push("snapshot"); });
+    const onOpenSession = vi.fn(() => { events.push("session"); });
+    const onOpenBeacon = vi.fn(() => { events.push("beacon"); });
+    const api = installAPI({ selectTarget, openInteractionWindow });
+    const rendered = render(<TargetsPage mode={mode} snapshot={initial} onSnapshot={onSnapshot} onOpenSession={onOpenSession} onOpenBeacon={onOpenBeacon} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: new RegExp(secondTarget.name) }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.slice(0, 2).map((item) => item.textContent)).toEqual(["Interact", "Interact"]);
+    expect(items[0]).toHaveAccessibleName("Interact");
+    expect(items[1]).toHaveAccessibleName("Interact in new window");
+    expect(selectTarget).not.toHaveBeenCalled();
+    await user.click(within(menu).getByRole("menuitem", { name: label }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(secondRef));
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(openInteractionWindow).not.toHaveBeenCalled();
+
+    await act(async () => { gate.resolve({ ok: true, value: selected }); await gate.promise; });
+    expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(selected);
+    if (destination === "popout") {
+      expect(openInteractionWindow).toHaveBeenCalledExactlyOnceWith();
+      expect(onOpenSession).not.toHaveBeenCalled();
+      expect(onOpenBeacon).not.toHaveBeenCalled();
+      expect(events).toEqual(["select", "snapshot", "popout"]);
+    } else {
+      const expectedCallback = mode === "session" ? onOpenSession : onOpenBeacon;
+      const otherCallback = mode === "session" ? onOpenBeacon : onOpenSession;
+      expect(expectedCallback).toHaveBeenCalledExactlyOnceWith(confirmedTarget, secondRef);
+      expect(otherCallback).not.toHaveBeenCalled();
+      expect(openInteractionWindow).not.toHaveBeenCalled();
+      expect(events).toEqual(["select", "snapshot", mode]);
+    }
+    expect(api.prepareTargetAction).not.toHaveBeenCalled();
+    expect(api.submitTargetOperation).not.toHaveBeenCalled();
+  });
+
   it("renames the right-clicked session without opening its interaction workspace", async () => {
     const user = userEvent.setup();
     const secondSession: SessionSummary = { ...session, id: "session-2", name: "secondary" };
@@ -1060,44 +1139,53 @@ describe("TargetsPage", () => {
     expect(within(backgroundMenu).queryByRole("menuitem", { name: /Rename|Kill Session|Close Session/ })).not.toBeInTheDocument();
   });
 
-  it.each(["Rename", "Kill Session", "Close Session"])("discards a row %s selection reply after a reconnect", async (label) => {
+  it.each(rowActionRaceCases)("discards a $mode row $label selection reply after a reconnect", async ({ mode, label }) => {
     const user = userEvent.setup();
     const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
     const selectTarget = vi.fn().mockImplementation(() => gate.promise);
     const api = installAPI({ selectTarget });
     const onSnapshot = vi.fn();
-    const initial = targetSnapshot("session");
+    const onOpenSession = vi.fn();
+    const onOpenBeacon = vi.fn();
+    const ref = mode === "session" ? sessionRef : beaconRef;
+    const initial = targetSnapshot(mode);
     initial.connection.incarnation = 1;
-    const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} />);
-    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    const rendered = render(<TargetsPage mode={mode} snapshot={initial} onSnapshot={onSnapshot} onOpenSession={onOpenSession} onOpenBeacon={onOpenBeacon} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: mode === "session" ? /payments/i : /warehouse/i }));
     rendered.contextMenu.emit();
     await user.click(await screen.findByRole("menuitem", { name: label }));
-    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(ref));
 
-    const reconnected = targetSnapshot("session");
+    const reconnected = targetSnapshot(mode);
     reconnected.connection.incarnation = 2;
-    rendered.rerender(<TargetsPage mode="session" snapshot={reconnected} onSnapshot={onSnapshot} />);
+    rendered.rerender(<TargetsPage mode={mode} snapshot={reconnected} onSnapshot={onSnapshot} onOpenSession={onOpenSession} onOpenBeacon={onOpenBeacon} />);
     await act(async () => {
       gate.resolve({ ok: true, value: initial });
       await gate.promise;
     });
     expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(api.openInteractionWindow).not.toHaveBeenCalled();
     expect(api.prepareTargetAction).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument();
   });
 
-  it.each(["Rename", "Kill Session", "Close Session"])("discards a row %s selection reply after the catalog unmounts", async (label) => {
+  it.each(rowActionRaceCases)("discards a $mode row $label selection reply after the catalog unmounts", async ({ mode, label }) => {
     const user = userEvent.setup();
     const gate = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
     const selectTarget = vi.fn().mockImplementation(() => gate.promise);
     const api = installAPI({ selectTarget });
     const onSnapshot = vi.fn();
-    const snapshot = targetSnapshot("session");
-    const rendered = render(<TargetsPage mode="session" snapshot={snapshot} onSnapshot={onSnapshot} />);
-    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    const onOpenSession = vi.fn();
+    const onOpenBeacon = vi.fn();
+    const ref = mode === "session" ? sessionRef : beaconRef;
+    const snapshot = targetSnapshot(mode);
+    const rendered = render(<TargetsPage mode={mode} snapshot={snapshot} onSnapshot={onSnapshot} onOpenSession={onOpenSession} onOpenBeacon={onOpenBeacon} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: mode === "session" ? /payments/i : /warehouse/i }));
     rendered.contextMenu.emit();
     await user.click(await screen.findByRole("menuitem", { name: label }));
-    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(ref));
 
     rendered.unmount();
     await act(async () => {
@@ -1105,23 +1193,32 @@ describe("TargetsPage", () => {
       await gate.promise;
     });
     expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(api.openInteractionWindow).not.toHaveBeenCalled();
     expect(api.prepareTargetAction).not.toHaveBeenCalled();
   });
 
-  it.each(["Rename", "Kill Session", "Close Session"])("rejects a row %s response that confirms a replacement session", async (label) => {
+  it.each(rowActionRaceCases)("rejects a $mode row $label response that confirms a replacement target", async ({ mode, label }) => {
     const user = userEvent.setup();
-    const initial = targetSnapshot("session");
-    const replacement = targetSnapshot("session");
-    replacement.targetContext.activeTarget = { ...sessionRef, fingerprint: "e".repeat(64) };
+    const ref = mode === "session" ? sessionRef : beaconRef;
+    const initial = targetSnapshot(mode);
+    const replacement = targetSnapshot(mode);
+    replacement.targetContext.activeTarget = { ...ref, fingerprint: "e".repeat(64) };
     const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: replacement });
     const api = installAPI({ selectTarget });
     const onSnapshot = vi.fn();
-    const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={onSnapshot} />);
-    fireEvent.contextMenu(screen.getByRole("row", { name: /payments/i }));
+    const onOpenSession = vi.fn();
+    const onOpenBeacon = vi.fn();
+    const rendered = render(<TargetsPage mode={mode} snapshot={initial} onSnapshot={onSnapshot} onOpenSession={onOpenSession} onOpenBeacon={onOpenBeacon} />);
+    fireEvent.contextMenu(screen.getByRole("row", { name: mode === "session" ? /payments/i : /warehouse/i }));
     rendered.contextMenu.emit();
     await user.click(await screen.findByRole("menuitem", { name: label }));
-    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(sessionRef));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(ref));
     expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(api.openInteractionWindow).not.toHaveBeenCalled();
     expect(api.prepareTargetAction).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Rename session" })).not.toBeInTheDocument();
   });

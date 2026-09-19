@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "@heroui/react";
 import type { SliverSnapshot } from "../../../shared/contracts";
-import type { TargetActionExecutionResult, TargetActionPlan, TargetRef } from "../../../shared/target-contracts";
+import type { BeaconSummary, SessionSummary, TargetActionExecutionResult, TargetActionPlan, TargetRef } from "../../../shared/target-contracts";
 import { DestructiveReviewModal } from "../pages/TargetsPage";
 import { capabilityFor } from "../pages/target-page-model";
+import { isUsableConnection } from "../connection-status";
 import type { ApplicationContextMenuAction } from "./ApplicationContextMenu";
 import { RenameSessionModal } from "./RenameSessionModal";
 import { sessionContextMenuActions, sessionContextTargetIdentity, type SessionContextActionId } from "./session-context-menu-actions";
@@ -12,7 +13,7 @@ interface SessionInteraction {
   target: TargetRef;
   incarnation: string;
   request: number;
-  action: SessionContextActionId;
+  action: Exclude<SessionContextActionId, "target.interact" | "target.interact-popout">;
   plan?: TargetActionPlan;
   result?: TargetActionExecutionResult;
 }
@@ -24,33 +25,38 @@ function incarnation(snapshot: SliverSnapshot): string {
 
 function connected(snapshot: SliverSnapshot): boolean {
   return snapshot.connection.epoch !== undefined
-    && (snapshot.connection.status === "connected" || snapshot.connection.status === "degraded");
+    && isUsableConnection(snapshot.connection.status);
 }
 
 function selectable(snapshot: SliverSnapshot, target: TargetRef): boolean {
-  return target.mode === "session" && snapshot.connection.epoch === target.backendEpoch
+  return snapshot.connection.epoch === target.backendEpoch
     && snapshot.targetContext.selectableTargets.some((ref) => sessionContextTargetIdentity(ref) === sessionContextTargetIdentity(target))
-    && snapshot.domains.sessions.items.some((session) => session.id === target.id);
+    && (target.mode === "session" ? snapshot.domains.sessions.items : snapshot.domains.beacons.items)
+      .some((summary) => summary.id === target.id);
 }
 
 function selected(snapshot: SliverSnapshot, target: TargetRef): boolean {
   return snapshot.targetContext.status === "selected"
     && sessionContextTargetIdentity(snapshot.targetContext.activeTarget) === sessionContextTargetIdentity(target)
-    && snapshot.targetContext.activeTargetSummary?.mode === "session"
+    && snapshot.targetContext.activeTargetSummary?.mode === target.mode
     && snapshot.targetContext.activeTargetSummary.id === target.id;
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
-/** Existing session maintenance dialogs, bound to a live main-issued inventory ref. */
-export function useSessionContextActions({ snapshot, onSnapshot }: {
+/** Existing interaction navigation and session dialogs, bound to a live main-issued inventory ref. */
+export function useSessionContextActions({ snapshot, onSnapshot, onOpenSession, onOpenBeacon }: {
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
+  onOpenSession?: (session: SessionSummary, target: TargetRef) => void;
+  onOpenBeacon?: (beacon: BeaconSummary, target: TargetRef) => void;
 }): { actionsForTarget: (target: TargetRef) => ApplicationContextMenuAction[]; dialogs: ReactNode } {
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const onSnapshotRef = useRef(onSnapshot);
   onSnapshotRef.current = onSnapshot;
+  const navigationRef = useRef({ onOpenSession, onOpenBeacon });
+  navigationRef.current = { onOpenSession, onOpenBeacon };
   const mounted = useRef(false);
   const sequence = useRef(0);
   const busyRef = useRef(false);
@@ -96,6 +102,10 @@ export function useSessionContextActions({ snapshot, onSnapshot }: {
 
   const runAction = useCallback(async (target: TargetRef, action: SessionContextActionId, expected: string): Promise<void> => {
     if (busyRef.current || !scopeCurrent(expected) || !selectable(snapshotRef.current, target)) return;
+    const navigation = action === "target.interact" || action === "target.interact-popout";
+    if (!navigation && target.mode !== "session") return;
+    if (action === "target.interact"
+      && !(target.mode === "session" ? navigationRef.current.onOpenSession : navigationRef.current.onOpenBeacon)) return;
     const request = ++sequence.current;
     busyRef.current = true;
     setBusy(true);
@@ -104,16 +114,32 @@ export function useSessionContextActions({ snapshot, onSnapshot }: {
       const response = await window.sliver.selectTarget(target);
       if (!requestCurrent(expected, request) || !selectable(snapshotRef.current, target)) return;
       if (!response.ok || !response.value) {
-        toast.danger("Could not select session", { description: response.error });
+        toast.danger(`Could not select ${target.mode}`, { description: response.error });
         return;
       }
       const confirmed = response.value;
       if (!connected(confirmed) || incarnation(confirmed) !== expected || !selected(confirmed, target)) {
-        toast.warning("Session changed", { description: "The server did not confirm the selected session. Select it again from the live inventory." });
+        toast.warning("Target changed", { description: "The server did not confirm the selected target. Select it again from the live inventory." });
         return;
       }
       const previous = snapshotRef.current;
       onSnapshotRef.current(confirmed);
+      if (!requestCurrent(expected, request) || !selectable(snapshotRef.current, target)
+        || (snapshotRef.current !== previous && !selected(snapshotRef.current, target))) return;
+      if (action === "target.interact") {
+        const summary = confirmed.targetContext.activeTargetSummary!;
+        const ref = confirmed.targetContext.activeTarget!;
+        if (summary.mode === "session") navigationRef.current.onOpenSession?.(summary, ref);
+        else navigationRef.current.onOpenBeacon?.(summary, ref);
+        return;
+      }
+      if (action === "target.interact-popout") {
+        const result = await window.sliver.openInteractionWindow();
+        if (requestCurrent(expected, request) && !result.ok) {
+          toast.danger("Could not pop out interaction", { description: result.error });
+        }
+        return;
+      }
       const current: SessionInteraction = { target: confirmed.targetContext.activeTarget!, incarnation: expected, request, action };
       if (action === "target.rename") {
         setInteraction(current);
@@ -140,7 +166,7 @@ export function useSessionContextActions({ snapshot, onSnapshot }: {
       }
       setInteraction({ ...current, plan: plan.value });
     } catch (error) {
-      if (requestCurrent(expected, request)) toast.danger("Could not review session action", { description: errorMessage(error) });
+      if (requestCurrent(expected, request)) toast.danger(navigation ? "Could not open interaction" : "Could not review session action", { description: errorMessage(error) });
     } finally {
       if (requestCurrent(expected, request)) { busyRef.current = false; setBusy(false); }
     }
@@ -181,14 +207,16 @@ export function useSessionContextActions({ snapshot, onSnapshot }: {
   }, [refresh, requestCurrent]);
 
   const actionsForTarget = useCallback((target: TargetRef): ApplicationContextMenuAction[] => {
-    if (target.mode !== "session" || !selectable(snapshot, target)) return [];
+    if (!selectable(snapshot, target)) return [];
     return sessionContextMenuActions({ target, activeTarget: snapshot.targetContext.activeTarget,
       capabilities: snapshot.targetContext.capabilities, disabled: !usable || busy,
       onAction: (ref, action) => {
         if (contextVersion.current === version) return runAction(ref, action, backend);
         return undefined;
-      } });
-  }, [backend, busy, runAction, snapshot, usable, version]);
+      } }).map((action) => action.id === "target.interact"
+        && !(target.mode === "session" ? onOpenSession : onOpenBeacon)
+        ? { ...action, isDisabled: true } : action);
+  }, [backend, busy, onOpenBeacon, onOpenSession, runAction, snapshot, usable, version]);
 
   const current = interaction && usable && interaction.incarnation === backend
     && (interaction.result || executing || (selected(snapshot, interaction.target) && selectable(snapshot, interaction.target)))

@@ -27,7 +27,8 @@ import {
   faWindowRestore,
 } from "@fortawesome/free-solid-svg-icons";
 import { disconnectedSnapshot, SLIVER_PROTOCOL_COMPATIBILITY } from "../../shared/contracts";
-import type { ConnectionStatus, EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
+import type { EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
+import { isUsableConnection } from "./connection-status";
 import {
   APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
@@ -429,6 +430,8 @@ export function App() {
       connectionIncarnation: snapshot.connection.incarnation ?? 0,
       targetFingerprint: target.fingerprint,
     });
+    setBeaconWorkspaceRoute(undefined);
+    setView("sessions");
   }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
   const changeSessionWorkspace = useCallback((next: SliverSnapshot, route: SessionWorkspaceRoute) => {
     setSnapshot(next);
@@ -449,6 +452,8 @@ export function App() {
       target,
       connectionIncarnation: snapshot.connection.incarnation ?? 0,
     });
+    setSessionWorkspaceRoute(undefined);
+    setView("beacons");
   }, [snapshot.connection.epoch, snapshot.connection.incarnation]);
 
   useEffect(() => {
@@ -678,7 +683,8 @@ export function App() {
             ? "app-content app-content--generate"
             : "app-content"}
         >
-          {view === "overview" ? <OverviewPage snapshot={snapshot} onSnapshot={setSnapshot} onNavigate={changeView} /> : view === "settings" ? (
+          {view === "overview" ? <OverviewPage snapshot={snapshot} onSnapshot={setSnapshot} onNavigate={changeView}
+            onOpenSession={openSessionWorkspace} onOpenBeacon={openBeaconWorkspace} /> : view === "settings" ? (
             <SettingsPage
               isSaving={applicationSettings
                 ? !applicationSettings.isReady || applicationSettings.isSaving
@@ -1114,8 +1120,4 @@ function compatibilityNoticeKey(snapshot: SliverSnapshot): string | undefined {
     ? `${snapshot.connection.server ?? "unknown"}:${capabilities.serverVersion ?? snapshot.connection.version ?? "unknown"}`
     : String(snapshot.connection.epoch);
   return `${connectionIdentity}:${SLIVER_PROTOCOL_COMPATIBILITY.series}`;
-}
-
-function isUsableConnection(status: ConnectionStatus): boolean {
-  return status === "connected" || status === "degraded" || status === "reconnecting";
 }

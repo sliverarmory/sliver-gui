@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { disconnectedSnapshot, type SliverSnapshot } from "../../../shared/contracts";
-import type { SessionSummary } from "../../../shared/target-contracts";
+import type { BeaconSummary, SessionSummary } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyNode } from "../../../shared/topology-contracts";
 import { renderWithApplicationContextMenu } from "../application-context-menu-test-utils";
 import { OverviewDocument, OverviewPage } from "./OverviewPage";
@@ -41,23 +41,26 @@ function sessionSnapshot(): SliverSnapshot {
   return snapshot;
 }
 
-describe("Overview session context menu", () => {
-  it.each(["connected", "degraded"] as const)("keeps the session menu while %s and event updates are stale", async (status) => {
+describe("Overview target context menu", () => {
+  it.each(["connected", "degraded", "reconnecting"] as const)("keeps the session menu while %s and event updates are stale", async (status) => {
     const user = userEvent.setup();
     const snapshot = sessionSnapshot();
     snapshot.connection.status = status;
-    snapshot.eventStream = { status: "stopped", attempt: 0 };
+    snapshot.eventStream = { status: status === "reconnecting" ? "retrying" : "stopped", attempt: 0 };
     const onSnapshot = vi.fn();
-    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={onSnapshot} />);
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={onSnapshot} onOpenSession={vi.fn()} />);
     const node = screen.getByRole("button", { name: "session-host" });
     await user.click(node);
     expect(within(screen.getByRole("complementary", { name: "Infrastructure details" })).getByText("stale")).toBeInTheDocument();
     fireEvent.contextMenu(node);
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getByRole("menuitem", { name: "Interact" })).not.toHaveAttribute("aria-disabled", "true");
+    expect(within(menu).getByRole("menuitem", { name: "Interact in new window" })).not.toHaveAttribute("aria-disabled", "true");
     expect(within(menu).getByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "Close Session" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "Kill Session" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "Rename" })).not.toHaveAttribute("aria-disabled", "true");
     expect(onSnapshot).not.toHaveBeenCalled();
   });
 
@@ -70,7 +73,7 @@ describe("Overview session context menu", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu", { name: "Application context menu" });
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-      "Rename", "Close Session", "Kill Session", "Inspect Element",
+      "Interact", "Interact", "Rename", "Close Session", "Kill Session", "Inspect Element",
     ]);
     expect(props.onSnapshot).not.toHaveBeenCalled();
     await user.keyboard("{Escape}");
@@ -80,19 +83,52 @@ describe("Overview session context menu", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: "session-host" }));
     rendered.contextMenu.emit();
     const missingReferenceMenu = await screen.findByRole("menu");
-    expect(within(missingReferenceMenu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
+    for (const name of ["Interact", "Interact in new window", "Rename", "Close Session", "Kill Session"]) {
+      expect(within(missingReferenceMenu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
   });
 
-  it("does not attach session actions to retained nodes after disconnect", async () => {
+  it("keeps unavailable session actions disabled on retained nodes after disconnect", async () => {
     const props = { onNavigate: vi.fn(), onSnapshot: vi.fn() };
     const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={sessionSnapshot()} {...props} />);
     rendered.rerender(<OverviewPage snapshot={disconnectedSnapshot()} {...props} />);
     fireEvent.contextMenu(screen.getByRole("button", { name: "session-host" }));
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu", { name: "Application context menu" });
-    expect(within(menu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
-    expect(within(menu).queryByRole("menuitem", { name: "Close Session" })).not.toBeInTheDocument();
-    expect(within(menu).queryByRole("menuitem", { name: "Kill Session" })).not.toBeInTheDocument();
+    for (const name of ["Interact", "Interact in new window", "Rename", "Close Session", "Kill Session"]) {
+      expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+
+  it("offers both interactions on beacon nodes and disables them when their reference disappears", async () => {
+    const user = userEvent.setup();
+    const snapshot = sessionSnapshot();
+    const beacon: BeaconSummary = { ...snapshot.sessions[0]!, mode: "beacon", id: "beacon-one", hostname: "beacon-host",
+      checkinStatus: "on-time", intervalMs: 60_000, jitterMs: 0, taskCount: 0, completedTaskCount: 0, nonCompletedTaskCount: 0 };
+    snapshot.domains.beacons = { ...snapshot.domains.sessions, items: [beacon] };
+    snapshot.beacons = [beacon];
+    snapshot.targetContext.selectableTargets.push({ ...snapshot.targetContext.selectableTargets[0]!, mode: "beacon", id: beacon.id });
+    const props = { onNavigate: vi.fn(), onSnapshot: vi.fn(), onOpenBeacon: vi.fn() };
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} {...props} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "beacon-host" }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Interact", "Interact", "Inspect Element",
+    ]);
+    for (const name of ["Interact", "Interact in new window"]) {
+      expect(within(menu).getByRole("menuitem", { name })).not.toHaveAttribute("aria-disabled", "true");
+    }
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    rendered.rerender(<OverviewPage snapshot={{ ...snapshot, targetContext: { ...snapshot.targetContext, selectableTargets: [] } }} {...props} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "beacon-host" }));
+    rendered.contextMenu.emit();
+    const missingReferenceMenu = await screen.findByRole("menu");
+    for (const name of ["Interact", "Interact in new window"]) {
+      expect(within(missingReferenceMenu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+    expect(within(missingReferenceMenu).queryByRole("menuitem", { name: "Rename" })).not.toBeInTheDocument();
   });
 });
 

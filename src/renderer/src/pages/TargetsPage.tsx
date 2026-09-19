@@ -74,7 +74,7 @@ import type {
 import { AreaField, Field } from "../components/FormControls";
 import { useApplicationContextMenuScope } from "../components/ApplicationContextMenu";
 import { RenameSessionModal } from "../components/RenameSessionModal";
-import { sessionContextMenuActions } from "../components/session-context-menu-actions";
+import { sessionContextMenuActions, type SessionContextActionId } from "../components/session-context-menu-actions";
 import {
   beaconTaskCountLabel,
   capabilityFor,
@@ -725,9 +725,9 @@ export function TargetsPage({
     }
   }, []);
 
-  const runSessionRowAction = useCallback(async (
+  const runTargetRowAction = useCallback(async (
     ref: TargetRef,
-    actionId: "target.rename" | "target.kill" | "session.close",
+    actionId: SessionContextActionId,
   ) => {
     const expectedIncarnation = backendIncarnationRef.current;
     const requestSequence = ++targetSelectionRequestSequence.current;
@@ -739,24 +739,38 @@ export function TargetsPage({
         expectedIncarnation !== backendIncarnationRef.current
       ) return;
       if (!result.ok || !result.value) {
-        toast.danger("Could not select session", { description: result.error });
+        toast.danger("Could not select target", { description: result.error });
         return;
       }
       const selectedRef = result.value.targetContext.activeTarget;
       const selectedSummary = result.value.targetContext.activeTargetSummary;
       if (
         targetBackendIncarnation(result.value) !== expectedIncarnation ||
-        selectedRef?.mode !== "session" ||
+        selectedRef?.mode !== ref.mode ||
         targetRefIdentity(selectedRef) !== targetRefIdentity(ref) ||
-        selectedSummary?.mode !== "session" ||
+        selectedSummary?.mode !== ref.mode ||
         selectedSummary.id !== ref.id
       ) {
-        toast.warning("Session changed", {
-          description: "The server did not confirm the selected session. Return to the live inventory and select it again.",
+        toast.warning("Target changed", {
+          description: "The server did not confirm the selected target. Return to the live inventory and select it again.",
         });
         return;
       }
       onSnapshot(result.value);
+      if (actionId === "target.interact") {
+        if (selectedSummary.mode === "session") onOpenSession?.(selectedSummary, selectedRef);
+        else onOpenBeacon?.(selectedSummary, selectedRef);
+        return;
+      }
+      if (actionId === "target.interact-popout") {
+        const opened = await window.sliver.openInteractionWindow();
+        if (!opened.ok && requestSequence === targetSelectionRequestSequence.current &&
+          expectedIncarnation === backendIncarnationRef.current) {
+          toast.danger("Could not open interaction window", { description: opened.error });
+        }
+        return;
+      }
+      if (selectedRef.mode !== "session") return;
       if (actionId === "target.rename") {
         setRenameSessionTarget({ ref: selectedRef, backendIncarnation: expectedIncarnation });
         return;
@@ -774,14 +788,14 @@ export function TargetsPage({
       if (
         requestSequence === targetSelectionRequestSequence.current &&
         expectedIncarnation === backendIncarnationRef.current
-      ) toast.danger("Could not select session", { description: errorMessage(error) });
+      ) toast.danger("Could not select target", { description: errorMessage(error) });
     } finally {
       if (
         requestSequence === targetSelectionRequestSequence.current &&
         expectedIncarnation === backendIncarnationRef.current
       ) setIsSelecting(false);
     }
-  }, [onSnapshot, prepareAction]);
+  }, [onSnapshot, onOpenSession, onOpenBeacon, prepareAction]);
 
   const selectTarget = useCallback(async (target: TargetSummary) => {
     const ref = presentedTargetInventory.refs[targetRowKey(target)];
@@ -1146,7 +1160,7 @@ export function TargetsPage({
             activeTarget={activeRef}
             capabilities={snapshot.targetContext.capabilities}
             onAction={(ref, actionId) => {
-              if (backendIncarnation === backendIncarnationRef.current) void runSessionRowAction(ref, actionId);
+              if (backendIncarnation === backendIncarnationRef.current) void runTargetRowAction(ref, actionId);
             }}
           >
             <DataGrid
@@ -1650,7 +1664,7 @@ function TargetTableContextMenu({
   targetRefs: Readonly<Record<string, TargetRef>>;
   activeTarget: TargetRef | null;
   capabilities: SliverSnapshot["targetContext"]["capabilities"];
-  onAction: (target: TargetRef, actionId: "target.rename" | "target.kill" | "session.close") => void;
+  onAction: (target: TargetRef, actionId: SessionContextActionId) => void;
 }): React.JSX.Element {
   const [contextTarget, setContextTarget] = useState<TargetRef>();
   const scope = useApplicationContextMenuScope({
@@ -1668,7 +1682,7 @@ function TargetTableContextMenu({
         const target = key && event.currentTarget.contains(row)
           ? targets.find((candidate) => targetRowKey(candidate) === key)
           : undefined;
-        setContextTarget(target?.mode === "session" && key ? targetRefs[key] : undefined);
+        setContextTarget(target && key ? targetRefs[key] : undefined);
       }}
     >
       {children}

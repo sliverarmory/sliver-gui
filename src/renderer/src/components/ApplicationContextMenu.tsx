@@ -48,6 +48,7 @@ export type ApplicationContextMenuBuiltInPolicy = "all" | "inspect-only";
 export interface ApplicationContextMenuAction {
   readonly id: string;
   readonly label: string;
+  readonly ariaLabel?: string;
   readonly icon?: IconDefinition;
   readonly isDisabled?: boolean;
   readonly shortcut?: string;
@@ -357,6 +358,7 @@ export function ApplicationContextMenu({
                   id={scopeActionKey(item, index)}
                   key={scopeActionKey(item, index)}
                   textValue={item.label}
+                  {...(item.ariaLabel === undefined ? {} : { "aria-label": item.ariaLabel })}
                   {...(item.isDisabled === undefined ? {} : { isDisabled: item.isDisabled })}
                   {...(item.variant === undefined ? {} : { variant: item.variant })}
                 >

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { disconnectedSnapshot, type SliverDesktopAPI, type SliverSnapshot } from "../../../shared/contracts";
 import type { TargetOperationRecord } from "../../../shared/operation-contracts";
-import type { SessionSummary, TargetActionPlan, TargetRef } from "../../../shared/target-contracts";
+import type { BeaconSummary, SessionSummary, TargetActionPlan, TargetMode, TargetRef } from "../../../shared/target-contracts";
 import type { ApplicationContextMenuAction } from "./ApplicationContextMenu";
 import { sessionContextMenuActions } from "./session-context-menu-actions";
 import { useSessionContextActions } from "./useSessionContextActions";
@@ -24,15 +24,19 @@ const session: SessionSummary = {
   executable: "/tmp/example", version: "1.7.6", locale: "en-US", integrity: "user", burned: false, liveness: "active",
 };
 const target: TargetRef = { mode: "session", id: session.id, backendEpoch: 7, domainRevision: 1, fingerprint: "a".repeat(64) };
+const beacon: BeaconSummary = { ...session, mode: "beacon", id: "beacon-1", checkinStatus: "on-time" };
+const beaconTarget: TargetRef = { ...target, mode: "beacon", id: beacon.id };
 const backend = { configId: "config-1", configName: "Example", server: "192.0.2.1:31337", operator: "alice", epoch: 7, sharedWindowCount: 1 };
 
-function snapshot(active = false): SliverSnapshot {
+function snapshot(active = false, mode: TargetMode = "session"): SliverSnapshot {
   const value = disconnectedSnapshot();
   value.connection = { status: "connected", managedServer: null, epoch: 7, incarnation: 1, server: backend.server, configName: backend.configName };
   value.eventStream.status = "connected";
   value.domains.sessions = { status: "ready", revision: 1, updatedAt: new Date().toISOString(), items: [session], page: { limit: 500, total: 1, truncated: false } };
-  value.targetContext = { ...value.targetContext, selectableTargets: [target],
-    ...(active ? { status: "selected", activeTarget: target, activeTargetSummary: session,
+  if (mode === "beacon") value.domains.beacons = { ...value.domains.sessions, items: [beacon] };
+  const ref = mode === "session" ? target : beaconTarget;
+  value.targetContext = { ...value.targetContext, selectableTargets: [ref],
+    ...(active ? { status: "selected", activeTarget: ref, activeTargetSummary: mode === "session" ? session : beacon,
       capabilities: [{ id: "target.rename", available: true }, { id: "session.close", available: true }, { id: "target.terminate", available: true }] } : {}) };
   return value;
 }
@@ -48,11 +52,12 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-type TestAPI = Pick<SliverDesktopAPI, "selectTarget" | "prepareTargetAction" | "executeTargetActionPlan" | "submitTargetOperation" | "refresh">;
+type TestAPI = Pick<SliverDesktopAPI, "selectTarget" | "prepareTargetAction" | "executeTargetActionPlan" | "submitTargetOperation" | "refresh" | "openInteractionWindow">;
 
-function setup(overrides: Partial<TestAPI> = {}, initial = snapshot()) {
+function setup(overrides: Partial<TestAPI> = {}, initial = snapshot(), contextTarget = target, navigationEnabled = true) {
   const api = {
-    selectTarget: vi.fn<TestAPI["selectTarget"]>().mockResolvedValue({ ok: true, value: snapshot(true) }),
+    selectTarget: vi.fn<TestAPI["selectTarget"]>().mockResolvedValue({ ok: true, value: snapshot(true, contextTarget.mode) }),
+    openInteractionWindow: vi.fn<TestAPI["openInteractionWindow"]>().mockResolvedValue({ ok: true }),
     prepareTargetAction: vi.fn<TestAPI["prepareTargetAction"]>().mockResolvedValue({ ok: true, value: plan() }),
     executeTargetActionPlan: vi.fn<TestAPI["executeTargetActionPlan"]>().mockResolvedValue({ ok: true, value: {
       actionId: "session.close", partial: false,
@@ -63,34 +68,129 @@ function setup(overrides: Partial<TestAPI> = {}, initial = snapshot()) {
     ...overrides,
   };
   vi.stubGlobal("sliver", api);
+  const onOpenSession = vi.fn();
+  const onOpenBeacon = vi.fn();
   let actions: ApplicationContextMenuAction[] = [];
   function Harness({ value }: { value: SliverSnapshot }) {
-    const context = useSessionContextActions({ snapshot: value, onSnapshot });
-    actions = context.actionsForTarget(target);
+    const context = useSessionContextActions({ snapshot: value, onSnapshot,
+      ...(navigationEnabled ? { onOpenSession, onOpenBeacon } : {}) });
+    actions = context.actionsForTarget(contextTarget);
     return <>{actions.map((action) => <button key={action.id} disabled={action.isDisabled}
+      aria-label={`Context ${action.ariaLabel ?? action.label}`}
       onClick={() => { void action.onAction(); }}>Context {action.label}</button>)}{context.dialogs}</>;
   }
   const onSnapshot = vi.fn((value: SliverSnapshot) => rendered.rerender(<Harness value={value} />));
   const rendered = render(<Harness value={initial} />);
-  return { ...rendered, api, onSnapshot, actions: () => actions,
+  return { ...rendered, api, onSnapshot, onOpenSession, onOpenBeacon, actions: () => actions,
     update: (value: SliverSnapshot) => rendered.rerender(<Harness value={value} />) };
 }
 
 describe("session context action definitions", () => {
-  it("keeps the table's labels, ordering, capabilities, and session-only scope", () => {
+  it("places interaction entries first and keeps maintenance labels, capabilities, and session-only scope", () => {
     const onAction = vi.fn();
     const options = { target, activeTarget: target, capabilities: snapshot(true).targetContext.capabilities, disabled: false, onAction };
     expect(sessionContextMenuActions(options).map(({ id, label }) => [id, label])).toEqual([
+      ["target.interact", "Interact"], ["target.interact-popout", "Interact"],
       ["session.rename", "Rename"], ["session.close", "Close Session"], ["session.kill", "Kill Session"],
     ]);
-    expect(sessionContextMenuActions({ ...options, capabilities: [] }).map(({ isDisabled }) => isDisabled)).toEqual([false, true, true]);
+    expect(sessionContextMenuActions({ ...options, capabilities: [] }).map(({ isDisabled }) => isDisabled)).toEqual([false, false, false, true, true]);
     expect(sessionContextMenuActions({ ...options, activeTarget: null, capabilities: [] }).every(({ isDisabled }) => !isDisabled)).toBe(true);
-    expect(sessionContextMenuActions({ ...options, target: { ...target, mode: "beacon" } })).toEqual([]);
+    expect(sessionContextMenuActions({ ...options, target: beaconTarget }).map(({ id }) => id))
+      .toEqual(["target.interact", "target.interact-popout"]);
     expect(onAction).not.toHaveBeenCalled();
   });
 });
 
+describe.each(["session", "beacon"] as const)("%s interaction navigation", (mode) => {
+  const ref = mode === "session" ? target : beaconTarget;
+  const summary = mode === "session" ? session : beacon;
+
+  it("opens the existing current-window view after main confirms the exact selection", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<TestAPI["selectTarget"]>>>();
+    const test = setup({ selectTarget: vi.fn().mockReturnValue(pending.promise) }, snapshot(false, mode), ref);
+    await user.click(screen.getByRole("button", { name: "Context Interact" }));
+    expect(test.onOpenSession).not.toHaveBeenCalled();
+    expect(test.onOpenBeacon).not.toHaveBeenCalled();
+    await act(async () => { pending.resolve({ ok: true, value: snapshot(true, mode) }); });
+    expect(test.api.selectTarget).toHaveBeenCalledExactlyOnceWith(ref);
+    expect(mode === "session" ? test.onOpenSession : test.onOpenBeacon).toHaveBeenCalledExactlyOnceWith(summary, ref);
+    expect(mode === "session" ? test.onOpenBeacon : test.onOpenSession).not.toHaveBeenCalled();
+    expect(test.onSnapshot).toHaveBeenCalledOnce();
+    expect(test.api.openInteractionWindow).not.toHaveBeenCalled();
+    expect(test.api.prepareTargetAction).not.toHaveBeenCalled();
+    expect(test.api.submitTargetOperation).not.toHaveBeenCalled();
+  });
+
+  it("opens the existing standalone interaction window after main confirms the exact selection", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<TestAPI["selectTarget"]>>>();
+    const test = setup({ selectTarget: vi.fn().mockReturnValue(pending.promise) }, snapshot(false, mode), ref);
+    await user.click(screen.getByRole("button", { name: "Context Interact in new window" }));
+    expect(test.api.openInteractionWindow).not.toHaveBeenCalled();
+    await act(async () => { pending.resolve({ ok: true, value: snapshot(true, mode) }); });
+    expect(test.api.selectTarget).toHaveBeenCalledExactlyOnceWith(ref);
+    expect(test.api.openInteractionWindow).toHaveBeenCalledExactlyOnceWith();
+    expect(test.onOpenSession).not.toHaveBeenCalled();
+    expect(test.onOpenBeacon).not.toHaveBeenCalled();
+    expect(test.api.prepareTargetAction).not.toHaveBeenCalled();
+    expect(test.api.submitTargetOperation).not.toHaveBeenCalled();
+  });
+
+  it.each(["Context Interact", "Context Interact in new window"])("ignores %s selection after the backend incarnation changes", async (label) => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<TestAPI["selectTarget"]>>>();
+    const test = setup({ selectTarget: vi.fn().mockReturnValue(pending.promise) }, snapshot(false, mode), ref);
+    await user.click(screen.getByRole("button", { name: label }));
+    const changed = snapshot(false, mode);
+    changed.connection.incarnation = 2;
+    test.update(changed);
+    await act(async () => { pending.resolve({ ok: true, value: snapshot(true, mode) }); });
+    expect(test.api.openInteractionWindow).not.toHaveBeenCalled();
+    expect(test.onOpenSession).not.toHaveBeenCalled();
+    expect(test.onOpenBeacon).not.toHaveBeenCalled();
+    expect(test.onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each(["Context Interact", "Context Interact in new window"])("rejects %s when the returned selection has a different fingerprint", async (label) => {
+    const user = userEvent.setup();
+    const changed = snapshot(true, mode);
+    changed.targetContext.activeTarget = { ...ref, fingerprint: "b".repeat(64) };
+    const test = setup({ selectTarget: vi.fn().mockResolvedValue({ ok: true, value: changed }) }, snapshot(false, mode), ref);
+    await user.click(screen.getByRole("button", { name: label }));
+    expect(test.api.selectTarget).toHaveBeenCalledOnce();
+    expect(test.api.openInteractionWindow).not.toHaveBeenCalled();
+    expect(test.onOpenSession).not.toHaveBeenCalled();
+    expect(test.onOpenBeacon).not.toHaveBeenCalled();
+    expect(test.onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("disables current-window interaction when its navigation callback is unavailable", () => {
+    setup({}, snapshot(false, mode), ref, false);
+    expect(screen.getByRole("button", { name: "Context Interact" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Context Interact in new window" })).toBeEnabled();
+  });
+});
+
 describe("session context actions", () => {
+  it("keeps a session selection valid while only the event stream starts retrying", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<TestAPI["selectTarget"]>>>();
+    const test = setup({ selectTarget: vi.fn().mockReturnValue(pending.promise) });
+    await user.click(screen.getByRole("button", { name: "Context Rename" }));
+    const retrying = snapshot();
+    retrying.connection.status = "reconnecting";
+    retrying.eventStream.status = "retrying";
+    test.update(retrying);
+    const confirmed = snapshot(true);
+    confirmed.connection.status = "reconnecting";
+    confirmed.eventStream.status = "retrying";
+    await act(async () => { pending.resolve({ ok: true, value: confirmed }); });
+    expect(await screen.findByRole("dialog", { name: "Rename session" })).toBeInTheDocument();
+    expect(test.api.selectTarget).toHaveBeenCalledExactlyOnceWith(target);
+    expect(test.api.submitTargetOperation).not.toHaveBeenCalled();
+  });
+
   it("selects the exact session and requires the existing confirmation before sending a reviewed token", async () => {
     const user = userEvent.setup();
     const { api, onSnapshot } = setup();
@@ -147,7 +247,7 @@ describe("session context actions", () => {
 
   it("retires an already-open menu across a disconnect even if the same backend later returns", async () => {
     const test = setup();
-    const oldAction = test.actions()[1]!;
+    const oldAction = test.actions().find((action) => action.id === "session.close")!;
     test.update(disconnectedSnapshot());
     test.update(snapshot());
     await act(async () => { await oldAction.onAction(); });
