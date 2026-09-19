@@ -198,18 +198,57 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     }
     await page.screenshot({ path: join(artifactDirectory, "overview-nested-topology-dark.png"), animations: "disabled" });
 
-    for (const [option, kind, ids, hiddenKind, hiddenIds] of [
-      ["External Builder", "external-builder", BUILDERS, "crackstation", CRACKSTATION_IDS],
-      ["Crackstation", "crackstation", CRACKSTATION_IDS, "external-builder", BUILDERS],
-    ] as const) {
-      await chooseFilter(page, "Infrastructure type", option);
-      for (const id of ids) await serviceNode(page, kind, id).waitFor();
-      for (const id of hiddenIds) assert.equal(await serviceNode(page, hiddenKind, id).count(), 0);
-      for (const hostname of SESSION_HOSTS) assert.equal(await nodeByLabel(page, hostname).count(), 0);
-      await page.getByText("2 matches · connection context included", { exact: true }).waitFor();
+    const allNodeLabels = ["This client", snapshot.connection.server!, ...SESSION_HOSTS, RELAY,
+      ...OPERATORS, ...BUILDERS, "overview-crackstation", "overview-crackstation"];
+    const typeList = await openFilter(page, "Infrastructure type");
+    await assertAllOptionsSelected(typeList);
+    await toggleFilter(typeList, "All types");
+    await expectNodeLabels(page, []);
+    await toggleFilter(typeList, "All types");
+    await expectNodeLabels(page, allNodeLabels);
+    await assertAllOptionsSelected(typeList);
+    await toggleFilter(typeList, "All types");
+    await toggleFilter(typeList, "External Builder");
+    await expectNodeLabels(page, BUILDERS);
+    assert.equal(await edgeTestIds(page).then((edges) => edges.length), 0,
+      "unselected server and client categories must not return as connection context");
+    await toggleFilter(typeList, "Crackstation");
+    await expectNodeLabels(page, [...BUILDERS, "overview-crackstation", "overview-crackstation"]);
+    assert.equal(await typeList.getByRole("option", { name: "All types", exact: true }).getAttribute("aria-selected"), "false");
+    assert.equal(await typeList.getByRole("option", { name: "External Builder", exact: true }).getAttribute("aria-selected"), "true");
+    assert.equal(await typeList.getByRole("option", { name: "Crackstation", exact: true }).getAttribute("aria-selected"), "true");
+    await toggleFilter(typeList, "External Builder");
+    await expectNodeLabels(page, ["overview-crackstation", "overview-crackstation"]);
+    await toggleFilter(typeList, "Operator");
+    await expectNodeLabels(page, [...OPERATORS, "overview-crackstation", "overview-crackstation"]);
+    await page.screenshot({ path: join(artifactDirectory, "overview-types-multiselect.png"), animations: "disabled" });
+    await closeFilter(page, typeList);
+
+    const stateList = await openFilter(page, "Status");
+    await assertAllOptionsSelected(stateList);
+    await toggleFilter(stateList, "All states");
+    await expectNodeLabels(page, []);
+    await toggleFilter(stateList, "Healthy");
+    await expectNodeLabels(page, ["overview-fixture", "overview-online-observer", "overview-crackstation", "overview-crackstation"]);
+    await toggleFilter(stateList, "Inactive");
+    await expectNodeLabels(page, [...OPERATORS, "overview-crackstation", "overview-crackstation"]);
+    assert.equal(await stateList.getByRole("option", { name: "Healthy", exact: true }).getAttribute("aria-selected"), "true");
+    assert.equal(await stateList.getByRole("option", { name: "Inactive", exact: true }).getAttribute("aria-selected"), "true");
+    await page.screenshot({ path: join(artifactDirectory, "overview-states-multiselect.png"), animations: "disabled" });
+    await toggleFilter(stateList, "Healthy");
+    await expectNodeLabels(page, ["overview-offline-observer"]);
+    await closeFilter(page, stateList);
+
+    await page.getByLabel("Search infrastructure", { exact: true }).fill("no-matching-infrastructure");
+    await expectNodeLabels(page, []);
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await expectNodeLabels(page, allNodeLabels);
+    assert.equal(await page.getByLabel("Search infrastructure", { exact: true }).inputValue(), "");
+    for (const label of ["Infrastructure type", "Status"]) {
+      const list = await openFilter(page, label);
+      await assertAllOptionsSelected(list);
+      await closeFilter(page, list);
     }
-    await chooseFilter(page, "Infrastructure type", "All types");
-    await nodeByLabel(page, "overview-deepest").waitFor();
     await page.getByRole("button", { name: "List", exact: true }).click();
     await page.getByTestId("topology-graph").waitFor({ state: "hidden" });
     const resources = page.getByRole("table", { name: "Infrastructure resources", exact: true });
@@ -317,11 +356,38 @@ function serviceNode(page: Page, kind: "external-builder" | "crackstation", id: 
   return page.locator(`.react-flow__node[data-id$="${suffix}"]`).getByTestId("topology-node");
 }
 
-async function chooseFilter(page: Page, label: string, option: string): Promise<void> {
+async function openFilter(page: Page, label: string): Promise<Locator> {
   await page.getByRole("button", { name: new RegExp(label, "u") }).click();
-  const list = page.getByRole("listbox");
-  await page.getByRole("option", { name: option, exact: true }).click();
+  const list = page.getByRole("listbox", { name: label, exact: true });
+  await list.waitFor();
+  assert.equal(await list.getAttribute("aria-multiselectable"), "true");
+  return list;
+}
+
+async function toggleFilter(list: Locator, option: string): Promise<void> {
+  await list.getByRole("option", { name: option, exact: true }).click();
+  assert.equal(await list.isVisible(), true, "the dropdown must stay open while toggling multiple options");
+}
+
+async function assertAllOptionsSelected(list: Locator): Promise<void> {
+  for (const option of await list.getByRole("option").all()) {
+    assert.equal(await option.getAttribute("aria-selected"), "true", `expected ${await option.innerText()} to be selected`);
+  }
+}
+
+async function closeFilter(page: Page, list: Locator): Promise<void> {
+  await page.keyboard.press("Escape");
   await list.waitFor({ state: "hidden" });
+}
+
+async function expectNodeLabels(page: Page, labels: readonly string[]): Promise<void> {
+  await page.waitForFunction((expected) => {
+    const browser = globalThis as unknown as {
+      document: { querySelectorAll: (selector: string) => ArrayLike<{ textContent: string | null }> };
+    };
+    const actual = Array.from(browser.document.querySelectorAll('[data-testid="topology-node"] strong'), (node) => node.textContent).sort();
+    return JSON.stringify(actual) === JSON.stringify(expected);
+  }, [...labels].sort());
 }
 
 function decodeEdgeId(testId: string): string {

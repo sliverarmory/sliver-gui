@@ -114,10 +114,15 @@ for additional trusted adapters.
 ## Rendering and layout
 
 `OverviewDocument` consumes a `TopologyDocument` with an optional node decorator. Search, type/status
-filters, the inspector, and the accessible list all use that document. The
-projection preserves the complete upstream communication path and parent
-enclosures while filtering, with cycle-safe traversal. Other associations retain
-one hop of context.
+filters, the inspector, and the accessible list all use that document. Type and
+state filters allow multiple selections: a node must match any selected type
+and any selected state. All options start selected; an empty selection shows no
+nodes. Clear filters restores all options and clears the search.
+Search preserves upstream communication paths and parent enclosures among
+selected types and states, with cycle-safe traversal. Other associations retain
+one hop of eligible context. Unselected categories stay hidden, and a visible
+child whose enclosure is hidden renders independently. Only original edges
+between visible endpoints remain; filtering never adds shortcut connections.
 Large homogeneous leaf collections collapse into summaries, with their
 individual records available on expansion. Intermediate relays and branching
 nodes stay explicit. Unknown kinds retain a generic card

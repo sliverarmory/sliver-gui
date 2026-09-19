@@ -266,6 +266,29 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       await sessionNode.waitFor();
       await beaconNode.waitFor();
 
+      if (hosting !== "unmanaged") {
+        const cloud = page.locator(`.topology-enclosure[data-provider="${hosting}"]`);
+        const server = page.getByTestId("topology-node").filter({
+          has: page.locator(".topology-node__kind").filter({ hasText: /^server$/u }),
+        });
+        const allNodes = await page.getByTestId("topology-node").count();
+        await page.getByRole("button", { name: /Infrastructure type/u }).click();
+        const types = page.getByRole("listbox", { name: "Infrastructure type", exact: true });
+        await types.getByRole("option", { name: "Cloud", exact: true }).click();
+        assert.equal(await types.isVisible(), true);
+        assert.equal(await types.getByRole("option", { name: "Server", exact: true }).getAttribute("aria-selected"), "true");
+        await page.keyboard.press("Escape");
+        await types.waitFor({ state: "hidden" });
+        await cloud.waitFor({ state: "hidden" });
+        await server.waitFor();
+        await sessionNode.waitFor();
+        await beaconNode.waitFor();
+        assert.equal(await page.getByTestId("topology-node").count(), allNodes - 1,
+          "excluding the cloud enclosure must preserve its selected server as a standalone node");
+        await chooseFilter(page, "Infrastructure type", "All types");
+        await cloud.waitFor();
+      }
+
       await page.getByRole("button", { name: "List", exact: true }).click();
       await page.getByTestId("topology-graph").waitFor({ state: "hidden" });
       const resources = page.getByRole("table", { name: "Infrastructure resources", exact: true });
@@ -700,8 +723,18 @@ async function assertInteractionWorkspace(page: Page, mode: "session" | "beacon"
 
 async function chooseFilter(page: Page, label: string, option: string): Promise<void> {
   await page.getByRole("button", { name: new RegExp(label, "u") }).click();
-  const list = page.getByRole("listbox");
-  await page.getByRole("option", { name: option, exact: true }).click();
+  const list = page.getByRole("listbox", { name: label, exact: true });
+  await list.waitFor();
+  assert.equal(await list.getAttribute("aria-multiselectable"), "true");
+  const allLabel = label === "Infrastructure type" ? "All types" : "All states";
+  const all = list.getByRole("option", { name: allLabel, exact: true });
+  if (await all.getAttribute("aria-selected") !== "true") await all.click();
+  if (option !== allLabel) {
+    await all.click();
+    await list.getByRole("option", { name: option, exact: true }).click();
+  }
+  assert.equal(await list.isVisible(), true, "multiselect filters stay open after changing choices");
+  await page.keyboard.press("Escape");
   await list.waitFor({ state: "hidden" });
 }
 

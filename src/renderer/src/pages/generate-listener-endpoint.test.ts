@@ -7,6 +7,7 @@ import {
   appendListenerEndpoint,
   listenerEndpointAlreadyAdded,
   listenerEndpointOptions,
+  resolveManagedWildcardListenerEndpoint,
   resolveWildcardListenerEndpoints,
 } from "./generate-listener-endpoint";
 
@@ -140,6 +141,39 @@ describe("running listener endpoint derivation", () => {
       ]);
     expect(resolveWildcardListenerEndpoints(wildcard, inventory, "remote.example:53137"))
       .toMatchObject({ options: [], unavailableReason: expect.stringMatching(/remote.*does not expose/i) });
+  });
+
+  it("resolves a managed wildcard listener against the managed server public IP", () => {
+    const [wildcard] = listenerEndpointOptions([
+      job({ name: "mTLS", description: "mutual tls listener 0.0.0.0:9443", domains: [], port: 9443 }),
+    ]);
+    if (!wildcard) throw new Error("Expected wildcard listener option");
+
+    expect(resolveManagedWildcardListenerEndpoint(wildcard, " 203.0.113.24 ")).toEqual({
+      options: [{
+        id: `${wildcard.id}:managed-public:203.0.113.24`,
+        endpoint: "mtls://203.0.113.24:9443",
+        interfaceName: "Managed server",
+        family: "IPv4",
+        scope: "global",
+      }],
+    });
+  });
+
+  it("requires an available managed public IP in the wildcard listener address family", () => {
+    const [wildcard] = listenerEndpointOptions([
+      job({ name: "mTLS", description: "mutual tls listener [::]:8888", domains: [], port: 8888 }),
+    ]);
+    if (!wildcard) throw new Error("Expected wildcard listener option");
+
+    expect(resolveManagedWildcardListenerEndpoint(wildcard, null)).toMatchObject({
+      options: [],
+      unavailableReason: expect.stringMatching(/does not have an available public IP/i),
+    });
+    expect(resolveManagedWildcardListenerEndpoint(wildcard, "203.0.113.24")).toMatchObject({
+      options: [],
+      unavailableReason: expect.stringMatching(/IPv6 listener.*IPv4 public IP/i),
+    });
   });
 
   it("does not produce endpoints from invalid ports or malformed domains", () => {

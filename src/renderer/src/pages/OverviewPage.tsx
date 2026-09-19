@@ -10,7 +10,7 @@ import { useSessionContextActions } from "../components/useSessionContextActions
 import { sessionContextMenuActions } from "../components/session-context-menu-actions";
 import { isUsableConnection } from "../connection-status";
 import { createOverviewTopology, overviewTopologyScopeId } from "../topology/overview-topology";
-import { projectTopology } from "../topology/topology-projection";
+import { projectTopology, type TopologyFilters } from "../topology/topology-projection";
 import { TopologyGraph, type TopologySelection } from "../topology/TopologyGraph";
 import { TopologyIcon } from "../topology/TopologyIcon";
 
@@ -151,13 +151,13 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   decorateNode?: (node: TopologyNode, content: ReactNode) => ReactNode;
 }) {
   const [query, setQuery] = useState("");
-  const [kind, setKind] = useState("all");
-  const [status, setStatus] = useState("all");
+  const [selectedKinds, setSelectedKinds] = useState<TopologyFilters["kinds"]>("all");
+  const [selectedStatuses, setSelectedStatuses] = useState<TopologyFilters["statuses"]>("all");
   const [presentation, setPresentation] = useState<"graph" | "list">("graph");
   const [selection, setSelection] = useState<TopologySelection>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const projection = useMemo(() => projectTopology(document, { query, kind, status, expanded }),
-    [document, query, kind, status, expanded]);
+  const projection = useMemo(() => projectTopology(document, { query, kinds: selectedKinds, statuses: selectedStatuses, expanded }),
+    [document, query, selectedKinds, selectedStatuses, expanded]);
   const kinds = useMemo(() => [...new Set(document.nodes.map((node) => node.kind))].sort(), [document.nodes]);
   const selectedNode = selection?.type === "node" ? projection.document.nodes.find((node) => node.id === selection.id) : undefined;
   const selectedEdge = selection?.type === "edge" ? projection.document.edges.find((edge) => edge.id === selection.id) : undefined;
@@ -166,7 +166,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
     if (selection && !selectedNode && !selectedEdge) setSelection(null);
   }, [selection, selectedNode, selectedEdge]);
 
-  const filtering = Boolean(query || kind !== "all" || status !== "all");
+  const filtering = Boolean(query || selectedKinds !== "all" || selectedStatuses !== "all");
   const visibleNotices = document.notices.filter((notice) => notice.severity === "warning");
   const resourceCount = document.nodes.filter((node) => node.role === "resource").length;
   const updated = document.updatedAt ? new Date(document.updatedAt) : null;
@@ -185,18 +185,18 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
       <SearchField aria-label="Search infrastructure" value={query} onChange={setQuery} className="overview-search" variant="secondary">
         <SearchField.Group><SearchField.SearchIcon /><SearchField.Input placeholder="Search infrastructure…" /><SearchField.ClearButton /></SearchField.Group>
       </SearchField>
-      <OverviewFilter label="Infrastructure type" value={kind} onChange={setKind}
-        options={[["all", "All types"], ...kinds.map((value): [string, string] => [value, titleCase(value)])]} />
-      <OverviewFilter label="Status" value={status} onChange={setStatus}
-        options={[["all", "All states"], ["healthy", "Healthy"], ["warning", "Needs attention"], ["inactive", "Inactive"], ["unknown", "Unknown"]]} />
+      <OverviewFilter label="Infrastructure type" noun="types" value={selectedKinds} onChange={setSelectedKinds}
+        options={kinds.map((value): [string, string] => [value, titleCase(value)])} />
+      <OverviewFilter label="Status" noun="states" value={selectedStatuses} onChange={setSelectedStatuses}
+        options={[["healthy", "Healthy"], ["warning", "Needs attention"], ["inactive", "Inactive"], ["unknown", "Unknown"]]} />
       <div className="overview-view-controls" role="group" aria-label="Overview presentation">
         <Button size="sm" variant={presentation === "graph" ? "secondary" : "ghost"} aria-pressed={presentation === "graph"} onPress={() => setPresentation("graph")}>Graph</Button>
         <Button size="sm" variant={presentation === "list" ? "secondary" : "ghost"} aria-pressed={presentation === "list"} onPress={() => setPresentation("list")}>List</Button>
       </div>
     </div>
     {filtering ? <div className="overview-filter-summary" role="status">
-      <span>{projection.matchCount} matches · connection context included</span>
-      <Button size="sm" variant="ghost" onPress={() => { setQuery(""); setKind("all"); setStatus("all"); }}>Clear filters</Button>
+      <span>{projection.matchCount} matches{query.trim() ? " · connection context included" : ""}</span>
+      <Button size="sm" variant="ghost" onPress={() => { setQuery(""); setSelectedKinds("all"); setSelectedStatuses("all"); }}>Clear filters</Button>
     </div> : null}
     {visibleNotices.length ? <div className="overview-notices" aria-label="Topology data status">
       {visibleNotices.map((notice) => <p key={notice.id} data-severity={notice.severity}>{notice.message}</p>)}
@@ -242,13 +242,34 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   </section>;
 }
 
-function OverviewFilter({ label, value, onChange, options }: {
-  label: string; value: string; onChange: (value: string) => void; options: [string, string][];
+function OverviewFilter({ label, noun, value, onChange, options }: {
+  label: string;
+  noun: "types" | "states";
+  value: "all" | ReadonlySet<string>;
+  onChange: (value: "all" | ReadonlySet<string>) => void;
+  options: [string, string][];
 }) {
-  return <Select aria-label={label} className="overview-filter" value={value} onChange={(value) => onChange(String(value ?? "all"))} variant="secondary">
-    <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
-    <Select.Popover><ListBox aria-label={label}>{options.map(([id, text]) =>
-      <ListBox.Item key={id} id={id} textValue={text}><Label>{text}</Label><ListBox.ItemIndicator /></ListBox.Item>)}
+  const allKey = "__all__";
+  const allLabel = `All ${noun}`;
+  const selectedOptions = value === "all" ? options : options.filter(([id]) => value.has(id));
+  const summary = value === "all" ? allLabel : selectedOptions.length === 0 ? `No ${noun}`
+    : selectedOptions.length === 1 ? selectedOptions[0]![1] : `${selectedOptions.length} ${noun} selected`;
+  return <Select aria-label={label} className="overview-filter" selectionMode="multiple" shouldCloseOnSelect={false}
+    value={value === "all" ? [allKey, ...options.map(([id]) => id)] : [...value]}
+    onChange={(keys) => {
+      const next = new Set(keys.map(String));
+      // The aggregate option toggles all choices; individual choices remain
+      // independently checked, including when starting from "All".
+      if (value === "all" && !next.has(allKey)) { onChange(new Set()); return; }
+      if (value !== "all" && next.has(allKey)) { onChange("all"); return; }
+      const selected = new Set(options.filter(([id]) => next.has(id)).map(([id]) => id));
+      onChange(selected.size === options.length ? "all" : selected);
+    }} variant="secondary">
+    <Select.Trigger><Select.Value>{summary}</Select.Value><Select.Indicator /></Select.Trigger>
+    <Select.Popover><ListBox selectionMode="multiple" selectionBehavior="toggle">
+      <ListBox.Item id={allKey} textValue={allLabel}><Label>{allLabel}</Label><ListBox.ItemIndicator /></ListBox.Item>
+      {options.map(([id, text]) =>
+        <ListBox.Item key={id} id={id} textValue={text}><Label>{text}</Label><ListBox.ItemIndicator /></ListBox.Item>)}
     </ListBox></Select.Popover>
   </Select>;
 }

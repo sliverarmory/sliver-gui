@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   LocalNetworkInterfaceInventory,
+  ManagedServerReference,
   NetworkInterfaceAddressScope,
   SliverSnapshot,
 } from "../../../shared/contracts";
@@ -32,6 +33,7 @@ import {
   listenerEndpointAlreadyAdded,
   listenerEndpointOptions,
   listenerProtocolLabel,
+  resolveManagedWildcardListenerEndpoint,
   resolveWildcardListenerEndpoints,
   type ListenerEndpointOption,
   type ListenerInterfaceEndpointOption,
@@ -44,6 +46,7 @@ export interface ListenerEndpointSelectorProps {
   currentC2: string;
   connectionIncarnation: number | undefined;
   connectionServer: string | undefined;
+  managedServer: ManagedServerReference | null;
   targetOs: string;
   onOpenChange: (isOpen: boolean) => void;
   onAddEndpoint: (endpoint: string) => void;
@@ -65,6 +68,7 @@ export function ListenerEndpointSelector({
   currentC2,
   connectionIncarnation,
   connectionServer,
+  managedServer,
   targetOs,
   onOpenChange,
   onAddEndpoint,
@@ -104,7 +108,7 @@ export function ListenerEndpointSelector({
   }, [isAdded, isOpen, options]);
 
   useEffect(() => {
-    if (!isOpen || !hasWildcardListener) {
+    if (!isOpen || !hasWildcardListener || managedServer) {
       interfaceRequest.current += 1;
       setInterfaceInventory({ status: "idle" });
       return;
@@ -136,22 +140,31 @@ export function ListenerEndpointSelector({
     return () => {
       if (request === interfaceRequest.current) interfaceRequest.current += 1;
     };
-  }, [connectionIncarnation, hasWildcardListener, isOpen, jobs.revision]);
+  }, [connectionIncarnation, hasWildcardListener, isOpen, jobs.revision, managedServer]);
 
   const selectedOption = useMemo(
     () => options.find((option) => option.id === selectedId),
     [options, selectedId],
   );
   const interfaceResolution = useMemo(
-    () => selectedOption?.wildcardBinding && interfaceInventory.status === "ready"
-      ? resolveWildcardListenerEndpoints(selectedOption, interfaceInventory.value, connectionServer)
-      : undefined,
-    [connectionServer, interfaceInventory, selectedOption],
+    () => {
+      if (!selectedOption?.wildcardBinding) return undefined;
+      if (managedServer) {
+        return resolveManagedWildcardListenerEndpoint(
+          selectedOption,
+          managedServer.overview?.publicIpAddress,
+        );
+      }
+      return interfaceInventory.status === "ready"
+        ? resolveWildcardListenerEndpoints(selectedOption, interfaceInventory.value, connectionServer)
+        : undefined;
+    },
+    [connectionServer, interfaceInventory, managedServer, selectedOption],
   );
   const interfaceOptions = interfaceResolution?.options ?? EMPTY_INTERFACE_OPTIONS;
 
   useEffect(() => {
-    if (!isOpen || !selectedOption?.wildcardBinding || interfaceInventory.status !== "ready") {
+    if (!isOpen || !selectedOption?.wildcardBinding || !interfaceResolution) {
       setSelectedInterfaceId(null);
       return;
     }
@@ -164,7 +177,7 @@ export function ListenerEndpointSelector({
         (option) => !listenerEndpointAlreadyAdded(currentC2, option.endpoint, targetOs),
       )?.id ?? null;
     });
-  }, [currentC2, interfaceInventory.status, interfaceOptions, isOpen, selectedOption, targetOs]);
+  }, [currentC2, interfaceOptions, interfaceResolution, isOpen, selectedOption, targetOs]);
 
   const selectedInterfaceOption = useMemo(
     () => interfaceOptions.find((option) => option.id === selectedInterfaceId),
@@ -220,7 +233,8 @@ export function ListenerEndpointSelector({
             <div className="min-w-0 flex-1">
               <Modal.Heading>Add listener endpoint</Modal.Heading>
               <p className="mt-0.5 text-xs font-normal leading-relaxed text-muted">
-                Choose an endpoint advertised by a running C2 listener. Existing entries remain unchanged.
+                Choose an endpoint advertised by a running C2 listener. Untouched default content is replaced;
+                edited or selected endpoints are kept.
               </p>
             </div>
           </Modal.Header>
@@ -355,16 +369,18 @@ export function ListenerEndpointSelector({
                         Callback address
                       </h3>
                       <p className="mt-0.5 text-xs text-muted">
-                        Addresses configured on the machine running this GUI, ordered by routability.
+                        {managedServer
+                          ? `Public IP reported for ${managedServer.name}.`
+                          : "Addresses configured on the machine running this GUI, ordered by routability."}
                       </p>
                     </div>
 
-                    {interfaceInventory.status === "idle" || interfaceInventory.status === "loading" ? (
+                    {!managedServer && (interfaceInventory.status === "idle" || interfaceInventory.status === "loading") ? (
                       <div className="flex items-center gap-2.5 rounded-xl bg-default px-3 py-3 text-xs text-muted" role="status">
                         <Spinner aria-label="Loading configured network interfaces" size="sm" />
                         <p>Loading configured network interfaces…</p>
                       </div>
-                    ) : interfaceInventory.status === "error" ? (
+                    ) : !managedServer && interfaceInventory.status === "error" ? (
                       <InterfaceMessage error message={interfaceInventory.error} />
                     ) : interfaceResolution?.unavailableReason ? (
                       <InterfaceMessage message={interfaceResolution.unavailableReason} />

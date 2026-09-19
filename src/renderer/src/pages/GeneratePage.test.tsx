@@ -51,6 +51,57 @@ function readyGenerationSnapshot() {
   return snapshot;
 }
 
+function wildcardListenerSnapshot() {
+  const snapshot = readyGenerationSnapshot();
+  snapshot.domains.jobs = {
+    status: "ready",
+    revision: 1,
+    updatedAt: "2026-09-19T12:00:00.000Z",
+    items: [{
+      id: 1,
+      name: "mTLS",
+      description: "mutual tls listener 0.0.0.0:8888",
+      protocol: "tcp",
+      port: 8888,
+      domains: [],
+      profileName: "",
+    }],
+    page: { limit: 500, total: 1, truncated: false },
+  };
+  return snapshot;
+}
+
+function advertisedListenerSnapshot() {
+  const snapshot = readyGenerationSnapshot();
+  snapshot.domains.jobs = {
+    status: "ready",
+    revision: 1,
+    updatedAt: "2026-08-29T12:00:00.000Z",
+    items: [
+      {
+        id: 7,
+        name: "HTTPS",
+        description: "Primary HTTPS listener",
+        protocol: "tcp",
+        port: 8443,
+        domains: ["first.example.test"],
+        profileName: "",
+      },
+      {
+        id: 8,
+        name: "HTTPS",
+        description: "Secondary HTTPS listener",
+        protocol: "tcp",
+        port: 9443,
+        domains: ["second.example.test"],
+        profileName: "",
+      },
+    ],
+    page: { limit: 500, total: 2, truncated: false },
+  };
+  return snapshot;
+}
+
 function targetMatrixSnapshot() {
   const snapshot = readyGenerationSnapshot();
   snapshot.domains.compiler.items = [
@@ -226,35 +277,9 @@ describe("GeneratePage action footer", () => {
     expect(screen.getByText(/without a scheme default to mTLS/i)).toBeInTheDocument();
   });
 
-  it("adds a selected running listener endpoint without replacing existing C2 entries", async () => {
+  it("replaces untouched C2 content with the first selected listener and appends later listeners", async () => {
     const user = userEvent.setup();
-    const snapshot = readyGenerationSnapshot();
-    snapshot.domains.jobs = {
-      status: "ready",
-      revision: 1,
-      updatedAt: "2026-08-29T12:00:00.000Z",
-      items: [
-        {
-          id: 7,
-          name: "HTTPS",
-          description: "Primary HTTPS listener",
-          protocol: "tcp",
-          port: 8443,
-          domains: ["first.example.test"],
-          profileName: "",
-        },
-        {
-          id: 8,
-          name: "HTTPS",
-          description: "Secondary HTTPS listener",
-          protocol: "tcp",
-          port: 9443,
-          domains: ["second.example.test"],
-          profileName: "",
-        },
-      ],
-      page: { limit: 500, total: 2, truncated: false },
-    };
+    const snapshot = advertisedListenerSnapshot();
 
     render(<GeneratePage snapshot={snapshot} />);
 
@@ -277,9 +302,62 @@ describe("GeneratePage action footer", () => {
     await user.click(addEndpoint);
 
     expect(screen.queryByRole("dialog", { name: "Add listener endpoint" })).not.toBeInTheDocument();
+    expect(c2Field).toHaveValue("https://second.example.test:9443");
+
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+    const firstListener = screen.getByRole("option", {
+      name: /Job #7.*https:\/\/first\.example\.test:8443/i,
+    });
+    await waitFor(() => expect(firstListener).toHaveAttribute("aria-selected", "true"));
+    const secondAddEndpoint = screen.getByRole("button", { name: "Add endpoint" });
+    await waitFor(() => expect(secondAddEndpoint).toBeEnabled());
+    await user.click(secondAddEndpoint);
+
     expect(c2Field).toHaveValue(
-      "mtls://127.0.0.1:8888\nhttps://second.example.test:9443",
+      "https://second.example.test:9443\nhttps://first.example.test:8443",
     );
+  });
+
+  it("appends a selected listener when the operator modified the C2 textarea", async () => {
+    const user = userEvent.setup();
+    render(<GeneratePage snapshot={advertisedListenerSnapshot()} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    await user.clear(c2Field);
+    await user.type(c2Field, "mtls://operator.example.test:8888");
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+    await user.click(screen.getByRole("option", {
+      name: /Job #8.*https:\/\/second\.example\.test:9443/i,
+    }));
+    const addEndpoint = screen.getByRole("button", { name: "Add endpoint" });
+    await waitFor(() => expect(addEndpoint).toBeEnabled());
+    await user.click(addEndpoint);
+
+    expect(c2Field).toHaveValue(
+      "mtls://operator.example.test:8888\nhttps://second.example.test:9443",
+    );
+  });
+
+  it("restores replacement behavior after the form is reset", async () => {
+    const user = userEvent.setup();
+    render(<GeneratePage snapshot={advertisedListenerSnapshot()} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    await user.clear(c2Field);
+    await user.type(c2Field, "mtls://operator.example.test:8888");
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+    expect(c2Field).toHaveValue("mtls://127.0.0.1:8888");
+
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+    const firstListener = screen.getByRole("option", {
+      name: /Job #7.*https:\/\/first\.example\.test:8443/i,
+    });
+    await waitFor(() => expect(firstListener).toHaveAttribute("aria-selected", "true"));
+    const addEndpoint = screen.getByRole("button", { name: "Add endpoint" });
+    await waitFor(() => expect(addEndpoint).toBeEnabled());
+    await user.click(addEndpoint);
+
+    expect(c2Field).toHaveValue("https://first.example.test:8443");
   });
 
   it("offers local interface addresses for a wildcard listener in routability order", async () => {
@@ -351,9 +429,129 @@ describe("GeneratePage action footer", () => {
     await waitFor(() => expect(addEndpoint).toBeEnabled());
     await user.click(addEndpoint);
 
-    expect(c2Field).toHaveValue(
-      "mtls://127.0.0.1:8888\nmtls://192.168.50.10:8888",
-    );
+    expect(c2Field).toHaveValue("mtls://192.168.50.10:8888");
+  });
+
+  it("uses a managed remote server public IP for a wildcard listener", async () => {
+    const user = userEvent.setup();
+    const snapshot = wildcardListenerSnapshot();
+    snapshot.connection = {
+      managedServer: {
+        deploymentId: "11111111-1111-4111-8111-111111111111",
+        provider: "aws",
+        name: "Team server",
+        overview: {
+          region: "us-west-2",
+          size: "t3.small",
+          instanceState: "running",
+          publicIpAddress: "203.0.113.24",
+          privateIpAddress: "10.0.0.24",
+          updatedAt: "2026-09-19T12:00:00.000Z",
+        },
+      },
+      status: "connected",
+      server: "remote.example.test:31337",
+      incarnation: 4,
+    };
+    const listLocalNetworkInterfaces = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        hostname: "operator-host",
+        addresses: [{ name: "en0", address: "192.0.2.50", family: "IPv4", scope: "global" }],
+      },
+    });
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: {
+        listLocalNetworkInterfaces,
+      } as Pick<SliverDesktopAPI, "listLocalNetworkInterfaces"> as SliverDesktopAPI,
+    });
+
+    render(<GeneratePage snapshot={snapshot} />);
+
+    const c2Field = screen.getByRole("textbox", { name: "C2 endpoints" });
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+
+    expect(listLocalNetworkInterfaces).not.toHaveBeenCalled();
+    expect(screen.getByText("Public IP reported for Team server.")).toBeVisible();
+    const addressList = await screen.findByRole("listbox", { name: "Callback address" });
+    const publicEndpoint = within(addressList).getByRole("option", {
+      name: /mtls:\/\/203\.0\.113\.24:8888.*Managed server.*Public IPv4/i,
+    });
+    expect(publicEndpoint).toHaveAttribute("aria-selected", "true");
+    expect(within(addressList).queryByText(/192\.0\.2\.50/)).not.toBeInTheDocument();
+
+    const addEndpoint = screen.getByRole("button", { name: "Add endpoint" });
+    await waitFor(() => expect(addEndpoint).toBeEnabled());
+    await user.click(addEndpoint);
+
+    expect(c2Field).toHaveValue("mtls://203.0.113.24:8888");
+  });
+
+  it("does not fall back to GUI interfaces when a managed server has no public IP", async () => {
+    const user = userEvent.setup();
+    const snapshot = wildcardListenerSnapshot();
+    snapshot.connection = {
+      managedServer: {
+        deploymentId: "11111111-1111-4111-8111-111111111111",
+        provider: "azure",
+        name: "Private server",
+        overview: {
+          region: "eastus",
+          size: "Standard_B2s",
+          instanceState: "running",
+          publicIpAddress: null,
+          privateIpAddress: "10.0.0.24",
+          updatedAt: "2026-09-19T12:00:00.000Z",
+        },
+      },
+      status: "connected",
+      server: "10.0.0.24:31337",
+      incarnation: 5,
+    };
+    const listLocalNetworkInterfaces = vi.fn();
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: {
+        listLocalNetworkInterfaces,
+      } as Pick<SliverDesktopAPI, "listLocalNetworkInterfaces"> as SliverDesktopAPI,
+    });
+
+    render(<GeneratePage snapshot={snapshot} />);
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+
+    expect(listLocalNetworkInterfaces).not.toHaveBeenCalled();
+    expect(screen.getByText(/managed server does not have an available public IP address/i)).toBeVisible();
+    expect(screen.queryByRole("listbox", { name: "Callback address" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add endpoint" })).toBeDisabled();
+  });
+
+  it("keeps the local-interface warning for an unmanaged remote server", async () => {
+    const user = userEvent.setup();
+    const snapshot = wildcardListenerSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      server: "remote.example.test:31337",
+      incarnation: 6,
+    };
+    const listLocalNetworkInterfaces = vi.fn().mockResolvedValue({
+      ok: false,
+      error: "Local interface selection is available only when the Sliver server is running on this machine",
+    });
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: {
+        listLocalNetworkInterfaces,
+      } as Pick<SliverDesktopAPI, "listLocalNetworkInterfaces"> as SliverDesktopAPI,
+    });
+
+    render(<GeneratePage snapshot={snapshot} />);
+    await user.click(screen.getByRole("button", { name: "Add listener" }));
+
+    await waitFor(() => expect(listLocalNetworkInterfaces).toHaveBeenCalledOnce());
+    expect(screen.getByText(/Local interface selection is available only when the Sliver server is running on this machine/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add endpoint" })).toBeDisabled();
   });
 
   it("marks an existing listener endpoint as added and prevents duplicates", async () => {

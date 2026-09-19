@@ -110,6 +110,41 @@ export function resolveWildcardListenerEndpoints(
       };
 }
 
+export function resolveManagedWildcardListenerEndpoint(
+  option: ListenerEndpointOption,
+  publicIpAddress: string | null | undefined,
+): ListenerInterfaceEndpointResolution {
+  const binding = option.wildcardBinding;
+  const protocol = option.protocol;
+  if (!binding || protocol === "wireguard") return { options: [] };
+
+  const address = normalizedIpAddress(publicIpAddress);
+  if (!address) {
+    return {
+      options: [],
+      unavailableReason:
+        "This managed server does not have an available public IP address. Enter the callback endpoint manually.",
+    };
+  }
+  if (address.family !== binding.family) {
+    return {
+      options: [],
+      unavailableReason:
+        `This ${binding.family} listener cannot use the managed server's ${address.family} public IP address. Enter the callback endpoint manually.`,
+    };
+  }
+
+  return {
+    options: [{
+      id: `${option.id}:managed-public:${address.value}`,
+      endpoint: endpointUrl(protocol, address.value, binding.port),
+      interfaceName: "Managed server",
+      family: address.family,
+      scope: "global",
+    }],
+  };
+}
+
 export function appendListenerEndpoint(
   raw: string,
   endpoint: string,
@@ -361,6 +396,31 @@ function connectionHost(connectionServer: string | undefined): string | undefine
     const parsed = new URL(value.includes("://") ? value : `tcp://${value}`);
     const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, "").replace(/\.+$/u, "");
     return host || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizedIpAddress(
+  value: string | null | undefined,
+): { value: string; family: LocalNetworkInterfaceAddress["family"] } | undefined {
+  const address = value?.trim().replace(/^\[|\]$/gu, "");
+  if (!address) return undefined;
+
+  const octets = address.split(".");
+  if (
+    octets.length === 4 &&
+    octets.every((octet) =>
+      /^(?:0|[1-9]\d{0,2})$/u.test(octet) && Number(octet) <= 255)
+  ) {
+    return { value: address, family: "IPv4" };
+  }
+
+  if (!address.includes(":")) return undefined;
+  try {
+    const parsed = new URL(`http://[${address}]/`);
+    if (parsed.hostname.replace(/^\[|\]$/gu, "") === "") return undefined;
+    return { value: address, family: "IPv6" };
   } catch {
     return undefined;
   }

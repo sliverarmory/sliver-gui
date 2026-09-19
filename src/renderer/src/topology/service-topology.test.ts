@@ -168,15 +168,19 @@ describe("service topology contributor", () => {
     ]);
   });
 
-  it("integrates into the default graph and supports type and metadata filters with server context", () => {
+  it("integrates into the default graph and restricts metadata search context to selected types", () => {
     const source = createOverviewTopology(context().snapshot);
     expect(source.nodes.filter(({ kind }) => kind === "external-builder")).toHaveLength(2);
     expect(source.nodes.filter(({ kind }) => kind === "crackstation")).toHaveLength(2);
-    const filtered = projectTopology(source, { kind: "crackstation", query: "2.0.0", status: "healthy", expanded: new Set() });
+    const filters = { kinds: new Set(["crackstation"]), query: "2.0.0", statuses: new Set(["healthy"]), expanded: new Set<string>() };
+    const filtered = projectTopology(source, filters);
     expect(filtered.matchCount).toBe(1);
-    expect(filtered.document.nodes.map(({ kind }) => kind).sort()).toEqual(["crackstation", "server"]);
-    expect(filtered.document.edges).toHaveLength(1);
-    expect(filtered.document.edges[0]).toMatchObject({ role: "relationship", kind: "crackstation-connection" });
+    expect(filtered.document.nodes.map(({ kind }) => kind)).toEqual(["crackstation"]);
+    expect(filtered.document.edges).toEqual([]);
+    const withServer = projectTopology(source, { ...filters, kinds: new Set(["crackstation", "server"]) });
+    expect(withServer.document.nodes.map(({ kind }) => kind).sort()).toEqual(["crackstation", "server"]);
+    expect(withServer.document.edges).toHaveLength(1);
+    expect(withServer.document.edges[0]).toMatchObject({ role: "relationship", kind: "crackstation-connection" });
   });
 
   it("uses distinct local service iconography instead of the generic fallback", () => {

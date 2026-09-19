@@ -311,6 +311,92 @@ function topology(): TopologyDocument {
 }
 
 describe("Overview document rendering", () => {
+  it("combines selected types and states in both graph and list without restoring excluded neighbors", async () => {
+    const user = userEvent.setup();
+    const base = topology();
+    const source: TopologyDocument = {
+      ...base,
+      nodes: [
+        { ...base.nodes[0]!, id: "server", kind: "server", label: "Control server" },
+        { ...base.nodes[0]!, id: "online", kind: "operator", label: "Online operator" },
+        { ...base.nodes[0]!, id: "offline", kind: "operator", label: "Offline operator", status: "inactive" },
+        { ...base.nodes[0]!, id: "warning", kind: "operator", label: "Warning operator", status: "warning" },
+        { ...base.nodes[0]!, id: "client", kind: "client", label: "This client" },
+      ],
+      edges: [{ id: "presence", source: "client", target: "server", kind: "presence", role: "relationship",
+        label: "Presence", state: "unknown", freshness: "current", description: "Presence", properties: [] }],
+    };
+    render(<OverviewDocument document={source} />);
+    await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
+    const types = screen.getByRole("listbox", { name: "Infrastructure type" });
+    expect(types).toHaveAttribute("aria-multiselectable", "true");
+    for (const option of within(types).getAllByRole("option")) expect(option).toHaveAttribute("aria-selected", "true");
+    await user.click(within(types).getByRole("option", { name: "Client" }));
+    expect(types).toBeInTheDocument();
+    expect(within(types).getByRole("option", { name: "Operator" })).toHaveAttribute("aria-selected", "true");
+    expect(within(types).getByRole("option", { name: "Server" })).toHaveAttribute("aria-selected", "true");
+    expect(within(types).getByRole("option", { name: "All types" })).toHaveAttribute("aria-selected", "false");
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: /Infrastructure type/ })).toHaveTextContent("2 types selected");
+
+    await user.click(screen.getByRole("button", { name: /Status/ }));
+    const states = screen.getByRole("listbox", { name: "Status" });
+    await user.click(within(states).getByRole("option", { name: "All states" }));
+    await user.click(within(states).getByRole("option", { name: "Healthy" }));
+    await user.click(within(states).getByRole("option", { name: "Inactive" }));
+    expect(states).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    const graph = within(screen.getByLabelText("Test graph"));
+    expect(graph.getAllByRole("button").map((item) => item.textContent)).toEqual(["Control server", "Online operator", "Offline operator"]);
+    expect(screen.getByRole("button", { name: /Status/ })).toHaveTextContent("2 states selected");
+    await user.click(screen.getByRole("button", { name: "List" }));
+    const rows = within(screen.getByRole("table", { name: "Infrastructure resources" })).getAllByRole("row");
+    expect(rows).toHaveLength(4);
+    expect(rows.map((row) => row.textContent).join(" ")).not.toMatch(/Warning operator|This client/);
+  });
+
+  it("supports empty selections, keyboard toggles, and resetting both filters", async () => {
+    const user = userEvent.setup();
+    render(<OverviewDocument document={topology()} />);
+    await user.click(screen.getByRole("button", { name: "Regional queue" }));
+    await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
+    await user.click(screen.getByRole("option", { name: "All types" }));
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: /Infrastructure type/ })).toHaveTextContent("No types");
+    expect(within(screen.getByLabelText("Test graph")).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Status/ }));
+    await user.keyboard("{Home} {Escape}");
+    expect(screen.getByRole("button", { name: /Status/ })).toHaveTextContent("No states");
+    await user.type(screen.getByRole("searchbox", { name: "Search infrastructure" }), "missing");
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(screen.getByRole("button", { name: /Infrastructure type/ })).toHaveTextContent("All types");
+    expect(screen.getByRole("button", { name: /Status/ })).toHaveTextContent("All states");
+    expect(screen.getByRole("searchbox", { name: "Search infrastructure" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Regional queue" })).toBeInTheDocument();
+  });
+
+  it("includes new types when all are selected and preserves an explicit subset on refresh", async () => {
+    const user = userEvent.setup();
+    const source = topology();
+    const added: TopologyDocument = { ...source, nodes: [...source.nodes,
+      { ...source.nodes[0]!, id: "server", kind: "server", label: "Control server" },
+    ] };
+    const { rerender } = render(<OverviewDocument document={source} />);
+    rerender(<OverviewDocument document={added} />);
+    expect(screen.getByRole("button", { name: "Control server" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
+    expect(screen.getByRole("option", { name: "Server" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("option", { name: "Server" }));
+    await user.keyboard("{Escape}");
+    rerender(<OverviewDocument document={{ ...added, nodes: [...added.nodes,
+      { ...source.nodes[0]!, id: "new-service", kind: "new-service", label: "New service" },
+    ] }} />);
+    expect(screen.getByRole("button", { name: "Regional queue" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Control server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New service" })).not.toBeInTheDocument();
+  });
+
   it("resolves a collapsed connection's endpoints to visible resource labels", async () => {
     const user = userEvent.setup();
     const source = topology();

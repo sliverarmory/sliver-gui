@@ -2,10 +2,12 @@ import type { TopologyDocument, TopologyEdge, TopologyFreshness, TopologyNode, T
 
 export const TOPOLOGY_COLLECTION_THRESHOLD = 12;
 
+export type TopologyFilterSelection = "all" | ReadonlySet<string>;
+
 export interface TopologyFilters {
   query: string;
-  kind: string;
-  status: string;
+  kinds: TopologyFilterSelection;
+  statuses: TopologyFilterSelection;
   expanded: ReadonlySet<string>;
 }
 
@@ -29,6 +31,12 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
 } {
   const query = filters.query.trim().toLocaleLowerCase();
   const byId = new Map(source.nodes.map((node) => [node.id, node]));
+  // Categorical selections are a hard visibility boundary. Search context can
+  // only add nodes that satisfy both selected dimensions.
+  const permitted = source.nodes.filter((node) =>
+    (filters.kinds === "all" || filters.kinds.has(node.kind))
+    && (filters.statuses === "all" || filters.statuses.has(node.status)));
+  const permittedIds = new Set(permitted.map((node) => node.id));
   const unresolved = new Set<string>();
   const communicationSources = new Set<string>();
   const incomingCommunication = new Map<string, string[]>();
@@ -39,6 +47,7 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
       unresolved.add(edge.target);
       return false;
     }
+    if (!permittedIds.has(edge.source) || !permittedIds.has(edge.target)) return false;
     if (edge.role === "communication") {
       const upstream = incomingCommunication.get(edge.target) ?? [];
       upstream.push(edge.source);
@@ -46,18 +55,16 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
     }
     return true;
   });
-  const filtering = Boolean(query || filters.kind !== "all" || filters.status !== "all");
-  const matches = source.nodes.filter((node) =>
-    (filters.kind === "all" || node.kind === filters.kind)
-    && (filters.status === "all" || node.status === filters.status)
-    && (!query || [node.label, node.subtitle, node.kind, node.provider,
+  const filtering = Boolean(query || filters.kinds !== "all" || filters.statuses !== "all");
+  const matches = permitted.filter((node) =>
+    !query || [node.label, node.subtitle, node.kind, node.provider,
       ...node.properties.map((property) => `${property.label} ${property.value ?? ""}`)]
-      .join(" ").toLocaleLowerCase().includes(query)));
+      .join(" ").toLocaleLowerCase().includes(query));
   const matchedIds = new Set(matches.map((node) => node.id));
   const included = new Set((filtering ? matches : source.nodes).map((node) => node.id));
   // Matching an enclosure retains its contents, but those contents do not
   // become new filter matches or recursively pull in unrelated neighbors.
-  if (filtering) for (const node of source.nodes) {
+  if (filtering) for (const node of permitted) {
     let parent = node.parentId;
     const seen = new Set<string>();
     while (parent && !seen.has(parent)) {
@@ -93,11 +100,16 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
     const seen = new Set<string>();
     while (parent && byId.has(parent) && !seen.has(parent)) {
       seen.add(parent);
-      included.add(parent);
+      if (permittedIds.has(parent)) included.add(parent);
       parent = byId.get(parent)?.parentId;
     }
   }
-  const nodes = source.nodes.filter((node) => included.has(node.id));
+  const nodes = source.nodes.filter((node) => included.has(node.id)).map((node) => {
+    if (!node.parentId || included.has(node.parentId)) return node;
+    const standalone = { ...node };
+    delete standalone.parentId;
+    return standalone;
+  });
   const edges = knownEdges.filter((edge) => included.has(edge.source) && included.has(edge.target));
   const groups = new Map<string, readonly TopologyNode[]>();
   if (filtering) return { document: { ...source, nodes, edges }, groups, matchCount: matches.length };

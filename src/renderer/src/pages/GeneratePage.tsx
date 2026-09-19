@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Checkbox, Chip, Spinner, toast } from "@heroui/react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -311,6 +311,7 @@ function oneToTwoSelection(value: 1 | 2): OneToTwoSelection {
 
 export function GeneratePage({ snapshot }: GeneratePageProps) {
   const [form, setForm] = useState<GenerateInput>(() => cloneGenerateInput(defaultGenerateInput));
+  const c2Modified = useRef(false);
   const [profileName, setProfileName] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -375,6 +376,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   ].filter(Boolean).length;
 
   function update<K extends keyof GenerateInput>(key: K, value: GenerateInput[K]) {
+    if (key === "c2") c2Modified.current = true;
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -395,14 +397,17 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
   }
 
   function addListenerEndpoint(endpoint: string) {
+    const preserveExisting = c2Modified.current;
+    c2Modified.current = true;
     setForm((current) => {
-      const result = appendListenerEndpoint(current.c2, endpoint, current.os);
+      const result = appendListenerEndpoint(preserveExisting ? current.c2 : "", endpoint, current.os);
       return result.added ? { ...current, c2: result.value } : current;
     });
   }
 
   function resetForm() {
     const next = cloneGenerateInput(defaultGenerateInput);
+    c2Modified.current = false;
     setForm(normalizeGenerateTarget(next, targets));
   }
 
@@ -866,6 +871,7 @@ export function GeneratePage({ snapshot }: GeneratePageProps) {
         currentC2={form.c2}
         isOpen={isListenerSelectorOpen}
         jobs={snapshot.domains.jobs}
+        managedServer={snapshot.connection.managedServer}
         targetOs={form.os}
         onAddEndpoint={addListenerEndpoint}
         onOpenChange={setIsListenerSelectorOpen}

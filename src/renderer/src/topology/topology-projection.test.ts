@@ -4,7 +4,7 @@ import type { TopologyDocument, TopologyEdge, TopologyNode } from "../../../shar
 import { projectTopology, TOPOLOGY_COLLECTION_THRESHOLD } from "./topology-projection";
 import type { TopologyFilters } from "./topology-projection";
 
-const defaults: TopologyFilters = { query: "", kind: "all", status: "all", expanded: new Set() };
+const defaults: TopologyFilters = { query: "", kinds: "all", statuses: "all", expanded: new Set() };
 
 function node(id: string, values: Partial<TopologyNode> = {}): TopologyNode {
   return { id, kind: "future-kind", role: "resource", label: id, icon: "future-icon", status: "healthy", statusLabel: "Available", freshness: "current", properties: [], ...values };
@@ -109,7 +109,9 @@ describe("topology projection", () => {
       node("match", { status: "warning", properties: [{ label: "Region", value: "NEEDLE" }] }),
       node("other"), node("client"),
     ], [edge("first", "server", "match"), edge("other-link", "server", "other"), edge("operator", "client", "server")]);
-    const result = projectTopology(source, { ...defaults, query: " needle ", kind: "future-kind", status: "warning" });
+    const result = projectTopology(source, {
+      ...defaults, query: " needle ", kinds: new Set(["future-kind", "server"]), statuses: new Set(["healthy", "warning"]),
+    });
     expect(result.matchCount).toBe(1);
     expect(result.document.nodes.map(({ id }) => id)).toEqual(["outer", "cloud", "server", "match"]);
     expect(result.document.edges.map(({ id }) => id)).toEqual(["first"]);
@@ -133,7 +135,7 @@ describe("topology projection", () => {
       node("other"),
     ], reverse ? [...links].reverse() : links);
     const before = JSON.stringify(source);
-    const result = projectTopology(source, { ...defaults, query: "needle", status: "warning" });
+    const result = projectTopology(source, { ...defaults, query: "needle" });
     expect(result.matchCount).toBe(1);
     expect(result.document.nodes.map(({ id }) => id)).toEqual(["outer", "cloud", "client", "root", "relay-a", "relay-b", "match"]);
     expect(new Set(result.document.edges.map(({ id }) => id))).toEqual(new Set(["operator", "first-hop", "second-hop", "third-hop"]));
@@ -257,7 +259,7 @@ describe("topology projection", () => {
       node("server", { kind: "server", parentId: "nested" }),
       node("remote"),
     ], [edge("link", "server", "remote")]);
-    const result = projectTopology(source, { ...defaults, kind: "cloud" });
+    const result = projectTopology(source, { ...defaults, query: "cloud" });
     expect(result.matchCount).toBe(1);
     expect(result.document.nodes.map(({ id }) => id)).toEqual(["cloud", "nested", "server"]);
     expect(result.document.edges).toEqual([]);
@@ -269,9 +271,94 @@ describe("topology projection", () => {
     expect(none.document.nodes).toEqual([]);
     expect(none.document.edges).toEqual([]);
     expect(none.matchCount).toBe(0);
-    const allLeaves = projectTopology(source, { ...defaults, kind: "future-kind" });
-    expect(allLeaves.document.nodes).toEqual(source.nodes);
+    const allLeaves = projectTopology(source, { ...defaults, kinds: new Set(["future-kind"]) });
+    expect(allLeaves.document.nodes).toEqual(source.nodes.slice(1));
+    expect(allLeaves.document.edges).toEqual([]);
     expect(allLeaves.groups.size).toBe(0);
     expect(allLeaves.matchCount).toBe(13);
+  });
+
+  it("unions selected types while excluding connected nodes of unselected types", () => {
+    const source = document([
+      node("client", { kind: "client" }), node("server", { kind: "server" }),
+      node("operator", { kind: "operator" }), node("future", { kind: "future-kind" }),
+    ], [communication("client-server", "client", "server"), edge("server-operator", "server", "operator")]);
+    const result = projectTopology(source, { ...defaults, kinds: new Set(["client", "server"]) });
+    expect(result.document.nodes).toEqual(source.nodes.slice(0, 2));
+    expect(result.document.edges).toEqual(source.edges.slice(0, 1));
+    expect(result.matchCount).toBe(2);
+    expect(projectTopology(source, defaults).document.nodes).toEqual(source.nodes);
+  });
+
+  it("unions selected states and intersects the result with selected types", () => {
+    const source = document([
+      node("healthy-server", { kind: "server", status: "healthy" }),
+      node("warning-server", { kind: "server", status: "warning" }),
+      node("inactive-server", { kind: "server", status: "inactive" }),
+      node("healthy-client", { kind: "client", status: "healthy" }),
+      node("unknown-client", { kind: "client", status: "unknown" }),
+      node("warning-operator", { kind: "operator", status: "warning" }),
+    ], []);
+    const statuses = new Set(["healthy", "warning"]);
+    const statesOnly = projectTopology(source, { ...defaults, statuses });
+    expect(statesOnly.document.nodes.map(({ id }) => id)).toEqual(["healthy-server", "warning-server", "healthy-client", "warning-operator"]);
+    expect(statesOnly.matchCount).toBe(4);
+    const combined = projectTopology(source, { ...defaults, kinds: new Set(["server", "client"]), statuses });
+    expect(combined.document.nodes.map(({ id }) => id)).toEqual(["healthy-server", "warning-server", "healthy-client"]);
+    expect(combined.matchCount).toBe(3);
+  });
+
+  it.each(["kinds", "statuses"] as const)("shows no nodes when no %s are selected", (dimension) => {
+    const source = document([node("parent", { role: "group" }), node("child", { parentId: "parent" })], [edge("link", "parent", "child")]);
+    const result = projectTopology(source, { ...defaults, [dimension]: new Set<string>() });
+    expect(result.document.nodes).toEqual([]);
+    expect(result.document.edges).toEqual([]);
+    expect(result.matchCount).toBe(0);
+    expect(result.groups.size).toBe(0);
+  });
+
+  it("never restores unselected types through matching enclosures, neighbors, or ancestors", () => {
+    const source = document([
+      node("cloud", { role: "group", kind: "cloud", label: "Needle cloud" }),
+      node("server", { kind: "server", parentId: "cloud", label: "Needle server" }),
+      node("nested", { role: "group", kind: "cloud", parentId: "server" }),
+      node("client", { kind: "client" }),
+      node("match", { kind: "server", label: "Needle match" }),
+      node("operator", { kind: "operator" }),
+    ], [communication("client-server", "client", "server"), edge("server-operator", "server", "operator")]);
+    const before = JSON.stringify(source);
+    const result = projectTopology(source, { ...defaults, query: "needle", kinds: new Set(["server"]) });
+    expect(result.document.nodes.map(({ id }) => id)).toEqual(["server", "match"]);
+    expect(result.document.nodes[0]).not.toHaveProperty("parentId");
+    expect(result.document.nodes[1]).toBe(source.nodes[4]);
+    expect(result.document.edges).toEqual([]);
+    expect(result.matchCount).toBe(2);
+    expect(JSON.stringify(source)).toBe(before);
+
+    const groupsOnly = projectTopology(source, { ...defaults, query: "needle", kinds: new Set(["cloud"]) });
+    expect(groupsOnly.document.nodes.map(({ id }) => id)).toEqual(["cloud", "nested"]);
+    expect(groupsOnly.document.nodes[1]).not.toHaveProperty("parentId");
+    expect(groupsOnly.matchCount).toBe(1);
+  });
+
+  it("never restores unselected states or bridges an excluded communication hop for search context", () => {
+    const source = document([
+      node("upstream", { status: "healthy" }),
+      node("hidden-relay", { status: "inactive" }),
+      node("group", { role: "group", status: "inactive" }),
+      node("match", { label: "Needle", status: "warning", parentId: "group" }),
+      node("permitted-child", { status: "healthy" }),
+      node("hidden-child", { status: "unknown" }),
+    ], [
+      communication("upstream-relay", "upstream", "hidden-relay"),
+      communication("relay-match", "hidden-relay", "match"),
+      edge("permitted-link", "match", "permitted-child"),
+      edge("hidden-link", "match", "hidden-child"),
+    ]);
+    const result = projectTopology(source, { ...defaults, query: "needle", statuses: new Set(["healthy", "warning"]) });
+    expect(result.document.nodes.map(({ id }) => id)).toEqual(["match", "permitted-child"]);
+    expect(result.document.nodes[0]).not.toHaveProperty("parentId");
+    expect(result.document.edges).toEqual([source.edges[2]]);
+    expect(result.matchCount).toBe(1);
   });
 });
