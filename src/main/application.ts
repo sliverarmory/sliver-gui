@@ -961,6 +961,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   function openCloudDeploymentWindowFromRenderer(
     source: TrustedWindowIdentity,
+    request?: CloudDeploymentNavigationRequest,
   ): Promise<OperationResult> | OperationResult {
     const sourceWindow = windowsByContentsId.get(source.contentsId);
     if (
@@ -971,7 +972,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ) {
       return { ok: false, error: "Cloud Deployment can only be opened from a workspace window" };
     }
-    return openCloudDeploymentWindow();
+    return openCloudDeploymentWindow(request);
   }
 
   async function openManagedSshWindow(

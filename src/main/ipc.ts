@@ -84,6 +84,7 @@ import {
   parseRenameLootInput,
 } from "../shared/operator-data-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
+import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import {
   parseConsoleAttachRequest,
   parseConsoleTabId,
@@ -129,7 +130,7 @@ export interface InteractionWindowController {
 }
 
 export interface CloudDeploymentWindowController {
-  open(source: TrustedWindowIdentity): MaybePromise<OperationResult>;
+  open(source: TrustedWindowIdentity, request?: CloudDeploymentNavigationRequest): MaybePromise<OperationResult>;
 }
 
 export interface ApplicationUpdateController {
@@ -302,14 +303,14 @@ export function registerIpcHandlers(
   handleTrusted(
     IPC.openCloudDeploymentWindow,
     rendererUrl,
-    parseNoArguments,
-    ({ contentsId, rendererProcessId, rendererFrameToken }) => cloudDeploymentWindows?.open({
-      contentsId,
-      rendererProcessId,
-      rendererFrameToken,
-    }) ?? {
-      ok: false,
-      error: "Cloud Deployment is unavailable",
+    parseCloudDeploymentWindowArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, request) => {
+      if (request && request.deploymentId !== registry.snapshot(contentsId).connection.managedServer?.deploymentId) {
+        return { ok: false, error: "The requested deployment is not associated with this window's current connection" };
+      }
+      if (!cloudDeploymentWindows) return { ok: false, error: "Cloud Deployment is unavailable" };
+      const source = { contentsId, rendererProcessId, rendererFrameToken };
+      return request ? cloudDeploymentWindows.open(source, request) : cloudDeploymentWindows.open(source);
     },
   );
   handleTrusted(
@@ -802,6 +803,31 @@ function handleTrusted<Channel extends IpcInvokeChannel>(
 function parseNoArguments(args: readonly unknown[]): [] {
   requireArgumentCount(args, 0, "arguments");
   return [];
+}
+
+function parseCloudDeploymentWindowArguments(
+  args: readonly unknown[],
+): [request?: CloudDeploymentNavigationRequest] {
+  if (args.length === 0) return [];
+  const description = "arguments for Cloud Deployment navigation";
+  const value = requireRecord(requireSingleArgument(args, description), description);
+  const deploymentId = value["deploymentId"];
+  if (typeof deploymentId !== "string" || !UUID_PATTERN.test(deploymentId)) throw invalidArguments(description);
+  if (value["view"] === "firewall") {
+    requireExactKeys(value, ["view", "deploymentId"], description);
+    return [Object.freeze({ view: "firewall", deploymentId })];
+  }
+  if (value["view"] === "deployments") {
+    requireExactKeys(value, ["view", "deploymentId", "action"], description);
+    const action = requireStringLiteralProperty(
+      value,
+      "action",
+      ["start", "stop", "reboot", "terminate", "ssh", "operator"] as const,
+      description,
+    );
+    return [Object.freeze({ view: "deployments", deploymentId, action })];
+  }
+  throw invalidArguments(description);
 }
 
 function parseApplicationSettingsUpdateArguments(

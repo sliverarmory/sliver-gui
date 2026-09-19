@@ -463,6 +463,7 @@ function parseNavigationRequest(payload: readonly unknown[]): CloudDeploymentNav
     hasExactKeys(request, ["view", "deploymentId", "action"]) &&
     (request["action"] === "start" ||
       request["action"] === "stop" ||
+      request["action"] === "reboot" ||
       request["action"] === "terminate" ||
       request["action"] === "ssh" ||
       request["action"] === "operator")

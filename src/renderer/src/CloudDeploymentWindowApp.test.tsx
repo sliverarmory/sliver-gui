@@ -2885,6 +2885,22 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.createOperatorConfig).not.toHaveBeenCalled();
   });
 
+  it("routes a reboot shortcut through the existing lifecycle flow while idle setup is open", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
+    vi.mocked(api.runLifecycleAction).mockReturnValueOnce(lifecycleResult.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "New Deployment" }));
+    act(() => navigationListener?.({ view: "deployments", deploymentId: DEPLOYMENT_ID, action: "reboot" }));
+
+    await waitFor(() => expect(api.runLifecycleAction).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: DEPLOYMENT_ID, expectedRevision: 9, action: "reboot",
+    }));
+    expect(screen.queryByRole("button", { name: "Close Setup" })).not.toBeInTheDocument();
+    await act(async () => lifecycleResult.resolve({ ok: true, value: runningDeployment }));
+  });
+
   it("retains an Add Operator navigation request while the initial inventory loads", async () => {
     currentSnapshot = runningCloudSnapshot();
     const initial = deferred<OperationResult<CloudDeploymentSnapshot>>();

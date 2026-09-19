@@ -210,6 +210,21 @@ describe("sandboxed preload bridge", () => {
     );
   });
 
+  it("forwards optional cloud navigation on its existing dedicated channel", async () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    if (!exposed) throw new Error("Expected the preload API to be exposed");
+    const request = {
+      view: "deployments" as const,
+      deploymentId: "22222222-2222-4222-8222-222222222222",
+      action: "reboot" as const,
+    };
+
+    await exposed.openCloudDeploymentWindow(request);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.openCloudDeploymentWindow, request);
+    await exposed.openCloudDeploymentWindow();
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.openCloudDeploymentWindow);
+  });
+
   it("exposes a frozen capability-only application context-menu bridge", async () => {
     const call = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => (
       name === "applicationContextMenu"

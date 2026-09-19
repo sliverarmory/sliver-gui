@@ -11,6 +11,7 @@ import {
 } from "../../../shared/application-context-menu-contracts";
 import {
   ApplicationContextMenu,
+  ApplicationContextMenuScope,
   useApplicationContextMenuScope,
 } from "./ApplicationContextMenu";
 
@@ -155,6 +156,52 @@ describe("ApplicationContextMenu", () => {
     expect(document.activeElement).toBe(scopedTarget);
     expect(contextMenu.api.executeAction).not.toHaveBeenCalled();
   });
+
+  it.each(["View details", "Start"])(
+    "separates scoped action groups and dispatches %s without changing native action boundaries",
+    async (selectedAction) => {
+      const user = userEvent.setup();
+      const contextMenu = mockContextMenuAPI();
+      const viewDetails = vi.fn();
+      const openSsh = vi.fn();
+      const start = vi.fn();
+      render(
+        <ApplicationContextMenu api={contextMenu.api}>
+          <ApplicationContextMenuScope actions={[
+            { id: "details", label: "View details", separatorBefore: true, onAction: viewDetails },
+            { id: "ssh", label: "SSH", onAction: openSsh },
+            { id: "start", label: "Start", separatorBefore: true, onAction: start },
+          ]}>
+            <button type="button">Grouped target</button>
+          </ApplicationContextMenuScope>
+        </ApplicationContextMenu>,
+      );
+
+      fireEvent.contextMenu(screen.getByRole("button", { name: "Grouped target" }));
+      contextMenu.emit(request(REQUEST_ID_ONE, nativeEditItems().slice(-1)));
+      const menu = await screen.findByRole("menu", { name: "Application context menu" });
+      const entries = [...menu.querySelectorAll('[role="menuitem"], [role="separator"]')];
+      expect(entries.map((entry) => entry.getAttribute("role") === "separator"
+        ? "separator"
+        : entry.textContent)).toEqual([
+        "View details",
+        "SSH",
+        "separator",
+        "Start",
+        "separator",
+        "Inspect Element",
+      ]);
+
+      await user.click(within(menu).getByRole("menuitem", { name: selectedAction }));
+      const expectedAction = selectedAction === "Start" ? start : viewDetails;
+      const otherAction = selectedAction === "Start" ? viewDetails : start;
+      await waitFor(() => expect(expectedAction).toHaveBeenCalledOnce());
+      expect(otherAction).not.toHaveBeenCalled();
+      expect(openSsh).not.toHaveBeenCalled();
+      expect(contextMenu.api.executeAction).not.toHaveBeenCalled();
+      expect(contextMenu.api.setOpen).toHaveBeenCalledWith({ requestId: REQUEST_ID_ONE, open: false });
+    },
+  );
 
   it("preserves Select All on an editable target after the main action completes", async () => {
     const user = userEvent.setup();

@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "@heroui/react";
 import { disconnectedSnapshot, type SliverSnapshot } from "../../../shared/contracts";
 import type { BeaconSummary, SessionSummary } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyNode } from "../../../shared/topology-contracts";
@@ -132,6 +133,120 @@ describe("Overview target context menu", () => {
   });
 });
 
+function managedServerSnapshot(state = "running"): SliverSnapshot {
+  const snapshot = sessionSnapshot();
+  snapshot.connection.managedServer = {
+    deploymentId: "77777777-7777-4777-8777-777777777777",
+    provider: state === "deallocated" ? "azure" : "aws",
+    name: "managed-control",
+    overview: {
+      region: "us-west-2", size: "t3.micro", instanceState: state,
+      publicIpAddress: "198.51.100.24", privateIpAddress: "10.0.0.4",
+      updatedAt: "2026-09-19T12:00:00.000Z",
+    },
+  };
+  return snapshot;
+}
+
+describe("Overview server context menu", () => {
+  const openCloudDeploymentWindow = vi.fn(async (_request: unknown) => ({ ok: true }));
+  beforeEach(() => {
+    openCloudDeploymentWindow.mockReset().mockResolvedValue({ ok: true });
+    vi.stubGlobal("sliver", { openCloudDeploymentWindow });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("groups access actions before lifecycle actions and opens Jobs/Listeners", async () => {
+    const user = userEvent.setup();
+    const onNavigate = vi.fn();
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={managedServerSnapshot()} onNavigate={onNavigate} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "example.test:31337" }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "Stop", "Reboot", "Terminate", "Inspect Element",
+    ]);
+    expect(Array.from(menu.querySelectorAll('[role="menuitem"], [role="separator"]')).map((item) =>
+      item.getAttribute("role") === "separator" ? "separator" : item.textContent,
+    )).toEqual([
+      "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "separator", "Stop", "Reboot", "Terminate", "separator", "Inspect Element",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "View Jobs/Listeners" }));
+    await waitFor(() => expect(onNavigate).toHaveBeenCalledExactlyOnceWith("operations"));
+    expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["SSH", "ssh"], ["Firewall", "firewall"], ["Add Operator", "operator"],
+    ["Stop", "stop"], ["Reboot", "reboot"], ["Terminate", "terminate"],
+  ])("routes %s to the current managed deployment's existing cloud flow", async (label, action) => {
+    const user = userEvent.setup();
+    const snapshot = managedServerSnapshot();
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "example.test:31337" }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu");
+    await user.click(within(menu).getByRole("menuitem", { name: label }));
+    await waitFor(() => expect(openCloudDeploymentWindow).toHaveBeenCalledExactlyOnceWith(action === "firewall"
+      ? { view: "firewall", deploymentId: snapshot.connection.managedServer!.deploymentId }
+      : { view: "deployments", deploymentId: snapshot.connection.managedServer!.deploymentId, action }));
+  });
+
+  it.each(["stopped", "deallocated"])("offers Start while %s and reconnecting, and disables running-only actions", async (state) => {
+    const user = userEvent.setup();
+    const snapshot = managedServerSnapshot(state);
+    snapshot.connection.status = "reconnecting";
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "example.test:31337" }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu");
+    for (const name of ["SSH", "Add Operator", "Reboot"]) {
+      expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+    expect(within(menu).queryByRole("menuitem", { name: "Stop" })).not.toBeInTheDocument();
+    await user.click(within(menu).getByRole("menuitem", { name: "Start" }));
+    await waitFor(() => expect(openCloudDeploymentWindow).toHaveBeenCalledExactlyOnceWith({
+      view: "deployments", deploymentId: snapshot.connection.managedServer!.deploymentId, action: "start",
+    }));
+  });
+
+  it("disables cloud actions for an unmanaged server", async () => {
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={sessionSnapshot()} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "example.test:31337" }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "View Jobs/Listeners" })).not.toHaveAttribute("aria-disabled", "true");
+    for (const name of ["SSH", "Firewall", "Add Operator", "Start", "Reboot", "Terminate"]) {
+      expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+    expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
+  });
+
+  it("disables retained server actions after their current association is lost", async () => {
+    const props = { onNavigate: vi.fn(), onSnapshot: vi.fn() };
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={managedServerSnapshot()} {...props} />);
+    rendered.rerender(<OverviewPage snapshot={disconnectedSnapshot()} {...props} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "example.test:31337" }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu");
+    for (const name of ["View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "Start", "Reboot", "Terminate"]) {
+      expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+    expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
+  });
+
+  it("shows a toast when opening a server action fails", async () => {
+    const user = userEvent.setup();
+    const danger = vi.spyOn(toast, "danger");
+    openCloudDeploymentWindow.mockRejectedValueOnce(new Error("The association changed"));
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={managedServerSnapshot()} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "example.test:31337" }));
+    rendered.contextMenu.emit();
+    await user.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Firewall" }));
+    await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not open server action", { description: "The association changed" }));
+  });
+});
+
 function topology(): TopologyDocument {
   return {
     schemaVersion: 1, scope: { id: "example", label: "Example", connected: true },
@@ -217,7 +332,7 @@ describe("Overview connection context", () => {
     const user = userEvent.setup();
     const first = disconnectedSnapshot();
     first.connection = { status: "connected", managedServer: null, server: "first.example:31337", configName: "first" };
-    const { rerender } = render(<OverviewPage snapshot={first} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    const { rerender } = renderWithApplicationContextMenu(<OverviewPage snapshot={first} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
     rerender(<OverviewPage snapshot={disconnectedSnapshot()} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "first.example:31337" }));
     expect(within(screen.getByRole("complementary")).getByText("stale")).toBeInTheDocument();
@@ -239,7 +354,7 @@ describe("Overview connection context", () => {
         cloud: { provider: "aws", vpcId: "vpc-123" },
       },
     } };
-    render(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "vpc-123" }));
     const inspector = screen.getByRole("complementary");
     expect(within(inspector).getByText("AWS")).toBeInTheDocument();

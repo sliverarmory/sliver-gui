@@ -51,6 +51,8 @@ export interface ApplicationContextMenuAction {
   readonly ariaLabel?: string;
   readonly icon?: IconDefinition;
   readonly isDisabled?: boolean;
+  /** Starts a new visual group when this is not the first scoped action. */
+  readonly separatorBefore?: boolean;
   readonly shortcut?: string;
   readonly variant?: ApplicationContextMenuItemVariant;
   readonly onAction: () => void | Promise<void>;
@@ -353,7 +355,10 @@ export function ApplicationContextMenu({
               aria-label="Application context menu"
               onAction={handleAction}
             >
-              {session?.scopeActions.map((item, index) => (
+              {session?.scopeActions.flatMap((item, index) => [
+                ...(item.separatorBefore && index > 0
+                  ? [<ContextMenu.Separator key={`scope-separator-${index}`} />]
+                  : []),
                 <ContextMenu.Item
                   id={scopeActionKey(item, index)}
                   key={scopeActionKey(item, index)}
@@ -371,8 +376,8 @@ export function ApplicationContextMenu({
                   ) : null}
                   <Label>{item.label}</Label>
                   {item.shortcut ? <MenuShortcut value={item.shortcut} /> : null}
-                </ContextMenu.Item>
-              ))}
+                </ContextMenu.Item>,
+              ])}
 
               {session && session.scopeActions.length > 0 && session.nativeItems.length > 0
                 ? <ContextMenu.Separator />

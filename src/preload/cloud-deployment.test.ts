@@ -375,7 +375,7 @@ describe("Cloud Deployment preload bridge", () => {
     ) => void;
     const deploymentId = "22222222-2222-4222-8222-222222222222";
     handler({}, { view: "deployments", deploymentId: "not-a-deployment", action: "stop" });
-    handler({}, { view: "deployments", deploymentId, action: "reboot" });
+    handler({}, { view: "deployments", deploymentId, action: "delete" });
     handler({}, { view: "firewall", deploymentId, action: "stop" });
 
     const api = exposedApi();
@@ -424,6 +424,30 @@ describe("Cloud Deployment preload bridge", () => {
     handler({}, nextRequest);
     expect(listener).toHaveBeenCalledTimes(2);
     expect(listener).toHaveBeenLastCalledWith(nextRequest);
+    unsubscribe();
+  });
+
+  it("validates and replays a bounded reboot navigation request", async () => {
+    const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
+      event: unknown,
+      ...payload: unknown[]
+    ) => void;
+    const request = {
+      view: "deployments",
+      deploymentId: "22222222-2222-4222-8222-222222222222",
+      action: "reboot",
+    };
+    handler({}, request);
+    const listener = vi.fn();
+    const unsubscribe = exposedApi().onNavigationRequested(listener);
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledExactlyOnceWith(request);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
+
+    handler({}, { ...request, command: "unexpected" });
+    handler({}, { ...request, view: "firewall" });
+    handler({}, request, "extra");
+    expect(listener).toHaveBeenCalledOnce();
     unsubscribe();
   });
 

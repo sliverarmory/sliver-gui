@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Button, Chip, Label, ListBox, SearchField, Select } from "@heroui/react";
-import type { SliverSnapshot } from "../../../shared/contracts";
+import { Button, Chip, Label, ListBox, SearchField, Select, toast } from "@heroui/react";
+import { faList, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
+import type { ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
+import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyEdge, TopologyNode, TopologyProperty } from "../../../shared/topology-contracts";
-import { ApplicationContextMenuScope } from "../components/ApplicationContextMenu";
+import { ApplicationContextMenuScope, type ApplicationContextMenuAction } from "../components/ApplicationContextMenu";
 import { useSessionContextActions } from "../components/useSessionContextActions";
 import { sessionContextMenuActions } from "../components/session-context-menu-actions";
 import { isUsableConnection } from "../connection-status";
@@ -41,13 +43,21 @@ export function OverviewPage({ snapshot, onSnapshot, onNavigate, onOpenSession, 
   }, [snapshot]);
   const topology = useMemo(() => createOverviewTopology(source), [source]);
   const decorateNode = useCallback((node: TopologyNode, content: ReactNode): ReactNode => {
+    const currentScope = overviewTopologyScopeId(snapshot) === topology.scope.id;
+    if (node.kind === "server" && node.resource?.kind === "server") {
+      return <ApplicationContextMenuScope builtInPolicy="inspect-only" actions={serverContextMenuActions({
+        managed: currentScope ? snapshot.connection.managedServer : null,
+        canViewJobs: currentScope && isUsableConnection(snapshot.connection.status),
+        onViewJobs: () => onNavigate("operations"),
+      })}>{content}</ApplicationContextMenuScope>;
+    }
     // Resolve display identities against the current main-issued inventory. The
     // JSON model never carries action capabilities, including in retained views.
     // Stale event telemetry does not revoke a target's main-issued reference.
     if ((node.kind !== "session" && node.kind !== "beacon") ||
       (node.resource?.kind !== "session" && node.resource?.kind !== "beacon")) return content;
     const mode = node.resource.kind;
-    const target = overviewTopologyScopeId(snapshot) === topology.scope.id && isUsableConnection(snapshot.connection.status)
+    const target = currentScope && isUsableConnection(snapshot.connection.status)
       ? snapshot.targetContext.selectableTargets.find((ref) =>
           ref.mode === mode && ref.id === node.resource?.id && ref.backendEpoch === snapshot.connection.epoch)
       : undefined;
@@ -56,11 +66,62 @@ export function OverviewPage({ snapshot, onSnapshot, onNavigate, onOpenSession, 
       target: undefined, mode, activeTarget: null, capabilities: [], disabled: true,
       showUnavailable: true, onAction: () => undefined,
     })}>{content}</ApplicationContextMenuScope>;
-  }, [actionsForTarget, snapshot, topology.scope.id]);
+  }, [actionsForTarget, onNavigate, snapshot, topology.scope.id]);
   return <>
     <OverviewDocument key={topology.scope.id} document={topology} onNavigate={onNavigate} decorateNode={decorateNode} />
     {dialogs}
   </>;
+}
+
+function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
+  managed: ManagedServerReference | null;
+  canViewJobs: boolean;
+  onViewJobs: () => void;
+}): ApplicationContextMenuAction[] {
+  const state = managed?.overview?.instanceState;
+  const running = state === "running";
+  const stopped = state === "stopped" || state === "deallocated";
+  const lifecycleAction = running ? "stop" : "start";
+  type CloudAction = Extract<CloudDeploymentNavigationRequest, { view: "deployments" }>["action"] | "firewall";
+  const cloudAction = (
+    action: CloudAction,
+    label: string,
+    icon: ApplicationContextMenuAction["icon"],
+    disabled = false,
+  ): ApplicationContextMenuAction => ({
+    id: `server.${action}`,
+    label,
+    ...(icon ? { icon } : {}),
+    isDisabled: !managed || disabled,
+    onAction: async () => {
+      if (!managed || disabled) return;
+      const request: CloudDeploymentNavigationRequest = action === "firewall"
+        ? { view: "firewall", deploymentId: managed.deploymentId }
+        : { view: "deployments", deploymentId: managed.deploymentId, action };
+      try {
+        const result = await window.sliver.openCloudDeploymentWindow(request);
+        if (!result.ok) toast.danger("Could not open server action", { description: result.error });
+      } catch (error) {
+        toast.danger("Could not open server action", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  });
+  return [{
+    id: "server.jobs",
+    label: "View Jobs/Listeners",
+    icon: faList,
+    isDisabled: !canViewJobs,
+    onAction: () => { if (canViewJobs) onViewJobs(); },
+  },
+  cloudAction("ssh", "SSH", faTerminal, state !== undefined && !running),
+  cloudAction("firewall", "Firewall", faShieldHalved),
+  cloudAction("operator", "Add Operator", faUserPlus, state !== undefined && !running),
+  { ...cloudAction(lifecycleAction, running ? "Stop" : "Start", running ? faStop : faPlay, !running && !stopped), separatorBefore: true },
+  cloudAction("reboot", "Reboot", faRotate, !running),
+  { ...cloudAction("terminate", "Terminate", faTrashCan), variant: "danger" },
+  ];
 }
 
 /** The view consumes the JSON document only; it knows nothing about RPCs or providers. */

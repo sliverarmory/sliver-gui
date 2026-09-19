@@ -76,7 +76,8 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     await useDarkTheme(page);
-    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
     await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
     await page.waitForFunction(async () => {
       const snapshot = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot();

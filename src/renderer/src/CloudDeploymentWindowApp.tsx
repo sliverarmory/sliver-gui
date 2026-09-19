@@ -801,7 +801,7 @@ function DeploymentsPanel({
   const deploymentInProgress = wizardBusy || resumedDeployment !== undefined;
 
   useEffect(() => {
-    if (actionRequest?.action !== "operator" || !showWizard || wizardBusy) return;
+    if (!actionRequest || !showWizard || wizardBusy) return;
     setShowWizard(false);
     setActiveDeploymentId(null);
   }, [actionRequest, showWizard, wizardBusy]);

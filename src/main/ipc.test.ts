@@ -17,6 +17,7 @@ import {
   type ListenerInput,
 } from "../shared/contracts.js";
 import type { PrepareExecutionActionInput } from "../shared/execution-contracts.js";
+import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import type { AddCredentialInput } from "../shared/operator-data-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { APPLICATION_SETTINGS_VERSION, DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
@@ -41,7 +42,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { registerIpcHandlers, unregisterIpcHandlers, type IpcConnectionRegistry } from "./ipc.js";
+import { registerIpcHandlers, unregisterIpcHandlers, type IpcConnectionRegistry, type TrustedWindowIdentity } from "./ipc.js";
 
 const RENDERER_URL = "sliver://app/index.html";
 
@@ -121,8 +122,9 @@ describe("trusted Electron IPC boundary", () => {
 
   it("opens Cloud Deployment with the exact trusted renderer identity", async () => {
     const open = vi.fn(async () => ({ ok: true as const }));
+    const registry = registryMock();
     registerIpcHandlers(
-      registryMock(),
+      registry,
       vi.fn(),
       RENDERER_URL,
       undefined,
@@ -142,12 +144,91 @@ describe("trusted Electron IPC boundary", () => {
       rendererProcessId: 100,
       rendererFrameToken: "main-frame",
     });
+    expect(registry.snapshot).not.toHaveBeenCalled();
 
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     expect(electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(trusted.event)).toEqual({
       ok: false,
       error: "Cloud Deployment is unavailable",
     });
+  });
+
+  it("routes bounded cloud navigation only for the invoking window's associated deployment", async () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId));
+    const open = vi.fn(async (_source: TrustedWindowIdentity, _request?: CloudDeploymentNavigationRequest) => ({ ok: true as const }));
+    registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined, undefined, { open });
+    const { event } = invokeEvent(RENDERER_URL, 77);
+    const requests: readonly CloudDeploymentNavigationRequest[] = [
+      { view: "firewall", deploymentId },
+      ...(["start", "stop", "reboot", "terminate", "ssh", "operator"] as const).map((action) => ({
+        view: "deployments" as const, deploymentId, action,
+      })),
+    ];
+
+    for (const request of requests) {
+      await expect(electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(event, request))
+        .resolves.toEqual({ ok: true });
+      expect(snapshot).toHaveBeenLastCalledWith(77);
+      expect(open).toHaveBeenLastCalledWith({
+        contentsId: 77,
+        rendererProcessId: 100,
+        rendererFrameToken: "main-frame",
+      }, request);
+      const forwarded = open.mock.calls.at(-1)?.[1];
+      expect(forwarded).not.toBe(request);
+      expect(Object.isFrozen(forwarded)).toBe(true);
+    }
+    expect(open).toHaveBeenCalledTimes(requests.length);
+  });
+
+  it.each([null, "33333333-3333-4333-8333-333333333333"])(
+    "rejects cloud navigation when the current connection association is %s",
+    (associatedDeploymentId) => {
+      const snapshot = vi.fn(() => managedCloudSnapshot(associatedDeploymentId));
+      const open = vi.fn(async () => ({ ok: true as const }));
+      registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL,
+        undefined, undefined, undefined, undefined, undefined, undefined, { open });
+      const { event } = invokeEvent(RENDERER_URL, 77);
+
+      expect(electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(event, {
+        view: "deployments", deploymentId: "22222222-2222-4222-8222-222222222222", action: "stop",
+      })).toEqual({
+        ok: false,
+        error: "The requested deployment is not associated with this window's current connection",
+      });
+      expect(snapshot).toHaveBeenCalledExactlyOnceWith(77);
+      expect(open).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects malformed cloud navigation before reading connection state or opening a window", () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const request = { view: "deployments", deploymentId, action: "reboot" };
+    const registry = registryMock();
+    const open = vi.fn(async () => ({ ok: true as const }));
+    registerIpcHandlers(registry, vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined, undefined, { open });
+    const { event } = invokeEvent(RENDERER_URL, 77);
+    const malformed: readonly (readonly unknown[])[] = [
+      [undefined], [null], ["unexpected"], [{}],
+      [{ ...request, deploymentId: "not-a-deployment" }],
+      [{ ...request, deploymentId: "22222222-2222-1222-8222-222222222222" }],
+      [{ ...request, view: "credentials" }],
+      [{ ...request, action: "delete" }],
+      [{ ...request, action: undefined }],
+      [{ ...request, sourceContentsId: 88 }],
+      [{ ...request, view: "firewall" }],
+      [{ view: "deployments", deploymentId }],
+      [request, "extra"],
+    ];
+    for (const args of malformed) {
+      expect(() => electronMocks.handlers.get(IPC.openCloudDeploymentWindow)?.(event, ...args))
+        .toThrow(/invalid arguments/iu);
+    }
+    expect(registry.snapshot).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("exposes only the bounded application-update controller methods", async () => {
@@ -1410,6 +1491,15 @@ function executionCredential(input: PrepareExecutionActionInput): Uint8Array {
 
 function isZeroBytes(value: Uint8Array): boolean {
   return value.every((byte) => byte === 0);
+}
+
+function managedCloudSnapshot(deploymentId: string | null): ReturnType<IpcConnectionRegistry["snapshot"]> {
+  const snapshot = disconnectedSnapshot();
+  snapshot.connection = {
+    status: "connected",
+    managedServer: deploymentId ? { deploymentId, provider: "aws", name: "managed-server" } : null,
+  };
+  return snapshot;
 }
 
 function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnectionRegistry {

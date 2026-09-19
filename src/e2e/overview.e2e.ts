@@ -81,7 +81,8 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
       await setTheme(page, "light");
-      await page.getByRole("button", { name: "Connect", exact: true }).click();
+      await page.getByRole("dialog", { name: "Saved configurations" })
+        .getByRole("button", { name: "Connect", exact: true }).click();
       await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
       await page.getByTestId("topology-graph").waitFor();
 
@@ -216,6 +217,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
         "session actions must not leak onto other infrastructure nodes");
       await page.keyboard.press("Escape");
       await contextMenu.waitFor({ state: "hidden" });
+      await verifyServerContextMenuNavigation(application, page, hosting, artifactDirectory, rendererErrors);
       await page.screenshot({ path: join(artifactDirectory, `overview-${hosting}-graph.png`), animations: "disabled" });
       if (hosting !== "unmanaged") await verifyCloudAndInstanceMetadata(page, hosting, artifactDirectory);
       if (hosting === "aws") {
@@ -356,6 +358,99 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       }
     }
   });
+}
+
+async function verifyServerContextMenuNavigation(
+  application: ElectronApplication,
+  page: Page,
+  hosting: "unmanaged" | "aws" | "azure",
+  artifactDirectory: string,
+  rendererErrors: string[],
+): Promise<void> {
+  const server = page.getByTestId("topology-node").filter({
+    has: page.locator(".topology-node__kind").filter({ hasText: /^server$/u }),
+  });
+  const menu = page.getByRole("menu", { name: "Application context menu" });
+  const powerLabel = hosting === "unmanaged" ? "Start" : "Stop";
+  const labels = ["View Jobs/Listeners", "SSH", "Firewall", "Add Operator", powerLabel, "Reboot", "Terminate"];
+  const originalWindows = application.windows().length;
+  await server.click({ button: "right" });
+  await menu.waitFor();
+  assert.deepEqual((await menu.getByRole("menuitem").allTextContents()).slice(0, labels.length), labels,
+    "the server context menu must keep navigation before its power controls");
+  const orderedItems = await menu.locator('[role="menuitem"], [role="separator"], hr').evaluateAll((items) =>
+    items.map((item) => item.getAttribute("role") === "separator" || item.tagName === "HR"
+      ? "separator" : item.textContent?.trim()));
+  assert.deepEqual(orderedItems.slice(0, 8), [
+    "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "separator", powerLabel, "Reboot", "Terminate",
+  ], "a real separator must divide Add Operator from Start/Stop");
+  assert.equal(await menu.getByRole("menuitem", { name: "View Jobs/Listeners", exact: true }).isEnabled(), true);
+  for (const name of labels.slice(1)) {
+    assert.equal(await menu.getByRole("menuitem", { name, exact: true }).isEnabled(), hosting !== "unmanaged",
+      `${hosting} server action ${name} must respect its managed association`);
+  }
+  await page.screenshot({ path: join(artifactDirectory, `overview-${hosting}-server-menu.png`), animations: "disabled" });
+
+  // Jobs navigation reuses this workspace. No listener or server action is submitted.
+  await menu.getByRole("menuitem", { name: "View Jobs/Listeners", exact: true }).click();
+  await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
+  assert.equal(application.windows().length, originalWindows);
+  await page.locator('[aria-label="Overview navigation"]').getByRole("row", { name: "Overview", exact: true }).click();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await server.waitFor();
+  if (hosting === "unmanaged") return;
+
+  const deployment = hosting === "aws" ? E2E_AWS_DEPLOYMENT : E2E_AZURE_DEPLOYMENT;
+  const observeCloudWindow = (candidate: Page): void => {
+    candidate.on("pageerror", (error) => rendererErrors.push(error.message));
+    candidate.on("console", (message) => {
+      if (message.type() === "error" || /Content Security Policy/iu.test(message.text())) {
+        rendererErrors.push(message.text());
+      }
+    });
+  };
+  application.on("window", observeCloudWindow);
+  let cloudPage: Page | undefined;
+  try {
+    for (const destination of ["Add Operator", "Firewall"] as const) {
+      await server.click({ button: "right" });
+      await menu.waitFor();
+      [cloudPage] = await Promise.all([
+        application.waitForEvent("window", { timeout: 15_000 }),
+        menu.getByRole("menuitem", { name: destination, exact: true }).click(),
+      ]);
+      cloudPage.setDefaultTimeout(15_000);
+      await cloudPage.waitForURL(/\?surface=cloud-deployment$/u);
+      assert.equal(application.windows().length, originalWindows + 1);
+      if (destination === "Add Operator") {
+        await cloudPage.getByRole("heading", { level: 1, name: "New Operator", exact: true }).waitFor();
+        const form = cloudPage.getByRole("form", { name: `New Operator for ${deployment.name}`, exact: true });
+        await form.waitFor();
+        assert.equal(await form.getByRole("textbox", { name: "Operator Name" }).inputValue(), "");
+        assert.equal(await form.getByLabel("Public IP", { exact: true }).inputValue(), deployment.runtime.publicIpAddress);
+        assert.equal(await form.getByLabel("Port", { exact: true }).inputValue(), String(deployment.spec.multiplayerPort));
+        assert.equal(await form.getByRole("button", { name: "Create Operator", exact: true }).isDisabled(), true);
+      } else {
+        await cloudPage.getByRole("heading", { level: 1, name: deployment.name, exact: true }).waitFor();
+        await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
+        await cloudPage.getByRole("grid", { name: "Inbound firewall rules", exact: true }).waitFor();
+      }
+      await cloudPage.screenshot({
+        path: join(artifactDirectory, `overview-${hosting}-server-${destination === "Add Operator" ? "operator" : "firewall"}.png`),
+        animations: "disabled",
+      });
+      // Opening the existing form/details is the complete action under test.
+      // Never submit operator creation, lifecycle, firewall edits, or SSH.
+      await cloudPage.close();
+      cloudPage = undefined;
+      await page.bringToFront();
+      assert.equal(application.windows().length, originalWindows);
+      await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    }
+  } finally {
+    application.off("window", observeCloudWindow);
+    await cloudPage?.close();
+  }
 }
 
 async function verifyCloudAndInstanceMetadata(

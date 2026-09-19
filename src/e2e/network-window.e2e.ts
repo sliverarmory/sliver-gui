@@ -57,7 +57,8 @@ test("native Network window manages port forwards, reverse forwards, and SOCKS5"
     const workspace = await application.firstWindow();
     workspace.setDefaultTimeout(15_000);
     await workspace.getByRole("dialog", { name: "Saved configurations" }).waitFor();
-    await workspace.getByRole("button", { name: "Connect", exact: true }).click();
+    await workspace.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
     await workspace.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
 
     const initialWindowCount = liveWindowCount(application);

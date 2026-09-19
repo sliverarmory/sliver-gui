@@ -45,6 +45,7 @@ import type {
 import type { SliverReleaseDownloadEvent } from "./release-contracts.js";
 import type { ApplicationUpdateState } from "./application-update-contracts.js";
 import type { CloudProvider } from "./cloud-deployment-contracts.js";
+import type { CloudDeploymentNavigationRequest } from "./cloud-deployment-ipc.js";
 import type {
   ApplicationSettingsState,
   ApplicationSettingsUpdateInput,
@@ -730,7 +731,7 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     result: OperationResult;
   };
   [IPC.openCloudDeploymentWindow]: {
-    args: [];
+    args: [request?: CloudDeploymentNavigationRequest];
     result: OperationResult;
   };
   [IPC.openInteractionWindow]: {

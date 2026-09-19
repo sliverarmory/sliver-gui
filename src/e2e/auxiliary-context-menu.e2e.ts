@@ -90,7 +90,8 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     await reopenedArmory.close();
 
     // The connection uses fake-main's in-process client; no sockets or forwards are started.
-    await workspace.getByRole("button", { name: "Connect", exact: true }).click();
+    await workspace.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
     await workspace.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
     await invokeMenu(application, workspace, "network.socks5");
     const network = await surfacePage(application, "network");
