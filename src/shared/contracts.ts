@@ -229,10 +229,34 @@ export interface ServerCapabilitySummary {
   };
 }
 
+/** Cached shared cloud/network identity, separate from the hosted instance. */
+export type ManagedCloudOverview = {
+  readonly provider: "aws";
+  readonly vpcId?: string;
+  /** Configured managed-network CIDR; not a live provider observation. */
+  readonly vpcCidr?: string;
+} | {
+  readonly provider: "azure";
+  readonly subscriptionId?: string;
+  readonly resourceGroupName?: string;
+  readonly resourceGroupId?: string;
+  readonly virtualNetworkId?: string;
+  readonly virtualNetworkName?: string;
+  /** A VNet may belong to a different group than the hosted VM. */
+  readonly virtualNetworkResourceGroup?: string;
+  /** Configured managed-network CIDR; not a live provider observation. */
+  readonly virtualNetworkCidr?: string;
+};
+
 /** Cached display metadata; reading it never refreshes a cloud provider. */
 export interface ManagedServerOverview {
+  readonly cloud?: ManagedCloudOverview;
   readonly region: string;
   readonly size: string;
+  readonly instanceId?: string;
+  readonly instanceName?: string;
+  readonly availabilityZone?: string;
+  readonly subnetId?: string;
   readonly instanceState: string;
   readonly health?: string;
   readonly publicIpAddress: string | null;

@@ -7,6 +7,11 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
+import {
+  E2E_AWS_DEPLOYMENT,
+  E2E_AZURE_DEPLOYMENT,
+  E2E_AZURE_SUBSCRIPTION_ID,
+} from "./cloud-deployment-fixture.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
@@ -88,7 +93,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       if (hosting !== "unmanaged") {
         const cloud = page.locator(`.topology-enclosure[data-provider="${hosting}"]`);
         await cloud.waitFor();
-        assert.match(await cloud.innerText(), hosting === "aws" ? /AWS.*us-west-2/u : /Azure.*eastus/u);
+        assert.match(await cloud.innerText(), hosting === "aws" ? /AWS.*us-west-2/u : /Azure.*Resource group/u);
       }
       await page.waitForFunction(() => {
         const browser = globalThis as unknown as {
@@ -212,6 +217,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       await page.keyboard.press("Escape");
       await contextMenu.waitFor({ state: "hidden" });
       await page.screenshot({ path: join(artifactDirectory, `overview-${hosting}-graph.png`), animations: "disabled" });
+      if (hosting !== "unmanaged") await verifyCloudAndInstanceMetadata(page, hosting, artifactDirectory);
       if (hosting === "aws") {
         await setTheme(page, "dark");
         await page.screenshot({ path: join(artifactDirectory, "overview-aws-graph-dark.png"), animations: "disabled" });
@@ -350,6 +356,114 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       }
     }
   });
+}
+
+async function verifyCloudAndInstanceMetadata(
+  page: Page,
+  provider: "aws" | "azure",
+  artifactDirectory: string,
+): Promise<void> {
+  const cloud = page.locator(`.topology-enclosure[data-provider="${provider}"]`);
+  const server = page.locator(".topology-node").filter({
+    has: page.locator(".topology-node__kind").filter({ hasText: /^server$/u }),
+  });
+  const inspector = page.getByRole("complementary", { name: "Infrastructure details", exact: true });
+  const record = provider === "aws" ? E2E_AWS_DEPLOYMENT : E2E_AZURE_DEPLOYMENT;
+  const expectedCloud: Record<string, string> = provider === "aws" ? {
+    "Provider": "AWS",
+    "Region": E2E_AWS_DEPLOYMENT.spec.region,
+    "VPC ID": E2E_AWS_DEPLOYMENT.runtime.vpcId!,
+  } : {
+    "Provider": "Azure",
+    "Subscription ID": E2E_AZURE_SUBSCRIPTION_ID,
+    "Resource group": E2E_AZURE_DEPLOYMENT.runtime.resourceGroupName!,
+    "Resource group ID": `/subscriptions/${E2E_AZURE_SUBSCRIPTION_ID}/resourceGroups/${E2E_AZURE_DEPLOYMENT.runtime.resourceGroupName}`,
+    "Virtual network": `${E2E_AZURE_DEPLOYMENT.name}-vnet`,
+    "Virtual network ID": E2E_AZURE_DEPLOYMENT.runtime.vnetId!,
+    "Virtual network resource group": E2E_AZURE_DEPLOYMENT.runtime.resourceGroupName!,
+    "Virtual network CIDR": E2E_AZURE_DEPLOYMENT.spec.managedVnetCidr!,
+  };
+  const expectedInstance: Record<string, string> = {
+    "Deployment": record.name,
+    "Instance name": provider === "aws" ? record.name : E2E_AZURE_DEPLOYMENT.runtime.vmName!,
+    "Instance state (cached)": record.runtime.instanceState,
+    "Public IP": record.runtime.publicIpAddress!,
+    "Private IP": record.runtime.privateIpAddress!,
+    "Subnet ID": record.runtime.subnetId!,
+    "Instance metadata updated": record.updatedAt,
+    ...(provider === "aws" ? {
+      "Instance ID": E2E_AWS_DEPLOYMENT.runtime.instanceId!,
+      "Region": E2E_AWS_DEPLOYMENT.spec.region,
+      "Availability zone": E2E_AWS_DEPLOYMENT.runtime.availabilityZone!,
+      "Instance size": E2E_AWS_DEPLOYMENT.spec.instanceType,
+      "Instance health (cached)": "ok",
+    } : {
+      "Instance ID": E2E_AZURE_DEPLOYMENT.runtime.vmId!,
+      "Location": E2E_AZURE_DEPLOYMENT.spec.location,
+      "Instance size": E2E_AZURE_DEPLOYMENT.spec.vmSize,
+    }),
+  };
+
+  // The cloud represents a shared infrastructure scope, not this deployment.
+  // Inspect the actual rendered properties, not an independently built model.
+  await cloud.locator(".topology-enclosure__heading").click();
+  await inspector.waitFor();
+  await inspector.getByRole("heading", {
+    name: provider === "aws" ? E2E_AWS_DEPLOYMENT.runtime.vpcId! : E2E_AZURE_DEPLOYMENT.runtime.resourceGroupName!,
+    exact: true,
+  }).waitFor();
+  const cloudProperties = await inspectorProperties(inspector);
+  for (const [label, value] of Object.entries(expectedCloud)) {
+    assert.equal(cloudProperties[label], value, `${provider} cloud must expose ${label}`);
+  }
+  assert.equal(cloudProperties["Status"], provider === "aws" ? "VPC" : "Resource group");
+  assert.equal(cloudProperties["Cloud metadata updated"], record.updatedAt);
+  for (const label of [
+    "Deployment", "Instance ID", "Instance name", "Availability zone", "Subnet ID", "Instance size",
+    "Instance state (cached)", "Instance health (cached)", "Public IP", "Private IP", "Instance metadata updated",
+    ...(provider === "azure" ? ["Region", "Location"] : []),
+  ]) {
+    assert.equal(cloudProperties[label], undefined, `${provider} cloud must not expose instance property ${label}`);
+  }
+  for (const value of [record.name, record.runtime.publicIpAddress, record.runtime.privateIpAddress, expectedInstance["Instance size"]]) {
+    assert.ok(!Object.values(cloudProperties).includes(value!), `${provider} cloud must not retain instance value ${value}`);
+  }
+  await page.screenshot({ path: join(artifactDirectory, `overview-${provider}-cloud-inspector.png`), animations: "disabled" });
+  await inspector.getByRole("button", { name: "Close", exact: true }).click();
+
+  // Preserve the graph's enclosure when details move to its instance child.
+  const cloudBounds = await cloud.boundingBox();
+  const serverBounds = await server.boundingBox();
+  assert.ok(cloudBounds && serverBounds);
+  assert.ok(serverBounds.x >= cloudBounds.x && serverBounds.y >= cloudBounds.y &&
+    serverBounds.x + serverBounds.width <= cloudBounds.x + cloudBounds.width + 1 &&
+    serverBounds.y + serverBounds.height <= cloudBounds.y + cloudBounds.height + 1,
+  `${provider} server must remain enclosed by its cloud scope`);
+  await server.click();
+  await inspector.getByRole("heading", { name: "127.0.0.1:31337", exact: true }).waitFor();
+  const instanceProperties = await inspectorProperties(inspector);
+  for (const [label, value] of Object.entries(expectedInstance)) {
+    assert.equal(instanceProperties[label], value, `${provider} instance must expose ${label}`);
+  }
+  assert.equal(instanceProperties["Status"], "Connected", "server connectivity remains distinct from cached instance state");
+  for (const label of [
+    "VPC ID", "VPC CIDR", "Subscription ID", "Resource group", "Resource group ID", "Virtual network",
+    "Virtual network ID", "Virtual network resource group", "Virtual network CIDR", "Cloud metadata updated",
+  ]) {
+    assert.equal(instanceProperties[label], undefined, `${provider} instance must not duplicate cloud property ${label}`);
+  }
+  await page.screenshot({ path: join(artifactDirectory, `overview-${provider}-instance-inspector.png`), animations: "disabled" });
+  await inspector.getByRole("button", { name: "Close", exact: true }).click();
+}
+
+async function inspectorProperties(inspector: Locator): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const row of await inspector.locator(".overview-properties > div").all()) {
+    const label = await row.locator("dt").innerText();
+    assert.equal(result[label], undefined, `inspector property ${label} must not be duplicated`);
+    result[label] = await row.locator("dd").innerText();
+  }
+  return result;
 }
 
 async function assertInteractionEntries(menu: Locator): Promise<void> {

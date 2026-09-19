@@ -111,19 +111,78 @@ describe("overview topology adapter", () => {
     expect(byKind(createOverviewTopology(first).nodes, "session").id).not.toBe(byKind(createOverviewTopology(otherServer).nodes, "session").id);
   });
 
-  it("represents cloud hosting as containment and keeps cached provider health separate from connectivity", () => {
+  it("keeps AWS network metadata on the cloud and cached instance data on the enclosed server", () => {
     const source = snapshot();
     source.connection.managedServer = {
       provider: "aws", deploymentId: "deployment-1", name: "Office infrastructure",
-      overview: { region: "us-west-2", size: "t3.small", instanceState: "running", health: "ok", publicIpAddress: "203.0.113.10", privateIpAddress: "10.0.0.10", updatedAt: timestamp },
+      overview: { region: "us-west-2", size: "t3.small", instanceState: "running", health: "ok", publicIpAddress: "203.0.113.10", privateIpAddress: "10.0.0.10", updatedAt: timestamp,
+        cloud: { provider: "aws", vpcId: "vpc-123", vpcCidr: "10.0.0.0/16" },
+        instanceId: "i-123", instanceName: "Office infrastructure", availabilityZone: "us-west-2a", subnetId: "subnet-123" },
     };
     const document = createOverviewTopology(source);
     const cloud = byKind(document.nodes, "cloud");
     const server = byKind(document.nodes, "server");
-    expect(cloud).toMatchObject({ role: "group", provider: "aws", icon: "aws", label: "Office infrastructure", subtitle: "AWS · us-west-2", freshness: "unknown", statusLabel: "Last known: running" });
+    expect(cloud).toMatchObject({ role: "group", provider: "aws", icon: "aws", label: "vpc-123", subtitle: "AWS · us-west-2", freshness: "unknown", statusLabel: "VPC" });
     expect(server).toMatchObject({ parentId: cloud.id, status: "healthy", statusLabel: "Connected" });
-    expect(cloud.properties).toContainEqual({ label: "Cloud metadata updated", value: timestamp });
+    expect(cloud).not.toHaveProperty("resource");
+    expect(cloud.properties).toEqual([
+      { label: "Provider", value: "AWS" }, { label: "Region", value: "us-west-2" },
+      { label: "VPC ID", value: "vpc-123" }, { label: "VPC CIDR", value: "10.0.0.0/16" },
+      { label: "Cloud metadata updated", value: timestamp },
+    ]);
+    expect(server.properties).toEqual(expect.arrayContaining([
+      { label: "Deployment", value: "Office infrastructure" }, { label: "Instance ID", value: "i-123" },
+      { label: "Instance name", value: "Office infrastructure" }, { label: "Availability zone", value: "us-west-2a" },
+      { label: "Subnet ID", value: "subnet-123" }, { label: "Instance size", value: "t3.small" },
+      { label: "Instance state (cached)", value: "running" }, { label: "Instance health (cached)", value: "ok" },
+      { label: "Public IP", value: "203.0.113.10" }, { label: "Private IP", value: "10.0.0.10" },
+      { label: "Instance metadata updated", value: timestamp },
+    ]));
     expect(document.edges.every((edge) => edge.source !== cloud.id && edge.target !== cloud.id)).toBe(true);
+
+    source.connection.managedServer = { ...source.connection.managedServer!, name: "Renamed VM",
+      overview: { ...source.connection.managedServer!.overview!, size: "t3.medium", instanceState: "stopped", health: "impaired", publicIpAddress: "203.0.113.99" } };
+    expect(byKind(createOverviewTopology(source).nodes, "cloud")).toEqual(cloud);
+    source.connection.managedServer = { ...source.connection.managedServer,
+      overview: { ...source.connection.managedServer.overview!, cloud: { provider: "aws", vpcId: "vpc-other" } } };
+    expect(byKind(createOverviewTopology(source).nodes, "cloud").id).not.toBe(cloud.id);
+  });
+
+  it("uses Azure resource-group scope without attributing VM location, state, or addresses to it", () => {
+    const source = snapshot();
+    const resourceGroupId = "/subscriptions/sub-1/resourceGroups/team";
+    source.connection.managedServer = {
+      provider: "azure", deploymentId: "azure-1", name: "App VM", overview: {
+        region: "eastus", size: "Standard_B2s", instanceState: "deallocated", publicIpAddress: "203.0.113.20",
+        privateIpAddress: "10.1.0.4", updatedAt: timestamp, instanceId: `${resourceGroupId}/providers/Microsoft.Compute/virtualMachines/app`,
+        instanceName: "app", subnetId: "subnet-arm-id", cloud: {
+          provider: "azure", subscriptionId: "sub-1", resourceGroupName: "team", resourceGroupId,
+          virtualNetworkName: "shared-vnet", virtualNetworkId: "vnet-arm-id", virtualNetworkResourceGroup: "networks", virtualNetworkCidr: "10.1.0.0/16",
+        },
+      },
+    };
+    const document = createOverviewTopology(source);
+    const cloud = byKind(document.nodes, "cloud");
+    const server = byKind(document.nodes, "server");
+    expect(cloud).toMatchObject({ label: "team", subtitle: "Azure · Resource group", statusLabel: "Resource group", freshness: "unknown" });
+    expect(cloud.properties).toEqual([
+      { label: "Provider", value: "Azure" }, { label: "Subscription ID", value: "sub-1" },
+      { label: "Resource group", value: "team" }, { label: "Resource group ID", value: resourceGroupId },
+      { label: "Virtual network", value: "shared-vnet" }, { label: "Virtual network ID", value: "vnet-arm-id" },
+      { label: "Virtual network resource group", value: "networks" }, { label: "Virtual network CIDR", value: "10.1.0.0/16" },
+      { label: "Cloud metadata updated", value: timestamp },
+    ]);
+    expect(server.properties).toEqual(expect.arrayContaining([
+      { label: "Location", value: "eastus" }, { label: "Instance size", value: "Standard_B2s" },
+      { label: "Instance state (cached)", value: "deallocated" }, { label: "Public IP", value: "203.0.113.20" },
+    ]));
+    const extraResource: TopologyContributor = ({ ids, scopeId }) => ({ nodes: [{
+      id: `${scopeId}/other-server`, parentId: ids.cloud, kind: "server", role: "resource", label: "Second VM",
+      icon: "server", status: "unknown", statusLabel: "Unknown", freshness: "unknown", properties: [{ label: "Instance size", value: "Other size" }],
+    }] });
+    const expanded = createOverviewTopology(source, { contributors: [...DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS, extraResource] });
+    expect(expanded.nodes.filter((node) => node.parentId === cloud.id)).toHaveLength(2);
+    expect(byKind(expanded.nodes, "cloud")).toEqual(cloud);
   });
 
   it("renders associated deployments with missing cloud metadata and unmanaged hosting honestly", () => {
@@ -131,7 +190,7 @@ describe("overview topology adapter", () => {
     expect(byKind(createOverviewTopology(source).nodes, "server").subtitle).toBe("Hosting unknown");
     source.connection.managedServer = { provider: "azure", deploymentId: "azure-1", name: "Imported Azure deployment" };
     const cloud = byKind(createOverviewTopology(source).nodes, "cloud");
-    expect(cloud).toMatchObject({ provider: "azure", subtitle: "Azure", statusLabel: "Managed deployment" });
+    expect(cloud).toMatchObject({ provider: "azure", label: "Azure", subtitle: "Azure", statusLabel: "Cloud" });
     expect(cloud.properties).toEqual([{ label: "Provider", value: "Azure" }]);
   });
 

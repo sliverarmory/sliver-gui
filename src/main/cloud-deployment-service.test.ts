@@ -136,8 +136,11 @@ describe("CloudDeploymentService", () => {
           provider: "aws",
           name: `Server ${status}`,
           overview: {
+            cloud: { provider: "aws", vpcId: "vpc-0123456789abcdef0" },
             region: "us-west-2",
             size: "t3.small",
+            instanceName: `Server ${status}`,
+            subnetId: "subnet-a0000000000000000",
             instanceState: "unknown",
             health: "unknown",
             publicIpAddress: null,

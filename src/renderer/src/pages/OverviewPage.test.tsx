@@ -229,21 +229,27 @@ describe("Overview connection context", () => {
     expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
   });
 
-  it("shows the verified provider and cached cloud metadata without fetching cloud resources", async () => {
+  it("shows cloud metadata separately from the selected server's cached instance details", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = { status: "connected", server: "cloud.example:31337", managedServer: {
       deploymentId: "managed", provider: "aws", name: "Test deployment", overview: {
         region: "us-west-2", size: "t3.small", instanceState: "running", health: "ok",
         publicIpAddress: "192.0.2.20", privateIpAddress: "10.0.1.4", updatedAt: "2026-09-18T10:00:00Z",
+        cloud: { provider: "aws", vpcId: "vpc-123" },
       },
     } };
     render(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: "Test deployment" }));
+    await user.click(screen.getByRole("button", { name: "vpc-123" }));
     const inspector = screen.getByRole("complementary");
     expect(within(inspector).getByText("AWS")).toBeInTheDocument();
     expect(within(inspector).getByText("us-west-2")).toBeInTheDocument();
+    expect(within(inspector).getByText("VPC ID")).toBeInTheDocument();
+    expect(within(inspector).queryByText("Instance state (cached)")).not.toBeInTheDocument();
+    expect(within(inspector).queryByText("192.0.2.20")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "cloud.example:31337" }));
     expect(within(inspector).getByText("Instance state (cached)")).toBeInTheDocument();
     expect(within(inspector).getByText("192.0.2.20")).toBeInTheDocument();
+    expect(within(inspector).queryByText("VPC ID")).not.toBeInTheDocument();
   });
 });

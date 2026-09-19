@@ -46,10 +46,23 @@ relationships explicitly and document their source.
 
 ## Current data semantics
 
-- The cloud enclosure comes from the explicit managed deployment association.
-  Its cached region, size, instance state, and addresses are display metadata;
-  they are not live provider-health measurements. An unmanaged server has
-  unknown hosting. Server connectivity and cached VM state remain separate.
+- The cloud enclosure comes from the explicit managed deployment association,
+  but represents its shared infrastructure scope: an AWS VPC or Azure resource
+  group. It displays provider/network metadata (VPC ID/CIDR and region, or Azure
+  subscription, resource group, and VNet metadata). Its label and scoped identity
+  use that network/group rather than a VM name. Unknown scopes fall back to the
+  provider label without guessing a network or sharing an unverified identity.
+- The enclosed server owns deployment/instance identity, size, cached state and
+  health, instance region/location, availability zone, subnet, and IP addresses.
+  It retains live server connectivity separately from cached instance state.
+  Azure VM location is not presented as a resource-group location; an existing
+  VNet in another group is identified separately. Additional server/resources
+  can share the same enclosure without assigning their attributes to the cloud.
+- Cloud and instance metadata are allowlisted from cached local deployment
+  records; selecting nodes never contacts a cloud provider or reads credentials.
+  Runtime network IDs take precedence over configured fallbacks. CIDRs are
+  available for locally managed networks; missing values remain absent. Cache
+  timestamps do not imply live provider health. Unmanaged hosting remains unknown.
 - Every reported operator has a separate presence node, including offline
   operators. The local client remains distinct because a matching display name
   does not establish roster identity. Presence edges are associations, not
@@ -162,6 +175,8 @@ paths for sessions and beacons. It checks that no target
 commands or cloud actions occur. Screenshots are written to
 `artifacts/overview-e2e/`. The protocol test also verifies a same-origin module
 worker and its static import from an ASAR archive.
+AWS/Azure inspector checks assert that cloud/network metadata and instance
+metadata appear on their respective nodes, while preserving cloud containment.
 
 The separate topology journey supplies three operators and a branched five-hop
 route with a sessionless relay, plus two builders and two crackstations sharing

@@ -3,6 +3,7 @@ import { chmod, lstat, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, posix as posixPath, win32 as win32Path } from "node:path";
 import { createSecureContext } from "node:tls";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   BrowserWindow,
@@ -615,18 +616,9 @@ export class ConnectionRegistry {
       const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
       const managedServer = this.managedServerForConnection(pool, context.snapshot.connection.status);
       const previous = context.snapshot.connection.managedServer;
-      if (
-        previous === managedServer ||
-        (previous && managedServer && previous.deploymentId === managedServer.deploymentId &&
-          previous.provider === managedServer.provider && previous.name === managedServer.name &&
-          previous.overview?.region === managedServer.overview?.region &&
-          previous.overview?.size === managedServer.overview?.size &&
-          previous.overview?.instanceState === managedServer.overview?.instanceState &&
-          previous.overview?.health === managedServer.overview?.health &&
-          previous.overview?.publicIpAddress === managedServer.overview?.publicIpAddress &&
-          previous.overview?.privateIpAddress === managedServer.overview?.privateIpAddress &&
-          previous.overview?.updatedAt === managedServer.overview?.updatedAt)
-      ) continue;
+      // Compare the complete display-only reference so newly added nested
+      // metadata participates without another field-by-field change detector.
+      if (isDeepStrictEqual(previous, managedServer)) continue;
       context.snapshot = {
         ...context.snapshot,
         connection: { ...context.snapshot.connection, managedServer },

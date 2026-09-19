@@ -1,4 +1,4 @@
-import type { DomainCollection, SliverSnapshot } from "../../../shared/contracts";
+import type { DomainCollection, ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
 import type { TargetSummary } from "../../../shared/target-contracts";
 import { TOPOLOGY_SCHEMA_VERSION } from "../../../shared/topology-contracts";
 import { operatorTopologyContributor } from "./operator-topology";
@@ -75,6 +75,23 @@ function providerName(provider: string): string {
   return provider === "aws" ? "AWS" : provider === "azure" ? "Azure" : titleCase(provider);
 }
 
+/** Use the reported cloud scope; do not make the enclosing resource a VM. */
+function cloudScopeIdentity(managed: ManagedServerReference): string {
+  const cloud = managed.overview?.cloud;
+  if (managed.provider === "aws" && cloud?.provider === "aws" && cloud.vpcId) {
+    return JSON.stringify(["aws", managed.overview?.region ?? "", cloud.vpcId]);
+  }
+  if (managed.provider === "azure" && cloud?.provider === "azure") {
+    if (cloud.resourceGroupId) return JSON.stringify(["azure", cloud.resourceGroupId.toLowerCase()]);
+    if (cloud.subscriptionId && cloud.resourceGroupName) {
+      return JSON.stringify(["azure", cloud.subscriptionId.toLowerCase(), cloud.resourceGroupName.toLowerCase()]);
+    }
+  }
+  // An unknown network is local to this association, not a claim that every
+  // deployment with the same provider belongs to one shared cloud scope.
+  return JSON.stringify([managed.provider, "unknown", managed.deploymentId]);
+}
+
 function osIcon(os: string): string {
   if (os.toLowerCase().startsWith("windows")) return "windows";
   if (os.toLowerCase() === "linux") return "linux";
@@ -136,29 +153,36 @@ export const connectionTopologyContributor: TopologyContributor = (context) => {
   }
   if (managed) {
     const summary = managed.overview;
+    const cloud = summary?.cloud?.provider === managed.provider ? summary.cloud : undefined;
+    const aws = cloud?.provider === "aws" ? cloud : undefined;
+    const azure = cloud?.provider === "azure" ? cloud : undefined;
+    const scopeLabel = aws?.vpcId ? "VPC" : azure?.resourceGroupName ? "Resource group" : "Cloud";
     nodes.push({
       id: ids.cloud,
       kind: "cloud",
       role: "group",
-      label: managed.name,
-      subtitle: [providerName(managed.provider), summary?.region].filter(Boolean).join(" · "),
+      label: aws?.vpcId || azure?.resourceGroupName || providerName(managed.provider),
+      subtitle: [providerName(managed.provider), managed.provider === "aws" ? summary?.region : azure?.resourceGroupName ? "Resource group" : ""].filter(Boolean).join(" · "),
       icon: managed.provider,
       provider: managed.provider,
       status: "unknown",
-      statusLabel: summary?.instanceState ? `Last known: ${summary.instanceState}` : "Managed deployment",
+      statusLabel: scopeLabel,
       // Cloud record updates are not a live provider-health observation.
       freshness: "unknown",
       properties: [
         { label: "Provider", value: providerName(managed.provider) },
-        ...property("Region", summary?.region),
-        ...property("Instance size", summary?.size),
-        ...property("Instance state (cached)", summary?.instanceState),
-        ...property("Instance health (cached)", summary?.health),
-        ...property("Public IP", summary?.publicIpAddress),
-        ...property("Private IP", summary?.privateIpAddress),
+        ...property("Region", managed.provider === "aws" ? summary?.region : undefined),
+        ...property("VPC ID", aws?.vpcId),
+        ...property("VPC CIDR", aws?.vpcCidr),
+        ...property("Subscription ID", azure?.subscriptionId),
+        ...property("Resource group", azure?.resourceGroupName),
+        ...property("Resource group ID", azure?.resourceGroupId),
+        ...property("Virtual network", azure?.virtualNetworkName),
+        ...property("Virtual network ID", azure?.virtualNetworkId),
+        ...property("Virtual network resource group", azure?.virtualNetworkResourceGroup),
+        ...property("Virtual network CIDR", azure?.virtualNetworkCidr),
         ...property("Cloud metadata updated", summary?.updatedAt),
       ],
-      resource: { kind: "cloud-deployment", id: managed.deploymentId },
     });
   }
   const jobs = snapshot.domains.jobs;
@@ -179,6 +203,18 @@ export const connectionTopologyContributor: TopologyContributor = (context) => {
       ...property("Server version", connection.version),
       { label: "Connectivity", value: titleCase(connection.status) },
       { label: "Hosting", value: managed ? `${providerName(managed.provider)} · ${managed.name}` : "Unknown" },
+      ...property("Deployment", managed?.name),
+      ...property("Instance ID", managed?.overview?.instanceId),
+      ...property("Instance name", managed?.overview?.instanceName),
+      ...property(managed?.provider === "azure" ? "Location" : "Region", managed?.overview?.region),
+      ...property("Availability zone", managed?.overview?.availabilityZone),
+      ...property("Subnet ID", managed?.overview?.subnetId),
+      ...property("Instance size", managed?.overview?.size),
+      ...property("Instance state (cached)", managed?.overview?.instanceState),
+      ...property("Instance health (cached)", managed?.overview?.health),
+      ...property("Public IP", managed?.overview?.publicIpAddress),
+      ...property("Private IP", managed?.overview?.privateIpAddress),
+      ...property("Instance metadata updated", managed?.overview?.updatedAt),
       { label: "Listener inventory", value: `${jobs.items.length} of ${jobs.page.total}${listenerFreshness !== "current" ? " · last known" : ""}` },
       ...jobs.items.map((job) => ({
         label: `Listener ${job.id}`,
@@ -331,7 +367,7 @@ export function createOverviewTopology(snapshot: SliverSnapshot, options: Overvi
     ids: {
       client: scopedId(scopeId, "client", "local"),
       server: scopedId(scopeId, "server", "current"),
-      cloud: scopedId(scopeId, "cloud", snapshot.connection.managedServer?.deploymentId ?? "unknown"),
+      cloud: scopedId(scopeId, "cloud", snapshot.connection.managedServer ? cloudScopeIdentity(snapshot.connection.managedServer) : "unknown"),
     },
   };
   const contributions = (options.contributors ?? DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS).map((contribute) => contribute(context));

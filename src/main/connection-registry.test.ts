@@ -12,7 +12,7 @@ import { clientpb, sliverpb, type SliverEventStreamState } from "sliver-script";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
-import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedServerReference, type SliverSnapshot } from "../shared/contracts.js";
+import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedCloudOverview, type ManagedServerReference, type SliverSnapshot } from "../shared/contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -507,6 +507,93 @@ describe("managed server connection metadata", () => {
     for (const id of [1, 2]) expect(registry.snapshot(id).connection.managedServer).toEqual(managedServer);
     expect(client.connect).toHaveBeenCalledOnce();
   });
+
+  it.each(["aws", "azure"] as const)("publishes nested %s cloud metadata changes with an unchanged timestamp", async (provider) => {
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    const updatedAt = "2026-09-19T12:00:00.000Z";
+    let current: ManagedServerReference = {
+      ...managedServer, provider,
+      overview: { region: "region", size: "size", instanceState: "running", publicIpAddress: null,
+        privateIpAddress: null, updatedAt, cloud: { provider } },
+    };
+    registry.setManagedServerResolver(() => current);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    registry.inheritConnection(1, 2);
+    const updates: ManagedCloudOverview[] = provider === "aws" ? [
+      { provider: "aws", vpcId: "vpc-shared" },
+      { provider: "aws", vpcCidr: "10.20.0.0/16" },
+    ] : [
+      { provider: "azure", subscriptionId: "subscription-one" },
+      { provider: "azure", resourceGroupName: "server-group" },
+      { provider: "azure", resourceGroupId: "/subscriptions/subscription-one/resourceGroups/server-group" },
+      { provider: "azure", virtualNetworkId: "/subscriptions/subscription-one/resourceGroups/network-group/providers/Microsoft.Network/virtualNetworks/shared-network" },
+      { provider: "azure", virtualNetworkName: "shared-network" },
+      { provider: "azure", virtualNetworkResourceGroup: "network-group" },
+      { provider: "azure", virtualNetworkCidr: "10.30.0.0/16" },
+    ];
+
+    for (const cloud of updates) {
+      send.mockClear();
+      current = { ...current, overview: { ...current.overview!, cloud: { ...current.overview!.cloud!, ...cloud } } };
+      registry.refreshManagedServerMetadata();
+      expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(2);
+      expect(send.mock.calls.filter(([channel]) => channel === "sliver:network-forwarding:changed")).toHaveLength(2);
+      for (const id of [1, 2]) {
+        expect(registry.snapshot(id).connection.managedServer).toEqual(current);
+        expect(registry.snapshot(id).connection.managedServer?.overview?.updatedAt).toBe(updatedAt);
+      }
+
+      send.mockClear();
+      current = structuredClone(current);
+      registry.refreshManagedServerMetadata();
+      expect(send).not.toHaveBeenCalled();
+    }
+
+    send.mockClear();
+    const overview = { ...current.overview! };
+    delete overview.cloud;
+    current = { ...current, overview };
+    registry.refreshManagedServerMetadata();
+    expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(2);
+    for (const id of [1, 2]) expect(registry.snapshot(id).connection.managedServer?.overview).not.toHaveProperty("cloud");
+    expect(client.connect).toHaveBeenCalledOnce();
+  });
+
+  it.each(["instanceId", "instanceName", "availabilityZone", "subnetId"] as const)(
+    "publishes an %s-only update with an unchanged timestamp", async (field) => {
+      const send = vi.fn();
+      electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+      const client = new FakeSliverClient();
+      const registry = createRegistry(() => client.adapter);
+      let current: ManagedServerReference = {
+        ...managedServer,
+        overview: { region: "us-west-2", size: "t3.small", instanceState: "running", publicIpAddress: null,
+          privateIpAddress: null, updatedAt: "2026-09-19T12:00:00.000Z", cloud: { provider: "aws", vpcId: "vpc-shared" } },
+      };
+      registry.setManagedServerResolver(() => current);
+      registry.registerWindow(1);
+      registry.registerWindow(2);
+      await connectSaved(registry, 1);
+      registry.inheritConnection(1, 2);
+      send.mockClear();
+
+      current = { ...current, overview: { ...current.overview!, [field]: "changed-instance-metadata" } };
+      registry.refreshManagedServerMetadata();
+      expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(2);
+      for (const id of [1, 2]) expect(registry.snapshot(id).connection.managedServer).toEqual(current);
+
+      send.mockClear();
+      current = structuredClone(current);
+      registry.refreshManagedServerMetadata();
+      expect(send).not.toHaveBeenCalled();
+      expect(client.connect).toHaveBeenCalledOnce();
+    },
+  );
 
   it("clears provenance after failure and ignores a superseded connection completion", async () => {
     await writeFile(join(externalDirectory, "other.cfg"), validConfig({ operator: "other" }));
