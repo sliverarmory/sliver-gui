@@ -1,5 +1,8 @@
+import { isIP } from "node:net";
+
 import {
   BrowserWindow,
+  clipboard,
   ipcMain,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -10,6 +13,7 @@ import {
 import {
   IPC,
   IPC_INVOKE,
+  type CopyManagedServerPublicIpInput,
   type ExecuteJobStopPlanInput,
   type GenerateFromProfileInput,
   type GenerateInput,
@@ -311,6 +315,27 @@ export function registerIpcHandlers(
       if (!cloudDeploymentWindows) return { ok: false, error: "Cloud Deployment is unavailable" };
       const source = { contentsId, rendererProcessId, rendererFrameToken };
       return request ? cloudDeploymentWindows.open(source, request) : cloudDeploymentWindows.open(source);
+    },
+  );
+  handleTrusted(
+    IPC.copyManagedServerPublicIp,
+    rendererUrl,
+    parseCopyManagedServerPublicIpArguments,
+    ({ contentsId }, input) => {
+      try {
+        const managed = registry.snapshot(contentsId).connection.managedServer;
+        if (!managed || managed.deploymentId !== input.deploymentId) {
+          return { ok: false, error: "The requested deployment is not associated with this window's current connection" };
+        }
+        const address = managed.overview?.publicIpAddress;
+        if (typeof address !== "string" || isIP(address) === 0) {
+          return { ok: false, error: "The managed server does not have an available public IP address" };
+        }
+        clipboard.writeText(address);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "The managed server's public IP address could not be copied" };
+      }
     },
   );
   handleTrusted(
@@ -822,12 +847,23 @@ function parseCloudDeploymentWindowArguments(
     const action = requireStringLiteralProperty(
       value,
       "action",
-      ["start", "stop", "reboot", "terminate", "ssh", "operator"] as const,
+      ["start", "stop", "reboot", "terminate", "ssh", "operator", "rename"] as const,
       description,
     );
     return [Object.freeze({ view: "deployments", deploymentId, action })];
   }
   throw invalidArguments(description);
+}
+
+function parseCopyManagedServerPublicIpArguments(
+  args: readonly unknown[],
+): [input: CopyManagedServerPublicIpInput] {
+  const description = "arguments for copying a managed server public IP";
+  const value = requireRecord(requireSingleArgument(args, description), description);
+  requireExactKeys(value, ["deploymentId"], description);
+  const deploymentId = value["deploymentId"];
+  if (typeof deploymentId !== "string" || !UUID_PATTERN.test(deploymentId)) throw invalidArguments(description);
+  return [Object.freeze({ deploymentId })];
 }
 
 function parseApplicationSettingsUpdateArguments(

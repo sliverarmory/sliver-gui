@@ -471,6 +471,7 @@ const api: CloudDeploymentAPI = {
     value: { saved: true as const, fileName: "new-operator.cfg", mutationState: "created" as const },
   })),
   runLifecycleAction: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
+  renameDeployment: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
   updateFirewall: vi.fn(async () => ({ ok: true as const, value: runningDeployment })),
   listFirewallRules: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
   createFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
@@ -588,6 +589,8 @@ beforeEach(() => {
     value: { saved: true, fileName: "new-operator.cfg", mutationState: "created" },
   });
   vi.mocked(api.runLifecycleAction).mockClear();
+  vi.mocked(api.renameDeployment).mockReset();
+  vi.mocked(api.renameDeployment).mockResolvedValue({ ok: true, value: runningDeployment });
   vi.mocked(api.updateFirewall).mockClear();
   vi.mocked(api.listFirewallRules).mockClear();
   vi.mocked(api.createFirewallRule).mockClear();
@@ -2264,6 +2267,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(lifecycleActions).toHaveClass("ml-auto");
     const serverActions = await openServerActions(user, "range-control");
     expect(within(serverActions).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Rename",
       "Stop",
       "Reboot",
       "Terminate",
@@ -2280,11 +2284,14 @@ describe("CloudDeploymentWindowApp", () => {
     trigger.focus();
     await user.keyboard("{Enter}");
     const menu = await screen.findByRole("menu", { name: "Server actions for range-control" });
+    const rename = within(menu).getByRole("menuitem", { name: "Rename" });
     const stop = within(menu).getByRole("menuitem", { name: "Stop" });
     const reboot = within(menu).getByRole("menuitem", { name: "Reboot" });
     const terminate = within(menu).getByRole("menuitem", { name: "Terminate" });
     expect(trigger).toHaveAttribute("aria-expanded", "true");
-    await waitFor(() => expect(stop).toHaveFocus());
+    await waitFor(() => expect(rename).toHaveFocus());
+    await user.keyboard("{ArrowDown}");
+    expect(stop).toHaveFocus();
     await user.keyboard("{ArrowDown}");
     expect(reboot).toHaveFocus();
     await user.keyboard("{ArrowDown}");
@@ -2295,6 +2302,105 @@ describe("CloudDeploymentWindowApp", () => {
     })).not.toBeInTheDocument());
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("opens Rename from server actions with the current name and cancels without a mutation", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(within(await openServerActions(user, "range-control")).getByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename Instance" });
+    expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue("range-control");
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename Instance" })).not.toBeInTheDocument());
+    expect(api.renameDeployment).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Server actions for range-control" })).toHaveFocus();
+  });
+
+  it.each([runningDeployment, runningAzureDeployment])("opens the same rename modal from navigation for $provider", async (deployment) => {
+    currentSnapshot = {
+      ...emptySnapshot,
+      state: { v: 1, revision: 9, deployments: [deployment] },
+      credentials: [awsCredential, azureCredential],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/u }));
+    act(() => navigationListener?.({ view: "deployments", deploymentId: deployment.id, action: "rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename Instance" });
+    expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue(deployment.name);
+    expect(api.renameDeployment).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename Instance" })).not.toBeInTheDocument());
+  });
+
+  it("saves a trimmed name once, keeps Save/Cancel locked while pending, and refreshes after success", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const saved = deferred<Awaited<ReturnType<CloudDeploymentAPI["renameDeployment"]>>>();
+    vi.mocked(api.renameDeployment).mockReturnValueOnce(saved.promise);
+    const successToast = vi.spyOn(toast, "success");
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(within(await openServerActions(user, "range-control")).getByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename Instance" });
+    const input = within(dialog).getByRole("textbox", { name: "Name" });
+    await user.clear(input);
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+    await user.type(input, "  Team Server  ");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(api.renameDeployment).toHaveBeenCalledExactlyOnceWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9, name: "Team Server" });
+    expect(input).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(dialog).toBeInTheDocument();
+    expect(successToast).not.toHaveBeenCalled();
+
+    const renamed = { ...runningDeployment, name: "Team Server" };
+    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [renamed] } };
+    await act(async () => saved.resolve({ ok: true, value: renamed }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename Instance" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("button", { name: "Server actions for Team Server" })).toBeInTheDocument();
+    expect(successToast).toHaveBeenCalledWith("Instance renamed", expect.objectContaining({ description: "range-control is now Team Server." }));
+    successToast.mockRestore();
+  });
+
+  it("keeps the draft and captured revision when a rename fails after a background refresh", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.renameDeployment).mockResolvedValueOnce({ ok: false, error: "Deployment state changed. Refresh and try again." });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(within(await openServerActions(user, "range-control")).getByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename Instance" });
+    const input = within(dialog).getByRole("textbox", { name: "Name" });
+    await user.clear(input);
+    await user.type(input, "Draft name");
+    currentSnapshot = { ...currentSnapshot, state: { ...currentSnapshot.state, revision: 10 } };
+    act(() => changedListener?.("snapshot"));
+    await waitFor(() => expect(api.getSnapshot).toHaveBeenCalledTimes(2));
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(api.renameDeployment).toHaveBeenCalledExactlyOnceWith({ deploymentId: DEPLOYMENT_ID, expectedRevision: 9, name: "Draft name" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Deployment state changed. Refresh and try again.");
+    expect(input).toHaveValue("Draft name");
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
+
+  it("releases the rename lock when a refreshed inventory removes its instance", async () => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      state: { v: 1, revision: 9, deployments: [runningDeployment, runningAzureDeployment] },
+      credentials: [awsCredential, azureCredential],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(within(await openServerActions(user, "range-control")).getByRole("menuitem", { name: "Rename" }));
+    await screen.findByRole("dialog", { name: "Rename Instance" });
+    act(() => navigationListener?.({ view: "deployments", deploymentId: AZURE_DEPLOYMENT_ID, action: "rename" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("range-control");
+    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [runningAzureDeployment] } };
+    act(() => changedListener?.("snapshot"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("azure-control"));
+    expect(api.renameDeployment).not.toHaveBeenCalled();
   });
 
   it("opens a validated operator form with editable endpoint and permission controls", async () => {
@@ -2315,8 +2421,9 @@ describe("CloudDeploymentWindowApp", () => {
     const newOperator = await screen.findByRole("button", { name: "New Operator for range-control" });
     expect(newOperator).toHaveTextContent("New Operator");
     expect(newOperator).toBeEnabled();
+    await user.keyboard("{Tab}");
     newOperator.focus();
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Add an operator to range-control");
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent("Add an operator to range-control"));
     newOperator.blur();
     await user.click(newOperator);
 

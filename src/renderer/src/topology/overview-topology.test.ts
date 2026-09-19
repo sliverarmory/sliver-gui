@@ -148,6 +148,41 @@ describe("overview topology adapter", () => {
     expect(byKind(createOverviewTopology(source).nodes, "cloud").id).not.toBe(cloud.id);
   });
 
+  it("uses managed friendly names without changing server identity or endpoint properties", () => {
+    const source = snapshot();
+    source.connection.managedServer = {
+      provider: "aws", deploymentId: "deployment-1", name: "Deployment name",
+      overview: { instanceName: "  Cloud Name tag  ", region: "us-west-2", size: "t3.small", instanceState: "running",
+        publicIpAddress: "203.0.113.10", privateIpAddress: "10.0.0.10", updatedAt: timestamp },
+    };
+    const original = createOverviewTopology(source);
+    const server = byKind(original.nodes, "server");
+    expect(server.label).toBe("Cloud Name tag");
+    expect(server.properties).toContainEqual({ label: "Server", value: "example.test:31337" });
+
+    source.connection.managedServer = { ...source.connection.managedServer,
+      overview: { ...source.connection.managedServer.overview!, instanceName: "Renamed cloud instance" } };
+    const renamed = createOverviewTopology(source);
+    expect(byKind(renamed.nodes, "server")).toMatchObject({ id: server.id, label: "Renamed cloud instance", resource: server.resource });
+    expect(renamed.scope.id).toBe(original.scope.id);
+    expect(renamed.edges.map(({ id }) => id)).toEqual(original.edges.map(({ id }) => id));
+  });
+
+  it.each([
+    [undefined, "  Managed deployment  ", "Managed deployment"],
+    ["   ", "  Managed deployment  ", "Managed deployment"],
+    [undefined, "", "example.test:31337"],
+    ["   ", "  ", "example.test:31337"],
+  ])("falls back from instance name %s and deployment name %s to %s", (instanceName, name, expected) => {
+    const source = snapshot();
+    source.connection.managedServer = {
+      provider: "azure", deploymentId: "deployment-1", name: name!,
+      overview: { ...(instanceName === undefined ? {} : { instanceName }), region: "eastus", size: "Standard_B2s",
+        instanceState: "running", publicIpAddress: null, privateIpAddress: null, updatedAt: timestamp },
+    };
+    expect(byKind(createOverviewTopology(source).nodes, "server").label).toBe(expected);
+  });
+
   it("uses Azure resource-group scope without attributing VM location, state, or addresses to it", () => {
     const source = snapshot();
     const resourceGroupId = "/subscriptions/sub-1/resourceGroups/team";

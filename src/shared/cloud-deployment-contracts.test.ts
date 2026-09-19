@@ -18,6 +18,7 @@ import {
   parseDeleteAwsFirewallRuleInput,
   parseListAwsFirewallRulesInput,
   parseResolvedCloudCredentialInput,
+  parseRenameCloudDeploymentInput,
   parseUpdateAwsFirewallRuleInput,
   parseUpdateCloudFirewallInput,
 } from "./cloud-deployment-contracts.js";
@@ -30,6 +31,30 @@ const AZURE_SUBSCRIPTION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const AZURE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
 describe("cloud deployment contracts", () => {
+  it("normalizes a bounded deployment rename without changing its identity or revision", () => {
+    const input = { deploymentId: DEPLOYMENT_ID, expectedRevision: 7, name: "  Production Control  " };
+    const parsed = parseRenameCloudDeploymentInput(input);
+    expect(parsed).toEqual({ deploymentId: DEPLOYMENT_ID, expectedRevision: 7, name: "Production Control" });
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(input.name).toBe("  Production Control  ");
+    expect(parseRenameCloudDeploymentInput({ ...input, name: "x".repeat(120) }).name).toHaveLength(120);
+  });
+
+  it("rejects malformed deployment renames, oversized names, controls, and extra authority", () => {
+    const input = { deploymentId: DEPLOYMENT_ID, expectedRevision: 0, name: "Production Control" };
+    for (const value of [
+      null, [], {}, { ...input, deploymentId: "not-a-uuid" },
+      { ...input, expectedRevision: -1 }, { ...input, expectedRevision: 0.5 },
+      { ...input, expectedRevision: "0" }, { ...input, expectedRevision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...input, name: "" }, { ...input, name: "   " }, { ...input, name: "x".repeat(121) },
+      { ...input, name: "\nProduction" }, { ...input, name: "Production\r" },
+      { ...input, name: "Production\tControl" }, { ...input, name: "Production\0Control" },
+      { ...input, name: "Production\u007fControl" }, { ...input, name: "Production\u0085Control" },
+      { ...input, name: 123 },
+      { ...input, provider: "aws" }, { ...input, command: "arbitrary" },
+    ]) expect(() => parseRenameCloudDeploymentInput(value)).toThrow(/Invalid cloud deployment rename/u);
+  });
+
   it("accepts only native Azure login capabilities and bounded main-process session caches", () => {
     expect(parseBeginAzureLoginInput({ tenantId: null, clientId: null })).toEqual({ tenantId: null, clientId: null });
     expect(() => parseBeginAzureLoginInput({ tenantId: "common", clientId: null })).toThrow(/Invalid/u);

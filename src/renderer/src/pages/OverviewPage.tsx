@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Label, ListBox, SearchField, Select, toast } from "@heroui/react";
-import { faList, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
+import { faCopy, faList, faPen, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
 import type { ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
 import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
@@ -81,6 +81,7 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
   const state = managed?.overview?.instanceState;
   const running = state === "running";
   const stopped = state === "stopped" || state === "deallocated";
+  const canCopyPublicIp = Boolean(managed?.overview?.publicIpAddress?.trim());
   const lifecycleAction = running ? "stop" : "start";
   type CloudAction = Extract<CloudDeploymentNavigationRequest, { view: "deployments" }>["action"] | "firewall";
   const cloudAction = (
@@ -118,6 +119,25 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
   cloudAction("ssh", "SSH", faTerminal, state !== undefined && !running),
   cloudAction("firewall", "Firewall", faShieldHalved),
   cloudAction("operator", "Add Operator", faUserPlus, state !== undefined && !running),
+  { ...cloudAction("rename", "Rename", faPen), separatorBefore: true },
+  {
+    id: "server.copy-public-ip",
+    label: "Copy Public IP",
+    icon: faCopy,
+    isDisabled: !managed || !canCopyPublicIp,
+    onAction: async () => {
+      if (!managed || !canCopyPublicIp) return;
+      try {
+        const result = await window.sliver.copyManagedServerPublicIp({ deploymentId: managed.deploymentId });
+        if (result.ok) toast.success("Public IP copied to clipboard");
+        else toast.danger("Could not copy public IP", { description: result.error });
+      } catch (error) {
+        toast.danger("Could not copy public IP", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  },
   { ...cloudAction(lifecycleAction, running ? "Stop" : "Start", running ? faStop : faPlay, !running && !stopped), separatorBefore: true },
   cloudAction("reboot", "Reboot", faRotate, !running),
   { ...cloudAction("terminate", "Terminate", faTrashCan), variant: "danger" },

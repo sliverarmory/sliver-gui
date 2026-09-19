@@ -192,7 +192,7 @@ export const connectionTopologyContributor: TopologyContributor = (context) => {
     kind: "server",
     role: "resource",
     ...(managed ? { parentId: ids.cloud } : {}),
-    label: connection.server ?? managed?.name ?? connection.configName ?? "Sliver server",
+    label: managed?.overview?.instanceName?.trim() || managed?.name?.trim() || connection.server || connection.configName || "Sliver server",
     subtitle: managed ? `${providerName(managed.provider)} · Managed server` : "Hosting unknown",
     icon: "server",
     status: connection.status === "connected" ? "healthy" : connection.status === "degraded" ? "warning" : "unknown",

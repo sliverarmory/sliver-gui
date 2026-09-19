@@ -2939,6 +2939,7 @@ function unavailableCloudDeploymentController(
     createDeployment: () => ({ ok: false, error: message }),
     generateOperatorConfig: () => ({ ok: false, error: message, mutationState: "not-started" }),
     runLifecycleAction: () => ({ ok: false, error: message }),
+    renameDeployment: () => ({ ok: false, error: message }),
     updateFirewall: () => ({ ok: false, error: message }),
     listFirewallRules: () => ({ ok: false, error: message }),
     createFirewallRule: () => ({ ok: false, error: message }),

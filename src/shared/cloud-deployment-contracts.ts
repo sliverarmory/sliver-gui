@@ -477,6 +477,12 @@ export interface CloudDeploymentActionInput {
   readonly action: CloudDeploymentAction;
 }
 
+export interface RenameCloudDeploymentInput {
+  readonly deploymentId: string;
+  readonly expectedRevision: number;
+  readonly name: string;
+}
+
 export interface UpdateCloudFirewallInput {
   readonly deploymentId: string;
   readonly expectedRevision: number;
@@ -610,6 +616,7 @@ const STATE_KEYS = ["v", "revision", "deployments"] as const;
 const UPDATE_KEYS = ["expectedRevision", "deployment"] as const;
 const DELETE_KEYS = ["expectedRevision", "deploymentId"] as const;
 const ACTION_KEYS = ["deploymentId", "expectedRevision", "action"] as const;
+const RENAME_DEPLOYMENT_KEYS = ["deploymentId", "expectedRevision", "name"] as const;
 const FIREWALL_KEYS = ["deploymentId", "expectedRevision", "sshCidrs", "operatorCidrs"] as const;
 const AWS_FIREWALL_RULE_KEYS = ["direction", "protocol", "fromPort", "toPort", "peerType", "peer", "description"] as const;
 const AZURE_FIREWALL_RULE_KEYS = ["name", "priority", "direction", "access", "protocol", "sourceAddressPrefixes", "sourcePortRanges", "destinationAddressPrefixes", "destinationPortRanges", "description"] as const;
@@ -941,6 +948,19 @@ export function parseDeleteCloudDeploymentInput(value: unknown): DeleteCloudDepl
 export function parseCloudDeploymentActionInput(value: unknown): CloudDeploymentActionInput {
   if (!hasExactKeys(value, ACTION_KEYS) || !isUuidV4(value["deploymentId"]) || !isRevision(value["expectedRevision"]) || typeof value["action"] !== "string" || !DEPLOYMENT_ACTIONS.has(value["action"] as CloudDeploymentAction)) throw invalid("cloud deployment action");
   return Object.freeze({ deploymentId: value["deploymentId"], expectedRevision: value["expectedRevision"], action: value["action"] as CloudDeploymentAction });
+}
+
+export function parseRenameCloudDeploymentInput(value: unknown): RenameCloudDeploymentInput {
+  if (
+    !hasExactKeys(value, RENAME_DEPLOYMENT_KEYS) ||
+    !isUuidV4(value["deploymentId"]) ||
+    !isRevision(value["expectedRevision"]) ||
+    typeof value["name"] !== "string" ||
+    /\p{Cc}/u.test(value["name"])
+  ) throw invalid("cloud deployment rename");
+  const name = value["name"].trim();
+  if (!boundedName(name)) throw invalid("cloud deployment rename");
+  return Object.freeze({ deploymentId: value["deploymentId"], expectedRevision: value["expectedRevision"], name });
 }
 
 export function parseUpdateCloudFirewallInput(value: unknown): UpdateCloudFirewallInput {

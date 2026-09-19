@@ -77,6 +77,7 @@ describe("Cloud Deployment preload bridge", () => {
       "discoverAzureAccounts",
       "discoverAzureOptions",
       "createDeployment",
+      "renameDeployment",
       "createOperatorConfig",
       "runLifecycleAction",
       "updateFirewall",
@@ -427,7 +428,7 @@ describe("Cloud Deployment preload bridge", () => {
     unsubscribe();
   });
 
-  it("validates and replays a bounded reboot navigation request", async () => {
+  it.each(["reboot", "rename"])("validates and replays a bounded %s navigation request", async (action) => {
     const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
       event: unknown,
       ...payload: unknown[]
@@ -435,7 +436,7 @@ describe("Cloud Deployment preload bridge", () => {
     const request = {
       view: "deployments",
       deploymentId: "22222222-2222-4222-8222-222222222222",
-      action: "reboot",
+      action,
     };
     handler({}, request);
     const listener = vi.fn();
@@ -449,6 +450,12 @@ describe("Cloud Deployment preload bridge", () => {
     handler({}, request, "extra");
     expect(listener).toHaveBeenCalledOnce();
     unsubscribe();
+  });
+
+  it("forwards a deployment rename on its fixed channel without exposing arbitrary IPC", async () => {
+    const input = { deploymentId: "22222222-2222-4222-8222-222222222222", expectedRevision: 4, name: "Production Control" };
+    await exposedApi().renameDeployment(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, input);
   });
 
   it("retains an early navigation request across a subscribe-cleanup-resubscribe cycle", async () => {

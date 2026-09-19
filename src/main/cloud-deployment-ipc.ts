@@ -35,6 +35,7 @@ import {
   parseCreateCloudCredentialInput,
   parseBeginAzureLoginInput,
   parseCreateCloudDeploymentInput,
+  parseRenameCloudDeploymentInput,
   parseDeleteCloudFirewallRuleInput,
   parseListCloudFirewallRulesInput,
   parseUpdateCloudFirewallRuleInput,
@@ -45,6 +46,7 @@ import {
   type CloudFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentActionInput,
+  type RenameCloudDeploymentInput,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
   type CreateCloudFirewallRuleInput,
@@ -126,6 +128,7 @@ export interface CloudDeploymentController {
     input: CreateCloudOperatorConfigInput,
   ): MaybePromise<GenerateCloudOperatorConfigResult>;
   runLifecycleAction(input: CloudDeploymentActionInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
+  renameDeployment(input: RenameCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   listFirewallRules(input: ListCloudFirewallRulesInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
   createFirewallRule(input: CreateCloudFirewallRuleInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
@@ -509,6 +512,13 @@ export function registerCloudDeploymentIpcHandlers(
         if (Buffer.isBuffer(data)) data.fill(0);
       }
     },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseRenameCloudDeploymentInput(requireSingleArgument(args))),
+    (_sender, input) => controller.renameDeployment(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.runLifecycleAction,

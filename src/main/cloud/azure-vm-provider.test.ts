@@ -470,6 +470,63 @@ describe("Azure VM provider", () => {
     expect(fake.reads.filter((entry) => entry === "vm.get").length).toBeGreaterThanOrEqual(6);
   });
 
+  it("updates the VM Name tag while preserving other tags and ARM identity", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const original = fake.virtualMachines.get(vmId)!;
+    const tags: Record<string, string> = { ...original.tags, environment: "production", name: "old lowercase name" };
+    delete tags[AZURE_NAME_TAG_KEY];
+    fake.virtualMachines.set(vmId, { ...original, tags });
+    const update = vi.spyOn(fake.clients.virtualMachines, "update");
+    const before = fake.mutations.length;
+
+    await provider.rename(resource, "Operations server");
+
+    expect(update).toHaveBeenCalledExactlyOnceWith(resourceGroupName, original.name, {
+      tags: { SliverGUIManaged: "true", SliverGUID: guid, environment: "production", Name: "Operations server" },
+    });
+    expect(fake.mutations.slice(before)).toEqual(["vm.update"]);
+    expect(fake.virtualMachines.get(vmId)).toMatchObject({ id: original.id, name: original.name, location: original.location });
+    expect((await provider.refresh(resource)).name).toBe("Operations server");
+    expect((await provider.refresh(resource)).virtualMachineId).toBe(resource.virtualMachineId);
+  });
+
+  it("rejects VM rename ownership/name violations and sanitizes provider failures", async () => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const original = fake.virtualMachines.get(vmId)!;
+    const update = vi.spyOn(fake.clients.virtualMachines, "update");
+    await expect(provider.rename(resource, "bad\nname")).rejects.toThrow(/deployment name is invalid/u);
+    fake.virtualMachines.set(vmId, { ...original, tags: { ...original.tags, SliverGUID: "wrong-owner" } });
+    await expect(provider.rename(resource, "Operations server")).rejects.toThrow(/ownership tags do not match/u);
+    expect(update).not.toHaveBeenCalled();
+    fake.virtualMachines.set(vmId, original);
+    update.mockRejectedValueOnce(new Error("private provider response"));
+    await expect(provider.rename(resource, "Operations server")).rejects.toThrow("Azure could not rename the managed virtual machine (Error).");
+    expect(fake.virtualMachines.get(vmId)?.tags).toEqual(original.tags);
+  });
+
+  it.each([
+    { name: "Provider friendly name", valid: true },
+    { name: "bad\nname", valid: false },
+    { name: "x".repeat(121), valid: false },
+  ])("reads only displayable VM Name tags during refresh: $valid", async ({ name, valid }) => {
+    const fake = new FakeAzureClients();
+    const provider = providerFor(fake);
+    const resource = await provider.create(managedCreateInput());
+    const original = fake.virtualMachines.get(vmId)!;
+    fake.virtualMachines.set(vmId, { ...original, tags: { ...original.tags, [AZURE_NAME_TAG_KEY]: name } });
+    const before = fake.mutations.length;
+
+    const refreshed = await provider.refresh(resource);
+
+    expect(refreshed.name).toBe(valid ? name : resource.name);
+    expect(refreshed.virtualMachineId).toBe(resource.virtualMachineId);
+    expect(fake.mutations).toHaveLength(before);
+  });
+
   it("clears disappeared addresses and provisioning state when refreshing without cloud mutations", async () => {
     const fake = new FakeAzureClients();
     const provider = providerFor(fake);
@@ -1337,6 +1394,13 @@ class FakeAzureClients {
         };
         this.virtualMachines.set(id, value);
         this.mutations.push("vm.create");
+        return value;
+      },
+      update: async (group, name, parameters) => {
+        const id = computeId(group, "virtualMachines", name);
+        const value = { ...getOrNotFound(this.virtualMachines, id), ...parameters };
+        this.virtualMachines.set(id, value);
+        this.mutations.push("vm.update");
         return value;
       },
       start: async (group, name) => {

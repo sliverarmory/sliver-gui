@@ -397,6 +397,7 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
     mutationState: "not-started",
   }),
   runLifecycleAction: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  renameDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   updateFirewall: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   listFirewallRules: ({ deploymentId }) => {
     if (deploymentId === E2E_AWS_DEPLOYMENT.id) return { ok: true, value: E2E_AWS_FIREWALL };

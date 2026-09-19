@@ -40,6 +40,7 @@ import {
   parseCreateCloudDeploymentInput,
   parseDeleteCloudFirewallRuleInput,
   parseListCloudFirewallRulesInput,
+  parseRenameCloudDeploymentInput,
   parseUpdateCloudFirewallRuleInput,
   parseUpdateCloudFirewallInput,
   type AwsCloudDeploymentRecord,
@@ -67,6 +68,7 @@ import {
   type CreateCloudDeploymentInput,
   type DeleteCloudFirewallRuleInput,
   type ListCloudFirewallRulesInput,
+  type RenameCloudDeploymentInput,
   type UpdateCloudFirewallRuleInput,
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
@@ -196,6 +198,7 @@ export interface CloudAwsProvider {
     onMutation?: Parameters<AwsEc2Provider["create"]>[1],
   ): Promise<AwsEc2DeploymentResource>;
   refresh(resource: AwsEc2DeploymentResource, signal?: AbortSignal): Promise<AwsEc2DeploymentResource>;
+  rename(resource: AwsEc2DeploymentResource, name: string): Promise<void>;
   start(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource>;
   stop(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource>;
   reboot(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource>;
@@ -230,6 +233,7 @@ export interface CloudAzureProvider {
     onMutation?: Parameters<AzureVmProvider["create"]>[1],
   ): Promise<AzureVmDeploymentResource>;
   refresh(resource: AzureVmDeploymentResource, signal?: AbortSignal): Promise<AzureVmDeploymentResource>;
+  rename(resource: AzureVmDeploymentResource, name: string): Promise<void>;
   start(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
   stop(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
   reboot(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource>;
@@ -1353,6 +1357,52 @@ export class CloudDeploymentService {
       });
     } catch (error) {
       return failure(error, "The cloud deployment could not be created");
+    }
+  }
+
+  async renameDeployment(input: RenameCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>> {
+    try {
+      this.#assertActive();
+      const parsed = parseRenameCloudDeploymentInput(input);
+      if (this.#busyDeployments.has(parsed.deploymentId)) return { ok: false, error: "The deployment is busy" };
+      return await this.#serializeDeployment(parsed.deploymentId, async () => {
+        let providerUpdated = false;
+        try {
+          const deployment = this.#requireDeploymentAtRevision(parsed.deploymentId, parsed.expectedRevision);
+          if (deployment.status === "provisioning" || deployment.status === "deleting") {
+            return { ok: false, error: "The deployment is busy" };
+          }
+          if (deployment.provider === "aws") {
+            await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+              try {
+                const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
+                await provider.rename(awsResourceFromRecord(deployment), parsed.name);
+              } catch (error) {
+                throw new Error(cloudErrorMessage(error, "The AWS instance could not be renamed", credentialValues(secret)));
+              }
+            });
+          } else {
+            await this.#vault.withCredential(deployment.credentialId, "azure", async (secret) => {
+              try {
+                const provider = this.#azureProviderFactory(this.#azureConnection(deployment.spec.location, secret, deployment.credentialId));
+                await provider.rename(azureResourceFromRecord(deployment, secret), parsed.name);
+              } catch (error) {
+                throw new Error(cloudErrorMessage(error, "The Azure instance could not be renamed", credentialValues(secret)));
+              }
+            });
+          }
+          providerUpdated = true;
+          const renamed = await this.#persistPatch(deployment.id, (current) => ({ ...current, name: parsed.name }));
+          return { ok: true, value: renamed };
+        } catch (error) {
+          if (providerUpdated) {
+            return { ok: false, error: "The cloud name was updated, but local state could not be saved. Refresh the deployment before retrying." };
+          }
+          return failure(error, "The cloud instance could not be renamed");
+        }
+      });
+    } catch (error) {
+      return failure(error, "The cloud instance rename was rejected");
     }
   }
 
@@ -3165,6 +3215,7 @@ function applyAwsStatusObservation(
   return {
     ...record,
     ...observedDeploymentState(record, state),
+    name: resource.name,
     remoteHost: resource.publicIpAddress ?? resource.privateIpAddress ?? null,
     runtime: {
       ...record.runtime,
@@ -3188,6 +3239,7 @@ function applyAzureStatusObservation(
   return {
     ...record,
     ...observedDeploymentState(record, state),
+    name: resource.name,
     remoteHost: azureConnectionAddress(record.spec.usePublicIp, resource) ?? null,
     runtime: {
       ...record.runtime,
@@ -3892,6 +3944,7 @@ function applyAwsResource(
   return {
     ...deployment,
     status,
+    name: resource.name,
     phase,
     remoteHost: resource.publicIpAddress ?? resource.privateIpAddress ?? deployment.remoteHost,
     lastError: null,
@@ -4290,6 +4343,7 @@ function applyAzureResource(
   return {
     ...deployment,
     status: phase === "installing-sliver" ? "provisioning" : stopped ? "stopped" : "running",
+    name: resource.name,
     phase: stopped ? "stopped" : phase,
     remoteHost: azureConnectionAddress(deployment.spec.usePublicIp, resource) ?? null,
     lastError: null,
@@ -4586,7 +4640,7 @@ function cloudErrorMessage(
   fallback: string,
   secrets: readonly string[] = [],
 ): string {
-  let message = error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
+  let message = error instanceof Error && error.message.trim() ? error.message : fallback;
   for (const secret of secrets) {
     if (secret.length > 0) message = message.replaceAll(secret, "[redacted]");
   }

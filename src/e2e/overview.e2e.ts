@@ -372,7 +372,7 @@ async function verifyServerContextMenuNavigation(
   });
   const menu = page.getByRole("menu", { name: "Application context menu" });
   const powerLabel = hosting === "unmanaged" ? "Start" : "Stop";
-  const labels = ["View Jobs/Listeners", "SSH", "Firewall", "Add Operator", powerLabel, "Reboot", "Terminate"];
+  const labels = ["View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "Rename", "Copy Public IP", powerLabel, "Reboot", "Terminate"];
   const originalWindows = application.windows().length;
   await server.click({ button: "right" });
   await menu.waitFor();
@@ -381,9 +381,9 @@ async function verifyServerContextMenuNavigation(
   const orderedItems = await menu.locator('[role="menuitem"], [role="separator"], hr').evaluateAll((items) =>
     items.map((item) => item.getAttribute("role") === "separator" || item.tagName === "HR"
       ? "separator" : item.textContent?.trim()));
-  assert.deepEqual(orderedItems.slice(0, 8), [
-    "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "separator", powerLabel, "Reboot", "Terminate",
-  ], "a real separator must divide Add Operator from Start/Stop");
+  assert.deepEqual(orderedItems.slice(0, 11), [
+    "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", powerLabel, "Reboot", "Terminate",
+  ], "real separators must divide access, metadata, and lifecycle actions");
   assert.equal(await menu.getByRole("menuitem", { name: "View Jobs/Listeners", exact: true }).isEnabled(), true);
   for (const name of labels.slice(1)) {
     assert.equal(await menu.getByRole("menuitem", { name, exact: true }).isEnabled(), hosting !== "unmanaged",
@@ -401,6 +401,39 @@ async function verifyServerContextMenuNavigation(
   if (hosting === "unmanaged") return;
 
   const deployment = hosting === "aws" ? E2E_AWS_DEPLOYMENT : E2E_AZURE_DEPLOYMENT;
+  // Capture only this isolated fixture's write without reading or changing the
+  // user's clipboard. The real menu still crosses the preload/main boundary.
+  await application.evaluate(({ clipboard }) => {
+    const state = globalThis as unknown as {
+      __overviewClipboardCapture?: { originalWriteText: typeof clipboard.writeText; writes: string[] };
+    };
+    if (state.__overviewClipboardCapture) throw new Error("Overview clipboard capture is already installed");
+    const writes: string[] = [];
+    state.__overviewClipboardCapture = { originalWriteText: clipboard.writeText, writes };
+    clipboard.writeText = (text) => { writes.push(text); };
+  });
+  try {
+    await server.click({ button: "right" });
+    await menu.waitFor();
+    await menu.getByRole("menuitem", { name: "Copy Public IP", exact: true }).click();
+    await page.getByText("Public IP copied to clipboard", { exact: true }).waitFor();
+    const clipboardWrites = await application.evaluate(() => {
+      const state = globalThis as unknown as { __overviewClipboardCapture?: { writes: string[] } };
+      return state.__overviewClipboardCapture?.writes ?? [];
+    });
+    assert.deepEqual(clipboardWrites, [deployment.runtime.publicIpAddress]);
+    assert.equal(application.windows().length, originalWindows, "copying the public IP must not open a window");
+  } finally {
+    await application.evaluate(({ clipboard }) => {
+      const state = globalThis as unknown as {
+        __overviewClipboardCapture?: { originalWriteText: typeof clipboard.writeText; writes: string[] };
+      };
+      if (state.__overviewClipboardCapture) {
+        clipboard.writeText = state.__overviewClipboardCapture.originalWriteText;
+        delete state.__overviewClipboardCapture;
+      }
+    });
+  }
   const observeCloudWindow = (candidate: Page): void => {
     candidate.on("pageerror", (error) => rendererErrors.push(error.message));
     candidate.on("console", (message) => {
@@ -412,7 +445,7 @@ async function verifyServerContextMenuNavigation(
   application.on("window", observeCloudWindow);
   let cloudPage: Page | undefined;
   try {
-    for (const destination of ["Add Operator", "Firewall"] as const) {
+    for (const destination of ["Add Operator", "Firewall", "Rename"] as const) {
       await server.click({ button: "right" });
       await menu.waitFor();
       [cloudPage] = await Promise.all([
@@ -430,17 +463,27 @@ async function verifyServerContextMenuNavigation(
         assert.equal(await form.getByLabel("Public IP", { exact: true }).inputValue(), deployment.runtime.publicIpAddress);
         assert.equal(await form.getByLabel("Port", { exact: true }).inputValue(), String(deployment.spec.multiplayerPort));
         assert.equal(await form.getByRole("button", { name: "Create Operator", exact: true }).isDisabled(), true);
-      } else {
+      } else if (destination === "Firewall") {
         await cloudPage.getByRole("heading", { level: 1, name: deployment.name, exact: true }).waitFor();
         await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
         await cloudPage.getByRole("grid", { name: "Inbound firewall rules", exact: true }).waitFor();
+      } else {
+        const rename = cloudPage.getByRole("dialog", { name: "Rename Instance", exact: true });
+        await rename.waitFor();
+        assert.equal(await rename.getByRole("textbox", { name: /^Name/u }).inputValue(), deployment.name);
+        assert.equal(await rename.getByRole("button", { name: "Save", exact: true }).isDisabled(), true);
       }
       await cloudPage.screenshot({
-        path: join(artifactDirectory, `overview-${hosting}-server-${destination === "Add Operator" ? "operator" : "firewall"}.png`),
+        path: join(artifactDirectory, `overview-${hosting}-server-${destination === "Add Operator" ? "operator" : destination.toLowerCase()}.png`),
         animations: "disabled",
       });
       // Opening the existing form/details is the complete action under test.
-      // Never submit operator creation, lifecycle, firewall edits, or SSH.
+      // Never submit a rename, operator creation, lifecycle, firewall edits, or SSH.
+      if (destination === "Rename") {
+        const rename = cloudPage.getByRole("dialog", { name: "Rename Instance", exact: true });
+        await rename.getByRole("button", { name: "Cancel", exact: true }).click();
+        await rename.waitFor({ state: "hidden" });
+      }
       await cloudPage.close();
       cloudPage = undefined;
       await page.bringToFront();
@@ -480,7 +523,7 @@ async function verifyCloudAndInstanceMetadata(
   };
   const expectedInstance: Record<string, string> = {
     "Deployment": record.name,
-    "Instance name": provider === "aws" ? record.name : E2E_AZURE_DEPLOYMENT.runtime.vmName!,
+    "Instance name": record.name,
     "Instance state (cached)": record.runtime.instanceState,
     "Public IP": record.runtime.publicIpAddress!,
     "Private IP": record.runtime.privateIpAddress!,
@@ -534,8 +577,10 @@ async function verifyCloudAndInstanceMetadata(
     serverBounds.x + serverBounds.width <= cloudBounds.x + cloudBounds.width + 1 &&
     serverBounds.y + serverBounds.height <= cloudBounds.y + cloudBounds.height + 1,
   `${provider} server must remain enclosed by its cloud scope`);
+  assert.equal(await server.locator(".topology-node__text strong").textContent(), expectedInstance["Instance name"],
+    `${provider} server must display its instance name instead of its endpoint`);
   await server.click();
-  await inspector.getByRole("heading", { name: "127.0.0.1:31337", exact: true }).waitFor();
+  await inspector.getByRole("heading", { name: expectedInstance["Instance name"]!, exact: true }).waitFor();
   const instanceProperties = await inspectorProperties(inspector);
   for (const [label, value] of Object.entries(expectedInstance)) {
     assert.equal(instanceProperties[label], value, `${provider} instance must expose ${label}`);

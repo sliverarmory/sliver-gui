@@ -41,6 +41,7 @@ const CHANNELS = Object.freeze({
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
   createDeployment: "sliver:cloud-deployment:create",
+  renameDeployment: "sliver:cloud-deployment:rename",
   createOperatorConfig: "sliver:cloud-deployment:operator:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
   updateFirewall: "sliver:cloud-deployment:firewall:update",
@@ -137,6 +138,7 @@ const api: CloudDeploymentAPI = {
   discoverAzureAccounts: () => ipcRenderer.invoke(CHANNELS.discoverAzureAccounts),
   discoverAzureOptions: (input) => ipcRenderer.invoke(CHANNELS.discoverAzureOptions, input),
   createDeployment: (input) => ipcRenderer.invoke(CHANNELS.createDeployment, input),
+  renameDeployment: (input) => ipcRenderer.invoke(CHANNELS.renameDeployment, input),
   createOperatorConfig: (input) => ipcRenderer.invoke(CHANNELS.createOperatorConfig, input),
   runLifecycleAction: (input) => ipcRenderer.invoke(CHANNELS.runLifecycleAction, input),
   updateFirewall: (input) => ipcRenderer.invoke(CHANNELS.updateFirewall, input),
@@ -466,7 +468,8 @@ function parseNavigationRequest(payload: readonly unknown[]): CloudDeploymentNav
       request["action"] === "reboot" ||
       request["action"] === "terminate" ||
       request["action"] === "ssh" ||
-      request["action"] === "operator")
+      request["action"] === "operator" ||
+      request["action"] === "rename")
   ) {
     return Object.freeze({
       view: "deployments",

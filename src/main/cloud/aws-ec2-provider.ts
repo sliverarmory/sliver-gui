@@ -12,6 +12,7 @@ import {
   CreateRouteTableCommand,
   CreateSecurityGroupCommand,
   CreateSubnetCommand,
+  CreateTagsCommand,
   CreateVpcCommand,
   DeleteInternetGatewayCommand,
   DeleteKeyPairCommand,
@@ -101,6 +102,7 @@ import {
 
 import {
   AWS_SUPPORTED_INSTANCE_TYPES,
+  CLOUD_DEPLOYMENT_NAME_MAX_LENGTH,
   isAwsRegion,
   isSupportedAwsInstanceType,
   type AwsFirewallDirection,
@@ -841,7 +843,7 @@ export class AwsEc2Provider {
       ] : []))].sort();
     return {
       guid: resource.guid,
-      name: resource.name,
+      name: observedInstanceName(instance.Tags, resource.name),
       region: resource.region,
       ...(resource.keyPair ? { keyPair: resource.keyPair } : {}),
       ...(resource.managedNetwork ? { managedNetwork: resource.managedNetwork } : {}),
@@ -857,6 +859,15 @@ export class AwsEc2Provider {
       ...optionalString("publicIpAddress", publicIpAddress),
       ...(elasticIp ? { elasticIp } : {}),
     };
+  }
+
+  async rename(resource: AwsEc2DeploymentResource, name: string): Promise<void> {
+    const validatedName = validateName(name);
+    await this.describeOwnedInstance(resource);
+    await this.send("rename the managed instance", new CreateTagsCommand({
+      Resources: [resource.instanceId],
+      Tags: [{ Key: NAME_TAG_KEY, Value: validatedName }],
+    }));
   }
 
   async start(resource: AwsEc2DeploymentResource): Promise<AwsEc2DeploymentResource> {
@@ -2043,6 +2054,13 @@ function validateName(value: string): string {
     throw new AwsEc2ProviderError("The deployment name is invalid.");
   }
   return value;
+}
+
+function observedInstanceName(tags: readonly Tag[] | undefined, fallback: string): string {
+  const name = tagValue(tags, NAME_TAG_KEY);
+  if (name === undefined || name.length > CLOUD_DEPLOYMENT_NAME_MAX_LENGTH) return fallback;
+  try { return validateName(name); }
+  catch { return fallback; }
 }
 
 function validateSshPublicKey(value: string): string {

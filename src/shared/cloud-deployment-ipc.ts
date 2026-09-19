@@ -14,6 +14,7 @@ import type {
   CreateCloudDeploymentInput,
   DeleteCloudFirewallRuleInput,
   ListCloudFirewallRulesInput,
+  RenameCloudDeploymentInput,
   UpdateCloudFirewallRuleInput,
   UpdateCloudFirewallInput,
 } from "./cloud-deployment-contracts.js";
@@ -55,6 +56,7 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
   createDeployment: "sliver:cloud-deployment:create",
+  renameDeployment: "sliver:cloud-deployment:rename",
   createOperatorConfig: "sliver:cloud-deployment:operator:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
   updateFirewall: "sliver:cloud-deployment:firewall:update",
@@ -78,7 +80,7 @@ export type CloudDeploymentNavigationRequest =
   | {
       readonly view: "deployments";
       readonly deploymentId: string;
-      readonly action: "start" | "stop" | "reboot" | "terminate" | "ssh" | "operator";
+      readonly action: "start" | "stop" | "reboot" | "terminate" | "ssh" | "operator" | "rename";
     }
   | {
       readonly view: "firewall";
@@ -282,6 +284,7 @@ export interface CloudDeploymentAPI {
     input: CreateCloudOperatorConfigInput,
   ): Promise<OperationResult<SaveCloudOperatorConfigResult>>;
   runLifecycleAction(input: CloudDeploymentActionInput): Promise<OperationResult<CloudDeploymentRecord>>;
+  renameDeployment(input: RenameCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): Promise<OperationResult<CloudDeploymentRecord>>;
   listFirewallRules(input: ListCloudFirewallRulesInput): Promise<OperationResult<CloudFirewallSnapshot>>;
   createFirewallRule(input: CreateCloudFirewallRuleInput): Promise<OperationResult<CloudFirewallSnapshot>>;

@@ -3208,7 +3208,7 @@ describe("CloudDeploymentService", () => {
   });
 });
 
-describe("CloudDeploymentService provider status refresh", () => {
+describe("CloudDeploymentService instance metadata and provider status refresh", () => {
   let activeService: CloudDeploymentService | undefined;
 
   afterEach(() => {
@@ -3265,7 +3265,7 @@ describe("CloudDeploymentService provider status refresh", () => {
     provisioner.provision.mockClear();
     const assertNoMutations = (): void => {
       for (const candidate of [aws, azure]) {
-        for (const mutation of [candidate.create, candidate.start, candidate.stop, candidate.reboot,
+        for (const mutation of [candidate.create, candidate.rename, candidate.start, candidate.stop, candidate.reboot,
           candidate.replaceFirewall, candidate.createFirewallRule, candidate.updateFirewallRule,
           candidate.deleteFirewallRule, candidate.destroy]) expect(mutation).not.toHaveBeenCalled();
       }
@@ -3280,6 +3280,99 @@ describe("CloudDeploymentService provider status refresh", () => {
     };
     return { ...deps, service, aws, azure, azureConnections, assertNoMutations, update };
   }
+
+  it.each(["aws", "azure"] as const)("persists a %s rename only after the provider succeeds and rejects duplicate work", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState();
+    const deployment = before.deployments[0]!;
+    const pending = deferred<void>();
+    const rename = provider === "aws" ? f.aws.rename : f.azure.rename;
+    rename.mockReturnValueOnce(pending.promise);
+    const changed = vi.fn();
+    f.service.subscribe(changed);
+    const input = { deploymentId: deployment.id, expectedRevision: before.revision, name: "Operations server" };
+
+    const result = f.service.renameDeployment(input);
+    await vi.waitFor(() => expect(rename).toHaveBeenCalledTimes(1));
+    expect(rename).toHaveBeenCalledWith(expect.objectContaining({ name: deployment.name }), input.name);
+    expect(f.store.getState()).toEqual(before);
+    await expect(f.service.renameDeployment(input)).resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    pending.resolve();
+
+    await expect(result).resolves.toMatchObject({ ok: true, value: { ...deployment, name: input.name } });
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      ...deployment, name: input.name, runtime: deployment.runtime, managedAssets: deployment.managedAssets,
+    });
+    expect(f.store.getState().revision).toBe(before.revision + 1);
+    expect(changed.mock.calls.filter(([scope]) => scope === "snapshot")).toHaveLength(1);
+  });
+
+  it.each(["aws", "azure"] as const)("leaves %s state intact and redacts secrets when the provider rejects a rename", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState();
+    const rename = provider === "aws" ? f.aws.rename : f.azure.rename;
+    rename.mockRejectedValueOnce(new Error(`Rename failed: ${TEST_SSH_PRIVATE_KEY}`));
+    const changed = vi.fn();
+    f.service.subscribe(changed);
+
+    const result = await f.service.renameDeployment({
+      deploymentId: before.deployments[0]!.id, expectedRevision: before.revision, name: "Operations server",
+    });
+
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("Rename failed") });
+    expect(JSON.stringify(result)).not.toContain(TEST_SSH_PRIVATE_KEY);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE KEY");
+    expect(f.store.getState()).toEqual(before);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed, stale, busy-state, and missing-credential renames before provider writes", async () => {
+    const f = await fixture();
+    const input = { deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision, name: "Operations server" };
+    await expect(f.service.renameDeployment({ ...input, name: "invalid\nname" })).resolves.toMatchObject({ ok: false });
+    await expect(f.service.renameDeployment({ ...input, expectedRevision: input.expectedRevision - 1 }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/changed in another window/u) });
+    for (const status of ["provisioning", "deleting"] as const) {
+      await f.update({ status });
+      await expect(f.service.renameDeployment({ ...input, expectedRevision: f.store.getState().revision }))
+        .resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    }
+    await f.update({ status: "running" });
+    await f.vault.delete(CREDENTIAL_ID);
+    await expect(f.service.renameDeployment({ ...input, expectedRevision: f.store.getState().revision }))
+      .resolves.toMatchObject({ ok: false });
+    expect(f.aws.rename).not.toHaveBeenCalled();
+  });
+
+  it("reports a successful cloud rename separately from a failed local save", async () => {
+    const f = await fixture();
+    const before = f.store.getState();
+    vi.spyOn(f.store, "update").mockRejectedValueOnce(new Error("local journal unavailable"));
+
+    await expect(f.service.renameDeployment({
+      deploymentId: DEPLOYMENT_ID, expectedRevision: before.revision, name: "Operations server",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The cloud name was updated, but local state could not be saved. Refresh the deployment before retrying.",
+    });
+
+    expect(f.aws.rename).toHaveBeenCalledTimes(1);
+    expect(f.store.getState()).toEqual(before);
+  });
+
+  it.each(["aws", "azure"] as const)("refreshes the observed %s friendly name while keeping resource identity", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState().deployments[0]!;
+    if (provider === "aws") f.aws.refresh.mockResolvedValueOnce({ ...awsResource(), name: "Cloud console name" });
+    else f.azure.refresh.mockResolvedValueOnce({ ...azureResource(), name: "Cloud console name" });
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      name: "Cloud console name", runtime: before.runtime, managedAssets: before.managedAssets,
+    });
+    f.assertNoMutations();
+  });
 
   it.each(["aws", "azure"] as const)("recovers completed %s deployments from legacy authentication read failures", async (provider) => {
     const f = await fixture(provider);
@@ -3934,6 +4027,7 @@ function fakeOperatorDirectoryClient(
 }
 
 class FakeAwsProvider implements CloudAwsProvider {
+  readonly rename = vi.fn(async (_resource: AwsEc2DeploymentResource, _name: string): Promise<void> => undefined);
   readonly refresh = vi.fn(async (_resource: AwsEc2DeploymentResource, _signal?: AbortSignal) => awsResource());
   readonly create = vi.fn(async (
     _input: Parameters<CloudAwsProvider["create"]>[0],
@@ -4203,6 +4297,7 @@ function azureFirewallSnapshot(): AzureFirewallSnapshot {
 }
 
 class FakeAzureProvider implements CloudAzureProvider {
+  readonly rename = vi.fn(async (_resource: AzureVmDeploymentResource, _name: string): Promise<void> => undefined);
   readonly create = vi.fn(async (
     _input: Parameters<CloudAzureProvider["create"]>[0],
     onMutation?: Parameters<CloudAzureProvider["create"]>[1],

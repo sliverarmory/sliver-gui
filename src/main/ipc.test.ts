@@ -30,10 +30,12 @@ const electronMocks = vi.hoisted(() => ({
   removeHandler: vi.fn(),
   removeListener: vi.fn(),
   fromWebContents: vi.fn(),
+  writeText: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
+  clipboard: { writeText: electronMocks.writeText },
   ipcMain: {
     handle: electronMocks.handle,
     on: electronMocks.on,
@@ -66,6 +68,7 @@ beforeEach(() => {
   electronMocks.removeListener.mockReset();
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue({});
+  electronMocks.writeText.mockReset();
 });
 
 afterEach(() => unregisterIpcHandlers());
@@ -162,7 +165,7 @@ describe("trusted Electron IPC boundary", () => {
     const { event } = invokeEvent(RENDERER_URL, 77);
     const requests: readonly CloudDeploymentNavigationRequest[] = [
       { view: "firewall", deploymentId },
-      ...(["start", "stop", "reboot", "terminate", "ssh", "operator"] as const).map((action) => ({
+      ...(["start", "stop", "reboot", "terminate", "ssh", "operator", "rename"] as const).map((action) => ({
         view: "deployments" as const, deploymentId, action,
       })),
     ];
@@ -229,6 +232,86 @@ describe("trusted Electron IPC boundary", () => {
     }
     expect(registry.snapshot).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
+  });
+
+  it.each(["203.0.113.24", "2001:db8::24"])("copies the current managed server public address %s from main-owned state", (address) => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId, address));
+    registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent(RENDERER_URL, 77);
+
+    expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, { deploymentId })).toEqual({ ok: true });
+    expect(snapshot).toHaveBeenCalledExactlyOnceWith(77);
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(address);
+  });
+
+  it.each([null, "33333333-3333-4333-8333-333333333333"])(
+    "does not copy when the current managed association is %s",
+    (associatedDeploymentId) => {
+      const snapshot = vi.fn(() => managedCloudSnapshot(associatedDeploymentId, "203.0.113.24"));
+      registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
+      const { event } = invokeEvent(RENDERER_URL, 77);
+
+      expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, {
+        deploymentId: "22222222-2222-4222-8222-222222222222",
+      })).toEqual({
+        ok: false,
+        error: "The requested deployment is not associated with this window's current connection",
+      });
+      expect(electronMocks.writeText).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, null, "", "example.test", "999.0.0.1", "203.0.113.24\n", "https://203.0.113.24"])(
+    "rejects unavailable or invalid public address %s without falling back to a private address",
+    (address) => {
+      const deploymentId = "22222222-2222-4222-8222-222222222222";
+      registerIpcHandlers(registryMock({ snapshot: vi.fn(() => managedCloudSnapshot(deploymentId, address)) }), vi.fn(), RENDERER_URL);
+      const { event } = invokeEvent(RENDERER_URL, 77);
+
+      expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, { deploymentId })).toEqual({
+        ok: false,
+        error: "The managed server does not have an available public IP address",
+      });
+      expect(electronMocks.writeText).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects renderer-supplied clipboard text and malformed copy requests before consulting state", () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const registry = registryMock();
+    registerIpcHandlers(registry, vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent(RENDERER_URL, 77);
+    const malformed: readonly (readonly unknown[])[] = [
+      [], [undefined], [null], [{}], ["203.0.113.24"],
+      [{ deploymentId: "invalid" }], [{ deploymentId: "22222222-2222-1222-8222-222222222222" }],
+      [{ deploymentId, address: "203.0.113.24" }], [{ deploymentId, kind: "private" }],
+      [{ deploymentId }, "extra"],
+    ];
+    for (const args of malformed) {
+      expect(() => electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, ...args))
+        .toThrow(/invalid arguments/iu);
+    }
+    expect(registry.snapshot).not.toHaveBeenCalled();
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the associated server for each copy and reports clipboard failure", () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId, "203.0.113.24"));
+    registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent(RENDERER_URL, 77);
+    const copy = electronMocks.handlers.get(IPC.copyManagedServerPublicIp)!;
+
+    expect(copy(event, { deploymentId })).toEqual({ ok: true });
+    snapshot.mockReturnValueOnce(managedCloudSnapshot(null));
+    expect(copy(event, { deploymentId })).toMatchObject({ ok: false });
+    expect(electronMocks.writeText).toHaveBeenCalledOnce();
+    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("clipboard unavailable"); });
+    expect(copy(event, { deploymentId })).toEqual({
+      ok: false,
+      error: "The managed server's public IP address could not be copied",
+    });
   });
 
   it("exposes only the bounded application-update controller methods", async () => {
@@ -1493,11 +1576,28 @@ function isZeroBytes(value: Uint8Array): boolean {
   return value.every((byte) => byte === 0);
 }
 
-function managedCloudSnapshot(deploymentId: string | null): ReturnType<IpcConnectionRegistry["snapshot"]> {
+function managedCloudSnapshot(
+  deploymentId: string | null,
+  publicIpAddress?: string | null,
+): ReturnType<IpcConnectionRegistry["snapshot"]> {
   const snapshot = disconnectedSnapshot();
   snapshot.connection = {
     status: "connected",
-    managedServer: deploymentId ? { deploymentId, provider: "aws", name: "managed-server" } : null,
+    managedServer: deploymentId ? {
+      deploymentId,
+      provider: "aws",
+      name: "managed-server",
+      ...(publicIpAddress === undefined ? {} : {
+        overview: {
+          region: "us-west-2",
+          size: "t3.small",
+          instanceState: "running",
+          publicIpAddress,
+          privateIpAddress: "10.0.0.24",
+          updatedAt: "2026-09-19T12:00:00.000Z",
+        },
+      }),
+    } : null,
   };
   return snapshot;
 }

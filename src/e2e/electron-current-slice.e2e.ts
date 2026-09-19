@@ -640,6 +640,7 @@ async function verifyManagedServerOperatorControls(
   });
   await actions.waitFor();
   assert.deepEqual(await actions.getByRole("menuitem").allTextContents(), [
+    "Rename",
     "Stop",
     "Reboot",
     "Terminate",
@@ -2629,7 +2630,7 @@ async function verifyInteractionWindowPopout(
     });
 
     assert.equal(
-      await popout.locator('[aria-label="Infrastructure navigation"]').count(),
+      await popout.locator('[aria-label="Operational navigation"]').count(),
       0,
       "a dedicated interaction window must not render the application sidebar",
     );
@@ -3833,7 +3834,7 @@ async function verifyM3ManagedShellPopout(
     await popout.locator('[data-presentation="dedicated"]').waitFor();
     await popout.getByRole("heading", { name: "Managed Shells", exact: true }).waitFor();
     assert.equal(
-      await popout.locator('[aria-label="Infrastructure navigation"]').count(),
+      await popout.locator('[aria-label="Operational navigation"]').count(),
       0,
       "the dedicated managed-shell window must not render the full application sidebar",
     );

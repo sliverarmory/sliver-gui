@@ -33,7 +33,7 @@ export function resolveManagedServerFromDeployments(
 
 function deploymentOverview(deployment: CloudDeploymentRecord): ManagedServerOverview {
   const instanceId = deployment.provider === "aws" ? deployment.runtime.instanceId : deployment.runtime.vmId;
-  const instanceName = deployment.provider === "aws" ? deployment.name : deployment.runtime.vmName ?? deployment.name;
+  const instanceName = deployment.name;
   const subnetId = deployment.runtime.subnetId ?? deployment.spec.subnetId;
   return Object.freeze({
     cloud: deploymentCloudOverview(deployment),

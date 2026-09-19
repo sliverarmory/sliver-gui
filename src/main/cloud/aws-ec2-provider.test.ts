@@ -985,6 +985,45 @@ describe("AWS EC2 managed deployment creation", () => {
 });
 
 describe("AWS EC2 owned lifecycle and firewall operations", () => {
+  it("renames only the owned instance's Name tag", async () => {
+    const client = managedResourceClient();
+    await providerFor(client).rename(resource(), "Operations server");
+    expect(client.commandNames()).toEqual(["DescribeInstancesCommand", "CreateTagsCommand"]);
+    expect(client.input("CreateTagsCommand")).toEqual({
+      Resources: [instanceId], Tags: [{ Key: "Name", Value: "Operations server" }],
+    });
+  });
+
+  it("rejects a rename before mutation when ownership or the name is invalid", async () => {
+    const client = managedResourceClient({ DescribeInstancesCommand: instanceResponse("running", "wrong-owner") });
+    await expect(providerFor(client).rename(resource(), "Operations server")).rejects.toThrow(/ownership tags do not match/u);
+    expect(client.commandNames()).toEqual(["DescribeInstancesCommand"]);
+    const invalid = managedResourceClient();
+    await expect(providerFor(invalid).rename(resource(), "bad\nname")).rejects.toThrow(/name is invalid/u);
+    expect(invalid.commandNames()).toEqual([]);
+  });
+
+  it("sanitizes a provider rename failure", async () => {
+    const client = managedResourceClient({ CreateTagsCommand: () => { throw new Error("private provider response"); } });
+    await expect(providerFor(client).rename(resource(), "Operations server"))
+      .rejects.toThrow("AWS EC2 could not rename the managed instance (Error).");
+  });
+
+  it.each([
+    { name: "Provider friendly name", valid: true },
+    { name: "bad\nname", valid: false },
+    { name: "x".repeat(121), valid: false },
+  ])("reads only displayable instance Name tags during refresh: $valid", async ({ name, valid }) => {
+    const response = instanceResponse("running");
+    response.Reservations[0]!.Instances[0]!.Tags = managedTags().map((tag) => tag.Key === "Name" ? { ...tag, Value: name } : tag);
+    const client = managedResourceClient({ DescribeInstancesCommand: response });
+    const current = resource();
+    const refreshed = await providerFor(client).refresh(current);
+    expect(refreshed.name).toBe(valid ? name : current.name);
+    expect(refreshed.instanceId).toBe(current.instanceId);
+    expect(client.commandNames()).not.toContain("CreateTagsCommand");
+  });
+
   it("replaces only tagged Sliver GUI rules in the tracked security group", async () => {
     const client = managedResourceClient({
       DescribeSecurityGroupRulesCommand: {

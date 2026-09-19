@@ -94,6 +94,29 @@ beforeEach(() => {
 afterEach(() => unregisterCloudDeploymentIpcHandlers());
 
 describe("Cloud Deployment IPC boundary", () => {
+  it("forwards only a validated canonical deployment rename to the controller", async () => {
+    const response = { ok: true as const, value: { ...E2E_AWS_DEPLOYMENT, name: "Production Control" } };
+    const renameDeployment = vi.fn<CloudDeploymentController["renameDeployment"]>(async () => response);
+    registerCloudDeploymentIpcHandlers(controllerMock({ renameDeployment }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const input = { deploymentId: E2E_AWS_DEPLOYMENT.id, expectedRevision: 3, name: "  Production Control  " };
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event, input)).resolves.toEqual(response);
+    expect(renameDeployment).toHaveBeenCalledExactlyOnceWith({ ...input, name: "Production Control" });
+    expect(Object.isFrozen(renameDeployment.mock.calls[0]?.[0])).toBe(true);
+  });
+
+  it("rejects deployment renaming from another surface or revoked window", async () => {
+    const renameDeployment = vi.fn(async () => ({ ok: false as const, error: "not called" }));
+    registerCloudDeploymentIpcHandlers(controllerMock({ renameDeployment }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    for (const event of [invokeEvent("sliver://app/index.html", 77).event, invokeEvent(CLOUD_RENDERER_URL, 78).event]) {
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, event, {
+        deploymentId: E2E_AWS_DEPLOYMENT.id, expectedRevision: 3, name: "Production Control",
+      })).resolves.toEqual(REJECTED);
+    }
+    expect(renameDeployment).not.toHaveBeenCalled();
+  });
+
   it("copies the required AWS Terraform policy without reading credentials or provider state", async () => {
     const controller = controllerMock();
     registerCloudDeploymentIpcHandlers(controller, CLOUD_RENDERER_URL, authorizeCurrentWindow);
@@ -1013,6 +1036,13 @@ describe("Cloud Deployment IPC boundary", () => {
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts, [null]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, [{ credentialId: CREDENTIAL_ID, location: "West US 2" }]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createDeployment, [{}]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, []],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, [{ deploymentId: "invalid", expectedRevision: 0, name: "valid" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, [{ deploymentId: CREDENTIAL_ID, expectedRevision: -1, name: "valid" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, [{ deploymentId: CREDENTIAL_ID, expectedRevision: 0, name: " " }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, [{ deploymentId: CREDENTIAL_ID, expectedRevision: 0, name: "x".repeat(121) }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, [{ deploymentId: CREDENTIAL_ID, expectedRevision: 0, name: "valid", command: "unexpected" }]],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, [{ deploymentId: CREDENTIAL_ID, expectedRevision: 0, name: "valid" }, "extra"]],
       [CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig, [{
         ...operatorInput("valid-name"),
         operatorName: "not an operator name",
@@ -1364,6 +1394,7 @@ function controllerMock(
     discoverAzureAccounts: vi.fn(unavailable),
     discoverAzureOptions: vi.fn(unavailable),
     createDeployment: vi.fn(unavailable),
+    renameDeployment: vi.fn(unavailable),
     generateOperatorConfig: vi.fn(async () => ({
       ok: false as const,
       error: "not implemented",

@@ -987,8 +987,8 @@ export function NavigationContent({
           </Sidebar.Menu>
         </Sidebar.Group>
         <Sidebar.Group>
-          <Sidebar.GroupLabel>Infrastructure</Sidebar.GroupLabel>
-          <Sidebar.Menu aria-label="Infrastructure navigation" showGuideLines={false}>
+          <Sidebar.GroupLabel>Operational</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label="Operational navigation" showGuideLines={false}>
             {infrastructureNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}

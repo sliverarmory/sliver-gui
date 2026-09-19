@@ -123,7 +123,7 @@ describe("resolveManagedServerFromDeployments", () => {
         region: deployment.spec.location,
         size: deployment.spec.vmSize,
         instanceId: deployment.runtime.vmId,
-        instanceName: deployment.runtime.vmName,
+        instanceName: deployment.name,
         subnetId: deployment.runtime.subnetId,
         instanceState: deployment.runtime.instanceState,
         publicIpAddress: null,
@@ -133,6 +133,21 @@ describe("resolveManagedServerFromDeployments", () => {
     });
     expect(Object.isFrozen(result?.overview)).toBe(true);
     expect(Object.isFrozen(result?.overview?.cloud)).toBe(true);
+  });
+
+  it("shows renamed Azure metadata while retaining the immutable VM resource identity", () => {
+    const deployment = {
+      ...E2E_AZURE_DEPLOYMENT,
+      name: "Operations server",
+      operatorConfigDigest: CONFIG_DIGEST,
+    };
+
+    const result = resolveManagedServerFromDeployments(CONFIG_DIGEST, [deployment]);
+
+    expect(result?.name).toBe("Operations server");
+    expect(result?.overview?.instanceName).toBe("Operations server");
+    expect(result?.overview?.instanceId).toBe(E2E_AZURE_DEPLOYMENT.runtime.vmId);
+    expect(deployment.runtime.vmName).toBe(E2E_AZURE_DEPLOYMENT.runtime.vmName);
   });
 
   it("prefers observed AWS network IDs while keeping configured network CIDR separate from instance metadata", () => {

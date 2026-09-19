@@ -37,6 +37,7 @@ import {
   ProgressBar,
   ScrollShadow,
   Select,
+  Separator,
   Skeleton,
   Spinner,
   Switch,
@@ -80,6 +81,7 @@ import {
   type CloudProvider,
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
+  type RenameCloudDeploymentInput,
 } from "../../shared/cloud-deployment-contracts";
 import type { AwsDeploymentOptions, AzureDeploymentOptions } from "../../shared/cloud-provider-inventory";
 import type { SshHostKeyReview } from "../../shared/ssh-contracts";
@@ -105,6 +107,7 @@ import {
 import { applyRendererTheme } from "./components/ApplicationSettingsProvider";
 import { CloudProvisioningTerminal } from "./components/CloudProvisioningTerminal";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
+import { RenameCloudDeploymentModal } from "./components/RenameCloudDeploymentModal";
 
 type FeedbackTone = "danger" | "success" | "warning" | "info";
 
@@ -1948,13 +1951,21 @@ function DeploymentCard({
   const [sshHostKeyReviewError, setSshHostKeyReviewError] = useState<string | null>(null);
   const [isOpeningSsh, setIsOpeningSsh] = useState(false);
   const [serverActionsOpen, setServerActionsOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<RenameCloudDeploymentInput | null>(null);
   const handledActionRequest = useRef<CloudDeploymentActionRequest | null>(null);
   const actionInFlight = useRef(false);
+  const renameLockHeld = useRef(false);
   const destroyExecutionInFlight = useRef(false);
   const sshRequestInFlight = useRef(false);
   const restoreServerActionsFocus = useRef(false);
   const serverActionsTrigger = useRef<HTMLButtonElement | null>(null);
   const runtimeIsStable = hasStableDeploymentRuntime(deployment);
+
+  useEffect(() => () => {
+    if (!renameLockHeld.current) return;
+    renameLockHeld.current = false;
+    onFinishCardAction(deployment.id, "rename");
+  }, [deployment.id, onFinishCardAction]);
 
   useEffect(() => {
     if (!serverActionsOpen) return undefined;
@@ -2126,6 +2137,27 @@ function DeploymentCard({
       : pendingAction !== null
         ? `Wait for the current ${deployment.name} server action to finish before adding an operator.`
         : operatorUnavailableReason;
+  const renameUnavailable = deployment.status === "provisioning" || deployment.status === "deleting" ||
+    !(deployment.provider === "aws" ? deployment.runtime.instanceId : deployment.runtime.vmId);
+  const beginRename = useCallback((): void => {
+    if (renameUnavailable) {
+      onFeedback({ tone: "danger", title: "Rename unavailable", detail: "Wait until this instance is ready before renaming it." });
+      return;
+    }
+    if (actionInFlight.current || !onBeginCardAction(deployment.id, "rename")) return;
+    actionInFlight.current = true;
+    renameLockHeld.current = true;
+    setPendingAction("rename");
+    setRenameTarget({ deploymentId: deployment.id, expectedRevision: revision, name: deployment.name });
+  }, [deployment.id, deployment.name, onBeginCardAction, onFeedback, renameUnavailable, revision]);
+  const closeRename = (): void => {
+    setRenameTarget(null);
+    setPendingAction(null);
+    actionInFlight.current = false;
+    renameLockHeld.current = false;
+    onFinishCardAction(deployment.id, "rename");
+    queueMicrotask(() => serverActionsTrigger.current?.focus());
+  };
 
   useEffect(() => {
     if (
@@ -2141,10 +2173,11 @@ function DeploymentCard({
       } else {
         onOpenNewOperator?.();
       }
-    } else if (actionRequest.action === "ssh") void openSsh();
+    } else if (actionRequest.action === "rename") beginRename();
+    else if (actionRequest.action === "ssh") void openSsh();
     else if (actionRequest.action === "terminate") void prepareDestroy();
     else void lifecycle(actionRequest.action);
-  }, [actionRequest, deployment.id, lifecycle, onActionRequestHandled, onFeedback, onOpenNewOperator, openSsh, operatorActionDisabledReason, prepareDestroy]);
+  }, [actionRequest, beginRename, deployment.id, lifecycle, onActionRequestHandled, onFeedback, onOpenNewOperator, openSsh, operatorActionDisabledReason, prepareDestroy]);
 
   const loginCredential = canLoginCloudCredential(credential) ? credential : undefined;
   const cloudLogin = useCloudLoginActionController({
@@ -2302,10 +2335,16 @@ function DeploymentCard({
                 aria-label={`Server actions for ${deployment.name}`}
                 onAction={(key) => {
                   const action = String(key);
-                  if (action === "terminate") void prepareDestroy();
+                  if (action === "rename") beginRename();
+                  else if (action === "terminate") void prepareDestroy();
                   else if (action === "start" || action === "stop" || action === "reboot") void lifecycle(action);
                 }}
               >
+                <Dropdown.Item id="rename" isDisabled={renameUnavailable || pendingAction !== null} textValue="Rename">
+                  <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faPen} />
+                  <Label>Rename</Label>
+                </Dropdown.Item>
+                <Separator />
                 <Dropdown.Item
                   id={lifecycleAction ?? "start"}
                   isDisabled={lifecycleAction === null || pendingAction !== null}
@@ -2340,6 +2379,16 @@ function DeploymentCard({
           </Dropdown>
         </div>
       </Card.Footer>
+
+      {renameTarget ? <RenameCloudDeploymentModal
+        api={api}
+        initial={renameTarget}
+        onCancel={closeRename}
+        onRenamed={async (renamed) => {
+          onFeedback({ tone: "success", title: "Instance renamed", detail: `${renameTarget.name} is now ${renamed.name}.` });
+          try { await onRefresh(); } finally { closeRename(); }
+        }}
+      /> : null}
 
       <AlertDialog.Backdrop isOpen={destroyPlan !== null} variant="blur" onOpenChange={(open) => { if (!open && pendingAction !== "destroy") cancelDestroyReview(); }}>
         <AlertDialog.Container placement="center" size="sm">

@@ -6,6 +6,7 @@ import {
   type DiskUpdate,
   type ResourceSku,
   type VirtualMachine,
+  type VirtualMachineUpdate,
 } from "@azure/arm-compute";
 import {
   NetworkManagementClient,
@@ -26,6 +27,7 @@ import type { TokenCredential } from "@azure/identity";
 import {
   AZURE_FIREWALL_RULE_MAX_VALUES,
   AZURE_SSH_PORT,
+  CLOUD_DEPLOYMENT_NAME_MAX_LENGTH,
   isAzureSshUsername,
 } from "../../shared/cloud-deployment-contracts.js";
 import {
@@ -240,6 +242,7 @@ export interface AzureVirtualMachineClient {
     virtualMachineName: string,
     parameters: VirtualMachine,
   ): Promise<VirtualMachine>;
+  update(resourceGroupName: string, virtualMachineName: string, parameters: VirtualMachineUpdate): Promise<VirtualMachine>;
   start(resourceGroupName: string, virtualMachineName: string): Promise<void>;
   deallocate(resourceGroupName: string, virtualMachineName: string): Promise<void>;
   restart(resourceGroupName: string, virtualMachineName: string): Promise<void>;
@@ -1060,6 +1063,7 @@ export class AzureVmProvider {
     delete refreshedResource.publicIpAddress;
     return {
       ...refreshedResource,
+      name: observedVmName(virtualMachine.tags, resource.name),
       instanceState: normalizeInstanceState(virtualMachine),
       ...optionalString("provisioningState", normalizeOptionalAzureString(
         virtualMachine.provisioningState,
@@ -1069,6 +1073,20 @@ export class AzureVmProvider {
       ...optionalString("privateIpAddress", validateOptionalIp(privateIpAddress, "private IP address")),
       ...optionalString("publicIpAddress", validateOptionalIp(publicIpValue, "public IP address")),
     };
+  }
+
+  async rename(resource: AzureVmDeploymentResource, name: string): Promise<void> {
+    const validatedName = validateDisplayName(name);
+    const virtualMachine = await this.getOwnedVirtualMachine(resource);
+    const parsed = parseExpectedResourceId(
+      resource.virtualMachineId, this.subscriptionId, "Microsoft.Compute", ["virtualMachines"], "virtual machine",
+    );
+    const tags = Object.fromEntries(Object.entries(virtualMachine.tags ?? {}).filter(([key]) => (
+      key.toLowerCase() !== AZURE_NAME_TAG_KEY.toLowerCase()
+    )));
+    await this.call("rename the managed virtual machine", () => this.clients.virtualMachines.update(
+      parsed.resourceGroupName, parsed.nameSegments[0]!, { tags: { ...tags, [AZURE_NAME_TAG_KEY]: validatedName } },
+    ));
   }
 
   async start(resource: AzureVmDeploymentResource): Promise<AzureVmDeploymentResource> {
@@ -2027,6 +2045,9 @@ export const defaultAzureVmClientFactory: AzureVmClientFactory = (configuration)
           .createOrUpdate(resourceGroupName, virtualMachineName, parameters)
           .pollUntilDone()
       ),
+      update: async (resourceGroupName, virtualMachineName, parameters) => (
+        await computeClient.virtualMachines.update(resourceGroupName, virtualMachineName, parameters).pollUntilDone()
+      ),
       start: async (resourceGroupName, virtualMachineName) => {
         await computeClient.virtualMachines
           .start(resourceGroupName, virtualMachineName)
@@ -2855,6 +2876,13 @@ function validateVmSize(value: string): string {
 
 function validateDisplayName(value: string): string {
   return validateBoundedString(value, "deployment name", 1, 128);
+}
+
+function observedVmName(tags: Record<string, string> | undefined, fallback: string): string {
+  const name = Object.entries(tags ?? {}).find(([key]) => key.toLowerCase() === AZURE_NAME_TAG_KEY.toLowerCase())?.[1];
+  if (name === undefined || name.length > CLOUD_DEPLOYMENT_NAME_MAX_LENGTH) return fallback;
+  try { return validateDisplayName(name); }
+  catch { return fallback; }
 }
 
 function validateSshUsername(value: string): string {

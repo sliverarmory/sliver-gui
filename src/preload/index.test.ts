@@ -32,6 +32,7 @@ const invokeArguments = {
   listLocalNetworkInterfaces: [],
   openWindow: [{ inheritConnection: true }],
   openCloudDeploymentWindow: [],
+  copyManagedServerPublicIp: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   openInteractionWindow: [],
   claimInteractionWindow: [],
   exitApp: [],
@@ -216,13 +217,21 @@ describe("sandboxed preload bridge", () => {
     const request = {
       view: "deployments" as const,
       deploymentId: "22222222-2222-4222-8222-222222222222",
-      action: "reboot" as const,
+      action: "rename" as const,
     };
 
     await exposed.openCloudDeploymentWindow(request);
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.openCloudDeploymentWindow, request);
     await exposed.openCloudDeploymentWindow();
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.openCloudDeploymentWindow);
+  });
+
+  it("copies a managed server public IP using only its deployment identity", async () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    if (!exposed) throw new Error("Expected the preload API to be exposed");
+    const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
+    await exposed.copyManagedServerPublicIp(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.copyManagedServerPublicIp, input);
   });
 
   it("exposes a frozen capability-only application context-menu bridge", async () => {

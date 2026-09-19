@@ -134,6 +134,7 @@ function installSliverAPI(
     }),
     openInteractionWindow: vi.fn(failedOperation),
     openCloudDeploymentWindow: vi.fn(failedOperation),
+    copyManagedServerPublicIp: vi.fn(async () => ({ ok: true as const })),
     claimInteractionWindow: vi.fn(failedOperation),
     openSessionShellWindow: vi.fn(failedOperation),
     claimSessionShellWindow: vi.fn(failedOperation),
@@ -1133,7 +1134,7 @@ describe("Sidebar navigation", () => {
     const menus = screen.getAllByRole("treegrid");
     expect(menus.map((menu) => menu.getAttribute("aria-label"))).toEqual([
       "Overview navigation",
-      "Infrastructure navigation",
+      "Operational navigation",
       "Interact navigation",
       "Data navigation",
     ]);
@@ -1265,7 +1266,7 @@ describe("Sidebar navigation", () => {
       </Sidebar.Provider>,
     );
 
-    const infrastructure = screen.getByRole("treegrid", { name: "Infrastructure navigation" });
+    const infrastructure = screen.getByRole("treegrid", { name: "Operational navigation" });
     const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
     const data = screen.getByRole("treegrid", { name: "Data navigation" });
     expect(within(infrastructure).getAllByRole("row").map((row) => row.getAttribute("aria-label"))).toEqual([
@@ -1553,7 +1554,7 @@ describe("Sidebar navigation", () => {
 
       await screen.findByText("mobile-ready");
       await user.click(screen.getByRole("button", { name: "Open mobile navigation" }));
-      const infrastructure = await screen.findByRole("treegrid", { name: "Infrastructure navigation" });
+      const infrastructure = await screen.findByRole("treegrid", { name: "Operational navigation" });
       const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
       const data = await screen.findByRole("treegrid", { name: "Data navigation" });
       expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();

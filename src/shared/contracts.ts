@@ -97,6 +97,7 @@ export const IPC_INVOKE = {
   listLocalNetworkInterfaces: "sliver:network-interfaces:list-local",
   openWindow: "sliver:window:open",
   openCloudDeploymentWindow: "sliver:window:open-cloud-deployment",
+  copyManagedServerPublicIp: "sliver:managed-server:copy-public-ip",
   openInteractionWindow: "sliver:window:open-interaction",
   claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
@@ -272,6 +273,10 @@ export interface ManagedServerReference {
   readonly provider: CloudProvider;
   readonly name: string;
   readonly overview?: ManagedServerOverview;
+}
+
+export interface CopyManagedServerPublicIpInput {
+  readonly deploymentId: string;
 }
 
 export interface ConnectionSummary {
@@ -732,6 +737,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   };
   [IPC.openCloudDeploymentWindow]: {
     args: [request?: CloudDeploymentNavigationRequest];
+    result: OperationResult;
+  };
+  [IPC.copyManagedServerPublicIp]: {
+    args: [input: CopyManagedServerPublicIpInput];
     result: OperationResult;
   };
   [IPC.openInteractionWindow]: {
