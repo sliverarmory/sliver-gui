@@ -8,6 +8,7 @@ import { _electron as electron, type ElectronApplication, type Locator, type Pag
 
 import type { ApplicationContextMenuAPI } from "../shared/application-context-menu-contracts.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
+import { readElectronSnapshot } from "./read-electron-snapshot.js";
 
 const APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS = 5_000;
 
@@ -53,7 +54,7 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     for (const page of application.windows()) observe(page);
     const workspace = await application.firstWindow();
     await workspace.getByRole("dialog", { name: "Saved configurations" }).waitFor();
-    originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
+    originalClipboard = await readClipboardText(application);
 
     // Each form is local and discarded. The injected cloud controller rejects mutations.
     await workspace.getByRole("button", { name: "Cloud Deployment", exact: true }).click();
@@ -203,7 +204,7 @@ async function verifyTextEditing(
   }
   await copy.click();
   await menu.waitFor({ state: "hidden" });
-  await waitFor(async () => await application.evaluate(({ clipboard }) => clipboard.readText()) === selectedValue,
+  await waitFor(async () => await readClipboardText(application) === selectedValue,
     `${name} Copy reaches the native clipboard`);
   await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), pastedValue);
   await selectInput(input);
@@ -218,7 +219,7 @@ async function verifyTextEditing(
 }
 
 async function verifyPasswordMenu(application: ElectronApplication, page: Page, input: Locator): Promise<void> {
-  const originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
+  const originalClipboard = await readClipboardText(application);
   await input.fill("inert-password-fixture");
   await selectInput(input);
   await input.click({ button: "right", position: { x: 24, y: 8 } });
@@ -230,7 +231,7 @@ async function verifyPasswordMenu(application: ElectronApplication, page: Page, 
   }
   await page.keyboard.press("Escape");
   await menu.waitFor({ state: "hidden" });
-  assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText()), originalClipboard);
+  assert.equal(await readClipboardText(application), originalClipboard);
   await input.fill("");
 }
 
@@ -264,14 +265,21 @@ async function surfacePage(application: ElectronApplication, surface: string): P
 async function invokeMenu(application: ElectronApplication, page: Page, itemId: string): Promise<void> {
   await waitFor(() => application.evaluate(({ BrowserWindow, Menu }, input) => {
     const focused = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.getURL() === input.url);
-    const item = Menu.getApplicationMenu()?.getMenuItemById(input.itemId);
-    if (!focused || !item || typeof item.click !== "function") return false;
+    if (!focused) return false;
     focused.show();
     focused.focus();
     focused.webContents.focus();
+    const item = Menu.getApplicationMenu()?.getMenuItemById(input.itemId);
+    if (!item?.enabled || typeof item.click !== "function") return false;
     Reflect.apply(item.click, item, [item, focused, {}]);
     return true;
   }, { itemId, url: page.url() }), `${itemId} menu is available`);
+}
+
+function readClipboardText(application: ElectronApplication): Promise<string> {
+  return readElectronSnapshot(() =>
+    application.evaluate(({ clipboard }) => clipboard.readText())
+  );
 }
 
 async function waitFor(predicate: () => Promise<boolean>, description: string): Promise<void> {

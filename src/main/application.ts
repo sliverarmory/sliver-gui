@@ -260,6 +260,7 @@ interface StartedConsoleTab {
 
 interface NetworkWindowRecord {
   readonly key: string;
+  readonly contentsId: number;
   readonly window: BrowserWindow;
   readonly source: TrustedWindowIdentity;
   readonly connectionIncarnation: number;
@@ -653,12 +654,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         }
       }
       const networkWindowRecord = networkWindowsByContentsId.get(contentsId);
-      if (networkWindowRecord) {
-        networkWindowsByContentsId.delete(contentsId);
-        if (networkWindowsByKey.get(networkWindowRecord.key) === networkWindowRecord) {
-          networkWindowsByKey.delete(networkWindowRecord.key);
-        }
-      }
+      if (networkWindowRecord) retireNetworkWindow(networkWindowRecord);
       const cleanup = Promise.all([
         registerWithConnectionRegistry
           ? registry.unregisterWindow(contentsId).catch(() => undefined)
@@ -745,6 +741,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     }
   }
 
+  function retireNetworkWindow(record: NetworkWindowRecord): void {
+    if (networkWindowsByContentsId.get(record.contentsId) === record) {
+      networkWindowsByContentsId.delete(record.contentsId);
+    }
+    if (networkWindowsByKey.get(record.key) === record) {
+      networkWindowsByKey.delete(record.key);
+    }
+  }
+
   function showNetworkWindow(record: NetworkWindowRecord, tab: NetworkTabId): void {
     record.pendingTab = tab;
     if (record.window.isMinimized()) record.window.restore();
@@ -797,10 +802,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       showNetworkWindow(existing, tab);
       return { ok: true };
     }
-    if (existing) {
-      networkWindowsByKey.delete(key);
-      networkWindowsByContentsId.delete(existing.window.webContents.id);
-    }
+    if (existing) retireNetworkWindow(existing);
 
     let createdWindow: BrowserWindow | undefined;
     let createdRecord: NetworkWindowRecord | undefined;
@@ -814,6 +816,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       createdWindow = window;
       const record: NetworkWindowRecord = {
         key,
+        contentsId: window.webContents.id,
         window,
         source,
         connectionIncarnation: incarnation!,
@@ -823,6 +826,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       createdRecord = record;
       networkWindowsByKey.set(key, record);
       networkWindowsByContentsId.set(window.webContents.id, record);
+      window.on("close", () => retireNetworkWindow(record));
       window.webContents.on("did-start-loading", () => {
         if (networkWindowsByContentsId.get(window.webContents.id) === record) {
           record.rendererReady = false;
@@ -859,10 +863,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       flushNetworkNavigation(record);
       return { ok: true };
     } catch (error) {
-      if (createdRecord && networkWindowsByKey.get(createdRecord.key) === createdRecord) {
-        networkWindowsByKey.delete(createdRecord.key);
-      }
-      if (createdWindow) networkWindowsByContentsId.delete(createdWindow.webContents.id);
+      if (createdRecord) retireNetworkWindow(createdRecord);
       if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
       return {
         ok: false,

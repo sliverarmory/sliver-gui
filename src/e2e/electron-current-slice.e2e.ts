@@ -284,9 +284,7 @@ async function verifyApplicationContextMenu(
       end: control.selectionEnd,
     };
   });
-  const originalClipboardText = await electronApplication.evaluate(
-    ({ clipboard }) => clipboard.readText(),
-  );
+  const originalClipboardText = await readClipboardText(electronApplication);
 
   try {
     await input.fill(value);
@@ -349,10 +347,7 @@ async function verifyApplicationContextMenu(
     const copyDeadline = Date.now() + 5_000;
     let copied = false;
     while (Date.now() < copyDeadline && !copied) {
-      copied = await electronApplication.evaluate(
-        ({ clipboard }, expected) => clipboard.readText() === expected,
-        value,
-      );
+      copied = await readClipboardText(electronApplication) === value;
       if (!copied) await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(copied, true, "context-menu Copy should reach the native clipboard");
@@ -445,10 +440,7 @@ async function verifyApplicationContextMenu(
     let cutCopied = false;
     while (Date.now() < cutDeadline && (!cutInputCleared || !cutCopied)) {
       cutInputCleared = await input.inputValue() === "";
-      cutCopied = await electronApplication.evaluate(
-        ({ clipboard }, expected) => clipboard.readText() === expected,
-        pastedValue,
-      );
+      cutCopied = await readClipboardText(electronApplication) === pastedValue;
       if (!cutInputCleared || !cutCopied) await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(cutCopied, true, "context-menu Cut should copy the selection");
@@ -1935,7 +1927,7 @@ async function verifySliverConsoleWindow(
     await secondTabBeforeRename.click();
     await waitForSelectedConsoleTab(consolePage, /Console 2/iu);
 
-    const clipboardBeforeResume = await electronApplication.evaluate(({ clipboard }) => clipboard.readText());
+    const clipboardBeforeResume = await readClipboardText(electronApplication);
     try {
       await secondTerminal.locator("canvas").dblclick({ position: { x: 12, y: 8 } });
       await electronApplication.evaluate(({ clipboard }) => clipboard.writeText("before-console-resume"));
@@ -1958,7 +1950,7 @@ async function verifySliverConsoleWindow(
       const clipboardDeadline = Date.now() + 5_000;
       let resumedSelection = "";
       while (Date.now() < clipboardDeadline) {
-        resumedSelection = await electronApplication.evaluate(({ clipboard }) => clipboard.readText());
+        resumedSelection = await readClipboardText(electronApplication);
         if (resumedSelection === "Sliver") break;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
@@ -3277,7 +3269,7 @@ async function verifyTerminalClipboard(
   readWrites: () => Promise<string[][]>,
   selectedRuntimeIndex: number,
 ): Promise<void> {
-  const clipboardBefore = await application.evaluate(({ clipboard }) => clipboard.readText());
+  const clipboardBefore = await readClipboardText(application);
   const contextMenu = page.getByRole("menu", { name: "Application context menu" });
   const canvas = terminal.locator("canvas");
   const initialWrites = await readWrites();
@@ -3291,7 +3283,7 @@ async function verifyTerminalClipboard(
     const deadline = Date.now() + 5_000;
     let actual = "";
     while (Date.now() < deadline) {
-      actual = await application.evaluate(({ clipboard }) => clipboard.readText());
+      actual = await readClipboardText(application);
       if (actual === expected) return;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -3474,9 +3466,7 @@ async function verifyM3SessionTerminal(
     );
 
     const contextMenu = page.getByRole("menu", { name: "Application context menu" });
-    const terminalClipboardText = await electronApplication.evaluate(
-      ({ clipboard }) => clipboard.readText(),
-    );
+    const terminalClipboardText = await readClipboardText(electronApplication);
     const shellWritesBeforeContextMenu = fakeMethodCount(
       await readFakeState(electronApplication),
       "shell.write",
@@ -3611,10 +3601,7 @@ async function verifyM3SessionTerminal(
         element.style.cssText = originalStyle;
       }, originalTerminalTextareaStyle);
       assert.equal(
-        await electronApplication.evaluate(
-          ({ clipboard }, expected) => clipboard.readText() === expected,
-          terminalClipboardText,
-        ),
+        await readClipboardText(electronApplication) === terminalClipboardText,
         true,
         "opening and dismissing the terminal context menu must not change the clipboard",
       );
@@ -4752,6 +4739,12 @@ async function assertJobActionColumnSurface(page: Page, jobId: number): Promise<
 async function readFakeState(electronApplication: ElectronApplication): Promise<FakeStateSnapshot> {
   return readElectronSnapshot(() =>
     electronApplication.evaluate(() => structuredClone(globalThis.__SLIVER_GUI_E2E_STATE__))
+  );
+}
+
+function readClipboardText(electronApplication: ElectronApplication): Promise<string> {
+  return readElectronSnapshot(() =>
+    electronApplication.evaluate(({ clipboard }) => clipboard.readText())
   );
 }
 

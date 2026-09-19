@@ -608,6 +608,21 @@ describe("application protocol lifecycle", () => {
         "reverse-port-forward",
       );
 
+      // Electron emits close before closed. A reopen during that gap must not
+      // select a native window that is already committed to closing.
+      networkWindow.emit("close", { preventDefault: vi.fn() });
+      const socksMenuItem = findTemplateMenuItem(applicationMenuTemplate ?? [], "network.socks5");
+      Reflect.apply(socksMenuItem!.click, socksMenuItem, [socksMenuItem, workspaceWindow, {}]);
+      await settleLifecycle();
+      const reopenedNetworkWindow = harness.windows.at(-1)!;
+      expect(reopenedNetworkWindow).not.toBe(networkWindow);
+      expect(reopenedNetworkWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=network");
+      expect(reopenedNetworkWindow.webContents.send).toHaveBeenCalledExactlyOnceWith(
+        NETWORK_FORWARDING_IPC_EVENTS.navigationRequested,
+        "socks5",
+      );
+      networkWindow.destroy();
+
       const registration = vi.mocked(registerIpcHandlers).mock.calls.at(-1)!;
       expect(registration[2]).toBe("sliver://app/index.html");
       const cloudWindowActions = registration[9]!;
@@ -627,7 +642,7 @@ describe("application protocol lifecycle", () => {
       expect(sshWindow.webContents.getURL()).toBe("sliver://app/index.html?surface=ssh");
 
       await application.stop();
-      for (const window of [workspaceWindow, networkWindow, cloudWindow, sshWindow]) {
+      for (const window of [workspaceWindow, networkWindow, reopenedNetworkWindow, cloudWindow, sshWindow]) {
         expect(window.isDestroyed()).toBe(true);
       }
       for (const ownedProtocol of [defaultProtocol, cloudProtocol, networkProtocol]) {
