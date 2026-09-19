@@ -4,7 +4,7 @@ import { faCloud, faComputer, faCube, faLaptop, faSatellite, faServer } from "@f
 
 const icons = new Map([
   ["aws", faAmazon], ["azure", faMicrosoft], ["cloud", faCloud],
-  ["client", faLaptop], ["server", faServer], ["computer", faComputer],
+  ["client", faLaptop], ["server", faServer], ["computer", faComputer], ["session", faComputer],
   ["windows", faWindows], ["linux", faLinux], ["apple", faApple], ["beacon", faSatellite],
 ]);
 

@@ -22,7 +22,8 @@
 .topology-node__identity { display: flex; align-items: center; gap: 10px; }
 .topology-node__icon { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 9px; background: var(--color-surface-secondary); color: var(--color-muted); font-size: 18px; }
 .topology-node__text { min-width: 0; flex: 1; }
-.topology-node__kind { display: block; color: var(--color-muted); font-size: 10px; text-transform: capitalize; line-height: 1.1; margin-bottom: 4px; }
+.topology-node__kind { display: flex; align-items: center; gap: 4px; color: var(--color-muted); font-size: 10px; text-transform: capitalize; line-height: 1.1; margin-bottom: 4px; }
+.topology-node__kind-icon { flex: none; width: 1em; }
 .topology-node__text strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 1.2; font-weight: 600; }
 .topology-node__subtitle { margin-top: 9px; color: var(--color-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topology-node__status { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-top: 7px; color: var(--color-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

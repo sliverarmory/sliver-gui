@@ -54,7 +54,11 @@ const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<Gr
       <div className="topology-node__identity">
         <span className="topology-node__icon"><TopologyIcon name={node.icon} /></span>
         <div className="topology-node__text">
-          <span className="topology-node__kind">{node.kind}</span>
+          <span className="topology-node__kind">
+            {node.kind === "session" || node.kind === "beacon"
+              ? <TopologyIcon name={node.kind} className="topology-node__kind-icon" /> : null}
+            {node.kind}
+          </span>
           <strong title={node.label}>{node.label}</strong>
         </div>
       </div>
