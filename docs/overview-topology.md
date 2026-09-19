@@ -54,6 +54,20 @@ relationships explicitly and document their source.
   operators. The local client remains distinct because a matching display name
   does not establish roster identity. Presence edges are associations, not
   traffic measurements or target ownership.
+- External builders and crackstations have distinct service nodes and icons.
+  Builders use their unique registered name; crackstations use their host UUID,
+  so identical display names remain separate. Their server associations are
+  relationships, not measured traffic or job activity. Presence means registered
+  for a builder and connected for a crackstation. Neither service exposes target
+  actions. The inspector contains only identity, platform, reported operator,
+  and optional station version metadata.
+- Service inventories come from the passive `Builders` and `Crackstations`
+  registry RPCs, with a 500-record limit per type. They refresh with full inventory,
+  periodic reconciliation, reconnects, and relevant presence events. Builder
+  registration has no dedicated event, so periodic refresh remains necessary.
+  Successful refreshes remove absent services; failures preserve last-known
+  records without failing otherwise successful core inventory reads. No build,
+  crack, benchmark, or registration operation is initiated by Overview.
 - Session routes use the server's passive pivot graph when available. Exact
   parent/child peers become edges, including nested relays and branches. Peers
   missing a current session record remain visible as non-actionable relay
@@ -150,6 +164,8 @@ commands or cloud actions occur. Screenshots are written to
 worker and its static import from an ASAR archive.
 
 The separate topology journey supplies three operators and a branched five-hop
-route with a sessionless relay. It checks the rendered parent edges, complete
+route with a sessionless relay, plus two builders and two crackstations sharing
+a display name. It checks service identity, inspector metadata, type filters,
+list rendering, the rendered parent edges, complete
 upstream context when filtering the deepest session, and the existing session
 menu. It audits fixture calls to ensure only passive inventory is read.

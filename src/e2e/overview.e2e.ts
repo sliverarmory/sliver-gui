@@ -310,7 +310,8 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       }));
       const allowedMethods = new Set([
         "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
-        "getOperators", "getSessions", "getBeacons", "getPivotGraph", ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
+        "getOperators", "getSessions", "getBeacons", "getPivotGraph", "getExternalBuilders", "getCrackstations",
+        ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
       ]);
       assert.deepEqual(state.methods.filter((method) => !allowedMethods.has(method)), [],
         "Overview navigation must only read inventory and the selected workspace's existing task list");

@@ -3,6 +3,7 @@ import type { TargetSummary } from "../../../shared/target-contracts";
 import { TOPOLOGY_SCHEMA_VERSION } from "../../../shared/topology-contracts";
 import { operatorTopologyContributor } from "./operator-topology";
 import { createPivotTopology } from "./pivot-topology";
+import { serviceTopologyContributor } from "./service-topology";
 import type {
   TopologyDocument,
   TopologyEdge,
@@ -288,6 +289,7 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
 export const DEFAULT_OVERVIEW_TOPOLOGY_CONTRIBUTORS: readonly TopologyContributor[] = [
   connectionTopologyContributor,
   operatorTopologyContributor,
+  serviceTopologyContributor,
   targetTopologyContributor,
 ];
 

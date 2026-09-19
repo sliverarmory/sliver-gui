@@ -22,7 +22,8 @@ import {
 } from "sliver-script";
 import type { Subscription } from "rxjs";
 import { normalizePivotTopology } from "./pivot-topology.js";
-import type { PivotTopologySnapshot } from "../shared/topology-contracts.js";
+import { normalizeCrackstations, normalizeExternalBuilders } from "./infrastructure-services.js";
+import type { InfrastructureServiceSummary, InfrastructureServicesSnapshot, PivotTopologySnapshot } from "../shared/topology-contracts.js";
 
 import {
   IPC,
@@ -6306,7 +6307,8 @@ export class ConnectionRegistry {
   }
 }
 
-type DomainName = "jobs" | "builds" | "profiles" | "compiler" | "pivots" | TargetDomainName;
+type ServiceDomainName = keyof InfrastructureServicesSnapshot;
+type DomainName = "jobs" | "builds" | "profiles" | "compiler" | "pivots" | ServiceDomainName | TargetDomainName;
 
 class BackendPool {
   private readonly windowIds = new Set<number>();
@@ -6561,7 +6563,7 @@ class BackendPool {
     await this.refreshAll().catch(() => undefined);
     this.assertCurrent();
     this.reconcileTimer = setInterval(
-      () => this.runBackgroundRefresh(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators"]),
+      () => this.runBackgroundRefresh(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "builders", "crackstations"]),
       RECONCILE_INTERVAL_MS,
     );
     this.reconcileTimer.unref();
@@ -6584,7 +6586,7 @@ class BackendPool {
   }
 
   async refreshAll(): Promise<void> {
-    return this.refreshDomains(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "pivots"]);
+    return this.refreshDomains(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "pivots", "builders", "crackstations"]);
   }
 
   async refreshDomains(domains: readonly DomainName[]): Promise<void> {
@@ -6595,7 +6597,7 @@ class BackendPool {
     // Optional display metadata retains its own error/health state without
     // invalidating successful authoritative inventories.
     const failures = results.filter((result, index): result is PromiseRejectedResult =>
-      result.status === "rejected" && unique[index] !== "pivots");
+      result.status === "rejected" && !["pivots", "builders", "crackstations"].includes(unique[index]!));
     if (failures.length > 0) {
       this.setHealth("degraded", boundedText(errorMessage(failures[0]!.reason), MAX_SUMMARY_TEXT));
       throw new AggregateError(failures.map((failure) => failure.reason), "One or more Sliver state domains failed to refresh");
@@ -6640,6 +6642,33 @@ class BackendPool {
     this.markDomainLoading(domain);
     try {
       switch (domain) {
+        case "builders":
+        case "crackstations": {
+          const current = this.serviceInventory(domain);
+          const supported = domain === "builders" ? this.client.getExternalBuilders : this.client.getCrackstations;
+          if (!supported) {
+            this.replaceServiceInventory(domain, { ...emptyServiceInventory(), status: "unsupported", revision: current.revision });
+            break;
+          }
+          try {
+            const normalized = domain === "builders"
+              ? normalizeExternalBuilders(await abortable(this.client.getExternalBuilders!(), this.lifetime.signal))
+              : normalizeCrackstations(await abortable(this.client.getCrackstations!(), this.lifetime.signal));
+            this.assertCurrent();
+            this.replaceServiceInventory(domain, {
+              ...normalized, status: normalized.items.length ? "ready" : "empty",
+              revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(),
+            });
+          } catch (error) {
+            if (error && typeof error === "object" && "code" in error && error.code === 12) {
+              this.assertCurrent();
+              this.replaceServiceInventory(domain, { ...emptyServiceInventory(), status: "unsupported", revision: current.revision });
+              break;
+            }
+            throw error;
+          }
+          break;
+        }
         case "pivots": {
           if (!this.client.getPivotGraph) {
             this.replacePivotTopology({ status: "unsupported", revision: 0, entries: [], truncated: false });
@@ -6732,6 +6761,10 @@ class BackendPool {
 
   private markDomainLoading(domain: DomainName): void {
     switch (domain) {
+      case "builders":
+      case "crackstations":
+        this.replaceServiceInventory(domain, loadingDomain(this.serviceInventory(domain)));
+        break;
       case "pivots":
         this.replacePivotTopology({ revision: 0, entries: [], truncated: false, ...this.snapshot.pivotTopology, status: "loading" });
         break;
@@ -6759,6 +6792,10 @@ class BackendPool {
   private markDomainError(domain: DomainName, error: string): void {
     const safeError = boundedText(error, MAX_SUMMARY_TEXT);
     switch (domain) {
+      case "builders":
+      case "crackstations":
+        this.replaceServiceInventory(domain, domainWithStatus(this.serviceInventory(domain), "error", safeError));
+        break;
       case "pivots":
         this.replacePivotTopology({ revision: 0, entries: [], truncated: false, ...this.snapshot.pivotTopology, status: "error", error: safeError });
         break;
@@ -6789,6 +6826,22 @@ class BackendPool {
 
   private replacePivotTopology(pivotTopology: PivotTopologySnapshot): void {
     this.snapshot = { ...this.snapshot, pivotTopology };
+    this.onSnapshot(this.snapshot);
+  }
+
+  private serviceInventory(domain: ServiceDomainName): DomainCollection<InfrastructureServiceSummary> {
+    return this.snapshot.infrastructureServices?.[domain] ?? emptyServiceInventory();
+  }
+
+  private replaceServiceInventory(domain: ServiceDomainName, inventory: DomainCollection<InfrastructureServiceSummary>): void {
+    this.snapshot = {
+      ...this.snapshot,
+      infrastructureServices: {
+        builders: this.serviceInventory("builders"),
+        crackstations: this.serviceInventory("crackstations"),
+        [domain]: inventory,
+      },
+    };
     this.onSnapshot(this.snapshot);
   }
 
@@ -6921,7 +6974,7 @@ class BackendPool {
           this.onSnapshot(this.snapshot);
           if (state.status === "retrying") this.onTaskSignal("connection-interrupted");
           if (recovered) {
-            this.scheduleInvalidation(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators"], 0);
+            this.scheduleInvalidation(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "builders", "crackstations"], 0);
             this.onTaskSignal("reconnect");
           }
         },
@@ -6984,6 +7037,8 @@ class BackendPool {
     if (this.snapshot.pivotTopology?.error || this.snapshot.pivotTopology?.status === "error") {
       return { status: "degraded", error: this.snapshot.pivotTopology.error ?? "Pivot topology could not be refreshed" };
     }
+    const failedService = Object.values(this.snapshot.infrastructureServices ?? {}).find((domain) => Boolean(domain.error));
+    if (failedService) return { status: "degraded", error: failedService.error ?? "Infrastructure services could not be refreshed" };
     const failedDomain = Object.values(this.snapshot.domains).find((domain) => Boolean(domain.error));
     if (failedDomain) {
       return {
@@ -7374,10 +7429,17 @@ function invalidatedDomainsForEvent(eventType: string): DomainName[] {
       return ["beacons"];
     case "client-joined":
     case "client-left":
-      return ["operators"];
+      return ["operators", "builders"];
+    case "crackstation-connected":
+    case "crackstation-disconnected":
+      return ["crackstations"];
     default:
       return [];
   }
+}
+
+function emptyServiceInventory(): DomainCollection<InfrastructureServiceSummary> {
+  return { status: "idle", revision: 0, items: [], page: { limit: MAX_DOMAIN_ITEMS, total: 0, truncated: false } };
 }
 
 function domainWithStatus<T>(

@@ -158,6 +158,8 @@ export type SliverClientAdapter = Pick<
   connect(): Promise<unknown>;
   /** Server inventory only; does not query or operate an individual target. */
   getPivotGraph?(): Promise<clientpb.PivotGraph>;
+  getExternalBuilders?(): Promise<clientpb.Builders>;
+  getCrackstations?(): Promise<clientpb.Crackstations>;
   pwdBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Pwd>;
   lsBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
   psBeacon(beaconId: string, fullInfo: boolean, timeoutSeconds: number): Promise<sliverpb.Ps>;
@@ -167,12 +169,14 @@ export type SliverClientAdapter = Pick<
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
 
 /**
- * Adds only the four reviewed beacon-read wrappers used by the operation
- * registry. `interactBeacon` deliberately remains outside SliverClientAdapter.
+ * Adds narrow passive inventory reads and the reviewed beacon-read wrappers.
+ * `interactBeacon` deliberately remains outside SliverClientAdapter.
  */
 export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
   return Object.assign(client, {
     getPivotGraph: () => withTimeoutSignal(10, (signal) => client.rpc.pivotGraph({}, { signal })),
+    getExternalBuilders: () => withTimeoutSignal(10, (signal) => client.rpc.builders({}, { signal })),
+    getCrackstations: () => withTimeoutSignal(10, (signal) => client.rpc.crackstations({}, { signal })),
     pwdBeacon: (beaconId: string, timeoutSeconds: number) =>
       client.interactBeacon(beaconId).pwd(timeoutSeconds),
     // InteractiveBeacon.lsTask intentionally exposes only {id, wait}; it

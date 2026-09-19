@@ -9,6 +9,23 @@ import {
 } from "./sliver-client-adapter.js";
 
 describe("SliverClientAdapter passive topology inventory", () => {
+  it("reads service registries with bounded empty requests and no worker commands", async () => {
+    const builders = vi.fn().mockResolvedValue({ Builders: [] });
+    const crackstations = vi.fn().mockResolvedValue({ Crackstations: [] });
+    const startBuild = vi.fn();
+    const crackstationTrigger = vi.fn();
+    const adapter = adaptSliverClient({ rpc: { builders, crackstations, startBuild, crackstationTrigger } } as unknown as SliverClient);
+
+    await expect(adapter.getExternalBuilders!()).resolves.toEqual({ Builders: [] });
+    await expect(adapter.getCrackstations!()).resolves.toEqual({ Crackstations: [] });
+
+    expect(builders).toHaveBeenCalledExactlyOnceWith({}, { signal: expect.any(AbortSignal) });
+    expect(crackstations).toHaveBeenCalledExactlyOnceWith({}, { signal: expect.any(AbortSignal) });
+    expect(startBuild).not.toHaveBeenCalled();
+    expect(crackstationTrigger).not.toHaveBeenCalled();
+    expectTypeOf<SliverClientAdapter>().not.toHaveProperty("crackstationTrigger");
+  });
+
   it("queries only the server pivot graph with an empty request and bounded signal", async () => {
     const graph = { Children: [] };
     const pivotGraph = vi.fn().mockResolvedValue(graph);

@@ -13,8 +13,10 @@ const SESSION_MENU_LABELS = ["Interact", "Interact in new window", "Rename", "Cl
 const SESSION_HOSTS = ["overview-relay-a", "overview-relay-b", "overview-relay-c", "overview-deepest", "overview-branch"] as const;
 const OPERATORS = ["overview-fixture", "overview-online-observer", "overview-offline-observer"] as const;
 const RELAY = "Sessionless relay";
+const BUILDERS = ["overview-builder-linux", "overview-builder-windows"] as const;
+const CRACKSTATION_IDS = ["8fd48f35-c2c2-4d62-8584-8cd274486301", "8fd48f35-c2c2-4d62-8584-8cd274486302"] as const;
 
-test("Overview renders passive operator presence and a nested relay hierarchy without target actions", {
+test("Overview renders passive operators, services, and a nested relay hierarchy without target actions", {
   timeout: 90_000,
 }, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -80,7 +82,9 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
       const snapshot = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot();
       return snapshot.pivotTopology?.status === "ready"
         && snapshot.domains.sessions.status === "ready"
-        && snapshot.domains.operators.status === "ready";
+        && snapshot.domains.operators.status === "ready"
+        && snapshot.infrastructureServices?.builders.status === "ready"
+        && snapshot.infrastructureServices.crackstations.status === "ready";
     });
     const snapshot = await page.evaluate(() => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot());
     assert.equal(snapshot.pivotTopology?.entries.length, 6);
@@ -89,13 +93,22 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
     assert.equal(snapshot.targetContext.selectableTargets.length, 5);
     assert.equal(snapshot.targetContext.selectableTargets.some((target) => target.id === "103"), false,
       "the sessionless relay must never acquire a selectable target reference");
+    const builders = snapshot.infrastructureServices!.builders.items;
+    const crackstations = snapshot.infrastructureServices!.crackstations.items;
+    assert.deepEqual(builders.map((builder) => builder.id).sort(), [...BUILDERS].sort());
+    assert.deepEqual(crackstations.map((station) => station.id).sort(), [...CRACKSTATION_IDS].sort());
+    assert.equal(new Set(crackstations.map((station) => station.name)).size, 1,
+      "distinct crackstation host identities must remain separate even when their display names match");
 
     for (const hostname of SESSION_HOSTS) await nodeByLabel(page, hostname).waitFor();
     await nodeByLabel(page, RELAY).waitFor();
     for (const name of OPERATORS) await nodeByLabel(page, name).waitFor();
     assert.equal(await nodeByLabel(page, "overview-offline-observer").getAttribute("data-status"), "inactive");
     assert.equal(await nodeByLabel(page, "overview-online-observer").getAttribute("data-status"), "healthy");
-    assert.equal(await page.getByTestId("topology-node").count(), 11);
+    for (const id of BUILDERS) await serviceNode(page, "external-builder", id).waitFor();
+    for (const id of CRACKSTATION_IDS) await serviceNode(page, "crackstation", id).waitFor();
+    assert.equal(await nodeByLabel(page, "overview-crackstation").count(), 2);
+    assert.equal(await page.getByTestId("topology-node").count(), 15);
     await page.locator('[data-slot="toast"]').filter({ hasText: "Connected" }).waitFor({ state: "hidden" });
     await fitGraph(page);
 
@@ -125,10 +138,36 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
       assert.equal(await inspectorProperty(page, "State"), "unknown",
         "operator presence must not imply measured network traffic");
     }
-    assert.equal(renderedEdges.length, expectedHops.size + operatorEdges.length + 1,
-      "only observed hops, operator presence, and this client's server link belong in the graph");
+    const serviceEdges = renderedEdges.filter((id) => /\/(?:external-builder-registration|crackstation-connection)\//u.test(decodeEdgeId(id)));
+    assert.equal(serviceEdges.length, 4);
+    for (const testId of serviceEdges) {
+      const [from, to] = await inspectEdge(page, testId);
+      assert.ok([...BUILDERS, "overview-crackstation"].some((name) => name === from));
+      assert.equal(to, snapshot.connection.server);
+      assert.equal(await inspectorProperty(page, "State"), "unknown",
+        "registered infrastructure must not imply measured traffic or active work");
+    }
+    assert.equal(renderedEdges.length, expectedHops.size + operatorEdges.length + serviceEdges.length + 1,
+      "only observed hops, service and operator associations, and this client's server link belong in the graph");
     await closeInspector(page);
     await fitGraph(page);
+
+    for (const [kind, entries] of [["external-builder", builders], ["crackstation", crackstations]] as const) {
+      for (const service of entries) {
+        const node = serviceNode(page, kind, service.id);
+        await node.click();
+        assert.equal(await inspectorProperty(page, kind === "external-builder" ? "Builder name" : "Host UUID"), service.id);
+        assert.equal(await inspectorProperty(page, "Operating system"), service.os);
+        assert.equal(await inspectorProperty(page, "Architecture"), service.arch);
+        assert.equal(await inspectorProperty(page, "Reported operator"), service.operatorName);
+        assert.equal(await inspectorProperty(page, "Status"), kind === "external-builder" ? "Registered" : "Connected");
+        if (service.version) assert.equal(await inspectorProperty(page, "Version"), service.version);
+        assert.equal(await page.getByRole("complementary", { name: "Infrastructure details", exact: true }).getByRole("button").count(), 1,
+          "passive service inspectors expose only the close button");
+        await closeInspector(page);
+        await fitGraph(page);
+      }
+    }
 
     const menu = page.getByRole("menu", { name: "Application context menu" });
     for (const hostname of SESSION_HOSTS) {
@@ -140,17 +179,59 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "hidden" });
     }
-    for (const label of [RELAY, ...OPERATORS]) {
-      await nodeByLabel(page, label).click({ button: "right" });
+    const graphPage = page;
+    const passiveNodes = [
+      ...[RELAY, ...OPERATORS].map((label) => nodeByLabel(graphPage, label)),
+      ...BUILDERS.map((id) => serviceNode(graphPage, "external-builder", id)),
+      ...CRACKSTATION_IDS.map((id) => serviceNode(graphPage, "crackstation", id)),
+    ];
+    for (const node of passiveNodes) {
+      await node.click({ button: "right" });
       await menu.waitFor();
       for (const name of SESSION_MENU_LABELS) {
         assert.equal(await menu.getByRole("menuitem", { name, exact: true }).count(), 0,
-          "passive relay/operator metadata must not expose target actions");
+          "passive relay, operator, and service metadata must not expose target actions");
       }
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "hidden" });
     }
     await page.screenshot({ path: join(artifactDirectory, "overview-nested-topology-dark.png"), animations: "disabled" });
+
+    for (const [option, kind, ids, hiddenKind, hiddenIds] of [
+      ["External Builder", "external-builder", BUILDERS, "crackstation", CRACKSTATION_IDS],
+      ["Crackstation", "crackstation", CRACKSTATION_IDS, "external-builder", BUILDERS],
+    ] as const) {
+      await chooseFilter(page, "Infrastructure type", option);
+      for (const id of ids) await serviceNode(page, kind, id).waitFor();
+      for (const id of hiddenIds) assert.equal(await serviceNode(page, hiddenKind, id).count(), 0);
+      for (const hostname of SESSION_HOSTS) assert.equal(await nodeByLabel(page, hostname).count(), 0);
+      await page.getByText("2 matches · connection context included", { exact: true }).waitFor();
+    }
+    await chooseFilter(page, "Infrastructure type", "All types");
+    await nodeByLabel(page, "overview-deepest").waitFor();
+    await page.getByRole("button", { name: "List", exact: true }).click();
+    await page.getByTestId("topology-graph").waitFor({ state: "hidden" });
+    const resources = page.getByRole("table", { name: "Infrastructure resources", exact: true });
+    for (const name of BUILDERS) {
+      const row = resources.getByRole("row").filter({ has: page.getByRole("button", { name, exact: true }) });
+      await row.waitFor();
+      assert.match(await row.innerText(), /External Builder\s+Registered\s+current/u);
+    }
+    const stationRows = resources.getByRole("row").filter({ has: page.getByRole("button", { name: "overview-crackstation", exact: true }) });
+    assert.equal(await stationRows.count(), 2);
+    const listedStationIds: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const row = stationRows.nth(index);
+      assert.match(await row.innerText(), /Crackstation\s+Connected\s+current/u);
+      await row.getByRole("button", { name: "overview-crackstation", exact: true }).click();
+      listedStationIds.push(await inspectorProperty(page, "Host UUID"));
+    }
+    assert.deepEqual(listedStationIds.sort(), [...CRACKSTATION_IDS].sort());
+    await closeInspector(page);
+    await page.screenshot({ path: join(artifactDirectory, "overview-infrastructure-services-list.png"), animations: "disabled" });
+    await page.getByRole("button", { name: "Graph", exact: true }).click();
+    await page.getByTestId("topology-graph").waitFor();
+    await fitGraph(page);
 
     await page.getByLabel("Search infrastructure", { exact: true }).fill("overview-deepest");
     await nodeByLabel(page, "overview-branch").waitFor({ state: "hidden" });
@@ -159,6 +240,8 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
     }
     assert.equal(await page.getByTestId("topology-node").count(), 7);
     for (const name of OPERATORS) assert.equal(await nodeByLabel(page, name).count(), 0);
+    for (const id of BUILDERS) assert.equal(await serviceNode(page, "external-builder", id).count(), 0);
+    for (const id of CRACKSTATION_IDS) assert.equal(await serviceNode(page, "crackstation", id).count(), 0);
     await page.getByText("1 matches · connection context included", { exact: true }).waitFor();
     const filteredEdges = await edgeTestIds(page);
     assert.equal(filteredEdges.length, 6);
@@ -187,10 +270,12 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
     }));
     const allowedMethods = new Set([
       "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
-      "getOperators", "getSessions", "getBeacons", "getPivotGraph",
+      "getOperators", "getSessions", "getBeacons", "getPivotGraph", "getExternalBuilders", "getCrackstations",
     ]);
     assert.deepEqual(audit.methods.filter((method) => !allowedMethods.has(method)), []);
     assert.ok(audit.methods.includes("getPivotGraph"));
+    assert.ok(audit.methods.includes("getExternalBuilders"));
+    assert.ok(audit.methods.includes("getCrackstations"));
     assert.deepEqual(audit.tasks, []);
     assert.deepEqual(audit.openSessionRequests, []);
     assert.deepEqual(audit.executionCalls, {});
@@ -224,6 +309,18 @@ test("Overview renders passive operator presence and a nested relay hierarchy wi
 
 function nodeByLabel(page: Page, label: string): Locator {
   return page.getByTestId("topology-node").filter({ has: page.locator("strong").filter({ hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u") }) });
+}
+
+function serviceNode(page: Page, kind: "external-builder" | "crackstation", id: string): Locator {
+  const suffix = encodeURIComponent(`/${kind}/${encodeURIComponent(id)}`);
+  return page.locator(`.react-flow__node[data-id$="${suffix}"]`).getByTestId("topology-node");
+}
+
+async function chooseFilter(page: Page, label: string, option: string): Promise<void> {
+  await page.getByRole("button", { name: new RegExp(label, "u") }).click();
+  const list = page.getByRole("listbox");
+  await page.getByRole("option", { name: option, exact: true }).click();
+  await list.waitFor({ state: "hidden" });
 }
 
 function decodeEdgeId(testId: string): string {

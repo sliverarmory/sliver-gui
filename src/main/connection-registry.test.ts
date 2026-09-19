@@ -104,6 +104,128 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+describe("passive infrastructure service inventory", () => {
+  function services(client: FakeSliverClient) {
+    const getExternalBuilders = vi.fn().mockResolvedValue(clientpb.Builders.create({ Builders: [
+      { Name: "linux-builder", GOOS: "linux", GOARCH: "amd64", OperatorName: "builder-operator", Templates: ["excluded-template"] },
+    ] }));
+    const getCrackstations = vi.fn().mockResolvedValue(clientpb.Crackstations.create({ Crackstations: [
+      { HostUUID: "station-host", Name: "Station", GOOS: "linux", GOARCH: "amd64", Version: "1.0", Benchmarks: { 1: "excluded-benchmark" } },
+    ] }));
+    client.adapter.getExternalBuilders = getExternalBuilders;
+    client.adapter.getCrackstations = getCrackstations;
+    return { getExternalBuilders, getCrackstations };
+  }
+
+  it("publishes bounded service metadata independently from selectable targets", async () => {
+    const client = new FakeSliverClient();
+    const queries = services(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const snapshot = registry.snapshot(1);
+    expect(snapshot.infrastructureServices?.builders).toMatchObject({ status: "ready", revision: 1, items: [
+      { id: "linux-builder", name: "linux-builder", os: "linux", arch: "amd64", operatorName: "builder-operator" },
+    ] });
+    expect(snapshot.infrastructureServices?.crackstations).toMatchObject({ status: "ready", revision: 1, items: [
+      { id: "station-host", name: "Station", version: "1.0" },
+    ] });
+    expect(queries.getExternalBuilders).toHaveBeenCalledExactlyOnceWith();
+    expect(queries.getCrackstations).toHaveBeenCalledExactlyOnceWith();
+    expect(snapshot.targetContext.selectableTargets).toEqual([]);
+    expect(JSON.stringify(snapshot.infrastructureServices)).not.toContain("excluded-");
+  });
+
+  it.each(["builders", "crackstations"] as const)("isolates %s errors, retains last-known data, and removes absent services after recovery", async (domain) => {
+    const client = new FakeSliverClient();
+    const queries = services(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const previous = registry.snapshot(1).infrastructureServices![domain];
+    const query = domain === "builders" ? queries.getExternalBuilders : queries.getCrackstations;
+    query.mockRejectedValueOnce(new Error("Service inventory unavailable"));
+
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+
+    expect(registry.snapshot(1).infrastructureServices![domain]).toEqual({ ...previous, status: "error", error: "Service inventory unavailable" });
+    expect(registry.snapshot(1).connection.status).toBe("degraded");
+    expect(registry.snapshot(1).domains.sessions.status).toBe("empty");
+    query.mockResolvedValue(domain === "builders" ? clientpb.Builders.create({}) : clientpb.Crackstations.create({}));
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    expect(registry.snapshot(1).infrastructureServices![domain]).toMatchObject({ status: "empty", items: [], revision: previous.revision + 1 });
+    expect(registry.snapshot(1).infrastructureServices![domain]).not.toHaveProperty("error");
+    expect(registry.snapshot(1).connection.status).toBe("connected");
+  });
+
+  it("keeps a prior station inventory when a malformed replacement is returned", async () => {
+    const client = new FakeSliverClient();
+    const queries = services(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const previous = registry.snapshot(1).infrastructureServices!.crackstations.items;
+    queries.getCrackstations.mockResolvedValue(clientpb.Crackstations.create({ Crackstations: [{ Name: "No stable identity" }] }));
+    await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+    expect(registry.snapshot(1).infrastructureServices!.crackstations).toMatchObject({ status: "error", items: previous });
+    expect(registry.snapshot(1).infrastructureServices!.builders.status).toBe("ready");
+  });
+
+  it("handles missing and unimplemented optional service APIs without failing core inventories", async () => {
+    const client = new FakeSliverClient();
+    client.adapter.getCrackstations = vi.fn().mockRejectedValue(Object.assign(new Error("UNIMPLEMENTED"), { code: 12 }));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    expect(registry.snapshot(1).infrastructureServices).toMatchObject({
+      builders: { status: "unsupported", items: [] }, crackstations: { status: "unsupported", items: [] },
+    });
+    expect(registry.snapshot(1).connection.status).toBe("connected");
+  });
+
+  it("refreshes service presence on relevant events and periodic reconciliation", async () => {
+    vi.useFakeTimers();
+    const client = new FakeSliverClient();
+    const queries = services(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    client.events.next(clientpb.Event.create({ EventType: "crackstation-disconnected" }));
+    await vi.advanceTimersByTimeAsync(101);
+    expect(queries.getCrackstations).toHaveBeenCalledTimes(2);
+    expect(queries.getExternalBuilders).toHaveBeenCalledTimes(1);
+    client.events.next(clientpb.Event.create({ EventType: "client-joined" }));
+    await vi.advanceTimersByTimeAsync(101);
+    expect(queries.getExternalBuilders).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(queries.getExternalBuilders).toHaveBeenCalledTimes(3);
+    expect(queries.getCrackstations).toHaveBeenCalledTimes(3);
+  });
+
+  it("discards delayed service responses after disconnect and a new backend connection", async () => {
+    const first = new FakeSliverClient();
+    const second = new FakeSliverClient();
+    const queries = services(first);
+    const clients = [first, second];
+    const registry = createRegistry(() => clients.shift()!.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const pending = deferred<clientpb.Crackstations>();
+    queries.getCrackstations.mockReturnValueOnce(pending.promise);
+    const refresh = registry.refresh(1);
+    await vi.waitFor(() => expect(queries.getCrackstations).toHaveBeenCalledTimes(2));
+    await registry.disconnect(1);
+    expect(registry.snapshot(1).infrastructureServices).toBeUndefined();
+    await connectSaved(registry, 1);
+    const current = registry.snapshot(1).infrastructureServices;
+    pending.resolve(clientpb.Crackstations.create({ Crackstations: [{ HostUUID: "old-host", Name: "Old station" }] }));
+    await expect(refresh).resolves.toMatchObject({ ok: false });
+    expect(registry.snapshot(1).infrastructureServices).toEqual(current);
+  });
+});
+
 describe("passive pivot topology inventory", () => {
   function graph(childPeer = "3"): clientpb.PivotGraph {
     return clientpb.PivotGraph.create({ Children: [{

@@ -410,6 +410,8 @@ export interface RecentEventSummary {
 }
 
 export interface SliverSnapshot {
+  /** Passive server-reported service inventory for infrastructure views. */
+  infrastructureServices?: import("./topology-contracts.js").InfrastructureServicesSnapshot;
   /** Bounded display-only hierarchy reported by the server's passive graph RPC. */
   pivotTopology?: import("./topology-contracts.js").PivotTopologySnapshot;
   connection: ConnectionSummary;

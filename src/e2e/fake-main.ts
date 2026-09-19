@@ -1010,6 +1010,26 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       record("getPivotGraph");
       return overviewPivotFixture ? seedOverviewPivotGraph(sessions) : clientpb.PivotGraph.create({ Children: [] });
     },
+    async getExternalBuilders() {
+      record("getExternalBuilders");
+      return clientpb.Builders.create({ Builders: overviewPivotFixture ? [
+        { Name: "overview-builder-linux", OperatorName: config.operator, GOOS: "linux", GOARCH: "amd64" },
+        { Name: "overview-builder-windows", OperatorName: "overview-online-observer", GOOS: "windows", GOARCH: "amd64" },
+      ] : [] });
+    },
+    async getCrackstations() {
+      record("getCrackstations");
+      return clientpb.Crackstations.create({ Crackstations: overviewPivotFixture ? [
+        {
+          Name: "overview-crackstation", HostUUID: "8fd48f35-c2c2-4d62-8584-8cd274486301",
+          OperatorName: config.operator, GOOS: "linux", GOARCH: "amd64", Version: "fixture-1.0",
+        },
+        {
+          Name: "overview-crackstation", HostUUID: "8fd48f35-c2c2-4d62-8584-8cd274486302",
+          OperatorName: "overview-online-observer", GOOS: "darwin", GOARCH: "arm64", Version: "fixture-2.0",
+        },
+      ] : [] });
+    },
     async getBeacons() {
       record("getBeacons");
       return clientpb.Beacons.create({ Beacons: beacons.map(cloneBeacon) });

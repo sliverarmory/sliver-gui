@@ -4,9 +4,24 @@
  * objects. Unknown kinds and icon keys intentionally remain valid; renderers
  * display them using a generic resource card and icon.
  */
-import type { DomainStatus } from "./contracts.js";
+import type { DomainCollection, DomainStatus } from "./contracts.js";
 
 export const TOPOLOGY_SCHEMA_VERSION = 1 as const;
+
+/** Allowlisted service identity and display metadata; no jobs or action handles. */
+export interface InfrastructureServiceSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly os: string;
+  readonly arch: string;
+  readonly operatorName: string;
+  readonly version?: string;
+}
+
+export interface InfrastructureServicesSnapshot {
+  readonly builders: DomainCollection<InfrastructureServiceSummary>;
+  readonly crackstations: DomainCollection<InfrastructureServiceSummary>;
+}
 
 /** Passive server-reported routing inventory; no target action authority. */
 export interface PivotTopologyEntry {

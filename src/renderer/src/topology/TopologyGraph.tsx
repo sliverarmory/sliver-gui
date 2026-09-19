@@ -57,7 +57,7 @@ const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<Gr
           <span className="topology-node__kind">
             {node.kind === "session" || node.kind === "beacon"
               ? <TopologyIcon name={node.kind} className="topology-node__kind-icon" /> : null}
-            {node.kind}
+            {node.kind.replace(/[-_]/gu, " ")}
           </span>
           <strong title={node.label}>{node.label}</strong>
         </div>
