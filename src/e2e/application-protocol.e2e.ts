@@ -260,6 +260,7 @@ async function assertBuiltAssets(page: Page): Promise<void> {
 async function assertStrictPolicy(page: Page): Promise<void> {
   const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
   assert.ok(csp);
+  assert.match(csp, /(?:^|;)\s*default-src 'none'(?:;|$)/u);
   assert.deepEqual(csp.match(/'[^']*unsafe[^']*'/gu), ["'wasm-unsafe-eval'"]);
   assert.match(csp, /(?:^|;)\s*connect-src 'none'(?:;|$)/u);
   assert.match(csp, /(?:^|;)\s*style-src 'self'(?: 'sha256-[A-Za-z0-9+/=]+')*(?:;|$)/u);

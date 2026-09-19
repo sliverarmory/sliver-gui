@@ -40,6 +40,7 @@ function expectStrictContentSecurityPolicy(policy: string): void {
     ...(directives.get("script-src-attr") ?? []),
   ];
 
+  expect(directives.get("default-src")).toEqual(["'none'"]);
   expect(directives.get("script-src-attr")).toEqual(["'none'"]);
   expect(scriptValues).not.toContain("'unsafe-inline'");
   expect(scriptValues).not.toContain("'unsafe-eval'");
@@ -72,7 +73,6 @@ describe("Electron content security policy", () => {
     const directives = parsePolicy(policy);
 
     expectStrictContentSecurityPolicy(policy);
-    expect(directives.get("default-src")).toEqual(["'self'"]);
     expect(directives.get("script-src")).toEqual(["'self'", "'wasm-unsafe-eval'"]);
     expect(directives.get("script-src-elem")).toEqual(["'self'"]);
     expect(directives.get("connect-src")).toEqual(["'none'"]);

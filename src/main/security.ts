@@ -6,7 +6,7 @@ const REACT_ARIA_PRESSABLE_STYLE_HASH = "'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUc
 
 export function productionContentSecurityPolicy(): string {
   return [
-    "default-src 'self'",
+    "default-src 'none'",
     "script-src 'self' 'wasm-unsafe-eval'",
     "script-src-elem 'self'",
     "script-src-attr 'none'",
@@ -29,7 +29,7 @@ export function developmentContentSecurityPolicy(devServerUrl: string): string {
   const origin = new URL(devServerUrl).origin;
   const websocketOrigin = origin.replace(/^http/, "ws");
   return [
-    "default-src 'self'",
+    "default-src 'none'",
     `script-src 'self' 'wasm-unsafe-eval' ${origin}`,
     `script-src-elem 'self' ${origin}`,
     "script-src-attr 'none'",
