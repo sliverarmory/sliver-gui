@@ -21,7 +21,9 @@ import { App, ConnectionMenu, NavigationContent, WindowMenu } from "./App";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 import * as connectionContext from "./components/ConnectionProvider";
 import { renderWithApplicationContextMenu as render } from "./application-context-menu-test-utils";
-import { navigationShortcuts } from "./navigation-shortcuts";
+import { navigationShortcuts, shortcutAriaKeyShortcuts } from "./navigation-shortcuts";
+import { isApplePlatform } from "./components/CommandPaletteShortcut";
+import { OPEN_CONSOLE_SHORTCUT } from "./window-shortcuts";
 
 beforeAll(() => {
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
@@ -59,6 +61,7 @@ function installSliverAPI(
 ): SliverDesktopAPI {
   const failedOperation = async () => ({ ok: false as const, error: "Not implemented by this test" });
   const api: SliverDesktopAPI = {
+    setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),
     chooseCertificatePair: vi.fn(failedOperation),
     backgroundTarget: vi.fn(failedOperation),
@@ -352,8 +355,8 @@ describe("App startup", () => {
     await user.click(screen.getByRole("menuitem", { name: /Settings/u }));
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Command Palette" }));
-    await user.click(screen.getByRole("button", { name: "Change shortcut" }));
+    await user.click(screen.getByRole("tab", { name: "Keyboard Shortcuts" }));
+    await user.click(screen.getByRole("button", { name: "Change shortcut for Open command palette" }));
     await user.keyboard("{Control>}{Shift>}p{/Shift}{/Control}");
 
     expect(screen.getByLabelText(/(?:Command|Ctrl) \+ Shift \+ P/u)).toBeInTheDocument();
@@ -721,7 +724,7 @@ describe("App startup", () => {
     expect(screen.queryByText("Connect an operator configuration")).not.toBeInTheDocument();
   });
 
-  it("opens a dedicated console for the active server without renderer-authored config arguments", async () => {
+  it("opens the active server console from its button and advertised shortcut without config arguments", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -743,9 +746,28 @@ describe("App startup", () => {
     expect(screen.getByRole("button", { name: "New window options" })).toBeInTheDocument();
     const consoleButton = screen.getByRole("button", { name: "Open Sliver console" });
     expect(consoleButton).toBeEnabled();
+    expect(consoleButton).toHaveAttribute("aria-keyshortcuts", shortcutAriaKeyShortcuts(OPEN_CONSOLE_SHORTCUT));
+    await user.hover(consoleButton);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("Open console for the active server");
+    expect(within(tooltip).getByLabelText(/(?:Command|Ctrl) \+ T/u)).toBeInTheDocument();
     await user.click(consoleButton);
 
     expect(api.openConsoleWindow).toHaveBeenCalledExactlyOnceWith();
+    vi.mocked(api.openConsoleWindow).mockClear();
+    await user.keyboard(isApplePlatform() ? "{Meta>}t{/Meta}" : "{Control>}t{/Control}");
+    expect(api.openConsoleWindow).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("leaves the console shortcut inactive while disconnected", async () => {
+    const user = userEvent.setup();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    render(<App />);
+    await screen.findByText("No saved configurations");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Open Sliver console" })).toBeDisabled();
+    await user.keyboard(isApplePlatform() ? "{Meta>}t{/Meta}" : "{Control>}t{/Control}");
+    expect(api.openConsoleWindow).not.toHaveBeenCalled();
   });
 
   it("does not expose an IPC exception when opening a console fails", async () => {
@@ -1585,6 +1607,16 @@ describe("Sidebar navigation", () => {
 });
 
 describe("WindowMenu", () => {
+  it("shows the native new-window shortcut in its tooltip", async () => {
+    const user = userEvent.setup();
+    render(<WindowMenu connected onOpenWindow={vi.fn().mockResolvedValue(undefined)} />);
+
+    await user.hover(screen.getByRole("button", { name: "New window options" }));
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("New window");
+    expect(within(tooltip).getByLabelText(/(?:Command|Ctrl) \+ N/u)).toBeInTheDocument();
+  });
+
   it("offers only a different-server window while disconnected", async () => {
     const user = userEvent.setup();
     const onOpenWindow = vi.fn().mockResolvedValue(undefined);
@@ -1603,8 +1635,11 @@ describe("WindowMenu", () => {
     render(<WindowMenu connected onOpenWindow={onOpenWindow} />);
 
     await user.click(screen.getByRole("button", { name: "New window options" }));
-    expect(screen.getByRole("menuitem", { name: "Different server" })).toBeInTheDocument();
-    await user.click(screen.getByRole("menuitem", { name: "Same server" }));
+    const differentServer = screen.getByRole("menuitem", { name: "Different server" });
+    const sameServer = screen.getByRole("menuitem", { name: "Same server" });
+    expect(within(differentServer).getByLabelText(/(?:Command|Ctrl) \+ N/u)).toBeInTheDocument();
+    expect(within(sameServer).getByLabelText(/(?:Command|Ctrl) \+ Shift \+ N/u)).toBeInTheDocument();
+    await user.click(sameServer);
     expect(onOpenWindow).toHaveBeenCalledWith(true);
   });
 });

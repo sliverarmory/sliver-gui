@@ -1,5 +1,6 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 
 import {
   navigationDirectionFromKeyboardEvent,
@@ -14,14 +15,21 @@ afterEach(() => {
 });
 
 describe("navigation shortcuts", () => {
+  it("uses configured shortcuts and stops handling their old chords", () => {
+    const settings = { ...DEFAULT_APPLICATION_SETTINGS_STATE, keyboardShortcuts: { navigateBack: "mod+shift+b", navigateForward: "mod+shift+f" } };
+    expect(navigationShortcuts(false, settings).back).toEqual({ shortcut: "mod+shift+b", ariaKeyShortcuts: "Control+Shift+B" });
+    expect(navigationDirectionFromKeyboardEvent(keyEvent({ key: "b", ctrlKey: true, shiftKey: true }), false, settings)).toBe("back");
+    expect(navigationDirectionFromKeyboardEvent(keyEvent({ key: "f", ctrlKey: true, shiftKey: true }), false, settings)).toBe("forward");
+    expect(navigationDirectionFromKeyboardEvent(keyEvent({ key: "ArrowLeft", altKey: true }), false, settings)).toBeUndefined();
+  });
   it("uses Command brackets on Apple platforms and Alt arrows elsewhere", () => {
     expect(navigationShortcuts(true)).toEqual({
       back: { shortcut: "mod+[", ariaKeyShortcuts: "Meta+[" },
       forward: { shortcut: "mod+]", ariaKeyShortcuts: "Meta+]" },
     });
     expect(navigationShortcuts(false)).toEqual({
-      back: { shortcut: "alt+ArrowLeft", ariaKeyShortcuts: "Alt+ArrowLeft" },
-      forward: { shortcut: "alt+ArrowRight", ariaKeyShortcuts: "Alt+ArrowRight" },
+      back: { shortcut: "alt+arrowleft", ariaKeyShortcuts: "Alt+ArrowLeft" },
+      forward: { shortcut: "alt+arrowright", ariaKeyShortcuts: "Alt+ArrowRight" },
     });
     expect(navigationDirectionFromKeyboardEvent(keyEvent({ key: "[", metaKey: true }), true)).toBe("back");
     expect(navigationDirectionFromKeyboardEvent(keyEvent({ key: "]", metaKey: true }), true)).toBe("forward");

@@ -207,6 +207,7 @@ describe("trusted Electron IPC boundary", () => {
         appIcon: "passion" as const,
         reduceMotion: true,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     };
@@ -234,6 +235,29 @@ describe("trusted Electron IPC boundary", () => {
       destinationPath: "/tmp/private",
     })).toThrow(/invalid application settings update/);
     expect(update).toHaveBeenCalledOnce();
+  });
+
+  it("accepts shortcut recording only from a trusted sender with a single boolean", () => {
+    const setKeyboardShortcutRecording = vi.fn();
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined, {
+        getState: () => DEFAULT_APPLICATION_SETTINGS_STATE,
+        getIcon: () => "dark",
+        update: vi.fn(),
+        setKeyboardShortcutRecording,
+      });
+    const { event } = invokeEvent("sliver://app/index.html", 42);
+    const handler = electronMocks.handlers.get(IPC.setKeyboardShortcutRecording);
+    handler?.(event, true);
+    handler?.(event, false);
+    const identity = { contentsId: 42, rendererProcessId: 100, rendererFrameToken: "main-frame" };
+    expect(setKeyboardShortcutRecording.mock.calls).toEqual([[identity, true], [identity, false]]);
+    for (const args of [[], ["true"], [1], [true, false], [{ isRecording: true }]]) {
+      expect(() => handler?.(event, ...args)).toThrow(/invalid keyboard shortcut recording/);
+    }
+    const { event: untrusted } = invokeEvent("https://example.invalid/index.html", 42);
+    expect(() => handler?.(untrusted, true)).toThrow(/untrusted renderer/);
+    expect(setKeyboardShortcutRecording).toHaveBeenCalledTimes(2);
   });
 
   it("rejects origins that merely prefix-match the configured renderer", () => {

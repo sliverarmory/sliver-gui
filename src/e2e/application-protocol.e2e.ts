@@ -103,6 +103,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
           appIcon: settings.appIcon,
           reduceMotion: true,
           commandPaletteShortcut: settings.commandPaletteShortcut,
+          keyboardShortcuts: settings.keyboardShortcuts,
           terminal: settings.terminal,
         },
       });

@@ -2,9 +2,16 @@ import type { ArmoryTabId } from "../shared/armory-contracts.js";
 import type { BaseWindow, MenuItemConstructorOptions } from "electron";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
 import {
-  isCommandPaletteShortcut,
-  normalizeCommandPaletteShortcutKey,
+  DEFAULT_APPLICATION_SETTINGS_VALUES,
+  type ApplicationSettingsValues,
 } from "../shared/application-settings-contracts.js";
+import {
+  KEYBOARD_SHORTCUT_DEFINITIONS,
+  keyboardShortcutToAccelerator,
+  matchesKeyboardShortcut,
+  resolveKeyboardShortcut,
+  type KeyboardShortcutAction,
+} from "../shared/keyboard-shortcuts.js";
 import { CONSOLE_MAX_TABS_PER_WINDOW } from "../shared/console-contracts.js";
 import type { CloudDeploymentStatus, CloudProvider } from "../shared/cloud-deployment-contracts.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
@@ -71,75 +78,72 @@ export function commandPaletteShortcutDispositionForInput(
   shortcut: string,
   input: ConsoleTabShortcutInput,
 ): CommandPaletteShortcutDisposition | undefined {
-  if (
-    !isCommandPaletteShortcut(shortcut) ||
-    input.type !== "keyDown" ||
-    input.isComposing
-  ) return undefined;
-
-  const tokens = shortcut.split("+");
-  const key = tokens.at(-1);
-  const modifiers = new Set(tokens.slice(0, -1));
-  const primaryPressed = platform === "darwin" ? input.meta : input.control;
-  const secondaryPressed = platform === "darwin" ? input.control : input.meta;
-  if (
-    secondaryPressed ||
-    normalizeCommandPaletteShortcutKey(input.key, input.code) !== key ||
-    primaryPressed !== modifiers.has("mod") ||
-    input.alt !== modifiers.has("alt") ||
-    input.shift !== modifiers.has("shift")
-  ) return undefined;
-
+  if (!matchesNativeKeyboardShortcut(shortcut, platform, input)) return undefined;
   return input.isAutoRepeat ? "suppress" : "request";
 }
 
 export function serverRefreshShortcutDispositionForInput(
   input: ConsoleTabShortcutInput,
+  platform: NodeJS.Platform = process.platform,
+  settings: ApplicationSettingsValues = DEFAULT_APPLICATION_SETTINGS_VALUES,
 ): ServerRefreshShortcutDisposition | undefined {
+  if (isApplicationShortcutInput("refreshServer", platform, input, settings)) {
+    return input.isAutoRepeat ? "suppress" : "refresh";
+  }
+  // Keep an unassigned F5 from falling through to Chromium's page reload.
+  // A different application action may explicitly reuse it after remapping.
   if (
-    input.type !== "keyDown" ||
-    input.code !== "F5" ||
-    input.isComposing ||
-    input.shift ||
-    input.control ||
-    input.alt ||
-    input.meta
-  ) return undefined;
-  return input.isAutoRepeat ? "suppress" : "refresh";
+    matchesNativeKeyboardShortcut("f5", platform, input) &&
+    !KEYBOARD_SHORTCUT_DEFINITIONS.some(({ id, scope }) => scope !== "terminal" &&
+      isApplicationShortcutInput(id, platform, input, settings))
+  ) return "suppress";
+  return undefined;
 }
 
 export function consoleTabShortcutIndexForInput(
   platform: NodeJS.Platform,
   input: ConsoleTabShortcutInput,
+  settings: ApplicationSettingsValues = DEFAULT_APPLICATION_SETTINGS_VALUES,
 ): number | undefined {
-  if (!isConsolePrimaryShortcutInput(platform, input)) return undefined;
-
-  const codeMatch = /^Digit([0-9])$/u.exec(input.code);
-  if (!codeMatch?.[1]) return undefined;
-  const digit = Number(codeMatch[1]);
-  return digit === 0 ? CONSOLE_MAX_TABS_PER_WINDOW - 1 : digit - 1;
+  for (let index = 0; index < CONSOLE_MAX_TABS_PER_WINDOW; index += 1) {
+    if (isApplicationShortcutInput(`terminalTab${index + 1}` as KeyboardShortcutAction, platform, input, settings)) {
+      return index;
+    }
+  }
+  return undefined;
 }
 
 export function isConsoleNewTabShortcutInput(
   platform: NodeJS.Platform,
   input: ConsoleTabShortcutInput,
+  settings: ApplicationSettingsValues = DEFAULT_APPLICATION_SETTINGS_VALUES,
 ): boolean {
-  return isConsolePrimaryShortcutInput(platform, input) && input.code === "KeyT";
+  return isApplicationShortcutInput("terminalNewTab", platform, input, settings);
 }
 
-function isConsolePrimaryShortcutInput(
+export function isApplicationShortcutInput(
+  action: KeyboardShortcutAction,
+  platform: NodeJS.Platform,
+  input: ConsoleTabShortcutInput,
+  settings: ApplicationSettingsValues = DEFAULT_APPLICATION_SETTINGS_VALUES,
+): boolean {
+  return matchesNativeKeyboardShortcut(resolveKeyboardShortcut(action, settings, platform === "darwin"), platform, input);
+}
+
+function matchesNativeKeyboardShortcut(
+  shortcut: string,
   platform: NodeJS.Platform,
   input: ConsoleTabShortcutInput,
 ): boolean {
-  if (
-    input.type !== "keyDown" ||
-    input.isComposing ||
-    input.shift ||
-    input.alt
-  ) return false;
-  return platform === "darwin"
-    ? input.meta && !input.control
-    : input.control && !input.meta;
+  if (input.type !== "keyDown" || input.isComposing) return false;
+  return matchesKeyboardShortcut(shortcut, {
+    key: input.key,
+    code: input.code,
+    metaKey: input.meta,
+    ctrlKey: input.control,
+    altKey: input.alt,
+    shiftKey: input.shift,
+  }, platform === "darwin");
 }
 
 export function buildApplicationMenuTemplate(
@@ -152,7 +156,10 @@ export function buildApplicationMenuTemplate(
   cloudDeployments: readonly CloudMenuDeployment[] = [],
   networkEnabled = false,
   crackstationReleaseCatalog: ReleaseMenuCatalog = { status: "loading" },
+  settings: ApplicationSettingsValues = DEFAULT_APPLICATION_SETTINGS_VALUES,
 ): MenuItemConstructorOptions[] {
+  const accelerator = (action: KeyboardShortcutAction): string =>
+    keyboardShortcutToAccelerator(resolveKeyboardShortcut(action, settings, platform === "darwin"));
   const updateItems = applicationUpdateState
     ? buildApplicationUpdateMenuItems(applicationUpdateState, actions)
     : [];
@@ -181,12 +188,12 @@ export function buildApplicationMenuTemplate(
       submenu: [
         {
           label: "New Window",
-          accelerator: "CmdOrCtrl+N",
+          accelerator: accelerator("newWindow"),
           click: actions.newWindow,
         },
         {
           label: "Duplicate Connected Window",
-          accelerator: "CmdOrCtrl+Shift+N",
+          accelerator: accelerator("duplicateWindow"),
           click: actions.duplicateConnectedWindow,
         },
         { type: "separator" },
@@ -194,7 +201,7 @@ export function buildApplicationMenuTemplate(
           ? consoleActions
             ? {
                 label: "Close Window",
-                accelerator: "CmdOrCtrl+Shift+W",
+                accelerator: accelerator("terminalCloseWindow"),
                 click: consoleActions.closeWindow,
               }
             : { role: "close" }
@@ -294,13 +301,13 @@ export function buildApplicationMenuTemplate(
             {
               id: "console.new-tab",
               label: "New Tab",
-              accelerator: "CmdOrCtrl+T",
+              accelerator: accelerator("terminalNewTab"),
               click: consoleActions.newTab,
             },
             {
               id: "console.close-tab",
               label: "Close Tab",
-              accelerator: "CmdOrCtrl+W",
+              accelerator: accelerator("terminalCloseTab"),
               click: consoleActions.closeTab,
             },
             { type: "separator" as const },
@@ -309,7 +316,7 @@ export function buildApplicationMenuTemplate(
               return {
                 id: `console.select-tab-${digit}`,
                 label: `Select Tab ${index + 1}`,
-                accelerator: `CmdOrCtrl+${digit}`,
+                accelerator: accelerator(`terminalTab${index + 1}` as KeyboardShortcutAction),
                 click: () => consoleActions.selectTab(index),
               };
             }),
@@ -317,7 +324,7 @@ export function buildApplicationMenuTemplate(
             {
               id: "console.settings",
               label: "Terminal Settings…",
-              accelerator: "CmdOrCtrl+,",
+              accelerator: accelerator("terminalSettings"),
               click: consoleActions.showSettings,
             },
           ],
@@ -334,7 +341,7 @@ export function buildApplicationMenuTemplate(
           : consoleActions
             ? [{
                 label: "Close Window",
-                accelerator: "CmdOrCtrl+Shift+W",
+                accelerator: accelerator("terminalCloseWindow"),
                 click: consoleActions.closeWindow,
               }]
             : [{ role: "close" as const }]),

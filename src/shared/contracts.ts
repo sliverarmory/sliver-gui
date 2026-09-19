@@ -102,6 +102,7 @@ export const IPC_INVOKE = {
   getApplicationSettings: "sliver:application-settings:get",
   getApplicationIcon: "sliver:application-icon:get",
   updateApplicationSettings: "sliver:application-settings:update",
+  setKeyboardShortcutRecording: "sliver:keyboard-shortcuts:recording",
   getApplicationUpdateState: "sliver:application-update:get",
   checkForApplicationUpdates: "sliver:application-update:check",
   restartToApplyApplicationUpdate: "sliver:application-update:restart",
@@ -755,6 +756,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.updateApplicationSettings]: {
     args: [input: ApplicationSettingsUpdateInput];
     result: OperationResult<ApplicationSettingsState>;
+  };
+  [IPC.setKeyboardShortcutRecording]: {
+    args: [isRecording: boolean];
+    result: void;
   };
   [IPC.getApplicationUpdateState]: {
     args: [];

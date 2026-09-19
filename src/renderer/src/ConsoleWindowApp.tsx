@@ -23,8 +23,8 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult } from "../../shared/contracts";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import {
-  CONSOLE_MAX_TABS_PER_WINDOW,
   type ConsoleTabCloseResult,
   type ConsoleTabLaunchContext,
   type ConsoleWindowLaunchContext,
@@ -44,6 +44,7 @@ import {
 import { TerminalSettingsModal } from "./components/TerminalSettingsModal";
 import { RenamableTab } from "./components/RenamableTab";
 import { RenameTabDialog } from "./components/RenameTabDialog";
+import { terminalKeyboardShortcutForEvent, terminalTabShortcutLabels } from "./terminal-shortcuts";
 
 const EMPTY_CONSOLE_TAB_KEY = "sliver-console-empty";
 
@@ -76,6 +77,7 @@ let pendingConsoleTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
 
 export function ConsoleWindowApp(): React.JSX.Element {
   const applicationSettings = useApplicationSettings();
+  const shortcutSettings = applicationSettings?.settings ?? DEFAULT_APPLICATION_SETTINGS_STATE;
   const [phase, setPhase] = useState<ConsoleWindowPhase>("claiming");
   const [context, setContext] = useState<ConsoleWindowLaunchContext>();
   const [runtime, setRuntime] = useState<TerminalRuntimeAsset>();
@@ -278,7 +280,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
   useEffect(() => {
     if (!context) return;
     const handleTabShortcut = (event: KeyboardEvent): void => {
-      const shortcut = consoleKeyboardShortcutForEvent(context.shortcutModifier, event);
+      const shortcut = terminalKeyboardShortcutForEvent(shortcutSettings, event, context.shortcutModifier === "Command");
       if (!shortcut) return;
       // Electron claims native input in the main process. Keep this capture
       // guard as a renderer boundary too: Ghostty owns the focused target and
@@ -295,7 +297,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
     };
     window.addEventListener("keydown", handleTabShortcut, true);
     return () => window.removeEventListener("keydown", handleTabShortcut, true);
-  }, [context, createTab, selectTabByShortcut]);
+  }, [context, createTab, selectTabByShortcut, shortcutSettings]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -368,10 +370,10 @@ export function ConsoleWindowApp(): React.JSX.Element {
             <Tabs.List aria-label="Sliver console tabs" className="min-w-0 bg-transparent p-0 shadow-none">
               {tabs.map((tab, index) => {
                 const state = consoleTabState(tab);
-                const shortcutDigit = consoleTabShortcutDigit(index);
+                const shortcutLabels = terminalTabShortcutLabels(index, shortcutSettings, context.shortcutModifier === "Command");
                 return (
                   <RenamableTab
-                    ariaLabel={`${tab.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
+                    ariaLabel={`${tab.label} ${state === "connected" ? "Connected" : "Exited"}, shortcut ${shortcutLabels.accessible}`}
                     key={tab.context.tabId}
                     className="max-w-56 min-w-28 gap-2 rounded-none px-3 data-[selected=true]:text-foreground"
                     id={tab.context.tabId}
@@ -386,7 +388,7 @@ export function ConsoleWindowApp(): React.JSX.Element {
                       aria-hidden
                       className="flex-none rounded-md bg-surface-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted tabular-nums"
                     >
-                      {context.shortcutModifier === "Command" ? "⌘" : "Ctrl+"}{shortcutDigit}
+                      {shortcutLabels.display}
                     </kbd>
                     <span className="sr-only"> {state === "connected" ? "Connected" : "Exited"}</span>
                     <Tabs.Indicator className="top-auto bottom-0 h-0.5 rounded-none bg-accent shadow-none" />
@@ -583,33 +585,6 @@ function ConsoleTabNotice({ title, message }: { readonly title: string; readonly
 
 function consoleTabState(tab: ReadyConsoleTab): "connected" | "exited" {
   return tab.exitMessage || tab.terminalError ? "exited" : "connected";
-}
-
-function consoleTabShortcutDigit(index: number): number {
-  return index === 9 ? 0 : index + 1;
-}
-
-type ConsoleKeyboardShortcut =
-  | { readonly type: "new-tab" }
-  | { readonly type: "select-tab"; readonly index: number };
-
-function consoleKeyboardShortcutForEvent(
-  modifier: ConsoleWindowLaunchContext["shortcutModifier"],
-  event: KeyboardEvent,
-): ConsoleKeyboardShortcut | undefined {
-  if (event.isComposing || event.shiftKey || event.altKey) return undefined;
-  const primaryModifierOnly = modifier === "Command"
-    ? event.metaKey && !event.ctrlKey
-    : event.ctrlKey && !event.metaKey;
-  if (!primaryModifierOnly) return undefined;
-  if (event.code === "KeyT") return { type: "new-tab" };
-  const codeMatch = /^Digit([0-9])$/u.exec(event.code);
-  if (!codeMatch?.[1]) return undefined;
-  const digit = Number(codeMatch[1]);
-  return {
-    type: "select-tab",
-    index: digit === 0 ? CONSOLE_MAX_TABS_PER_WINDOW - 1 : digit - 1,
-  };
 }
 
 function consoleWindowApi(): ConsoleWindowAPI {

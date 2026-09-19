@@ -65,11 +65,17 @@ import {
   buildApplicationMenuTemplate,
   commandPaletteShortcutDispositionForInput,
   consoleTabShortcutIndexForInput,
+  isApplicationShortcutInput,
   isConsoleNewTabShortcutInput,
   serverRefreshShortcutDispositionForInput,
   type CloudMenuDeployment,
   type ReleaseMenuCatalog,
 } from "./application-menus.js";
+import {
+  KEYBOARD_SHORTCUT_DEFINITIONS,
+  keyboardShortcutConflict,
+  resolveKeyboardShortcut,
+} from "../shared/keyboard-shortcuts.js";
 import { ApplicationContextMenuController } from "./application-context-menu.js";
 import {
   createApplicationUpdater,
@@ -339,6 +345,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let applicationUpdater: ApplicationUpdater | undefined;
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
+  const shortcutRecordingWindows = new Set<BrowserWindow>();
   let applicationContextMenus: ApplicationContextMenuController | undefined;
   let cloudDeploymentController = options.cloudDeploymentController;
   let sshWindow: BrowserWindow | undefined;
@@ -464,6 +471,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (!applicationContextMenus) throw new Error("Application context menus are not initialized");
     applicationContextMenus.install(window.webContents);
     if (registerWithConnectionRegistry && surface !== "network") window.webContents.on("before-input-event", (event, input) => {
+      if (shortcutRecordingWindows.has(window)) return;
       const commandPaletteDisposition = applicationSettingsStore
         ? commandPaletteShortcutDispositionForInput(
             process.platform,
@@ -493,10 +501,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     });
     if (surface === "workspace") {
       window.webContents.on("before-input-event", (event, input) => {
-        const disposition = serverRefreshShortcutDispositionForInput(input);
+        if (shortcutRecordingWindows.has(window)) return;
+        const disposition = serverRefreshShortcutDispositionForInput(input, process.platform, applicationSettingsStore?.getState());
         if (!disposition) return;
-        // F5 reconciles the trusted backend snapshot; it must never reload the
-        // renderer and tear down active UI state.
+        // Refresh reconciles the trusted snapshot. An unassigned F5 stays
+        // suppressed so it cannot reload the renderer and tear down UI state.
         event.preventDefault();
         if (disposition === "refresh") {
           void registry.refresh(contentsId).catch(() => undefined);
@@ -505,10 +514,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     }
     if (consoleWindowRecord) {
       window.webContents.on("before-input-event", (event, input) => {
-        const index = consoleTabShortcutIndexForInput(process.platform, input);
-        const requestsNewTab = isConsoleNewTabShortcutInput(process.platform, input);
+        const settings = applicationSettingsStore?.getState();
+        const index = consoleTabShortcutIndexForInput(process.platform, input, settings);
+        const requestsNewTab = isConsoleNewTabShortcutInput(process.platform, input, settings);
+        const requestsCloseTab = isApplicationShortcutInput("terminalCloseTab", process.platform, input, settings);
+        const requestsSettings = isApplicationShortcutInput("terminalSettings", process.platform, input, settings);
+        const requestsCloseWindow = isApplicationShortcutInput("terminalCloseWindow", process.platform, input, settings);
         if (
-          (index === undefined && !requestsNewTab) ||
+          (index === undefined && !requestsNewTab && !requestsCloseTab && !requestsSettings && !requestsCloseWindow) ||
           !isClaimedConsoleWindow(consoleWindowRecord)
         ) return;
         // Ghostty consumes terminal key events before Electron's menu accelerator
@@ -518,12 +531,23 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         if (input.isAutoRepeat) return;
         if (requestsNewTab) {
           sendConsoleMenuEventFromInput(consoleWindowRecord, IPC.consoleNewTabRequested);
+        } else if (requestsCloseTab) {
+          sendConsoleMenuEventFromInput(consoleWindowRecord, IPC.consoleCloseTabRequested);
+        } else if (requestsSettings) {
+          sendConsoleMenuEventFromInput(consoleWindowRecord, IPC.consoleSettingsRequested);
+        } else if (requestsCloseWindow) {
+          window.close();
         } else if (index !== undefined) {
           sendConsoleTabSelectionFromInput(consoleWindowRecord, index);
         }
       });
     }
     window.on("focus", installMenu);
+    window.on("blur", () => stopKeyboardShortcutRecording(window));
+    window.webContents.on("did-start-navigation", (details) => {
+      if (details.isMainFrame && !details.isSameDocument) stopKeyboardShortcutRecording(window);
+    });
+    window.webContents.on("render-process-gone", () => stopKeyboardShortcutRecording(window));
     window.once("ready-to-show", () => {
       if (!consoleWindowRecord?.hiddenByUser) window.show();
     });
@@ -609,6 +633,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       });
     }
     window.on("closed", () => {
+      shortcutRecordingWindows.delete(window);
       windows.delete(window);
       nativeWindowSurfaces.delete(window);
       windowsByContentsId.delete(contentsId);
@@ -1049,14 +1074,24 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     });
     window.webContents.on("before-input-event", (event, input) => {
       if (!isCurrentClaimedSshWindow(window)) return;
-      const index = consoleTabShortcutIndexForInput(process.platform, input);
-      const requestsNewTab = isConsoleNewTabShortcutInput(process.platform, input);
-      if (index === undefined && !requestsNewTab) return;
+      const settings = applicationSettingsStore?.getState();
+      const index = consoleTabShortcutIndexForInput(process.platform, input, settings);
+      const requestsNewTab = isConsoleNewTabShortcutInput(process.platform, input, settings);
+      const requestsCloseTab = isApplicationShortcutInput("terminalCloseTab", process.platform, input, settings);
+      const requestsSettings = isApplicationShortcutInput("terminalSettings", process.platform, input, settings);
+      const requestsCloseWindow = isApplicationShortcutInput("terminalCloseWindow", process.platform, input, settings);
+      if (index === undefined && !requestsNewTab && !requestsCloseTab && !requestsSettings && !requestsCloseWindow) return;
       event.preventDefault();
       if (input.isAutoRepeat) return;
+      if (requestsCloseWindow) {
+        window.close();
+        return;
+      }
       window.webContents.send(
-        requestsNewTab ? SSH_IPC_EVENTS.newTabRequested : SSH_IPC_EVENTS.selectTabRequested,
-        ...(requestsNewTab ? [] : [index]),
+        requestsNewTab ? SSH_IPC_EVENTS.newTabRequested
+          : requestsCloseTab ? SSH_IPC_EVENTS.closeTabRequested
+            : requestsSettings ? SSH_IPC_EVENTS.settingsRequested : SSH_IPC_EVENTS.selectTabRequested,
+        ...(index === undefined ? [] : [index]),
       );
     });
     window.on("closed", () => {
@@ -2042,6 +2077,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       cloudMenuDeployments,
       true,
       crackstationReleaseCatalog,
+      applicationSettingsStore?.getState(),
     );
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
@@ -2219,13 +2255,46 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (!applicationSettingsStore) {
       return { ok: false, error: "Application settings are unavailable" };
     }
+    const previous = applicationSettingsStore.getState();
+    for (const { id } of KEYBOARD_SHORTCUT_DEFINITIONS) {
+      const shortcut = resolveKeyboardShortcut(id, input.settings, process.platform === "darwin");
+      if (shortcut === resolveKeyboardShortcut(id, previous, process.platform === "darwin")) continue;
+      const conflict = keyboardShortcutConflict(id, shortcut, input.settings, process.platform === "darwin");
+      if (conflict) return { ok: false, error: conflict };
+    }
     const result = await applicationSettingsStore.update(input);
     if (!result.ok || !result.value) return result;
     nativeTheme.themeSource = result.value.theme;
     applyApplicationIcon();
     applyNativeWindowTheme();
+    installMenu();
     publishApplicationSettingsState(result.value);
     return result;
+  }
+
+  function stopKeyboardShortcutRecording(window: BrowserWindow): void {
+    if (!shortcutRecordingWindows.delete(window)) return;
+    if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.setIgnoreMenuShortcuts(false);
+    }
+  }
+
+  function setKeyboardShortcutRecording(source: TrustedWindowIdentity, isRecording: boolean): void {
+    const window = windowsByContentsId.get(source.contentsId);
+    if (
+      !window || window.isDestroyed() || window.webContents.isDestroyed() ||
+      nativeWindowSurfaces.get(window) !== "workspace" ||
+      !sameWindowIdentity(source, identityForWindow(window))
+    ) throw new Error("This window is not authorized to configure keyboard shortcuts");
+    if (!isRecording) {
+      stopKeyboardShortcutRecording(window);
+      return;
+    }
+    // A delayed renderer request after blur must not suppress a different
+    // window's native shortcuts or outlive the focus-bound recorder UI.
+    if (!window.isFocused()) throw new Error("Focus this window to record a keyboard shortcut");
+    window.webContents.setIgnoreMenuShortcuts(true);
+    shortcutRecordingWindows.add(window);
   }
 
   function publishApplicationUpdateState(state: ApplicationUpdateState): void {
@@ -2525,6 +2594,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       getState: () => loadedApplicationSettingsStore.getState(),
       getIcon: () => applicationIcons.getResolvedIcon(),
       update: updateApplicationSettings,
+      setKeyboardShortcutRecording,
     },
     {
       open: openCloudDeploymentWindowFromRenderer,

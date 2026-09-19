@@ -7,7 +7,8 @@ import type {
   ApplicationSettingsState,
   ApplicationTheme,
 } from "../../../shared/application-settings-contracts";
-import { CommandPaletteShortcutRecorder } from "../components/CommandPaletteShortcut";
+import { KeyboardShortcutsSettings } from "../components/KeyboardShortcutsSettings";
+import type { KeyboardShortcutAction } from "../../../shared/keyboard-shortcuts";
 import { SwitchRow } from "../components/FormControls";
 import {
   DEFAULT_CONSOLE_TERMINAL_SETTINGS,
@@ -24,7 +25,8 @@ export interface SettingsPageProps {
   readonly onAppIconChange: (appIcon: ApplicationIcon) => void;
   readonly onThemeChange: (theme: ApplicationTheme) => void;
   readonly onReduceMotionChange: (value: boolean) => void;
-  readonly onCommandPaletteShortcutChange: (shortcut: string) => void;
+  readonly onKeyboardShortcutChange: (action: KeyboardShortcutAction, shortcut: string | undefined) => void;
+  readonly onResetKeyboardShortcuts: () => void;
   readonly onTerminalChange: (value: ConsoleTerminalSettings) => void;
 }
 
@@ -34,7 +36,8 @@ export function SettingsPage({
   onAppIconChange,
   onThemeChange,
   onReduceMotionChange,
-  onCommandPaletteShortcutChange,
+  onKeyboardShortcutChange,
+  onResetKeyboardShortcuts,
   onTerminalChange,
 }: SettingsPageProps): React.JSX.Element {
   const [terminalDraft, setTerminalDraft] = useState<ConsoleTerminalSettings>(() =>
@@ -65,7 +68,7 @@ export function SettingsPage({
         <Tabs.ListContainer className="w-fit max-w-full">
           <Tabs.List aria-label="Settings sections">
             <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">General</Tabs.Tab>
-            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">Command Palette</Tabs.Tab>
+            <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">Keyboard Shortcuts</Tabs.Tab>
             <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">Terminal</Tabs.Tab>
           </Tabs.List>
         </Tabs.ListContainer>
@@ -147,29 +150,8 @@ export function SettingsPage({
         </Tabs.Panel>
 
         <Tabs.Panel className="pt-6" id="keyboard">
-          <Card variant="secondary">
-            <Card.Header>
-              <div>
-                <Card.Title>Command Palette</Card.Title>
-                <Card.Description>Open app navigation and common actions without leaving the keyboard.</Card.Description>
-              </div>
-            </Card.Header>
-            <Card.Content>
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground">Open command palette</p>
-                  <p className="mt-1 max-w-xl text-xs leading-5 text-muted">
-                    Choose a modified letter, number, or function key. Use Command on macOS or Ctrl on Windows and Linux.
-                  </p>
-                </div>
-                <CommandPaletteShortcutRecorder
-                  isDisabled={isSaving}
-                  shortcut={settings.commandPaletteShortcut}
-                  onChange={onCommandPaletteShortcutChange}
-                />
-              </div>
-            </Card.Content>
-          </Card>
+          <KeyboardShortcutsSettings settings={settings} isSaving={isSaving}
+            onShortcutChange={onKeyboardShortcutChange} onReset={onResetKeyboardShortcuts} />
         </Tabs.Panel>
 
         <Tabs.Panel className="pt-6" id="terminal">

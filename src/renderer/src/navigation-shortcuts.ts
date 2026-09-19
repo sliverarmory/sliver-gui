@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 
 import { isApplePlatform } from "./components/CommandPaletteShortcut";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
+import { matchesKeyboardShortcut, resolveKeyboardShortcut, type KeyboardShortcutSettings } from "../../shared/keyboard-shortcuts";
 
 export type NavigationDirection = "back" | "forward";
 
@@ -10,6 +12,7 @@ interface NavigationShortcutKeyboardEvent {
   readonly defaultPrevented?: boolean;
   readonly isComposing?: boolean;
   readonly key: string;
+  readonly code?: string;
   readonly metaKey: boolean;
   readonly repeat?: boolean;
   readonly shiftKey: boolean;
@@ -23,6 +26,7 @@ interface NavigationShortcutOptions {
   readonly goBack: () => void;
   readonly goForward: () => void;
   readonly isDisabled?: boolean;
+  readonly settings?: KeyboardShortcutSettings;
 }
 
 const INPUT_SELECTOR = [
@@ -37,9 +41,9 @@ const INPUT_SELECTOR = [
   '[data-command-palette-shortcut-recorder="true"]',
 ].join(",");
 
-export function navigationShortcuts(apple = isApplePlatform()) {
-  const back = apple ? "mod+[" : "alt+ArrowLeft";
-  const forward = apple ? "mod+]" : "alt+ArrowRight";
+export function navigationShortcuts(apple = isApplePlatform(), settings: KeyboardShortcutSettings = DEFAULT_APPLICATION_SETTINGS_STATE) {
+  const back = resolveKeyboardShortcut("navigateBack", settings, apple);
+  const forward = resolveKeyboardShortcut("navigateForward", settings, apple);
   return {
     back: { shortcut: back, ariaKeyShortcuts: shortcutAriaKeyShortcuts(back, apple) },
     forward: { shortcut: forward, ariaKeyShortcuts: shortcutAriaKeyShortcuts(forward, apple) },
@@ -51,6 +55,8 @@ export function shortcutAriaKeyShortcuts(shortcut: string, apple = isApplePlatfo
     if (token === "mod") return apple ? "Meta" : "Control";
     if (token === "alt") return "Alt";
     if (token === "shift") return "Shift";
+    if (token.toLowerCase().startsWith("arrow")) return `Arrow${token.slice(5, 6).toUpperCase()}${token.slice(6)}`;
+    if (/^f\d+$/u.test(token)) return token.toUpperCase();
     return token.length === 1 ? token.toUpperCase() : token;
   }).join("+");
 }
@@ -58,27 +64,33 @@ export function shortcutAriaKeyShortcuts(shortcut: string, apple = isApplePlatfo
 export function navigationDirectionFromKeyboardEvent(
   event: NavigationShortcutKeyboardEvent,
   apple = isApplePlatform(),
+  settings: KeyboardShortcutSettings = DEFAULT_APPLICATION_SETTINGS_STATE,
 ): NavigationDirection | undefined {
-  if (event.defaultPrevented || event.repeat || event.isComposing || event.shiftKey || event.ctrlKey) {
+  if (event.defaultPrevented || event.repeat || event.isComposing) {
     return undefined;
   }
-  if (apple ? !event.metaKey || event.altKey : !event.altKey || event.metaKey) return undefined;
-
-  const direction = event.key === (apple ? "[" : "ArrowLeft") ? "back"
-    : event.key === (apple ? "]" : "ArrowRight") ? "forward" : undefined;
+  const direction = matchesKeyboardShortcut(resolveKeyboardShortcut("navigateBack", settings, apple), event, apple) ? "back"
+    : matchesKeyboardShortcut(resolveKeyboardShortcut("navigateForward", settings, apple), event, apple) ? "forward" : undefined;
   if (!direction) return undefined;
+  if (isApplicationShortcutContextBlocked(event)) return undefined;
 
+  return direction;
+}
+
+export function isApplicationShortcutContextBlocked(
+  event: Pick<NavigationShortcutKeyboardEvent, "target" | "composedPath">,
+): boolean {
   const targets = event.composedPath?.() ?? [event.target];
   const target = targets.find((candidate): candidate is Element => candidate instanceof Element);
   const document = target?.ownerDocument ?? globalThis.document;
   if (targets.some((candidate) => candidate instanceof Element && candidate.closest(INPUT_SELECTOR))) {
-    return undefined;
+    return true;
   }
-  if (document?.activeElement?.closest(INPUT_SELECTOR)) return undefined;
+  if (document?.activeElement?.closest(INPUT_SELECTOR)) return true;
   if (document && [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open]')]
-    .some(isActiveDialog)) return undefined;
+    .some(isActiveDialog)) return true;
 
-  return direction;
+  return false;
 }
 
 function isActiveDialog(dialog: Element): boolean {
@@ -96,11 +108,12 @@ export function useNavigationShortcuts({
   goBack,
   goForward,
   isDisabled = false,
+  settings = DEFAULT_APPLICATION_SETTINGS_STATE,
 }: NavigationShortcutOptions): void {
   useEffect(() => {
     if (isDisabled) return;
     const onKeyDown = (event: KeyboardEvent): void => {
-      const direction = navigationDirectionFromKeyboardEvent(event);
+      const direction = navigationDirectionFromKeyboardEvent(event, isApplePlatform(), settings);
       if (!direction) return;
       // Consume our navigation keys at either history boundary as well, so the
       // browser cannot interpret the same gesture as document navigation.
@@ -110,5 +123,5 @@ export function useNavigationShortcuts({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canGoBack, canGoForward, goBack, goForward, isDisabled]);
+  }, [canGoBack, canGoForward, goBack, goForward, isDisabled, settings]);
 }

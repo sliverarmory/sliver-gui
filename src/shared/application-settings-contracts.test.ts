@@ -25,18 +25,20 @@ const settings = {
   appIcon: "passion" as const,
   reduceMotion: true,
   commandPaletteShortcut: "mod+shift+p",
+  keyboardShortcuts: {},
   terminal,
 };
 
 describe("application settings contracts", () => {
-  it("provides deeply frozen version-three defaults with automatic icons", () => {
+  it("provides deeply frozen version-four defaults with automatic icons", () => {
     expect(DEFAULT_APPLICATION_SETTINGS_STATE).toEqual({
-      v: 3,
+      v: 4,
       revision: 0,
       theme: "system",
       appIcon: "auto",
       reduceMotion: false,
       commandPaletteShortcut: "mod+k",
+      keyboardShortcuts: {},
       terminal: {
         fontId: "fira-code",
         fontSize: 13,
@@ -48,6 +50,7 @@ describe("application settings contracts", () => {
     expect(Object.isFrozen(DEFAULT_APPLICATION_SETTINGS_STATE)).toBe(true);
     expect(Object.isFrozen(DEFAULT_APPLICATION_SETTINGS_VALUES)).toBe(true);
     expect(Object.isFrozen(DEFAULT_APPLICATION_TERMINAL_SETTINGS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts)).toBe(true);
   });
 
   it("parses and deeply freezes exact state and update schemas", () => {
@@ -61,10 +64,11 @@ describe("application settings contracts", () => {
       settings,
     });
 
-    expect(state).toEqual({ v: 3, revision: 7, ...settings });
+    expect(state).toEqual({ v: 4, revision: 7, ...settings });
     expect(update).toEqual({ expectedRevision: 7, settings });
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.terminal)).toBe(true);
+    expect(Object.isFrozen(state.keyboardShortcuts)).toBe(true);
     expect(Object.isFrozen(update)).toBe(true);
     expect(Object.isFrozen(update.settings)).toBe(true);
     expect(Object.isFrozen(update.settings.terminal)).toBe(true);
@@ -90,9 +94,35 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 3, appIcon: "auto" });
+    expect(migrated).toEqual({ ...previous, v: 4, appIcon: "auto", keyboardShortcuts: {} });
     expect(Object.isFrozen(migrated)).toBe(true);
     expect(Object.isFrozen(migrated.terminal)).toBe(true);
+  });
+
+  it.each(["mod+shift+p", "mod+shift+v", "mod+alt+i"])("migrates version-three settings while preserving the existing %s palette shortcut", (commandPaletteShortcut) => {
+    const previous = {
+      v: 3,
+      revision: 12,
+      theme: "dark",
+      appIcon: "passion",
+      reduceMotion: true,
+      commandPaletteShortcut,
+      terminal,
+    };
+    const migrated = parsePersistedApplicationSettingsState(previous);
+    expect(migrated).toEqual({ ...previous, v: 4, keyboardShortcuts: {} });
+    expect(Object.isFrozen(migrated.keyboardShortcuts)).toBe(true);
+  });
+
+  it("accepts the expanded shortcut syntax and freezes persisted overrides", () => {
+    const parsed = parseApplicationSettingsValues({
+      ...settings,
+      commandPaletteShortcut: "mod+;",
+      keyboardShortcuts: { newWindow: "mod+alt+n", terminalSettings: "mod+shift+," },
+    });
+    expect(parsed.commandPaletteShortcut).toBe("mod+;");
+    expect(parsed.keyboardShortcuts).toEqual({ newWindow: "mod+alt+n", terminalSettings: "mod+shift+," });
+    expect(Object.isFrozen(parsed.keyboardShortcuts)).toBe(true);
   });
 
   it("migrates exact version-one state with automatic icons and the default command palette shortcut", () => {
@@ -105,12 +135,13 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(legacy)).toThrow("Invalid application settings state");
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
-      v: 3,
+      v: 4,
       revision: 4,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
       commandPaletteShortcut: "mod+k",
+      keyboardShortcuts: {},
       terminal,
     });
   });
@@ -123,6 +154,8 @@ describe("application settings contracts", () => {
     { v: 2, revision: 0, ...settings },
     { v: 2, revision: 0, theme: "dark", reduceMotion: true, commandPaletteShortcut: "mod+n", terminal },
     { v: 2, revision: 0, theme: "dark", reduceMotion: true, commandPaletteShortcut: "mod+k", terminal: { ...terminal, fontSize: 100 } },
+    { v: 3, revision: 0, ...settings },
+    { v: 3, revision: 0, theme: "dark", appIcon: "auto", reduceMotion: true, commandPaletteShortcut: "mod+n", terminal },
   ])("rejects malformed legacy settings instead of silently discarding fields %#", (value) => {
     expect(() => parsePersistedApplicationSettingsState(value)).toThrow("Invalid persisted application settings state");
   });
@@ -157,20 +190,21 @@ describe("application settings contracts", () => {
     { ...settings, commandPaletteShortcut: "shift+k" },
     { ...settings, commandPaletteShortcut: "mod+alt+alt+k" },
     { ...settings, commandPaletteShortcut: "mod+space" },
-    { ...settings, commandPaletteShortcut: "mod+n" },
-    { ...settings, commandPaletteShortcut: "alt+f4" },
     { ...settings, terminal: { ...terminal, extra: true } },
+    { ...settings, keyboardShortcuts: undefined },
+    { ...settings, keyboardShortcuts: { newWindow: "mod+c" } },
+    { ...settings, keyboardShortcuts: { missingAction: "mod+p" } },
   ])("rejects invalid application setting values %#", (value) => {
     expect(() => parseApplicationSettingsValues(value)).toThrow("Invalid application settings");
   });
 
   it.each([
-    { v: 4, revision: 0, ...settings },
-    { v: 3, revision: -1, ...settings },
-    { v: 3, revision: 1.5, ...settings },
-    { v: 3, revision: 0, ...settings, extra: true },
-    { v: 3, revision: 0, ...settings, theme: "sepia" },
-    { v: 3, revision: 0, ...settings, appIcon: "system" },
+    { v: 5, revision: 0, ...settings },
+    { v: 4, revision: -1, ...settings },
+    { v: 4, revision: 1.5, ...settings },
+    { v: 4, revision: 0, ...settings, extra: true },
+    { v: 4, revision: 0, ...settings, theme: "sepia" },
+    { v: 4, revision: 0, ...settings, appIcon: "system" },
     { v: 2, revision: 0, ...settings },
     { v: 1, revision: 0, ...settings },
   ])("rejects invalid persisted state %#", (value) => {

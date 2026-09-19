@@ -38,14 +38,15 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-three file", async () => {
+  it("loads an exact private version-four file", async () => {
     const persisted = {
-      v: 3,
+      v: 4,
       revision: 9,
       theme: "dark",
       appIcon: "passion",
       reduceMotion: true,
       commandPaletteShortcut: "mod+shift+p",
+      keyboardShortcuts: { newWindow: "mod+alt+n", terminalCloseTab: "mod+shift+e" },
       terminal: {
         fontId: "source-code-pro",
         fontSize: 18,
@@ -64,7 +65,7 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("migrates version-two preferences and saves version three on the next update", async () => {
+  it("migrates version-two preferences and saves version four on the next update", async () => {
     const previous = {
       v: 2,
       revision: 9,
@@ -83,14 +84,14 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: 3, appIcon: "auto" });
+    expect(store.getState()).toEqual({ ...previous, v: 4, appIcon: "auto", keyboardShortcuts: {} });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     const { v: _version, revision, ...settings } = store.getState();
     const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
     expect(result).toEqual({
       ok: true,
-      value: { ...previous, v: 3, revision: 10, appIcon: "passion" },
+      value: { ...previous, v: 4, revision: 10, appIcon: "passion", keyboardShortcuts: {} },
     });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toEqual(result.value);
@@ -116,12 +117,13 @@ describe("ApplicationSettingsStore", () => {
     const store = await ApplicationSettingsStore.load(settingsPath);
 
     expect(store.getState()).toEqual({
-      v: 3,
+      v: 4,
       revision: 9,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
       commandPaletteShortcut: "mod+k",
+      keyboardShortcuts: {},
       terminal: {
         fontId: "source-code-pro",
         fontSize: 18,
@@ -134,7 +136,7 @@ describe("ApplicationSettingsStore", () => {
 
   it.each([
     "not-json",
-    JSON.stringify({ v: 4 }),
+    JSON.stringify({ v: 5 }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, extra: true }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "sepia" }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, appIcon: "system" }),
@@ -189,7 +191,7 @@ describe("ApplicationSettingsStore", () => {
 
     expect(result.ok).toBe(true);
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
-    expect(reloaded.getState()).toMatchObject({ v: 3, revision: 1, appIcon, theme: "system" });
+    expect(reloaded.getState()).toMatchObject({ v: 4, revision: 1, appIcon, theme: "system" });
   });
 
   it("rejects stale revisions without changing memory or disk", async () => {
@@ -259,6 +261,7 @@ function updateInput(
       appIcon: overrides.appIcon ?? DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: overrides.reduceMotion ?? DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+      keyboardShortcuts: {},
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
     },
   };

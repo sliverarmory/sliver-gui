@@ -576,6 +576,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
         commandPaletteShortcut: current.commandPaletteShortcut,
+        keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
       },
     });

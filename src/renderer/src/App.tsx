@@ -23,7 +23,6 @@ import {
   faRotate,
   faSatellite,
   faSatelliteDish,
-  faServer,
   faTableColumns,
   faTerminal,
   faTriangleExclamation,
@@ -33,9 +32,12 @@ import { disconnectedSnapshot, SLIVER_PROTOCOL_COMPATIBILITY } from "../../share
 import type { EventStreamStatus, SavedConfigSummary, SliverSnapshot } from "../../shared/contracts";
 import { isUsableConnection } from "./connection-status";
 import { useNavigationHistory } from "./use-navigation-history";
-import { navigationShortcuts, useNavigationShortcuts } from "./navigation-shortcuts";
+import { navigationShortcuts, shortcutAriaKeyShortcuts, useNavigationShortcuts } from "./navigation-shortcuts";
+import { useConsoleShortcut } from "./window-shortcuts";
+import { resolveKeyboardShortcut } from "../../shared/keyboard-shortcuts";
 import {
   APPLICATION_SETTINGS_VERSION,
+  DEFAULT_COMMAND_PALETTE_SHORTCUT,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   type ApplicationSettingsState,
   type ApplicationSettingsValues,
@@ -50,7 +52,7 @@ import {
   AppCommandPalette,
   type AppCommandPaletteCommand,
 } from "./components/AppCommandPalette";
-import { CommandPaletteShortcutKbd } from "./components/CommandPaletteShortcut";
+import { CommandPaletteShortcutKbd, isApplePlatform } from "./components/CommandPaletteShortcut";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
 import { ConnectionProvider } from "./components/ConnectionProvider";
@@ -161,6 +163,7 @@ export function App() {
   const [standaloneSettings, setStandaloneSettings] = useState<ApplicationSettingsState>(
     DEFAULT_APPLICATION_SETTINGS_STATE,
   );
+  const settings = applicationSettings?.settings ?? standaloneSettings;
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const connected = isUsableConnection(snapshot.connection.status);
   const isViewAvailable = useCallback((entry: ViewId) =>
@@ -351,7 +354,7 @@ export function App() {
     }
   }
 
-  async function openConsole() {
+  const openConsole = useCallback(async () => {
     try {
       const result = await window.sliver.openConsoleWindow();
       if (!result.ok) {
@@ -362,7 +365,9 @@ export function App() {
         description: CONSOLE_WINDOW_OPEN_REQUEST_ERROR,
       });
     }
-  }
+  }, []);
+
+  useConsoleShortcut({ isEnabled: connected, onOpenConsole: openConsole, settings });
 
   const connectionInProgress = snapshot.connection.status === "connecting";
 
@@ -415,6 +420,7 @@ export function App() {
     goForward();
   }, [canGoForward, goForward]);
   useNavigationShortcuts({
+    settings,
     canGoBack,
     canGoForward,
     goBack: navigateBack,
@@ -435,6 +441,7 @@ export function App() {
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
         commandPaletteShortcut: current.commandPaletteShortcut,
+        keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
       }),
     }));
@@ -510,8 +517,8 @@ export function App() {
     snapshot.connection.incarnation,
   ]);
 
-  const settings = applicationSettings?.settings ?? standaloneSettings;
-  const historyShortcuts = navigationShortcuts();
+  const historyShortcuts = navigationShortcuts(isApplePlatform(), settings);
+  const consoleShortcut = resolveKeyboardShortcut("openConsole", settings, isApplePlatform());
   const navigationCommands = [
     overviewNavItem,
     ...infrastructureNavItems,
@@ -578,6 +585,7 @@ export function App() {
       group: "Server",
       icon: faTerminal,
       label: "Open Sliver console",
+      shortcut: consoleShortcut,
       description: connected ? "Open a console for the active server." : "Connect to a server first.",
       keywords: ["terminal"],
       isDisabled: !connected,
@@ -597,6 +605,7 @@ export function App() {
       group: "Server",
       icon: faRotate,
       label: "Refresh server",
+      shortcut: resolveKeyboardShortcut("refreshServer", settings, isApplePlatform()),
       description: connected ? "Reconcile the active server snapshot." : "Connect to a server first.",
       keywords: ["reload", "sync"],
       isDisabled: !connected,
@@ -616,6 +625,7 @@ export function App() {
       group: "Windows",
       icon: faWindowRestore,
       label: "New connected window",
+      shortcut: resolveKeyboardShortcut("duplicateWindow", settings, isApplePlatform()),
       description: connected ? "Open another window on the active server." : "Connect to a server first.",
       keywords: ["duplicate", "same server"],
       isDisabled: !connected,
@@ -626,6 +636,7 @@ export function App() {
       group: "Windows",
       icon: faPlus,
       label: "New connection window",
+      shortcut: resolveKeyboardShortcut("newWindow", settings, isApplePlatform()),
       description: "Open another window for a different server.",
       keywords: ["different server"],
       onAction: () => void openWindow(false),
@@ -672,8 +683,7 @@ export function App() {
         <header className="app-header">
           <div aria-hidden="true" className="app-header-drag-region" />
           <div className="header-server">
-            <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-muted" icon={faServer} />
-            <div className="hidden min-w-0 sm:block">
+            <div className="hidden min-w-0 text-center sm:block">
               <p className="truncate text-sm font-medium text-foreground">
                 {connected ? snapshot.connection.server : "No server connected"}
               </p>
@@ -706,7 +716,7 @@ export function App() {
                 </span>
               </Tooltip.Content>
             </Tooltip>
-            <WindowMenu connected={connected} onOpenWindow={openWindow} />
+            <WindowMenu connected={connected} settings={settings} onOpenWindow={openWindow} />
             <Tooltip delay={250}>
               <Button
                 aria-label="Open Sliver console"
@@ -715,11 +725,17 @@ export function App() {
                 size="sm"
                 variant="ghost"
                 onPress={() => void openConsole()}
+                render={(props) => (
+                  <button {...props} aria-keyshortcuts={shortcutAriaKeyShortcuts(consoleShortcut)} />
+                )}
               >
                 <FontAwesomeIcon aria-hidden icon={faTerminal} />
               </Button>
               <Tooltip.Content placement="bottom">
-                {connected ? "Open console for the active server" : "Connect to a server first"}
+                <span className="flex items-center gap-2">
+                  {connected ? "Open console for the active server" : "Connect to a server first"}
+                  <CommandPaletteShortcutKbd className="text-xs" shortcut={consoleShortcut} />
+                </span>
               </Tooltip.Content>
             </Tooltip>
             {!connected ? (
@@ -745,10 +761,18 @@ export function App() {
                 ...current,
                 appIcon,
               }))}
-              onCommandPaletteShortcutChange={(commandPaletteShortcut) => updateSettings((current) => ({
+              onResetKeyboardShortcuts={() => updateSettings((current) => ({
                 ...current,
-                commandPaletteShortcut,
+                commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
+                keyboardShortcuts: {},
               }))}
+              onKeyboardShortcutChange={(action, shortcut) => updateSettings((current) => {
+                if (action === "commandPalette") return { ...current, commandPaletteShortcut: shortcut ?? DEFAULT_COMMAND_PALETTE_SHORTCUT };
+                const keyboardShortcuts = { ...current.keyboardShortcuts };
+                if (shortcut === undefined) delete keyboardShortcuts[action];
+                else keyboardShortcuts[action] = shortcut;
+                return { ...current, keyboardShortcuts };
+              })}
               onReduceMotionChange={(reduceMotion) => updateSettings((current) => ({
                 ...current,
                 reduceMotion,
@@ -843,6 +867,7 @@ export function App() {
         />
       </Sidebar.Main>
       <WindowNavigation
+        settings={settings}
         canGoBack={canGoBack}
         canGoForward={canGoForward}
         onBack={navigateBack}
@@ -854,7 +879,8 @@ export function App() {
   return <ConnectionProvider connection={snapshot.connection}>{content}</ConnectionProvider>;
 }
 
-function WindowNavigation({ canGoBack, canGoForward, onBack, onForward }: {
+function WindowNavigation({ canGoBack, canGoForward, onBack, onForward, settings }: {
+  settings: ApplicationSettingsState;
   canGoBack: boolean;
   canGoForward: boolean;
   onBack: () => void;
@@ -862,7 +888,7 @@ function WindowNavigation({ canGoBack, canGoForward, onBack, onForward }: {
 }) {
   const { isMobile, isMobileOpen, isOpen, toggleSidebar } = useSidebar();
   const sidebarLabel = (isMobile ? isMobileOpen : isOpen) ? "Collapse sidebar" : "Expand sidebar";
-  const shortcuts = navigationShortcuts();
+  const shortcuts = navigationShortcuts(isApplePlatform(), settings);
   const actions = [
     { id: "sidebar", label: sidebarLabel, icon: faTableColumns, onPress: toggleSidebar, isDisabled: false, shortcut: undefined },
     { id: "back", label: "Go back", icon: faArrowLeft, onPress: onBack, isDisabled: !canGoBack, shortcut: shortcuts.back },
@@ -1102,10 +1128,14 @@ export function ConnectionMenu({
 export function WindowMenu({
   connected,
   onOpenWindow,
+  settings = DEFAULT_APPLICATION_SETTINGS_STATE,
 }: {
   connected: boolean;
   onOpenWindow: (inherit: boolean) => Promise<void>;
+  settings?: ApplicationSettingsState;
 }) {
+  const newWindowShortcut = resolveKeyboardShortcut("newWindow", settings, isApplePlatform());
+  const duplicateWindowShortcut = resolveKeyboardShortcut("duplicateWindow", settings, isApplePlatform());
   return (
     <Tooltip delay={250}>
       <Dropdown>
@@ -1118,19 +1148,34 @@ export function WindowMenu({
             onAction={(key) => void onOpenWindow(String(key) === "same-server")}
           >
             {connected ? (
-              <Dropdown.Item id="same-server" textValue="Same server">
+              <Dropdown.Item
+                id="same-server"
+                textValue="Same server"
+                aria-label="Same server"
+              >
                 <FontAwesomeIcon aria-hidden icon={faWindowRestore} className="size-3.5 shrink-0 text-muted" />
                 <Label>Same server</Label>
+                <CommandPaletteShortcutKbd slot="keyboard" shortcut={duplicateWindowShortcut} />
               </Dropdown.Item>
             ) : null}
-            <Dropdown.Item id="different-server" textValue="Different server">
+            <Dropdown.Item
+              id="different-server"
+              textValue="Different server"
+              aria-label="Different server"
+            >
               <FontAwesomeIcon aria-hidden icon={faPlus} className="size-3.5 shrink-0 text-muted" />
               <Label>Different server</Label>
+              <CommandPaletteShortcutKbd slot="keyboard" shortcut={newWindowShortcut} />
             </Dropdown.Item>
           </Dropdown.Menu>
         </Dropdown.Popover>
       </Dropdown>
-      <Tooltip.Content placement="bottom">New window</Tooltip.Content>
+      <Tooltip.Content placement="bottom">
+        <span className="flex items-center gap-2">
+          New window
+          <CommandPaletteShortcutKbd className="text-xs" shortcut={newWindowShortcut} />
+        </span>
+      </Tooltip.Content>
     </Tooltip>
   );
 }

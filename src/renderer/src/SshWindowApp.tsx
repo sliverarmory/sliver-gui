@@ -29,6 +29,7 @@ import {
 
 import type { TerminalRuntimeAsset } from "../../shared/stream-contracts";
 import type { OperationResult } from "../../shared/contracts";
+import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import {
   SSH_MAX_TABS_PER_WINDOW,
   type ManagedSshTarget,
@@ -52,6 +53,7 @@ import {
 import { TerminalSettingsModal } from "./components/TerminalSettingsModal";
 import { RenamableTab } from "./components/RenamableTab";
 import { RenameTabDialog } from "./components/RenameTabDialog";
+import { terminalKeyboardShortcutForEvent, terminalTabShortcutLabels } from "./terminal-shortcuts";
 
 const EMPTY_SSH_TAB_KEY = "sliver-ssh-empty";
 
@@ -78,6 +80,7 @@ let pendingSshTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
 export function SshWindowApp(): React.JSX.Element {
   const api = sshWindowApi();
   const applicationSettings = useApplicationSettings();
+  const shortcutSettings = applicationSettings?.settings ?? DEFAULT_APPLICATION_SETTINGS_STATE;
   const [phase, setPhase] = useState<SshWindowPhase>("claiming");
   const [context, setContext] = useState<SshWindowLaunchContext>();
   const [runtime, setRuntime] = useState<TerminalRuntimeAsset>();
@@ -581,7 +584,7 @@ export function SshWindowApp(): React.JSX.Element {
   useEffect(() => {
     if (!context) return;
     const handleTabShortcut = (event: KeyboardEvent): void => {
-      const shortcut = sshKeyboardShortcutForEvent(context.shortcutModifier, event);
+      const shortcut = terminalKeyboardShortcutForEvent(shortcutSettings, event, context.shortcutModifier === "Command");
       if (!shortcut) return;
       event.preventDefault();
       event.stopPropagation();
@@ -592,7 +595,7 @@ export function SshWindowApp(): React.JSX.Element {
     };
     window.addEventListener("keydown", handleTabShortcut, true);
     return () => window.removeEventListener("keydown", handleTabShortcut, true);
-  }, [context, selectTabByShortcut, showTargetPicker]);
+  }, [context, selectTabByShortcut, shortcutSettings, showTargetPicker]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -667,10 +670,10 @@ export function SshWindowApp(): React.JSX.Element {
             <Tabs.List aria-label="Managed SSH tabs" className="min-w-0 bg-transparent p-0 shadow-none">
               {tabs.map((tab, index) => {
                 const state = sshTabState(tab);
-                const shortcutDigit = sshTabShortcutDigit(index);
+                const shortcutLabels = terminalTabShortcutLabels(index, shortcutSettings, context.shortcutModifier === "Command");
                 return (
                   <RenamableTab
-                    ariaLabel={`${tab.context.label}, ${sshEndpoint(tab.context.target)}, ${tabStateLabel(state)}, shortcut ${context.shortcutModifier}+${shortcutDigit}`}
+                    ariaLabel={`${tab.context.label}, ${sshEndpoint(tab.context.target)}, ${tabStateLabel(state)}, shortcut ${shortcutLabels.accessible}`}
                     className="max-w-64 min-w-32 gap-2 rounded-none px-3 data-[selected=true]:text-foreground"
                     id={tab.context.tabId}
                     key={tab.context.tabId}
@@ -682,7 +685,7 @@ export function SshWindowApp(): React.JSX.Element {
                       aria-hidden
                       className="flex-none rounded-md bg-surface-secondary px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted tabular-nums"
                     >
-                      {context.shortcutModifier === "Command" ? "⌘" : "Ctrl+"}{shortcutDigit}
+                      {shortcutLabels.display}
                     </kbd>
                     <span className="sr-only"> {tabStateLabel(state)}</span>
                     <Tabs.Indicator className="top-auto bottom-0 h-0.5 rounded-none bg-accent shadow-none" />
@@ -1185,33 +1188,6 @@ function tabStateColor(state: SshTabState): string {
   if (state === "connected") return "bg-success";
   if (state === "failed") return "bg-danger";
   return "bg-warning";
-}
-
-function sshTabShortcutDigit(index: number): number {
-  return index === 9 ? 0 : index + 1;
-}
-
-type SshKeyboardShortcut =
-  | { readonly type: "new-tab" }
-  | { readonly type: "select-tab"; readonly index: number };
-
-function sshKeyboardShortcutForEvent(
-  modifier: SshWindowLaunchContext["shortcutModifier"],
-  event: KeyboardEvent,
-): SshKeyboardShortcut | undefined {
-  if (event.isComposing || event.shiftKey || event.altKey) return undefined;
-  const primaryModifierOnly = modifier === "Command"
-    ? event.metaKey && !event.ctrlKey
-    : event.ctrlKey && !event.metaKey;
-  if (!primaryModifierOnly) return undefined;
-  if (event.code === "KeyT") return { type: "new-tab" };
-  const codeMatch = /^Digit([0-9])$/u.exec(event.code);
-  if (!codeMatch?.[1]) return undefined;
-  const digit = Number(codeMatch[1]);
-  return {
-    type: "select-tab",
-    index: digit === 0 ? SSH_MAX_TABS_PER_WINDOW - 1 : digit - 1,
-  };
 }
 
 function sshWindowApi(): SshWindowAPI | undefined {

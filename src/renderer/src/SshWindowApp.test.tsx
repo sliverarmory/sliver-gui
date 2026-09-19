@@ -573,6 +573,49 @@ describe("SshWindowApp", () => {
     expect(firstTransport.close).not.toHaveBeenCalled();
   });
 
+  it("updates tab shortcuts and their hints from shared settings without retaining the previous chords", async () => {
+    openSshTransport.mockResolvedValue(fakeTransport());
+    const api = installAPI({
+      claimSshWindow: async () => ok({ ...launchContext, tabs: [firstTab, secondTab], activeTabId: secondTab.tabId }),
+    });
+    renderWithApplicationContextMenu(
+      <ApplicationSettingsProvider api={api}>
+        <SshWindowApp />
+      </ApplicationSettingsProvider>,
+    );
+    const terminal = await screen.findByRole("region", {
+      name: "SSH session azure-vm for operator@10.0.0.42:2222",
+    });
+    const key = (code: string, value: string, modifiers: KeyboardEventInit = {}) => new KeyboardEvent("keydown", {
+      bubbles: true, cancelable: true, code, key: value, metaKey: true, ...modifiers,
+    });
+    const downstreamKeydown = vi.fn();
+    terminal.addEventListener("keydown", downstreamKeydown);
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 1,
+      keyboardShortcuts: { terminalNewTab: "mod+shift+j", terminalTab1: "mod+alt+1" },
+    }));
+    const firstTabButton = screen.getByRole("tab", {
+      name: "test1, ubuntu@44.240.136.251:22, Connected, shortcut Command+Option+1",
+    });
+    expect(firstTabButton).toHaveTextContent("⌘⌥1");
+    act(() => expect(terminal.dispatchEvent(key("Digit1", "1"))).toBe(true));
+    expect(screen.getByRole("tab", { name: /azure-vm.*Connected/u })).toHaveAttribute("aria-selected", "true");
+    expect(api.selectSshTab).not.toHaveBeenCalled();
+    act(() => expect(terminal.dispatchEvent(key("Digit1", "1", { altKey: true }))).toBe(false));
+    expect(firstTabButton).toHaveAttribute("aria-selected", "true");
+    expect(api.selectSshTab).toHaveBeenLastCalledWith({ tabId: firstTab.tabId });
+
+    act(() => expect(terminal.dispatchEvent(key("KeyT", "t"))).toBe(true));
+    expect(api.listSshTargets).not.toHaveBeenCalled();
+    act(() => expect(terminal.dispatchEvent(key("KeyJ", "J", { shiftKey: true }))).toBe(false));
+    expect(api.listSshTargets).toHaveBeenCalledOnce();
+    expect(downstreamKeydown).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("dialog", { name: "New SSH Session" })).toBeInTheDocument();
+  });
+
   it("replaces a reused tab attachment only after the fresh transport opens", async () => {
     const originalTransport = fakeTransport();
     const replacementTransport = fakeTransport();

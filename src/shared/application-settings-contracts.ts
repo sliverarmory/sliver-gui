@@ -1,5 +1,12 @@
-export const APPLICATION_SETTINGS_VERSION = 3 as const;
-const PREVIOUS_APPLICATION_SETTINGS_VERSION = 2 as const;
+import {
+  isKeyboardShortcut,
+  parseKeyboardShortcutOverrides,
+  type KeyboardShortcutOverrides,
+} from "./keyboard-shortcuts.js";
+
+export const APPLICATION_SETTINGS_VERSION = 4 as const;
+const PREVIOUS_APPLICATION_SETTINGS_VERSION = 3 as const;
+const COMMAND_PALETTE_APPLICATION_SETTINGS_VERSION = 2 as const;
 const LEGACY_APPLICATION_SETTINGS_VERSION = 1 as const;
 
 export const CONSOLE_TERMINAL_FONT_SIZE_MIN = 8;
@@ -34,6 +41,7 @@ export interface ApplicationSettingsValues {
   readonly appIcon: ApplicationIcon;
   readonly reduceMotion: boolean;
   readonly commandPaletteShortcut: string;
+  readonly keyboardShortcuts: KeyboardShortcutOverrides;
   readonly terminal: ApplicationTerminalSettings;
 }
 
@@ -60,6 +68,7 @@ export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Ob
   appIcon: "auto",
   reduceMotion: false,
   commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
+  keyboardShortcuts: Object.freeze({}),
   terminal: DEFAULT_APPLICATION_TERMINAL_SETTINGS,
 });
 
@@ -80,9 +89,10 @@ const TERMINAL_KEYS = [
   "cursorBlink",
   "smoothScrolling",
 ] as const;
-const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
+const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
 const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
-const PREVIOUS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
+const PREVIOUS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
+const COMMAND_PALETTE_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
 const LEGACY_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "terminal"] as const;
 const UPDATE_INPUT_KEYS = ["expectedRevision", "settings"] as const;
 const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
@@ -166,13 +176,15 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     !isApplicationTheme(value["theme"]) ||
     !isApplicationIcon(value["appIcon"]) ||
     typeof value["reduceMotion"] !== "boolean" ||
-    !isCommandPaletteShortcut(value["commandPaletteShortcut"])
+    !isKeyboardShortcut(value["commandPaletteShortcut"])
   ) {
     throw new TypeError("Invalid application settings");
   }
   let terminal: ApplicationTerminalSettings;
+  let keyboardShortcuts: KeyboardShortcutOverrides;
   try {
     terminal = parseApplicationTerminalSettings(value["terminal"]);
+    keyboardShortcuts = parseKeyboardShortcutOverrides(value["keyboardShortcuts"]);
   } catch {
     throw new TypeError("Invalid application settings");
   }
@@ -181,6 +193,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     appIcon: value["appIcon"],
     reduceMotion: value["reduceMotion"],
     commandPaletteShortcut: value["commandPaletteShortcut"],
+    keyboardShortcuts,
     terminal,
   });
 }
@@ -200,6 +213,7 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
       appIcon: value["appIcon"],
       reduceMotion: value["reduceMotion"],
       commandPaletteShortcut: value["commandPaletteShortcut"],
+      keyboardShortcuts: value["keyboardShortcuts"],
       terminal: value["terminal"],
     });
   } catch {
@@ -218,10 +232,20 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
   } catch {
     try {
       if (hasExactKeys(value, PREVIOUS_SETTINGS_STATE_KEYS) && value["v"] === PREVIOUS_APPLICATION_SETTINGS_VERSION) {
+        if (!isCommandPaletteShortcut(value["commandPaletteShortcut"])) throw new TypeError("Invalid previous command palette shortcut");
+        return parseApplicationSettingsState({
+          ...value,
+          v: APPLICATION_SETTINGS_VERSION,
+          keyboardShortcuts: {},
+        });
+      }
+      if (hasExactKeys(value, COMMAND_PALETTE_SETTINGS_STATE_KEYS) && value["v"] === COMMAND_PALETTE_APPLICATION_SETTINGS_VERSION) {
+        if (!isCommandPaletteShortcut(value["commandPaletteShortcut"])) throw new TypeError("Invalid previous command palette shortcut");
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
           appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
+          keyboardShortcuts: {},
         });
       }
       if (hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) && value["v"] === LEGACY_APPLICATION_SETTINGS_VERSION) {
@@ -230,6 +254,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
           v: APPLICATION_SETTINGS_VERSION,
           appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
           commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
+          keyboardShortcuts: {},
         });
       }
     } catch {

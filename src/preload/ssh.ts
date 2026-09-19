@@ -61,35 +61,15 @@ const TERMINAL_FONT_IDS = new Set(["fira-code", "jetbrains-mono", "cascadia-mono
 const TERMINAL_CURSOR_STYLES = new Set(["block", "underline", "bar"]);
 const APPLICATION_THEMES = new Set(["system", "light", "dark"]);
 const APPLICATION_ICONS = new Set(["auto", "light", "dark", "passion"]);
-const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
-  "alt+f4",
-  "mod+0",
-  "mod+1",
-  "mod+2",
-  "mod+3",
-  "mod+4",
-  "mod+5",
-  "mod+6",
-  "mod+7",
-  "mod+8",
-  "mod+9",
-  "mod+a",
-  "mod+c",
-  "mod+h",
-  "mod+alt+h",
-  "mod+m",
-  "mod+n",
-  "mod+shift+n",
-  "mod+q",
-  "mod+r",
-  "mod+shift+r",
-  "mod+t",
-  "mod+v",
-  "mod+w",
-  "mod+shift+w",
-  "mod+x",
-  "mod+y",
-  "mod+z",
+const KEYBOARD_SHORTCUT_ACTIONS = new Set([
+  "newWindow", "duplicateWindow", "navigateBack", "navigateForward", "refreshServer", "openConsole",
+  "terminalNewTab", "terminalCloseTab", "terminalSettings", "terminalCloseWindow",
+  ...Array.from({ length: 10 }, (_, index) => `terminalTab${index + 1}`),
+]);
+const RESERVED_KEYBOARD_SHORTCUTS = new Set([
+  "alt+f4", "mod+a", "mod+c", "mod+v", "mod+shift+v", "mod+x", "mod+y", "mod+z", "mod+shift+z",
+  "mod+h", "mod+alt+h", "mod+m", "mod+q", "mod+r", "mod+shift+r",
+  "mod+-", "mod+=", "mod+shift+=", "mod+alt+i", "mod+shift+i", "f11", "f12",
 ]);
 const CONTEXT_MENU_KINDS = new Set<ApplicationContextMenuItemKind>([
   "undo", "redo", "cut", "copy", "paste", "paste-and-match-style", "delete",
@@ -600,17 +580,18 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
 function parseApplicationSettingsState(value: unknown): ApplicationSettingsState {
   const state = exactRecord(
     value,
-    ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"],
+    ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "keyboardShortcuts", "terminal"],
     "application settings",
   );
-  if (state["v"] !== 3 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 4 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
   if (!APPLICATION_ICONS.has(stringValue(state["appIcon"]))) throw new TypeError("Invalid application icon");
   if (typeof state["reduceMotion"] !== "boolean") throw new TypeError("Invalid reduced-motion setting");
   const shortcut = stringValue(state["commandPaletteShortcut"]);
-  if (!isCommandPaletteShortcut(shortcut)) throw new TypeError("Invalid command-palette shortcut");
+  if (!isKeyboardShortcut(shortcut)) throw new TypeError("Invalid command-palette shortcut");
+  const keyboardShortcuts = parseKeyboardShortcuts(state["keyboardShortcuts"]);
   const terminal = exactRecord(
     state["terminal"],
     ["fontId", "fontSize", "cursorStyle", "cursorBlink", "smoothScrolling"],
@@ -627,12 +608,13 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
     throw new TypeError("Invalid terminal behavior");
   }
   return Object.freeze({
-    v: 3,
+    v: 4,
     revision: state["revision"] as number,
     theme: state["theme"] as ApplicationSettingsState["theme"],
     appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
     reduceMotion: state["reduceMotion"],
     commandPaletteShortcut: shortcut,
+    keyboardShortcuts,
     terminal: Object.freeze({
       fontId: terminal["fontId"] as ApplicationSettingsState["terminal"]["fontId"],
       fontSize: terminal["fontSize"] as number,
@@ -643,17 +625,33 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
   });
 }
 
-function isCommandPaletteShortcut(value: string): boolean {
-  if (value.length > 64 || value !== value.toLowerCase() || RESERVED_COMMAND_PALETTE_SHORTCUTS.has(value)) return false;
+function isKeyboardShortcut(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 64 || value !== value.toLowerCase()) return false;
   const tokens = value.split("+");
-  if (tokens.length < 2 || tokens.some((token) => token === "" || token.trim() !== token)) return false;
   const key = tokens.at(-1);
   const modifiers = tokens.slice(0, -1);
-  if (!key || (!/^[a-z0-9]$/u.test(key) && !/^f(?:[1-9]|1[0-2])$/u.test(key))) return false;
-  if (!modifiers.includes("mod")) return false;
+  const functionKey = key !== undefined && /^f(?:[1-9]|1[0-9]|2[0-4])$/u.test(key);
+  if (!key || (!/^[a-z0-9]$/u.test(key) && !functionKey &&
+    !/^arrow(?:left|right|up|down)$/u.test(key) &&
+    !["[", "]", ",", ".", "/", "\\", ";", "'", "`", "-", "="].includes(key))) return false;
   const expectedOrder = ["mod", "alt", "shift"];
-  return modifiers.length <= expectedOrder.length &&
-    modifiers.every((modifier, index) => modifier === expectedOrder.filter((item) => modifiers.includes(item))[index]);
+  const expectedModifiers = expectedOrder.filter((item) => modifiers.includes(item));
+  return modifiers.length === expectedModifiers.length &&
+    modifiers.every((modifier, index) => modifier === expectedModifiers[index]) &&
+    (modifiers.includes("mod") || modifiers.includes("alt") || (modifiers.length === 0 && functionKey));
+}
+
+function parseKeyboardShortcuts(value: unknown): ApplicationSettingsState["keyboardShortcuts"] {
+  const overrides = record(value, "keyboard shortcuts");
+  const parsed: Record<string, string> = {};
+  for (const [action, shortcut] of Object.entries(overrides)) {
+    if (!KEYBOARD_SHORTCUT_ACTIONS.has(action) || !isKeyboardShortcut(shortcut) || RESERVED_KEYBOARD_SHORTCUTS.has(shortcut) ||
+      (shortcut === "f5" && ["navigateBack", "navigateForward", "openConsole"].includes(action))) {
+      throw new TypeError("Invalid keyboard shortcuts");
+    }
+    parsed[action] = shortcut;
+  }
+  return Object.freeze(parsed);
 }
 
 function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {

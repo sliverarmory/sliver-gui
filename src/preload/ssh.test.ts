@@ -216,6 +216,7 @@ describe("SSH preload bridge", () => {
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     };
@@ -384,10 +385,15 @@ describe("SSH preload bridge", () => {
       revision: 4,
       theme: "light" as const,
       appIcon: "passion" as const,
+      keyboardShortcuts: { terminalNewTab: "mod+shift+t", terminalSettings: "alt+," },
     };
     handler({}, { ...valid, rendererPath: "/tmp/private" });
     handler({}, { ...valid, terminal: { ...valid.terminal, fontSize: 100 } });
     handler({}, { ...valid, appIcon: "system" });
+    handler({}, { ...valid, keyboardShortcuts: { arbitraryAction: "mod+p" } });
+    handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "mod+c" } });
+    handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "shift+mod+t" } });
+    handler({}, { ...valid, keyboardShortcuts: { navigateBack: "f5" } });
     handler({}, valid);
 
     const listener = vi.fn();
@@ -397,6 +403,7 @@ describe("SSH preload bridge", () => {
     expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0].terminal)).toBe(true);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0].keyboardShortcuts)).toBe(true);
     unsubscribe();
   });
 

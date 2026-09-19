@@ -7,9 +7,11 @@ import {
   buildApplicationMenuTemplate,
   commandPaletteShortcutDispositionForInput,
   consoleTabShortcutIndexForInput,
+  isApplicationShortcutInput,
   isConsoleNewTabShortcutInput,
   serverRefreshShortcutDispositionForInput,
 } from "./application-menus.js";
+import { DEFAULT_APPLICATION_SETTINGS_VALUES } from "../shared/application-settings-contracts.js";
 
 const shortcutInput = (overrides: Partial<Parameters<typeof consoleTabShortcutIndexForInput>[1]> = {}) => ({
   type: "keyDown",
@@ -122,7 +124,7 @@ describe("server refresh shortcut input", () => {
     const f5 = shortcutInput({ key: "F5", code: "F5", meta: false });
     expect(serverRefreshShortcutDispositionForInput(f5)).toBe("refresh");
     expect(serverRefreshShortcutDispositionForInput({ ...f5, type: "keyUp" })).toBeUndefined();
-    expect(serverRefreshShortcutDispositionForInput({ ...f5, code: "KeyR" })).toBeUndefined();
+    expect(serverRefreshShortcutDispositionForInput({ ...f5, key: "r", code: "KeyR" })).toBeUndefined();
     expect(serverRefreshShortcutDispositionForInput({ ...f5, isComposing: true })).toBeUndefined();
     expect(serverRefreshShortcutDispositionForInput({ ...f5, shift: true })).toBeUndefined();
     expect(serverRefreshShortcutDispositionForInput({ ...f5, control: true })).toBeUndefined();
@@ -137,6 +139,70 @@ describe("server refresh shortcut input", () => {
       meta: false,
       isAutoRepeat: true,
     }))).toBe("suppress");
+  });
+});
+
+describe("configured native shortcuts", () => {
+  const settings = {
+    ...DEFAULT_APPLICATION_SETTINGS_VALUES,
+    keyboardShortcuts: {
+      newWindow: "mod+alt+n",
+      duplicateWindow: "mod+alt+shift+n",
+      terminalNewTab: "mod+shift+t",
+      terminalCloseTab: "mod+alt+w",
+      terminalSettings: "mod+shift+,",
+      terminalCloseWindow: "mod+alt+shift+w",
+      terminalTab1: "mod+alt+1",
+      refreshServer: "mod+shift+u",
+    },
+  };
+
+  it("moves new/select-tab handlers to configured chords and leaves the old chords unclaimed", () => {
+    const commandT = shortcutInput({ key: "t", code: "KeyT" });
+    expect(isConsoleNewTabShortcutInput("darwin", commandT, settings)).toBe(false);
+    expect(isConsoleNewTabShortcutInput("darwin", { ...commandT, shift: true }, settings)).toBe(true);
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput(), settings)).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ alt: true }), settings)).toBe(0);
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ alt: true, isComposing: true }), settings)).toBeUndefined();
+    expect(consoleTabShortcutIndexForInput("darwin", shortcutInput({ alt: true, isAutoRepeat: true }), settings)).toBe(0);
+  });
+
+  it("moves refresh and terminal settings/close handlers to their configured chords", () => {
+    const f5 = shortcutInput({ key: "F5", code: "F5", meta: false });
+    expect(serverRefreshShortcutDispositionForInput(f5, "darwin", settings)).toBe("suppress");
+    expect(serverRefreshShortcutDispositionForInput(f5, "darwin", {
+      ...settings, keyboardShortcuts: { ...settings.keyboardShortcuts, newWindow: "f5" },
+    })).toBeUndefined();
+    const refresh = shortcutInput({ key: "U", code: "KeyU", shift: true });
+    expect(serverRefreshShortcutDispositionForInput(refresh, "darwin", settings)).toBe("refresh");
+    expect(serverRefreshShortcutDispositionForInput({ ...refresh, isAutoRepeat: true }, "darwin", settings)).toBe("suppress");
+    expect(isApplicationShortcutInput("terminalSettings", "darwin", shortcutInput({ key: ",", code: "Comma" }), settings)).toBe(false);
+    expect(isApplicationShortcutInput("terminalSettings", "darwin", shortcutInput({ key: "<", code: "Comma", shift: true }), settings)).toBe(true);
+    expect(isApplicationShortcutInput("terminalCloseTab", "darwin", shortcutInput({ key: "w", code: "KeyW", alt: true }), settings)).toBe(true);
+    expect(isApplicationShortcutInput("terminalCloseWindow", "darwin", shortcutInput({ key: "w", code: "KeyW", alt: true, shift: true }), settings)).toBe(true);
+  });
+
+  it("shows the configured accelerators while preserving trusted menu callbacks", () => {
+    const actions = {
+      newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), openCloudDeployment: vi.fn(),
+      openNetwork: vi.fn(), openArmory: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),
+      downloadRelease: vi.fn(), checkForApplicationUpdates: vi.fn(), restartToApplyApplicationUpdate: vi.fn(),
+    };
+    const terminal = { newTab: vi.fn(), closeTab: vi.fn(), selectTab: vi.fn(), closeWindow: vi.fn(), showSettings: vi.fn() };
+    const template = buildApplicationMenuTemplate("darwin", "Sliver GUI", actions, { status: "loading" }, undefined,
+      terminal, [], false, { status: "loading" }, settings);
+    const file = menuItems(template, "File");
+    expect(file[0]?.accelerator).toBe("CmdOrCtrl+Alt+N");
+    expect(file[1]?.accelerator).toBe("CmdOrCtrl+Alt+Shift+N");
+    expect(file.at(-1)?.accelerator).toBe("CmdOrCtrl+Alt+Shift+W");
+    const terminalMenu = menuItems(template, "Terminal");
+    expect(terminalMenu.find(({ id }) => id === "console.new-tab")?.accelerator).toBe("CmdOrCtrl+Shift+T");
+    expect(terminalMenu.find(({ id }) => id === "console.select-tab-1")?.accelerator).toBe("CmdOrCtrl+Alt+1");
+    expect(terminalMenu.find(({ id }) => id === "console.settings")?.accelerator).toBe("CmdOrCtrl+Shift+,");
+    clickItem(file[0]);
+    clickItem(terminalMenu.find(({ id }) => id === "console.settings"));
+    expect(actions.newWindow).toHaveBeenCalledOnce();
+    expect(terminal.showSettings).toHaveBeenCalledOnce();
   });
 });
 

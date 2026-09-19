@@ -101,9 +101,11 @@ export function CommandPaletteShortcutRecorder({
 export function CommandPaletteShortcutKbd({
   className,
   shortcut,
+  slot,
 }: {
   readonly className?: string;
   readonly shortcut: string;
+  readonly slot?: string;
 }): React.JSX.Element {
   const tokens = shortcut.split("+");
   const key = tokens.at(-1) ?? "";
@@ -114,6 +116,7 @@ export function CommandPaletteShortcutKbd({
     <Kbd
       aria-label={formatCommandPaletteShortcut(shortcut, apple)}
       {...(className === undefined ? {} : { className })}
+      {...(slot === undefined ? {} : { slot })}
     >
       {modifiers.map((modifier) => {
         if (modifier === "mod") {
@@ -124,8 +127,8 @@ export function CommandPaletteShortcutKbd({
         }
         return <Kbd.Abbr key="shift" keyValue="shift" />;
       })}
-      {key === "ArrowLeft" || key === "ArrowRight" ? (
-        <Kbd.Abbr keyValue={key === "ArrowLeft" ? "left" : "right"} />
+      {key.toLowerCase() === "arrowleft" || key.toLowerCase() === "arrowright" ? (
+        <Kbd.Abbr keyValue={key.toLowerCase() === "arrowleft" ? "left" : "right"} />
       ) : <Kbd.Content>{shortcutKeyLabel(key)}</Kbd.Content>}
     </Kbd>
   );
@@ -166,7 +169,9 @@ export function isApplePlatform(platform = globalThis.navigator?.platform ?? "")
 }
 
 function shortcutKeyLabel(value: string): string {
-  if (value === "ArrowLeft") return "Left Arrow";
-  if (value === "ArrowRight") return "Right Arrow";
+  if (value.toLowerCase() === "arrowleft") return "Left Arrow";
+  if (value.toLowerCase() === "arrowright") return "Right Arrow";
+  if (value.toLowerCase() === "arrowup") return "Up Arrow";
+  if (value.toLowerCase() === "arrowdown") return "Down Arrow";
   return value.toUpperCase();
 }

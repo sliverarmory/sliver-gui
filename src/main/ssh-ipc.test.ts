@@ -132,6 +132,7 @@ describe("SSH IPC boundary", () => {
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: true,
         commandPaletteShortcut: "mod+shift+k",
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     });

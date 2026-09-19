@@ -1161,6 +1161,7 @@ async function setApplicationTheme(
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
         commandPaletteShortcut: current.commandPaletteShortcut,
+        keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
       },
     });
@@ -1484,8 +1485,9 @@ async function verifyApplicationSettings(
   await page.keyboard.press("Escape");
   await commandPalette.waitFor({ state: "hidden" });
 
-  await page.getByRole("tab", { name: "Command Palette" }).click();
-  await page.getByRole("button", { name: "Change shortcut" }).click();
+  await page.getByRole("tab", { name: "Keyboard Shortcuts", exact: true }).click();
+  await page.getByRole("button", { name: "Change shortcut for Open command palette", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel changing shortcut for Open command palette", exact: true }).waitFor();
   await page.keyboard.press(`${primaryModifier}+Shift+p`);
   await waitForApplicationSettings(
     page,

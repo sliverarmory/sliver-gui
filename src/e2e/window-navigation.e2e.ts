@@ -141,11 +141,13 @@ test("window navigation supports pointer, keyboard and palette actions without d
     await page.keyboard.press(backShortcut);
     await expectView(page, "Settings");
     assert.equal(await fontSize.evaluate((element) => element === element.ownerDocument.activeElement), true);
-    await page.getByRole("tab", { name: "Command Palette", exact: true }).click();
-    await page.getByRole("button", { name: "Change shortcut", exact: true }).click();
+    await page.getByRole("tab", { name: "Keyboard Shortcuts", exact: true }).click();
+    await page.getByRole("button", { name: "Change shortcut for Open command palette", exact: true }).click();
+    const shortcutRecorder = page.getByRole("button", { name: "Cancel changing shortcut for Open command palette", exact: true });
+    await shortcutRecorder.waitFor();
     await page.keyboard.press(backShortcut);
     await expectView(page, "Settings");
-    assert.equal(await page.getByRole("button", { name: "Press shortcut…", exact: true }).getAttribute("aria-pressed"), "true");
+    assert.equal(await shortcutRecorder.getAttribute("aria-pressed"), "true");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Saved configurations", exact: true }).click();
     await configurations.waitFor();

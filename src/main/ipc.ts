@@ -142,6 +142,7 @@ export interface ApplicationSettingsController {
   getState(): ApplicationSettingsState;
   getIcon(): ResolvedApplicationIcon;
   update(input: ApplicationSettingsUpdateInput): MaybePromise<OperationResult<ApplicationSettingsState>>;
+  setKeyboardShortcutRecording?(source: TrustedWindowIdentity, isRecording: boolean): void;
 }
 
 export interface ConsoleWindowController {
@@ -349,6 +350,18 @@ export function registerIpcHandlers(
     (_sender, input) => applicationSettings?.update(input) ?? {
       ok: false,
       error: "Application settings are unavailable",
+    },
+  );
+  handleTrusted(
+    IPC.setKeyboardShortcutRecording,
+    rendererUrl,
+    (args) => {
+      const value = requireSingleArgument(args, "keyboard shortcut recording");
+      if (typeof value !== "boolean") throw invalidArguments("keyboard shortcut recording");
+      return [value];
+    },
+    ({ contentsId, rendererProcessId, rendererFrameToken }, isRecording) => {
+      applicationSettings?.setKeyboardShortcutRecording?.({ contentsId, rendererProcessId, rendererFrameToken }, isRecording);
     },
   );
   handleTrusted(IPC.getApplicationUpdateState, rendererUrl, parseNoArguments, () =>

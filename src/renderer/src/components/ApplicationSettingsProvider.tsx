@@ -23,6 +23,7 @@ import {
   type ResolvedApplicationIcon,
 } from "../../../shared/application-settings-contracts";
 import type { OperationResult } from "../../../shared/contracts";
+import { keyboardShortcutsEqual } from "../../../shared/keyboard-shortcuts";
 import {
   CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY,
   loadConsoleTerminalSettings,
@@ -119,6 +120,7 @@ export function ApplicationSettingsProvider({
               appIcon: current.appIcon,
               reduceMotion: current.reduceMotion,
               commandPaletteShortcut: current.commandPaletteShortcut,
+              keyboardShortcuts: current.keyboardShortcuts,
               terminal: legacyTerminal,
             },
           });
@@ -252,6 +254,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
     appIcon: state.appIcon,
     reduceMotion: state.reduceMotion,
     commandPaletteShortcut: state.commandPaletteShortcut,
+    keyboardShortcuts: state.keyboardShortcuts,
     terminal: state.terminal,
   });
 }
@@ -261,6 +264,7 @@ function sameSettings(left: ApplicationSettingsValues, right: ApplicationSetting
     left.appIcon === right.appIcon &&
     left.reduceMotion === right.reduceMotion &&
     left.commandPaletteShortcut === right.commandPaletteShortcut &&
+    keyboardShortcutsEqual(left.keyboardShortcuts, right.keyboardShortcuts) &&
     left.terminal.fontId === right.terminal.fontId &&
     left.terminal.fontSize === right.terminal.fontSize &&
     left.terminal.cursorStyle === right.terminal.cursorStyle &&

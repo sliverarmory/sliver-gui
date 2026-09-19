@@ -358,6 +358,59 @@ describe("ConsoleWindowApp", () => {
     );
   });
 
+  it.each(["Command", "Control"] as const)("updates %s tab shortcuts and labels in an open console", async (modifier) => {
+    openConsoleTransport.mockResolvedValue(fakeTransport());
+    const api = installAPI({
+      claimConsoleWindow: async () => ok({ ...launchContext, shortcutModifier: modifier }),
+      createConsoleTab: vi.fn().mockResolvedValue(ok(secondTab)),
+    });
+    renderWithApplicationContextMenu(
+      <ApplicationSettingsProvider>
+        <ConsoleWindowApp />
+      </ApplicationSettingsProvider>,
+    );
+    const terminal = await screen.findByRole("region", {
+      name: "Sliver client Console 1 using Production operator",
+    });
+    const primary = modifier === "Command" ? { metaKey: true } : { ctrlKey: true };
+    const key = (code: string, value: string, modifiers: KeyboardEventInit = {}) => new KeyboardEvent("keydown", {
+      bubbles: true, cancelable: true, code, key: value, ...primary, ...modifiers,
+    });
+    const downstreamKeydown = vi.fn();
+    terminal.addEventListener("keydown", downstreamKeydown);
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 1,
+      keyboardShortcuts: { terminalNewTab: "mod+shift+j", terminalTab1: "mod+alt+1" },
+    }));
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAccessibleName(
+      `Console 1 Connected, shortcut ${modifier === "Command" ? "Command+Option" : "Ctrl+Alt"}+1`,
+    );
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveTextContent(
+      modifier === "Command" ? "⌘⌥1" : "Ctrl+Alt+1",
+    );
+    act(() => expect(terminal.dispatchEvent(key("KeyT", "t"))).toBe(true));
+    expect(downstreamKeydown).toHaveBeenCalledOnce();
+    expect(api.createConsoleTab).not.toHaveBeenCalled();
+
+    act(() => expect(terminal.dispatchEvent(key("KeyJ", "J", { shiftKey: true }))).toBe(false));
+    await screen.findByRole("tab", { name: /Console 2 Connected/u });
+    expect(api.createConsoleTab).toHaveBeenCalledOnce();
+    expect(downstreamKeydown).toHaveBeenCalledOnce();
+    act(() => expect(terminal.dispatchEvent(key("Digit1", "1"))).toBe(true));
+    expect(screen.getByRole("tab", { name: /Console 2 Connected/u })).toHaveAttribute("aria-selected", "true");
+    act(() => expect(terminal.dispatchEvent(key("Digit1", "1", { altKey: true }))).toBe(false));
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveAttribute("aria-selected", "true");
+
+    act(() => api.listeners.applicationSettings?.({ ...DEFAULT_APPLICATION_SETTINGS_STATE, revision: 2 }));
+    expect(screen.getByRole("tab", { name: /Console 1 Connected/u })).toHaveTextContent(
+      modifier === "Command" ? "⌘1" : "Ctrl+1",
+    );
+    act(() => expect(terminal.dispatchEvent(key("Digit1", "1", { altKey: true }))).toBe(true));
+    act(() => expect(terminal.dispatchEvent(key("Digit1", "1"))).toBe(false));
+  });
+
   it("closes only the active tab and selects its nearest sibling", async () => {
     const firstTransport = fakeTransport();
     const secondTransport = fakeTransport();

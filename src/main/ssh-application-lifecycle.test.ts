@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ApplicationCloudDeploymentController } from "./application.js";
-import type { ManagedServerReference } from "../shared/contracts.js";
+import { IPC, type ManagedServerReference } from "../shared/contracts.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { NETWORK_FORWARDING_IPC_EVENTS } from "../shared/network-forwarding-contracts.js";
 
@@ -29,12 +29,13 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn(() => ({
-      v: 3,
+      v: 4,
       revision: 0,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: false,
       commandPaletteShortcut: "mod+k",
+      keyboardShortcuts: {},
       terminal: {
         fontId: "fira-code",
         fontSize: 13,
@@ -84,6 +85,7 @@ vi.mock("electron", () => {
       isDestroyed: () => boolean;
     };
     readonly send = vi.fn();
+    readonly setIgnoreMenuShortcuts = vi.fn();
     readonly copyImageAt = vi.fn();
     readonly inspectElement = vi.fn();
     readonly replaceMisspelling = vi.fn();
@@ -162,6 +164,10 @@ vi.mock("electron", () => {
 
     isMinimized(): boolean {
       return false;
+    }
+
+    isFocused(): boolean {
+      return harness.focusedWindow === this;
     }
 
     isVisible(): boolean {
@@ -338,6 +344,55 @@ vi.mock("./ssh-ipc.js", () => ({
 }));
 
 describe("application protocol lifecycle", () => {
+  it("temporarily suspends native shortcuts only for the trusted recording window", async () => {
+    const { startApplication } = await import("./application.js");
+    const { registerIpcHandlers } = await import("./ipc.js");
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const application = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+    const window = harness.windows.at(-1)!;
+    const settings = vi.mocked(registerIpcHandlers).mock.calls.at(-1)![8]!;
+    const source = identityFor(window);
+    const event = { preventDefault: vi.fn() };
+    const input = {
+      type: "keyDown", key: "k", code: "KeyK", isComposing: false, isAutoRepeat: false,
+      shift: false, alt: false, meta: process.platform === "darwin", control: process.platform !== "darwin",
+    };
+    try {
+      settings.setKeyboardShortcutRecording!(source, true);
+      expect(window.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(true);
+      window.webContents.emit("before-input-event", event, input);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(window.webContents.send).not.toHaveBeenCalledWith(IPC.commandPaletteRequested);
+
+      settings.setKeyboardShortcutRecording!(source, false);
+      expect(window.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(false);
+      window.webContents.emit("before-input-event", event, input);
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(window.webContents.send).toHaveBeenCalledWith(IPC.commandPaletteRequested);
+
+      for (const clear of [
+        () => window.emit("blur"),
+        () => window.webContents.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false }),
+        () => window.webContents.emit("render-process-gone"),
+      ]) {
+        settings.setKeyboardShortcutRecording!(source, true);
+        clear();
+        expect(window.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(false);
+      }
+      expect(() => settings.setKeyboardShortcutRecording!({ ...source, rendererFrameToken: "stale-frame" }, true))
+        .toThrow(/not authorized/);
+      const anotherWindow = application.createWindow();
+      expect(() => settings.setKeyboardShortcutRecording!(source, true)).toThrow(/Focus this window/);
+      expect((anotherWindow.webContents as any).setIgnoreMenuShortcuts).not.toHaveBeenCalled();
+    } finally {
+      await application.stop();
+    }
+  });
+
   it("wires local managed metadata and refreshes it on deployment changes only", async () => {
     const { startApplication } = await import("./application.js");
     const registry = fakeConnectionRegistry();

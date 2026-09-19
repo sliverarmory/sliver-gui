@@ -37,6 +37,7 @@ const invokeArguments = {
   exitApp: [],
   getApplicationSettings: [],
   getApplicationIcon: [],
+  setKeyboardShortcutRecording: [true],
   updateApplicationSettings: [{
     expectedRevision: 0,
     settings: {
@@ -44,6 +45,7 @@ const invokeArguments = {
       appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
     },
   }],

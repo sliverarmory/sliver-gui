@@ -199,6 +199,7 @@ describe("ApplicationSettingsProvider", () => {
         appIcon: "passion",
         reduceMotion: false,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     });
@@ -228,6 +229,7 @@ describe("ApplicationSettingsProvider", () => {
         appIcon: "passion",
         reduceMotion: false,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     });
@@ -262,6 +264,7 @@ describe("ApplicationSettingsProvider", () => {
         appIcon: "auto",
         reduceMotion: false,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
+        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: {
           fontId: "jetbrains-mono",
           fontSize: 17,
@@ -272,6 +275,27 @@ describe("ApplicationSettingsProvider", () => {
       },
     });
     expect(screen.getByTestId("revision")).toHaveTextContent("1");
+  });
+
+  it("persists a shortcut-only change and preserves it across other preference updates", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+    }));
+    installSettingsAPI({ updateApplicationSettings });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+    await user.click(screen.getByRole("button", { name: "Remap new window" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("1"));
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.keyboardShortcuts).toEqual({ newWindow: "mod+alt+n" });
+    await user.click(screen.getByRole("button", { name: "Use light theme" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("2"));
+    expect(updateApplicationSettings.mock.calls[1]?.[0].settings).toMatchObject({
+      theme: "light", keyboardShortcuts: { newWindow: "mod+alt+n" },
+    });
+    await user.click(screen.getByRole("button", { name: "Remap new window" }));
+    expect(updateApplicationSettings).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -304,6 +328,14 @@ function SettingsProbe(): React.JSX.Element {
         onClick={() => void context.updateSettings((current) => ({ ...current, appIcon: "passion" }))}
       >
         Use Passion icon
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({
+          ...current, keyboardShortcuts: { ...current.keyboardShortcuts, newWindow: "mod+alt+n" },
+        }))}
+      >
+        Remap new window
       </button>
     </div>
   );

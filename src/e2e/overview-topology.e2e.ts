@@ -366,7 +366,8 @@ async function useDarkTheme(page: Page): Promise<void> {
       expectedRevision: settings.revision,
       settings: {
         theme: "dark", appIcon: settings.appIcon, reduceMotion: settings.reduceMotion,
-        commandPaletteShortcut: settings.commandPaletteShortcut, terminal: settings.terminal,
+        commandPaletteShortcut: settings.commandPaletteShortcut, keyboardShortcuts: settings.keyboardShortcuts,
+        terminal: settings.terminal,
       },
     });
   });
