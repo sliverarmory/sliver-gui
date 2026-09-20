@@ -15,6 +15,7 @@ const harness = vi.hoisted(() => ({
   cloudSshWindows: undefined as any,
   sshServices: undefined as any,
   sshAuthorizer: undefined as any,
+  scriptTasks: undefined as any,
   hardenedWindows: [] as any[],
   sliverReleaseDownloaders: [] as any[],
   crackstationReleaseDownloaders: [] as any[],
@@ -110,6 +111,8 @@ vi.mock("electron", () => {
     getURL(): string {
       return this.url;
     }
+
+    isLoadingMainFrame(): boolean { return false; }
   }
 
   class FakeBrowserWindow extends FakeEmitter {
@@ -300,6 +303,7 @@ vi.mock("./security.js", () => ({
     const trusted = new URL(trustedUrl);
     return candidate.origin === trusted.origin && candidate.pathname === trusted.pathname;
   }),
+  isSameRendererDocument: vi.fn((candidateUrl: string, trustedUrl: string) => candidateUrl === trustedUrl),
 }));
 
 vi.mock("./sliver-release-download.js", () => ({
@@ -343,7 +347,78 @@ vi.mock("./ssh-ipc.js", () => ({
   unregisterSshIpcHandlers: vi.fn(),
 }));
 
+vi.mock("./script-task-manager-ipc.js", () => ({
+  registerScriptTaskManagerIpc: vi.fn((services: unknown) => { harness.scriptTasks = services; }),
+  unregisterScriptTaskManagerIpc: vi.fn(),
+}));
+
+// Native menu initialization reads the script catalog; lifecycle tests never
+// read or initialize the developer's real ~/.sliver-client script directory.
+vi.mock("./script-store.js", () => ({
+  ScriptStore: class {
+    async list() { return { scripts: [], warnings: [] }; }
+    async read() { throw new Error("No saved test script"); }
+    async flush() {}
+  },
+}));
+
 describe("application protocol lifecycle", () => {
+  it("reuses script companions per workspace, keeps output across popout close, and retires only the navigated owner", async () => {
+    const { startApplication } = await import("./application.js");
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })), dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const application = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+    const owner = harness.windows.at(-1)!;
+    const actions = harness.scriptTasks;
+    const id = "123e4567-e89b-42d3-a456-426614174000";
+    const state = { scripts: [{ id, name: "Hello", dirty: false, conflict: false }], selectedId: id,
+      records: [{ sequence: 0, level: "log", text: "preserved" }], outputReset: 0, pending: false };
+    try {
+      expect(await actions.open(owner)).toEqual({ ok: true });
+      const manager = harness.windows.at(-1)!;
+      expect(manager.webContents.getURL()).toBe("sliver://app/index.html?surface=script-task-manager");
+      expect(harness.hardenedWindows.at(-1)).toMatchObject({ utilityUrl: "sliver://app/index.html?surface=script-task-manager" });
+      const count = harness.windows.length;
+      expect(await actions.open(manager)).toEqual({ ok: true });
+      expect(harness.windows.length).toBe(count);
+      expect(actions.authorize(manager, identityFor(manager))).toEqual({ role: "manager", ownerId: owner.webContents.id });
+      actions.relay.publish(owner.webContents.id, state);
+      manager.close();
+      expect(actions.relay.getState(owner.webContents.id)).toEqual(state);
+      expect(await actions.open(owner)).toEqual({ ok: true });
+      const reopened = harness.windows.at(-1)!;
+      const otherOwner = application.createWindow();
+      expect(await actions.open(otherOwner)).toEqual({ ok: true });
+      const otherManager = harness.windows.at(-1)!;
+      owner.webContents.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+      expect(reopened.isDestroyed()).toBe(true);
+      expect(actions.authorize(reopened, identityFor(reopened))).toBeUndefined();
+      expect(otherManager.isDestroyed()).toBe(false);
+      expect(actions.relay.getState(otherOwner.webContents.id).records).toEqual([]);
+      otherOwner.close();
+      expect(otherManager.isDestroyed()).toBe(true);
+    } finally { await application.stop(); }
+  });
+
+  it("opens a workspace for the native Scripts action when all main windows have closed", async () => {
+    const { startApplication } = await import("./application.js");
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })), dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const application = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+    harness.windows.at(-1)!.close();
+    try {
+      expect(await harness.scriptTasks.open(undefined)).toEqual({ ok: true });
+      const manager = harness.windows.at(-1)!;
+      const source = harness.windows.at(-2)!;
+      expect(source.webContents.getURL()).toBe("sliver://app/index.html");
+      expect(manager.webContents.getURL()).toContain("surface=script-task-manager");
+      expect(harness.scriptTasks.authorize(manager, identityFor(manager))).toEqual({ role: "manager", ownerId: source.webContents.id });
+    } finally { await application.stop(); }
+  });
   it("temporarily suspends native shortcuts only for the trusted recording window", async () => {
     const { startApplication } = await import("./application.js");
     const { registerIpcHandlers } = await import("./ipc.js");

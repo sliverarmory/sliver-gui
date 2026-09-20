@@ -12,6 +12,7 @@ import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
 import { NetworkWindowApp } from "./NetworkWindowApp";
+import { ScriptTaskManagerWindowApp } from "./ScriptTaskManagerWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 import { ApplicationContextMenu } from "./components/ApplicationContextMenu";
@@ -37,6 +38,11 @@ function RendererSurface(): React.JSX.Element {
 }
 
 function ApplicationRoot(): React.JSX.Element {
+  if (surface === "script-task-manager") {
+    return window.scriptTasks ? <ApplicationSettingsProvider api={window.scriptTasks}>
+      <ScriptTaskManagerWindowApp />
+    </ApplicationSettingsProvider> : <ScriptTaskManagerWindowApp />;
+  }
   if (surface === "armory") {
     return window.armory ? (
       <ApplicationSettingsProvider api={window.armory}>

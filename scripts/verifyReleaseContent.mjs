@@ -107,6 +107,7 @@ const requiredPackagedFiles = [
   "dist/preload/network.cjs",
   "dist/preload/armory.cjs",
   "dist/preload/ssh.cjs",
+  "dist/preload/script-task-manager.cjs",
   "dist/renderer/index.html",
   "node_modules/sliver-script/LICENSE",
   "node_modules/sliver-script/package.json",

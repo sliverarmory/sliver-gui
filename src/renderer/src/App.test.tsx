@@ -10,6 +10,7 @@ import {
   type ResolvedApplicationIcon,
 } from "../../shared/application-settings-contracts";
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
+import type { ScriptTaskManagerAPI } from "../../shared/script-task-manager-contracts";
 import type {
   OperationResult,
   SavedConfigSummary,
@@ -49,6 +50,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, "scriptTasks");
 });
 
 function deferred<T>() {
@@ -198,6 +200,39 @@ function installSliverAPI(
 }
 
 describe("App startup", () => {
+  it("mounts the task owner in the background and reveals native Edit requests", async () => {
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    let host!: () => void;
+    let edit!: (id: string) => void;
+    const unsubscribeHost = vi.fn();
+    const unsubscribeEdit = vi.fn();
+    const tasks = {
+      onHostRequested: vi.fn((listener: typeof host) => { host = listener; return unsubscribeHost; }),
+      onEditRequested: vi.fn((listener: typeof edit) => { edit = listener; return unsubscribeEdit; }),
+      onCommand: vi.fn(() => vi.fn()),
+      ownerReady: vi.fn(async () => ({ ok: true as const })),
+      publish: vi.fn(async () => ({ ok: true as const })),
+    };
+    Object.defineProperty(window, "scriptTasks", { configurable: true, value: tasks as unknown as ScriptTaskManagerAPI });
+    const view = render(<App />);
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    act(() => host());
+    await waitFor(() => expect(api.listScripts).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("heading", { name: "Script Editor" })).not.toBeInTheDocument();
+    await waitFor(() => expect(tasks.ownerReady).toHaveBeenCalledOnce());
+    act(() => edit("09cf16dd-3f93-48c1-8abc-03c07a530a72"));
+    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
+    expect(api.listScripts).toHaveBeenCalledOnce();
+    await userEvent.click(screen.getByRole("row", { name: "Overview" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open command palette" }));
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    act(() => edit("09cf16dd-3f93-48c1-8abc-03c07a530a72"));
+    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
+    view.unmount();
+    expect(unsubscribeHost).toHaveBeenCalledOnce();
+    expect(unsubscribeEdit).toHaveBeenCalledOnce();
+  });
   it("reveals Script Editor on Keep Editing and dismisses blocking overlays on repeated requests", async () => {
     const user = userEvent.setup();
     const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));

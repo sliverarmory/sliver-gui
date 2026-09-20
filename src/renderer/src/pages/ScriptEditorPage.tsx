@@ -2,28 +2,22 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Button, Chip, Dropdown, Input, Label, Modal, SearchField, TextField, Tooltip } from "@heroui/react";
 import { Resizable } from "@heroui-pro/react/resizable";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faCode, faCopy, faEllipsisVertical, faFileExport, faFileImport, faPen, faPlay, faPlus, faRotateRight, faStop, faTrashCan } from "@fortawesome/free-solid-svg-icons";
+import { faCode, faCopy, faListCheck, faEllipsisVertical, faFileExport, faFileImport, faPen, faPlay, faPlus, faRotateRight, faStop, faTrashCan } from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult } from "../../../shared/contracts";
-import { SCRIPT_LIMITS, parseScriptSource, type ScriptCatalog, type ScriptDocument, type ScriptSummary } from "../../../shared/script-contracts";
+import { SCRIPT_LIMITS, type ScriptCatalog, type ScriptDocument, type ScriptSummary } from "../../../shared/script-contracts";
 import type { ScriptConsoleRecord, ScriptRunState } from "../../../shared/script-runtime-protocol";
+import { SCRIPT_TASK_LIMITS, type ScriptTaskCommand, type ScriptTaskManagerSnapshot } from "../../../shared/script-task-manager-contracts";
 import { useApplicationSettings } from "../components/ApplicationSettingsProvider";
 import { ApplicationContextMenuScope, type ApplicationContextMenuAction } from "../components/ApplicationContextMenu";
 import { CodeEditor } from "../components/CodeEditor";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ScriptOutputTerminal, scriptOutputText } from "../components/ScriptOutputTerminal";
-import { ScriptRunner } from "../scripting/script-runner";
+import { ScriptTaskSession } from "../scripting/script-task-session";
 
 interface ScriptDraft extends ScriptDocument {
   savedSource: string;
   conflict?: string;
-}
-
-interface RunSnapshot {
-  scriptId: string;
-  name: string;
-  source: string;
-  unsaved: boolean;
 }
 
 type NameAction = "new" | "rename" | "duplicate";
@@ -42,9 +36,10 @@ const RUN_LABELS: Record<ScriptRunState["status"], string> = {
 };
 
 /** Drafts stay in this window's memory while the application switches pages. */
-export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
+export function ScriptEditorPage({ active, revealUnsavedRequest = 0, editRequest }: {
   readonly active: boolean;
   readonly revealUnsavedRequest?: number;
+  readonly editRequest?: { readonly id: string; readonly request: number };
 }): React.JSX.Element {
   const settings = useApplicationSettings();
   const [catalog, setCatalog] = useState<ScriptCatalog>(EMPTY_CATALOG);
@@ -60,11 +55,7 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
   const [nameError, setNameError] = useState<string>();
   const [deleteTarget, setDeleteTarget] = useState<ScriptDraft>();
   const [reloadTarget, setReloadTarget] = useState<ScriptDraft>();
-  const [records, setRecords] = useState<readonly ScriptConsoleRecord[]>([]);
-  const [outputReset, setOutputReset] = useState(0);
-  const [runState, setRunState] = useState<ScriptRunState>();
-  const [runSnapshot, setRunSnapshot] = useState<RunSnapshot>();
-  const [runLoading, setRunLoading] = useState(false);
+  const [taskVersion, setTaskVersion] = useState(0);
   const [copied, setCopied] = useState(false);
   const [wide, setWide] = useState(() => window.matchMedia?.("(min-width: 960px)").matches ?? true);
   const mounted = useRef(false);
@@ -75,11 +66,14 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
   const refreshAfterMutation = useRef(false);
   const catalogRequest = useRef(0);
   const documentRequest = useRef(0);
-  const runRequest = useRef(0);
-  const runBusy = useRef(false);
-  const loadingRuntime = useRef(false);
+  const selectionRequest = useRef(0);
+  const documentLoads = useRef(new Map<string, Promise<ScriptDocument>>());
+  const startingScripts = useRef(new Map<string, object>());
   const handledRevealRequest = useRef(0);
-  const runner = useRef<ScriptRunner | undefined>(undefined);
+  const handledEditRequest = useRef(0);
+  const taskSession = useRef<ScriptTaskSession | undefined>(undefined);
+  const taskCommand = useRef<(command: ScriptTaskCommand) => void>(() => undefined);
+  const taskSnapshot = useRef<ScriptTaskManagerSnapshot | undefined>(undefined);
   activeRef.current = active;
   draftsRef.current = drafts;
   selectedIdRef.current = selectedId;
@@ -91,8 +85,23 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
   const hasDirtyDrafts = Object.values(drafts).some((draft) => draft.source !== draft.savedSource);
   const dirtyRef = useRef(hasDirtyDrafts);
   dirtyRef.current = hasDirtyDrafts;
-  const running = runLoading || runState?.status === "starting" || runState?.status === "running";
+  const selectedTask = taskSession.current?.get(selectedId);
+  const records: readonly ScriptConsoleRecord[] = selectedTask?.records ?? [];
+  const outputReset = selectedTask?.outputReset ?? 0;
+  const runState: ScriptRunState | undefined = selectedId && startingScripts.current.has(selectedId)
+    ? { status: "starting", elapsedMs: 0 } : selectedTask?.state;
+  const runSnapshot = selectedTask?.snapshot;
+  const running = runState?.status === "starting" || runState?.status === "running";
   const editedSinceRun = Boolean(runSnapshot && selected && selected.source !== runSnapshot.source);
+  const readDocument = useCallback((id: string): Promise<ScriptDocument> => {
+    const pendingRead = documentLoads.current.get(id);
+    if (pendingRead) return pendingRead;
+    const read = Promise.resolve().then(() => window.sliver.readScript({ id })).then(unwrap).finally(() => {
+      if (documentLoads.current.get(id) === read) documentLoads.current.delete(id);
+    });
+    documentLoads.current.set(id, read);
+    return read;
+  }, []);
 
   const refreshCatalog = useCallback(async (): Promise<void> => {
     if (pendingRef.current) { refreshAfterMutation.current = true; return; }
@@ -100,6 +109,10 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
     try {
       const value = unwrap(await window.sliver.listScripts());
       if (!mounted.current || request !== catalogRequest.current) return;
+      const retainedIds = new Set(value.scripts.map((script) => script.id));
+      for (const draft of Object.values(draftsRef.current)) if (isDirty(draft)) retainedIds.add(draft.id);
+      for (const id of startingScripts.current.keys()) if (!retainedIds.has(id)) startingScripts.current.delete(id);
+      taskSession.current?.retainScripts(retainedIds);
       setCatalog(value);
       setDrafts((current) => {
         const next = { ...current };
@@ -128,24 +141,22 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
     }
   }, []);
 
-  const stopRun = useCallback(() => {
-    runRequest.current += 1;
-    runner.current?.stop();
-    if (loadingRuntime.current) setRunState({ status: "stopped", elapsedMs: 0 });
-    loadingRuntime.current = false;
-    runBusy.current = false;
-    setRunLoading(false);
+  const stopScript = useCallback((id: string) => {
+    const loading = startingScripts.current.delete(id);
+    taskSession.current?.stop(id);
+    if (loading) setTaskVersion((current) => current + 1);
   }, []);
+  const stopRun = useCallback(() => {
+    const id = selectedIdRef.current;
+    if (id) stopScript(id);
+  }, [stopScript]);
 
   useEffect(() => {
     mounted.current = true;
-    runner.current = new ScriptRunner({
-      onOutput: (next) => { if (mounted.current) setRecords((current) => [...current, ...next]); },
-      onState: (next) => {
-        runBusy.current = next.status === "starting" || next.status === "running";
-        if (mounted.current) setRunState(next);
-      },
-    });
+    taskSession.current = new ScriptTaskSession(
+      async () => unwrap(await window.sliver.getScriptRuntime()).bytes,
+      () => { if (mounted.current) setTaskVersion((current) => current + 1); },
+    );
     void refreshCatalog();
     const unsubscribe = window.sliver.onScriptsChanged(() => void refreshCatalog());
     const onBeforeUnload = (event: BeforeUnloadEvent): void => {
@@ -154,17 +165,19 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
       event.returnValue = "Unsaved script changes";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
-    window.addEventListener("pagehide", stopRun);
+    const stopAll = (): void => { startingScripts.current.clear(); taskSession.current?.stopAll(); };
+    window.addEventListener("pagehide", stopAll);
     return () => {
       mounted.current = false;
       catalogRequest.current += 1;
       documentRequest.current += 1;
-      runRequest.current += 1;
-      runner.current?.dispose();
-      runner.current = undefined;
+      documentLoads.current.clear();
+      startingScripts.current.clear();
+      taskSession.current?.dispose();
+      taskSession.current = undefined;
       unsubscribe();
       window.removeEventListener("beforeunload", onBeforeUnload);
-      window.removeEventListener("pagehide", stopRun);
+      window.removeEventListener("pagehide", stopAll);
     };
   }, [refreshCatalog, stopRun]);
 
@@ -174,7 +187,6 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
     });
   }, [hasDirtyDrafts]);
 
-  useEffect(() => { if (!active) stopRun(); }, [active, stopRun]);
   useEffect(() => {
     const media = window.matchMedia?.("(min-width: 960px)");
     if (!media) return;
@@ -186,34 +198,74 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
   useEffect(() => {
     if (!selectedId || draftsRef.current[selectedId]) return;
     const request = ++documentRequest.current;
-    void window.sliver.readScript({ id: selectedId }).then((result) => {
-      const document = unwrap(result);
+    void readDocument(selectedId).then((document) => {
       if (!mounted.current || request !== documentRequest.current) return;
       setDrafts((current) => ({ ...current, [document.id]: { ...document, savedSource: document.source } }));
     }).catch((cause: unknown) => {
       if (mounted.current && request === documentRequest.current) setError(messageOf(cause));
     });
     return () => { documentRequest.current += 1; };
-  }, [selectedId, catalog]);
+  }, [selectedId, catalog, readDocument]);
 
+  const acceptDocument = useCallback((document: ScriptDocument, source = document.source): void => {
+    setDrafts((current) => ({ ...current, [document.id]: { ...document, source, savedSource: document.source } }));
+    setCatalog((current) => ({ ...current, scripts: [
+      ...current.scripts.filter((script) => script.id !== document.id),
+      { id: document.id, name: document.name, revision: document.revision },
+    ].sort((left, right) => left.name.localeCompare(right.name)) }));
+  }, []);
   const clearOutput = useCallback((): void => {
-    setRecords([]);
-    setOutputReset((current) => current + 1);
+    const id = selectedIdRef.current;
+    if (id) taskSession.current?.clear(id);
     setCopied(false);
   }, []);
   const selectScript = useCallback((id: string): void => {
-    if (pendingRef.current || id === selectedIdRef.current) return;
-    stopRun();
-    clearOutput();
-    setRunState(undefined);
-    setRunSnapshot(undefined);
+    if (pendingRef.current) return;
+    selectionRequest.current += 1;
+    if (id === selectedIdRef.current) return;
+    setCopied(false);
     setError(undefined);
+    selectedIdRef.current = id;
     setSelectedId(id);
-  }, [clearOutput, stopRun]);
+  }, []);
+  useEffect(() => {
+    if (!active || loading || pending || !editRequest || editRequest.request === handledEditRequest.current) return;
+    setQuery("");
+    setNameAction(undefined);
+    setDeleteTarget(undefined);
+    setReloadTarget(undefined);
+    if (draftsRef.current[editRequest.id]) {
+      handledEditRequest.current = editRequest.request;
+      selectScript(editRequest.id);
+      return;
+    }
+    // Native menus can observe new scripts before this window's catalog refresh.
+    // Resolve the requested UUID directly, and discard a stale navigation read.
+    let canceled = false;
+    const selection = selectionRequest.current;
+    const current = (): boolean => {
+      if (!mounted.current || canceled) return false;
+      if (selection === selectionRequest.current) return true;
+      handledEditRequest.current = Math.max(handledEditRequest.current, editRequest.request);
+      return false;
+    };
+    void readDocument(editRequest.id).then((document) => {
+      if (!current()) return;
+      acceptDocument(document, draftsRef.current[document.id]?.source ?? document.source);
+      handledEditRequest.current = editRequest.request;
+      selectScript(document.id);
+    }).catch((cause: unknown) => {
+      if (!current()) return;
+      handledEditRequest.current = editRequest.request;
+      setError(messageOf(cause));
+    });
+    return () => { canceled = true; };
+  }, [acceptDocument, active, editRequest, loading, pending, readDocument, selectScript]);
   useEffect(() => {
     if (!active || pending || pendingRef.current || revealUnsavedRequest === 0 ||
       revealUnsavedRequest === handledRevealRequest.current) return;
     handledRevealRequest.current = revealUnsavedRequest;
+    selectionRequest.current += 1;
     setQuery("");
     setNameAction(undefined);
     setDeleteTarget(undefined);
@@ -223,13 +275,6 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
     const unsaved = Object.values(draftsRef.current).find(isDirty);
     if (unsaved) selectScript(unsaved.id);
   }, [active, pending, revealUnsavedRequest, selectScript]);
-  const acceptDocument = (document: ScriptDocument, source = document.source): void => {
-    setDrafts((current) => ({ ...current, [document.id]: { ...document, source, savedSource: document.source } }));
-    setCatalog((current) => ({ ...current, scripts: [
-      ...current.scripts.filter((script) => script.id !== document.id),
-      { id: document.id, name: document.name, revision: document.revision },
-    ].sort((left, right) => left.name.localeCompare(right.name)) }));
-  };
   const beginMutation = (): boolean => {
     if (pendingRef.current) return false;
     pendingRef.current = true;
@@ -261,44 +306,70 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
     try {
       const result = unwrap(await window.sliver.importScript());
       if (result.canceled || !mounted.current) return;
-      stopRun();
-      clearOutput();
-      setRunState(undefined);
-      setRunSnapshot(undefined);
       acceptDocument(result.script);
       setSelectedId(result.script.id);
     } catch (cause) {
       if (mounted.current) setError(messageOf(cause));
     } finally { endMutation(); }
   };
-  const run = async (): Promise<void> => {
-    const draft = selectedIdRef.current ? draftsRef.current[selectedIdRef.current] : undefined;
-    if (!activeRef.current || !draft || runBusy.current || pendingRef.current) return;
-    runBusy.current = true;
-    loadingRuntime.current = true;
-    const request = ++runRequest.current;
-    const snapshot: RunSnapshot = { source: draft.source, scriptId: draft.id, name: draft.name, unsaved: isDirty(draft) };
-    setRunSnapshot(snapshot);
-    clearOutput();
-    setRunLoading(true);
-    setRunState({ status: "starting", elapsedMs: 0 });
+  const runScript = async (id: string, select = false): Promise<void> => {
+    if (!mounted.current || pendingRef.current || startingScripts.current.has(id) || taskSession.current?.isRunning(id)) return;
+    if (startingScripts.current.size + (taskSession.current?.runningCount() ?? 0) >= SCRIPT_TASK_LIMITS.maxConcurrentRuns) {
+      setError(`Up to ${SCRIPT_TASK_LIMITS.maxConcurrentRuns} scripts can run at once. Stop a running script before starting another.`);
+      return;
+    }
+    const attempt = {};
+    startingScripts.current.set(id, attempt);
+    if (select) selectScript(id);
+    if (id === selectedIdRef.current) setCopied(false);
+    setTaskVersion((current) => current + 1);
+    setError(undefined);
     try {
-      parseScriptSource(snapshot.source);
-      const asset = unwrap(await window.sliver.getScriptRuntime());
-      if (!mounted.current || !activeRef.current || request !== runRequest.current) return;
-      runner.current?.run({ source: snapshot.source, scriptId: snapshot.scriptId, wasmBytes: asset.bytes });
-    } catch (cause) {
-      if (mounted.current && request === runRequest.current) {
-        runBusy.current = false;
-        setRunState({ status: "failed", elapsedMs: 0, message: messageOf(cause) });
+      let draft = draftsRef.current[id];
+      if (!draft) {
+        const document = await readDocument(id);
+        if (!mounted.current || startingScripts.current.get(id) !== attempt) return;
+        draft = draftsRef.current[id] ?? { ...document, savedSource: document.source };
+        if (!draftsRef.current[id]) acceptDocument(document);
       }
+      if (!mounted.current || pendingRef.current || startingScripts.current.get(id) !== attempt) return;
+      // Once the source is available, the session owns startup and cancellation.
+      startingScripts.current.delete(id);
+      await taskSession.current?.run({ source: draft.source, scriptId: draft.id, name: draft.name, unsaved: isDirty(draft) });
+    } catch (cause) {
+      if (mounted.current) setError(messageOf(cause));
     } finally {
-      if (mounted.current && request === runRequest.current) {
-        loadingRuntime.current = false;
-        setRunLoading(false);
+      if (startingScripts.current.get(id) === attempt) {
+        startingScripts.current.delete(id);
+        if (mounted.current) setTaskVersion((current) => current + 1);
       }
     }
   };
+  const run = async (): Promise<void> => {
+    const id = selectedIdRef.current;
+    if (id && activeRef.current) await runScript(id);
+  };
+  taskCommand.current = (command): void => {
+    if (!mounted.current || (command.type !== "stop" && pendingRef.current)) return;
+    if (!catalog.scripts.some((script) => script.id === command.id) && !draftsRef.current[command.id]) return;
+    if (command.type === "select") selectScript(command.id);
+    else if (command.type === "run") void runScript(command.id, true);
+    else if (command.type === "stop") stopScript(command.id);
+    else taskSession.current?.clear(command.id);
+  };
+  useEffect(() => {
+    const api = window.scriptTasks;
+    if (!api) return;
+    const unsubscribe = api.onCommand((command) => taskCommand.current(command));
+    return unsubscribe;
+  }, []);
+  useEffect(() => {
+    const api = window.scriptTasks;
+    if (!api || loading) return;
+    void api.ownerReady().then(unwrap).catch((cause: unknown) => {
+      if (mounted.current) setError(messageOf(cause));
+    });
+  }, [loading]);
   const openNameDialog = (action: NameAction, target = selected): void => {
     setNameAction(action);
     setNameTarget(action === "new" ? undefined : target);
@@ -351,10 +422,6 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
       if (!mounted.current) return;
       acceptDocument(document, nameAction === "rename" ? draftsRef.current[document.id]?.source ?? document.source : document.source);
       if (nameAction !== "rename") {
-        stopRun();
-        clearOutput();
-        setRunState(undefined);
-        setRunSnapshot(undefined);
         setSelectedId(document.id);
       }
       setNameAction(undefined);
@@ -368,12 +435,8 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
       const id = deleteTarget.id;
       unwrap(await window.sliver.deleteScript({ id, expectedRevision: deleteTarget.revision }));
       if (!mounted.current) return true;
-      if (selectedIdRef.current === id) {
-        stopRun();
-        clearOutput();
-        setRunState(undefined);
-        setRunSnapshot(undefined);
-      }
+      startingScripts.current.delete(id);
+      taskSession.current?.remove(id);
       setDrafts((current) => { const next = { ...current }; delete next[id]; return next; });
       setCatalog((current) => ({ ...current, scripts: current.scripts.filter((script) => script.id !== id) }));
       setSelectedId((current) => current === id ? catalog.scripts.find((script) => script.id !== id)?.id : current);
@@ -408,6 +471,49 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
   for (const draft of Object.values(drafts)) {
     if (isDirty(draft) && !listedScripts.some((script) => script.id === draft.id)) listedScripts.push(draft);
   }
+  const taskPriority = (script: ScriptSummary): number => script.id === selectedId ? 0
+    : taskSession.current?.isRunning(script.id) || startingScripts.current.has(script.id) ? 1
+      : isDirty(drafts[script.id]) ? 2 : 3;
+  const publishedScripts = listedScripts.length > SCRIPT_TASK_LIMITS.displayScripts
+    ? [...listedScripts].sort((left, right) => taskPriority(left) - taskPriority(right)).slice(0, SCRIPT_TASK_LIMITS.displayScripts)
+    : listedScripts;
+  const taskError = publishedScripts.length < listedScripts.length
+    ? `Task Manager shows ${publishedScripts.length} of ${listedScripts.length} scripts. Select a script in the editor to include it.${error ? ` ${error}` : ""}`
+    : error;
+  const publishedId = publishedScripts.some((script) => script.id === selectedId) ? selectedId : undefined;
+  taskSnapshot.current = {
+    scripts: publishedScripts.map((script) => {
+      const state: ScriptRunState | undefined = startingScripts.current.has(script.id)
+        ? { status: "starting", elapsedMs: 0 } : taskSession.current?.get(script.id)?.state;
+      return { id: script.id, name: script.name, dirty: isDirty(drafts[script.id]), conflict: Boolean(drafts[script.id]?.conflict),
+        ...(state ? { state: { ...state, ...(state.message ? { message: state.message.slice(0, 1024) } : {}) } } : {}) };
+    }),
+    ...(publishedId ? { selectedId: publishedId } : {}),
+    records: publishedId ? records : [], outputReset, pending: pending || loading,
+    ...(publishedId && runSnapshot ? { run: { name: runSnapshot.name, unsaved: runSnapshot.unsaved, editedSinceRun } } : {}),
+    ...(taskError ? { error: taskError.slice(0, 1024) } : {}),
+  };
+  // Coalesce worker output and editor changes into at most one display snapshot
+  // every 50 ms. The trailing update reads the newest snapshot, even under load.
+  const publishTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    const api = window.scriptTasks;
+    if (!api || publishTimer.current) return;
+    publishTimer.current = setTimeout(() => {
+      publishTimer.current = undefined;
+      if (!mounted.current || !taskSnapshot.current) return;
+      const snapshot = taskSnapshot.current;
+      void Promise.resolve().then(() => api.publish(snapshot)).then(unwrap).catch((cause: unknown) => {
+        if (mounted.current) setError(messageOf(cause));
+      });
+    }, 50);
+  }, [catalog, drafts, selectedId, pending, loading, error, taskVersion]);
+  useEffect(() => () => { clearTimeout(publishTimer.current); publishTimer.current = undefined; }, []);
+  const openTaskManager = async (): Promise<void> => {
+    if (!window.scriptTasks) return;
+    try { unwrap(await window.scriptTasks.open()); }
+    catch (cause) { if (mounted.current) setError(messageOf(cause)); }
+  };
   const filteredScripts = listedScripts.filter((script) => script.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   const importButton = <Tooltip delay={250}>
     <Button aria-label="Import script" isIconOnly size="sm" variant="ghost" isDisabled={pending} onPress={() => void importScript()}><FontAwesomeIcon icon={faFileImport} /></Button>
@@ -482,7 +588,7 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
               <Button size="sm" variant="ghost" isDisabled={records.length === 0} onPress={clearOutput}>Clear</Button>
             </div>
             {runState?.message ? <p role="alert" className="px-4 py-2 text-sm text-danger">{runState.message}</p> : null}
-            <ScriptOutputTerminal records={records} resetKey={outputReset} className="min-h-0 flex-1" />
+            <ScriptOutputTerminal records={records} resetKey={`${selectedId ?? "none"}:${outputReset}`} className="min-h-0 flex-1" />
           </section>
         </Resizable.Panel>
       </Resizable>
@@ -490,7 +596,7 @@ export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
   </div>;
 
   return <section className="script-editor-page" hidden={!active} inert={!active} aria-label="Script Editor">
-    <header className="script-editor-header"><div><h1 className="text-xl font-semibold tracking-tight">Script Editor</h1><p className="mt-1 text-sm text-muted">Write JavaScript and see its console output.</p></div><Chip size="sm" variant="soft">Local scripts</Chip></header>
+    <header className="script-editor-header"><div><h1 className="text-xl font-semibold tracking-tight">Script Editor</h1><p className="mt-1 text-sm text-muted">Write JavaScript and see its console output.</p></div><div className="flex items-center gap-3"><Chip size="sm" variant="soft">Local scripts</Chip><Tooltip delay={250}><Button aria-label="Open script task manager" isIconOnly variant="secondary" onPress={() => void openTaskManager()}><FontAwesomeIcon aria-hidden icon={faListCheck} /></Button><Tooltip.Content>Task Manager</Tooltip.Content></Tooltip></div></header>
     {error ? <div role="alert" className="script-editor-notice text-danger"><span>{error}</span><Button size="sm" variant="ghost" onPress={() => { setError(undefined); void refreshCatalog(); }}>Retry</Button></div> : null}
     {catalog.warnings.length ? <div role="status" aria-label="Script library notices" className="max-h-36 shrink-0 overflow-y-auto">{catalog.warnings.map((warning, index) => <p key={`${index}:${warning}`} className="script-editor-notice text-warning">{warning}</p>)}</div> : null}
     <div className="min-h-0 flex-1">

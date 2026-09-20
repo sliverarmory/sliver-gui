@@ -54,6 +54,16 @@ test(`Script Editor works offline with real Monaco, QuickJS and Ghostty (${packa
     });
     page.on("worker", (worker) => workers.push(worker.url()));
     previousClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
+    // Native menu launches the background task host before the editor is visited.
+    const firstManagerOpened = application.waitForEvent("window");
+    const firstOwner = await application.browserWindow(page);
+    await invokeScriptMenu(application, await firstOwner.evaluate((window) => window.id), "scripts.task-manager");
+    const firstManager = await firstManagerOpened;
+    await firstManager.getByRole("button", { name: "Run Hello World", exact: true }).click();
+    await firstManager.getByRole("status").filter({ hasText: /^Completed ·/u }).waitFor();
+    assert.equal(await firstManager.getByLabel("Script output transcript", { exact: true }).textContent(), "Hello, world!\n");
+    assert.equal(await page.getByRole("heading", { name: "Script Editor", exact: true }).count(), 0);
+    await firstManager.close();
     await openEditor(page);
     await page.getByRole("heading", { name: "Hello World", exact: true }).waitFor();
     await page.locator(".monaco-editor").waitFor();
@@ -107,6 +117,7 @@ test(`Script Editor works offline with real Monaco, QuickJS and Ghostty (${packa
     await page.getByRole("heading", { name: displayName, exact: true }).waitFor();
     await runAndWait(page, "Completed");
     await assertScriptContextActions(application, page, temporary, scriptRoot, displayName, artifacts);
+    await assertScriptTaskManager(application, page, scriptRoot, id, displayName, artifacts);
 
     // Exercise only denied local capabilities; no backend operations or targets.
     await editSource(page, 'console.log(typeof window, typeof document, typeof fetch, typeof process, typeof require, typeof sliver, typeof postMessage); console.warn("<b>literal</b>\\x1b]52;c;data\\x07");');
@@ -478,6 +489,105 @@ async function assertKeepEditingRevealsDraft(application: ElectronApplication, p
     if (!result.ok) throw new Error(result.error);
   }, cleanScript);
   await page.getByRole("button", { name: `Open ${cleanName}`, exact: true }).waitFor({ state: "hidden" });
+}
+async function assertScriptTaskManager(application: ElectronApplication, page: Page, scriptRoot: string, scriptId: string, name: string, artifacts: string): Promise<void> {
+  const stored = await readFile(join(scriptRoot, `${scriptId}.js`), "utf8");
+  const draft = 'console.log("shared unsaved task");';
+  await editSource(page, draft);
+  const opened = application.waitForEvent("window");
+  await page.getByRole("button", { name: "Open script task manager", exact: true }).click();
+  let manager = await opened;
+  manager.setDefaultTimeout(15_000);
+  const managerErrors: string[] = [];
+  manager.on("pageerror", (error) => managerErrors.push(error.message));
+  await manager.getByRole("heading", { name: "Task Manager", exact: true }).waitFor();
+  assert.equal(manager.url(), "sliver://app/index.html?surface=script-task-manager");
+  assert.equal(await manager.locator(".monaco-editor").count(), 0);
+  assert.equal(await manager.evaluate(() => typeof (globalThis as unknown as { sliver?: unknown }).sliver), "undefined");
+  assert.equal(await manager.evaluate(() => typeof (globalThis as unknown as { scriptTasks?: { publish?: unknown } }).scriptTasks?.publish), "undefined");
+  const output = (view: Page) => view.getByLabel("Script output transcript", { exact: true });
+  await manager.getByRole("button", { name: `Run ${name}`, exact: true }).click();
+  await waitUntil(async () => (await output(manager).textContent()) === "shared unsaved task\n");
+  await manager.getByRole("status").filter({ hasText: /^Completed ·/u }).waitFor();
+  assert.equal(await output(manager).textContent(), "shared unsaved task\n");
+  assert.equal(await output(page).textContent(), "shared unsaved task\n");
+  assert.equal(await readFile(join(scriptRoot, `${scriptId}.js`), "utf8"), stored, "Task Manager must run the shared unsaved draft without saving it");
+  await manager.getByLabel("Script output terminal", { exact: true }).locator("canvas").waitFor();
+  await manager.getByRole("button", { name: "Copy output", exact: true }).click();
+  await waitUntil(async () => (await application.evaluate(({ clipboard }) => clipboard.readText())) === "shared unsaved task\n");
+
+  const busyOutput = "shared busy task\n".repeat(64);
+  // Fill console batches before blocking so Stop can preserve delivered output.
+  await editSource(page, 'for (let i = 0; i < 64; i++) console.log("shared busy task"); while (true) {}');
+  await manager.getByRole("button", { name: `Run ${name}`, exact: true }).click();
+  await page.getByRole("button", { name: "Stop", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await manager.getByRole("status").filter({ hasText: /^Stopped ·/u }).waitFor();
+  await page.getByRole("button", { name: "Run", exact: true }).click();
+  await manager.getByRole("button", { name: `Stop ${name}`, exact: true }).click();
+  await page.getByText(/^Stopped ·/u).waitFor();
+
+  const second = await page.evaluate(async () => {
+    const result = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.createScript({ name: "Task manager second", source: 'console.log("second task output");' });
+    if (!result.ok || !result.value) throw new Error(result.error ?? "Could not create second task");
+    return result.value;
+  });
+  await page.getByRole("button", { name: "Run", exact: true }).click();
+  await manager.getByRole("button", { name: `Stop ${name}`, exact: true }).waitFor();
+  await waitUntil(async () => (await output(page).textContent()) === busyOutput);
+  await page.getByRole("row", { name: "Overview", exact: true }).click();
+  await manager.getByRole("button", { name: "Run Task manager second", exact: true }).click();
+  await manager.getByRole("heading", { name: "Task manager second", exact: true }).waitFor();
+  await manager.getByRole("status").filter({ hasText: /^Completed ·/u }).waitFor();
+  assert.equal(await output(manager).textContent(), "second task output\n");
+  await manager.getByRole("button", { name: `Stop ${name}`, exact: true }).click();
+  assert.equal(await output(manager).textContent(), "second task output\n", "Stopping another task preserves the selected console");
+  await manager.getByRole("button", { name: `Select ${name}`, exact: true }).click();
+  await manager.getByRole("status").filter({ hasText: /^Stopped ·/u }).waitFor();
+  assert.equal(await output(manager).textContent(), busyOutput);
+  await manager.getByRole("button", { name: "Select Task manager second", exact: true }).click();
+  await manager.getByRole("status").filter({ hasText: /^Completed ·/u }).waitFor();
+  assert.equal(await output(manager).textContent(), "second task output\n");
+  await manager.screenshot({ path: join(artifacts, "script-task-manager.png"), animations: "disabled" });
+
+  const managerWindow = await application.browserWindow(manager);
+  const managerId = await managerWindow.evaluate((window) => window.id);
+  const labels = await application.evaluate(({ Menu }) => Menu.getApplicationMenu()!.items.map((item) => item.label));
+  assert.equal(labels[labels.indexOf("Network") + 1], "Scripts");
+  await invokeScriptMenu(application, managerId, `scripts.edit.${second.id}`);
+  await page.getByRole("heading", { name: "Script Editor", exact: true }).waitFor();
+  await page.getByRole("heading", { name: second.name, exact: true }).waitFor();
+  assert.equal(await output(page).textContent(), "second task output\n");
+  await invokeScriptMenu(application, managerId, `scripts.edit.${scriptId}`);
+  await page.getByRole("heading", { name, exact: true }).waitFor();
+  await page.getByText("Unsaved changes", { exact: true }).waitFor();
+  assert.equal(await output(page).textContent(), busyOutput);
+  await invokeScriptMenu(application, managerId, "scripts.task-manager");
+  assert.equal(application.windows().filter((view) => view.url().includes("surface=script-task-manager")).length, 1);
+  await manager.close();
+  const reopened = application.waitForEvent("window");
+  const ownerWindow = await application.browserWindow(page);
+  await invokeScriptMenu(application, await ownerWindow.evaluate((window) => window.id), "scripts.task-manager");
+  manager = await reopened;
+  await manager.getByRole("heading", { name: "Task Manager", exact: true }).waitFor();
+  await manager.getByRole("status").filter({ hasText: /^Stopped ·/u }).waitFor();
+  assert.equal(await output(manager).textContent(), busyOutput, "Closing Task Manager must preserve the owner's tasks and output");
+  await manager.close();
+  await page.evaluate(async (script) => {
+    const result = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.deleteScript({ id: script.id, expectedRevision: script.revision });
+    if (!result.ok) throw new Error(result.error);
+  }, second);
+  assert.deepEqual(managerErrors, [], "The Task Manager must have no renderer errors");
+}
+async function invokeScriptMenu(application: ElectronApplication, windowId: number, itemId: string): Promise<void> {
+  await waitUntil(async () => application.evaluate(({ BrowserWindow, Menu }, request) => {
+    const window = BrowserWindow.fromId(request.windowId);
+    const item = Menu.getApplicationMenu()?.getMenuItemById(request.itemId);
+    if (!window || !item) return false;
+    window.show(); window.focus();
+    Reflect.apply(item.click, item, [item, window, {}]);
+    return true;
+  }, { windowId, itemId }));
 }
 async function waitUntil(check: () => Promise<boolean>): Promise<void> {
   const deadline = Date.now() + 5_000;

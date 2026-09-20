@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
+import type { SliverDesktopAPI } from "../../../shared/contracts";
 import { escapeScriptOutput, SCRIPT_LIMITS, type ScriptConsoleRecord } from "../../../shared/script-runtime-protocol";
 import type { TerminalRuntimeAsset } from "../../../shared/stream-contracts";
 import { useApplicationSettings } from "./ApplicationSettingsProvider";
@@ -11,12 +12,14 @@ export function scriptOutputText(records: readonly ScriptConsoleRecord[]): strin
   return records.map((record) => escapeScriptOutput(record.text) + "\n").join("");
 }
 
-export function ScriptOutputTerminal({ records, resetKey, className, onReady }: {
+export function ScriptOutputTerminal({ records, resetKey, className, onReady, runtimeApi }: {
   records: readonly ScriptConsoleRecord[];
   resetKey: string | number;
   className?: string;
   onReady?: () => void;
+  runtimeApi?: Pick<SliverDesktopAPI, "getTerminalRuntime">;
 }): React.JSX.Element {
+  const api = runtimeApi ?? window.sliver;
   const settings = useApplicationSettings();
   const [runtime, setRuntime] = useState<TerminalRuntimeAsset>();
   const [error, setError] = useState<string>();
@@ -32,7 +35,7 @@ export function ScriptOutputTerminal({ records, resetKey, className, onReady }: 
 
   useEffect(() => {
     let active = true;
-    void window.sliver.getTerminalRuntime().then((result) => {
+    void api.getTerminalRuntime().then((result) => {
       if (!active) return;
       if (!result.ok || !result.value) throw new Error(result.error ?? "Terminal runtime unavailable");
       setRuntime(result.value);
@@ -40,7 +43,7 @@ export function ScriptOutputTerminal({ records, resetKey, className, onReady }: 
       if (active) setError(reason instanceof Error ? reason.message : "Terminal runtime unavailable");
     });
     return () => { active = false; };
-  }, []);
+  }, [api]);
 
   useEffect(() => { transport.update(records); }, [records, transport]);
 

@@ -94,7 +94,7 @@ import {
   unregisterIpcHandlers,
   type TrustedWindowIdentity,
 } from "./ipc.js";
-import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl } from "./security.js";
+import { configureSessionSecurity, hardenWindow, isTrustedRendererUrl, isSameRendererDocument } from "./security.js";
 import { installApplicationNavigationSecurity } from "./navigation-security.js";
 import { APP_RENDERER_URL, APP_SCHEME, APP_SCHEME_PRIVILEGES, createAppProtocolHandler } from "./app-protocol.js";
 import {
@@ -118,6 +118,8 @@ import { formatSshCommand } from "./ssh-command.js";
 import {
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
   NETWORK_SESSION_PARTITION,
+  SCRIPT_TASK_MANAGER_SESSION_PARTITION,
+  scriptTaskManagerWindowOptions,
   cloudDeploymentWindowOptions,
   consoleWindowOptions,
   interactionWindowOptions,
@@ -154,6 +156,9 @@ import {
   unregisterNetworkForwardingIpcHandlers,
 } from "./network-forwarding-ipc.js";
 
+import { ScriptTaskManagerRelay } from "./script-task-manager.js";
+import { registerScriptTaskManagerIpc, unregisterScriptTaskManagerIpc } from "./script-task-manager-ipc.js";
+import type { ScriptSummary } from "../shared/script-contracts.js";
 import { ScriptStore } from "./script-store.js";
 import { ScriptEditorCloseGuard } from "./script-editor-close-guard.js";
 import { confirmDiscardScriptChanges } from "./script-editor-close-dialog.js";
@@ -174,6 +179,7 @@ type NativeWindowSurface =
   | "managed-shells"
   | "console"
   | "network"
+  | "script-task-manager"
   | "ssh";
 
 export interface StartApplicationOptions {
@@ -184,6 +190,7 @@ export interface StartApplicationOptions {
   networkPreloadPath?: string;
   armoryPreloadPath?: string;
   sshPreloadPath?: string;
+  scriptTaskManagerPreloadPath?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
   consoleClientRootDirectory?: string;
@@ -312,6 +319,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     "../preload/ssh.cjs",
   );
+  const scriptTaskManagerPreloadPath = options.scriptTaskManagerPreloadPath ?? join(mainBundleDirectory, "../preload/script-task-manager.cjs");
   const consoleClientExecutable = options.consoleClientExecutable ?? resolveConsoleClientExecutable(
     app.isPackaged,
     process.resourcesPath,
@@ -334,9 +342,19 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let armoryRendererReady = false;
   const networkRendererUrl = rendererUrlForSurface(rendererUrl, "network");
   const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
+  const scriptTaskManagerRendererUrl = rendererUrlForSurface(rendererUrl, "script-task-manager");
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
+  const scriptManagerWindows = new Map<number, { window: BrowserWindow; owner: TrustedWindowIdentity }>();
+  const openingScriptManagers = new Map<number, Promise<OperationResult>>();
+  const scriptTaskRelay = new ScriptTaskManagerRelay((contentsId, channel, ...payload) => {
+    const window = windowsByContentsId.get(contentsId);
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+    try { window.webContents.send(channel, ...payload); } catch { /* A retiring document cannot receive relay data. */ }
+  });
+  let scriptMenuCatalog: ScriptSummary[] = [];
+  let scriptMenuRefresh = 0;
   const scriptCloseGuard = new ScriptEditorCloseGuard((contentsIds) => confirmDiscardScriptChanges(contentsIds, {
     getWindow: (id) => {
       const window = windowsByContentsId.get(id);
@@ -357,12 +375,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       return owner ? dialog.showMessageBoxSync(owner, prompt) : dialog.showMessageBoxSync(prompt);
     },
   }));
-  // Lazy initialization keeps startup and unrelated tests free of disk writes.
+  // Native Scripts menu and the editor share the main-owned saved catalog.
   const scriptStore = new ScriptStore(join(consoleClientRootDirectory, "gui", "scripts"), () => {
     for (const window of windows) {
       if (window.isDestroyed() || window.webContents.isDestroyed() || nativeWindowSurfaces.get(window) !== "workspace") continue;
       try { window.webContents.send(IPC.scriptsChanged); } catch { /* A closing window reloads the catalog on its next visit. */ }
     }
+    void refreshScriptMenu();
   });
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
@@ -452,7 +471,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
+    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh" | "script-task-manager",
   ): Promise<void> {
     const url = new URL(rendererUrl);
     if (surface) url.searchParams.set("surface", surface);
@@ -501,6 +520,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         ? cloudDeploymentRendererUrl
         : surface === "network"
           ? networkRendererUrl
+        : surface === "script-task-manager"
+          ? scriptTaskManagerRendererUrl
         : surface === "ssh"
           ? sshRendererUrl
           : undefined,
@@ -597,12 +618,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         if (registerWithConnectionRegistry) {
           void registry.closeWindowStreams(contentsId, "navigation").catch(() => undefined);
         }
+        if (surface === "workspace" && completedInitialLoad) retireScriptHost(contentsId);
         if (sessionShellRecord && completedInitialLoad) retireSessionShellWindow(sessionShellRecord);
         if (interactionWindowRecord && completedInitialLoad) resetInteractionWindowClaim(interactionWindowRecord);
         if (consoleWindowRecord && completedInitialLoad) retireConsoleWindow(consoleWindowRecord, "navigation");
       }
     });
     window.webContents.on("render-process-gone", () => {
+      if (surface === "workspace") retireScriptHost(contentsId);
       if (registerWithConnectionRegistry) {
         void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
       }
@@ -670,6 +693,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       });
     }
     window.on("closed", () => {
+      if (surface === "workspace") retireScriptHost(contentsId);
       scriptCloseGuard.forget(contentsId);
       shortcutRecordingWindows.delete(window);
       windows.delete(window);
@@ -722,9 +746,155 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       // the operator explicitly approved discarding this beforeunload veto.
       if (scriptCloseGuard.allowClose(window.webContents.id, true)) event.preventDefault();
     });
-    window.webContents.on("did-finish-load", () => scriptCloseGuard.forget(window.webContents.id));
+    window.webContents.on("did-finish-load", () => {
+      scriptCloseGuard.forget(window.webContents.id);
+      scriptTaskRelay.registerOwner(window.webContents.id);
+    });
     void loadRenderer(window);
     return window;
+  }
+
+  function retireScriptHost(ownerId: number): void {
+    const managerId = scriptTaskRelay.removeOwner(ownerId);
+    if (managerId === undefined) return;
+    const record = scriptManagerWindows.get(managerId);
+    scriptManagerWindows.delete(managerId);
+    if (record && !record.window.isDestroyed()) record.window.destroy();
+  }
+
+  function scriptWorkspace(sourceWindow?: BrowserWindow): BrowserWindow {
+    const focused = sourceWindow ?? BrowserWindow.getFocusedWindow();
+    if (focused && !focused.isDestroyed() && !focused.webContents.isDestroyed()) {
+      if (nativeWindowSurfaces.get(focused) === "workspace") return focused;
+      const record = scriptManagerWindows.get(focused.webContents.id);
+      const owner = record && windowsByContentsId.get(record.owner.contentsId);
+      if (record && owner && sameWindowIdentity(record.owner, identityForWindow(owner))) return owner;
+    }
+    return [...windows].reverse().find((window) => nativeWindowSurfaces.get(window) === "workspace" &&
+      !window.isDestroyed() && !window.webContents.isDestroyed()) ?? createWindow();
+  }
+
+  async function readyScriptWorkspace(sourceWindow?: BrowserWindow): Promise<BrowserWindow> {
+    const owner = scriptWorkspace(sourceWindow);
+    if (!isSameRendererDocument(owner.webContents.getURL(), rendererUrl) || owner.webContents.isLoadingMainFrame()) {
+      await new Promise<void>((resolveReady, reject) => {
+        const contents = owner.webContents;
+        const dispose = (): void => {
+          clearTimeout(timeout);
+          contents.removeListener("did-finish-load", ready);
+          contents.removeListener("destroyed", failed);
+          contents.removeListener("render-process-gone", failed);
+        };
+        const ready = (): void => { dispose(); resolveReady(); };
+        const failed = (): void => { dispose(); reject(new Error("The script workspace closed while loading")); };
+        const timeout = setTimeout(failed, 15_000);
+        contents.once("did-finish-load", ready);
+        contents.once("destroyed", failed);
+        contents.once("render-process-gone", failed);
+      });
+    }
+    if (owner.isDestroyed() || owner.webContents.isDestroyed() || !isSameRendererDocument(owner.webContents.getURL(), rendererUrl)) {
+      throw new Error("The script workspace is unavailable");
+    }
+    scriptTaskRelay.registerOwner(owner.webContents.id);
+    return owner;
+  }
+
+  async function openScriptTaskManager(sourceWindow?: BrowserWindow): Promise<OperationResult> {
+    if (shutdown.isStopping) return { ok: false, error: "Script Task Manager is unavailable while the application is closing" };
+    try {
+      const owner = await readyScriptWorkspace(sourceWindow);
+      if (shutdown.isStopping) return { ok: false, error: "Script Task Manager is unavailable while the application is closing" };
+      const ownerId = owner.webContents.id;
+      const opening = openingScriptManagers.get(ownerId);
+      if (opening) return await opening;
+      const pending = createScriptTaskManager(owner);
+      openingScriptManagers.set(ownerId, pending);
+      try { return await pending; } finally {
+        if (openingScriptManagers.get(ownerId) === pending) openingScriptManagers.delete(ownerId);
+      }
+    } catch (error) {
+      return { ok: false, error: applicationErrorMessage(error, "Script Task Manager could not be opened") };
+    }
+  }
+
+  async function createScriptTaskManager(owner: BrowserWindow): Promise<OperationResult> {
+    const ownerIdentity = identityForWindow(owner);
+    if (!ownerIdentity) throw new Error("The script workspace is unavailable");
+    const existingId = scriptTaskRelay.managerForOwner(ownerIdentity.contentsId);
+    const existing = existingId === undefined ? undefined : scriptManagerWindows.get(existingId);
+    if (existing && !existing.window.isDestroyed() && !existing.window.webContents.isDestroyed()) {
+      if (existing.window.isMinimized()) existing.window.restore();
+      existing.window.show();
+      existing.window.focus();
+      return { ok: true };
+    }
+    if (existingId !== undefined) scriptTaskRelay.detachManager(existingId);
+    const window = new BrowserWindow(scriptTaskManagerWindowOptions(
+      scriptTaskManagerPreloadPath, process.platform, applicationIcons.getIconPath(), nativeTheme.shouldUseDarkColors,
+    ));
+    const managerId = window.webContents.id;
+    const record = { window, owner: ownerIdentity };
+    scriptManagerWindows.set(managerId, record);
+    window.on("closed", () => {
+      if (scriptManagerWindows.get(managerId) === record) scriptManagerWindows.delete(managerId);
+      scriptTaskRelay.detachManager(managerId);
+    });
+    window.webContents.on("render-process-gone", () => { if (!window.isDestroyed()) window.destroy(); });
+    window.webContents.on("did-fail-load", (_event, _code, _description, _url, isMainFrame) => {
+      if (isMainFrame && !window.isDestroyed()) window.destroy();
+    });
+    try {
+      trackWindow(window, undefined, undefined, undefined, undefined, "script-task-manager", false);
+      scriptTaskRelay.attachManager(ownerIdentity.contentsId, managerId);
+      await loadRenderer(window, "script-task-manager");
+      if (window.isDestroyed() || !sameWindowIdentity(ownerIdentity, identityForWindow(owner))) throw new Error("The script workspace closed while loading");
+      window.setTitle("Script Task Manager");
+      window.show();
+      window.focus();
+      return { ok: true };
+    } catch (error) {
+      scriptTaskRelay.detachManager(managerId);
+      scriptManagerWindows.delete(managerId);
+      if (!window.isDestroyed()) window.destroy();
+      throw error;
+    }
+  }
+
+  async function editScriptFromMenu(id: string, sourceWindow?: BrowserWindow): Promise<OperationResult> {
+    if (shutdown.isStopping) return { ok: false, error: "The script editor is unavailable while the application is closing" };
+    try {
+      // Recheck disk availability because native menu items may outlive a catalog refresh.
+      await scriptStore.read({ id });
+      const owner = await readyScriptWorkspace(sourceWindow);
+      if (shutdown.isStopping) return { ok: false, error: "The script editor is unavailable while the application is closing" };
+      if (owner.isMinimized()) owner.restore();
+      owner.show();
+      owner.focus();
+      scriptTaskRelay.requestEdit(owner.webContents.id, id);
+      return { ok: true };
+    } catch (error) {
+      void refreshScriptMenu();
+      return { ok: false, error: applicationErrorMessage(error, "The script could not be opened") };
+    }
+  }
+
+  function reportScriptMenuError(result: OperationResult): void {
+    if (!result.ok && !shutdown.isStopping) dialog.showErrorBox("Scripts unavailable", result.error);
+  }
+
+  async function refreshScriptMenu(): Promise<void> {
+    const request = ++scriptMenuRefresh;
+    try {
+      const catalog = await scriptStore.list();
+      if (request !== scriptMenuRefresh || shutdown.isStopping) return;
+      scriptMenuCatalog = catalog.scripts;
+      installMenu();
+    } catch {
+      if (request !== scriptMenuRefresh || shutdown.isStopping) return;
+      scriptMenuCatalog = [];
+      installMenu();
+    }
   }
 
   function publishArmoryChanged(): void {
@@ -2111,6 +2281,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
             }
           });
         },
+        openScriptTaskManager: (sourceWindow) => {
+          void openScriptTaskManager(sourceWindow instanceof BrowserWindow ? sourceWindow : undefined).then(reportScriptMenuError);
+        },
+        editScript: (id, sourceWindow) => {
+          void editScriptFromMenu(id, sourceWindow instanceof BrowserWindow ? sourceWindow : undefined).then(reportScriptMenuError);
+        },
         openDocumentation: () => void shell.openExternal("https://sliver.sh/docs"),
         showAboutPanel: () => app.showAboutPanel(),
         downloadRelease: (target) => startReleaseDownload(target),
@@ -2126,6 +2302,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       true,
       crackstationReleaseCatalog,
       applicationSettingsStore?.getState(),
+      scriptMenuCatalog,
     );
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
@@ -2624,7 +2801,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   configureSessionSecurity(networkSession);
   const armorySession = session.fromPartition(ARMORY_SESSION_PARTITION);
   configureSessionSecurity(armorySession);
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession]);
+  const scriptTaskManagerSession = session.fromPartition(SCRIPT_TASK_MANAGER_SESSION_PARTITION);
+  configureSessionSecurity(scriptTaskManagerSession, undefined, scriptTaskManagerRendererUrl);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, scriptTaskManagerSession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
@@ -2715,6 +2894,26 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       },
     },
   );
+  registerScriptTaskManagerIpc({
+    relay: scriptTaskRelay,
+    workspaceUrl: rendererUrl,
+    managerUrl: scriptTaskManagerRendererUrl,
+    authorize: (window, identity) => {
+      if (!sameWindowIdentity(identity, identityForWindow(window))) return undefined;
+      if (nativeWindowSurfaces.get(window) === "workspace") {
+        scriptTaskRelay.registerOwner(identity.contentsId);
+        return { role: "owner", ownerId: identity.contentsId };
+      }
+      const record = scriptManagerWindows.get(identity.contentsId);
+      const owner = record && windowsByContentsId.get(record.owner.contentsId);
+      if (!record || record.window !== window || !owner || nativeWindowSurfaces.get(window) !== "script-task-manager" ||
+        !sameWindowIdentity(record.owner, identityForWindow(owner)) ||
+        scriptTaskRelay.ownerForManager(identity.contentsId) !== record.owner.contentsId) return undefined;
+      return { role: "manager", ownerId: record.owner.contentsId };
+    },
+    open: (window) => openScriptTaskManager(window),
+    settings: () => loadedApplicationSettingsStore.getState(),
+  });
   registerCloudDeploymentIpcHandlers(
     cloudDeploymentController,
     cloudDeploymentRendererUrl,
@@ -2793,6 +2992,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       sameWindowIdentity(identity, identityForWindow(window)),
   );
   installMenu();
+  void refreshScriptMenu();
   void refreshReleaseMenu();
   void refreshCrackstationReleaseMenu();
   app.on("activate", onActivate);
@@ -2824,8 +3024,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterNetworkForwardingIpcHandlers();
       unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
+      unregisterScriptTaskManagerIpc();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
+        if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
         window.close();
       }
@@ -2867,7 +3069,7 @@ function readLinuxPackageType(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh",
+  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh" | "script-task-manager",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);

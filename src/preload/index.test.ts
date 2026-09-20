@@ -15,6 +15,7 @@ import {
   APPLICATION_CONTEXT_MENU_IPC,
   type ApplicationContextMenuAPI,
 } from "../shared/application-context-menu-contracts.js";
+import { SCRIPT_TASK_IPC, type ScriptTaskManagerAPI } from "../shared/script-task-manager-contracts.js";
 
 type InvokeArgumentsByMethod = {
   [Method in keyof typeof IPC_INVOKE]: IpcInvokeArgs<(typeof IPC_INVOKE)[Method]>;
@@ -202,6 +203,22 @@ vi.stubGlobal("document", {
 await import("./index.js");
 
 describe("sandboxed preload bridge", () => {
+  it("buffers native host/edit requests until subscribers mount and consumes only the latest valid selection", async () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => name === "scriptTasks")![1] as unknown as ScriptTaskManagerAPI;
+    const hostEvent = electronMocks.on.mock.calls.find(([channel]) => channel === SCRIPT_TASK_IPC.hostRequested)![1] as (...args: unknown[]) => void;
+    const editEvent = electronMocks.on.mock.calls.find(([channel]) => channel === SCRIPT_TASK_IPC.editRequested)![1] as (...args: unknown[]) => void;
+    const id = "123e4567-e89b-42d3-a456-426614174000";
+    hostEvent({}, "discard payload"); hostEvent({}); hostEvent({});
+    editEvent({}, "123e4567-e89b-42d3-a456-426614174001"); editEvent({}, id);
+    editEvent({}, "../source.js"); editEvent({}, id, "extra");
+    const host = vi.fn(); const edit = vi.fn();
+    const stopHost = api.onHostRequested(host); const stopEdit = api.onEditRequested(edit);
+    await Promise.resolve();
+    expect(host).toHaveBeenCalledExactlyOnceWith(); expect(edit).toHaveBeenCalledExactlyOnceWith(id);
+    stopHost(); stopEdit();
+    const next = vi.fn(); const stopNext = api.onEditRequested(next);
+    await Promise.resolve(); expect(next).not.toHaveBeenCalled(); stopNext();
+  });
   it("exposes script invalidation without leaking the Electron event and unsubscribes cleanly", () => {
     const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
     const listener = vi.fn();
@@ -215,7 +232,7 @@ describe("sandboxed preload bridge", () => {
   });
 
   it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
-    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(2);
+    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(3);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];
     expect(call).toBeDefined();
     if (!call) throw new Error("Expected the preload API to be exposed");

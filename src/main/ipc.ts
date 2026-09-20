@@ -785,8 +785,8 @@ export function unregisterIpcHandlers(): void {
 export function isTrustedSender(sender: WebContents, rendererUrl: string): boolean {
   try {
     if (sender.isDestroyed() || !BrowserWindow.fromWebContents(sender)) return false;
-    // Armory has an independent local-package capability bridge.
-    if (new URL(sender.getURL()).searchParams.get("surface") === "armory") return false;
+    // These surfaces have independent, narrowly scoped capability bridges.
+    if (["armory", "script-task-manager"].includes(new URL(sender.getURL()).searchParams.get("surface") ?? "")) return false;
     return isTrustedRendererUrl(sender.getURL(), rendererUrl);
   } catch {
     return false;

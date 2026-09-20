@@ -46,6 +46,7 @@ export default defineConfig({
           network: resolve("src/preload/network.ts"),
           armory: resolve("src/preload/armory.ts"),
           ssh: resolve("src/preload/ssh.ts"),
+          "script-task-manager": resolve("src/preload/script-task-manager.ts"),
         },
         output: {
           format: "cjs",

@@ -154,9 +154,9 @@ describe("trusted Electron IPC boundary", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("rejects Armory windows at every operator invoke channel", () => {
+  it.each(["armory", "script-task-manager"])("rejects %s windows at every operator invoke channel", (surface) => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
-    const { event } = invokeEvent("sliver://app/index.html?surface=armory", 77);
+    const { event } = invokeEvent(`sliver://app/index.html?surface=${surface}`, 77);
     for (const handler of electronMocks.handlers.values()) {
       expect(() => handler(event)).toThrow(/untrusted renderer/iu);
     }

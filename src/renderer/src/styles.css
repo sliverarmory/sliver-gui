@@ -1053,6 +1053,14 @@
   color: var(--field-foreground);
 }
 
+.script-task-manager-workspace {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 html[data-reduce-motion="true"] *,
 html[data-reduce-motion="true"] *::before,
 html[data-reduce-motion="true"] *::after {

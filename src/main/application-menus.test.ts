@@ -185,7 +185,7 @@ describe("configured native shortcuts", () => {
   it("shows the configured accelerators while preserving trusted menu callbacks", () => {
     const actions = {
       newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(), openArmory: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(), openArmory: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(), checkForApplicationUpdates: vi.fn(), restartToApplyApplicationUpdate: vi.fn(),
     };
     const terminal = { newTab: vi.fn(), closeTab: vi.fn(), selectTab: vi.fn(), closeWindow: vi.fn(), showSettings: vi.fn() };
@@ -207,12 +207,31 @@ describe("configured native shortcuts", () => {
 });
 
 describe("application menu templates", () => {
+  it("places Scripts after Network and routes task manager/edit actions with the source window", () => {
+    const actions = { newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), openCloudDeployment: vi.fn(), openArmory: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),
+      downloadRelease: vi.fn(), checkForApplicationUpdates: vi.fn(), restartToApplyApplicationUpdate: vi.fn() };
+    const id = "123e4567-e89b-42d3-a456-426614174000";
+    const template = buildApplicationMenuTemplate("win32", "Sliver GUI", actions, undefined, undefined, undefined, [], false, undefined, undefined,
+      [{ id, name: "Logs & checks" }]);
+    const labels = template.map((item) => item.label);
+    expect(labels[labels.indexOf("Network") + 1]).toBe("Scripts");
+    const items = menuItems(template, "Scripts"); const source = {} as BrowserWindow;
+    items[0]!.click!({} as MenuItem, source, {} as Electron.KeyboardEvent);
+    expect(actions.openScriptTaskManager).toHaveBeenCalledExactlyOnceWith(source);
+    const edit = items[1]!.submenu as MenuItemConstructorOptions[];
+    expect(edit[0]).toMatchObject({ id: `scripts.edit.${id}`, label: "Logs && checks" });
+    edit[0]!.click!({} as MenuItem, source, {} as Electron.KeyboardEvent);
+    expect(actions.editScript).toHaveBeenCalledExactlyOnceWith(id, source);
+    const empty = buildApplicationMenuTemplate("darwin", "Sliver GUI", actions);
+    expect((menuItems(empty, "Scripts")[1]!.submenu as MenuItemConstructorOptions[])[0]).toEqual({ label: "No saved scripts", enabled: false });
+  });
   it("keeps explicit Edit, View, and Help menus with the expected platform actions", () => {
     const actions = {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
@@ -230,6 +249,7 @@ describe("application menu templates", () => {
       "Armory",
       "Cloud",
       "Network",
+      "Scripts",
       "Window",
       "Help",
     ]);
@@ -276,6 +296,8 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork,
+      openScriptTaskManager: vi.fn(),
+      editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
@@ -317,7 +339,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment,
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
@@ -478,7 +500,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel,
@@ -488,7 +510,7 @@ describe("application menu templates", () => {
     });
 
     expect(template.map((item) => item.label)).toEqual([
-      "File", "Edit", "View", "Armory", "Cloud", "Network", "Window", "Help",
+      "File", "Edit", "View", "Armory", "Cloud", "Network", "Scripts", "Window", "Help",
     ]);
     expect(menuRoles(template, "File")).toContain("quit");
     expect(menuRoles(template, "Window")).toContain("close");
@@ -502,7 +524,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
@@ -534,6 +556,7 @@ describe("application menu templates", () => {
       "Armory",
       "Cloud",
       "Network",
+      "Scripts",
       "Terminal",
       "Window",
       "Help",
@@ -603,7 +626,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
@@ -673,7 +696,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
@@ -727,7 +750,7 @@ describe("application menu templates", () => {
       newWindow: vi.fn(),
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(),
+      openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(),
       openArmory: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
