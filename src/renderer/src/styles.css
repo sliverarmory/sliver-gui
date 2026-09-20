@@ -742,7 +742,7 @@
 /* The embedded session workspace owns the full scrollport so its chrome can
    become full-bleed without including the collapsible sidebar. */
 .app-content:has(> .session-workspace[data-presentation="embedded"]) {
-  padding: 0 0 5rem;
+  padding: 0 0 10px;
 }
 
 .app-content:has(> .session-workspace[data-presentation="embedded"])
@@ -841,7 +841,43 @@
   border-radius: 0;
 }
 
-/* Registry values form a continuous editor pane, including virtualized rows. */
+/* Registry is a bounded workspace: its editor consumes only the space left by
+   the trail and session chrome, while the tree and values table scroll inside. */
+.session-workspace[data-selected-panel="registry"] {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-workspace[data-selected-panel="registry"] > .session-workspace__trail-frame,
+.session-workspace[data-selected-panel="registry"]
+  > .session-workspace__tabs
+  > .session-workspace__sticky {
+  flex: none;
+}
+
+.session-workspace[data-selected-panel="registry"] > .session-workspace__tabs,
+.session-workspace[data-selected-panel="registry"]
+  > .session-workspace__tabs
+  > :is(.session-workspace__panel-content, .session-workspace__viewport) {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.session-workspace[data-selected-panel="registry"]
+  :is(.session-workspace__viewport-content, .session-workspace__registry-panel) {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-workspace[data-selected-panel="registry"] .session-workspace__registry-panel {
+  margin-top: 0;
+}
+
+/* Registry values form a continuous editor pane. */
 .session-registry-values-grid.table-root,
 .session-registry-values-grid.table-root :is(.table__content, .table__header, .table__body, .table__row, .table__column, .table__cell) {
   border-radius: 0;
@@ -853,6 +889,14 @@
 
 .session-registry-values-grid.table-root .table__body {
   box-shadow: none;
+}
+
+.session-registry-values-grid.table-root .table__header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  background: var(--color-background);
+  box-shadow: 0 1px 0 var(--color-separator);
 }
 
 @media (max-width: 900px) {

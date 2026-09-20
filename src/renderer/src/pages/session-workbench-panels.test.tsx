@@ -53,6 +53,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -989,6 +990,140 @@ describe("session workbench panels", () => {
     expect(await screen.findByText("super-secret")).toBeInTheDocument();
   });
 
+  it("fuzzy-filters loaded environment names and visible values locally without searching hidden secrets", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.environment.list") {
+        return workbench(input.operationId, {
+          items: [
+            { name: "HTTP_PROXY", value: "http://127.0.0.1:8080", sensitive: false, redacted: false },
+            { name: "TOOL_PATH", value: "/usr/local/bin", sensitive: false, redacted: false },
+            { name: "API_TOKEN", sensitive: true, redacted: true },
+          ],
+          page: { limit: 100, total: 3, truncated: false },
+        });
+      }
+      if (input.operationId === "session.environment.reveal") {
+        return workbench(input.operationId, {
+          name: input.name,
+          value: "super-secret",
+          sensitive: true,
+          revealedAt: "2026-08-09T20:00:00.000Z",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(<SessionEnvironmentPanel {...panelContext()} />);
+    const filter = await screen.findByRole("searchbox", { name: "Filter environment variables" });
+    const grid = screen.getByRole("grid", { name: "Session environment variables" });
+
+    await user.type(filter, "hPxY");
+    expect(within(grid).getByRole("row", { name: /HTTP_PROXY/u })).toBeInTheDocument();
+    expect(within(grid).queryByRole("row", { name: /TOOL_PATH/u })).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 3 loaded environment variables matching “hPxY”")).toBeInTheDocument();
+
+    await user.clear(filter);
+    await user.type(filter, "USR BN");
+    expect(within(grid).getByRole("row", { name: /TOOL_PATH/u })).toBeInTheDocument();
+    expect(within(grid).queryByRole("row", { name: /HTTP_PROXY/u })).not.toBeInTheDocument();
+
+    await user.clear(filter);
+    await user.type(filter, "suprscrt");
+    expect(screen.getByText("Showing 0 of 3 loaded environment variables matching “suprscrt”")).toBeInTheDocument();
+    expect(within(grid).queryByRole("row", { name: /API_TOKEN/u })).not.toBeInTheDocument();
+
+    await user.clear(filter);
+    await user.click(within(grid).getByRole("button", { name: "Reveal API_TOKEN" }));
+    expect(await within(grid).findByText("super-secret")).toBeInTheDocument();
+    await user.type(filter, "SuPrScRt");
+    expect(within(grid).getByRole("row", { name: /API_TOKEN/u })).toBeInTheDocument();
+    expect(within(grid).queryByRole("row", { name: /HTTP_PROXY/u })).not.toBeInTheDocument();
+
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.environment.list")).toEqual([
+      [{ operationId: "session.environment.list", limit: 100 }],
+    ]);
+  });
+
+  it("keeps a fuzzy environment filter active while loading a matching continuation row", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId !== "session.environment.list") throw new Error(`Unexpected operation ${input.operationId}`);
+      if (input.cursor === "environment-2") {
+        return workbench(input.operationId, {
+          items: [{ name: "M2_PAGE_105", value: "continuation-value", sensitive: false, redacted: false }],
+          page: { limit: 100, total: 2, truncated: false },
+        });
+      }
+      return workbench(input.operationId, {
+        items: [{ name: "HOME", value: "/Users/e2e", sensitive: false, redacted: false }],
+        page: { limit: 100, total: 2, truncated: true, nextCursor: "environment-2" },
+      });
+    });
+
+    render(<SessionEnvironmentPanel {...panelContext()} />);
+    const filter = await screen.findByRole("searchbox", { name: "Filter environment variables" });
+    const grid = screen.getByRole("grid", { name: "Session environment variables" });
+    await user.type(filter, "m2Pg105");
+
+    expect(screen.getByText("Showing 0 of 1 loaded environment variables matching “m2Pg105”")).toBeInTheDocument();
+    expect(within(grid).queryByRole("row", { name: /HOME/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load more variables" })).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Load more variables" }));
+    expect(await within(grid).findByRole("row", { name: /M2_PAGE_105/u })).toBeInTheDocument();
+    expect(filter).toHaveValue("m2Pg105");
+    expect(within(grid).queryByRole("row", { name: /HOME/u })).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 2 loaded environment variables matching “m2Pg105”")).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenLastCalledWith({
+      operationId: "session.environment.list",
+      limit: 100,
+      cursor: "environment-2",
+    });
+  });
+
+  it("stops fuzzy-matching a revealed environment value when the reveal expires", async () => {
+    installAPI((input) => {
+      if (input.operationId === "session.environment.list") {
+        return workbench(input.operationId, {
+          items: [{ name: "API_TOKEN", sensitive: true, redacted: true }],
+          page: { limit: 100, total: 1, truncated: false },
+        });
+      }
+      if (input.operationId === "session.environment.reveal") {
+        return workbench(input.operationId, {
+          name: input.name,
+          value: "super-secret",
+          sensitive: true,
+          revealedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 1_000).toISOString(),
+        });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(<SessionEnvironmentPanel {...panelContext()} />);
+    const filter = await screen.findByRole("searchbox", { name: "Filter environment variables" });
+    const grid = screen.getByRole("grid", { name: "Session environment variables" });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+
+    await act(async () => {
+      fireEvent.click(within(grid).getByRole("button", { name: "Reveal API_TOKEN" }));
+    });
+    expect(within(grid).getByText("super-secret")).toBeInTheDocument();
+    fireEvent.change(filter, { target: { value: "suprscrt" } });
+    expect(within(grid).getByRole("row", { name: /API_TOKEN/u })).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_010);
+    });
+    expect(screen.getByText("Showing 0 of 1 loaded environment variables matching “suprscrt”")).toBeInTheDocument();
+    expect(within(grid).queryByRole("row", { name: /API_TOKEN/u })).not.toBeInTheDocument();
+    expect(screen.queryByText("super-secret")).not.toBeInTheDocument();
+  });
+
   it("pages environment variables while retaining reveals only for continuation and clearing them on refresh", async () => {
     const user = userEvent.setup();
     const refreshedList = deferred<unknown>();
@@ -1334,6 +1469,14 @@ describe("session workbench panels", () => {
     expect(await screen.findByRole("row", { name: /InstallPath/i })).toBeInTheDocument();
     const tree = screen.getByRole("treegrid", { name: "Registry keys" });
     const values = screen.getByRole("grid", { name: "Registry values in HKCU" });
+    const editor = screen.getByRole("region", { name: "Registry editor" });
+    const keyScrollRegion = tree.closest<HTMLElement>('[data-registry-scroll-region="keys"]');
+    const valueScrollRegion = values.closest<HTMLElement>('[data-registry-scroll-region="values"]');
+    const valueTableScrollContainer = values.closest<HTMLElement>('[data-slot="table-scroll-container"]');
+    expect(editor).toHaveClass("h-full", "max-h-full", "min-h-0", "overflow-hidden");
+    expect(keyScrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-auto", "overscroll-contain");
+    expect(valueScrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
+    expect(valueTableScrollContainer).toHaveClass("h-full", "max-h-full", "overflow-auto", "overscroll-contain");
     expect(within(tree).getByText("Software")).toBeInTheDocument();
     expect(within(tree).queryByText("InstallPath")).not.toBeInTheDocument();
     expect(within(values).queryByText("Software")).not.toBeInTheDocument();
@@ -1451,14 +1594,14 @@ describe("session workbench panels", () => {
       operationId: "session.registry.list-subkeys",
       hive: "HKCU",
       path: "",
-      limit: 500,
+      limit: 100,
       cursor: "subkeys-2",
     });
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({
       operationId: "session.registry.list-values",
       hive: "HKCU",
       path: "",
-      limit: 500,
+      limit: 100,
       cursor: "values-2",
     });
 
@@ -1528,7 +1671,7 @@ describe("session workbench panels", () => {
     await user.type(address, "Computer\\HKEY_LOCAL_MACHINE\\Software\\Example{Enter}", { skipClick: true });
     expect(await screen.findByRole("grid", { name: "Registry values in HKLM Software\\Example" })).toBeInTheDocument();
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({
-      operationId: "session.registry.list-subkeys", hive: "HKLM", path: "Software\\Example", limit: 500,
+      operationId: "session.registry.list-subkeys", hive: "HKLM", path: "Software\\Example", limit: 100,
     });
     await user.click(screen.getByRole("button", { name: "Up one registry key" }));
     expect(await screen.findByRole("grid", { name: "Registry values in HKLM Software" })).toBeInTheDocument();
@@ -1628,8 +1771,8 @@ describe("session workbench panels", () => {
     await screen.findByRole("grid", { name: "Registry values in HKCU Software" });
     expect(api.executeSessionDestructiveActionPlan).toHaveBeenCalledWith({ token: "review-session.registry.delete-key" });
     expect(api.runSessionWorkbench.mock.calls.map(([input]) => input)).toEqual([
-      { operationId: "session.registry.list-subkeys", hive: "HKCU", path: "Software", limit: 500 },
-      { operationId: "session.registry.list-values", hive: "HKCU", path: "Software", limit: 500 },
+      { operationId: "session.registry.list-subkeys", hive: "HKCU", path: "Software", limit: 100 },
+      { operationId: "session.registry.list-values", hive: "HKCU", path: "Software", limit: 100 },
     ]);
     expect(screen.getByRole("textbox", { name: "Registry path" })).toHaveValue("Computer\\HKEY_CURRENT_USER\\Software");
     expect(within(tree).queryByText("Example")).not.toBeInTheDocument();
@@ -2009,7 +2152,7 @@ describe("session workbench panels", () => {
     if (change === "navigation") {
       fireEvent.change(address, { target: { value: "HKCU\\Other" } });
       fireEvent.submit(address.closest("form")!);
-      await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.list-values", hive: "HKCU", path: "Other", limit: 500 }));
+      await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.list-values", hive: "HKCU", path: "Other", limit: 100 }));
     } else rendered.rerender(<SessionRegistryPanel {...context} route={{ ...context.route, backendEpoch: context.route.backendEpoch + 1 }} />);
     await user.click(action);
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
@@ -2137,20 +2280,20 @@ describe("session workbench panels", () => {
     expect(childReads).toBe(2);
   });
 
-  it("eagerly loads registry value pages without traversing subkeys or replacing selected details and retries failures only after refresh", async () => {
+  it("eagerly reads only loaded registry values until Load more is pressed and retries failures only after refresh", async () => {
     const user = userEvent.setup();
     const firstRead = deferred<unknown>();
     const secondRead = deferred<unknown>();
     const reads = new Map<string, number>();
     const api = installAPI((input) => {
       if (input.operationId === "session.registry.list-subkeys") {
-        return workbench(input.operationId, { items: ["Child"], page: { limit: 500, total: 2, truncated: true, nextCursor: "subkeys-2" } });
+        return workbench(input.operationId, { items: ["Child"], page: { limit: 100, total: 2, truncated: true, nextCursor: "subkeys-2" } });
       }
       if (input.operationId === "session.registry.list-values") {
         return workbench(input.operationId, input.cursor ? {
-          items: ["Third", ""], page: { limit: 500, total: 5, truncated: false },
+          items: ["Third", ""], page: { limit: 100, total: 5, truncated: false },
         } : {
-          items: ["First", "Second", "Denied"], page: { limit: 500, total: 5, truncated: true, nextCursor: "values-2" },
+          items: ["First", "Second", "Denied"], page: { limit: 100, total: 5, truncated: true, nextCursor: "values-2" },
         });
       }
       if (input.operationId === "session.registry.read") {
@@ -2179,8 +2322,15 @@ describe("session workbench panels", () => {
     await act(async () => {
       secondRead.resolve(workbench("session.registry.read", { hive: "HKCU", path: "", key: "Second", type: "string", value: "Second-data" }));
     });
+    await waitFor(() => expect(within(grid).getByText("Second-data")).toBeInTheDocument());
+    expect([...reads.keys()].sort()).toEqual(["Denied", "First", "Second"]);
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values" && input.cursor === "values-2")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Load more values" })).toBeInTheDocument();
+    expect(within(grid).queryByText("Third")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Load more values" }));
     await waitFor(() => expect([...reads.keys()].sort()).toEqual(["", "Denied", "First", "Second", "Third"]));
-    expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.list-values", hive: "HKCU", path: "", limit: 500, cursor: "values-2" });
+    expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.list-values", hive: "HKCU", path: "", limit: 100, cursor: "values-2" });
     expect(within(grid).getByText("Second-data")).toBeInTheDocument();
     expect(within(details).getByText("First-data")).toBeInTheDocument();
     expect(reads.get("First")).toBe(1);
@@ -2192,9 +2342,10 @@ describe("session workbench panels", () => {
     expect(reads.get("")).toBe(1);
 
     await user.click(screen.getByRole("button", { name: "Refresh registry" }));
-    await waitFor(() => expect([...reads.values()]).toEqual([2, 2, 2, 2, 2]));
+    await waitFor(() => expect(reads.get("Denied")).toBe(2));
+    expect(Object.fromEntries(reads)).toEqual({ First: 2, Second: 2, Denied: 2, Third: 1, "": 1 });
     expect(screen.getByRole("checkbox", { name: "Load all values" })).toBeChecked();
-    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values" && input.cursor === "values-2")).toHaveLength(2);
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values" && input.cursor === "values-2")).toHaveLength(1);
   });
 
   it.each(["toggle off", "navigate away"] as const)("stops queued registry eager reads when users %s", async (stop) => {

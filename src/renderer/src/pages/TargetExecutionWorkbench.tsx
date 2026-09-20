@@ -772,7 +772,7 @@ function ChildrenTable({ isLoadingMore, value, onLoadMore }: {
     <section className="mt-6 space-y-3" aria-labelledby="execution-children-heading">
       <div className="flex items-center justify-between gap-3"><h3 className="font-semibold text-foreground" id="execution-children-heading">Background children</h3><span className="text-xs text-muted">{value.items.length} of {value.total}</span></div>
       {value.truncated ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground">The server bounded this inventory. Load the next page to continue.</p> : null}
-      <DataGrid aria-label="Background child processes" columns={CHILD_COLUMNS} contentClassName="min-w-[760px]" data={value.items} getRowId={(item) => String(item.pid)} rowHeight={58} scrollContainerClassName="max-h-[440px] overflow-auto" variant="secondary" virtualized renderEmptyState={() => <GridEmpty label="No tracked background children were reported." />} />
+      <DataGrid aria-label="Background child processes" columns={CHILD_COLUMNS} contentClassName="min-w-[760px]" data={value.items} getRowId={(item) => String(item.pid)} variant="secondary" renderEmptyState={() => <GridEmpty label="No tracked background children were reported." />} />
       {value.nextCursor ? <div className="flex justify-center"><Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => onLoadMore("execution.children", value.nextCursor!)}>Load more</Button></div> : null}
     </section>
   );
@@ -794,7 +794,7 @@ function PrivilegesTable({ isLoadingMore, value, onLoadMore }: {
     <section className="mt-6 space-y-3" aria-labelledby="execution-privileges-heading">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold text-foreground" id="execution-privileges-heading">Windows privileges</h3><p className="mt-1 text-xs text-muted">{value.processName} · {value.processIntegrity}{value.currentIdentity ? ` · ${value.currentIdentity}` : ""}</p></div><span className="text-xs text-muted">{value.privileges.length} of {value.total}</span></div>
       {value.truncated ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground">The server bounded this inventory. Load the next page to continue.</p> : null}
-      <DataGrid aria-label="Windows process privileges" columns={PRIVILEGE_COLUMNS} contentClassName="min-w-[760px]" data={value.privileges} getRowId={(item) => item.name} rowHeight={54} scrollContainerClassName="max-h-[440px] overflow-auto" variant="secondary" virtualized renderEmptyState={() => <GridEmpty label="No Windows privileges were reported." />} />
+      <DataGrid aria-label="Windows process privileges" columns={PRIVILEGE_COLUMNS} contentClassName="min-w-[760px]" data={value.privileges} getRowId={(item) => item.name} variant="secondary" renderEmptyState={() => <GridEmpty label="No Windows privileges were reported." />} />
       {value.nextCursor ? <div className="flex justify-center"><Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => onLoadMore("privilege.get", value.nextCursor!)}>Load more</Button></div> : null}
     </section>
   );

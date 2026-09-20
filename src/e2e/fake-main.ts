@@ -194,6 +194,10 @@ const sshIdentityStore = new SshIdentityStore(
 // E2E callers keep the unassociated fixture and never load cloud credentials.
 const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
 const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
+const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
+if (registryLayoutFixture && overviewPivotFixture) {
+  throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
+}
 const overviewCloudRecord = overviewCloudArgument === "--overview-cloud-fixture=aws"
   ? E2E_AWS_DEPLOYMENT
   : overviewCloudArgument === "--overview-cloud-fixture=azure" ? E2E_AZURE_DEPLOYMENT : null;
@@ -639,8 +643,10 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       ProfileName: "",
     },
   ];
-  let sessions = overviewPivotFixture ? seedOverviewPivotSessions() : [seedSession(testState.sessionName)];
-  let beacons = overviewPivotFixture ? [] : [seedBeacon(testState.beaconName)];
+  let sessions = registryLayoutFixture
+    ? [seedRegistryLayoutSession(testState.sessionName)]
+    : overviewPivotFixture ? seedOverviewPivotSessions() : [seedSession(testState.sessionName)];
+  let beacons = overviewPivotFixture || registryLayoutFixture ? [] : [seedBeacon(testState.beaconName)];
   let lootStore: clientpb.Loot[] = [
     clientpb.Loot.create({
       ID: "591a16d2-e138-4a21-b38f-f166aa23e044",
@@ -1610,9 +1616,35 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async serviceDetailSession() { return unsupported("serviceDetailSession"); },
     async startServiceSession() { return unsupported("startServiceSession"); },
     async stopServiceSession() { return unsupported("stopServiceSession"); },
-    async registryReadSession() { return unsupported("registryReadSession"); },
-    async registryListSubkeysSession() { return unsupported("registryListSubkeysSession"); },
-    async registryListValuesSession() { return unsupported("registryListValuesSession"); },
+    async registryReadSession(sessionId: string, _hive: string, _path: string, key: string) {
+      if (!registryLayoutFixture) return unsupported("registryReadSession");
+      record("registryReadSession");
+      requireSession(sessionId);
+      return sliverpb.RegistryRead.create({
+        Value: `registry-layout-data-${key || "default"}`,
+        Binary: Buffer.alloc(0),
+        Type: sliverpb.RegistryType.String,
+        Response: response(false),
+      });
+    },
+    async registryListSubkeysSession(sessionId: string, _hive: string, path: string) {
+      if (!registryLayoutFixture) return unsupported("registryListSubkeysSession");
+      record("registryListSubkeysSession");
+      requireSession(sessionId);
+      return sliverpb.RegistrySubKeyList.create({
+        Subkeys: path === "" ? registryLayoutNames("E2EKey") : [],
+        Response: response(false),
+      });
+    },
+    async registryListValuesSession(sessionId: string, _hive: string, path: string) {
+      if (!registryLayoutFixture) return unsupported("registryListValuesSession");
+      record("registryListValuesSession");
+      requireSession(sessionId);
+      return sliverpb.RegistryValuesList.create({
+        ValueNames: path === "" ? registryLayoutNames("E2EValue") : [],
+        Response: response(false),
+      });
+    },
     async registryReadHiveSession() { return unsupported("registryReadHiveSession"); },
     async registryWriteSession() { return unsupported("registryWriteSession"); },
     async registryCreateKeySession() { return unsupported("registryCreateKeySession"); },
@@ -2220,6 +2252,25 @@ function seedSession(name: string): clientpb.Session {
     FirstContact: String(now - 30),
     Integrity: "Medium",
   });
+}
+
+function seedRegistryLayoutSession(name: string): clientpb.Session {
+  const session = seedSession(name);
+  return clientpb.Session.create({
+    ...session,
+    Hostname: "registry-layout-host",
+    Username: "REGISTRY\\e2e-user",
+    OS: "windows",
+    Arch: "amd64",
+    Filename: "C:\\ProgramData\\m1-session.exe",
+  });
+}
+
+function registryLayoutNames(prefix: string): string[] {
+  return Array.from(
+    { length: 105 },
+    (_, index) => `${prefix}${String(index + 1).padStart(3, "0")}`,
+  );
 }
 
 function seedBeacon(name: string): clientpb.Beacon {

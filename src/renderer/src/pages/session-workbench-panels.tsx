@@ -480,7 +480,6 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
                 contentClassName="min-w-[820px]"
                 data={connectionRows}
                 getRowId={(row) => row.id}
-                scrollContainerClassName="max-h-[360px] overflow-auto"
                 variant="secondary"
                 renderEmptyState={() => <GridEmpty label="No network connections were reported." />}
               />
@@ -849,7 +848,6 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
                 contentClassName="min-w-[900px]"
                 data={visibleState.value.items}
                 getRowId={(file) => file.path}
-                scrollContainerClassName="max-h-[560px] overflow-auto"
                 variant="secondary"
                 onRowAction={(key) => {
                   const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
@@ -1069,7 +1067,7 @@ function SessionFileSearch({ currentPath, routeKey }: { currentPath: string; rou
       header: "Match and context",
       minWidth: 420,
       cell: (match) => (
-        <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-all py-1 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all py-1 font-mono text-xs leading-relaxed text-foreground">
           {[...match.linesBefore, match.line, ...match.linesAfter].join("\n")}
         </pre>
       ),
@@ -1132,7 +1130,6 @@ function SessionFileSearch({ currentPath, routeKey }: { currentPath: string; rou
             contentClassName="min-w-[820px]"
             data={state.value.items}
             getRowId={(row) => row.id}
-            scrollContainerClassName="max-h-[560px] overflow-auto"
             variant="secondary"
             renderEmptyState={() => <GridEmpty label="No files matched this search." />}
           />
@@ -1333,7 +1330,6 @@ function SessionFileStorage({
                 contentClassName="min-w-[860px]"
                 data={mounts.value.items}
                 getRowId={(mount) => mountKey(mount)}
-                scrollContainerClassName="max-h-[360px] overflow-auto"
                 variant="secondary"
                 renderEmptyState={() => <GridEmpty label="No mounted storage was reported." />}
               />
@@ -1373,7 +1369,6 @@ function SessionFileStorage({
                   contentClassName="min-w-[520px]"
                   data={memoryFiles.value.items}
                   getRowId={(file) => file.fd}
-                  scrollContainerClassName="max-h-[320px] overflow-auto"
                   variant="secondary"
                   renderEmptyState={() => <GridEmpty label="No Linux memory files were reported." />}
                 />
@@ -2124,10 +2119,7 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
                     contentClassName="min-w-[850px]"
                     data={processRows}
                     getRowId={(process) => String(process.pid)}
-                    rowHeight={52}
-                    scrollContainerClassName="max-h-[520px] overflow-auto"
                     variant="secondary"
-                    virtualized
                     onRowAction={(key) => setSelectedProcess(processes.value.items.find((process) => process.pid === Number(key)))}
                     renderEmptyState={() => <GridEmpty label={debouncedQuery ? "No processes match this search." : "No processes were reported."} />}
                   />
@@ -2150,10 +2142,7 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
                     contentClassName="min-w-[760px]"
                     data={services.value.items}
                     getRowId={(service) => service.name}
-                    rowHeight={52}
-                    scrollContainerClassName="max-h-[520px] overflow-auto"
                     variant="secondary"
-                    virtualized
                     onRowAction={(key) => {
                       const service = services.value.items.find((candidate) => candidate.name === String(key));
                       if (service) void openService(service);
@@ -2181,6 +2170,7 @@ export function SessionEnvironmentPanel({
 }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const [state, setState] = useState<LoadState<SessionBoundedPage<SessionEnvironmentEntry>>>({ status: "loading" });
+  const [environmentQuery, setEnvironmentQuery] = useState("");
   const [revealed, setRevealed] = useState<Record<string, SessionEnvironmentRevealResult>>({});
   const [revealingName, setRevealingName] = useState<string>();
   const [editor, setEditor] = useState<EnvironmentVariableEditor>();
@@ -2227,6 +2217,7 @@ export function SessionEnvironmentPanel({
     listRequestSequence.current += 1;
     revealRequestSequence.current += 1;
     setState({ status: "loading" });
+    setEnvironmentQuery("");
     setRevealed({});
     setRevealingName(undefined);
     setEditor(undefined);
@@ -2376,6 +2367,13 @@ export function SessionEnvironmentPanel({
       ),
     },
   ], [clear, clearingName, mutationUnavailableReason, reveal, revealed, revealingName]);
+  const normalizedEnvironmentQuery = normalizeEnvironmentQuery(environmentQuery);
+  const filteredEnvironmentEntries = useMemo(
+    () => state.status === "ready"
+      ? fuzzyFilterEnvironmentEntries(state.value.items, environmentQuery, revealed)
+      : [],
+    [environmentQuery, revealed, state],
+  );
 
   return (
     <>
@@ -2400,18 +2398,38 @@ export function SessionEnvironmentPanel({
         {state.status === "error" ? <PanelError message={state.error} onRetry={() => void load()} /> : null}
         {state.status === "ready" ? (
           <div className="flex min-w-0 flex-col gap-3">
-            <InventoryCount loaded={state.value.items.length} noun="environment variables" page={state.value.page} />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              {normalizedEnvironmentQuery ? (
+                <p aria-live="polite" className="text-xs tabular-nums text-muted" role="status">
+                  {`Showing ${filteredEnvironmentEntries.length} of ${state.value.items.length} loaded environment variables matching “${environmentQuery.trim()}”`}
+                </p>
+              ) : (
+                <InventoryCount loaded={state.value.items.length} noun="environment variables" page={state.value.page} />
+              )}
+              <SearchField
+                aria-label="Filter environment variables"
+                className="w-full sm:max-w-sm"
+                value={environmentQuery}
+                variant="secondary"
+                onChange={setEnvironmentQuery}
+              >
+                <SearchField.Group>
+                  <SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon>
+                  <SearchField.Input maxLength={200} placeholder="Filter loaded names or visible values" />
+                  <SearchField.ClearButton />
+                </SearchField.Group>
+              </SearchField>
+            </div>
             {state.value.page.truncated ? <BoundedNotice nextCursor={state.value.page.nextCursor} noun="environment variables" /> : null}
             <DataGrid
               aria-label="Session environment variables"
               className="[--background:var(--surface)]"
               columns={columns}
               contentClassName="min-w-[800px]"
-              data={state.value.items}
+              data={filteredEnvironmentEntries}
               getRowId={(entry) => entry.name}
-              scrollContainerClassName="max-h-[600px] overflow-auto"
               variant="secondary"
-              renderEmptyState={() => <GridEmpty label="No environment variables were reported." />}
+              renderEmptyState={() => <GridEmpty label={normalizedEnvironmentQuery ? "No loaded environment variables match this search." : "No environment variables were reported."} />}
             />
             {state.value.page.nextCursor ? (
               <div className="flex justify-center"><Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => void load(state.value.page.nextCursor)}>Load more variables</Button></div>
@@ -2501,8 +2519,8 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     setIsLoadingMoreValues(false);
     try {
       const [subkeys, values] = await Promise.all([
-        runWorkbench({ operationId: "session.registry.list-subkeys", hive: nextHive, path: nextPath, limit: 500 }),
-        runWorkbench({ operationId: "session.registry.list-values", hive: nextHive, path: nextPath, limit: 500 }),
+        runWorkbench({ operationId: "session.registry.list-subkeys", hive: nextHive, path: nextPath, limit: 100 }),
+        runWorkbench({ operationId: "session.registry.list-values", hive: nextHive, path: nextPath, limit: 100 }),
       ]);
       if (!isCurrent(expected) || requestSequence !== navigationRequestSequence.current) return;
       setHive(nextHive);
@@ -2546,8 +2564,8 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     else setIsLoadingMoreValues(true);
     try {
       const result = kind === "key"
-        ? await runWorkbench({ operationId: "session.registry.list-subkeys", hive, path, limit: 500, cursor })
-        : await runWorkbench({ operationId: "session.registry.list-values", hive, path, limit: 500, cursor });
+        ? await runWorkbench({ operationId: "session.registry.list-subkeys", hive, path, limit: 100, cursor })
+        : await runWorkbench({ operationId: "session.registry.list-values", hive, path, limit: 100, cursor });
       if (
         !isCurrent(expected) ||
         navigationSequence !== navigationRequestSequence.current ||
@@ -2651,13 +2669,10 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         void request.then(() => { activeEagerReads.current.delete(request); });
       }
       await Promise.all(pending);
-      if (isActive() && listing.valuesPage.nextCursor) {
-        await loadRegistryContinuation("value", listing.valuesPage.nextCursor);
-      }
     };
     void populate();
     return () => { canceled = true; };
-  }, [eagerLoadValues, hive, isCurrent, loadRegistryContinuation, path, routeKey, state, valueCache]);
+  }, [eagerLoadValues, hive, isCurrent, path, routeKey, state, valueCache]);
 
   const refreshRegistry = () => {
     valueCache.clear();
@@ -2829,8 +2844,8 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
 
   return (
     <>
-    <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-label="Registry editor">
-      <div className="flex flex-wrap items-center gap-1 border-b border-separator px-3 py-2">
+    <section className="session-registry-editor flex h-full max-h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-separator bg-surface" aria-label="Registry editor">
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-separator px-3 py-2">
         <h2 className="mr-3 px-1 text-sm font-semibold text-foreground">Registry Editor</h2>
         <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => void openRegistryEditor({ kind: "key", hive, path }, "create-key")}>
           <FontAwesomeIcon aria-hidden icon={faFolderPlus} /> Create key
@@ -2870,7 +2885,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         </div>
       </div>
       <form
-        className="flex items-center gap-2 border-b border-separator px-3 py-2"
+        className="flex shrink-0 items-center gap-2 border-b border-separator px-3 py-2"
         onSubmit={(event) => { event.preventDefault(); navigateFromAddress(); }}
       >
         <IconButton
@@ -2891,7 +2906,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         </TextField>
         <Button size="sm" type="submit" variant="secondary">Go</Button>
       </form>
-      {addressError ? <p className="px-4 py-2 text-xs text-danger" role="alert">{addressError}</p> : null}
+      {addressError ? <p className="shrink-0 px-4 py-2 text-xs text-danger" role="alert">{addressError}</p> : null}
       <RegistryContextMenu
         disabled={isLocked}
         hive={hive}
@@ -2900,11 +2915,19 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         valueNames={values.map((entry) => entry.name)}
         onAction={contextAction}
       >
-      <div className="h-[min(64vh,680px)] min-h-[420px] bg-background">
+      <div className="min-h-0 flex-1 overflow-hidden bg-background">
         <Resizable orientation="horizontal">
-          <Resizable.Panel defaultSize="300px" minSize="160px" maxSize="50%" groupResizeBehavior="preserve-pixel-size">
-            <div className="flex h-full min-w-0 flex-col" aria-label="Registry key navigation">
-              <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
+          <Resizable.Panel
+            defaultSize="300px"
+            groupResizeBehavior="preserve-pixel-size"
+            maxSize="50%"
+            minSize="160px"
+          >
+            <div className="flex h-full min-h-0 min-w-0 flex-col" aria-label="Registry key navigation">
+              <div
+                className="min-h-0 flex-1 overflow-auto overscroll-contain px-2 py-2"
+                data-registry-scroll-region="keys"
+              >
                 <SessionRegistryTree
                   branches={branches}
                   hive={requestedLocation.hive}
@@ -2914,7 +2937,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
                 />
               </div>
               {state.status === "ready" && state.value.subkeysPage.nextCursor ? (
-                <div className="border-t border-separator p-2">
+                <div className="shrink-0 border-t border-separator p-2">
                   <Button fullWidth isPending={isLoadingMoreSubkeys} size="sm" variant="ghost" onPress={() => void loadRegistryContinuation("key", state.value.subkeysPage.nextCursor!)}>Load more subkeys</Button>
                 </div>
               ) : null}
@@ -2922,7 +2945,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
           </Resizable.Panel>
           <Resizable.Handle type="line" variant="secondary" withIndicator />
           <Resizable.Panel minSize={35}>
-            <div className="flex h-full min-w-0 flex-col" aria-label="Registry values">
+            <div className="flex h-full min-h-0 min-w-0 flex-col" aria-label="Registry values">
               <Resizable id={`registry-values-${routeKey}`} orientation="vertical">
                 <Resizable.Panel minSize="160px">
                   <div className="flex h-full min-h-0 flex-col">
@@ -2932,7 +2955,10 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
                     ) : null}
                     {state.status === "ready" ? (
                       <>
-                        <div className="min-h-0 flex-1 overflow-auto">
+                        <div
+                          className="min-h-0 flex-1 overflow-hidden"
+                          data-registry-scroll-region="values"
+                        >
                           <DataGrid
                             aria-label={`Registry values in ${hive} ${path}`}
                             className="session-registry-values-grid h-full rounded-none bg-transparent p-0"
@@ -2940,12 +2966,10 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
                             contentClassName="min-w-[580px]"
                             data={values}
                             getRowId={(entry) => entry.id}
-                            rowHeight={36}
-                            scrollContainerClassName="h-full max-h-full overflow-auto rounded-none"
+                            scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
                             selectedKeys={new Set(readingValueKey !== undefined ? [readingValueKey] : selectedValue ? [`value:${selectedValue.key}`] : [])}
                             selectionBehavior="replace"
                             selectionMode="single"
-                            virtualized
                             onSelectionChange={(keys) => {
                               if (keys === "all") return;
                               const entry = values.find((candidate) => keys.has(candidate.id));
@@ -2991,7 +3015,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         </Resizable>
       </div>
       </RegistryContextMenu>
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-separator px-4 py-2 text-xs text-muted" role="status">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t border-separator px-4 py-2 text-xs text-muted" role="status">
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={registryAddress(requestedLocation.hive, requestedLocation.path)}>
           {registryAddress(requestedLocation.hive, requestedLocation.path)}
         </span>
@@ -3709,6 +3733,44 @@ function uniqueServices(items: SessionService[]): SessionService[] {
 
 function uniqueEnvironmentEntries(items: SessionEnvironmentEntry[]): SessionEnvironmentEntry[] {
   return [...new Map(items.map((item) => [item.name, item])).values()];
+}
+
+function normalizeEnvironmentQuery(value: string): string {
+  return value.normalize("NFKC").trim().toLowerCase();
+}
+
+function fuzzyEnvironmentTokenMatches(value: string, token: string): boolean {
+  if (value.includes(token)) return true;
+  let offset = 0;
+  for (const character of token) {
+    const match = value.indexOf(character, offset);
+    if (match < 0) return false;
+    offset = match + character.length;
+  }
+  return true;
+}
+
+function fuzzyFilterEnvironmentEntries(
+  items: readonly SessionEnvironmentEntry[],
+  query: string,
+  revealed: Readonly<Record<string, SessionEnvironmentRevealResult>>,
+  now = Date.now(),
+): SessionEnvironmentEntry[] {
+  const tokens = normalizeEnvironmentQuery(query).split(/\s+/u).filter(Boolean);
+  if (tokens.length === 0) return [...items];
+
+  return items.filter((entry) => {
+    const searchableValues = [normalizeEnvironmentQuery(entry.name)];
+    if (!entry.redacted) {
+      searchableValues.push(normalizeEnvironmentQuery(entry.value));
+    } else {
+      const revealResult = revealed[entry.name];
+      if (revealResult && Date.parse(revealResult.expiresAt) > now) {
+        searchableValues.push(normalizeEnvironmentQuery(revealResult.value));
+      }
+    }
+    return tokens.every((token) => searchableValues.some((value) => fuzzyEnvironmentTokenMatches(value, token)));
+  });
 }
 
 function orderProcessesAsTree(items: SessionProcess[]): SessionProcess[] {

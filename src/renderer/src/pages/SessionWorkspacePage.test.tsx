@@ -1096,6 +1096,163 @@ describe("SessionWorkspacePage", () => {
     expect(screen.getByText("1 matching operations loaded")).toBeInTheDocument();
   });
 
+  it("fills each Activity page with up to one hundred matching session rows", async () => {
+    const user = userEvent.setup();
+    const firstSessionPage = Array.from({ length: 60 }, (_, index) => operation({
+      requestId: `request-current-${String(index + 1).padStart(3, "0")}`,
+    }));
+    const unrelated = Array.from({ length: 40 }, (_, index) => operation({
+      requestId: `request-other-${String(index + 1).padStart(3, "0")}`,
+      target: otherSessionRef,
+    }));
+    const secondSessionPage = Array.from({ length: 40 }, (_, index) => operation({
+      requestId: `request-current-${String(index + 61).padStart(3, "0")}`,
+    }));
+    const older = operation({ requestId: "request-older", updatedAt: "2026-08-09T19:59:59.000Z" });
+    const { listTargetOperations } = installAPI();
+    vi.mocked(listTargetOperations).mockImplementation(async (input) => {
+      if (input.cursor === "activity-3") {
+        return { ok: true, value: { items: [older], page: { limit: 100, total: 141, truncated: false } } };
+      }
+      if (input.cursor === "activity-2") {
+        return {
+          ok: true,
+          value: {
+            items: secondSessionPage,
+            page: { limit: 100, total: 141, truncated: true, nextCursor: "activity-3" },
+          },
+        };
+      }
+      return {
+        ok: true,
+        value: {
+          items: [...firstSessionPage, ...unrelated],
+          page: { limit: 100, total: 141, truncated: true, nextCursor: "activity-2" },
+        },
+      };
+    });
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByText("100 matching operations loaded")).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /request-current-100/i })).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /request-other-001/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: /request-older/i })).not.toBeInTheDocument();
+    expect(listTargetOperations).toHaveBeenNthCalledWith(1, { limit: 100 });
+    expect(listTargetOperations).toHaveBeenNthCalledWith(2, { limit: 100, cursor: "activity-2" });
+    expect(listTargetOperations).toHaveBeenNthCalledWith(3, { limit: 100, cursor: "activity-3" });
+
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByRole("row", { name: /request-older/i })).toBeInTheDocument();
+    expect(screen.getByText("101 matching operations loaded")).toBeInTheDocument();
+    expect(listTargetOperations).toHaveBeenCalledTimes(3);
+  });
+
+  it("hides Activity load-more when only unrelated global history remains", async () => {
+    const user = userEvent.setup();
+    const matching = Array.from({ length: 100 }, (_, index) => operation({
+      requestId: `request-current-${String(index + 1).padStart(3, "0")}`,
+    }));
+    const unrelated = operation({ requestId: "request-unrelated-older", target: otherSessionRef });
+    const { listTargetOperations } = installAPI();
+    vi.mocked(listTargetOperations).mockImplementation(async (input) => ({
+      ok: true,
+      value: input.cursor === "activity-2"
+        ? { items: [unrelated], page: { limit: 100, total: 101, truncated: false } }
+        : {
+            items: matching,
+            page: { limit: 100, total: 101, truncated: true, nextCursor: "activity-2" },
+          },
+    }));
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByText("100 matching operations loaded")).toBeInTheDocument();
+    await waitFor(() => expect(listTargetOperations).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "Load older activity" })).not.toBeInTheDocument();
+  });
+
+  it("keeps new live Activity rows inside the current one-hundred-row page", async () => {
+    const user = userEvent.setup();
+    const initial = Array.from({ length: 100 }, (_, index) => operation({
+      requestId: `request-current-${String(index + 1).padStart(3, "0")}`,
+    }));
+    const { emitOperationChanged, listTargetOperations } = installAPI(initial);
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByText("100 matching operations loaded")).toBeInTheDocument();
+    act(() => emitOperationChanged(operation({
+      requestId: "request-live-new",
+      updatedAt: "2026-08-09T20:03:01.000Z",
+    })));
+
+    expect(await screen.findByRole("row", { name: /request-live-new/i })).toBeInTheDocument();
+    expect(screen.getByText("100 matching operations loaded")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByText("101 matching operations loaded")).toBeInTheDocument();
+    expect(listTargetOperations).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a live Activity event that arrives while its first page is pending", async () => {
+    const pending = deferred<Awaited<ReturnType<SliverDesktopAPI["listTargetOperations"]>>>();
+    const historical = operation({ requestId: "request-historical" });
+    const live = operation({
+      requestId: "request-live-during-load",
+      updatedAt: "2026-08-09T20:03:01.000Z",
+    });
+    const { emitOperationChanged, listTargetOperations } = installAPI();
+    vi.mocked(listTargetOperations).mockReturnValue(pending.promise);
+
+    render(
+      <SessionWorkspacePage
+        route={route}
+        session={session}
+        snapshot={workspaceSnapshot()}
+        onBack={vi.fn()}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    act(() => emitOperationChanged(live));
+    await act(async () => pending.resolve({
+      ok: true,
+      value: { items: [historical], page: { limit: 100, total: 1, truncated: false } },
+    }));
+
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Activity" }));
+    expect(await screen.findByRole("row", { name: /request-live-during-load/i })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /request-historical/i })).toBeInTheDocument();
+    expect(screen.getByText("2 matching operations loaded")).toBeInTheDocument();
+  });
+
   it("updates Activity rows from operation events without a refresh control", async () => {
     const user = userEvent.setup();
     const stale = operation({ requestId: "request-live", state: "submitted" });

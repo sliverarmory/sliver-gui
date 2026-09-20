@@ -79,6 +79,7 @@ const sessionOperatingSystemIcons = new Map([
 ]);
 
 const OVERVIEW_OPERATION_IDS = ["target.ping"] as const satisfies readonly TargetOperationId[];
+const SESSION_ACTIVITY_PAGE_SIZE = 100;
 
 export interface SessionWorkspaceRoute {
   sessionId: string;
@@ -148,7 +149,14 @@ export function SessionWorkspacePage({
   isCurrentRef.current = isCurrent;
   const currentSession = isCurrent ? session : null;
   const [operations, setOperations] = useState<TargetOperationRecord[]>([]);
+  const operationsRef = useRef<TargetOperationRecord[]>([]);
+  operationsRef.current = operations;
+  const [visibleOperationLimit, setVisibleOperationLimit] = useState(SESSION_ACTIVITY_PAGE_SIZE);
+  const visibleOperationLimitRef = useRef(SESSION_ACTIVITY_PAGE_SIZE);
+  visibleOperationLimitRef.current = visibleOperationLimit;
   const [nextOperationCursor, setNextOperationCursor] = useState<string>();
+  const nextOperationCursorRef = useRef<string | undefined>(undefined);
+  nextOperationCursorRef.current = nextOperationCursor;
   const [operationsError, setOperationsError] = useState<string>();
   const [isLoadingOperations, setIsLoadingOperations] = useState(false);
   const [isLoadingMoreOperations, setIsLoadingMoreOperations] = useState(false);
@@ -177,11 +185,9 @@ export function SessionWorkspacePage({
 
   const mergeOperation = useCallback((operation: TargetOperationRecord) => {
     if (!operationBelongsToRoute(operation, route)) return;
-    setOperations((current) => {
-      const next = current.filter((candidate) => candidate.requestId !== operation.requestId);
-      next.unshift(operation);
-      return next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    });
+    const next = mergeUniqueOperations(operationsRef.current, [operation]);
+    operationsRef.current = next;
+    setOperations(next);
     setSelectedOperation((current) => current?.requestId === operation.requestId ? operation : current);
   }, [route.backendEpoch, route.sessionId, route.targetFingerprint]);
 
@@ -196,39 +202,63 @@ export function SessionWorkspacePage({
     return true;
   }, [isTargetTransitionPending, mergeOperation, route.backendEpoch, route.sessionId, route.targetFingerprint, routeIdentity]);
 
-  const loadOperations = useCallback(async (cursor?: string) => {
+  const loadOperations = useCallback(async (targetVisibleLimit = SESSION_ACTIVITY_PAGE_SIZE, append = false) => {
     if (!isCurrentRef.current) return;
-    const append = cursor !== undefined;
     const expectedRouteIdentity = routeIdentity;
     const requestSequence = ++operationsRequestSequence.current;
     if (append) setIsLoadingMoreOperations(true);
     else setIsLoadingOperations(true);
+    let matching = append ? [...operationsRef.current] : [];
+    let pageCursor = append ? nextOperationCursorRef.current : undefined;
+    let shouldRequestFirstPage = !append;
+    const visitedCursors = new Set<string>();
+    const requestIsCurrent = () =>
+      requestSequence === operationsRequestSequence.current &&
+      expectedRouteIdentity === routeIdentityRef.current;
+    const commit = (error?: string) => {
+      const merged = mergeUniqueOperations(matching, operationsRef.current);
+      operationsRef.current = merged;
+      visibleOperationLimitRef.current = targetVisibleLimit;
+      nextOperationCursorRef.current = pageCursor;
+      setOperations(merged);
+      setVisibleOperationLimit(targetVisibleLimit);
+      setNextOperationCursor(pageCursor);
+      setOperationsError(error);
+    };
     try {
-      const result = await window.sliver.listTargetOperations({
-        limit: 100,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      if (
-        requestSequence !== operationsRequestSequence.current ||
-        expectedRouteIdentity !== routeIdentityRef.current
-      ) return;
-      if (!result.ok || !result.value) {
-        if (!append) setOperations([]);
-        setOperationsError(result.error ?? "Session activity is unavailable");
-        return;
-      }
-      const matching = result.value.items.filter((operation) => operationBelongsToRoute(operation, route));
-      setOperations((current) => append ? mergeUniqueOperations(current, matching) : matching);
-      setNextOperationCursor(result.value.page.nextCursor);
-      setOperationsError(undefined);
-    } catch (error) {
-      if (
-        requestSequence === operationsRequestSequence.current &&
-        expectedRouteIdentity === routeIdentityRef.current
+      // Operation history is global to the window. Keep advancing through it
+      // until this session has a complete visible page plus one look-ahead row,
+      // or the global history ends. The look-ahead keeps Load older precise.
+      while (
+        matching.length <= targetVisibleLimit &&
+        (shouldRequestFirstPage || pageCursor !== undefined)
       ) {
-        if (!append) setOperations([]);
-        setOperationsError(errorMessage(error));
+        if (pageCursor !== undefined) {
+          if (visitedCursors.has(pageCursor)) {
+            commit("Session activity pagination repeated a cursor");
+            return;
+          }
+          visitedCursors.add(pageCursor);
+        }
+        shouldRequestFirstPage = false;
+        const result = await window.sliver.listTargetOperations({
+          limit: SESSION_ACTIVITY_PAGE_SIZE,
+          ...(pageCursor === undefined ? {} : { cursor: pageCursor }),
+        });
+        if (!requestIsCurrent()) return;
+        if (!result.ok || !result.value) {
+          commit(result.error ?? "Session activity is unavailable");
+          return;
+        }
+        matching = mergeUniqueOperations(
+          matching,
+          result.value.items.filter((operation) => operationBelongsToRoute(operation, route)),
+        );
+        pageCursor = result.value.page.nextCursor;
       }
+      commit();
+    } catch (error) {
+      if (requestIsCurrent()) commit(errorMessage(error));
     } finally {
       if (
         requestSequence === operationsRequestSequence.current &&
@@ -246,7 +276,11 @@ export function SessionWorkspacePage({
     shellPreflightRequestSequence.current += 1;
     interactionWindowRequestSequence.current += 1;
     setOperations([]);
+    operationsRef.current = [];
+    setVisibleOperationLimit(SESSION_ACTIVITY_PAGE_SIZE);
+    visibleOperationLimitRef.current = SESSION_ACTIVITY_PAGE_SIZE;
     setNextOperationCursor(undefined);
+    nextOperationCursorRef.current = undefined;
     setOperationsError(undefined);
     setSelectedOperation(undefined);
     setSelectedOperationRouteIdentity(undefined);
@@ -543,6 +577,7 @@ export function SessionWorkspacePage({
       aria-labelledby="session-workspace-heading"
       className="page-stack session-workspace"
       data-presentation={presentation}
+      data-selected-panel={selectedPanel}
       inert={isTargetTransitionPending ? true : undefined}
     >
       <div className="session-workspace__trail-frame">
@@ -728,7 +763,7 @@ export function SessionWorkspacePage({
             })}
           </Tabs.Panel>
           {isWindows ? (
-            <Tabs.Panel className="pt-6" id="registry">
+            <Tabs.Panel className="session-workspace__registry-panel pt-6" id="registry">
               {renderPanel(resolvedPanels.registry, context, {
                 icon: faList,
                 title: "No registry location loaded",
@@ -756,11 +791,14 @@ export function SessionWorkspacePage({
           <Tabs.Panel className="pt-6" id="activity">
             <SessionActivity
               error={operationsError}
+              hasMore={operations.length > visibleOperationLimit || nextOperationCursor !== undefined}
               isLoading={isLoadingOperations}
               isLoadingMore={isLoadingMoreOperations}
-              nextCursor={nextOperationCursor}
-              operations={operations}
-              onLoadMore={(cursor) => void loadOperations(cursor)}
+              operations={operations.slice(0, visibleOperationLimit)}
+              onLoadMore={() => void loadOperations(
+                visibleOperationLimitRef.current + (operationsError ? 0 : SESSION_ACTIVITY_PAGE_SIZE),
+                true,
+              )}
               onOpen={(operation) => {
                 const expectedRouteIdentity = routeIdentity;
                 const requestSequence = ++operationDetailRequestSequence.current;
@@ -859,7 +897,7 @@ function WorkspacePanelViewport({ children, presentation, scrollKey }: {
       size={32}
       tabIndex={0}
     >
-      <div ref={contentRef} className="flow-root pb-12 sm:pb-20">{children}</div>
+      <div ref={contentRef} className="session-workspace__viewport-content flow-root pb-[10px]">{children}</div>
     </ScrollShadow>
   );
 }
@@ -1089,18 +1127,18 @@ function WorkspaceTab({ id, label }: { id: SessionWorkspacePanelId; label: strin
 function SessionActivity({
   operations,
   error,
+  hasMore,
   isLoading,
   isLoadingMore,
-  nextCursor,
   onLoadMore,
   onOpen,
 }: {
   operations: TargetOperationRecord[];
   error: string | undefined;
+  hasMore: boolean;
   isLoading: boolean;
   isLoadingMore: boolean;
-  nextCursor: string | undefined;
-  onLoadMore: (cursor: string) => void;
+  onLoadMore: () => void;
   onOpen: (operation: TargetOperationRecord) => void;
 }): React.JSX.Element {
   const columns = useMemo<DataGridColumn<TargetOperationRecord>[]>(() => [
@@ -1162,7 +1200,6 @@ function SessionActivity({
         data={operations}
         defaultSortDescriptor={{ column: "updated", direction: "descending" }}
         getRowId={(operation) => operation.requestId}
-        scrollContainerClassName="max-h-[480px] overflow-auto"
         variant="secondary"
         onRowAction={(key) => {
           const operation = operations.find((candidate) => candidate.requestId === String(key));
@@ -1182,8 +1219,8 @@ function SessionActivity({
       />
       <div className="flex min-h-12 items-center justify-between gap-3 px-5 py-2.5 sm:px-6">
         <p className="text-xs tabular-nums text-muted">{operations.length} matching operations loaded</p>
-        {nextCursor ? (
-          <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => onLoadMore(nextCursor)}>
+        {hasMore ? (
+          <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={onLoadMore}>
             Load older activity
           </Button>
         ) : null}
@@ -1382,7 +1419,12 @@ function mergeUniqueOperations(
   incoming: TargetOperationRecord[],
 ): TargetOperationRecord[] {
   const byId = new Map(current.map((operation) => [operation.requestId, operation]));
-  for (const operation of incoming) byId.set(operation.requestId, operation);
+  for (const operation of incoming) {
+    const existing = byId.get(operation.requestId);
+    if (!existing || operation.updatedAt.localeCompare(existing.updatedAt) >= 0) {
+      byId.set(operation.requestId, operation);
+    }
+  }
   return [...byId.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 

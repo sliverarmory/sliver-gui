@@ -2627,6 +2627,20 @@ async function verifyInteractionWindowPopout(
     if (mode === "session") {
       await popout.getByRole("navigation", { name: "Session workspace breadcrumbs", exact: true }).waitFor();
       await popout.getByRole("tablist", { name: "Session interaction sections", exact: true }).waitFor();
+      const dedicatedContent = popout.getByRole("region", {
+        name: "Session interaction content",
+        exact: true,
+      });
+      const dedicatedLayout = await dedicatedContent.evaluate((element) => {
+        const content = element.querySelector(".flow-root");
+        const view = element.ownerDocument.defaultView;
+        return {
+          bottomPadding: content ? view?.getComputedStyle(content).paddingBottom : undefined,
+          overflowY: view?.getComputedStyle(element).overflowY,
+        };
+      });
+      assert.equal(dedicatedLayout.overflowY, "auto");
+      assert.equal(dedicatedLayout.bottomPadding, "10px");
     } else {
       await popout.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
       await popout.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
@@ -3014,8 +3028,48 @@ async function verifyM2SessionWorkspace(
   await processesGrid.getByText("launchd", { exact: true }).waitFor();
   await processesGrid.getByText("sliver-m2-session", { exact: true }).waitFor();
   await page.getByText("Loaded 100 of 108 processes · bounded", { exact: true }).waitFor();
+  const processRows = processesGrid.locator('[data-slot="table-body"] [data-slot="table-row"]');
+  assert.equal(await processRows.count(), 100, "the first process page must eagerly render all 100 rows");
+
+  const processTableScroll = processesGrid
+    .locator("xpath=ancestor::*[@data-slot='data-grid'][1]")
+    .locator('[data-slot="table-scroll-container"]');
+  const tableMaxScrollTop = await processTableScroll.evaluate((element) => {
+    const previous = element.scrollTop;
+    element.scrollTop = element.scrollHeight;
+    const maximum = element.scrollTop;
+    element.scrollTop = previous;
+    return maximum;
+  });
+  assert.ok(
+    tableMaxScrollTop <= 1,
+    `the process table must not own vertical scrolling; max scrollTop was ${tableMaxScrollTop}`,
+  );
+
+  const sessionContent = page.locator(
+    '.app-content:has(> .session-workspace[data-presentation="embedded"])',
+  );
+  const pageLayout = await sessionContent.evaluate((element) => {
+    const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+    return {
+      bottomPadding: style?.paddingBottom,
+      overflowY: style?.overflowY,
+      scrollRange: element.scrollHeight - element.clientHeight,
+    };
+  });
+  assert.equal(pageLayout.overflowY, "auto");
+  assert.ok(pageLayout.scrollRange > 0, "the application content must own scrolling for eager process rows");
+  assert.equal(pageLayout.bottomPadding, "10px");
+
   await page.getByRole("button", { name: "Load more processes", exact: true }).click();
   await page.getByText("Loaded 108 of 108 processes", { exact: true }).waitFor();
+  await processesGrid.getByText("m2-worker-105", { exact: true }).waitFor();
+  assert.equal(await processRows.count(), 108, "Load more must append all eight remaining process rows");
+  assert.equal(
+    await page.getByRole("button", { name: "Load more processes", exact: true }).count(),
+    0,
+    "Load more must disappear after the complete 108-row inventory is loaded",
+  );
 
   const processViews = page.getByRole("radiogroup", { name: "Process view" });
   await processViews.getByRole("radio", { name: "Tree", exact: true }).click();
@@ -3050,9 +3104,15 @@ async function verifyM2SessionWorkspace(
   await environmentGrid.getByText("HOME", { exact: true }).waitFor();
   await environmentGrid.getByText("/Users/e2e", { exact: true }).waitFor();
   await page.getByText("Loaded 100 of 108 environment variables · bounded", { exact: true }).waitFor();
+  const environmentFilter = page.getByRole("searchbox", { name: "Filter environment variables" });
+  await environmentFilter.fill("m2pg105");
+  await page.getByText("No loaded environment variables match this search.", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Load more variables", exact: true }).click();
-  await page.getByText("Loaded 108 of 108 environment variables", { exact: true }).waitFor();
+  await page.getByText("Showing 1 of 108 loaded environment variables matching “m2pg105”", { exact: true }).waitFor();
   await environmentGrid.getByText("M2_PAGE_105", { exact: true }).waitFor();
+  assert.equal(await environmentGrid.getByText("HOME", { exact: true }).count(), 0);
+  await environmentFilter.fill("");
+  await page.getByText("Loaded 108 of 108 environment variables", { exact: true }).waitFor();
   const sensitiveRow = environmentGrid.getByRole("row").filter({ hasText: "SLIVER_GUI_M2_API_TOKEN" });
   await sensitiveRow.waitFor();
   await sensitiveRow.getByText("Sensitive", { exact: true }).waitFor();
