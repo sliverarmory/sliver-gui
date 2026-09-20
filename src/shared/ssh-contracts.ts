@@ -109,6 +109,7 @@ export interface SshWindowAPI {
   approveSshHostKey(input: SshHostKeyReviewInput): Promise<OperationResult<SshOpenTabResult>>;
   closeSshTab(input: SshTabInput): Promise<OperationResult<SshTabCloseResult>>;
   selectSshTab(input: SshTabInput): Promise<OperationResult>;
+  copySshCommand(input: SshTabInput): Promise<OperationResult>;
   renameSshTab(input: SshTabRenameInput): Promise<OperationResult<SshTabRenameResult>>;
   getTerminalRuntime(): Promise<OperationResult<TerminalRuntimeAsset>>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;

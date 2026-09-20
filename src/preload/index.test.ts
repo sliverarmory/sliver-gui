@@ -32,6 +32,7 @@ const invokeArguments = {
   listLocalNetworkInterfaces: [],
   openWindow: [{ inheritConnection: true }],
   openCloudDeploymentWindow: [],
+  copyManagedServerSshCommand: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   copyManagedServerPublicIp: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   openInteractionWindow: [],
   claimInteractionWindow: [],
@@ -232,6 +233,14 @@ describe("sandboxed preload bridge", () => {
     const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
     await exposed.copyManagedServerPublicIp(input);
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.copyManagedServerPublicIp, input);
+  });
+
+  it("copies a managed server SSH command using only its deployment identity", async () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    if (!exposed) throw new Error("Expected the preload API to be exposed");
+    const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
+    await exposed.copyManagedServerSshCommand(input);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.copyManagedServerSshCommand, input);
   });
 
   it("exposes a frozen capability-only application context-menu bridge", async () => {

@@ -8,6 +8,7 @@ const shellMocks = vi.hoisted(() => ({
   focus: vi.fn(),
   getSelection: vi.fn(() => "selected output"),
   paste: vi.fn(),
+  onClipboardPaste: undefined as ((text: string) => void | Promise<void>) | undefined,
 }));
 
 vi.mock("../components/GhosttyTerminal", async () => {
@@ -17,6 +18,8 @@ vi.mock("../components/GhosttyTerminal", async () => {
       props: {
         ariaLabel?: string;
         disableInput?: boolean;
+        enableClipboard?: boolean;
+        onClipboardPaste?: (text: string) => void | Promise<void>;
         onError?: (error: Error) => void;
         onReady?: () => void;
         transport: {
@@ -30,6 +33,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
     ) {
       const hostRef = React.useRef<HTMLDivElement>(null);
       const outputRef = React.useRef("");
+      shellMocks.onClipboardPaste = props.onClipboardPaste;
       React.useImperativeHandle(ref, () => ({
         focus: shellMocks.focus,
         getSelection: shellMocks.getSelection,
@@ -47,6 +51,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
         <div
           ref={hostRef}
           aria-label={props.ariaLabel}
+          data-terminal-clipboard-enabled={String(Boolean(props.enableClipboard))}
           data-terminal-input-disabled={String(Boolean(props.disableInput))}
           data-terminal-output=""
           role="textbox"
@@ -116,6 +121,7 @@ beforeEach(() => {
   shellMocks.focus.mockReset();
   shellMocks.getSelection.mockReset().mockReturnValue("selected output");
   shellMocks.paste.mockReset();
+  shellMocks.onClipboardPaste = undefined;
 });
 
 afterEach(() => {
@@ -766,7 +772,7 @@ describe("SessionTerminalPanel", () => {
     await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({ resourceId, action }));
   });
 
-  it("requires explicit review for multiline paste and never renders clipboard payload", async () => {
+  it("requires explicit review for multiline toolbar paste and never renders the clipboard payload", async () => {
     const secretClipboardText = "echo hidden-secret\nuname -a";
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {
@@ -786,7 +792,9 @@ describe("SessionTerminalPanel", () => {
     render(<SessionTerminalPanel route={route} session={session} />);
     await screen.findByText("No managed shells");
     await user.click(screen.getAllByRole("button", { name: "New shell" })[0]!);
-    await screen.findByRole("textbox", { name: "Interactive shell for payments" });
+    const terminal = await screen.findByRole("textbox", { name: "Interactive shell for payments" });
+    expect(terminal).toHaveAttribute("data-terminal-clipboard-enabled", "true");
+    expect(shellMocks.onClipboardPaste).toBeTypeOf("function");
 
     await user.click(screen.getByRole("button", { name: "Copy" }));
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith("selected output");
@@ -798,6 +806,94 @@ describe("SessionTerminalPanel", () => {
     await user.click(screen.getByRole("button", { name: "Paste anyway" }));
     expect(shellMocks.paste).toHaveBeenCalledWith(secretClipboardText);
     expect(shellMocks.focus).toHaveBeenCalled();
+  });
+
+  it("routes delegated terminal Paste through the same metadata-only review", async () => {
+    const secretClipboardText = "echo context-secret\nuname -a";
+    const user = userEvent.setup();
+    shellMocks.open.mockResolvedValue(fakeTransport().api);
+    installAPI({
+      listSessionShells: vi.fn()
+        .mockResolvedValueOnce({ ok: true, value: inventory([]) })
+        .mockResolvedValue({ ok: true, value: inventory([resource()]) }),
+      prepareSessionShell: async () => ({ ok: true, value: plan() }),
+    });
+    render(<SessionTerminalPanel route={route} session={session} />);
+    await screen.findByText("No managed shells");
+    await user.click(screen.getAllByRole("button", { name: "New shell" })[0]!);
+    const terminal = await screen.findByRole("textbox", { name: "Interactive shell for payments" });
+    expect(terminal).toHaveAttribute("data-terminal-clipboard-enabled", "true");
+    expect(shellMocks.onClipboardPaste).toBeTypeOf("function");
+    shellMocks.focus.mockClear();
+
+    act(() => {
+      shellMocks.onClipboardPaste?.(secretClipboardText);
+    });
+
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("2 lines");
+    expect(screen.queryByText(secretClipboardText)).not.toBeInTheDocument();
+    expect(shellMocks.paste).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Paste anyway" }));
+    expect(shellMocks.paste).toHaveBeenCalledExactlyOnceWith(secretClipboardText);
+    expect(shellMocks.focus).toHaveBeenCalledOnce();
+  });
+
+  it("does not redirect a reviewed paste when another managed shell becomes selected", async () => {
+    const firstResourceId = "a".repeat(43);
+    const secondResourceId = "b".repeat(43);
+    const first = resource({ resourceId: firstResourceId, state: "detached" });
+    const second = resource({
+      resourceId: secondResourceId,
+      state: "detached",
+      createdAt: "2026-08-10T01:01:00.000Z",
+    });
+    let notifyShellsChanged: ((preferredResourceId?: string) => void) | undefined;
+    shellMocks.open
+      .mockResolvedValueOnce(fakeTransport().api)
+      .mockResolvedValueOnce(fakeTransport().api);
+    const api = installAPI({
+      listSessionShells: async () => ({ ok: true, value: inventory([first, second]) }),
+      onSessionShellsChanged: (listener) => {
+        notifyShellsChanged = listener;
+        return vi.fn();
+      },
+      actOnSessionShell: async (requestedResourceId, action) => ({
+        ok: true,
+        value: {
+          action,
+          resourceId: requestedResourceId,
+          resource: requestedResourceId === firstResourceId ? first : second,
+          attachment: {
+            attachmentToken: requestedResourceId === firstResourceId
+              ? "c".repeat(43)
+              : "d".repeat(43),
+            expiresAt: new Date(Date.now() + 5_000).toISOString(),
+          },
+        },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<SessionTerminalPanel route={route} session={session} />);
+    await screen.findByText("Shell 1");
+    await user.click(screen.getByText("Shell 1"));
+    await screen.findByRole("textbox", { name: "Interactive shell for payments" });
+
+    act(() => {
+      shellMocks.onClipboardPaste?.("echo first\necho second");
+    });
+    await screen.findByRole("alertdialog");
+    act(() => notifyShellsChanged?.(secondResourceId));
+    await waitFor(() => expect(api.actOnSessionShell).toHaveBeenCalledWith({
+      resourceId: secondResourceId,
+      action: "attach",
+    }));
+    await waitFor(() => {
+      expect(screen.getByText("Shell 2").closest("[role=row]"))
+        .toHaveAttribute("aria-selected", "true");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Paste anyway" }));
+    expect(shellMocks.paste).not.toHaveBeenCalled();
   });
 
   it("quarantines stale prepare callbacks and detaches on route replacement", async () => {

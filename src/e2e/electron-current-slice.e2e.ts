@@ -52,6 +52,13 @@ const M6_CREDENTIAL_SECRET = "FAKE_M6_CREDENTIAL_SECRET_DO_NOT_RENDER_BY_DEFAULT
 const M4_PRIVATE_KEY_SECRET = "FAKE_M4_PRIVATE_KEY_SECRET_DO_NOT_RENDER";
 const M4_SSH_STDOUT_TEXT = "deterministic M4 SSH stdout";
 const M4_SSH_STDOUT = `${M4_SSH_STDOUT_TEXT}\n`;
+const SSH_IDENTITY_PRIVATE_KEY_MARKER = "E2E_SSH_IDENTITY_PRIVATE_KEY_DO_NOT_RENDER";
+const SSH_IDENTITY_PRIVATE_KEY_CONTENT = [
+  "-----BEGIN OPENSSH PRIVATE KEY-----",
+  SSH_IDENTITY_PRIVATE_KEY_MARKER,
+  "-----END OPENSSH PRIVATE KEY-----",
+  "",
+].join("\n");
 const M4_PRIVATE_KEY_CONTENT = [
   "-----BEGIN OPENSSH PRIVATE KEY-----",
   M4_PRIVATE_KEY_SECRET,
@@ -66,6 +73,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   const managedConfigDirectory = join(temporaryRoot, "managed-configs");
   const userDataDirectory = join(temporaryRoot, "user-data");
   const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  const sshIdentityDirectory = join(temporaryRoot, "home", ".ssh", "sliver-gui");
   const consoleClientRootMarker = join(consoleClientRootDirectory, "installed-armory-package.marker");
   const selectedConfigPath = join(temporaryRoot, "chosen-m0-operator.cfg");
   const savedExistingConfigPath = join(savedConfigDirectory, "existing-m0-operator.cfg");
@@ -115,6 +123,7 @@ test("real renderer reaches an injected fake only through frozen preload and tru
         `--managed-config-directory=${managedConfigDirectory}`,
         `--user-data-directory=${userDataDirectory}`,
         `--console-client-root-directory=${consoleClientRootDirectory}`,
+        `--ssh-identity-directory=${sshIdentityDirectory}`,
       ],
       bypassCSP: false,
       chromiumSandbox: true,
@@ -129,7 +138,12 @@ test("real renderer reaches an injected fake only through frozen preload and tru
 
     await assertRendererSecurity(electronApplication, page);
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
-    await verifyCloudDeploymentWindow(electronApplication, page, artifactDirectory);
+    await verifyCloudDeploymentWindow(
+      electronApplication,
+      page,
+      artifactDirectory,
+      sshIdentityDirectory,
+    );
     await verifyReleaseDownloadToast(electronApplication, page);
     await verifyApplicationContextMenu(electronApplication, page);
 
@@ -519,6 +533,7 @@ async function verifyCloudDeploymentWindow(
   electronApplication: ElectronApplication,
   workspacePage: Page,
   artifactDirectory: string,
+  sshIdentityDirectory: string,
 ): Promise<void> {
   const dialog = workspacePage.getByRole("dialog", { name: "Saved configurations" });
   const forget = dialog.getByRole("button", { name: "Forget" });
@@ -575,7 +590,11 @@ async function verifyCloudDeploymentWindow(
   await firstCloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
   await verifyAwsDeploymentWizard(firstCloudPage, artifactDirectory);
   await assertCloudDeploymentThemeSync(electronApplication, workspacePage, firstCloudPage);
-  await verifySshTerminalClipboard(electronApplication, firstCloudPage);
+  await verifySshTerminalClipboard(
+    electronApplication,
+    firstCloudPage,
+    sshIdentityDirectory,
+  );
   const firstWindowId = await cloudDeploymentWindowId(electronApplication);
 
   await invokeApplicationMenuItem(electronApplication, "cloud.deployment");
@@ -3360,13 +3379,19 @@ async function verifyTerminalClipboard(
   }
 }
 
-async function verifySshTerminalClipboard(application: ElectronApplication, cloudPage: Page): Promise<void> {
+async function verifySshTerminalClipboard(
+  application: ElectronApplication,
+  cloudPage: Page,
+  sshIdentityDirectory: string,
+): Promise<void> {
   const windowOpened = application.waitForEvent("window");
   const opened = await cloudPage.evaluate(async (deploymentId) => (
     globalThis as unknown as { cloudDeployment: CloudDeploymentAPI }
   ).cloudDeployment.openSshWindow({ deploymentId }), E2E_AWS_DEPLOYMENT_ID);
   assert.equal(opened.ok, true);
   const sshPage = await windowOpened;
+  const sshConsoleMessages: string[] = [];
+  sshPage.on("console", (message) => sshConsoleMessages.push(message.text()));
   try {
     assert.equal(new URL(sshPage.url()).search, "?surface=ssh");
     await sshPage.locator('[data-terminal-state="ready"]').waitFor();
@@ -3375,6 +3400,118 @@ async function verifySshTerminalClipboard(application: ElectronApplication, clou
       name: new RegExp(`Connect to ${E2E_AZURE_DEPLOYMENT_NAME}`),
     }).click();
     await sshPage.locator('[data-ssh-terminal-tab-id][inert]').waitFor({ state: "attached" });
+    await sshPage.getByRole("dialog", { name: "New SSH Session" }).waitFor({ state: "hidden" });
+    const inactiveAwsTab = sshPage.getByRole("tab", {
+      name: new RegExp(
+        `${E2E_AWS_DEPLOYMENT_NAME}.*fixture@192\\.0\\.2\\.10:22.*Connected`,
+        "u",
+      ),
+    });
+    const activeAzureTab = sshPage.getByRole("tab", {
+      name: new RegExp(
+        `${E2E_AZURE_DEPLOYMENT_NAME}.*azureuser@203\\.0\\.113\\.42:22.*Connected`,
+        "u",
+      ),
+    });
+    await inactiveAwsTab.waitFor();
+    await activeAzureTab.waitFor();
+    assert.equal(await inactiveAwsTab.getAttribute("aria-selected"), "false");
+    assert.equal(await activeAzureTab.getAttribute("aria-selected"), "true");
+
+    const sshIdentityPath = join(sshIdentityDirectory, E2E_AWS_DEPLOYMENT_NAME);
+    assert.equal(
+      await pathExists(sshIdentityPath),
+      false,
+      "the SSH identity must not be materialized before the explicit copy action",
+    );
+    const clipboardBeforeSshCommand = await readClipboardText(application);
+    const contextMenu = sshPage.getByRole("menu", { name: "Application context menu" });
+    try {
+      await application.evaluate(
+        ({ clipboard }) => clipboard.writeText("before-copy-ssh-command"),
+      );
+      const inactiveAwsTabBounds = await inactiveAwsTab.boundingBox();
+      assert.ok(inactiveAwsTabBounds, "the inactive AWS SSH tab must have native input bounds");
+      await sendNativeContextMenu(application, sshPage, {
+        x: inactiveAwsTabBounds.x + inactiveAwsTabBounds.width / 2,
+        y: inactiveAwsTabBounds.y + inactiveAwsTabBounds.height / 2,
+      });
+      await contextMenu.waitFor();
+      const copySshCommand = contextMenu.getByRole("menuitem", {
+        name: "Copy SSH Command",
+        exact: true,
+      });
+      await copySshCommand.waitFor();
+      assert.notEqual(await copySshCommand.getAttribute("aria-disabled"), "true");
+      await copySshCommand.click();
+      await contextMenu.waitFor({ state: "hidden" });
+
+      const expectedSshCommand =
+        "ssh -i ~/.ssh/sliver-gui/e2e-firewall-instance -p 22 fixture@192.0.2.10";
+      const clipboardDeadline = Date.now() + 5_000;
+      let copiedSshCommand = "";
+      while (Date.now() < clipboardDeadline) {
+        copiedSshCommand = await readClipboardText(application);
+        if (copiedSshCommand === expectedSshCommand) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(copiedSshCommand, expectedSshCommand);
+
+      const [identityDirectoryStats, sshIdentityStats, sshIdentityContent] = await Promise.all([
+        lstat(sshIdentityDirectory),
+        lstat(sshIdentityPath),
+        readFile(sshIdentityPath, "utf8"),
+      ]);
+      assert.equal(identityDirectoryStats.isDirectory(), true, "SSH identity root must be a directory");
+      assert.equal(sshIdentityStats.isFile(), true, "materialized SSH identity must be a regular file");
+      assert.equal(
+        sshIdentityContent,
+        SSH_IDENTITY_PRIVATE_KEY_CONTENT,
+        "materialized SSH identity must preserve the exact main-owned key bytes",
+      );
+      if (process.platform !== "win32") {
+        assert.equal(
+          identityDirectoryStats.mode & 0o777,
+          0o700,
+          "SSH identity directory must be mode 0700",
+        );
+        assert.equal(sshIdentityStats.mode & 0o777, 0o600, "SSH identity file must be mode 0600");
+      }
+
+      const rendererObservations = [
+        ["SSH DOM", await sshPage.locator("body").innerText()],
+        ["SSH URL", decodeURIComponent(sshPage.url())],
+        ["SSH console", sshConsoleMessages.join("\n")],
+        ["fake main state", JSON.stringify(await readFakeState(application))],
+      ] as const;
+      for (const [surface, value] of rendererObservations) {
+        assert.equal(
+          value.includes(SSH_IDENTITY_PRIVATE_KEY_MARKER),
+          false,
+          `${surface} exposed the main-owned SSH identity marker`,
+        );
+      }
+      assert.equal(
+        await inactiveAwsTab.getAttribute("aria-selected"),
+        "false",
+        "copying a background SSH tab command must not select it",
+      );
+      assert.equal(
+        await activeAzureTab.getAttribute("aria-selected"),
+        "true",
+        "copying a background SSH tab command must preserve the active Azure tab",
+      );
+    } finally {
+      if (!sshPage.isClosed()) {
+        await sshPage.keyboard.press("Escape").catch(() => undefined);
+        await contextMenu.waitFor({ state: "hidden" }).catch(() => undefined);
+      }
+      await application.evaluate(
+        ({ clipboard }, text) => clipboard.writeText(text),
+        clipboardBeforeSshCommand,
+      );
+    }
+
     const activeTerminal = sshPage.locator('[data-ssh-terminal-tab-id]:not([inert])')
       .getByRole("textbox", { name: /^SSH session /u });
     await activeTerminal.waitFor();
@@ -3520,11 +3657,18 @@ async function verifyM3SessionTerminal(
         1,
         "the terminal context menu must retain Inspect Element",
       );
-      for (const label of ["Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All"]) {
+      for (const label of ["Copy", "Paste"]) {
+        assert.equal(
+          await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
+          1,
+          `the terminal context menu must expose scoped ${label}`,
+        );
+      }
+      for (const label of ["Undo", "Redo", "Cut", "Delete", "Select All"]) {
         assert.equal(
           await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
           0,
-          `the terminal context menu must not expose ${label}`,
+          `the terminal context menu must not expose native ${label}`,
         );
       }
       await page.keyboard.press("Escape");
@@ -3588,11 +3732,18 @@ async function verifyM3SessionTerminal(
         1,
         "the textarea-targeted terminal context menu must retain Inspect Element",
       );
-      for (const label of ["Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All"]) {
+      for (const label of ["Copy", "Paste"]) {
+        assert.equal(
+          await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
+          1,
+          `the textarea-targeted terminal context menu must expose scoped ${label}`,
+        );
+      }
+      for (const label of ["Undo", "Redo", "Cut", "Delete", "Select All"]) {
         assert.equal(
           await contextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
           0,
-          `the textarea-targeted terminal context menu must not expose ${label}`,
+          `the textarea-targeted terminal context menu must not expose native ${label}`,
         );
       }
       await page.keyboard.press("Escape");
@@ -3911,6 +4062,54 @@ async function verifyM3ManagedShellPopout(
     });
     await popoutTerminal.waitFor();
     await popout.getByText("Attached", { exact: true }).first().waitFor();
+    await popout.bringToFront();
+    const popoutContextMenu = popout.getByRole("menu", { name: "Application context menu" });
+    const clipboardBeforeContextPaste = await readClipboardText(electronApplication);
+    try {
+      await electronApplication.evaluate(({ clipboard }) => clipboard.writeText("pwd"));
+      const popoutTerminalCanvasBounds = await popoutTerminal.locator("canvas").boundingBox();
+      assert.ok(popoutTerminalCanvasBounds, "the dedicated managed-shell terminal must have native input bounds");
+      await sendNativeContextMenu(electronApplication, popout, {
+        x: popoutTerminalCanvasBounds.x + 8,
+        y: popoutTerminalCanvasBounds.y + 8,
+      });
+      await popoutContextMenu.waitFor();
+      for (const label of ["Copy", "Paste", "Inspect Element"]) {
+        assert.equal(
+          await popoutContextMenu.getByRole("menuitem", { name: label, exact: true }).count(),
+          1,
+          `the dedicated managed-shell terminal must expose ${label}`,
+        );
+      }
+      const contextPaste = popoutContextMenu.getByRole("menuitem", { name: "Paste", exact: true });
+      assert.notEqual(await contextPaste.getAttribute("aria-disabled"), "true");
+      const pastedPwdCommands = fakeMethodCount(
+        await readFakeState(electronApplication),
+        "shell.command.pwd",
+      );
+      const shellWritesBeforeContextPaste = fakeMethodCount(
+        await readFakeState(electronApplication),
+        "shell.write",
+      );
+      await contextPaste.click();
+      await popoutContextMenu.waitFor({ state: "hidden" });
+      await waitForFakeMethodCount(
+        electronApplication,
+        "shell.write",
+        shellWritesBeforeContextPaste + 1,
+      );
+      await popoutTerminal.press("Enter");
+      await waitForFakeMethodCount(electronApplication, "shell.command.pwd", pastedPwdCommands + 1);
+    } finally {
+      if (await popoutContextMenu.isVisible().catch(() => false)) {
+        await popout.keyboard.press("Escape").catch(() => undefined);
+      }
+      await popoutContextMenu.waitFor({ state: "hidden" }).catch(() => undefined);
+      await electronApplication.evaluate(
+        ({ clipboard }, text) => clipboard.writeText(text),
+        clipboardBeforeContextPaste,
+      );
+    }
     assert.equal(
       fakeMethodCount(await readFakeState(electronApplication), "startShellSession"),
       initialShellStarts,

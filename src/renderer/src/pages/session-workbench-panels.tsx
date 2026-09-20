@@ -2778,7 +2778,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         const cached = cachedValues.get(registryValueCacheKey(hive, path, entry.name));
         return (
           <span className={`block truncate font-mono text-xs ${cached?.status === "ready" ? "text-foreground" : cached?.status === "error" ? "text-danger" : "text-muted"}`}>
-            {cached?.status === "ready" ? registryReadDisplayValue(cached.result) : cached?.status === "loading" ? "Reading…" : cached?.status === "error" ? "Read failed" : "(not loaded)"}
+            {cached?.status === "ready" ? <RegistryReadValueData result={cached.result} /> : cached?.status === "loading" ? "Reading…" : cached?.status === "error" ? "Read failed" : "(not loaded)"}
           </span>
         );
       },
@@ -2976,7 +2976,9 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
                           <h3 className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground">{selectedValue.key || "(Default)"}</h3>
                           <span className="shrink-0 font-mono text-[11px] text-muted">{registryReadValueTypeLabel(selectedValue.type)}</span>
                         </div>
-                        <pre className="mt-2 min-h-0 flex-1 select-text overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{registryReadDisplayValue(selectedValue) || "(empty value)"}</pre>
+                        <pre className="mt-2 min-h-0 flex-1 select-text overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">
+                          <RegistryReadValueData emptyFallback="(empty value)" result={selectedValue} />
+                        </pre>
                       </>
                     ) : (
                       <p className="text-xs text-muted">{readingValueKey !== undefined ? "Reading value data…" : "Select a value to read its data."}</p>
@@ -3816,6 +3818,26 @@ function registryValueTypeLabel(type: SessionRegistryWriteValue["type"]): string
 
 function registryReadValueTypeLabel(type: SessionRegistryReadResult["type"]): string {
   return type === "unknown" ? "Unknown" : registryValueTypeLabel(type);
+}
+
+function RegistryReadValueData({
+  emptyFallback = "",
+  result,
+}: {
+  emptyFallback?: string;
+  result: SessionRegistryReadResult;
+}): React.JSX.Element {
+  if (result.type === "string") {
+    if (result.value === "") return <span className="italic text-muted">(empty)</span>;
+    return (
+      <span data-registry-string-value>
+        <span aria-hidden>&quot;</span>
+        <span>{result.value}</span>
+        <span aria-hidden>&quot;</span>
+      </span>
+    );
+  }
+  return <>{registryReadDisplayValue(result) || emptyFallback}</>;
 }
 
 function registryReadDisplayValue(result: SessionRegistryReadResult): string {

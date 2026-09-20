@@ -112,6 +112,7 @@ describe("SshSessionRegistry", () => {
       .mockResolvedValueOnce({ ok: true as const, value: { target, runtime: secondRuntime } });
     const source = {
       listSshTargets: vi.fn(async () => ({ ok: true as const, value: [target] })),
+      materializeSshIdentity: fakeMaterializeSshIdentity(),
       startSshSession,
       approveSshHostKey: vi.fn(),
     } satisfies ManagedSshSessionSource;
@@ -174,6 +175,7 @@ describe("SshSessionRegistry", () => {
     });
     const source = {
       listSshTargets: vi.fn(async () => ({ ok: true as const, value: [target] })),
+      materializeSshIdentity: fakeMaterializeSshIdentity(),
       startSshSession,
       approveSshHostKey: vi.fn(),
     } satisfies ManagedSshSessionSource;
@@ -209,6 +211,7 @@ describe("SshSessionRegistry", () => {
     }));
     const source = {
       listSshTargets: vi.fn(async () => ({ ok: true as const, value: [target] })),
+      materializeSshIdentity: fakeMaterializeSshIdentity(),
       startSshSession,
       approveSshHostKey: vi.fn(),
     } satisfies ManagedSshSessionSource;
@@ -249,6 +252,7 @@ describe("SshSessionRegistry", () => {
     }));
     const source = {
       listSshTargets: vi.fn(async () => ({ ok: true as const, value: [target] })),
+      materializeSshIdentity: fakeMaterializeSshIdentity(),
       startSshSession,
       approveSshHostKey,
     } satisfies ManagedSshSessionSource;
@@ -289,6 +293,7 @@ describe("SshSessionRegistry", () => {
     }));
     const source = {
       listSshTargets: vi.fn(async () => ({ ok: true as const, value: [target] })),
+      materializeSshIdentity: fakeMaterializeSshIdentity(),
       startSshSession,
       approveSshHostKey,
     } satisfies ManagedSshSessionSource;
@@ -459,6 +464,114 @@ describe("SshSessionRegistry", () => {
     await registry.dispose();
   });
 
+  it("formats the SSH command from the main-owned endpoint and ignores the tab label", async () => {
+    const runtime = fakeRuntime();
+    const commandTarget: ManagedSshTarget = {
+      ...target,
+      host: "203.0.113.10",
+      port: 2_222,
+      username: "operator",
+    };
+    const source = fakeSource({ target: commandTarget, runtime });
+    const ids = opaqueIds("a", "b", "c");
+    const registry = new SshSessionRegistry(source, { createOpaqueId: () => ids.next().value! });
+    await registry.openTarget(commandTarget.deploymentId);
+    await registry.claim(ownerOne);
+
+    await expect(registry.commandForTab(ownerOne, "a".repeat(43))).resolves.toEqual({
+      ok: true,
+      value: "ssh -i ~/.ssh/sliver-gui/test1 -p 2222 operator@203.0.113.10",
+    });
+    expect(source.materializeSshIdentity).toHaveBeenCalledExactlyOnceWith(commandTarget);
+
+    expect(await registry.renameTab(ownerOne, "a".repeat(43), "Production gateway")).toEqual({
+      ok: true,
+      value: { tabId: "a".repeat(43), label: "Production gateway" },
+    });
+    await expect(registry.commandForTab(ownerOne, "a".repeat(43))).resolves.toEqual({
+      ok: true,
+      value: "ssh -i ~/.ssh/sliver-gui/test1 -p 2222 operator@203.0.113.10",
+    });
+    expect(source.materializeSshIdentity).toHaveBeenCalledTimes(2);
+    expect(source.materializeSshIdentity).toHaveBeenLastCalledWith(commandTarget);
+
+    await registry.dispose();
+  });
+
+  it("requires the exact owner and rejects missing or closed tabs for SSH commands", async () => {
+    const runtime = fakeRuntime();
+    const source = fakeSource({ target, runtime });
+    const ids = opaqueIds("a", "b", "c");
+    const registry = new SshSessionRegistry(source, { createOpaqueId: () => ids.next().value! });
+    await registry.openTarget(target.deploymentId);
+    await registry.claim(ownerOne);
+
+    await expect(registry.commandForTab(ownerTwo, "a".repeat(43))).rejects.toThrow("not authorized");
+    await expect(registry.commandForTab(ownerOne, "z".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The SSH tab is unavailable",
+    });
+
+    expect(await registry.closeTab(ownerOne, "a".repeat(43))).toEqual({
+      ok: true,
+      value: { remainingTabs: 0 },
+    });
+    await expect(registry.commandForTab(ownerOne, "a".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The SSH tab is unavailable",
+    });
+
+    await registry.dispose();
+  });
+
+  it("does not format or retain a command when identity materialization fails", async () => {
+    const runtime = fakeRuntime();
+    const source = fakeSource({ target, runtime });
+    source.materializeSshIdentity.mockResolvedValueOnce({
+      ok: false,
+      error: "The SSH identity file could not be prepared",
+    });
+    const ids = opaqueIds("a", "b", "c");
+    const registry = new SshSessionRegistry(source, { createOpaqueId: () => ids.next().value! });
+    await registry.openTarget(target.deploymentId);
+    await registry.claim(ownerOne);
+
+    await expect(registry.commandForTab(ownerOne, "a".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The SSH identity file could not be prepared",
+    });
+    expect(source.materializeSshIdentity).toHaveBeenCalledExactlyOnceWith(target);
+    await registry.dispose();
+  });
+
+  it("rejects a copied command when its tab closes while the identity file is materializing", async () => {
+    const runtime = fakeRuntime();
+    const source = fakeSource({ target, runtime });
+    const materialized = deferred<Awaited<ReturnType<ManagedSshSessionSource["materializeSshIdentity"]>>>();
+    source.materializeSshIdentity.mockImplementationOnce(() => materialized.promise);
+    const ids = opaqueIds("a", "b", "c");
+    const registry = new SshSessionRegistry(source, { createOpaqueId: () => ids.next().value! });
+    await registry.openTarget(target.deploymentId);
+    await registry.claim(ownerOne);
+
+    const copying = registry.commandForTab(ownerOne, "a".repeat(43));
+    await vi.waitFor(() => expect(source.materializeSshIdentity).toHaveBeenCalledOnce());
+    await registry.closeTab(ownerOne, "a".repeat(43));
+    materialized.resolve({
+      ok: true,
+      value: {
+        filePath: "/Users/operator/.ssh/sliver-gui/test1",
+        commandPath: "~/.ssh/sliver-gui/test1",
+      },
+    });
+
+    await expect(copying).resolves.toEqual({
+      ok: false,
+      error: "The SSH tab is unavailable",
+    });
+    await registry.dispose();
+  });
+
   it("rejects and retires a session whose source name cannot form a visible tab label", async () => {
     const runtime = fakeRuntime();
     const unsafeTarget = { ...target, name: "\u200b" };
@@ -481,14 +594,26 @@ function fakeSource(
   initial: StartedManagedSshSession | SshHostKeyReview,
   approved: StartedManagedSshSession = initial as StartedManagedSshSession,
 ): ManagedSshSessionSource & {
+  materializeSshIdentity: ReturnType<typeof fakeMaterializeSshIdentity>;
   startSshSession: ReturnType<typeof vi.fn>;
   approveSshHostKey: ReturnType<typeof vi.fn>;
 } {
   return {
     listSshTargets: vi.fn(async () => ({ ok: true as const, value: [target] })),
+    materializeSshIdentity: fakeMaterializeSshIdentity(),
     startSshSession: vi.fn(async (_deploymentId: string) => ({ ok: true as const, value: initial })),
     approveSshHostKey: vi.fn(async (_token: string) => ({ ok: true as const, value: approved })),
   };
+}
+
+function fakeMaterializeSshIdentity() {
+  return vi.fn<ManagedSshSessionSource["materializeSshIdentity"]>(async () => ({
+    ok: true as const,
+    value: {
+      filePath: "/Users/operator/.ssh/sliver-gui/test1",
+      commandPath: "~/.ssh/sliver-gui/test1",
+    },
+  }));
 }
 
 function fakeRuntime(): ConsolePortRuntime & { close: ReturnType<typeof vi.fn> } {
@@ -504,6 +629,15 @@ function fakeRuntime(): ConsolePortRuntime & { close: ReturnType<typeof vi.fn> }
 
 function *opaqueIds(...characters: string[]): Generator<string> {
   for (const character of characters) yield character.repeat(43);
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => { resolve = accept; });
+  return { promise, resolve };
 }
 
 function sequentialOpaqueIds(): () => string {

@@ -14,6 +14,7 @@ import {
   IPC,
   IPC_INVOKE,
   type CopyManagedServerPublicIpInput,
+  type CopyManagedServerSshCommandInput,
   type ExecuteJobStopPlanInput,
   type GenerateFromProfileInput,
   type GenerateInput,
@@ -135,6 +136,10 @@ export interface InteractionWindowController {
 
 export interface CloudDeploymentWindowController {
   open(source: TrustedWindowIdentity, request?: CloudDeploymentNavigationRequest): MaybePromise<OperationResult>;
+}
+
+export interface ManagedServerSshCommandController {
+  commandForDeployment(deploymentId: string): MaybePromise<OperationResult<string>>;
 }
 
 export interface ApplicationUpdateController {
@@ -268,6 +273,7 @@ export function registerIpcHandlers(
   consoleWindows?: ConsoleWindowController,
   applicationSettings?: ApplicationSettingsController,
   cloudDeploymentWindows?: CloudDeploymentWindowController,
+  managedServerSshCommands?: ManagedServerSshCommandController,
 ): void {
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
@@ -315,6 +321,40 @@ export function registerIpcHandlers(
       if (!cloudDeploymentWindows) return { ok: false, error: "Cloud Deployment is unavailable" };
       const source = { contentsId, rendererProcessId, rendererFrameToken };
       return request ? cloudDeploymentWindows.open(source, request) : cloudDeploymentWindows.open(source);
+    },
+  );
+  handleTrusted(
+    IPC.copyManagedServerSshCommand,
+    rendererUrl,
+    parseCopyManagedServerSshCommandArguments,
+    async (trusted, input) => {
+      try {
+        const associatedDeploymentId = (): string | undefined => (
+          registry.snapshot(trusted.contentsId).connection.managedServer?.deploymentId
+        );
+        if (associatedDeploymentId() !== input.deploymentId) {
+          return {
+            ok: false,
+            error: "The requested deployment is not associated with this window's current connection",
+          };
+        }
+        if (!managedServerSshCommands) {
+          return { ok: false, error: "Managed SSH commands are unavailable" };
+        }
+        const result = await managedServerSshCommands.commandForDeployment(input.deploymentId);
+        requireCurrentTrustedSender(trusted, rendererUrl);
+        if (associatedDeploymentId() !== input.deploymentId) {
+          return {
+            ok: false,
+            error: "The requested deployment is not associated with this window's current connection",
+          };
+        }
+        if (!result.ok) return result;
+        clipboard.writeText(result.value);
+        return { ok: true as const };
+      } catch {
+        return { ok: false as const, error: "The managed server's SSH command could not be copied" };
+      }
     },
   );
   handleTrusted(
@@ -729,6 +769,21 @@ function requireTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent, renderer
   };
 }
 
+function requireCurrentTrustedSender(sender: TrustedSender, rendererUrl: string): void {
+  if (!isTrustedSender(sender.sender, rendererUrl)) {
+    throw new Error("Rejected IPC invocation from an untrusted renderer");
+  }
+  const mainFrame = sender.sender.mainFrame;
+  if (
+    mainFrame.isDestroyed() ||
+    mainFrame.processId !== sender.rendererProcessId ||
+    mainFrame.frameToken !== sender.rendererFrameToken ||
+    !isTrustedRendererUrl(mainFrame.url, rendererUrl)
+  ) {
+    throw new Error("Rejected IPC invocation from an untrusted renderer");
+  }
+}
+
 function createStreamAttachListener(
   registry: IpcConnectionRegistry,
   rendererUrl: string,
@@ -863,6 +918,19 @@ function parseCopyManagedServerPublicIpArguments(
   requireExactKeys(value, ["deploymentId"], description);
   const deploymentId = value["deploymentId"];
   if (typeof deploymentId !== "string" || !UUID_PATTERN.test(deploymentId)) throw invalidArguments(description);
+  return [Object.freeze({ deploymentId })];
+}
+
+function parseCopyManagedServerSshCommandArguments(
+  args: readonly unknown[],
+): [input: CopyManagedServerSshCommandInput] {
+  const description = "arguments for copying a managed server SSH command";
+  const value = requireRecord(requireSingleArgument(args, description), description);
+  requireExactKeys(value, ["deploymentId"], description);
+  const deploymentId = value["deploymentId"];
+  if (typeof deploymentId !== "string" || !UUID_PATTERN.test(deploymentId)) {
+    throw invalidArguments(description);
+  }
   return [Object.freeze({ deploymentId })];
 }
 

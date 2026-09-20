@@ -70,6 +70,7 @@ export interface GhosttyTerminalProps {
   disableInput?: boolean;
   enableClipboard?: boolean;
   terminalResponseBudgetBytes?: number;
+  onClipboardPaste?: (text: string) => void | Promise<void>;
   onClose?: (reason?: string) => void;
   onError?: (error: Error) => void;
   onReady?: () => void;
@@ -90,6 +91,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       className,
       disableInput = false,
       enableClipboard = false,
+      onClipboardPaste,
       onClose,
       onError,
       onReady,
@@ -474,6 +476,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         canPaste={terminalState === "ready" && !disableInput}
         getSelection={terminalHandle.getSelection}
         hostRef={hostRef}
+        {...(onClipboardPaste === undefined ? {} : { onPasteText: onClipboardPaste })}
         paste={terminalHandle.paste}
         terminal={terminalRef.current}
       >

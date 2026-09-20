@@ -82,6 +82,7 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
   const running = state === "running";
   const stopped = state === "stopped" || state === "deallocated";
   const canCopyPublicIp = Boolean(managed?.overview?.publicIpAddress?.trim());
+  const sshUnavailable = state !== undefined && !running;
   const lifecycleAction = running ? "stop" : "start";
   type CloudAction = Extract<CloudDeploymentNavigationRequest, { view: "deployments" }>["action"] | "firewall";
   const cloudAction = (
@@ -116,7 +117,25 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
     isDisabled: !canViewJobs,
     onAction: () => { if (canViewJobs) onViewJobs(); },
   },
-  cloudAction("ssh", "SSH", faTerminal, state !== undefined && !running),
+  cloudAction("ssh", "SSH", faTerminal, sshUnavailable),
+  {
+    id: "server.copy-ssh-command",
+    label: "Copy SSH Command",
+    icon: faCopy,
+    isDisabled: !managed || sshUnavailable,
+    onAction: async () => {
+      if (!managed || sshUnavailable) return;
+      try {
+        const result = await window.sliver.copyManagedServerSshCommand({ deploymentId: managed.deploymentId });
+        if (result.ok) toast.success("SSH command copied to clipboard");
+        else toast.danger("Could not copy SSH command", { description: result.error });
+      } catch (error) {
+        toast.danger("Could not copy SSH command", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  },
   cloudAction("firewall", "Firewall", faShieldHalved),
   cloudAction("operator", "Add Operator", faUserPlus, state !== undefined && !running),
   { ...cloudAction("rename", "Rename", faPen), separatorBefore: true },

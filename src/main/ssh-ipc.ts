@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  clipboard,
   ipcMain,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -44,6 +45,7 @@ export const SSH_IPC_INVOKE = {
   approveSshHostKey: "sliver:ssh:host-key:approve",
   closeSshTab: "sliver:ssh:tab:close",
   selectSshTab: "sliver:ssh:tab:select",
+  copySshCommand: "sliver:ssh:tab:copy-command",
   renameSshTab: "sliver:ssh:tab:rename",
   getTerminalRuntime: "sliver:ssh:terminal-runtime:get",
   getApplicationSettings: "sliver:ssh:application-settings:get",
@@ -85,6 +87,10 @@ export interface SshSessionController {
     tabId: string,
   ): MaybePromise<OperationResult<SshTabCloseResult>>;
   selectTab(owner: ConsoleOwnerIdentity, tabId: string): MaybePromise<OperationResult>;
+  commandForTab(
+    owner: ConsoleOwnerIdentity,
+    tabId: string,
+  ): MaybePromise<OperationResult<string>>;
   renameTab(
     owner: ConsoleOwnerIdentity,
     tabId: string,
@@ -179,6 +185,23 @@ export function registerSshIpcHandlers(
     ({ identity }, input) => services.sessions.selectTab(identity, input.tabId),
   );
   handleSsh(
+    SSH_IPC_INVOKE.copySshCommand,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseSshTabInput(requireSingleArgument(args))),
+    async (sshSender, input) => {
+      const result = await services.sessions.commandForTab(sshSender.identity, input.tabId);
+      if (!result.ok) return result;
+      requireCurrentSshSender(sshSender, exactRendererUrl, authorizeWindow);
+      try {
+        clipboard.writeText(result.value);
+        return { ok: true as const };
+      } catch {
+        return { ok: false as const, error: "The SSH command could not be copied" };
+      }
+    },
+  );
+  handleSsh(
     SSH_IPC_INVOKE.renameSshTab,
     exactRendererUrl,
     authorizeWindow,
@@ -270,6 +293,26 @@ function requireSshSender(
     !authorizeWindow(identity, window)
   ) throw new Error("Untrusted SSH renderer");
   return { identity, sender, window };
+}
+
+function requireCurrentSshSender(
+  { identity, sender, window }: SshSender,
+  exactRendererUrl: string,
+  authorizeWindow: SshWindowAuthorizer,
+): void {
+  const currentWindow = BrowserWindow.fromWebContents(sender);
+  if (sender.isDestroyed() || !currentWindow || currentWindow !== window) {
+    throw new Error("Untrusted SSH renderer");
+  }
+  const frame = sender.mainFrame;
+  if (
+    frame.isDestroyed() ||
+    frame.processId !== identity.rendererProcessId ||
+    frame.frameToken !== identity.rendererFrameToken ||
+    !isSameRendererDocument(sender.getURL(), exactRendererUrl) ||
+    !isSameRendererDocument(frame.url, exactRendererUrl) ||
+    !authorizeWindow(identity, window)
+  ) throw new Error("Untrusted SSH renderer");
 }
 
 function createSshAttachListener(

@@ -48,6 +48,11 @@ import {
 } from "./cloud-deployment-service.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
+import {
+  SshIdentityStore,
+  type MaterializedSshIdentity,
+  type SshIdentityMaterializer,
+} from "./ssh-identity-store.js";
 import { SshTerminalStartError } from "./ssh-terminal-runtime.js";
 import type { AwsEc2Credentials, AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
 import type { AzureVmDeploymentResource, AzureVmProviderConnection } from "./cloud/azure-vm-provider.js";
@@ -2850,6 +2855,172 @@ describe("CloudDeploymentService", () => {
       }],
     });
     if (result.ok) expect(Object.isFrozen(result.value)).toBe(true);
+    service.dispose();
+  });
+
+  it("materializes the current AWS SSH identity through the credential vault without returning key material", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const materialize = vi.fn<SshIdentityMaterializer["materialize"]>(async () => Object.freeze({
+      filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+      commandPath: "~/.ssh/sliver-gui/sliver-aws",
+    }));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: { materialize },
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok || !listed.value[0]) throw new Error("Expected a managed SSH target");
+
+    const result = await service.materializeSshIdentity(listed.value[0]);
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+        commandPath: "~/.ssh/sliver-gui/sliver-aws",
+      },
+    });
+    expect(materialize).toHaveBeenCalledWith({
+      managedName: "Sliver AWS",
+      deploymentId: DEPLOYMENT_ID,
+      privateKey: TEST_SSH_PRIVATE_KEY,
+      collision: false,
+    });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE KEY");
+    expect(JSON.stringify(result)).not.toContain("secret-cloud-value");
+    service.dispose();
+  });
+
+  it("detects canonical SSH identity name collisions for Azure deployments", async () => {
+    const { safeStorage, store, vault } = await dependencies([
+      DEPLOYMENT_ID,
+      SECOND_DEPLOYMENT_ID,
+    ]);
+    await vault.create(azureCredential());
+    await createRunningAzureDeployment(store);
+    const collision = await store.create({
+      ...azureDeployment(),
+      expectedRevision: store.getState().revision,
+      name: "sliver azure",
+    });
+    if (!collision.ok) throw new Error(collision.error);
+    const identityRoot = join(temporaryDirectory, "home", ".ssh", "sliver-gui");
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: new SshIdentityStore(identityRoot),
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok) throw new Error(listed.error);
+    const target = listed.value.find(({ deploymentId }) => deploymentId === DEPLOYMENT_ID);
+    if (!target) throw new Error("Expected the original managed SSH target");
+
+    const result = await service.materializeSshIdentity(target);
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        filePath: join(identityRoot, `sliver-azure--${DEPLOYMENT_ID}`),
+        commandPath: `~/.ssh/sliver-gui/sliver-azure--${DEPLOYMENT_ID}`,
+      },
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(await readFile(result.value.filePath, "utf8")).toBe(TEST_SSH_PRIVATE_KEY);
+    service.dispose();
+  });
+
+  it("revalidates the managed SSH target after identity materialization", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const pendingIdentity = deferred<MaterializedSshIdentity>();
+    const materialize = vi.fn<SshIdentityMaterializer["materialize"]>(
+      () => pendingIdentity.promise,
+    );
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: { materialize },
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok || !listed.value[0]) throw new Error("Expected a managed SSH target");
+    const materializing = service.materializeSshIdentity(listed.value[0]);
+    await vi.waitFor(() => expect(materialize).toHaveBeenCalledOnce());
+    const deployment = store.getState().deployments[0];
+    if (!deployment) throw new Error("Expected a managed SSH deployment");
+    const renamed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...deployment, name: "Renamed while exporting" },
+    });
+    if (!renamed.ok) throw new Error(renamed.error);
+    pendingIdentity.resolve({
+      filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+      commandPath: "~/.ssh/sliver-gui/sliver-aws",
+    });
+
+    await expect(materializing).resolves.toEqual({
+      ok: false,
+      error: "The managed SSH server changed. Review the latest server details and try again.",
+    });
+    expect(JSON.stringify(await materializing)).not.toContain("PRIVATE KEY");
+    service.dispose();
+  });
+
+  it("does not return an unsuffixed identity when a canonical name collision appears during materialization", async () => {
+    const { safeStorage, store, vault } = await dependencies([
+      DEPLOYMENT_ID,
+      SECOND_DEPLOYMENT_ID,
+    ]);
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const pendingIdentity = deferred<MaterializedSshIdentity>();
+    const materialize = vi.fn<SshIdentityMaterializer["materialize"]>(
+      () => pendingIdentity.promise,
+    );
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: { materialize },
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok || !listed.value[0]) throw new Error("Expected a managed SSH target");
+    const materializing = service.materializeSshIdentity(listed.value[0]);
+    await vi.waitFor(() => expect(materialize).toHaveBeenCalledOnce());
+    expect(materialize).toHaveBeenCalledWith(expect.objectContaining({ collision: false }));
+    const collision = await store.create({
+      ...awsDeployment(),
+      expectedRevision: store.getState().revision,
+      name: "SLIVER AWS",
+    });
+    if (!collision.ok) throw new Error(collision.error);
+    pendingIdentity.resolve({
+      filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+      commandPath: "~/.ssh/sliver-gui/sliver-aws",
+    });
+
+    await expect(materializing).resolves.toEqual({
+      ok: false,
+      error: "The managed SSH server changed. Review the latest server details and try again.",
+    });
     service.dispose();
   });
 

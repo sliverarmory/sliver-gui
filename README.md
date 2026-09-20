@@ -68,10 +68,12 @@ configuration files and their private keys stay in the Electron main process.
   background; reopening it from the same connected workspace restores its tabs,
   names, selection, and scrollback. Close a tab explicitly to stop that client
   and remove its private workspace. Quitting the app cleans up all clients.
-  SSH and console terminals offer Copy/Paste in the right-click menu for
-  Ghostty's highlighted text. Shortcuts are Cmd+C/Cmd+V on macOS and
-  Ctrl+Shift+C/Ctrl+Shift+V on Windows/Linux; Ctrl+C still interrupts the
-  terminal process. Selecting text alone does not change the clipboard.
+  SSH, console, and managed session terminals offer Copy/Paste in the
+  right-click menu for Ghostty's highlighted text. Shortcuts are Cmd+C/Cmd+V
+  on macOS and Ctrl+Shift+C/Ctrl+Shift+V on Windows/Linux; Ctrl+C still
+  interrupts the terminal process. Managed session pastes retain their
+  multiline/control-character review. Selecting text alone does not change the
+  clipboard.
 - A target execution workbench for bounded process, assembly, raw-shellcode,
   shared-library, reflective-DLL, migration, Metasploit, psexec, SSH, backdoor,
   DLL-hijack, token, identity, get-system, child-process, and privilege

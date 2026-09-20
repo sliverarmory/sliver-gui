@@ -15,6 +15,7 @@ import {
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
+const SSH_IDENTITY_PRIVATE_KEY_MARKER = "E2E_SSH_IDENTITY_PRIVATE_KEY_DO_NOT_RENDER";
 const SESSION_MENU_LABELS = ["Interact", "Interact in new window", "Rename", "Close Session", "Kill Session"] as const;
 
 for (const hosting of ["unmanaged", "aws", "azure"] as const) {
@@ -355,6 +356,12 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       assert.deepEqual(rendererErrors, []);
       const body = await page.locator("body").innerText();
       assert.doesNotMatch(body, /FAKE_[A-Z0-9_]*(?:SECRET|TOKEN|KEY)|secret-path/u);
+      assert.equal(body.includes(SSH_IDENTITY_PRIVATE_KEY_MARKER), false,
+        "the materialized SSH private key must not reach rendered content");
+      assert.equal(rendererErrors.join("\n").includes(SSH_IDENTITY_PRIVATE_KEY_MARKER), false,
+        "the materialized SSH private key must not reach renderer errors");
+      assert.equal(JSON.stringify(state).includes(SSH_IDENTITY_PRIVATE_KEY_MARKER), false,
+        "the materialized SSH private key must not reach renderer-observable state");
     } catch (error) {
       testFailed = true;
       testFailure = error;
@@ -395,7 +402,7 @@ async function verifyServerContextMenuNavigation(
   });
   const menu = page.getByRole("menu", { name: "Application context menu" });
   const powerLabel = hosting === "unmanaged" ? "Start" : "Stop";
-  const labels = ["View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "Rename", "Copy Public IP", powerLabel, "Reboot", "Terminate"];
+  const labels = ["View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", powerLabel, "Reboot", "Terminate"];
   const originalWindows = application.windows().length;
   await server.click({ button: "right" });
   await menu.waitFor();
@@ -404,8 +411,8 @@ async function verifyServerContextMenuNavigation(
   const orderedItems = await menu.locator('[role="menuitem"], [role="separator"], hr').evaluateAll((items) =>
     items.map((item) => item.getAttribute("role") === "separator" || item.tagName === "HR"
       ? "separator" : item.textContent?.trim()));
-  assert.deepEqual(orderedItems.slice(0, 11), [
-    "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", powerLabel, "Reboot", "Terminate",
+  assert.deepEqual(orderedItems.slice(0, 12), [
+    "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", powerLabel, "Reboot", "Terminate",
   ], "real separators must divide access, metadata, and lifecycle actions");
   assert.equal(await menu.getByRole("menuitem", { name: "View Jobs/Listeners", exact: true }).isEnabled(), true);
   for (const name of labels.slice(1)) {
@@ -438,14 +445,21 @@ async function verifyServerContextMenuNavigation(
   try {
     await server.click({ button: "right" });
     await menu.waitFor();
+    await menu.getByRole("menuitem", { name: "Copy SSH Command", exact: true }).click();
+    await page.getByText("SSH command copied to clipboard", { exact: true }).waitFor();
+    await server.click({ button: "right" });
+    await menu.waitFor();
     await menu.getByRole("menuitem", { name: "Copy Public IP", exact: true }).click();
     await page.getByText("Public IP copied to clipboard", { exact: true }).waitFor();
     const clipboardWrites = await application.evaluate(() => {
       const state = globalThis as unknown as { __overviewClipboardCapture?: { writes: string[] } };
       return state.__overviewClipboardCapture?.writes ?? [];
     });
-    assert.deepEqual(clipboardWrites, [deployment.runtime.publicIpAddress]);
-    assert.equal(application.windows().length, originalWindows, "copying the public IP must not open a window");
+    const expectedSshCommand = hosting === "aws"
+      ? `ssh -i ~/.ssh/sliver-gui/${deployment.name} -p 22 fixture@192.0.2.10`
+      : `ssh -i ~/.ssh/sliver-gui/${deployment.name} -p 22 azureuser@203.0.113.42`;
+    assert.deepEqual(clipboardWrites, [expectedSshCommand, deployment.runtime.publicIpAddress]);
+    assert.equal(application.windows().length, originalWindows, "copying server details must not open a window");
   } finally {
     await application.evaluate(({ clipboard }) => {
       const state = globalThis as unknown as {

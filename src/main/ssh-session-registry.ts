@@ -19,6 +19,8 @@ import {
 } from "./console-port-session.js";
 import type { ConsoleCloseReason } from "../shared/console-contracts.js";
 import { isTerminalTabLabel } from "../shared/terminal-tab-label.js";
+import { formatSshCommand } from "./ssh-command.js";
+import type { MaterializedSshIdentity } from "./ssh-identity-store.js";
 
 export interface StartedManagedSshSession {
   readonly target: ManagedSshTarget;
@@ -27,6 +29,9 @@ export interface StartedManagedSshSession {
 
 export interface ManagedSshSessionSource {
   listSshTargets(): Promise<OperationResult<readonly ManagedSshTarget[]>>;
+  materializeSshIdentity(
+    target: ManagedSshTarget,
+  ): Promise<OperationResult<MaterializedSshIdentity>>;
   startSshSession(
     deploymentId: string,
   ): Promise<OperationResult<StartedManagedSshSession | SshHostKeyReview>>;
@@ -280,6 +285,28 @@ export class SshSessionRegistry {
       this.#activeTabId = tabId;
       return { ok: true };
     });
+  }
+
+  async commandForTab(
+    owner: ConsoleOwnerIdentity,
+    tabId: string,
+  ): Promise<OperationResult<string>> {
+    this.#assertOwner(owner);
+    const record = this.#sessions.get(tabId);
+    if (!record) return { ok: false, error: "The SSH tab is unavailable" };
+    const identity = await this.#source.materializeSshIdentity(record.target);
+    this.#assertOwner(owner);
+    if (this.#sessions.get(tabId) !== record) {
+      return { ok: false, error: "The SSH tab is unavailable" };
+    }
+    if (!identity.ok || !identity.value) {
+      return { ok: false, error: identity.error ?? "The SSH identity file is unavailable" };
+    }
+    try {
+      return { ok: true, value: formatSshCommand(record.target, identity.value.commandPath) };
+    } catch {
+      return { ok: false, error: "The SSH command is unavailable" };
+    }
   }
 
   renameTab(

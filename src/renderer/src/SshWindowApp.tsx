@@ -14,12 +14,14 @@ import {
   Modal,
   Spinner,
   Tabs,
+  toast,
   Tooltip,
 } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { faAmazon, faMicrosoft } from "@fortawesome/free-brands-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
+  faCopy,
   faKey,
   faPlus,
   faTerminal,
@@ -439,6 +441,20 @@ export function SshWindowApp(): React.JSX.Element {
     setRenameError(undefined);
   }, []);
 
+  const copySshCommand = useCallback(async (tabId: string): Promise<void> => {
+    if (!api || !tabsRef.current.some(({ context }) => context.tabId === tabId)) return;
+    try {
+      const result = await api.copySshCommand({ tabId });
+      if (!mountedRef.current) return;
+      if (result.ok) toast.success("SSH command copied to clipboard");
+      else toast.danger("Could not copy SSH command", { description: result.error });
+    } catch (caught) {
+      if (mountedRef.current) toast.danger("Could not copy SSH command", {
+        description: errorMessage(caught),
+      });
+    }
+  }, [api]);
+
   const renameTab = useCallback(async (label: string): Promise<void> => {
     if (!api || !renameTabId || renamingTabRef.current) return;
     const tabId = renameTabId;
@@ -675,6 +691,12 @@ export function SshWindowApp(): React.JSX.Element {
                   <RenamableTab
                     ariaLabel={`${tab.context.label}, ${sshEndpoint(tab.context.target)}, ${tabStateLabel(state)}, shortcut ${shortcutLabels.accessible}`}
                     className="max-w-64 min-w-32 gap-2 rounded-none px-3 data-[selected=true]:text-foreground"
+                    contextMenuActions={[{
+                      id: "ssh-tab.copy-command",
+                      label: "Copy SSH Command",
+                      icon: faCopy,
+                      onAction: () => copySshCommand(tab.context.tabId),
+                    }]}
                     id={tab.context.tabId}
                     key={tab.context.tabId}
                     onRename={openRenameTab}

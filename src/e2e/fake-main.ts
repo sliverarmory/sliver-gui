@@ -29,13 +29,14 @@ import type {
   NativePtySpawnOptions,
 } from "../main/console-runtime.js";
 import type { ConsolePortRuntime } from "../main/console-port-session.js";
-import type { ManagedSshTarget } from "../shared/ssh-contracts.js";
+import { SshIdentityStore } from "../main/ssh-identity-store.js";
 import {
   ConnectionRegistry,
   type SliverClientAdapter,
 } from "../main/connection-registry.js";
 import { loadTerminalRuntime } from "../main/terminal-runtime.js";
 import { resolveManagedServerFromDeployments } from "../main/managed-server-resolver.js";
+import type { ManagedSshTarget } from "../shared/ssh-contracts.js";
 import {
   E2E_AWS_CREDENTIAL_ID,
   E2E_AWS_DEPLOYMENT,
@@ -133,6 +134,12 @@ declare global {
 
 const repositoryRoot = requiredArgument("--repository-root=");
 const M2_FILE_CONTENT = "FAKE_M2_FILE_CONTENT_DO_NOT_JOURNAL";
+const SSH_IDENTITY_PRIVATE_KEY = [
+  "-----BEGIN OPENSSH PRIVATE KEY-----",
+  "E2E_SSH_IDENTITY_PRIVATE_KEY_DO_NOT_RENDER",
+  "-----END OPENSSH PRIVATE KEY-----",
+  "",
+].join("\n");
 const state: FakeMainState = {
   configFactoryCalls: 0,
   dialogCalls: 0,
@@ -176,6 +183,13 @@ globalThis.__SLIVER_GUI_PROTOCOL_E2E_HANDLER__ = createAppProtocolHandler;
 let holdNextConsoleExit = false;
 let heldConsoleExit: (() => void) | undefined;
 const consoleClientRootDirectory = requiredArgument("--console-client-root-directory=");
+const sshIdentityDirectoryArgument = process.argv.find((argument) => (
+  argument.startsWith("--ssh-identity-directory=")
+));
+const sshIdentityStore = new SshIdentityStore(
+  sshIdentityDirectoryArgument?.slice("--ssh-identity-directory=".length) ??
+    join(requiredArgument("--user-data-directory="), "ssh-identities"),
+);
 // Optional display-only provenance for the dedicated Overview journey. Existing
 // E2E callers keep the unassociated fixture and never load cloud credentials.
 const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
@@ -213,6 +227,27 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
     ok: true,
     value: [fakeSshTarget(E2E_AWS_DEPLOYMENT_ID), fakeSshTarget(E2E_AZURE_DEPLOYMENT_ID)],
   }),
+  materializeSshIdentity: async (target) => {
+    const expected = target.deploymentId === E2E_AWS_DEPLOYMENT_ID ||
+        target.deploymentId === E2E_AZURE_DEPLOYMENT_ID
+      ? fakeSshTarget(target.deploymentId)
+      : undefined;
+    if (!expected || !sameFakeSshTarget(target, expected)) {
+      return { ok: false, error: "Unknown local SSH fixture" };
+    }
+    try {
+      return {
+        ok: true,
+        value: await sshIdentityStore.materialize({
+          managedName: expected.name,
+          deploymentId: expected.deploymentId,
+          privateKey: SSH_IDENTITY_PRIVATE_KEY,
+        }),
+      };
+    } catch {
+      return { ok: false, error: "The local SSH identity could not be materialized" };
+    }
+  },
   startSshSession: async (deploymentId) => {
     if (deploymentId !== E2E_AWS_DEPLOYMENT_ID && deploymentId !== E2E_AZURE_DEPLOYMENT_ID) {
       return { ok: false, error: "Unknown local SSH fixture" };
@@ -444,6 +479,18 @@ function fakeSshTarget(deploymentId: string): ManagedSshTarget {
     status: "running",
     connectable: true,
   };
+}
+
+function sameFakeSshTarget(left: ManagedSshTarget, right: ManagedSshTarget): boolean {
+  return left.deploymentId === right.deploymentId &&
+    left.name === right.name &&
+    left.provider === right.provider &&
+    left.host === right.host &&
+    left.port === right.port &&
+    left.username === right.username &&
+    left.status === right.status &&
+    left.connectable === right.connectable &&
+    left.unavailableReason === right.unavailableReason;
 }
 
 function createFakeConsolePtyFactory(

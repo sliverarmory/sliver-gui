@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { BrowserWindow } from "electron";
@@ -142,6 +143,12 @@ import type {
 import { loadTerminalRuntime } from "./terminal-runtime.js";
 import { readBoundedRegularFile, writePrivateFileExclusiveAtomic } from "./secure-file.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
+import {
+  canonicalSshIdentityBaseName,
+  SshIdentityStore,
+  type MaterializedSshIdentity,
+  type SshIdentityMaterializer,
+} from "./ssh-identity-store.js";
 import type { StartedManagedSshSession } from "./ssh-session-registry.js";
 import {
   SshTerminalRuntime,
@@ -346,6 +353,7 @@ export interface CloudDeploymentServiceOptions {
   /** Test seam for the bounded Azure public-IP propagation wait. */
   readonly azurePublicIpRefreshDelay?: (milliseconds: number) => Promise<void>;
   readonly sshHostKeyStore?: SshHostKeyStore;
+  readonly sshIdentityMaterializer?: SshIdentityMaterializer;
   readonly startSshTerminalRuntime?: CloudSshTerminalStarter;
   /** Generates 32-byte base64url capabilities for explicit host-key reviews. */
   readonly opaqueIdFactory?: () => string;
@@ -409,6 +417,7 @@ export class CloudDeploymentService {
   readonly #azureLoginGenerations = new Map<number, number>();
   readonly #azurePublicIpRefreshDelay: (milliseconds: number) => Promise<void>;
   readonly #sshHostKeys: SshHostKeyStore;
+  readonly #sshIdentities: SshIdentityMaterializer;
   readonly #startSshTerminalRuntime: CloudSshTerminalStarter;
   readonly #opaqueIdFactory: () => string;
   readonly #now: () => number;
@@ -471,6 +480,9 @@ export class CloudDeploymentService {
     });
     this.#azurePublicIpRefreshDelay = options.azurePublicIpRefreshDelay ?? delay;
     this.#sshHostKeys = sshHostKeys;
+    this.#sshIdentities = options.sshIdentityMaterializer ?? new SshIdentityStore(
+      join(homedir(), ".ssh", "sliver-gui"),
+    );
     this.#startSshTerminalRuntime = options.startSshTerminalRuntime ?? (
       (runtimeOptions) => SshTerminalRuntime.start(runtimeOptions)
     );
@@ -875,6 +887,89 @@ export class CloudDeploymentService {
       return { ok: true, value: Object.freeze(targets) };
     } catch (error) {
       return failure(error, "Managed SSH servers are unavailable");
+    }
+  }
+
+  async materializeSshIdentity(
+    expectedTarget: ManagedSshTarget,
+  ): Promise<OperationResult<MaterializedSshIdentity>> {
+    try {
+      this.#assertActive();
+      const deployment = this.#store.getState().deployments.find(
+        ({ id }) => id === expectedTarget.deploymentId,
+      );
+      if (!deployment) throw new Error("The managed SSH server no longer exists");
+      const credentialId = deployment.credentialId;
+      const value = deployment.provider === "aws"
+        ? await this.#vault.withCredential(credentialId, "aws", async (secret, summary) => {
+            const target = this.#requireCurrentSshTarget(
+              deployment.id,
+              credentialId,
+              summary,
+              expectedTarget,
+            );
+            try {
+              const collision = this.#hasSshIdentityNameCollision(target);
+              const identity = await this.#sshIdentities.materialize({
+                managedName: target.name,
+                deploymentId: target.deploymentId,
+                privateKey: secret.sshPrivateKey,
+                collision,
+              });
+              const currentTarget = this.#requireCurrentSshTarget(
+                deployment.id,
+                credentialId,
+                summary,
+                expectedTarget,
+              );
+              if (this.#hasSshIdentityNameCollision(currentTarget) !== collision) {
+                throw sshReviewStateChanged();
+              }
+              return identity;
+            } catch (error) {
+              throw new Error(cloudErrorMessage(
+                error,
+                "The SSH identity file could not be prepared",
+                credentialValues(secret),
+              ));
+            }
+          })
+        : await this.#vault.withCredential(credentialId, "azure", async (secret, summary) => {
+            const target = this.#requireCurrentSshTarget(
+              deployment.id,
+              credentialId,
+              summary,
+              expectedTarget,
+            );
+            try {
+              const collision = this.#hasSshIdentityNameCollision(target);
+              const identity = await this.#sshIdentities.materialize({
+                managedName: target.name,
+                deploymentId: target.deploymentId,
+                privateKey: secret.sshPrivateKey,
+                collision,
+              });
+              const currentTarget = this.#requireCurrentSshTarget(
+                deployment.id,
+                credentialId,
+                summary,
+                expectedTarget,
+              );
+              if (this.#hasSshIdentityNameCollision(currentTarget) !== collision) {
+                throw sshReviewStateChanged();
+              }
+              return identity;
+            } catch (error) {
+              throw new Error(cloudErrorMessage(
+                error,
+                "The SSH identity file could not be prepared",
+                credentialValues(secret),
+              ));
+            }
+          });
+      return { ok: true, value };
+    } catch (error) {
+      return failure(error, "The SSH identity file could not be prepared");
     }
   }
 
@@ -1952,6 +2047,14 @@ export class CloudDeploymentService {
     if (!target.connectable) throw new Error(target.unavailableReason ?? "The managed SSH server is unavailable");
     if (expectedTarget !== undefined && !sameManagedSshTarget(target, expectedTarget)) throw sshReviewStateChanged();
     return target;
+  }
+
+  #hasSshIdentityNameCollision(target: ManagedSshTarget): boolean {
+    const baseName = canonicalSshIdentityBaseName(target.name);
+    return this.#store.getState().deployments.some((deployment) => (
+      deployment.id !== target.deploymentId &&
+      canonicalSshIdentityBaseName(deployment.name) === baseName
+    ));
   }
 
   #issueSshHostKeyReview(

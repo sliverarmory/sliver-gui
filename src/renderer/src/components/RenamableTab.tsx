@@ -2,12 +2,16 @@ import { useMemo, type ReactNode } from "react";
 import { Tabs } from "@heroui/react";
 import { faPen } from "@fortawesome/free-solid-svg-icons";
 
-import { useApplicationContextMenuScope } from "./ApplicationContextMenu";
+import {
+  useApplicationContextMenuScope,
+  type ApplicationContextMenuAction,
+} from "./ApplicationContextMenu";
 
 export interface RenamableTabProps {
   readonly ariaLabel: string;
   readonly children: ReactNode;
   readonly className?: string;
+  readonly contextMenuActions?: readonly ApplicationContextMenuAction[];
   readonly id: string;
   readonly onRename: (id: string) => void;
 }
@@ -17,17 +21,21 @@ export function RenamableTab({
   ariaLabel,
   children,
   className,
+  contextMenuActions,
   id,
   onRename,
 }: RenamableTabProps): React.JSX.Element {
   const scopeOptions = useMemo(() => ({
-    actions: [{
-      id: "terminal-tab.rename",
-      label: "Rename",
-      icon: faPen,
-      onAction: () => onRename(id),
-    }],
-  }), [id, onRename]);
+    actions: [
+      {
+        id: "terminal-tab.rename",
+        label: "Rename",
+        icon: faPen,
+        onAction: () => onRename(id),
+      },
+      ...(contextMenuActions ?? []),
+    ],
+  }), [contextMenuActions, id, onRename]);
   const scope = useApplicationContextMenuScope(scopeOptions);
 
   return (

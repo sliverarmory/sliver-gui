@@ -88,6 +88,7 @@ describe("SSH preload bridge", () => {
       "approveSshHostKey",
       "closeSshTab",
       "selectSshTab",
+      "copySshCommand",
       "renameSshTab",
       "getTerminalRuntime",
       "getApplicationSettings",
@@ -228,6 +229,7 @@ describe("SSH preload bridge", () => {
     await api.approveSshHostKey(reviewInput);
     await api.closeSshTab(tabInput);
     await api.selectSshTab(tabInput);
+    await api.copySshCommand(tabInput);
     await api.renameSshTab(renameInput);
     await api.getTerminalRuntime();
     await api.getApplicationSettings();
@@ -241,6 +243,7 @@ describe("SSH preload bridge", () => {
       [SSH_IPC_INVOKE.approveSshHostKey, reviewInput],
       [SSH_IPC_INVOKE.closeSshTab, tabInput],
       [SSH_IPC_INVOKE.selectSshTab, tabInput],
+      [SSH_IPC_INVOKE.copySshCommand, tabInput],
       [SSH_IPC_INVOKE.renameSshTab, renameInput],
       [SSH_IPC_INVOKE.getTerminalRuntime],
       [SSH_IPC_INVOKE.getApplicationSettings],

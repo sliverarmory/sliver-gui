@@ -44,7 +44,13 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { registerIpcHandlers, unregisterIpcHandlers, type IpcConnectionRegistry, type TrustedWindowIdentity } from "./ipc.js";
+import {
+  registerIpcHandlers,
+  unregisterIpcHandlers,
+  type IpcConnectionRegistry,
+  type ManagedServerSshCommandController,
+  type TrustedWindowIdentity,
+} from "./ipc.js";
 
 const RENDERER_URL = "sliver://app/index.html";
 
@@ -232,6 +238,156 @@ describe("trusted Electron IPC boundary", () => {
     }
     expect(registry.snapshot).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
+  });
+
+  it("copies a main-resolved managed-server SSH command for the associated deployment", async () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const command = "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.24";
+    const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId));
+    const commandForDeployment = vi.fn(async () => ({ ok: true as const, value: command }));
+    registerManagedServerSshCommandIpc(registryMock({ snapshot }), { commandForDeployment });
+    const { event } = invokeEvent(RENDERER_URL, 77);
+
+    await expect(electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(
+      event,
+      { deploymentId },
+    )).resolves.toEqual({ ok: true });
+
+    expect(commandForDeployment).toHaveBeenCalledExactlyOnceWith(deploymentId);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(command);
+  });
+
+  it.each([null, "33333333-3333-4333-8333-333333333333"])(
+    "does not resolve an SSH command when the current managed association is %s",
+    async (associatedDeploymentId) => {
+      const deploymentId = "22222222-2222-4222-8222-222222222222";
+      const commandForDeployment = vi.fn(async () => ({
+        ok: true as const,
+        value: "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.24",
+      }));
+      registerManagedServerSshCommandIpc(
+        registryMock({ snapshot: vi.fn(() => managedCloudSnapshot(associatedDeploymentId)) }),
+        { commandForDeployment },
+      );
+
+      await expect(electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(
+        invokeEvent(RENDERER_URL, 77).event,
+        { deploymentId },
+      )).resolves.toEqual({
+        ok: false,
+        error: "The requested deployment is not associated with this window's current connection",
+      });
+      expect(commandForDeployment).not.toHaveBeenCalled();
+      expect(electronMocks.writeText).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects renderer-authored command or key data before consulting main-owned state", async () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const registry = registryMock();
+    const commandForDeployment = vi.fn(async () => ({
+      ok: true as const,
+      value: "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.24",
+    }));
+    registerManagedServerSshCommandIpc(registry, { commandForDeployment });
+    const { event } = invokeEvent(RENDERER_URL, 77);
+    const malformed: readonly (readonly unknown[])[] = [
+      [], [undefined], [null], [{}], [deploymentId],
+      [{ deploymentId: "invalid" }],
+      [{ deploymentId: "22222222-2222-1222-8222-222222222222" }],
+      [{ deploymentId, command: "ssh attacker" }],
+      [{ deploymentId, privateKey: "secret" }],
+      [{ deploymentId, identityPath: "/tmp/key" }],
+      [{ deploymentId }, "extra"],
+    ];
+
+    for (const args of malformed) {
+      expect(() => electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(event, ...args))
+        .toThrow(/invalid arguments/iu);
+    }
+    expect(registry.snapshot).not.toHaveBeenCalled();
+    expect(commandForDeployment).not.toHaveBeenCalled();
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the renderer document and deployment association after command resolution", async () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    let resolveCommand!: (result: { readonly ok: true; readonly value: string }) => void;
+    const pending = new Promise<{ readonly ok: true; readonly value: string }>((resolve) => {
+      resolveCommand = resolve;
+    });
+    const commandForDeployment = vi.fn(() => pending);
+    const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId));
+    registerManagedServerSshCommandIpc(registryMock({ snapshot }), { commandForDeployment });
+    const source = invokeEvent(RENDERER_URL, 77);
+    const copying = Promise.resolve(electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(
+      source.event,
+      { deploymentId },
+    ));
+    await vi.waitFor(() => expect(commandForDeployment).toHaveBeenCalledOnce());
+    (source.mainFrame as unknown as { frameToken: string }).frameToken = "navigated-frame";
+    resolveCommand({
+      ok: true,
+      value: "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.24",
+    });
+
+    await expect(copying).resolves.toEqual({
+      ok: false,
+      error: "The managed server's SSH command could not be copied",
+    });
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("does not copy a failed, stale, or clipboard-rejected managed-server SSH command", async () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const event = invokeEvent(RENDERER_URL, 77).event;
+    const failed = vi.fn(async () => ({ ok: false as const, error: "The SSH identity is unavailable" }));
+    registerManagedServerSshCommandIpc(
+      registryMock({ snapshot: vi.fn(() => managedCloudSnapshot(deploymentId)) }),
+      { commandForDeployment: failed },
+    );
+    await expect(electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(
+      event,
+      { deploymentId },
+    )).resolves.toEqual({ ok: false, error: "The SSH identity is unavailable" });
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+
+    const snapshot = vi.fn()
+      .mockReturnValueOnce(managedCloudSnapshot(deploymentId))
+      .mockReturnValue(managedCloudSnapshot(null));
+    registerManagedServerSshCommandIpc(registryMock({ snapshot }), {
+      commandForDeployment: vi.fn(async () => ({
+        ok: true as const,
+        value: "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.24",
+      })),
+    });
+    await expect(electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(
+      event,
+      { deploymentId },
+    )).resolves.toEqual({
+      ok: false,
+      error: "The requested deployment is not associated with this window's current connection",
+    });
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+
+    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("clipboard unavailable"); });
+    registerManagedServerSshCommandIpc(
+      registryMock({ snapshot: vi.fn(() => managedCloudSnapshot(deploymentId)) }),
+      { commandForDeployment: vi.fn(async () => ({
+        ok: true as const,
+        value: "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.24",
+      })) },
+    );
+    await expect(electronMocks.handlers.get(IPC.copyManagedServerSshCommand)?.(
+      event,
+      { deploymentId },
+    )).resolves.toEqual({
+      ok: false,
+      error: "The managed server's SSH command could not be copied",
+    });
+    expect(electronMocks.writeText).toHaveBeenCalledOnce();
   });
 
   it.each(["203.0.113.24", "2001:db8::24"])("copies the current managed server public address %s from main-owned state", (address) => {
@@ -1600,6 +1756,25 @@ function managedCloudSnapshot(
     } : null,
   };
   return snapshot;
+}
+
+function registerManagedServerSshCommandIpc(
+  registry: IpcConnectionRegistry,
+  controller: ManagedServerSshCommandController,
+): void {
+  registerIpcHandlers(
+    registry,
+    vi.fn(),
+    RENDERER_URL,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    controller,
+  );
 }
 
 function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnectionRegistry {

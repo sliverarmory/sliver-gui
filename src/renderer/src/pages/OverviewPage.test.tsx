@@ -150,11 +150,13 @@ function managedServerSnapshot(state = "running"): SliverSnapshot {
 
 describe("Overview server context menu", () => {
   const openCloudDeploymentWindow = vi.fn(async (_request: unknown) => ({ ok: true }));
+  const copyManagedServerSshCommand = vi.fn(async (_request: unknown): Promise<OperationResult> => ({ ok: true }));
   const copyManagedServerPublicIp = vi.fn(async (_request: unknown): Promise<OperationResult> => ({ ok: true }));
   beforeEach(() => {
     openCloudDeploymentWindow.mockReset().mockResolvedValue({ ok: true });
+    copyManagedServerSshCommand.mockReset().mockResolvedValue({ ok: true });
     copyManagedServerPublicIp.mockReset().mockResolvedValue({ ok: true });
-    vi.stubGlobal("sliver", { openCloudDeploymentWindow, copyManagedServerPublicIp });
+    vi.stubGlobal("sliver", { openCloudDeploymentWindow, copyManagedServerSshCommand, copyManagedServerPublicIp });
   });
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -166,12 +168,12 @@ describe("Overview server context menu", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-      "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Stop", "Reboot", "Terminate", "Inspect Element",
+      "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Stop", "Reboot", "Terminate", "Inspect Element",
     ]);
     expect(Array.from(menu.querySelectorAll('[role="menuitem"], [role="separator"]')).map((item) =>
       item.getAttribute("role") === "separator" ? "separator" : item.textContent,
     )).toEqual([
-      "View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", "Stop", "Reboot", "Terminate", "separator", "Inspect Element",
+      "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", "Stop", "Reboot", "Terminate", "separator", "Inspect Element",
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "View Jobs/Listeners" }));
     await waitFor(() => expect(onNavigate).toHaveBeenCalledExactlyOnceWith("operations"));
@@ -202,7 +204,7 @@ describe("Overview server context menu", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: "managed-control" }));
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
-    for (const name of ["SSH", "Add Operator", "Reboot"]) {
+    for (const name of ["SSH", "Copy SSH Command", "Add Operator", "Reboot"]) {
       expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
     }
     for (const name of ["Rename", "Copy Public IP"]) {
@@ -221,7 +223,7 @@ describe("Overview server context menu", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
     expect(within(menu).getByRole("menuitem", { name: "View Jobs/Listeners" })).not.toHaveAttribute("aria-disabled", "true");
-    for (const name of ["SSH", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
+    for (const name of ["SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
       expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
     }
     expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
@@ -234,7 +236,7 @@ describe("Overview server context menu", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: "managed-control" }));
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
-    for (const name of ["View Jobs/Listeners", "SSH", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
+    for (const name of ["View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
       expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
     }
     expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
@@ -249,6 +251,42 @@ describe("Overview server context menu", () => {
     rendered.contextMenu.emit();
     await user.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Firewall" }));
     await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not open server action", { description: "The association changed" }));
+  });
+
+  it("copies the associated deployment's SSH command and announces success only after the copy completes", async () => {
+    const user = userEvent.setup();
+    const success = vi.spyOn(toast, "success");
+    const danger = vi.spyOn(toast, "danger");
+    let completeCopy!: (result: OperationResult) => void;
+    copyManagedServerSshCommand.mockImplementationOnce(() => new Promise((resolve) => { completeCopy = resolve; }));
+    const snapshot = managedServerSnapshot();
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "managed-control" }));
+    rendered.contextMenu.emit();
+    await user.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Copy SSH Command" }));
+
+    await waitFor(() => expect(copyManagedServerSshCommand).toHaveBeenCalledExactlyOnceWith({
+      deploymentId: snapshot.connection.managedServer!.deploymentId,
+    }));
+    expect(success).not.toHaveBeenCalled();
+    await act(async () => { completeCopy({ ok: true }); });
+    await waitFor(() => expect(success).toHaveBeenCalledExactlyOnceWith("SSH command copied to clipboard"));
+    expect(danger).not.toHaveBeenCalled();
+    expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
+  });
+
+  it.each(["response", "rejection"])("reports an SSH command copy %s failure without a success toast", async (failure) => {
+    const user = userEvent.setup();
+    const success = vi.spyOn(toast, "success");
+    const danger = vi.spyOn(toast, "danger");
+    if (failure === "response") copyManagedServerSshCommand.mockResolvedValueOnce({ ok: false, error: "The association changed" });
+    else copyManagedServerSshCommand.mockRejectedValueOnce(new Error("The association changed"));
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={managedServerSnapshot()} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "managed-control" }));
+    rendered.contextMenu.emit();
+    await user.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Copy SSH Command" }));
+    await waitFor(() => expect(danger).toHaveBeenCalledExactlyOnceWith("Could not copy SSH command", { description: "The association changed" }));
+    expect(success).not.toHaveBeenCalled();
   });
 
   it("copies the associated deployment's public IP and announces success only after the copy completes", async () => {

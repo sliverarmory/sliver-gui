@@ -1354,6 +1354,65 @@ describe("session workbench panels", () => {
     expect(within(screen.getByRole("grid", { name: "Registry values in HKCU Software" })).getByText("C:\\Program Files\\Sliver")).toBeInTheDocument();
   });
 
+  it("visually distinguishes typed registry strings, including empty values", async () => {
+    const user = userEvent.setup();
+    const stringValues = new Map([
+      ["Color", "180 180 180"],
+      ["Blank", ""],
+      ["LiteralEmpty", "(empty)"],
+    ]);
+    installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, {
+          items: [...stringValues.keys()],
+          page: { limit: 500, total: stringValues.size, truncated: false },
+        });
+      }
+      if (input.operationId === "session.registry.read") {
+        return workbench(input.operationId, {
+          hive: input.hive,
+          path: input.path,
+          key: input.key,
+          type: "string",
+          value: stringValues.get(input.key)!,
+        });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    const details = screen.getByRole("region", { name: "Selected value data" });
+
+    await user.click(within(grid).getByRole("button", { name: "Read Color" }));
+    const colorRow = within(grid).getByRole("rowheader", { name: "Color" }).closest<HTMLElement>("[role=row]")!;
+    const colorData = await within(colorRow).findByText("180 180 180");
+    expect(colorData.parentElement).toHaveTextContent(/^"180 180 180"$/u);
+    expect(within(colorRow).getByText("String")).toBeInTheDocument();
+    const selectedColor = within(details).getByText("180 180 180");
+    expect(selectedColor.parentElement).toHaveTextContent(/^"180 180 180"$/u);
+
+    await user.click(within(grid).getByRole("button", { name: "Read Blank" }));
+    const blankRow = within(grid).getByRole("rowheader", { name: "Blank" }).closest<HTMLElement>("[role=row]")!;
+    const blankData = await within(blankRow).findByText("(empty)");
+    expect(blankData).toHaveClass("italic", "text-muted");
+    expect(blankData).toHaveTextContent("(empty)");
+    const selectedBlank = within(details).getByText("(empty)");
+    expect(selectedBlank).toHaveClass("italic", "text-muted");
+
+    await user.click(within(grid).getByRole("button", { name: "Read LiteralEmpty" }));
+    const literalRow = within(grid).getByRole("rowheader", { name: "LiteralEmpty" }).closest<HTMLElement>("[role=row]")!;
+    const literalData = await within(literalRow).findByText("(empty)");
+    expect(literalData.parentElement).toHaveTextContent(/^"\(empty\)"$/u);
+    expect(literalData).not.toHaveClass("italic");
+    expect(literalData).not.toHaveClass("text-muted");
+    const selectedLiteral = within(details).getByText("(empty)");
+    expect(selectedLiteral.parentElement).toHaveTextContent(/^"\(empty\)"$/u);
+  });
+
   it("pages registry subkeys and values independently and reviews exact create, write, and delete payloads", async () => {
     const user = userEvent.setup();
     const api = installAPI((input) => {
@@ -2129,7 +2188,7 @@ describe("session workbench panels", () => {
     expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-subkeys")).toHaveLength(1);
     expect(api.runSessionWorkbench.mock.calls.every(([input]) => !String(input.operationId).startsWith("session.registry.") || !("path" in input) || input.path === "")).toBe(true);
     await user.click(within(grid).getByText("(Default)"));
-    expect(await within(details).findByText("(empty value)")).toBeInTheDocument();
+    expect(await within(details).findByText("(empty)")).toHaveClass("italic", "text-muted");
     expect(reads.get("")).toBe(1);
 
     await user.click(screen.getByRole("button", { name: "Refresh registry" }));

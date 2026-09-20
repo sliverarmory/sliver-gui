@@ -94,6 +94,13 @@ interface PasteReview {
   readonly controlCharacters: number;
 }
 
+interface PendingPaste {
+  readonly entry: AttachedTerminal;
+  readonly resourceId: string;
+  readonly routeIdentity: string;
+  readonly text: string;
+}
+
 interface AttachmentPumpRun {
   readonly generation: number;
   readonly promise: Promise<void>;
@@ -140,7 +147,7 @@ export function SessionTerminalPanel({
   const startAttachmentPumpRef = useRef<((expectedIdentity: string, generation: number) => void) | undefined>(undefined);
   const preferredAttachmentKeyRef = useRef<string | undefined>(undefined);
   const pendingTerminalFocusResourceIdRef = useRef<string | undefined>(undefined);
-  const pendingPasteRef = useRef<string | undefined>(undefined);
+  const pendingPasteRef = useRef<PendingPaste | undefined>(undefined);
   const windowsCommandInputRef = useRef<HTMLInputElement>(null);
 
   const [panelStatus, setPanelStatus] = useState<PanelStatus>("loading");
@@ -728,40 +735,62 @@ export function SessionTerminalPanel({
     }
   }, []);
 
+  const stagePaste = useCallback((
+    text: string,
+    resourceId: string,
+    entry: AttachedTerminal,
+    expectedIdentity: string,
+  ): void => {
+    if (
+      !isCurrent(expectedIdentity) ||
+      selectedResourceIdRef.current !== resourceId ||
+      attachedTerminalsRef.current.get(resourceId) !== entry
+    ) return;
+
+    const review = inspectPaste(text);
+    if (review.bytes === 0) {
+      toast.warning("Clipboard is empty");
+      return;
+    }
+    if (review.bytes > MAX_PASTE_BYTES) throw new Error(`Clipboard text exceeds ${MAX_PASTE_BYTES} bytes`);
+    if (text.includes("\0")) throw new Error("Clipboard text contains a NUL byte");
+    if (requiresPasteConfirmation(review)) {
+      pendingPasteRef.current = { entry, resourceId, routeIdentity: expectedIdentity, text };
+      setPasteReview(review);
+      return;
+    }
+    entry.terminalRef.current?.paste(text);
+    entry.terminalRef.current?.focus();
+  }, [isCurrent]);
+
   const requestPaste = useCallback(async () => {
+    const expectedIdentity = routeIdentity;
+    const resourceId = selectedResourceIdRef.current;
+    const entry = resourceId ? attachedTerminalsRef.current.get(resourceId) : undefined;
+    if (!resourceId || !entry || !isCurrent(expectedIdentity)) return;
     try {
       requireActiveClipboardGesture();
       if (!navigator.clipboard?.readText) throw new Error("Clipboard read is unavailable");
       const text = await navigator.clipboard.readText();
-      const review = inspectPaste(text);
-      if (review.bytes === 0) {
-        toast.warning("Clipboard is empty");
-        return;
-      }
-      if (review.bytes > MAX_PASTE_BYTES) throw new Error(`Clipboard text exceeds ${MAX_PASTE_BYTES} bytes`);
-      if (text.includes("\0")) throw new Error("Clipboard text contains a NUL byte");
-      if (requiresPasteConfirmation(review)) {
-        pendingPasteRef.current = text;
-        setPasteReview(review);
-        return;
-      }
-      const terminal = selectedTerminalHandle(attachedTerminalsRef.current, selectedResourceIdRef.current);
-      terminal?.paste(text);
-      terminal?.focus();
+      stagePaste(text, resourceId, entry, expectedIdentity);
     } catch (caught) {
       toast.danger("Could not paste", { description: errorMessage(caught) });
     }
-  }, []);
+  }, [isCurrent, routeIdentity, stagePaste]);
 
   const confirmPaste = useCallback(() => {
-    const text = pendingPasteRef.current;
+    const pending = pendingPasteRef.current;
     pendingPasteRef.current = undefined;
     setPasteReview(undefined);
-    if (!text || !isCurrent()) return;
+    if (
+      !pending ||
+      !isCurrent(pending.routeIdentity) ||
+      selectedResourceIdRef.current !== pending.resourceId ||
+      attachedTerminalsRef.current.get(pending.resourceId) !== pending.entry
+    ) return;
     try {
-      const terminal = selectedTerminalHandle(attachedTerminalsRef.current, selectedResourceIdRef.current);
-      terminal?.paste(text);
-      terminal?.focus();
+      pending.entry.terminalRef.current?.paste(pending.text);
+      pending.entry.terminalRef.current?.focus();
     } catch (caught) {
       toast.danger("Could not paste", { description: errorMessage(caught) });
     }
@@ -833,8 +862,12 @@ export function SessionTerminalPanel({
           ariaLabel={`Interactive shell for ${session.name || session.hostname || session.id}`}
           className="min-h-[360px]"
           disableInput={isWindows(session.os)}
+          enableClipboard
           transport={entry.transport}
           wasmBytes={runtime.bytes}
+          onClipboardPaste={(text) => {
+            stagePaste(text, entry.resourceId, entry, routeIdentity);
+          }}
           onReady={() => {
             if (
               pendingTerminalFocusResourceIdRef.current !== entry.resourceId ||

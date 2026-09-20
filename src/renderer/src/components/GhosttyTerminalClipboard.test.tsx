@@ -94,6 +94,35 @@ describe("Ghostty terminal clipboard actions", () => {
     expect(fixture.readText).not.toHaveBeenCalled();
   });
 
+  it("delegates validated clipboard text without directly writing to the terminal", async () => {
+    const onPasteText = vi.fn(async (_text: string) => undefined);
+    const fixture = renderClipboard({ onPasteText });
+    const menu = await fixture.openMenu();
+
+    await fixture.user.click(within(menu).getByRole("menuitem", { name: "Paste" }));
+
+    await waitFor(() => expect(onPasteText).toHaveBeenCalledExactlyOnceWith("clipboard text"));
+    expect(fixture.readText).toHaveBeenCalledOnce();
+    expect(fixture.paste).not.toHaveBeenCalled();
+    expect(fixture.terminal.focus).not.toHaveBeenCalled();
+  });
+
+  it("keeps an asynchronous paste bound to the delegate present when the read began", async () => {
+    const originalDelegate = vi.fn(async (_text: string) => undefined);
+    const replacementDelegate = vi.fn(async (_text: string) => undefined);
+    const fixture = renderClipboard({ onPasteText: originalDelegate });
+    const pending = deferred<string>();
+    fixture.readText.mockReturnValue(pending.promise);
+
+    fixture.keyDown("v", { ctrlKey: true, shiftKey: true });
+    fixture.update({ onPasteText: replacementDelegate });
+    await act(async () => pending.resolve("route-bound clipboard text"));
+
+    expect(originalDelegate).toHaveBeenCalledExactlyOnceWith("route-bound clipboard text");
+    expect(replacementDelegate).not.toHaveBeenCalled();
+    expect(fixture.paste).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["MacIntel", { metaKey: true }],
     ["Win32", { ctrlKey: true, shiftKey: true }],
@@ -228,7 +257,13 @@ function fakeTerminal() {
   };
 }
 
-function renderClipboard(options: { selection?: string; canPaste?: boolean; platform?: string; strict?: boolean } = {}) {
+function renderClipboard(options: {
+  selection?: string;
+  canPaste?: boolean;
+  onPasteText?: (text: string) => void | Promise<void>;
+  platform?: string;
+  strict?: boolean;
+} = {}) {
   const user = userEvent.setup();
   const readText = vi.fn(async () => "clipboard text");
   const writeText = vi.fn(async (_text: string) => undefined);
@@ -239,10 +274,16 @@ function renderClipboard(options: { selection?: string; canPaste?: boolean; plat
   const terminal = fakeTerminal();
   const getSelection = vi.fn(() => options.selection ?? "selected terminal text");
   const paste = vi.fn();
-  let state: { terminal: Terminal | undefined; canPaste: boolean; inert: boolean } = {
+  let state: {
+    terminal: Terminal | undefined;
+    canPaste: boolean;
+    inert: boolean;
+    onPasteText: ((text: string) => void | Promise<void>) | undefined;
+  } = {
     terminal: terminal.value,
     canPaste: options.canPaste ?? true,
     inert: false,
+    onPasteText: options.onPasteText,
   };
   const content = () => {
     const scope = (
@@ -252,6 +293,7 @@ function renderClipboard(options: { selection?: string; canPaste?: boolean; plat
           hostRef={hostRef}
           canPaste={state.canPaste}
           getSelection={getSelection}
+          {...(state.onPasteText === undefined ? {} : { onPasteText: state.onPasteText })}
           paste={paste}
         >
           <div ref={hostRef} tabIndex={0} aria-label="Terminal canvas" />

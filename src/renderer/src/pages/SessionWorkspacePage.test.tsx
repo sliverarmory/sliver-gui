@@ -12,7 +12,42 @@ import {
   type SessionWorkspaceRoute,
 } from "./SessionWorkspacePage";
 
+interface IntersectionObserverRecord {
+  readonly callback: IntersectionObserverCallback;
+  readonly root: Element | Document | null;
+  readonly observed: Element[];
+  disconnected: boolean;
+}
+
+const intersectionObserverRecords: IntersectionObserverRecord[] = [];
+
 beforeAll(() => {
+  vi.stubGlobal("IntersectionObserver", class IntersectionObserver {
+    readonly record: IntersectionObserverRecord;
+
+    constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+      this.record = {
+        callback,
+        root: options?.root ?? null,
+        observed: [],
+        disconnected: false,
+      };
+      intersectionObserverRecords.push(this.record);
+    }
+
+    observe(target: Element) {
+      this.record.observed.push(target);
+    }
+
+    unobserve(target: Element) {
+      const index = this.record.observed.indexOf(target);
+      if (index >= 0) this.record.observed.splice(index, 1);
+    }
+
+    disconnect() {
+      this.record.disconnected = true;
+    }
+  });
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
     observe() {}
     unobserve() {}
@@ -31,6 +66,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  intersectionObserverRecords.length = 0;
 });
 
 function deferred<T>() {
@@ -290,7 +326,67 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
   };
 }
 
+function emitIntersection(
+  record: IntersectionObserverRecord,
+  target: Element,
+  targetTop: number,
+  rootTop = 0,
+): void {
+  record.callback([{
+    boundingClientRect: { top: targetTop } as DOMRectReadOnly,
+    intersectionRatio: targetTop < rootTop ? 0 : 1,
+    intersectionRect: {} as DOMRectReadOnly,
+    isIntersecting: targetTop >= rootTop,
+    rootBounds: { top: rootTop } as DOMRectReadOnly,
+    target,
+    time: 0,
+  }], {} as IntersectionObserver);
+}
+
 describe("SessionWorkspacePage", () => {
+  it("keeps the embedded session summary and tabs together while reporting the stuck state", () => {
+    installAPI();
+    const view = render(
+      <div className="app-content">
+        <SessionWorkspacePage
+          route={route}
+          session={session}
+          snapshot={workspaceSnapshot()}
+          onSnapshot={vi.fn()}
+        />
+      </div>,
+    );
+
+    const marker = view.container.querySelector(".session-workspace__scroll-marker");
+    const sticky = view.container.querySelector(".session-workspace__sticky");
+    const viewport = view.container.querySelector(".app-content");
+    expect(marker).toBeInstanceOf(HTMLDivElement);
+    expect(sticky).toBeInstanceOf(HTMLDivElement);
+    expect(viewport).toBeInstanceOf(HTMLDivElement);
+    if (!marker || !sticky || !viewport) throw new Error("Session sticky test markup is incomplete");
+
+    const summary = screen.getByRole("heading", { name: session.name }).closest("header");
+    const tablist = screen.getByRole("tablist", { name: "Session interaction sections" });
+    const panel = screen.getByRole("tabpanel");
+    expect(sticky).toHaveAttribute("data-stuck", "false");
+    expect(sticky).toContainElement(summary);
+    expect(sticky).toContainElement(tablist);
+    expect(sticky).not.toContainElement(panel);
+
+    const observer = intersectionObserverRecords.find((candidate) => candidate.observed.includes(marker));
+    expect(observer?.root).toBe(viewport);
+    if (!observer) throw new Error("Session sticky marker was not observed");
+
+    act(() => emitIntersection(observer, marker, -1));
+    expect(sticky).toHaveAttribute("data-stuck", "true");
+
+    act(() => emitIntersection(observer, marker, 1));
+    expect(sticky).toHaveAttribute("data-stuck", "false");
+
+    view.unmount();
+    expect(observer.disconnected).toBe(true);
+  });
+
   it.each(["embedded", "dedicated"] as const)("renames a session from the %s header using the shared dialog", async (presentation) => {
     const user = userEvent.setup();
     installAPI();

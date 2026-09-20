@@ -29,10 +29,12 @@ const electronMocks = vi.hoisted(() => ({
   on: vi.fn(),
   removeListener: vi.fn(),
   fromWebContents: vi.fn(),
+  writeText: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
+  clipboard: { writeText: electronMocks.writeText },
   ipcMain: {
     handle: electronMocks.handle,
     removeHandler: electronMocks.removeHandler,
@@ -47,6 +49,7 @@ const TAB_ID = "T".repeat(43);
 const TOKEN = "A".repeat(43);
 const REVIEW_TOKEN = "R".repeat(43);
 const RENAMED_LABEL = "Production shell";
+const SSH_COMMAND = "ssh -i ~/.ssh/sliver-gui/test1 -p 22 ubuntu@203.0.113.10";
 const CURRENT_WINDOW = { marker: "current-ssh-window" } as unknown as BrowserWindow;
 const OTHER_WINDOW = { marker: "other-window" } as unknown as BrowserWindow;
 const REJECTED = { ok: false, error: "The SSH request was rejected" };
@@ -86,6 +89,7 @@ beforeEach(() => {
   });
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue(CURRENT_WINDOW);
+  electronMocks.writeText.mockReset();
 });
 
 afterEach(() => unregisterSshIpcHandlers());
@@ -122,6 +126,7 @@ describe("SSH IPC boundary", () => {
     await invoke(SSH_IPC_INVOKE.approveSshHostKey, event, { token: REVIEW_TOKEN });
     await invoke(SSH_IPC_INVOKE.closeSshTab, event, { tabId: TAB_ID });
     await invoke(SSH_IPC_INVOKE.selectSshTab, event, { tabId: TAB_ID });
+    await invoke(SSH_IPC_INVOKE.copySshCommand, event, { tabId: TAB_ID });
     await invoke(SSH_IPC_INVOKE.renameSshTab, event, { tabId: TAB_ID, label: RENAMED_LABEL });
     await invoke(SSH_IPC_INVOKE.getTerminalRuntime, event);
     await invoke(SSH_IPC_INVOKE.getApplicationSettings, event);
@@ -149,6 +154,7 @@ describe("SSH IPC boundary", () => {
     expect(services.sessions.approveNewHostKey).toHaveBeenCalledExactlyOnceWith(REVIEW_TOKEN, owner);
     expect(services.sessions.closeTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
     expect(services.sessions.selectTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
+    expect(services.sessions.commandForTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID);
     expect(services.sessions.renameTab).toHaveBeenCalledExactlyOnceWith(owner, TAB_ID, RENAMED_LABEL);
     expect(services.getTerminalRuntime).toHaveBeenCalledExactlyOnceWith();
     expect(services.applicationSettings.getState).toHaveBeenCalledExactlyOnceWith();
@@ -157,6 +163,98 @@ describe("SSH IPC boundary", () => {
       settings: expect.objectContaining({ theme: "dark", reduceMotion: true }),
     }));
     expect(authorizeWindow).toHaveBeenCalledWith(owner, CURRENT_WINDOW);
+  });
+
+  it("copies only the main-owned command resolved for the exact authorized SSH tab", async () => {
+    const commandForTab = vi.fn<SshSessionController["commandForTab"]>(() => ({
+      ok: true,
+      value: SSH_COMMAND,
+    }));
+    const services = servicesMock({ commandForTab });
+    registerSshIpcHandlers(services, SSH_RENDERER_URL, authorizeCurrentWindow);
+    const event = invokeEvent(SSH_RENDERER_URL, 77).event;
+
+    await expect(invoke(
+      SSH_IPC_INVOKE.copySshCommand,
+      event,
+      { tabId: TAB_ID },
+    )).resolves.toEqual({ ok: true });
+
+    expect(commandForTab).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    }, TAB_ID);
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(SSH_COMMAND);
+  });
+
+  it("does not touch the clipboard when the main-owned SSH tab lookup fails", async () => {
+    const commandForTab = vi.fn<SshSessionController["commandForTab"]>(() => ({
+      ok: false,
+      error: "The SSH tab is unavailable",
+    }));
+    registerSshIpcHandlers(
+      servicesMock({ commandForTab }),
+      SSH_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+
+    await expect(invoke(
+      SSH_IPC_INVOKE.copySshCommand,
+      invokeEvent(SSH_RENDERER_URL, 77).event,
+      { tabId: TAB_ID },
+    )).resolves.toEqual({ ok: false, error: "The SSH tab is unavailable" });
+    expect(commandForTab).toHaveBeenCalledOnce();
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("does not copy after the requesting renderer navigates while the identity is materialized", async () => {
+    let resolveCommand!: (result: { readonly ok: true; readonly value: string }) => void;
+    const pendingCommand = new Promise<{ readonly ok: true; readonly value: string }>((resolve) => {
+      resolveCommand = resolve;
+    });
+    const commandForTab = vi.fn<SshSessionController["commandForTab"]>(() => pendingCommand);
+    registerSshIpcHandlers(
+      servicesMock({ commandForTab }),
+      SSH_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+    const source = invokeEvent(SSH_RENDERER_URL, 77);
+
+    const copying = invoke(
+      SSH_IPC_INVOKE.copySshCommand,
+      source.event,
+      { tabId: TAB_ID },
+    );
+    await vi.waitFor(() => expect(commandForTab).toHaveBeenCalledOnce());
+    (source.mainFrame as unknown as { url: string }).url = "sliver://app/index.html";
+    resolveCommand({ ok: true, value: SSH_COMMAND });
+
+    await expect(copying).resolves.toEqual(REJECTED);
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+  });
+
+  it("contains clipboard failures after resolving the main-owned SSH command", async () => {
+    const commandForTab = vi.fn<SshSessionController["commandForTab"]>(() => ({
+      ok: true,
+      value: SSH_COMMAND,
+    }));
+    electronMocks.writeText.mockImplementationOnce(() => {
+      throw new Error("clipboard unavailable");
+    });
+    registerSshIpcHandlers(
+      servicesMock({ commandForTab }),
+      SSH_RENDERER_URL,
+      authorizeCurrentWindow,
+    );
+
+    await expect(invoke(
+      SSH_IPC_INVOKE.copySshCommand,
+      invokeEvent(SSH_RENDERER_URL, 77).event,
+      { tabId: TAB_ID },
+    )).resolves.toEqual({ ok: false, error: "The SSH command could not be copied" });
+    expect(commandForTab).toHaveBeenCalledOnce();
+    expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(SSH_COMMAND);
   });
 
   it.each([
@@ -205,6 +303,10 @@ describe("SSH IPC boundary", () => {
       [SSH_IPC_INVOKE.approveSshHostKey, [{ token: "short" }]],
       [SSH_IPC_INVOKE.closeSshTab, [TAB_ID]],
       [SSH_IPC_INVOKE.selectSshTab, [{ tabId: TAB_ID }, "extra"]],
+      [SSH_IPC_INVOKE.copySshCommand, [{ tabId: "short" }]],
+      [SSH_IPC_INVOKE.copySshCommand, [{ tabId: TAB_ID, command: "ssh attacker" }]],
+      [SSH_IPC_INVOKE.copySshCommand, [{ tabId: TAB_ID, privateKey: "secret" }]],
+      [SSH_IPC_INVOKE.copySshCommand, [{ tabId: TAB_ID, privateKeyPath: "/tmp/key" }]],
       [SSH_IPC_INVOKE.renameSshTab, [{ tabId: TAB_ID, label: " padded " }]],
       [SSH_IPC_INVOKE.renameSshTab, [{ tabId: TAB_ID, label: RENAMED_LABEL, extra: true }]],
       [SSH_IPC_INVOKE.getTerminalRuntime, ["ghostty-vt.wasm"]],
@@ -221,9 +323,11 @@ describe("SSH IPC boundary", () => {
     expect(services.sessions.approveNewHostKey).not.toHaveBeenCalled();
     expect(services.sessions.closeTab).not.toHaveBeenCalled();
     expect(services.sessions.selectTab).not.toHaveBeenCalled();
+    expect(services.sessions.commandForTab).not.toHaveBeenCalled();
     expect(services.sessions.renameTab).not.toHaveBeenCalled();
     expect(services.getTerminalRuntime).not.toHaveBeenCalled();
     expect(services.applicationSettings.update).not.toHaveBeenCalled();
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
   });
 
   it("returns a safe default settings state when a settings read is rejected", async () => {
@@ -363,6 +467,7 @@ function servicesMock(overrides: Partial<SshSessionController> = {}): SshIpcServ
     })),
     closeTab: vi.fn(async () => ({ ok: true as const, value: { remainingTabs: 0 } })),
     selectTab: vi.fn(async () => ({ ok: true as const })),
+    commandForTab: vi.fn(() => ({ ok: true as const, value: SSH_COMMAND })),
     renameTab: vi.fn(async (_owner, tabId, label) => ({
       ok: true as const,
       value: { tabId, label },

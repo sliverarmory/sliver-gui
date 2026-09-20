@@ -114,6 +114,8 @@ import {
 } from "./cloud-deployment-ipc.js";
 import { CloudDeploymentService } from "./cloud-deployment-service.js";
 import { detectCurrentEgressIpv4 } from "./cloud/current-egress-ipv4.js";
+import type { MaterializedSshIdentity } from "./ssh-identity-store.js";
+import { formatSshCommand } from "./ssh-command.js";
 import {
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
   NETWORK_SESSION_PARTITION,
@@ -196,6 +198,9 @@ export interface ApplicationCloudDeploymentController
     deploymentId: string,
   ): Promise<OperationResult<StartedManagedSshSession | SshHostKeyReview>>;
   approveSshHostKey?(token: string): Promise<OperationResult<StartedManagedSshSession>>;
+  materializeSshIdentity?(
+    target: ManagedSshTarget,
+  ): Promise<OperationResult<MaterializedSshIdentity>>;
 }
 
 export interface ApplicationHandle {
@@ -2530,6 +2535,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       ok: false,
       error: "Managed SSH servers are unavailable",
     },
+    materializeSshIdentity: async (target) =>
+      activeCloudDeploymentController.materializeSshIdentity?.(target) ?? {
+        ok: false,
+        error: "Managed SSH identity files are unavailable",
+      },
     startSshSession: async (deploymentId) =>
       activeCloudDeploymentController.startSshSession?.(deploymentId) ?? {
         ok: false,
@@ -2601,6 +2611,27 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     {
       open: openCloudDeploymentWindowFromRenderer,
     },
+    {
+      commandForDeployment: async (deploymentId) => {
+        const targets = await activeCloudDeploymentController.listSshTargets?.() ?? {
+          ok: false as const,
+          error: "Managed SSH servers are unavailable",
+        };
+        if (!targets.ok) return targets;
+        const target = targets.value.find((candidate) => candidate.deploymentId === deploymentId);
+        if (!target) return { ok: false, error: "The managed SSH server is unavailable" };
+        const identity = await activeCloudDeploymentController.materializeSshIdentity?.(target) ?? {
+          ok: false as const,
+          error: "Managed SSH identity files are unavailable",
+        };
+        if (!identity.ok) return identity;
+        try {
+          return { ok: true, value: formatSshCommand(target, identity.value.commandPath) };
+        } catch {
+          return { ok: false, error: "The SSH command is unavailable" };
+        }
+      },
+    },
   );
   registerCloudDeploymentIpcHandlers(
     cloudDeploymentController,
@@ -2662,6 +2693,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         approveNewHostKey: (token, owner) => sshSessions!.approveNewHostKey(token, owner),
         closeTab: (owner, tabId) => sshSessions!.closeTab(owner, tabId),
         selectTab: (owner, tabId) => sshSessions!.selectTab(owner, tabId),
+        commandForTab: (owner, tabId) => sshSessions!.commandForTab(owner, tabId),
         renameTab: (owner, tabId, label) => sshSessions!.renameTab(owner, tabId, label),
         attach: (owner, attachmentToken, port) =>
           sshSessions!.attach(owner, attachmentToken, port),

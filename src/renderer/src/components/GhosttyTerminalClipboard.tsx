@@ -11,6 +11,7 @@ interface GhosttyTerminalClipboardProps {
   readonly hostRef: RefObject<HTMLDivElement | null>;
   readonly canPaste: boolean;
   readonly getSelection: () => string;
+  readonly onPasteText?: (text: string) => void | Promise<void>;
   readonly paste: (text: string) => void;
 }
 
@@ -21,12 +22,14 @@ export function GhosttyTerminalClipboard({
   hostRef,
   canPaste,
   getSelection,
+  onPasteText,
   paste,
 }: GhosttyTerminalClipboardProps): React.JSX.Element {
-  const [selection, setSelection] = useState("");
+  const [hasSelection, setHasSelection] = useState(false);
+  const menuSelection = useRef("");
   const mounted = useRef(false);
-  const current = useRef({ terminal, canPaste, getSelection, paste });
-  current.current = { terminal, canPaste, getSelection, paste };
+  const current = useRef({ terminal, canPaste, getSelection, onPasteText, paste });
+  current.current = { terminal, canPaste, getSelection, onPasteText, paste };
   const isMac = navigator.platform.toLowerCase().includes("mac");
 
   const isCurrent = (expected: Terminal | undefined): boolean => {
@@ -50,13 +53,20 @@ export function GhosttyTerminalClipboard({
 
   const pasteClipboard = async (expected = terminal): Promise<void> => {
     if (!isCurrent(expected) || !current.current.canPaste) return;
+    const delegatedPaste = current.current.onPasteText;
+    const directPaste = current.current.paste;
     try {
       requireClipboardGesture();
       if (!navigator.clipboard?.readText) throw new Error("Clipboard unavailable");
       const text = await navigator.clipboard.readText();
       // A tab switch, reconnect, close, or unmount must not redirect a pending paste.
-      if (!text || !isCurrent(expected) || !current.current.canPaste) return;
-      current.current.paste(text);
+      if (!isCurrent(expected) || !current.current.canPaste) return;
+      if (delegatedPaste) {
+        await delegatedPaste(text);
+        return;
+      }
+      if (!text) return;
+      directPaste(text);
       expected?.focus();
     } catch {
       toast.danger("Could not paste into terminal", {
@@ -72,10 +82,10 @@ export function GhosttyTerminalClipboard({
         id: "terminal-copy",
         label: "Copy",
         icon: faCopy,
-        isDisabled: !terminal || selection.length === 0,
+        isDisabled: !terminal || !hasSelection,
         shortcut: isMac ? "⌘C" : "Ctrl+Shift+C",
         // Preserve the selection that was present when this menu was opened.
-        onAction: () => copySelection(selection),
+        onAction: () => copySelection(menuSelection.current),
       },
       {
         id: "terminal-paste",
@@ -89,8 +99,9 @@ export function GhosttyTerminalClipboard({
   });
 
   useEffect(() => {
-    setSelection(terminal ? getSelection() : "");
-    const subscription = terminal?.onSelectionChange(() => setSelection(getSelection()));
+    const updateSelection = (): void => setHasSelection(Boolean(terminal && getSelection()));
+    updateSelection();
+    const subscription = terminal?.onSelectionChange(updateSelection);
     return () => subscription?.dispose();
   }, [getSelection, terminal]);
 
@@ -126,7 +137,10 @@ export function GhosttyTerminalClipboard({
       className="contents"
       // Ghostty 0.4.0 clears selection without emitting onSelectionChange.
       // Refresh before the menu takes focus and snapshots these scoped actions.
-      onContextMenuCapture={() => setSelection(terminal ? getSelection() : "")}
+      onContextMenuCapture={() => {
+        menuSelection.current = terminal ? getSelection() : "";
+        setHasSelection(menuSelection.current.length > 0);
+      }}
     >
       {children}
     </div>

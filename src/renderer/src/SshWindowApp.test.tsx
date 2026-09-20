@@ -324,6 +324,7 @@ describe("SshWindowApp", () => {
     const menu = await screen.findByRole("menu", { name: "Application context menu" });
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
       "Rename",
+      "Copy SSH Command",
       "Inspect Element",
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "Rename" }));
@@ -359,6 +360,40 @@ describe("SshWindowApp", () => {
     await waitFor(() => expect(document.title).toBe(
       "SSH — Primary gateway — ubuntu@44.240.136.251:22",
     ));
+  });
+
+  it("copies the exact background tab SSH command without selecting it", async () => {
+    const firstTransport = fakeTransport();
+    const secondTransport = fakeTransport();
+    openSshTransport.mockResolvedValueOnce(firstTransport).mockResolvedValueOnce(secondTransport);
+    const api = installAPI({
+      claimSshWindow: vi.fn(async () => ok({
+        ...launchContext,
+        tabs: [firstTab, secondTab],
+        activeTabId: firstTab.tabId,
+      })),
+    });
+    const user = userEvent.setup();
+    const rendered = renderWithApplicationContextMenu(<SshWindowApp />);
+    const firstTabButton = await screen.findByRole("tab", { name: /test1.*Connected/u });
+    const secondTabButton = screen.getByRole("tab", { name: /azure-vm.*Connected/u });
+    expect(firstTabButton).toHaveAttribute("aria-selected", "true");
+    expect(secondTabButton).toHaveAttribute("aria-selected", "false");
+
+    fireEvent.contextMenu(secondTabButton, { clientX: 40, clientY: 24 });
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy SSH Command" }));
+
+    await waitFor(() => expect(api.copySshCommand).toHaveBeenCalledExactlyOnceWith({
+      tabId: secondTab.tabId,
+    }));
+    expect(firstTabButton).toHaveAttribute("aria-selected", "true");
+    expect(secondTabButton).toHaveAttribute("aria-selected", "false");
+    expect(api.selectSshTab).not.toHaveBeenCalled();
+    expect(rendered.contextMenu.api.executeAction).not.toHaveBeenCalled();
+    expect(firstTransport.close).not.toHaveBeenCalled();
+    expect(secondTransport.close).not.toHaveBeenCalled();
   });
 
   it("dismisses Rename when the native close command removes its active SSH tab", async () => {
@@ -891,6 +926,7 @@ interface SshAPIOverrides {
   readonly reattachSshTab: SshWindowAPI["reattachSshTab"];
   readonly approveSshHostKey: (input: { readonly token: string }) => Promise<OperationResult<SshOpenTabResult>>;
   readonly closeSshTab: (input: { readonly tabId: string }) => Promise<OperationResult<SshTabCloseResult>>;
+  readonly copySshCommand: SshWindowAPI["copySshCommand"];
   readonly renameSshTab: SshWindowAPI["renameSshTab"];
   readonly getTerminalRuntime: () => Promise<OperationResult<TerminalRuntimeAsset>>;
   readonly updateApplicationSettings: SshWindowAPI["updateApplicationSettings"];
@@ -920,6 +956,7 @@ function installAPI(overrides: Partial<SshAPIOverrides> = {}) {
       error: "No host-key approval fixture",
     }))),
     closeSshTab: vi.fn(overrides.closeSshTab ?? (async () => ok({ remainingTabs: 0 }))),
+    copySshCommand: vi.fn(overrides.copySshCommand ?? (async () => ({ ok: true as const }))),
     renameSshTab: vi.fn(overrides.renameSshTab ?? (async ({ tabId, label }) => ok({ tabId, label }))),
     selectSshTab: vi.fn(async () => ({ ok: true as const })),
     getTerminalRuntime: vi.fn(overrides.getTerminalRuntime ?? (async () => ok(runtime()))),

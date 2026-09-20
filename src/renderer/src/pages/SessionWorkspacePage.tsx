@@ -165,7 +165,9 @@ export function SessionWorkspacePage({
   const [isCheckingSessionShells, setIsCheckingSessionShells] = useState(false);
   const [isSwitchingSession, setIsSwitchingSession] = useState(false);
   const [isPoppingOutInteraction, setIsPoppingOutInteraction] = useState(false);
+  const [isWorkspaceHeaderStuck, setIsWorkspaceHeaderStuck] = useState(false);
   const isTargetTransitionPending = isCheckingSessionShells || isSwitchingSession;
+  const workspaceScrollMarkerRef = useRef<HTMLDivElement>(null);
   const operationsRequestSequence = useRef(0);
   const operationDetailRequestSequence = useRef(0);
   const shellPreflightRequestSequence = useRef(0);
@@ -278,6 +280,23 @@ export function SessionWorkspacePage({
       if (subscribedIdentity === routeIdentityRef.current) mergeOperation(operation);
     });
   }, [isCurrent, mergeOperation, routeIdentity]);
+
+  useEffect(() => {
+    if (presentation !== "embedded" || !isCurrent) {
+      setIsWorkspaceHeaderStuck(false);
+      return;
+    }
+    const marker = workspaceScrollMarkerRef.current;
+    const viewport = marker?.closest(".app-content");
+    if (!marker || !viewport) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry) {
+        setIsWorkspaceHeaderStuck(entry.boundingClientRect.top < (entry.rootBounds?.top ?? 0));
+      }
+    }, { root: viewport, threshold: [0, 1] });
+    observer.observe(marker);
+    return () => observer.disconnect();
+  }, [isCurrent, presentation, routeIdentity]);
 
   const prepareAction = useCallback(async (actionId: DestructiveTargetActionId) => {
     if (!isCurrentRef.current) return;
@@ -526,84 +545,18 @@ export function SessionWorkspacePage({
       data-presentation={presentation}
       inert={isTargetTransitionPending ? true : undefined}
     >
-      <WorkspaceTrail
-        currentSessionId={route.sessionId}
-        isSessionMenuBusy={isTargetTransitionPending}
-        isPoppingOutInteraction={isPoppingOutInteraction}
-        sessionMenu={sessionMenu}
-        sessionName={currentSession.name || currentSession.hostname || currentSession.id}
-        onBack={onBack}
-        onPopOutInteraction={allowPopOut ? () => void popOutInteraction() : undefined}
-        onSelectSession={onSessionChange ? (option) => void requestSessionSwitch(option) : undefined}
-      />
-
-      <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-2xl bg-surface px-4 py-3">
-        <div className="flex min-w-0 flex-1 basis-80 items-center gap-3">
-          <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-default text-muted">
-            <FontAwesomeIcon aria-hidden icon={sessionOperatingSystemIcons.get(currentSession.os.trim().toLowerCase()) ?? faComputer} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <h1 className="truncate text-base font-semibold text-foreground" id="session-workspace-heading" title={currentSession.name || currentSession.hostname || "Unnamed session"}>
-                {currentSession.name || currentSession.hostname || "Unnamed session"}
-              </h1>
-              <Chip className="shrink-0" color={status.color} size="sm" variant="soft">{status.label}</Chip>
-            </div>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-              <p className="min-w-0 truncate" title={`${currentSession.username || "Unknown user"} on ${currentSession.hostname || "unknown host"}`}>
-                {currentSession.username || "Unknown user"} on {currentSession.hostname || "unknown host"}
-              </p>
-              <p className="min-w-0 truncate font-mono text-[11px]" title={currentSession.id}>{currentSession.id}</p>
-            </div>
-          </div>
-        </div>
-        <dl className="flex max-w-full flex-wrap items-center gap-x-5 gap-y-2">
-          <CompactDetail label="Platform" value={`${currentSession.os || "unknown"}/${currentSession.arch || "unknown"}`} mono />
-          <CompactDetail label="Process" value={currentSession.pid === undefined ? "Not reported" : String(currentSession.pid)} mono />
-          <CompactDetail label="Last check-in" value={formatTimestamp(currentSession.lastCheckinAt)} />
-        </dl>
-        <Dropdown>
-          <Tooltip delay={250}>
-            <Button aria-label="Session actions" className="shrink-0" isIconOnly size="sm" variant="ghost">
-              <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
-            </Button>
-            <Tooltip.Content>Session actions</Tooltip.Content>
-          </Tooltip>
-          <Dropdown.Popover placement="bottom end">
-            <Dropdown.Menu aria-label="Session actions" onAction={(key) => {
-              if (key === "rename") setRenameRouteIdentity(routeIdentity);
-              if (key === "target.kill" || key === "session.close") void prepareAction(key);
-            }}>
-              <Dropdown.Item
-                id="rename"
-                isDisabled={!capabilityFor(snapshot.targetContext.capabilities, "target.rename")?.available}
-                textValue="Rename"
-              >
-                <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faPen} />
-                <Label>Rename</Label>
-              </Dropdown.Item>
-              <Dropdown.Item
-                id="session.close"
-                isDisabled={isPreparingAction || isExecutingAction || close?.available !== true}
-                textValue="Close Session"
-                variant="danger"
-              >
-                <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faStop} />
-                <Label>Close Session</Label>
-              </Dropdown.Item>
-              <Dropdown.Item
-                id="target.kill"
-                isDisabled={isPreparingAction || isExecutingAction || terminate?.available !== true}
-                textValue="Kill Session"
-                variant="danger"
-              >
-                <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faSkullCrossbones} />
-                <Label>Kill Session</Label>
-              </Dropdown.Item>
-            </Dropdown.Menu>
-          </Dropdown.Popover>
-        </Dropdown>
-      </header>
+      <div className="session-workspace__trail-frame">
+        <WorkspaceTrail
+          currentSessionId={route.sessionId}
+          isSessionMenuBusy={isTargetTransitionPending}
+          isPoppingOutInteraction={isPoppingOutInteraction}
+          sessionMenu={sessionMenu}
+          sessionName={currentSession.name || currentSession.hostname || currentSession.id}
+          onBack={onBack}
+          onPopOutInteraction={allowPopOut ? () => void popOutInteraction() : undefined}
+          onSelectSession={onSessionChange ? (option) => void requestSessionSwitch(option) : undefined}
+        />
+      </div>
 
       {renameRouteIdentity === routeIdentity ? (
         <RenameSessionModal
@@ -625,19 +578,96 @@ export function SessionWorkspacePage({
           if (String(key) === "terminal") setTerminalVisitedRouteIdentity(routeIdentity);
         }}
       >
-        <Tabs.ListContainer>
-          <Tabs.List aria-label="Session interaction sections">
-            <WorkspaceTab id="overview" label="Overview" />
-            <WorkspaceTab id="execution" label="Execution" />
-            <WorkspaceTab id="files" label="Files" />
-            <WorkspaceTab id="processes" label="Processes" />
-            <WorkspaceTab id="network" label="Network" />
-            <WorkspaceTab id="environment" label="Environment" />
-            {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
-            <WorkspaceTab id="terminal" label="Shell" />
-            <WorkspaceTab id="activity" label="Activity" />
-          </Tabs.List>
-        </Tabs.ListContainer>
+        <div aria-hidden="true" className="session-workspace__scroll-marker" ref={workspaceScrollMarkerRef} />
+        <div
+          className="session-workspace__sticky"
+          data-stuck={isWorkspaceHeaderStuck}
+        >
+          <div className="session-workspace__summary-frame">
+            <header className="session-workspace__summary flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-2xl bg-surface px-4 py-3">
+              <div className="flex min-w-0 flex-1 basis-80 items-center gap-3">
+                <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-default text-muted">
+                  <FontAwesomeIcon aria-hidden icon={sessionOperatingSystemIcons.get(currentSession.os.trim().toLowerCase()) ?? faComputer} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h1 className="truncate text-base font-semibold text-foreground" id="session-workspace-heading" title={currentSession.name || currentSession.hostname || "Unnamed session"}>
+                      {currentSession.name || currentSession.hostname || "Unnamed session"}
+                    </h1>
+                    <Chip className="shrink-0" color={status.color} size="sm" variant="soft">{status.label}</Chip>
+                  </div>
+                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+                    <p className="min-w-0 truncate" title={`${currentSession.username || "Unknown user"} on ${currentSession.hostname || "unknown host"}`}>
+                      {currentSession.username || "Unknown user"} on {currentSession.hostname || "unknown host"}
+                    </p>
+                    <p className="min-w-0 truncate font-mono text-[11px]" title={currentSession.id}>{currentSession.id}</p>
+                  </div>
+                </div>
+              </div>
+              <dl className="flex max-w-full flex-wrap items-center gap-x-5 gap-y-2">
+                <CompactDetail label="Platform" value={`${currentSession.os || "unknown"}/${currentSession.arch || "unknown"}`} mono />
+                <CompactDetail label="Process" value={currentSession.pid === undefined ? "Not reported" : String(currentSession.pid)} mono />
+                <CompactDetail label="Last check-in" value={formatTimestamp(currentSession.lastCheckinAt)} />
+              </dl>
+              <Dropdown>
+                <Tooltip delay={250}>
+                  <Button aria-label="Session actions" className="shrink-0" isIconOnly size="sm" variant="ghost">
+                    <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
+                  </Button>
+                  <Tooltip.Content>Session actions</Tooltip.Content>
+                </Tooltip>
+                <Dropdown.Popover placement="bottom end">
+                  <Dropdown.Menu aria-label="Session actions" onAction={(key) => {
+                    if (key === "rename") setRenameRouteIdentity(routeIdentity);
+                    if (key === "target.kill" || key === "session.close") void prepareAction(key);
+                  }}>
+                    <Dropdown.Item
+                      id="rename"
+                      isDisabled={!capabilityFor(snapshot.targetContext.capabilities, "target.rename")?.available}
+                      textValue="Rename"
+                    >
+                      <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faPen} />
+                      <Label>Rename</Label>
+                    </Dropdown.Item>
+                    <Dropdown.Item
+                      id="session.close"
+                      isDisabled={isPreparingAction || isExecutingAction || close?.available !== true}
+                      textValue="Close Session"
+                      variant="danger"
+                    >
+                      <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faStop} />
+                      <Label>Close Session</Label>
+                    </Dropdown.Item>
+                    <Dropdown.Item
+                      id="target.kill"
+                      isDisabled={isPreparingAction || isExecutingAction || terminate?.available !== true}
+                      textValue="Kill Session"
+                      variant="danger"
+                    >
+                      <FontAwesomeIcon aria-hidden className="size-3.5 text-danger" icon={faSkullCrossbones} />
+                      <Label>Kill Session</Label>
+                    </Dropdown.Item>
+                  </Dropdown.Menu>
+                </Dropdown.Popover>
+              </Dropdown>
+            </header>
+          </div>
+          <div className="session-workspace__tabs-frame tabs--secondary" data-orientation="horizontal">
+            <Tabs.ListContainer>
+              <Tabs.List aria-label="Session interaction sections">
+                <WorkspaceTab id="overview" label="Overview" />
+                <WorkspaceTab id="execution" label="Execution" />
+                <WorkspaceTab id="files" label="Files" />
+                <WorkspaceTab id="processes" label="Processes" />
+                <WorkspaceTab id="network" label="Network" />
+                <WorkspaceTab id="environment" label="Environment" />
+                {isWindows ? <WorkspaceTab id="registry" label="Registry" /> : null}
+                <WorkspaceTab id="terminal" label="Shell" />
+                <WorkspaceTab id="activity" label="Activity" />
+              </Tabs.List>
+            </Tabs.ListContainer>
+          </div>
+        </div>
 
         <WorkspacePanelViewport presentation={presentation} scrollKey={`${routeIdentity}:${selectedPanel}`}>
           <Tabs.Panel className="pt-6" id="overview">
@@ -816,7 +846,9 @@ function WorkspacePanelViewport({ children, presentation, scrollKey }: {
     viewport.dispatchEvent(new Event("scroll"));
   }, [presentation, scrollKey]);
 
-  if (presentation === "embedded") return <>{children}</>;
+  if (presentation === "embedded") {
+    return <div className="session-workspace__panel-content">{children}</div>;
+  }
   return (
     <ScrollShadow
       ref={viewportRef}
