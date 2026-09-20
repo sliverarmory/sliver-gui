@@ -74,7 +74,11 @@ export async function verifySliverConsoleBeforeSigning({
     throw new Error(`Packaged Sliver console executable is not executable: ${executablePath}`);
   }
   if (platform === "darwin") {
-    await run("/usr/bin/lipo", [executablePath, "-verify_arch", "x86_64", "arm64"], {});
+    // Some host lipo versions parse a second architecture as another input.
+    // Verify each required slice separately without weakening the universal check.
+    for (const architecture of ["x86_64", "arm64"]) {
+      await run("/usr/bin/lipo", [executablePath, "-verify_arch", architecture], {});
+    }
   }
 }
 

@@ -49,7 +49,8 @@ function expectStrictContentSecurityPolicy(policy: string): void {
   expect([...directives.values()].flat().filter((value) => value.includes("unsafe")))
     .toEqual(["'wasm-unsafe-eval'"]);
   const pressableStyleHash = createHash("sha256").update(REACT_ARIA_PRESSABLE_STYLE).digest("base64");
-  expect(directives.get("style-src")).toEqual(["'self'", `'sha256-${pressableStyleHash}'`]);
+  const emptyStyleHash = createHash("sha256").update("").digest("base64");
+  expect(directives.get("style-src")).toEqual(["'self'", `'sha256-${pressableStyleHash}'`, `'sha256-${emptyStyleHash}'`]);
   expect(directives.get("font-src")).toEqual(["'self'"]);
   expect(scriptValues.every((value) => !value.startsWith("data:"))).toBe(true);
   // A worker must be an ordinary same-origin asset: blob, data, remote URLs,

@@ -4,6 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 
+import { monacoCspPlugin } from "./scripts/monacoCspPlugin.mjs";
+
 export default defineConfig({
   main: {
     plugins: [
@@ -54,7 +56,10 @@ export default defineConfig({
   },
   renderer: {
     root: resolve("src/renderer"),
-    plugins: [react(), tailwindcss()],
+    plugins: [monacoCspPlugin(), react(), tailwindcss()],
+    // Preserve Monaco's source seams for the strict-CSP transform in dev too.
+    optimizeDeps: { exclude: ["monaco-editor"] },
+    worker: { format: "es" },
     build: {
       outDir: resolve("dist/renderer"),
       sourcemap: false,

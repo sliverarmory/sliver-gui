@@ -20,6 +20,10 @@ configuration files and their private keys stay in the Electron main process.
 - Multiple application windows, each connected to the same or a different
   backend. Windows using the same operator configuration share one ref-counted
   backend connection; unrelated configurations remain isolated.
+- **Automations → Script Editor** provides reusable Monaco editing, UUID-backed
+  local scripts, and a console-only QuickJS WebAssembly runner with Ghostty
+  output. It works offline and includes Hello World. See
+  [Script Editor](docs/script-editor.md) for usage, sandbox limits and verification.
 - Standard right-click menus are available in the main, Armory, Network, and
   Cloud Deployment windows, including text fields and dialogs. Available edit
   actions follow the focused control and its selection.

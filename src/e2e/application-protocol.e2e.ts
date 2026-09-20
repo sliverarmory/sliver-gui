@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -37,7 +38,7 @@ interface ProtocolBrowser {
 
 test("sliver protocol serves built assets and isolated windows with strict CSP and trusted IPC", {
   timeout: 60_000,
-}, async () => {
+}, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-protocol-e2e-"));
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
@@ -53,6 +54,19 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
   ]);
 
   let application: ElectronApplication | undefined;
+  let applicationProcess: ChildProcess | undefined;
+  let stage = "launch";
+  const diagnostics = process.env["SLIVER_GUI_PROTOCOL_DIAGNOSTICS"] === "1";
+  const mark = (value: string): void => {
+    stage = value;
+    if (diagnostics) process.stderr.write(`[protocol] ${value}\n`);
+  };
+  context.signal.addEventListener("abort", () => {
+    if (applicationProcess?.exitCode === null && applicationProcess.signalCode === null) {
+      process.stderr.write(`[protocol] test ended during ${stage}; terminating its remaining fixture process\n`);
+      applicationProcess.kill("SIGKILL");
+    }
+  }, { once: true });
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   try {
@@ -70,11 +84,15 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
       chromiumSandbox: true,
       cwd: repositoryRoot,
     } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    applicationProcess = application.process();
+    if (diagnostics) applicationProcess.stderr?.on("data", (data: Buffer) => process.stderr.write(data));
+    mark("first window");
     const page = await application.firstWindow();
     page.on("pageerror", (error) => pageErrors.push(error.message));
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
+    await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     await page.context().addInitScript(() => {
       const browser = globalThis as unknown as ProtocolBrowser;
       browser.__protocolViolations = [];
@@ -88,11 +106,13 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     // Reload after attaching the observer so module startup and component style
     // creation are covered by the same CSP enforced for the production app.
     await page.reload();
+    mark("initial renderer assets and policy");
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     assert.equal(page.url(), RENDERER_URL);
     await assertBuiltAssets(page);
     await assertStrictPolicy(page);
 
+    mark("settings and terminal runtime");
     const settingsResult = await page.evaluate(async () => {
       const { sliver, location } = globalThis as unknown as ProtocolBrowser;
       const settings = await sliver.getApplicationSettings();
@@ -123,6 +143,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     assert.ok(settingsResult.wasmBytes > 0);
     await page.locator("html.light[data-reduce-motion='true']").waitFor();
 
+    mark("cloud window");
     const cloudOpened = application.waitForEvent("window");
     await page.getByRole("button", { name: "Cloud Deployment", exact: true }).click();
     const cloudPage = await cloudOpened;
@@ -170,6 +191,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
       mainHandler: true,
       cloudHandler: true,
     });
+    mark("ASAR assets");
     await createPackage(join(repositoryRoot, "dist/renderer"), rendererArchive);
     const cssPath = await page.locator('link[rel="stylesheet"]').getAttribute("href");
     assert.ok(cssPath);
@@ -207,8 +229,10 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
       assert.ok(response.csp);
       assert.deepEqual(response.csp.match(/'[^']*unsafe[^']*'/gu), ["'wasm-unsafe-eval'"]);
     }
+    mark("ASAR module worker");
     await assertPackagedModuleWorker(application, temporaryRoot);
 
+    mark("final policy assertions");
     for (const renderer of [page, cloudPage]) {
       const violations = await renderer.evaluate(() => (
         globalThis as unknown as ProtocolBrowser
@@ -226,13 +250,35 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     }
     assert.deepEqual(pageErrors, []);
   } catch (error) {
-    process.stderr.write(`${consoleErrors.join("\n")}\n`);
+    process.stderr.write(`[protocol] failed during ${stage}\n${consoleErrors.join("\n")}\n`);
     throw error;
   } finally {
-    await application?.close();
-    await rm(temporaryRoot, { recursive: true, force: true });
+    mark("application close");
+    try {
+      if (application) await closeProtocolApplication(application);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   }
 });
+
+async function closeProtocolApplication(application: ElectronApplication): Promise<void> {
+  const applicationProcess = application.process();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      application.close(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          applicationProcess.kill("SIGKILL");
+          reject(new Error("Protocol E2E application did not quit within 10 seconds"));
+        }, 10_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 async function assertBuiltAssets(page: Page): Promise<void> {
   const moduleUrl = await page.locator('script[type="module"][src]').getAttribute("src");

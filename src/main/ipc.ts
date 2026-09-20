@@ -103,6 +103,26 @@ import {
   localNetworkInterfaceInventory,
 } from "./network-interfaces.js";
 import { isTrustedRendererUrl } from "./security.js";
+import {
+  parseCreateScriptInput,
+  parseDeleteScriptInput,
+  parseExportScriptInput,
+  parseReadScriptInput,
+  parseRenameScriptInput,
+  parseSaveScriptInput,
+  type ExportScriptInput,
+  type ExportScriptResult,
+  type ImportScriptResult,
+} from "../shared/script-contracts.js";
+import { ScriptStoreError, type ScriptStore } from "./script-store.js";
+import { loadScriptRuntime } from "./script-runtime.js";
+
+export interface ScriptLibraryController {
+  store: ScriptStore;
+  setEditorDirty(source: TrustedWindowIdentity, isDirty: boolean): OperationResult;
+  exportScript(source: TrustedWindowIdentity, input: ExportScriptInput, authorize: () => void): Promise<OperationResult<ExportScriptResult>>;
+  importScript(source: TrustedWindowIdentity, authorize: () => void): Promise<OperationResult<ImportScriptResult>>;
+}
 
 interface TrustedSender {
   sender: WebContents;
@@ -274,7 +294,32 @@ export function registerIpcHandlers(
   applicationSettings?: ApplicationSettingsController,
   cloudDeploymentWindows?: CloudDeploymentWindowController,
   managedServerSshCommands?: ManagedServerSshCommandController,
+  scripts?: ScriptLibraryController,
 ): void {
+  const unavailableScripts = { ok: false as const, error: "The script library is unavailable" };
+  handleTrusted(IPC.listScripts, rendererUrl, parseNoArguments, () =>
+    scripts ? scriptOperation(() => scripts.store.list()) : unavailableScripts);
+  handleTrusted(IPC.readScript, rendererUrl, scriptArguments(parseReadScriptInput), (_sender, input) =>
+    scripts ? scriptOperation(() => scripts.store.read(input)) : unavailableScripts);
+  handleTrusted(IPC.createScript, rendererUrl, scriptArguments(parseCreateScriptInput), (sender, input) =>
+    scripts ? scriptOperation(() => scripts.store.create(input, () => requireCurrentTrustedSender(sender, rendererUrl))) : unavailableScripts);
+  handleTrusted(IPC.saveScript, rendererUrl, scriptArguments(parseSaveScriptInput), (sender, input) =>
+    scripts ? scriptOperation(() => scripts.store.save(input, () => requireCurrentTrustedSender(sender, rendererUrl))) : unavailableScripts);
+  handleTrusted(IPC.renameScript, rendererUrl, scriptArguments(parseRenameScriptInput), (sender, input) =>
+    scripts ? scriptOperation(() => scripts.store.rename(input, () => requireCurrentTrustedSender(sender, rendererUrl))) : unavailableScripts);
+  handleTrusted(IPC.deleteScript, rendererUrl, scriptArguments(parseDeleteScriptInput), (sender, input) =>
+    scripts ? scriptOperation(() => scripts.store.remove(input, () => requireCurrentTrustedSender(sender, rendererUrl))) : unavailableScripts);
+  handleTrusted(IPC.exportScript, rendererUrl, scriptArguments(parseExportScriptInput), (sender, input) =>
+    scripts?.exportScript(sender, input, () => requireCurrentTrustedSender(sender, rendererUrl)) ?? unavailableScripts);
+  handleTrusted(IPC.importScript, rendererUrl, parseNoArguments, (sender) =>
+    scripts?.importScript(sender, () => requireCurrentTrustedSender(sender, rendererUrl)) ?? unavailableScripts);
+  handleTrusted(IPC.getScriptRuntime, rendererUrl, parseNoArguments, () =>
+    scripts ? scriptOperation(loadScriptRuntime) : unavailableScripts);
+  handleTrusted(IPC.setScriptEditorDirty, rendererUrl, (args) => {
+    requireArgumentCount(args, 1, "script editor state");
+    if (typeof args[0] !== "boolean") throw new TypeError("Invalid script editor state");
+    return [args[0]];
+  }, (sender, isDirty) => scripts?.setEditorDirty(sender, isDirty) ?? unavailableScripts);
   handleTrusted(IPC.chooseConfig, rendererUrl, parseNoArguments, ({ sender }) => registry.chooseAndConnect(sender));
   handleTrusted(IPC.importConfig, rendererUrl, parseImportConfigArguments, ({ sender }, input) =>
     registry.importConfig(sender, input.displayName),
@@ -1682,4 +1727,21 @@ function invalidArguments(label: string): Error {
 
 function assertNever(value: never): never {
   throw invalidArguments(`listener kind ${String(value)}`);
+}
+
+function scriptArguments<T>(parse: (value: unknown) => T): (args: readonly unknown[]) => [T] {
+  return (args) => {
+    requireArgumentCount(args, 1, "script input");
+    return [parse(args[0])];
+  };
+}
+
+async function scriptOperation<T>(operation: () => Promise<T>): Promise<OperationResult<T>> {
+  try {
+    return { ok: true, value: await operation() } as OperationResult<T>;
+  } catch (error) {
+    return { ok: false, error: error instanceof ScriptStoreError
+      ? error.message
+      : "The script operation failed. Existing files have been preserved." };
+  }
 }

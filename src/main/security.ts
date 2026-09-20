@@ -3,6 +3,9 @@ import type { BrowserWindow, Session, WebContents, WebPreferences } from "electr
 // React Aria injects this fixed pressable touch-action stylesheet. Authorize
 // only its exact contents; arbitrary inline styles remain blocked.
 const REACT_ARIA_PRESSABLE_STYLE_HASH = "'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o='";
+// Authorize only an empty stylesheet. The pinned Monaco adapter populates its
+// CSSOM from trusted editor code; arbitrary inline CSS remains unauthorized.
+const EMPTY_EDITOR_STYLE_HASH = "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='";
 
 export function productionContentSecurityPolicy(): string {
   return [
@@ -10,7 +13,7 @@ export function productionContentSecurityPolicy(): string {
     "script-src 'self' 'wasm-unsafe-eval'",
     "script-src-elem 'self'",
     "script-src-attr 'none'",
-    `style-src 'self' ${REACT_ARIA_PRESSABLE_STYLE_HASH}`,
+    `style-src 'self' ${REACT_ARIA_PRESSABLE_STYLE_HASH} ${EMPTY_EDITOR_STYLE_HASH}`,
     "img-src 'self' data: blob:",
     "font-src 'self'",
     "connect-src 'none'",
@@ -33,7 +36,7 @@ export function developmentContentSecurityPolicy(devServerUrl: string): string {
     `script-src 'self' 'wasm-unsafe-eval' ${origin}`,
     `script-src-elem 'self' ${origin}`,
     "script-src-attr 'none'",
-    `style-src 'self' ${REACT_ARIA_PRESSABLE_STYLE_HASH}`,
+    `style-src 'self' ${REACT_ARIA_PRESSABLE_STYLE_HASH} ${EMPTY_EDITOR_STYLE_HASH}`,
     `img-src 'self' ${origin} data: blob:`,
     "font-src 'self'",
     `connect-src 'self' ${origin} ${websocketOrigin}`,

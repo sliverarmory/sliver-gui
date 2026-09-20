@@ -227,6 +227,29 @@ test("afterPack rejects a changed Sliver console before signing", async () => {
       projectDirectory,
       resourcesDirectory: join(projectDirectory, "packaged"),
     });
+    const architectureChecks = [];
+    await verifySliverConsoleBeforeSigning({
+      platform: "darwin",
+      projectDirectory,
+      resourcesDirectory: join(projectDirectory, "packaged"),
+      run: async (command, args) => {
+        assert.equal(command, "/usr/bin/lipo");
+        assert.equal(args.length, 3, "each lipo invocation must verify exactly one required architecture");
+        architectureChecks.push(args);
+      },
+    });
+    assert.deepEqual(architectureChecks, [
+      [join(packagedDirectory, "sliver-client"), "-verify_arch", "x86_64"],
+      [join(packagedDirectory, "sliver-client"), "-verify_arch", "arm64"],
+    ]);
+    await assert.rejects(verifySliverConsoleBeforeSigning({
+      platform: "darwin",
+      projectDirectory,
+      resourcesDirectory: join(projectDirectory, "packaged"),
+      run: async (_command, args) => {
+        if (args.at(-1) === "arm64") throw new Error("Required arm64 slice is missing");
+      },
+    }), /Required arm64 slice is missing/u);
     const packagedOverlayPath = join(packagedDirectory, "source-overlay", ...overlaySourcePath.split("/"));
     await writeFile(packagedOverlayPath, "changed source overlay\n");
     await assert.rejects(

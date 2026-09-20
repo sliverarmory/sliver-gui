@@ -147,6 +147,11 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
+  onScriptsChanged: (listener) => {
+    const handler = (): void => listener();
+    ipcRenderer.on(IPC.scriptsChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.scriptsChanged, handler);
+  },
   openStream,
   openConsoleStream,
   onSnapshotChanged: (listener) => {

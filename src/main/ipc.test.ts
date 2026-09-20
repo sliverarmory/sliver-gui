@@ -1,5 +1,10 @@
 // @vitest-environment node
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ScriptStore } from "./script-store.js";
+
 import type {
   IpcMainEvent,
   IpcMainInvokeEvent,
@@ -80,6 +85,75 @@ beforeEach(() => {
 afterEach(() => unregisterIpcHandlers());
 
 describe("trusted Electron IPC boundary", () => {
+  it("serves local scripts while disconnected without consulting connection state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sliver-script-ipc-"));
+    try {
+      const registry = registryMock();
+      const store = new ScriptStore(join(root, "client", "gui", "scripts"));
+      const setEditorDirty = vi.fn(() => ({ ok: true as const }));
+      const exportScript = vi.fn(async () => ({ ok: true as const, value: { canceled: true } }));
+      const importScript = vi.fn(async () => ({ ok: true as const, value: { canceled: true as const } }));
+      registerIpcHandlers(registry, vi.fn(), RENDERER_URL,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, { store, setEditorDirty, exportScript, importScript });
+      const { event } = invokeEvent(RENDERER_URL, 42);
+      await expect(electronMocks.handlers.get(IPC.listScripts)?.(event)).resolves.toMatchObject({
+        ok: true, value: { scripts: [{ name: "Hello World" }], warnings: [] },
+      });
+      await expect(electronMocks.handlers.get(IPC.createScript)?.(event, { name: "Local", source: "console.log(1);" }))
+        .resolves.toMatchObject({ ok: true, value: { name: "Local", source: "console.log(1);" } });
+      expect(electronMocks.handlers.get(IPC.setScriptEditorDirty)?.(event, true)).toEqual({ ok: true });
+      expect(setEditorDirty).toHaveBeenCalledWith(expect.objectContaining({ contentsId: 42 }), true);
+      await expect(electronMocks.handlers.get(IPC.exportScript)?.(event, { name: "Snapshot", source: "unsaved" }))
+        .resolves.toEqual({ ok: true, value: { canceled: true } });
+      expect(exportScript).toHaveBeenCalledWith(expect.objectContaining({ contentsId: 42 }),
+        { name: "Snapshot", source: "unsaved" }, expect.any(Function));
+      await expect(electronMocks.handlers.get(IPC.importScript)?.(event))
+        .resolves.toEqual({ ok: true, value: { canceled: true } });
+      expect(importScript).toHaveBeenCalledWith(expect.objectContaining({ contentsId: 42 }), expect.any(Function));
+      expect(registry.snapshot).not.toHaveBeenCalled();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("rejects script paths, unknown fields, extra arguments, invalid revisions and dirty payloads before dispatch", () => {
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent(RENDERER_URL, 42);
+    const id = "22222222-2222-4222-8222-222222222222";
+    const attempts: Array<[string, unknown[]]> = [
+      [IPC.listScripts, [true]],
+      [IPC.readScript, [{ id: "../outside.js" }]],
+      [IPC.readScript, [{ id, path: "/outside.js" }]],
+      [IPC.createScript, [{ name: "Local", source: "", directory: "/tmp" }]],
+      [IPC.exportScript, [{ name: "Local", source: "", path: "/tmp/script.js" }]],
+      [IPC.exportScript, [{ name: "Local", source: "" }, "/tmp/script.js"]],
+      [IPC.importScript, ["/tmp/script.js"]],
+      [IPC.saveScript, [{ id, source: "", expectedRevision: "stale" }]],
+      [IPC.renameScript, [{ id, name: "bad\nname", expectedRevision: "a".repeat(64) }]],
+      [IPC.deleteScript, [{ id, expectedRevision: "a".repeat(64) }, true]],
+      [IPC.getScriptRuntime, ["/custom.wasm"]],
+      [IPC.setScriptEditorDirty, [{ dirty: true }]],
+    ];
+    for (const [channel, args] of attempts) expect(() => electronMocks.handlers.get(channel)?.(event, ...args)).toThrow();
+    expect(electronMocks.handlers.get(IPC.listScripts)?.(event)).toEqual({ ok: false, error: "The script library is unavailable" });
+  });
+
+  it("revalidates the invoking document before a queued script mutation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sliver-script-ipc-"));
+    try {
+      const store = new ScriptStore(join(root, "client", "gui", "scripts"));
+      await store.list();
+      registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        { store, setEditorDirty: () => ({ ok: true }),
+          exportScript: async () => ({ ok: true, value: { canceled: true } }),
+          importScript: async () => ({ ok: true, value: { canceled: true } }) });
+      const { event, sender } = invokeEvent(RENDERER_URL, 42);
+      const pending = electronMocks.handlers.get(IPC.createScript)?.(event, { name: "Stale", source: "" });
+      vi.spyOn(sender, "getURL").mockReturnValue("https://outside.example/");
+      await expect(pending).resolves.toMatchObject({ ok: false });
+      expect((await store.list()).scripts).toHaveLength(1);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("rejects Armory windows at every operator invoke channel", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent("sliver://app/index.html?surface=armory", 77);

@@ -85,7 +85,31 @@ import type {
   RevealCredentialSecretInput,
 } from "./operator-data-contracts.js";
 
+import type {
+  CreateScriptInput,
+  DeleteScriptInput,
+  ExportScriptInput,
+  ExportScriptResult,
+  ImportScriptResult,
+  ReadScriptInput,
+  RenameScriptInput,
+  SaveScriptInput,
+  ScriptCatalog,
+  ScriptDocument,
+  ScriptRuntimeAsset,
+} from "./script-contracts.js";
+
 export const IPC_INVOKE = {
+  listScripts: "sliver:scripts:list",
+  readScript: "sliver:scripts:read",
+  createScript: "sliver:scripts:create",
+  saveScript: "sliver:scripts:save",
+  renameScript: "sliver:scripts:rename",
+  deleteScript: "sliver:scripts:delete",
+  exportScript: "sliver:scripts:export",
+  importScript: "sliver:scripts:import",
+  getScriptRuntime: "sliver:scripts:runtime",
+  setScriptEditorDirty: "sliver:scripts:editor-dirty",
   chooseConfig: "sliver:connection:choose-config",
   importConfig: "sliver:connection:import-config",
   listSavedConfigs: "sliver:connection:list-saved-configs",
@@ -174,6 +198,7 @@ export const IPC_STREAM = {
 } as const;
 
 export const IPC_EVENTS = {
+  scriptsChanged: "sliver:scripts:changed",
   cloudDeploymentThemeChanged: "sliver:cloud-deployment:theme-changed",
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
@@ -988,6 +1013,16 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: SessionShellResourceActionInput];
     result: OperationResult<SessionShellResourceActionResult>;
   };
+  [IPC.listScripts]: { args: []; result: OperationResult<ScriptCatalog> };
+  [IPC.readScript]: { args: [input: ReadScriptInput]; result: OperationResult<ScriptDocument> };
+  [IPC.createScript]: { args: [input: CreateScriptInput]; result: OperationResult<ScriptDocument> };
+  [IPC.saveScript]: { args: [input: SaveScriptInput]; result: OperationResult<ScriptDocument> };
+  [IPC.renameScript]: { args: [input: RenameScriptInput]; result: OperationResult<ScriptDocument> };
+  [IPC.deleteScript]: { args: [input: DeleteScriptInput]; result: OperationResult<void> };
+  [IPC.exportScript]: { args: [input: ExportScriptInput]; result: OperationResult<ExportScriptResult> };
+  [IPC.importScript]: { args: []; result: OperationResult<ImportScriptResult> };
+  [IPC.getScriptRuntime]: { args: []; result: OperationResult<ScriptRuntimeAsset> };
+  [IPC.setScriptEditorDirty]: { args: [isDirty: boolean]; result: OperationResult };
   [IPC.getTerminalRuntime]: {
     args: [];
     result: OperationResult<TerminalRuntimeAsset>;
@@ -1033,6 +1068,7 @@ export type SliverDesktopInvokeAPI = {
 };
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
+  onScriptsChanged: (listener: () => void) => () => void;
   /**
    * Transfer one narrow MessagePort capability to the trusted main process.
    * The port is delivered back to this document through a fixed window-message
@@ -1076,6 +1112,7 @@ function defineSliverDesktopNonInvokeAPIKeys<
  * is deliberately reviewed and updated.
  */
 export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAPIKeys([
+  "onScriptsChanged",
   "openStream",
   "openConsoleStream",
   "onSnapshotChanged",

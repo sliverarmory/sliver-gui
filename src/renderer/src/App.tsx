@@ -10,6 +10,7 @@ import {
   faBoxOpen,
   faBoxesStacked,
   faCloudArrowUp,
+  faCode,
   faComputer,
   faEllipsisVertical,
   faGear,
@@ -63,13 +64,14 @@ import { CredentialsPage } from "./pages/CredentialsPage";
 import { OperationsPage } from "./pages/OperationsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { ScriptEditorPage } from "./pages/ScriptEditorPage";
 import {
   SessionWorkspacePage,
   type SessionWorkspaceRoute,
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
+type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings" | "script-editor";
 
 const sidebarIcons = {
   dark: sliverDarkIcon,
@@ -110,11 +112,16 @@ const dataNavItems = [
   { id: "credentials" as const, label: "Credentials", description: "Browse collected credentials.", icon: faKey },
 ];
 
+const automationNavItems = [
+  { id: "script-editor" as const, label: "Script Editor", description: "Write and run local JavaScript scripts.", icon: faCode },
+];
+
 type NavigationItem =
   | typeof overviewNavItem
   | (typeof infrastructureNavItems)[number]
   | (typeof interactNavItems)[number]
-  | (typeof dataNavItems)[number];
+  | (typeof dataNavItems)[number]
+  | (typeof automationNavItems)[number];
 
 function SidebarNavigationItem({
   count,
@@ -167,9 +174,13 @@ export function App() {
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const connected = isUsableConnection(snapshot.connection.status);
   const isViewAvailable = useCallback((entry: ViewId) =>
-    entry === "overview" || entry === "settings" || connected, [connected]);
+    entry === "overview" || entry === "settings" || entry === "script-editor" || connected, [connected]);
   const { current: view, navigate: setView, goBack, goForward, canGoBack, canGoForward } =
     useNavigationHistory<ViewId>("overview", isViewAvailable);
+  const [scriptEditorVisited, setScriptEditorVisited] = useState(false);
+  useEffect(() => {
+    if (view === "script-editor") setScriptEditorVisited(true);
+  }, [view]);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
@@ -403,6 +414,7 @@ export function App() {
     });
   }, [compatibilityKey]);
   const changeView = useCallback((nextView: ViewId) => {
+    if (nextView === "script-editor") setIsConfigSelectorOpen(false);
     setSessionWorkspaceRoute(undefined);
     setBeaconWorkspaceRoute(undefined);
     setView(nextView);
@@ -524,6 +536,7 @@ export function App() {
     ...infrastructureNavItems,
     ...interactNavItems,
     ...dataNavItems,
+    ...automationNavItems,
   ].map((item): AppCommandPaletteCommand => ({
     id: `navigate-${item.id}`,
     group: "Navigate",
@@ -531,7 +544,7 @@ export function App() {
     label: item.label,
     description: item.description,
     isCurrent: view === item.id,
-    isDisabled: item.id !== "overview" && !connected,
+    isDisabled: !isViewAvailable(item.id),
     onAction: () => changeView(item.id),
   }));
   const commandPaletteCommands: readonly AppCommandPaletteCommand[] = [
@@ -746,10 +759,11 @@ export function App() {
           </div>
         </header>
         <div
-          className={view === "overview" ? "app-content app-content--overview" : view === "generate" && connected
+          className={view === "script-editor" ? "app-content app-content--scripts" : view === "overview" ? "app-content app-content--overview" : view === "generate" && connected
             ? "app-content app-content--generate"
             : "app-content"}
         >
+          {scriptEditorVisited || view === "script-editor" ? <ScriptEditorPage active={view === "script-editor"} /> : null}
           {view === "overview" ? <OverviewPage snapshot={snapshot} onSnapshot={setSnapshot} onNavigate={changeView}
             onOpenSession={openSessionWorkspace} onOpenBeacon={openBeaconWorkspace} /> : view === "settings" ? (
             <SettingsPage
@@ -1027,6 +1041,20 @@ export function NavigationContent({
                 item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}
+                onAction={() => navigate(item.id)}
+              />
+            ))}
+          </Sidebar.Menu>
+        </Sidebar.Group>
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>Automations</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label="Automations navigation" showGuideLines={false}>
+            {automationNavItems.map((item) => (
+              <SidebarNavigationItem
+                key={item.id}
+                item={item}
+                isCurrent={view === item.id}
+                isDisabled={false}
                 onAction={() => navigate(item.id)}
               />
             ))}

@@ -66,6 +66,17 @@ function installSliverAPI(
 ): SliverDesktopAPI {
   const failedOperation = async () => ({ ok: false as const, error: "Not implemented by this test" });
   const api: SliverDesktopAPI = {
+    listScripts: vi.fn(async () => ({ ok: true as const, value: { scripts: [], warnings: [] } })),
+    readScript: vi.fn(failedOperation),
+    createScript: vi.fn(failedOperation),
+    exportScript: vi.fn(failedOperation),
+    importScript: vi.fn(failedOperation),
+    saveScript: vi.fn(failedOperation),
+    renameScript: vi.fn(failedOperation),
+    deleteScript: vi.fn(failedOperation),
+    getScriptRuntime: vi.fn(failedOperation),
+    setScriptEditorDirty: vi.fn(async () => ({ ok: true as const })),
+    onScriptsChanged: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),
     chooseCertificatePair: vi.fn(failedOperation),
@@ -186,6 +197,27 @@ function installSliverAPI(
 }
 
 describe("App startup", () => {
+  it("opens Script Editor offline from the palette and preserves its page across back and forward", async () => {
+    const user = userEvent.setup();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const scripts = await screen.findByRole("menuitem", { name: /^Script Editor/u });
+    expect(scripts).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(scripts);
+    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: "Script Editor" })).toHaveAttribute("data-current", "true");
+    expect(api.listScripts).toHaveBeenCalledOnce();
+    const navigation = within(screen.getByRole("navigation", { name: "Window navigation" }));
+    await user.click(navigation.getByRole("button", { name: "Go back" }));
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Script Editor" })).not.toBeInTheDocument();
+    await user.click(navigation.getByRole("button", { name: "Go forward" }));
+    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
+    expect(api.listScripts).toHaveBeenCalledOnce();
+  });
+
   it("shares history between keyboard shortcuts and palette commands with matching boundaries", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
@@ -1138,11 +1170,16 @@ describe("Sidebar navigation", () => {
       "Operational navigation",
       "Interact navigation",
       "Data navigation",
+      "Automations navigation",
     ]);
     const overview = within(menus[0]!).getByRole("row", { name: "Overview" });
     expect(overview).not.toHaveAttribute("aria-disabled", "true");
     await user.click(overview);
     expect(onViewChange).toHaveBeenCalledExactlyOnceWith("overview");
+    const scripts = within(menus[4]!).getByRole("row", { name: "Script Editor" });
+    expect(scripts).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(scripts);
+    expect(onViewChange).toHaveBeenLastCalledWith("script-editor");
   });
 
   it("opens the loot and credential stores from the shared Data navigation", async () => {
@@ -1558,6 +1595,8 @@ describe("Sidebar navigation", () => {
       const infrastructure = await screen.findByRole("treegrid", { name: "Operational navigation" });
       const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
       const data = await screen.findByRole("treegrid", { name: "Data navigation" });
+      const automations = await screen.findByRole("treegrid", { name: "Automations navigation" });
+      expect(within(automations).getByRole("row", { name: "Script Editor" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();

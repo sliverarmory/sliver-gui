@@ -259,6 +259,17 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI {
   const failed = async () => ({ ok: false as const, error: "Not implemented by this test" });
   const api: SliverDesktopAPI = {
+    listScripts: vi.fn(failed),
+    readScript: vi.fn(failed),
+    createScript: vi.fn(failed),
+    exportScript: vi.fn(failed),
+    importScript: vi.fn(failed),
+    saveScript: vi.fn(failed),
+    renameScript: vi.fn(failed),
+    deleteScript: vi.fn(failed),
+    getScriptRuntime: vi.fn(failed),
+    setScriptEditorDirty: vi.fn(failed),
+    onScriptsChanged: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     backgroundTarget: vi.fn(failed),
     cancelBeaconTask: vi.fn(failed),

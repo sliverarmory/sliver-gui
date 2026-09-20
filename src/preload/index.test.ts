@@ -21,6 +21,16 @@ type InvokeArgumentsByMethod = {
 };
 
 const invokeArguments = {
+  listScripts: [],
+  readScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2" }],
+  createScript: [{ name: "Test", source: "console.log(1)" }],
+  saveScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2", source: "console.log(1)", expectedRevision: "a".repeat(64) }],
+  renameScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2", name: "Renamed", expectedRevision: "a".repeat(64) }],
+  deleteScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2", expectedRevision: "a".repeat(64) }],
+  exportScript: [{ name: "Test", source: "console.log(1)" }],
+  importScript: [],
+  getScriptRuntime: [],
+  setScriptEditorDirty: [true],
   chooseConfig: [],
   importConfig: [{ displayName: "local test" }],
   listSavedConfigs: [],
@@ -192,6 +202,18 @@ vi.stubGlobal("document", {
 await import("./index.js");
 
 describe("sandboxed preload bridge", () => {
+  it("exposes script invalidation without leaking the Electron event and unsubscribes cleanly", () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    const listener = vi.fn();
+    const unsubscribe = api.onScriptsChanged(listener);
+    const registration = electronMocks.on.mock.calls.findLast(([channel]) => channel === IPC.scriptsChanged)!;
+    const handler = registration[1] as (...args: unknown[]) => void;
+    handler({ privateElectronEvent: true }, "ignored payload");
+    expect(listener).toHaveBeenCalledExactlyOnceWith();
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.scriptsChanged, handler);
+  });
+
   it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
     expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(2);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];

@@ -42,6 +42,9 @@ const requiredBuilderPaths = [
   "node_modules/ghostty-web/LICENSE",
   "node_modules/ghostty-web/package.json",
   "node_modules/ghostty-web/ghostty-vt.wasm",
+  "node_modules/@jitl/quickjs-wasmfile-release-sync/LICENSE",
+  "node_modules/@jitl/quickjs-wasmfile-release-sync/package.json",
+  "node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm",
   "node_modules/node-pty/LICENSE",
   "node_modules/node-pty/package.json",
   "node_modules/node-pty/lib/**/*.js",
@@ -57,6 +60,7 @@ const requiredBuilderPaths = [
   "protocol/sliver-baseline.json",
   "protocol/sliver-script-provenance.json",
   "protocol/ghostty-web-provenance.json",
+  "protocol/script-editor-provenance.json",
   "protocol/terminal-fonts-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
@@ -74,6 +78,10 @@ const requiredAzureRuntimePackages = Object.freeze([
   "@azure/msal-node",
 ]);
 const requiredPackagedFiles = [
+  "node_modules/@jitl/quickjs-wasmfile-release-sync/LICENSE",
+  "node_modules/@jitl/quickjs-wasmfile-release-sync/package.json",
+  "node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm",
+  "protocol/script-editor-provenance.json",
   "LICENSE",
   "LICENSES/Apache-2.0.txt",
   "LICENSES/GPL-3.0-or-later.txt",
@@ -285,6 +293,9 @@ for (const requiredText of [
   "Copyright 2025 NextUI Inc.",
   "react@19.2.8",
   "ghostty-web@0.4.0",
+  "quickjs-emscripten@0.32.0",
+  "@jitl/quickjs-wasmfile-release-sync@0.32.0",
+  "monaco-editor@0.56.0",
   "node-pty@1.1.0",
   "electron-updater@6.8.9",
   `sliver-script@${sliverScriptVersion}\nDeclared license: GPL-3.0-or-later`,
@@ -420,11 +431,13 @@ async function verifyExternalNodePtyRuntime(archivePath) {
       ? ["x86_64", "arm64"]
       : [process.arch === "x64" ? "x86_64" : "arm64"];
     for (const relativePath of ["build/Release/pty.node", "build/Release/spawn-helper"]) {
-      await runCommand("/usr/bin/lipo", [
-        join(moduleDirectory, ...relativePath.split("/")),
-        "-verify_arch",
-        ...architectures,
-      ]);
+      for (const architecture of architectures) {
+        await runCommand("/usr/bin/lipo", [
+          join(moduleDirectory, ...relativePath.split("/")),
+          "-verify_arch",
+          architecture,
+        ]);
+      }
     }
   }
 }
@@ -583,7 +596,11 @@ async function verifySliverExecutableBuildInfo(executablePath, evidence) {
   const goEnvironment = hermeticGoEnvironment(process.env);
   const slices = evidence.buildRecord.build.slices;
   if (process.platform === "darwin") {
-    await runCommand("/usr/bin/lipo", [executablePath, "-verify_arch", "x86_64", "arm64"]);
+    // Keep both required slices while supporting host lipo versions that only
+    // accept one architecture per verification invocation.
+    for (const architecture of ["x86_64", "arm64"]) {
+      await runCommand("/usr/bin/lipo", [executablePath, "-verify_arch", architecture]);
+    }
     const temporaryDirectory = await mkdtemp(join(tmpdir(), "sliver-console-buildinfo-"));
     try {
       for (const slice of slices) {
@@ -796,6 +813,18 @@ function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) 
   const terminalRuntimeSha256 = sha256(terminalRuntime);
   if (terminalRuntime.byteLength !== 423_045 || terminalRuntimeSha256 !== "d6f0326f1874ad2ce9f289e3a4a0c5f3507d4cb38d8747e4b287def470a0c60a") {
     throw new Error(`Packaged Ghostty runtime failed its integrity check: ${archivePath}`);
+  }
+  const scriptRuntimePath = "node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm";
+  const scriptRuntimeEntry = entries.find(({ normalizedPath }) => normalizedPath === scriptRuntimePath);
+  if (!scriptRuntimeEntry) throw new Error("Packaged QuickJS runtime is missing");
+  const scriptRuntime = extractFile(archivePath, scriptRuntimeEntry.lookupPath, false);
+  if (scriptRuntime.byteLength !== 503134 || sha256(scriptRuntime) !== "105c3bed22d457e43e3d1c3c1c6959fda62a8fe06f0fc8a985303c3a2be72232") {
+    throw new Error("Packaged QuickJS runtime failed its integrity check");
+  }
+  for (const workerName of ["script.worker-", "editor.worker-", "script-language.worker-"]) {
+    if (!normalizedEntries.some((entry) => entry.startsWith("dist/renderer/assets/") && entry.includes(workerName) && entry.endsWith(".js"))) {
+      throw new Error(`Packaged Script Editor worker is missing: ${workerName}`);
+    }
   }
   const nativePtyPrefixes = ["node_modules/node-pty/build/Release/"];
   for (const nativePrefix of nativePtyPrefixes) {

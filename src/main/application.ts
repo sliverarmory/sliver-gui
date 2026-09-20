@@ -9,7 +9,6 @@ import { dirname, join, resolve } from "node:path";
 
 import {
   app,
-  autoUpdater as nativeAutoUpdater,
   BrowserWindow,
   clipboard,
   dialog,
@@ -154,6 +153,10 @@ import {
   registerNetworkForwardingIpcHandlers,
   unregisterNetworkForwardingIpcHandlers,
 } from "./network-forwarding-ipc.js";
+
+import { ScriptStore } from "./script-store.js";
+import { ScriptEditorCloseGuard } from "./script-editor-close-guard.js";
+import { exportScriptFile, importScriptFile } from "./script-file-dialogs.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
@@ -333,6 +336,27 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
+  const scriptCloseGuard = new ScriptEditorCloseGuard((contentsIds) => {
+    const owner = contentsIds.map((id) => windowsByContentsId.get(id)).find((window) => window && !window.isDestroyed());
+    const prompt = {
+      type: "warning" as const,
+      title: "Unsaved scripts",
+      message: "Discard unsaved script changes?",
+      detail: "Your unsaved editor drafts will be lost. Saved scripts remain on disk.",
+      buttons: ["Keep Editing", "Discard Changes"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    return (owner ? dialog.showMessageBoxSync(owner, prompt) : dialog.showMessageBoxSync(prompt)) === 1;
+  });
+  // Lazy initialization keeps startup and unrelated tests free of disk writes.
+  const scriptStore = new ScriptStore(join(consoleClientRootDirectory, "gui", "scripts"), () => {
+    for (const window of windows) {
+      if (window.isDestroyed() || window.webContents.isDestroyed() || nativeWindowSurfaces.get(window) !== "workspace") continue;
+      try { window.webContents.send(IPC.scriptsChanged); } catch { /* A closing window reloads the catalog on its next visit. */ }
+    }
+  });
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
   const interactionWindowsByContentsId = new Map<number, InteractionWindowRecord>();
@@ -594,7 +618,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (consoleWindowRecord) {
       window.on("close", (event) => {
         if (
-          shutdown.isStopping ||
+          shutdown.isStopping || scriptCloseGuard.isQuitRequested ||
           consoleWindowRecord.finalizing ||
           (consoleWindowRecord.tabsById.size === 0 && !consoleWindowRecord.claimPromise)
         ) return;
@@ -609,7 +633,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     if (sessionShellRecord) {
       window.on("close", (event) => {
         if (
-          shutdown.isStopping ||
+          shutdown.isStopping || scriptCloseGuard.isQuitRequested ||
           sessionShellRecord.finalizing ||
           !sessionShellRecord.claimedBy
         ) return;
@@ -639,6 +663,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       });
     }
     window.on("closed", () => {
+      scriptCloseGuard.forget(contentsId);
       shortcutRecordingWindows.delete(window);
       windows.delete(window);
       nativeWindowSurfaces.delete(window);
@@ -682,6 +707,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       nativeTheme.shouldUseDarkColors,
     ));
     trackWindow(window, inheritFromContentsId);
+    window.on("close", (event) => {
+      if (!scriptCloseGuard.allowClose(window.webContents.id)) event.preventDefault();
+    });
+    window.webContents.on("will-prevent-unload", (event) => {
+      // Electron defaults to retaining the document. preventDefault here means
+      // the operator explicitly approved discarding this beforeunload veto.
+      if (scriptCloseGuard.allowClose(window.webContents.id, true)) event.preventDefault();
+    });
+    window.webContents.on("did-finish-load", () => scriptCloseGuard.forget(window.webContents.id));
     void loadRenderer(window);
     return window;
   }
@@ -2345,7 +2379,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const result = window && !window.isDestroyed()
       ? await dialog.showMessageBox(window, options)
       : await dialog.showMessageBox(options);
-    if (result.response === 1) applicationUpdater?.restartToApply();
+    if (result.response === 1) restartApplicationForUpdate();
+  }
+
+  function restartApplicationForUpdate(): OperationResult {
+    if (!scriptCloseGuard.allowQuit()) return { ok: false, error: "Restart canceled to keep unsaved script changes" };
+    const result = applicationUpdater?.restartToApply() ?? { ok: false, error: "Application updates are unavailable" };
+    if (!result.ok) scriptCloseGuard.cancelQuit();
+    return result;
   }
 
   function startReleaseDownload(target: SliverReleaseTarget): void {
@@ -2470,16 +2511,22 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let quitCleanupComplete = false;
   let quitCleanupBarrier: Promise<void> | undefined;
   const onBeforeQuit = (event: Electron.Event): void => {
+    if (!scriptCloseGuard.allowQuit()) event.preventDefault();
+  };
+  const onWillQuit = (event: Electron.Event): void => {
+    // Do not stop services until every document has accepted closing. This also
+    // covers a beforeunload veto that raced its dirty-state IPC notification.
     beginShutdown();
     if (quitCleanupComplete) return;
     event.preventDefault();
-    quitCleanupBarrier ??= Promise.allSettled([...pendingWindowCleanup])
+    quitCleanupBarrier ??= Promise.allSettled([...pendingWindowCleanup, scriptStore.flush()])
       .then(() => {
         quitCleanupComplete = true;
-        app.quit();
+        // Resolved cleanup can finish in a microtask inside Electron's current
+        // will-quit stack. Retry on a later turn after the canceled quit resets.
+        setImmediate(() => app.quit());
       });
   };
-  const onBeforeQuitForUpdate = (): void => beginShutdown();
   const onNativeThemeUpdated = (): void => applyNativeWindowTheme();
 
   await app.whenReady();
@@ -2585,16 +2632,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       open: openSessionShellWindow,
       claim: claimSessionShellWindow,
     },
-    () => {
-      beginShutdown();
-      app.quit();
-    },
+    () => app.quit(),
     {
       open: openInteractionWindow,
       claim: claimInteractionWindow,
       selectTarget: selectInteractionWindowTarget,
     },
-    applicationUpdater,
+    {
+      getState: () => applicationUpdater!.getState(),
+      checkForUpdates: () => applicationUpdater!.checkForUpdates(),
+      restartToApply: restartApplicationForUpdate,
+    },
     {
       open: openConsoleWindow,
       claim: claimConsoleWindow,
@@ -2630,6 +2678,33 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         } catch {
           return { ok: false, error: "The SSH command is unavailable" };
         }
+      },
+    },
+    {
+      store: scriptStore,
+      exportScript: async (identity, input, authorize) => {
+        const window = windowsByContentsId.get(identity.contentsId);
+        if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          nativeWindowSurfaces.get(window) !== "workspace" || !sameWindowIdentity(identity, identityForWindow(window))) {
+          return { ok: false, error: "This window does not host a script editor" };
+        }
+        return exportScriptFile(window, input, authorize);
+      },
+      importScript: async (identity, authorize) => {
+        const window = windowsByContentsId.get(identity.contentsId);
+        if (!window || window.isDestroyed() || window.webContents.isDestroyed() ||
+          nativeWindowSurfaces.get(window) !== "workspace" || !sameWindowIdentity(identity, identityForWindow(window))) {
+          return { ok: false, error: "This window does not host a script editor" };
+        }
+        return importScriptFile(window, scriptStore, authorize);
+      },
+      setEditorDirty: (identity, isDirty) => {
+        const window = windowsByContentsId.get(identity.contentsId);
+        if (!window || nativeWindowSurfaces.get(window) !== "workspace" || !sameWindowIdentity(identity, identityForWindow(window))) {
+          return { ok: false, error: "This window does not host a script editor" };
+        }
+        scriptCloseGuard.setDirty(identity.contentsId, isDirty);
+        return { ok: true };
       },
     },
   );
@@ -2716,7 +2791,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   app.on("activate", onActivate);
   app.on("window-all-closed", onWindowAllClosed);
   app.on("before-quit", onBeforeQuit);
-  nativeAutoUpdater.on("before-quit-for-update", onBeforeQuitForUpdate);
+  app.on("will-quit", onWillQuit);
   createWindow();
   applicationUpdater.start();
 
@@ -2733,7 +2808,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("activate", onActivate);
       app.removeListener("window-all-closed", onWindowAllClosed);
       app.removeListener("before-quit", onBeforeQuit);
-      nativeAutoUpdater.removeListener("before-quit-for-update", onBeforeQuitForUpdate);
+      app.removeListener("will-quit", onWillQuit);
       nativeTheme.removeListener("updated", onNativeThemeUpdated);
       systemIconAppearance.dispose();
       applicationContextMenus?.dispose();
@@ -2747,7 +2822,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
         window.close();
       }
-      await Promise.allSettled([...pendingWindowCleanup]);
+      await Promise.allSettled([...pendingWindowCleanup, scriptStore.flush()]);
       for (const rendererSession of appProtocolSessions) {
         rendererSession.protocol.unhandle(APP_SCHEME);
         appProtocolSessions.delete(rendererSession);
