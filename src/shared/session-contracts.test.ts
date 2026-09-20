@@ -276,6 +276,35 @@ describe("session workbench contracts", () => {
     })).toThrow(/unsigned 64-bit/u);
   });
 
+  it("accepts empty string and binary registry write payloads", () => {
+    expect(parsePrepareSessionDestructiveActionInput({
+      actionId: "session.registry.write",
+      hive: "HKCU",
+      path: "Software\\Example",
+      key: "EmptyString",
+      value: { type: "string", value: "" },
+    })).toEqual({
+      actionId: "session.registry.write",
+      hive: "HKCU",
+      path: "Software\\Example",
+      key: "EmptyString",
+      value: { type: "string", value: "" },
+    });
+    expect(parsePrepareSessionDestructiveActionInput({
+      actionId: "session.registry.write",
+      hive: "HKCU",
+      path: "Software\\Example",
+      key: "EmptyBinary",
+      value: { type: "binary", hex: "" },
+    })).toEqual({
+      actionId: "session.registry.write",
+      hive: "HKCU",
+      path: "Software\\Example",
+      key: "EmptyBinary",
+      value: { type: "binary", hex: "" },
+    });
+  });
+
   it("allows execution by an opaque plan token only", () => {
     expect(parseExecuteSessionDestructiveActionPlanInput({ token: "plan-token" })).toEqual({
       token: "plan-token",

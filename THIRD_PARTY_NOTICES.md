@@ -13,7 +13,7 @@ Maxime Gris, and were provided under the MIT License. The MIT license text is
 reproduced in `LICENSES/MIT.txt`; that attribution does not change the license
 of the combined Sliver GUI application.
 
-The application bundles `sliver-script` version 2.0.0-rc.4, the TypeScript
+The application bundles `sliver-script` version 2.0.0-rc.5, the TypeScript
 client for the Sliver Implant Framework, copyright Bishop Fox. It is
 distributed under GPL-3.0-or-later. Native packages retain the exact published
 npm package's license, source, build metadata, and protobuf/integration locks
@@ -78,7 +78,7 @@ repository at the matching version tag together with the retained source for
 the exact published `sliver-script` package:
 
 https://github.com/sliverarmory/sliver-gui
-https://github.com/sliverarmory/sliver-script/tree/v2.0.0-rc.4
+https://github.com/sliverarmory/sliver-script/tree/v2.0.0-rc.5
 
 GitHub release pages provide source archives for the matching tag alongside
 the native application packages. Build instructions are in `README.md`.

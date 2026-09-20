@@ -140,7 +140,7 @@ For browser authentication and existing CLI credential support in Cloud
 Deployment, see [AWS Login](docs/aws-login.md) and [Azure Login](docs/azure-login.md).
 
 The TypeScript gRPC client used by Electron main is the exact npm dependency
-`sliver-script@2.0.0-rc.4`. The lockfile pins its registry tarball integrity, and
+`sliver-script@2.0.0-rc.5`. The lockfile pins its registry tarball integrity, and
 `protocol/sliver-script-provenance.json` verifies the installed package and its
 generic integration/protobuf locks against the GUI's Sliver source baseline
 without relying on an adjacent client checkout.
@@ -158,7 +158,7 @@ release tags provide the complete GUI source.
 An adjacent `./sliver/` checkout is optional for ordinary renderer/backend
 development and ignored by this repository. Native console and distribution
 builds require that directory (or `SLIVER_SOURCE_DIR`) to be a clean checkout
-at commit `bbb20155b7a18d4906ec936566bf0dc61fe38f35`; the build refuses a
+at commit `f8430cecf7ceb5cb332c84fb36aba9b75188802d`; the build refuses a
 different commit/tree or local source changes and does not fetch or modify the
 checkout. Source and toolchain requirements are pinned in
 `protocol/sliver-console-provenance.json`.

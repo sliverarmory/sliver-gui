@@ -2,35 +2,35 @@
   "schemaVersion": 3,
   "package": {
     "name": "sliver-script",
-    "version": "2.0.0-rc.4",
-    "dependencySpec": "2.0.0-rc.4",
-    "tarball": "https://registry.npmjs.org/sliver-script/-/sliver-script-2.0.0-rc.4.tgz",
-    "integrity": "sha512-8AttstbME5lQxw5q7qavQ5aF5j8NyOd9ExEyHEMkjzdV2MVcfc/tkk7+o/Ks8fggEbbcxVCIOE5SIlvgH8U/5A==",
-    "shasum": "bb8e346c19c9bbbe40840493d64f7be9ee9dcb69",
+    "version": "2.0.0-rc.5",
+    "dependencySpec": "2.0.0-rc.5",
+    "tarball": "https://registry.npmjs.org/sliver-script/-/sliver-script-2.0.0-rc.5.tgz",
+    "integrity": "sha512-H9WR/6rNdPiIJWbYeaPzTFF1V50ZlnmsgYRVkSeWLFXEuR0FE00A3rQ1Z6gV1WBhLm75/JUD3jzBPs5w8vVB2Q==",
+    "shasum": "be2d88676fc40835c2edfec7ad009c4289edb46a",
     "source": {
       "repository": "https://github.com/sliverarmory/sliver-script.git",
-      "tag": "v2.0.0-rc.4",
-      "commit": "ea287f92dff10d85d8352d7d8e3b6c4fefe607bc"
+      "tag": "v2.0.0-rc.5",
+      "commit": "d96ba366fdf497218258d5ead8155eccbb3af72e"
     }
   },
   "installedPackage": {
     "root": "node_modules/sliver-script",
     "tree": {
       "files": 66,
-      "sha256": "714a498e46b228b695c103be40a4efc2131158d6ac530104b228b57d0ae22f18"
+      "sha256": "9cd7630b140c48c7395ff987d2d8bee026f2e6358dc09dc859da072596682332"
     },
     "files": [
       {
         "path": "package.json",
-        "sha256": "bf1ea25dc63606c57a874700402c689fcf273c75042ebb08d6e020feb25330e6"
+        "sha256": "1a6211609897804b2e98fba7deb4df8be7c4b029b94dfe56e03e9a4715fd7637"
       },
       {
         "path": "integration.lock.json",
-        "sha256": "1ddda9899c30d2eef59978ed2e387b107fcceb70e9d1a71057a91f0413ee9453"
+        "sha256": "3b708b95dfb64c454c6ca7872dca506a2db2d9800c8387cdc3a5a7fe0b25202a"
       },
       {
         "path": "protobuf.lock.json",
-        "sha256": "de95deaa294fea5063efd0ff8d2ef8ba369d6eb2622af441eb3c33e6643936ec"
+        "sha256": "5a28d88699c1efc30fdcb5c2ab1ee3b82a777b7154c3809013c1372819239e18"
       }
     ]
   },

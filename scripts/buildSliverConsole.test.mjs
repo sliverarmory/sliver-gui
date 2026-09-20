@@ -142,7 +142,7 @@ test("requires exact module, VCS, target, and build settings", () => {
   const sourceManifest = {
     source: {
       commandPackage: "github.com/bishopfox/sliver/client",
-      commit: "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      commit: "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       module: "github.com/bishopfox/sliver",
     },
     build: { tags: ["go_sqlite", "client"] },
@@ -395,8 +395,8 @@ test("emits a digest-bound native artifact and build record", async () => {
   await writeFile(join(repositoryDirectory, overlayReplacementPath), overlayReplacement);
   await writeFile(join(repositoryDirectory, "package.json"), '{"version":"0.1.0"}\n');
 
-  const pinnedCommit = "bbb20155b7a18d4906ec936566bf0dc61fe38f35";
-  const pinnedTree = "29be1ac3a7580b1f0b672d8ade45fd32389e6231";
+  const pinnedCommit = "f8430cecf7ceb5cb332c84fb36aba9b75188802d";
+  const pinnedTree = "430f88ba6707f253c628022e201084657ac5a3c2";
   const goEnvironments = [];
   const goOverlays = [];
   const run = async (command, args, options = {}) => {

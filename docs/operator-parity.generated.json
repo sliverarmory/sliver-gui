@@ -3,8 +3,8 @@
   "generatorVersion": 1,
   "baseline": {
     "repository": "https://github.com/BishopFox/sliver.git",
-    "commit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
-    "tree": "29be1ac3a7580b1f0b672d8ade45fd32389e6231",
+    "commit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+    "tree": "430f88ba6707f253c628022e201084657ac5a3c2",
     "sources": [
       "client/command/server.go",
       "client/command/sliver.go",
@@ -37,7 +37,7 @@
     "addedNodes": [
       {
         "id": "implant.parity-alias",
-        "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+        "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
         "surface": "implant",
         "path": [
           "parity-alias"
@@ -125,7 +125,7 @@
       },
       {
         "id": "implant.parity-extension",
-        "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+        "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
         "surface": "implant",
         "path": [
           "parity-extension"
@@ -191,7 +191,7 @@
   "commands": [
     {
       "id": "implant.ai",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "ai"
@@ -233,7 +233,7 @@
     },
     {
       "id": "implant.aka",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "aka"
@@ -275,7 +275,7 @@
     },
     {
       "id": "implant.aka.create",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "aka",
@@ -318,7 +318,7 @@
     },
     {
       "id": "implant.aka.delete",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "aka",
@@ -361,7 +361,7 @@
     },
     {
       "id": "implant.backdoor",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "backdoor"
@@ -422,7 +422,7 @@
     },
     {
       "id": "implant.background",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "background"
@@ -474,7 +474,7 @@
     },
     {
       "id": "implant.cat",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cat"
@@ -580,7 +580,7 @@
     },
     {
       "id": "implant.cd",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cd"
@@ -632,7 +632,7 @@
     },
     {
       "id": "implant.chmod",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "chmod"
@@ -693,7 +693,7 @@
     },
     {
       "id": "implant.chown",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "chown"
@@ -754,7 +754,7 @@
     },
     {
       "id": "implant.chtimes",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "chtimes"
@@ -838,7 +838,7 @@
     },
     {
       "id": "implant.close",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "close"
@@ -890,7 +890,7 @@
     },
     {
       "id": "implant.cp",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cp"
@@ -942,7 +942,7 @@
     },
     {
       "id": "implant.cursed",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed"
@@ -995,7 +995,7 @@
     },
     {
       "id": "implant.cursed.chrome",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1101,7 +1101,7 @@
     },
     {
       "id": "implant.cursed.console",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1153,7 +1153,7 @@
     },
     {
       "id": "implant.cursed.cookies",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1205,7 +1205,7 @@
     },
     {
       "id": "implant.cursed.edge",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1311,7 +1311,7 @@
     },
     {
       "id": "implant.cursed.electron",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1372,7 +1372,7 @@
     },
     {
       "id": "implant.cursed.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1424,7 +1424,7 @@
     },
     {
       "id": "implant.cursed.screenshot",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "cursed",
@@ -1485,7 +1485,7 @@
     },
     {
       "id": "implant.dllhijack",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "dllhijack"
@@ -1573,7 +1573,7 @@
     },
     {
       "id": "implant.docs",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "docs"
@@ -1615,7 +1615,7 @@
     },
     {
       "id": "implant.download",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "download"
@@ -1712,7 +1712,7 @@
     },
     {
       "id": "implant.edit",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "edit"
@@ -1788,7 +1788,7 @@
     },
     {
       "id": "implant.env",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "env"
@@ -1840,7 +1840,7 @@
     },
     {
       "id": "implant.env.set",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "env",
@@ -1883,7 +1883,7 @@
     },
     {
       "id": "implant.env.unset",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "env",
@@ -1926,7 +1926,7 @@
     },
     {
       "id": "implant.execute",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "execute"
@@ -2092,7 +2092,7 @@
     },
     {
       "id": "implant.execute-assembly",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "execute-assembly"
@@ -2270,7 +2270,7 @@
     },
     {
       "id": "implant.execute-shellcode",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "execute-shellcode"
@@ -2449,7 +2449,7 @@
     },
     {
       "id": "implant.execute.children",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "execute",
@@ -2502,7 +2502,7 @@
     },
     {
       "id": "implant.extensions",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "extensions"
@@ -2545,7 +2545,7 @@
     },
     {
       "id": "implant.extensions.list",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "extensions",
@@ -2597,7 +2597,7 @@
     },
     {
       "id": "implant.getgid",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "getgid"
@@ -2649,7 +2649,7 @@
     },
     {
       "id": "implant.getpid",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "getpid"
@@ -2701,7 +2701,7 @@
     },
     {
       "id": "implant.getprivs",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "getprivs"
@@ -2753,7 +2753,7 @@
     },
     {
       "id": "implant.getsystem",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "getsystem"
@@ -2813,7 +2813,7 @@
     },
     {
       "id": "implant.getuid",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "getuid"
@@ -2865,7 +2865,7 @@
     },
     {
       "id": "implant.grep",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "grep"
@@ -3007,7 +3007,7 @@
     },
     {
       "id": "implant.head",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "head"
@@ -3131,7 +3131,7 @@
     },
     {
       "id": "implant.hex-edit",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "hex-edit"
@@ -3199,7 +3199,7 @@
     },
     {
       "id": "implant.ifconfig",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "ifconfig"
@@ -3260,7 +3260,7 @@
     },
     {
       "id": "implant.impersonate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "impersonate"
@@ -3312,7 +3312,7 @@
     },
     {
       "id": "implant.info",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "info"
@@ -3364,7 +3364,7 @@
     },
     {
       "id": "implant.interactive",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "interactive"
@@ -3480,7 +3480,7 @@
     },
     {
       "id": "implant.kill",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "kill"
@@ -3541,7 +3541,7 @@
     },
     {
       "id": "implant.ls",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "ls"
@@ -3620,7 +3620,7 @@
     },
     {
       "id": "implant.make-token",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "make-token"
@@ -3708,7 +3708,7 @@
     },
     {
       "id": "implant.memfiles",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "memfiles"
@@ -3760,7 +3760,7 @@
     },
     {
       "id": "implant.memfiles.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "memfiles",
@@ -3803,7 +3803,7 @@
     },
     {
       "id": "implant.memfiles.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "memfiles",
@@ -3846,7 +3846,7 @@
     },
     {
       "id": "implant.migrate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "migrate"
@@ -3924,7 +3924,7 @@
     },
     {
       "id": "implant.mkdir",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "mkdir"
@@ -3976,7 +3976,7 @@
     },
     {
       "id": "implant.mount",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "mount"
@@ -4028,7 +4028,7 @@
     },
     {
       "id": "implant.msf",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "msf"
@@ -4125,7 +4125,7 @@
     },
     {
       "id": "implant.msf-inject",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "msf-inject"
@@ -4231,7 +4231,7 @@
     },
     {
       "id": "implant.mv",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "mv"
@@ -4283,7 +4283,7 @@
     },
     {
       "id": "implant.netstat",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "netstat"
@@ -4389,7 +4389,7 @@
     },
     {
       "id": "implant.ping",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "ping"
@@ -4441,7 +4441,7 @@
     },
     {
       "id": "implant.pivots",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pivots"
@@ -4493,7 +4493,7 @@
     },
     {
       "id": "implant.pivots.details",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4546,7 +4546,7 @@
     },
     {
       "id": "implant.pivots.graph",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4589,7 +4589,7 @@
     },
     {
       "id": "implant.pivots.named-pipe",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4651,7 +4651,7 @@
     },
     {
       "id": "implant.pivots.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4704,7 +4704,7 @@
     },
     {
       "id": "implant.pivots.tcp",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pivots",
@@ -4766,7 +4766,7 @@
     },
     {
       "id": "implant.portfwd",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "portfwd"
@@ -4819,7 +4819,7 @@
     },
     {
       "id": "implant.portfwd.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "portfwd",
@@ -4889,7 +4889,7 @@
     },
     {
       "id": "implant.portfwd.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "portfwd",
@@ -4941,7 +4941,7 @@
     },
     {
       "id": "implant.procdump",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "procdump"
@@ -5038,7 +5038,7 @@
     },
     {
       "id": "implant.ps",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "ps"
@@ -5162,7 +5162,7 @@
     },
     {
       "id": "implant.psexec",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "psexec"
@@ -5259,7 +5259,7 @@
     },
     {
       "id": "implant.pwd",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "pwd"
@@ -5311,7 +5311,7 @@
     },
     {
       "id": "implant.reconfig",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "reconfig"
@@ -5400,7 +5400,7 @@
     },
     {
       "id": "implant.registry",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry"
@@ -5452,7 +5452,7 @@
     },
     {
       "id": "implant.registry.create",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5512,7 +5512,7 @@
     },
     {
       "id": "implant.registry.delete",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5572,7 +5572,7 @@
     },
     {
       "id": "implant.registry.list-subkeys",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5632,7 +5632,7 @@
     },
     {
       "id": "implant.registry.list-values",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5692,7 +5692,7 @@
     },
     {
       "id": "implant.registry.read",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5752,7 +5752,7 @@
     },
     {
       "id": "implant.registry.read.hive",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5840,7 +5840,7 @@
     },
     {
       "id": "implant.registry.write",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "registry",
@@ -5918,7 +5918,7 @@
     },
     {
       "id": "implant.rename",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "rename"
@@ -5979,7 +5979,7 @@
     },
     {
       "id": "implant.rev2self",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "rev2self"
@@ -6031,7 +6031,7 @@
     },
     {
       "id": "implant.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "rm"
@@ -6101,7 +6101,7 @@
     },
     {
       "id": "implant.rportfwd",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "rportfwd"
@@ -6154,7 +6154,7 @@
     },
     {
       "id": "implant.rportfwd.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "rportfwd",
@@ -6224,7 +6224,7 @@
     },
     {
       "id": "implant.rportfwd.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "rportfwd",
@@ -6276,7 +6276,7 @@
     },
     {
       "id": "implant.runas",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "runas"
@@ -6391,7 +6391,7 @@
     },
     {
       "id": "implant.screenshot",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "screenshot"
@@ -6470,7 +6470,7 @@
     },
     {
       "id": "implant.services",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "services"
@@ -6531,7 +6531,7 @@
     },
     {
       "id": "implant.services.info",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "services",
@@ -6591,7 +6591,7 @@
     },
     {
       "id": "implant.services.start",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "services",
@@ -6651,7 +6651,7 @@
     },
     {
       "id": "implant.services.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "services",
@@ -6711,7 +6711,7 @@
     },
     {
       "id": "implant.shell",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "shell"
@@ -6782,7 +6782,7 @@
     },
     {
       "id": "implant.shell.attach",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "shell",
@@ -6834,7 +6834,7 @@
     },
     {
       "id": "implant.shell.kill",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "shell",
@@ -6895,7 +6895,7 @@
     },
     {
       "id": "implant.shell.ls",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "shell",
@@ -6937,7 +6937,7 @@
     },
     {
       "id": "implant.sideload",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "sideload"
@@ -7070,7 +7070,7 @@
     },
     {
       "id": "implant.socks5",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "socks5"
@@ -7123,7 +7123,7 @@
     },
     {
       "id": "implant.socks5.start",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "socks5",
@@ -7193,7 +7193,7 @@
     },
     {
       "id": "implant.socks5.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "socks5",
@@ -7245,7 +7245,7 @@
     },
     {
       "id": "implant.spawndll",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "spawndll"
@@ -7369,7 +7369,7 @@
     },
     {
       "id": "implant.ssh",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "ssh"
@@ -7493,7 +7493,7 @@
     },
     {
       "id": "implant.tail",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "tail"
@@ -7617,7 +7617,7 @@
     },
     {
       "id": "implant.tasks",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "tasks"
@@ -7697,7 +7697,7 @@
     },
     {
       "id": "implant.tasks.cancel",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "tasks",
@@ -7739,7 +7739,7 @@
     },
     {
       "id": "implant.tasks.fetch",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "tasks",
@@ -7781,7 +7781,7 @@
     },
     {
       "id": "implant.terminate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "terminate"
@@ -7842,7 +7842,7 @@
     },
     {
       "id": "implant.upload",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "upload"
@@ -7912,7 +7912,7 @@
     },
     {
       "id": "implant.wasm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wasm"
@@ -8009,7 +8009,7 @@
     },
     {
       "id": "implant.wasm.ls",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wasm",
@@ -8052,7 +8052,7 @@
     },
     {
       "id": "implant.wg-portfwd",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wg-portfwd"
@@ -8105,7 +8105,7 @@
     },
     {
       "id": "implant.wg-portfwd.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wg-portfwd",
@@ -8166,7 +8166,7 @@
     },
     {
       "id": "implant.wg-portfwd.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wg-portfwd",
@@ -8208,7 +8208,7 @@
     },
     {
       "id": "implant.wg-socks",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wg-socks"
@@ -8262,7 +8262,7 @@
     },
     {
       "id": "implant.wg-socks.start",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wg-socks",
@@ -8315,7 +8315,7 @@
     },
     {
       "id": "implant.wg-socks.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "wg-socks",
@@ -8358,7 +8358,7 @@
     },
     {
       "id": "implant.whoami",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "implant",
       "path": [
         "whoami"
@@ -8410,7 +8410,7 @@
     },
     {
       "id": "root.console",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "root",
       "path": [
         "console"
@@ -8475,7 +8475,7 @@
     },
     {
       "id": "root.default-console",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "root",
       "path": [
         "default-console"
@@ -8540,7 +8540,7 @@
     },
     {
       "id": "root.implant",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "root",
       "path": [
         "implant"
@@ -8605,7 +8605,7 @@
     },
     {
       "id": "root.import",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "root",
       "path": [
         "import"
@@ -8653,7 +8653,7 @@
     },
     {
       "id": "root.mcp",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "root",
       "path": [
         "mcp"
@@ -8718,7 +8718,7 @@
     },
     {
       "id": "root.version",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "root",
       "path": [
         "version"
@@ -8757,7 +8757,7 @@
     },
     {
       "id": "server.ai",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "ai"
@@ -8796,7 +8796,7 @@
     },
     {
       "id": "server.aka",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aka"
@@ -8835,7 +8835,7 @@
     },
     {
       "id": "server.aka.create",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aka",
@@ -8875,7 +8875,7 @@
     },
     {
       "id": "server.aka.delete",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aka",
@@ -8915,7 +8915,7 @@
     },
     {
       "id": "server.aliases",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aliases"
@@ -8954,7 +8954,7 @@
     },
     {
       "id": "server.aliases.install",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aliases",
@@ -8994,7 +8994,7 @@
     },
     {
       "id": "server.aliases.load",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aliases",
@@ -9034,7 +9034,7 @@
     },
     {
       "id": "server.aliases.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "aliases",
@@ -9074,7 +9074,7 @@
     },
     {
       "id": "server.armory",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory"
@@ -9150,7 +9150,7 @@
     },
     {
       "id": "server.armory.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9242,7 +9242,7 @@
     },
     {
       "id": "server.armory.disable",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9282,7 +9282,7 @@
     },
     {
       "id": "server.armory.enable",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9322,7 +9322,7 @@
     },
     {
       "id": "server.armory.info",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9362,7 +9362,7 @@
     },
     {
       "id": "server.armory.install",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9421,7 +9421,7 @@
     },
     {
       "id": "server.armory.modify",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9516,7 +9516,7 @@
     },
     {
       "id": "server.armory.refresh",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9556,7 +9556,7 @@
     },
     {
       "id": "server.armory.reset",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9596,7 +9596,7 @@
     },
     {
       "id": "server.armory.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9636,7 +9636,7 @@
     },
     {
       "id": "server.armory.save",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9676,7 +9676,7 @@
     },
     {
       "id": "server.armory.search",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9716,7 +9716,7 @@
     },
     {
       "id": "server.armory.update",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "armory",
@@ -9766,7 +9766,7 @@
     },
     {
       "id": "server.beacons",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "beacons"
@@ -9869,7 +9869,7 @@
     },
     {
       "id": "server.beacons.prune",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "beacons",
@@ -9919,7 +9919,7 @@
     },
     {
       "id": "server.beacons.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "beacons",
@@ -9959,7 +9959,7 @@
     },
     {
       "id": "server.beacons.watch",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "beacons",
@@ -9999,7 +9999,7 @@
     },
     {
       "id": "server.builders",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "builders"
@@ -10048,7 +10048,7 @@
     },
     {
       "id": "server.c2profiles",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "c2profiles"
@@ -10097,7 +10097,7 @@
     },
     {
       "id": "server.c2profiles.export",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "c2profiles",
@@ -10156,7 +10156,7 @@
     },
     {
       "id": "server.c2profiles.generate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "c2profiles",
@@ -10233,7 +10233,7 @@
     },
     {
       "id": "server.c2profiles.import",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "c2profiles",
@@ -10301,7 +10301,7 @@
     },
     {
       "id": "server.certificates",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "certificates"
@@ -10386,7 +10386,7 @@
     },
     {
       "id": "server.certificates.authorities",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "certificates",
@@ -10426,7 +10426,7 @@
     },
     {
       "id": "server.clean",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "clean"
@@ -10465,7 +10465,7 @@
     },
     {
       "id": "server.crack",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack"
@@ -10477,9 +10477,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 22,
+        "line": 24,
         "symbol": "client/command/crack.Commands.func1",
-        "key": "client/command/crack/commands.go:22#server.crack"
+        "key": "client/command/crack/commands.go:24#server.crack"
       },
       "restrictions": {
         "targetModes": [
@@ -10494,12 +10494,21 @@
       },
       "options": [
         {
+          "name": "advice-disable",
+          "type": "bool",
+          "default": "false",
+          "usage": "disable hashcat advice",
+          "required": false,
+          "persistent": false
+        },
+        {
           "name": "attack-mode",
+          "shorthand": "a",
           "type": "string",
           "default": "",
-          "usage": "crack attack mode (straight, combination, bruteforce, hybrid-wordlist-mask, hybrid-mask-wordlist, association, no-attack, or numeric)",
+          "usage": "crack attack mode (straight, combination, bruteforce, pcfg, hybrid-wordlist-mask, hybrid-mask-wordlist, generic, association, no-attack, hybrid, or numeric)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "backend-devices",
@@ -10507,7 +10516,23 @@
           "default": "[]",
           "usage": "backend device IDs",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "backend-devices-virthost",
+          "type": "uint32",
+          "default": "0",
+          "usage": "virtual backend host count",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "backend-devices-virtmulti",
+          "type": "uint32",
+          "default": "0",
+          "usage": "virtual backend device multiplier",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "backend-ignore-cuda",
@@ -10515,7 +10540,7 @@
           "default": "false",
           "usage": "ignore CUDA backend",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "backend-ignore-hip",
@@ -10523,7 +10548,7 @@
           "default": "false",
           "usage": "ignore HIP backend",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "backend-ignore-metal",
@@ -10531,7 +10556,7 @@
           "default": "false",
           "usage": "ignore Metal backend",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "backend-ignore-opencl",
@@ -10539,15 +10564,23 @@
           "default": "false",
           "usage": "ignore OpenCL backend",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "backend-info",
           "type": "bool",
           "default": "false",
-          "usage": "show backend info",
+          "usage": "show registered backend info for all connected crackstations (does not create a job)",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "backend-info-level",
+          "type": "uint32",
+          "default": "0",
+          "usage": "registered backend information detail level: 1 or 2 (does not create a job)",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "backend-vector-width",
@@ -10555,7 +10588,7 @@
           "default": "0",
           "usage": "backend vector width",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "benchmark",
@@ -10563,7 +10596,7 @@
           "default": "false",
           "usage": "run benchmark",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "benchmark-all",
@@ -10571,7 +10604,23 @@
           "default": "false",
           "usage": "run full benchmark",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "benchmark-max",
+          "type": "uint32",
+          "default": "0",
+          "usage": "maximum benchmark runtime",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "benchmark-min",
+          "type": "uint32",
+          "default": "0",
+          "usage": "minimum benchmark runtime",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "bitmap-max",
@@ -10579,7 +10628,7 @@
           "default": "0",
           "usage": "bitmap max",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "bitmap-min",
@@ -10587,7 +10636,7 @@
           "default": "0",
           "usage": "bitmap min",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-client",
@@ -10595,7 +10644,7 @@
           "default": "false",
           "usage": "brain client mode",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-client-features",
@@ -10603,7 +10652,15 @@
           "default": "",
           "usage": "brain client features",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "brain-feed",
+          "type": "bool",
+          "default": "false",
+          "usage": "brain feed mode",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "brain-host",
@@ -10611,7 +10668,7 @@
           "default": "",
           "usage": "brain host",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-password",
@@ -10619,7 +10676,7 @@
           "default": "",
           "usage": "brain password",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-port",
@@ -10627,7 +10684,7 @@
           "default": "0",
           "usage": "brain port",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-server",
@@ -10635,7 +10692,7 @@
           "default": "false",
           "usage": "brain server mode",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-server-timer",
@@ -10643,7 +10700,7 @@
           "default": "0",
           "usage": "brain server timer",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-session",
@@ -10651,7 +10708,7 @@
           "default": "",
           "usage": "brain session",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "brain-session-whitelist",
@@ -10659,7 +10716,63 @@
           "default": "",
           "usage": "brain session whitelist",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "bridge-parameter1",
+          "type": "string",
+          "default": "",
+          "usage": "bridge parameter 1",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "bridge-parameter2",
+          "type": "string",
+          "default": "",
+          "usage": "bridge parameter 2",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "bridge-parameter3",
+          "type": "string",
+          "default": "",
+          "usage": "bridge parameter 3",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "bridge-parameter4",
+          "type": "string",
+          "default": "",
+          "usage": "bridge parameter 4",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "bypass-delay",
+          "type": "uint32",
+          "default": "0",
+          "usage": "bypass delay",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "bypass-threshold",
+          "type": "uint32",
+          "default": "0",
+          "usage": "bypass threshold",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "color-cracked",
+          "type": "bool",
+          "default": "false",
+          "usage": "color cracked output",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "cpu-affinity",
@@ -10667,7 +10780,31 @@
           "default": "[]",
           "usage": "CPU affinity list",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "crackstation",
+          "type": "string",
+          "default": "",
+          "usage": "target an exact crackstation name or host UUID for a synchronous query",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "credential",
+          "type": "stringArray",
+          "default": "[]",
+          "usage": "server credential ID or ID prefix to crack (repeatable)",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "credential-collection",
+          "type": "string",
+          "default": "",
+          "usage": "server credential collection to crack",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "custom-charset1",
@@ -10675,7 +10812,7 @@
           "default": "",
           "usage": "custom charset 1",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "custom-charset2",
@@ -10683,7 +10820,7 @@
           "default": "",
           "usage": "custom charset 2",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "custom-charset3",
@@ -10691,7 +10828,7 @@
           "default": "",
           "usage": "custom charset 3",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "custom-charset4",
@@ -10699,7 +10836,47 @@
           "default": "",
           "usage": "custom charset 4",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "custom-charset5",
+          "type": "string",
+          "default": "",
+          "usage": "custom charset 5",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "custom-charset6",
+          "type": "string",
+          "default": "",
+          "usage": "custom charset 6",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "custom-charset7",
+          "type": "string",
+          "default": "",
+          "usage": "custom charset 7",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "custom-charset8",
+          "type": "string",
+          "default": "",
+          "usage": "custom charset 8",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "debug-file",
+          "type": "string",
+          "default": "",
+          "usage": "debug file path or identifier",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "debug-mode",
@@ -10707,7 +10884,7 @@
           "default": "0",
           "usage": "debug mode mask",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "deprecated-check-disable",
@@ -10715,23 +10892,39 @@
           "default": "false",
           "usage": "disable deprecated check",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "dynamic-x",
+          "type": "bool",
+          "default": "false",
+          "usage": "enable dynamic-X mode",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "encoding-from",
           "type": "string",
           "default": "",
-          "usage": "input encoding (iso-8859-15, utf-32le, or numeric)",
+          "usage": "input encoding name (legacy enum names and numbers are also accepted)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "encoding-to",
           "type": "string",
           "default": "",
-          "usage": "output encoding (iso-8859-15, utf-32le, or numeric)",
+          "usage": "output encoding name (legacy enum names and numbers are also accepted)",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "encrypt-with-pubkey",
+          "type": "string",
+          "default": "",
+          "usage": "public key path or identifier used to encrypt output",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "force",
@@ -10739,7 +10932,7 @@
           "default": "false",
           "usage": "ignore warnings",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "generate-rules",
@@ -10747,23 +10940,39 @@
           "default": "0",
           "usage": "generate rules",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "generate-rules-fun-max",
           "type": "uint32",
           "default": "0",
-          "usage": "generate rules function max",
+          "usage": "deprecated alias for generate-rules-func-max",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "generate-rules-fun-min",
           "type": "uint32",
           "default": "0",
+          "usage": "deprecated alias for generate-rules-func-min",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "generate-rules-func-max",
+          "type": "uint32",
+          "default": "0",
+          "usage": "generate rules function max",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "generate-rules-func-min",
+          "type": "uint32",
+          "default": "0",
           "usage": "generate rules function min",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "generate-rules-func-sel",
@@ -10771,7 +10980,7 @@
           "default": "",
           "usage": "generate rules function selection",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "generate-rules-seed",
@@ -10779,31 +10988,56 @@
           "default": "0",
           "usage": "generate rules seed",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hash",
-          "type": "stringSlice",
+          "type": "stringArray",
           "default": "[]",
           "usage": "hashes to crack (repeatable)",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "hash-copy",
+          "type": "bool",
+          "default": "false",
+          "usage": "copy hashes",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "hash-info",
           "type": "bool",
           "default": "false",
-          "usage": "show hash information",
+          "usage": "show hash information from an idle crackstation (does not create a job)",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "hash-info-level",
+          "type": "uint32",
+          "default": "0",
+          "usage": "hash information detail level: 1 or 2 (does not create a job)",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "hash-mode",
+          "type": "uint32",
+          "default": "0",
+          "usage": "canonical numeric hashcat mode (overrides hash-type)",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "hash-type",
+          "shorthand": "m",
           "type": "string",
           "default": "",
           "usage": "hashcat hash type (number or enum name)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hccapx-message-pair",
@@ -10811,7 +11045,7 @@
           "default": "0",
           "usage": "hccapx message pair",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hex-charset",
@@ -10819,7 +11053,7 @@
           "default": "false",
           "usage": "treat charset as hex",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hex-salt",
@@ -10827,7 +11061,7 @@
           "default": "false",
           "usage": "treat salt as hex",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hex-wordlist",
@@ -10835,7 +11069,7 @@
           "default": "false",
           "usage": "treat wordlist as hex",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hook-threads",
@@ -10843,7 +11077,7 @@
           "default": "0",
           "usage": "hook threads",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hwmon-disable",
@@ -10851,7 +11085,7 @@
           "default": "false",
           "usage": "disable hardware monitoring",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "hwmon-temp-abort",
@@ -10859,15 +11093,31 @@
           "default": "0",
           "usage": "hardware monitor temperature abort",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "identify",
           "type": "string",
           "default": "",
-          "usage": "identify hash",
+          "usage": "deprecated: legacy positional input",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "identify-mode",
+          "type": "bool",
+          "default": "false",
+          "usage": "identify hash types on an idle crackstation (does not create a job)",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "include-cracked-credentials",
+          "type": "bool",
+          "default": "false",
+          "usage": "include credentials already marked as cracked",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "increment",
@@ -10875,7 +11125,15 @@
           "default": "false",
           "usage": "incremental mode",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "increment-inverse",
+          "type": "bool",
+          "default": "false",
+          "usage": "inverse incremental mode",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "increment-max",
@@ -10883,7 +11141,7 @@
           "default": "0",
           "usage": "increment max",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "increment-min",
@@ -10891,7 +11149,23 @@
           "default": "0",
           "usage": "increment min",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "induction-dir",
+          "type": "string",
+          "default": "",
+          "usage": "induction directory path or identifier",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "input",
+          "type": "stringArray",
+          "default": "[]",
+          "usage": "ordered positional hashcat inputs (repeatable)",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "keep-guessing",
@@ -10899,7 +11173,7 @@
           "default": "false",
           "usage": "keep guessing",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "kernel-accel",
@@ -10907,7 +11181,7 @@
           "default": "0",
           "usage": "kernel acceleration",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "kernel-loops",
@@ -10915,7 +11189,7 @@
           "default": "0",
           "usage": "kernel loops",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "kernel-threads",
@@ -10923,23 +11197,23 @@
           "default": "0",
           "usage": "kernel threads",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "keyboard-layout-mapping",
           "type": "string",
           "default": "",
-          "usage": "keyboard layout mapping file or identifier",
+          "usage": "local keyboard layout mapping file",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "keyspace",
           "type": "bool",
           "default": "false",
-          "usage": "show keyspace",
+          "usage": "calculate keyspace on an idle crackstation and return it (does not create a job)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "left",
@@ -10947,7 +11221,7 @@
           "default": "false",
           "usage": "show uncracked hashes",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "limit",
@@ -10955,7 +11229,7 @@
           "default": "0",
           "usage": "limit count",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "logfile-disable",
@@ -10963,7 +11237,15 @@
           "default": "false",
           "usage": "disable logfile",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "lookup",
+          "type": "string",
+          "default": "",
+          "usage": "locate a candidate in the attack on an idle crackstation (does not create a job)",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "loopback",
@@ -10971,7 +11253,7 @@
           "default": "false",
           "usage": "use loopback mode",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "machine-readable",
@@ -10979,7 +11261,7 @@
           "default": "false",
           "usage": "machine readable output",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "markov-classic",
@@ -10987,7 +11269,7 @@
           "default": "false",
           "usage": "use classic markov",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "markov-disable",
@@ -10995,7 +11277,7 @@
           "default": "false",
           "usage": "disable markov mode",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "markov-hcstat2",
@@ -11003,7 +11285,7 @@
           "default": "",
           "usage": "markov hcstat2 filename or identifier",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "markov-inverse",
@@ -11011,7 +11293,7 @@
           "default": "false",
           "usage": "use inverse markov",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "markov-threshold",
@@ -11019,15 +11301,31 @@
           "default": "0",
           "usage": "markov threshold",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "metal-compiler-runtime",
+          "type": "uint32",
+          "default": "0",
+          "usage": "Metal compiler runtime",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "multiply-accel-disable",
+          "type": "bool",
+          "default": "false",
+          "usage": "disable multiply accel",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "multiply-accel-disabled",
           "type": "bool",
           "default": "false",
-          "usage": "disable multiply accel",
+          "usage": "deprecated alias for multiply-accel-disable",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "nonce-error-corrections",
@@ -11035,7 +11333,7 @@
           "default": "0",
           "usage": "nonce error corrections",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "opencl-device-types",
@@ -11043,7 +11341,7 @@
           "default": "[]",
           "usage": "OpenCL device types",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "optimized-kernel-enable",
@@ -11051,7 +11349,15 @@
           "default": "false",
           "usage": "enable optimized kernels",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "outfile",
+          "type": "string",
+          "default": "",
+          "usage": "outfile path or identifier",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "outfile-autohex-disable",
@@ -11059,7 +11365,15 @@
           "default": "false",
           "usage": "disable outfile autohex",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "outfile-check-dir",
+          "type": "string",
+          "default": "",
+          "usage": "outfile-check directory path or identifier",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "outfile-check-timer",
@@ -11067,7 +11381,7 @@
           "default": "0",
           "usage": "outfile check timer interval (seconds)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "outfile-format",
@@ -11075,7 +11389,23 @@
           "default": "[]",
           "usage": "outfile formats (hash-salt, plain, hex-plain, crack-pos, timestamp-absolute, timestamp-relative, or numeric)",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "outfile-json",
+          "type": "bool",
+          "default": "false",
+          "usage": "write outfile records as JSON",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "pipeline-stats",
+          "type": "bool",
+          "default": "false",
+          "usage": "show pipeline statistics",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "potfile",
@@ -11083,7 +11413,7 @@
           "default": "",
           "usage": "potfile path or identifier",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "potfile-disable",
@@ -11091,7 +11421,7 @@
           "default": "false",
           "usage": "disable potfile",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "progress-only",
@@ -11099,7 +11429,7 @@
           "default": "false",
           "usage": "show progress only",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "quiet",
@@ -11107,7 +11437,7 @@
           "default": "false",
           "usage": "quiet mode",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "remove",
@@ -11115,7 +11445,7 @@
           "default": "false",
           "usage": "remove cracked hashes",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "remove-timer",
@@ -11123,7 +11453,7 @@
           "default": "0",
           "usage": "remove timer interval (seconds)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "restore",
@@ -11131,7 +11461,7 @@
           "default": "false",
           "usage": "restore session",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "restore-disable",
@@ -11139,7 +11469,7 @@
           "default": "false",
           "usage": "disable restore",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "restore-file",
@@ -11147,15 +11477,47 @@
           "default": "",
           "usage": "restore file path or identifier",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "restore-position",
+          "type": "bool",
+          "default": "false",
+          "usage": "restore from the stored position",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "restore-show-command",
+          "type": "bool",
+          "default": "false",
+          "usage": "display the stored restore command and stop",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "rule-left",
+          "type": "string",
+          "default": "",
+          "usage": "left combinator rule",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "rule-right",
+          "type": "string",
+          "default": "",
+          "usage": "right combinator rule",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "rules-file",
-          "type": "string",
-          "default": "",
-          "usage": "rules file path or identifier",
+          "type": "stringArray",
+          "default": "[]",
+          "usage": "rules file content or identifier (repeatable)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "runtime",
@@ -11163,7 +11525,7 @@
           "default": "0",
           "usage": "runtime in seconds",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "scrypt-tmto",
@@ -11171,15 +11533,23 @@
           "default": "0",
           "usage": "scrypt tmto",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "seekdb-path",
+          "type": "string",
+          "default": "",
+          "usage": "seek database path or identifier",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "segment-size",
           "type": "uint32",
           "default": "0",
-          "usage": "segment size",
+          "usage": "deprecated: removed in Hashcat v7",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "self-test-disable",
@@ -11187,7 +11557,7 @@
           "default": "false",
           "usage": "disable self-test",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "separator",
@@ -11195,7 +11565,7 @@
           "default": "",
           "usage": "separator character",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "session",
@@ -11203,7 +11573,7 @@
           "default": "",
           "usage": "session name",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "show",
@@ -11211,7 +11581,7 @@
           "default": "false",
           "usage": "show cracked hashes",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "skip",
@@ -11219,7 +11589,7 @@
           "default": "0",
           "usage": "skip count",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "slow-candidates",
@@ -11227,7 +11597,7 @@
           "default": "false",
           "usage": "slow candidates",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "speed-only",
@@ -11235,7 +11605,7 @@
           "default": "false",
           "usage": "show speed only",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "spin-damp",
@@ -11243,7 +11613,7 @@
           "default": "0",
           "usage": "spin damp",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "status",
@@ -11251,7 +11621,7 @@
           "default": "false",
           "usage": "enable status",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "status-json",
@@ -11259,7 +11629,7 @@
           "default": "false",
           "usage": "emit status in JSON",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "status-timer",
@@ -11267,7 +11637,15 @@
           "default": "0",
           "usage": "status timer interval (seconds)",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "stdin",
+          "type": "string",
+          "default": "",
+          "usage": "data supplied to hashcat standard input",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "stdin-timeout-abort",
@@ -11275,15 +11653,15 @@
           "default": "0",
           "usage": "abort after stdin timeout (seconds)",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
-          "name": "stdout",
+          "name": "task-time-breakdown",
           "type": "bool",
           "default": "false",
-          "usage": "stdout output",
+          "usage": "show task time breakdown",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "timeout",
@@ -11295,12 +11673,52 @@
           "persistent": true
         },
         {
+          "name": "total-candidates",
+          "type": "bool",
+          "default": "false",
+          "usage": "calculate the total candidate count on an idle crackstation (does not create a job)",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "truecrypt-keyfiles",
+          "type": "string",
+          "default": "",
+          "usage": "TrueCrypt keyfiles path or identifier",
+          "required": false,
+          "persistent": false
+        },
+        {
           "name": "username",
           "type": "bool",
           "default": "false",
           "usage": "enable username handling",
           "required": false,
-          "persistent": true
+          "persistent": false
+        },
+        {
+          "name": "veracrypt-keyfiles",
+          "type": "string",
+          "default": "",
+          "usage": "VeraCrypt keyfiles path or identifier",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "veracrypt-pim-start",
+          "type": "uint32",
+          "default": "0",
+          "usage": "VeraCrypt PIM start",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "veracrypt-pim-stop",
+          "type": "uint32",
+          "default": "0",
+          "usage": "VeraCrypt PIM stop",
+          "required": false,
+          "persistent": false
         },
         {
           "name": "wordlist-autohex-disable",
@@ -11308,15 +11726,15 @@
           "default": "false",
           "usage": "disable wordlist autohex",
           "required": false,
-          "persistent": true
+          "persistent": false
         },
         {
           "name": "workload-profile",
           "type": "string",
           "default": "",
-          "usage": "workload profile (low, default, high, nightmare, or numeric)",
+          "usage": "deprecated: accepted but ignored by Hashcat v7",
           "required": false,
-          "persistent": true
+          "persistent": false
         }
       ],
       "upstreamAnnotations": {},
@@ -11325,12 +11743,62 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "54b82855e7d5249994a15bea59174cb41231889326a67b90ede797ce72806ddf",
+      "fingerprint": "97e58b516ce413e0354b550afa22d65d2b7f203055e23a4bc765bddb0e62cb2b",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.benchmarks",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "benchmarks"
+      ],
+      "use": "benchmarks",
+      "aliases": [],
+      "summary": "Show cached crackstation benchmark results",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 57,
+        "symbol": "client/command/crack.Commands.func7",
+        "key": "client/command/crack/commands.go:57#server.crack.benchmarks"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [
+        {
+          "name": "all",
+          "shorthand": "a",
+          "type": "bool",
+          "default": "false",
+          "usage": "show every cached hash mode",
+          "required": false,
+          "persistent": false
+        }
+      ],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "e512f4b62ff4c232fdd36d9cc8f0bee6e8ee714a0df4d60ce070d019eaf4f002",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.hcstat2",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11343,9 +11811,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 118,
-        "symbol": "client/command/crack.Commands.func13",
-        "key": "client/command/crack/commands.go:118#server.crack.hcstat2"
+        "line": 233,
+        "symbol": "client/command/crack.Commands.func28",
+        "key": "client/command/crack/commands.go:233#server.crack.hcstat2"
       },
       "restrictions": {
         "targetModes": [
@@ -11365,12 +11833,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "a539d6605a550b0e7a4532c3d48abde92b2801789f90adcb80e88efcfdc5165d",
+      "fingerprint": "9e506fdfe7da7e3e5cb76853f483e6a3526c60e038495d98e77018fcb7678250",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.hcstat2.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11384,9 +11852,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 128,
-        "symbol": "client/command/crack.Commands.func14",
-        "key": "client/command/crack/commands.go:128#server.crack.hcstat2.add"
+        "line": 243,
+        "symbol": "client/command/crack.Commands.func29",
+        "key": "client/command/crack/commands.go:243#server.crack.hcstat2.add"
       },
       "restrictions": {
         "targetModes": [
@@ -11416,12 +11884,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "5d56e5889e73c272e9296be673834dcaec1719d6fc1a8d40d8d34ace8f769aad",
+      "fingerprint": "02f6b828f6609524fd4b9cb41798a02b90df9a350949f038d1d63f949748f651",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.hcstat2.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11435,9 +11903,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 143,
-        "symbol": "client/command/crack.Commands.func16",
-        "key": "client/command/crack/commands.go:143#server.crack.hcstat2.rm"
+        "line": 258,
+        "symbol": "client/command/crack.Commands.func31",
+        "key": "client/command/crack/commands.go:258#server.crack.hcstat2.rm"
       },
       "restrictions": {
         "targetModes": [
@@ -11457,12 +11925,293 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "9af3319a7530b4b142e7163091bc067841952a9df4fca8d4759b4ef6d10aefb3",
+      "fingerprint": "f356159ce1f0769b40695b98502db6aae632c7e2c78120624682d0010a1e7517",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.job",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "job"
+      ],
+      "use": "job [id]",
+      "aliases": [],
+      "summary": "Show a hash cracking job",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 96,
+        "symbol": "client/command/crack.Commands.func13",
+        "key": "client/command/crack/commands.go:96#server.crack.job"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [
+        {
+          "name": "poll-interval",
+          "type": "duration",
+          "default": "1s",
+          "usage": "job status polling interval",
+          "required": false,
+          "persistent": false
+        },
+        {
+          "name": "timeout",
+          "shorthand": "t",
+          "type": "int64",
+          "default": "60",
+          "usage": "grpc timeout in seconds",
+          "required": false,
+          "persistent": true
+        },
+        {
+          "name": "watch",
+          "shorthand": "w",
+          "type": "bool",
+          "default": "false",
+          "usage": "watch until the job reaches a terminal state",
+          "required": false,
+          "persistent": false
+        }
+      ],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "895f230da50b7ce59cf4a361849dbae9d2fcc163172ce4ca5195b93a87cbe2c2",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.job.cancel",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "job",
+        "cancel"
+      ],
+      "use": "cancel [id]",
+      "aliases": [],
+      "summary": "Cancel an active or paused hash cracking job",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 114,
+        "symbol": "client/command/crack.Commands.func16",
+        "key": "client/command/crack/commands.go:114#server.crack.job.cancel"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "a0cd786fd3f03d827613089081a700024f73e365f12c7dd74d0ec865c806c185",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.job.pause",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "job",
+        "pause"
+      ],
+      "use": "pause [id]",
+      "aliases": [],
+      "summary": "Pause an active hash cracking job",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 126,
+        "symbol": "client/command/crack.Commands.func17",
+        "key": "client/command/crack/commands.go:126#server.crack.job.pause"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "831ec933409a33c089c797848d9979bb90a0b2f311012ff4831ddb11c2796bb7",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.job.resume",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "job",
+        "resume"
+      ],
+      "use": "resume [id]",
+      "aliases": [],
+      "summary": "Resume a paused hash cracking job",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 138,
+        "symbol": "client/command/crack.Commands.func18",
+        "key": "client/command/crack/commands.go:138#server.crack.job.resume"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "2f960249880caf8e2652cb74fe588aeef54228d7627bf6fa1980b62fdf96d2e6",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.job.rm",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "job",
+        "rm"
+      ],
+      "use": "rm [id]",
+      "aliases": [],
+      "summary": "Remove a completed, failed, or cancelled hash cracking job",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 150,
+        "symbol": "client/command/crack.Commands.func19",
+        "key": "client/command/crack/commands.go:150#server.crack.job.rm"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "05f12fd7c5104a54972ecefa896ad5c42227efdcb49711c2eb42db5f94a5fb99",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.jobs",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "jobs"
+      ],
+      "use": "jobs",
+      "aliases": [],
+      "summary": "List hash cracking jobs",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 70,
+        "symbol": "client/command/crack.Commands.func9",
+        "key": "client/command/crack/commands.go:70#server.crack.jobs"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [
+        {
+          "name": "timeout",
+          "shorthand": "t",
+          "type": "int64",
+          "default": "60",
+          "usage": "grpc timeout in seconds",
+          "required": false,
+          "persistent": true
+        }
+      ],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "8518aecee5f34bdfe55dfa5d6d31f33ce3fbbfe5244e313f80b67746225c9a25",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.rules",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11475,9 +12224,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 82,
-        "symbol": "client/command/crack.Commands.func9",
-        "key": "client/command/crack/commands.go:82#server.crack.rules"
+        "line": 197,
+        "symbol": "client/command/crack.Commands.func24",
+        "key": "client/command/crack/commands.go:197#server.crack.rules"
       },
       "restrictions": {
         "targetModes": [
@@ -11497,12 +12246,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "f8b24f9712880878dd0b53ccf6a6e9f1a9b8cc5e97302f19a77eb7982231ae65",
+      "fingerprint": "52f8f9131c1425991e2d33bd332189296a203eb0f1fcade1944efeb9904a6e53",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.rules.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11516,9 +12265,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 92,
-        "symbol": "client/command/crack.Commands.func10",
-        "key": "client/command/crack/commands.go:92#server.crack.rules.add"
+        "line": 207,
+        "symbol": "client/command/crack.Commands.func25",
+        "key": "client/command/crack/commands.go:207#server.crack.rules.add"
       },
       "restrictions": {
         "targetModes": [
@@ -11548,12 +12297,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "0c42a4162b2703861fc0b1ab5a1b0e32f3c426f7e2d8594e0d0bcf66f8ccc5cc",
+      "fingerprint": "996167ea35a19b79a615d62031a9b222679e4fe9b2314fb838af1502357fca34",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.rules.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11567,9 +12316,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 107,
-        "symbol": "client/command/crack.Commands.func12",
-        "key": "client/command/crack/commands.go:107#server.crack.rules.rm"
+        "line": 222,
+        "symbol": "client/command/crack.Commands.func27",
+        "key": "client/command/crack/commands.go:222#server.crack.rules.rm"
       },
       "restrictions": {
         "targetModes": [
@@ -11589,12 +12338,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "bc38173c73e6e4bf53dcf77cefdba00dd34d6ed11ad429749d3a2030fb865d19",
+      "fingerprint": "183b9756e5988f4631d2985f28c95f67c7aa4aa29368160bdefe5ad2ae5f906e",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.stations",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11607,9 +12356,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 35,
-        "symbol": "client/command/crack.Commands.func3",
-        "key": "client/command/crack/commands.go:35#server.crack.stations"
+        "line": 44,
+        "symbol": "client/command/crack.Commands.func5",
+        "key": "client/command/crack/commands.go:44#server.crack.stations"
       },
       "restrictions": {
         "targetModes": [
@@ -11638,12 +12387,61 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "4279fb037dfb937949c527eea48d02068eff1352dd6771592d24789049a554a2",
+      "fingerprint": "852423f629669d09402c13ab89782c1ef5f9f4f0fd59c0e6bb32d64e7171fd7f",
+      "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
+    },
+    {
+      "id": "server.crack.top",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+      "surface": "server",
+      "path": [
+        "crack",
+        "top"
+      ],
+      "use": "top",
+      "aliases": [],
+      "summary": "Monitor crack jobs and crackstations in real time",
+      "hidden": false,
+      "deprecated": "",
+      "source": {
+        "file": "client/command/crack/commands.go",
+        "line": 83,
+        "symbol": "client/command/crack.Commands.func11",
+        "key": "client/command/crack/commands.go:83#server.crack.top"
+      },
+      "restrictions": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "options": [
+        {
+          "name": "poll-interval",
+          "type": "duration",
+          "default": "1s",
+          "usage": "crack job and crackstation refresh interval",
+          "required": false,
+          "persistent": false
+        }
+      ],
+      "upstreamAnnotations": {},
+      "restrictionEvidence": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "fingerprint": "3b559aa4cfd3e9321471df3df4ad1e1d2fa429daab20cb054d2252d764b792d8",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.wordlists",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11656,9 +12454,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 48,
-        "symbol": "client/command/crack.Commands.func5",
-        "key": "client/command/crack/commands.go:48#server.crack.wordlists"
+        "line": 163,
+        "symbol": "client/command/crack.Commands.func20",
+        "key": "client/command/crack/commands.go:163#server.crack.wordlists"
       },
       "restrictions": {
         "targetModes": [
@@ -11678,12 +12476,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "1381d692586bfcbd72d239b9ba9be72262a1820dd25a259408ccdf9d1f1b18d6",
+      "fingerprint": "0a7f76dc412665ee99053859695e5e541aeb8aed66a1a18e5e300394bcfe7570",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.wordlists.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11697,9 +12495,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 57,
-        "symbol": "client/command/crack.Commands.func6",
-        "key": "client/command/crack/commands.go:57#server.crack.wordlists.add"
+        "line": 172,
+        "symbol": "client/command/crack.Commands.func21",
+        "key": "client/command/crack/commands.go:172#server.crack.wordlists.add"
       },
       "restrictions": {
         "targetModes": [
@@ -11729,12 +12527,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "73253e4a35263e02678b801618d5ee3f1983645447a37a0570443a1dcc195274",
+      "fingerprint": "3e110b44871f87f3bf1b3ea3a95345b8828e0c698fe3f0be2a1f98f6f808aae4",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.crack.wordlists.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "crack",
@@ -11748,9 +12546,9 @@
       "deprecated": "",
       "source": {
         "file": "client/command/crack/commands.go",
-        "line": 71,
-        "symbol": "client/command/crack.Commands.func8",
-        "key": "client/command/crack/commands.go:71#server.crack.wordlists.rm"
+        "line": 186,
+        "symbol": "client/command/crack.Commands.func23",
+        "key": "client/command/crack/commands.go:186#server.crack.wordlists.rm"
       },
       "restrictions": {
         "targetModes": [
@@ -11770,12 +12568,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "43ef3b5ab6988fd00827068daddac01925b7a1ae344b767ec80b59e31ae137b3",
+      "fingerprint": "ed53e4da423e4f17241d90a849f025c0cb3022fbf2b937eb0f1059ecc2af526e",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.creds",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "creds"
@@ -11824,7 +12622,7 @@
     },
     {
       "id": "server.creds.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "creds",
@@ -11910,7 +12708,7 @@
     },
     {
       "id": "server.creds.add.file",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "creds",
@@ -11979,7 +12777,7 @@
     },
     {
       "id": "server.creds.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "creds",
@@ -12019,7 +12817,7 @@
     },
     {
       "id": "server.dns",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "dns"
@@ -12095,7 +12893,7 @@
     },
     {
       "id": "server.docs",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "docs"
@@ -12134,7 +12932,7 @@
     },
     {
       "id": "server.exit",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "exit"
@@ -12173,7 +12971,7 @@
     },
     {
       "id": "server.extensions",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "extensions"
@@ -12212,7 +13010,7 @@
     },
     {
       "id": "server.extensions.install",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "extensions",
@@ -12252,7 +13050,7 @@
     },
     {
       "id": "server.extensions.load",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "extensions",
@@ -12292,7 +13090,7 @@
     },
     {
       "id": "server.extensions.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "extensions",
@@ -12332,7 +13130,7 @@
     },
     {
       "id": "server.generate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "generate"
@@ -12733,6 +13531,14 @@
           "persistent": false
         },
         {
+          "name": "service-name",
+          "type": "string",
+          "default": "",
+          "usage": "service name to register the implant under (service format only)",
+          "required": false,
+          "persistent": false
+        },
+        {
           "name": "shellcode-bypass",
           "type": "uint32",
           "default": "3",
@@ -12891,12 +13697,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "a0fa6d703fcbb2e84240970bc49dd8a6d3b3045d555a8ecdfc48a95975f536e8",
+      "fingerprint": "8c3db12b07a100f84a947b49fd251e89cae353d690cde0daf6e65bb8a4e0373d",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.generate.beacon",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "generate",
@@ -13343,6 +14149,14 @@
           "persistent": false
         },
         {
+          "name": "service-name",
+          "type": "string",
+          "default": "",
+          "usage": "service name to register the implant under (service format only)",
+          "required": false,
+          "persistent": false
+        },
+        {
           "name": "shellcode-bypass",
           "type": "uint32",
           "default": "3",
@@ -13492,12 +14306,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "6813570959890fe61cfe98b7d59618fe5f07f685a3de2df2496c1472b7838ef2",
+      "fingerprint": "74daeda9fa3122d965f3e8ab9d91e652a2e3db57a554142ab250c1f396b4e6a0",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.generate.info",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "generate",
@@ -13537,7 +14351,7 @@
     },
     {
       "id": "server.generate.traffic-encoders",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "generate",
@@ -13577,7 +14391,7 @@
     },
     {
       "id": "server.generate.traffic-encoders.add",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "generate",
@@ -13628,7 +14442,7 @@
     },
     {
       "id": "server.generate.traffic-encoders.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "generate",
@@ -13669,7 +14483,7 @@
     },
     {
       "id": "server.hosts",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "hosts"
@@ -13718,7 +14532,7 @@
     },
     {
       "id": "server.hosts.ioc",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "hosts",
@@ -13758,7 +14572,7 @@
     },
     {
       "id": "server.hosts.ioc.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "hosts",
@@ -13799,7 +14613,7 @@
     },
     {
       "id": "server.hosts.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "hosts",
@@ -13839,7 +14653,7 @@
     },
     {
       "id": "server.http",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "http"
@@ -13942,7 +14756,7 @@
     },
     {
       "id": "server.https",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "https"
@@ -14081,7 +14895,7 @@
     },
     {
       "id": "server.implants",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "implants"
@@ -14184,7 +14998,7 @@
     },
     {
       "id": "server.implants.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "implants",
@@ -14224,7 +15038,7 @@
     },
     {
       "id": "server.implants.stage",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "implants",
@@ -14264,7 +15078,7 @@
     },
     {
       "id": "server.info",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "info"
@@ -14313,7 +15127,7 @@
     },
     {
       "id": "server.jobs",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "jobs"
@@ -14380,7 +15194,7 @@
     },
     {
       "id": "server.licenses",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "licenses"
@@ -14419,7 +15233,7 @@
     },
     {
       "id": "server.loot",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "loot"
@@ -14477,7 +15291,7 @@
     },
     {
       "id": "server.loot.fetch",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "loot",
@@ -14536,7 +15350,7 @@
     },
     {
       "id": "server.loot.local",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "loot",
@@ -14604,7 +15418,7 @@
     },
     {
       "id": "server.loot.remote",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "loot",
@@ -14672,7 +15486,7 @@
     },
     {
       "id": "server.loot.rename",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "loot",
@@ -14712,7 +15526,7 @@
     },
     {
       "id": "server.loot.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "loot",
@@ -14762,7 +15576,7 @@
     },
     {
       "id": "server.mcp",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "mcp"
@@ -14801,7 +15615,7 @@
     },
     {
       "id": "server.mcp.console",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "mcp",
@@ -14868,7 +15682,7 @@
     },
     {
       "id": "server.mcp.start",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "mcp",
@@ -14950,7 +15764,7 @@
     },
     {
       "id": "server.mcp.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "mcp",
@@ -14990,7 +15804,7 @@
     },
     {
       "id": "server.monitor",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "monitor"
@@ -15029,7 +15843,7 @@
     },
     {
       "id": "server.monitor.start",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "monitor",
@@ -15069,7 +15883,7 @@
     },
     {
       "id": "server.monitor.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "monitor",
@@ -15109,7 +15923,7 @@
     },
     {
       "id": "server.mtls",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "mtls"
@@ -15167,7 +15981,7 @@
     },
     {
       "id": "server.operators",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "operators"
@@ -15216,7 +16030,7 @@
     },
     {
       "id": "server.profiles",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles"
@@ -15265,7 +16079,7 @@
     },
     {
       "id": "server.profiles.generate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles",
@@ -15341,7 +16155,7 @@
     },
     {
       "id": "server.profiles.info",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles",
@@ -15381,7 +16195,7 @@
     },
     {
       "id": "server.profiles.new",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles",
@@ -15783,6 +16597,14 @@
           "persistent": false
         },
         {
+          "name": "service-name",
+          "type": "string",
+          "default": "",
+          "usage": "service name to register the implant under (service format only)",
+          "required": false,
+          "persistent": false
+        },
+        {
           "name": "shellcode-bypass",
           "type": "uint32",
           "default": "3",
@@ -15932,12 +16754,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "0eaecf89ce977b09c451cf641b1f04aaf3b8c1fb3d4e26a1ee83cab97199ce20",
+      "fingerprint": "aabf9f4d2bd60ae792dc74ded009b019d7b695dfec32e4c3f3d6219bfb13ed06",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.profiles.new.beacon",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles",
@@ -16385,6 +17207,14 @@
           "persistent": false
         },
         {
+          "name": "service-name",
+          "type": "string",
+          "default": "",
+          "usage": "service name to register the implant under (service format only)",
+          "required": false,
+          "persistent": false
+        },
+        {
           "name": "shellcode-bypass",
           "type": "uint32",
           "default": "3",
@@ -16534,12 +17364,12 @@
         "targetOperatingSystems": "server-command-tree-not-target-bound",
         "transports": "server-command-tree-visible-unless-console-hidden"
       },
-      "fingerprint": "7e9ad61a838470e9df30e5ce9fbd6801822ef1acf083a47771d39160dc9a29ee",
+      "fingerprint": "9705554e3cbf23d47ad2001d942acf6e57dc74e38f10d275c06a676c9d845911",
       "gateFingerprint": "08834148fa996a7c36bf4723f204caba40342a0704c1caab5a6d083466454da8"
     },
     {
       "id": "server.profiles.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles",
@@ -16579,7 +17409,7 @@
     },
     {
       "id": "server.profiles.stage",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "profiles",
@@ -16683,7 +17513,7 @@
     },
     {
       "id": "server.reaction",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "reaction"
@@ -16722,7 +17552,7 @@
     },
     {
       "id": "server.reaction.reload",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "reaction",
@@ -16762,7 +17592,7 @@
     },
     {
       "id": "server.reaction.save",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "reaction",
@@ -16802,7 +17632,7 @@
     },
     {
       "id": "server.reaction.set",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "reaction",
@@ -16852,7 +17682,7 @@
     },
     {
       "id": "server.reaction.unset",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "reaction",
@@ -16902,7 +17732,7 @@
     },
     {
       "id": "server.regenerate",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "regenerate"
@@ -16951,7 +17781,7 @@
     },
     {
       "id": "server.sessions",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "sessions"
@@ -17063,7 +17893,7 @@
     },
     {
       "id": "server.sessions.prune",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "sessions",
@@ -17113,7 +17943,7 @@
     },
     {
       "id": "server.settings",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings"
@@ -17161,7 +17991,7 @@
     },
     {
       "id": "server.settings.always-overflow",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17201,7 +18031,7 @@
     },
     {
       "id": "server.settings.autoadult",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17241,7 +18071,7 @@
     },
     {
       "id": "server.settings.beacon-autoresults",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17281,7 +18111,7 @@
     },
     {
       "id": "server.settings.console-logs",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17321,7 +18151,7 @@
     },
     {
       "id": "server.settings.readline",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17361,7 +18191,7 @@
     },
     {
       "id": "server.settings.readline.bind",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17547,7 +18377,7 @@
     },
     {
       "id": "server.settings.readline.set",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17588,7 +18418,7 @@
     },
     {
       "id": "server.settings.save",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17628,7 +18458,7 @@
     },
     {
       "id": "server.settings.small-terminal",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17668,7 +18498,7 @@
     },
     {
       "id": "server.settings.tables",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17708,7 +18538,7 @@
     },
     {
       "id": "server.settings.user-connect",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "settings",
@@ -17748,7 +18578,7 @@
     },
     {
       "id": "server.shellcode-encoders",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "shellcode-encoders"
@@ -17797,7 +18627,7 @@
     },
     {
       "id": "server.shellcode-encoders.encode",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "shellcode-encoders",
@@ -17892,7 +18722,7 @@
     },
     {
       "id": "server.shikata-ga-nai",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "shikata-ga-nai"
@@ -17977,7 +18807,7 @@
     },
     {
       "id": "server.socks5",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "socks5"
@@ -18028,7 +18858,7 @@
     },
     {
       "id": "server.socks5.stop",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "socks5",
@@ -18078,7 +18908,7 @@
     },
     {
       "id": "server.stage-listener",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "stage-listener"
@@ -18205,7 +19035,7 @@
     },
     {
       "id": "server.taskmany",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "taskmany"
@@ -18244,7 +19074,7 @@
     },
     {
       "id": "server.update",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "update"
@@ -18337,7 +19167,7 @@
     },
     {
       "id": "server.use",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "use"
@@ -18386,7 +19216,7 @@
     },
     {
       "id": "server.use.beacons",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "use",
@@ -18426,7 +19256,7 @@
     },
     {
       "id": "server.use.sessions",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "use",
@@ -18466,7 +19296,7 @@
     },
     {
       "id": "server.version",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "version"
@@ -18515,7 +19345,7 @@
     },
     {
       "id": "server.websites",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites"
@@ -18564,7 +19394,7 @@
     },
     {
       "id": "server.websites.add-content",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites",
@@ -18650,7 +19480,7 @@
     },
     {
       "id": "server.websites.content-type",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites",
@@ -18718,7 +19548,7 @@
     },
     {
       "id": "server.websites.list",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites",
@@ -18758,7 +19588,7 @@
     },
     {
       "id": "server.websites.rm",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites",
@@ -18798,7 +19628,7 @@
     },
     {
       "id": "server.websites.rm-content",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites",
@@ -18866,7 +19696,7 @@
     },
     {
       "id": "server.websites.show",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "websites",
@@ -18906,7 +19736,7 @@
     },
     {
       "id": "server.wg",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "wg"
@@ -18982,7 +19812,7 @@
     },
     {
       "id": "server.wg-config",
-      "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+      "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
       "surface": "server",
       "path": [
         "wg-config"

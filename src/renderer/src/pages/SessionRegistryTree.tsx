@@ -118,6 +118,8 @@ export function SessionRegistryTree({ hive, path, branches, onNavigate }: Sessio
         {function renderNode(node: RegistryTreeNode): React.JSX.Element {
           return (
             <FileTree.Item
+              data-registry-hive={node.hive}
+              data-registry-path={node.path}
               icon={({ isExpanded }) => <FontAwesomeIcon aria-hidden className="text-accent" icon={isExpanded ? faFolderOpen : faFolder} />}
               id={node.id}
               textValue={node.name}

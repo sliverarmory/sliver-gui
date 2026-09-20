@@ -198,7 +198,7 @@ export const IPC = {
 export type IpcInvokeChannel = (typeof IPC_INVOKE)[keyof typeof IPC_INVOKE];
 
 export const DEFAULT_C2_SCHEME = "mtls" as const;
-export const SLIVER_PROTOCOL_BASELINE_COMMIT = "bbb20155b7a18d4906ec936566bf0dc61fe38f35" as const;
+export const SLIVER_PROTOCOL_BASELINE_COMMIT = "f8430cecf7ceb5cb332c84fb36aba9b75188802d" as const;
 export const SLIVER_PROTOCOL_COMPATIBILITY = {
   major: 1,
   minor: 7,

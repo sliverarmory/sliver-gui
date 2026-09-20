@@ -2,11 +2,13 @@
 
 import { createHash } from "node:crypto";
 
+import { sliverpb } from "sliver-script";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  SESSION_WORKBENCH_MAX_TEXT_LENGTH,
   SESSION_WORKBENCH_PLATFORM_REQUIREMENTS,
   type SessionWorkbenchInput,
 } from "../shared/session-contracts.js";
@@ -98,6 +100,145 @@ describe("SessionWorkbench", () => {
       expect(result.operationId).toBe(input.operationId);
       expect(JSON.stringify(result)).not.toContain("Buffer");
     }
+  });
+
+  it("normalizes typed registry reads and clears consumed raw buffers", async () => {
+    const client = fakeClient();
+    const workbench = new SessionWorkbench(client, fakeArtifacts(), { now: () => NOW });
+    const binary = Buffer.from([0x00, 0x7f, 0x80, 0xff]);
+    const dword = Buffer.from([0xde, 0xc0, 0x17, 0x5a]);
+    const qword = Buffer.alloc(8, 0xff);
+    const responses = [
+      {
+        response: { Type: sliverpb.RegistryType.String, Value: "registry text", Binary: Buffer.alloc(0) },
+        expected: { type: "string", value: "registry text" },
+      },
+      {
+        response: { Type: sliverpb.RegistryType.Binary, Value: "legacy text must not win", Binary: binary },
+        expected: { type: "binary", value: "007f80ff" },
+      },
+      {
+        response: { Type: sliverpb.RegistryType.DWORD, Value: "ignored", Binary: dword },
+        expected: { type: "dword", value: "1511506142" },
+      },
+      {
+        response: { Type: sliverpb.RegistryType.QWORD, Value: "ignored", Binary: qword },
+        expected: { type: "qword", value: "18446744073709551615" },
+      },
+      {
+        response: { Type: sliverpb.RegistryType.Unknown, Value: "legacy value", Binary: Buffer.alloc(0) },
+        expected: { type: "unknown", value: "legacy value" },
+      },
+      {
+        response: { Type: sliverpb.RegistryType.UNRECOGNIZED, Value: "future value", Binary: Buffer.alloc(0) },
+        expected: { type: "unknown", value: "future value" },
+      },
+    ] as const;
+
+    for (const { response, expected } of responses) {
+      vi.mocked(client.registryReadSession).mockResolvedValueOnce(response as never);
+      const result = await workbench.run(target({ platform: "windows", os: "windows" }), {
+        operationId: "session.registry.read",
+        hive: "HKCU",
+        path: "Software\\Example",
+        key: "Value",
+      });
+      expect(result).toEqual({
+        operationId: "session.registry.read",
+        value: {
+          hive: "HKCU",
+          path: "Software\\Example",
+          key: "Value",
+          ...expected,
+        },
+      });
+    }
+
+    expect(binary).toEqual(Buffer.alloc(binary.length));
+    expect(dword).toEqual(Buffer.alloc(dword.length));
+    expect(qword).toEqual(Buffer.alloc(qword.length));
+  });
+
+  it("decodes rc5 registry metadata while preserving value-only agent responses", async () => {
+    const client = fakeClient();
+    const workbench = new SessionWorkbench(client, fakeArtifacts(), { now: () => NOW });
+    const typed = sliverpb.RegistryRead.decode(sliverpb.RegistryRead.encode({
+      Value: "legacy text must not win",
+      Binary: Buffer.from([0x00, 0x7f, 0x80, 0xff]),
+      Type: sliverpb.RegistryType.Binary,
+      Response: undefined,
+    }).finish());
+    const legacyValue = Buffer.from("legacy value", "utf8");
+    const legacy = sliverpb.RegistryRead.decode(Buffer.concat([
+      Buffer.from([0x0a, legacyValue.length]),
+      legacyValue,
+    ]));
+
+    for (const { response, expected } of [
+      { response: typed, expected: { type: "binary", value: "007f80ff" } },
+      { response: legacy, expected: { type: "unknown", value: "legacy value" } },
+    ] as const) {
+      vi.mocked(client.registryReadSession).mockResolvedValueOnce(response);
+      const result = await workbench.run(target({ platform: "windows", os: "windows" }), {
+        operationId: "session.registry.read",
+        hive: "HKCU",
+        path: "Software\\Example",
+        key: "Value",
+      });
+      expect(result.value).toEqual({
+        hive: "HKCU",
+        path: "Software\\Example",
+        key: "Value",
+        ...expected,
+      });
+    }
+
+    expect(typed.Binary).toEqual(Buffer.alloc(4));
+    expect(legacy).toMatchObject({
+      Value: "legacy value",
+      Binary: Buffer.alloc(0),
+      Type: sliverpb.RegistryType.Unknown,
+    });
+  });
+
+  it("rejects malformed registry raw values and clears rejected buffers", async () => {
+    const malformedDword = Buffer.from([0x01, 0x02, 0x03]);
+    const malformedQword = Buffer.alloc(7, 0xa5);
+    const oversizedBinary = Buffer.alloc(SESSION_WORKBENCH_MAX_TEXT_LENGTH / 2 + 1, 0xa5);
+    const cases = [
+      {
+        response: { Type: sliverpb.RegistryType.Binary, Value: "", Binary: new Uint8Array([0x01]) },
+        error: /did not return a Buffer/u,
+      },
+      {
+        response: { Type: sliverpb.RegistryType.DWORD, Value: "", Binary: malformedDword },
+        error: /exactly 4 bytes/u,
+      },
+      {
+        response: { Type: sliverpb.RegistryType.QWORD, Value: "", Binary: malformedQword },
+        error: /exactly 8 bytes/u,
+      },
+      {
+        response: { Type: sliverpb.RegistryType.Binary, Value: "", Binary: oversizedBinary },
+        error: /exceeds the session workbench limit/u,
+      },
+    ] as const;
+
+    for (const { response, error } of cases) {
+      const client = fakeClient();
+      vi.mocked(client.registryReadSession).mockResolvedValueOnce(response as never);
+      const workbench = new SessionWorkbench(client, fakeArtifacts());
+      await expect(workbench.run(target({ platform: "windows", os: "windows" }), {
+        operationId: "session.registry.read",
+        hive: "HKCU",
+        path: "Software\\Example",
+        key: "Value",
+      })).rejects.toThrow(error);
+    }
+
+    expect(malformedDword).toEqual(Buffer.alloc(malformedDword.length));
+    expect(malformedQword).toEqual(Buffer.alloc(malformedQword.length));
+    expect(oversizedBinary).toEqual(Buffer.alloc(oversizedBinary.length));
   });
 
   it("enforces authoritative platform gates before dispatch", async () => {

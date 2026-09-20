@@ -133,7 +133,7 @@
     "electron-updater": "6.8.9",
     "ghostty-web": "0.4.0",
     "node-pty": "1.1.0",
-    "sliver-script": "2.0.0-rc.4",
+    "sliver-script": "2.0.0-rc.5",
     "ssh2": "1.17.0"
   }
 }

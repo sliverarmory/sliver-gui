@@ -256,6 +256,7 @@ export interface SessionRegistryReadResult {
   hive: SessionRegistryHive;
   path: string;
   key: string;
+  type: "unknown" | SessionRegistryWriteValue["type"];
   value: string;
 }
 
@@ -964,12 +965,12 @@ function parseRegistryWriteValue(value: unknown): SessionRegistryWriteValue {
   const type = requiredString(record, "type", 16);
   switch (type) {
     case "string": {
-      const parsed = { type, value: requiredString(record, "value", SESSION_WORKBENCH_MAX_TEXT_LENGTH) } as const;
+      const parsed = { type, value: requiredPossiblyEmptyString(record, "value", SESSION_WORKBENCH_MAX_TEXT_LENGTH) } as const;
       assertExactKeys(record, ["type", "value"]);
       return parsed;
     }
     case "binary": {
-      const hex = requiredString(record, "hex", SESSION_WORKBENCH_MAX_TEXT_LENGTH);
+      const hex = requiredPossiblyEmptyString(record, "hex", SESSION_WORKBENCH_MAX_TEXT_LENGTH);
       if (!/^(?:[0-9a-f]{2})*$/iu.test(hex)) throw new Error("Registry binary value must be even-length hexadecimal");
       assertExactKeys(record, ["type", "hex"]);
       return { type, hex };

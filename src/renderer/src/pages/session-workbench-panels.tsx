@@ -10,6 +10,7 @@ import {
   AlertDialog,
   Breadcrumbs,
   Button,
+  Checkbox,
   Chip,
   Description,
   Dropdown,
@@ -102,6 +103,8 @@ import type {
 import { DateTimePickerField } from "../components/FormControls";
 import { EnvironmentVariableModal } from "../components/EnvironmentVariableModal";
 import { REGISTRY_HIVE_LABELS, SessionRegistryTree } from "./SessionRegistryTree";
+import { registryValueCacheKey, useRegistryValueCache } from "./useRegistryValueCache";
+import { RegistryContextMenu, type RegistryContextAction, type RegistryContextTarget } from "./RegistryContextMenu";
 
 type LoadState<T> =
   | { status: "loading" }
@@ -124,7 +127,7 @@ type EnvironmentVariableEditor =
   | { mode: "add" }
   | { mode: "edit"; entry: SessionEnvironmentEntry };
 
-type RegistryEditorMode = "create-key" | "write-value";
+type RegistryEditorMode = "create-key" | "write-value" | "modify-value";
 
 const REGISTRY_HIVES: readonly SessionRegistryHive[] = ["HKCU", "HKLM", "HKCR", "HKU", "HKCC"];
 
@@ -2448,7 +2451,8 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const [pathDraft, setPathDraft] = useState("Computer\\HKEY_CURRENT_USER");
   const [addressError, setAddressError] = useState<string>();
   const [branches, setBranches] = useState<Array<{ hive: SessionRegistryHive; path: string; subkeys: string[] }>>([]);
-  const [valueData, setValueData] = useState<Record<string, string>>({});
+  const { cache: valueCache, snapshot: cachedValues } = useRegistryValueCache(routeKey, readRegistryValue);
+  const [eagerLoadValues, setEagerLoadValues] = useState(false);
   const [requestedLocation, setRequestedLocation] = useState<{ hive: SessionRegistryHive; path: string }>({ hive: "HKCU", path: "" });
   const [state, setState] = useState<LoadState<RegistryListing>>({ status: "loading" });
   const [selectedValue, setSelectedValue] = useState<SessionRegistryReadResult>();
@@ -2456,11 +2460,24 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const [isSavingHive, setIsSavingHive] = useState(false);
   const [isLoadingMoreSubkeys, setIsLoadingMoreSubkeys] = useState(false);
   const [isLoadingMoreValues, setIsLoadingMoreValues] = useState(false);
-  const [editorMode, setEditorMode] = useState<RegistryEditorMode>();
+  const [editor, setEditor] = useState<{
+    mode: RegistryEditorMode;
+    hive: SessionRegistryHive;
+    path: string;
+    keyName?: string;
+    valueType?: SessionRegistryWriteValue["type"];
+    value?: string;
+  }>();
+  const editorRequestSequence = useRef(0);
+  const registryActionsLocked = useRef(true);
   const navigationRequestSequence = useRef(0);
+  const loadedNavigationSequence = useRef<number | undefined>(undefined);
   const subkeyRequestSequence = useRef(0);
   const valueRequestSequence = useRef(0);
   const readRequestSequence = useRef(0);
+  const eagerRunSequence = useRef(0);
+  const activeEagerReads = useRef(new Set<Promise<unknown>>());
+  const continuationRequests = useRef(new Set<string>());
   const mutationLocation = useRef({ hive: "HKCU" as SessionRegistryHive, path: "" });
   const isCurrent = useLatestIdentity(routeKey);
 
@@ -2468,6 +2485,8 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     if (platform !== "windows") return;
     const expected = routeKey;
     const requestSequence = ++navigationRequestSequence.current;
+    eagerRunSequence.current += 1;
+    editorRequestSequence.current += 1;
     subkeyRequestSequence.current += 1;
     valueRequestSequence.current += 1;
     readRequestSequence.current += 1;
@@ -2477,8 +2496,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     setAddressError(undefined);
     setState({ status: "loading" });
     setSelectedValue(undefined);
-    setValueData({});
-    setEditorMode(undefined);
+    setEditor(undefined);
     setIsLoadingMoreSubkeys(false);
     setIsLoadingMoreValues(false);
     try {
@@ -2489,6 +2507,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
       if (!isCurrent(expected) || requestSequence !== navigationRequestSequence.current) return;
       setHive(nextHive);
       setPath(nextPath);
+      loadedNavigationSequence.current = requestSequence;
       // A fresh listing invalidates cached descendants, including keys that may
       // have disappeared. Windows registry paths are case insensitive.
       setBranches((current) => [
@@ -2518,6 +2537,9 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     if (platform !== "windows" || state.status !== "ready") return;
     const expected = routeKey;
     const navigationSequence = navigationRequestSequence.current;
+    const requestKey = `${navigationSequence}:${kind}:${cursor}`;
+    if (continuationRequests.current.has(requestKey)) return;
+    continuationRequests.current.add(requestKey);
     const sequenceRef = kind === "key" ? subkeyRequestSequence : valueRequestSequence;
     const sequence = ++sequenceRef.current;
     if (kind === "key") setIsLoadingMoreSubkeys(true);
@@ -2558,6 +2580,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         toast.danger(kind === "key" ? "Could not load more subkeys" : "Could not load more values", { description: errorMessage(error) });
       }
     } finally {
+      continuationRequests.current.delete(requestKey);
       if (isCurrent(expected) && navigationSequence === navigationRequestSequence.current && sequence === sequenceRef.current) {
         if (kind === "key") setIsLoadingMoreSubkeys(false);
         else setIsLoadingMoreValues(false);
@@ -2571,11 +2594,11 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     setPathDraft(registryAddress("HKCU", ""));
     setAddressError(undefined);
     setBranches([]);
-    setValueData({});
+    setEagerLoadValues(false);
     setRequestedLocation({ hive: "HKCU", path: "" });
     setReadingValueKey(undefined);
     setSelectedValue(undefined);
-    setEditorMode(undefined);
+    setEditor(undefined);
     navigationRequestSequence.current += 1;
     subkeyRequestSequence.current += 1;
     valueRequestSequence.current += 1;
@@ -2583,17 +2606,17 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     if (platform === "windows") void load("HKCU", "");
   }, [load, platform, routeKey]);
 
-  const readValue = useCallback(async (key: string) => {
+  const readValue = useCallback(async (key: string, force = false) => {
     const expected = routeKey;
+    editorRequestSequence.current += 1;
     const requestSequence = ++readRequestSequence.current;
     const rowKey = `value:${key}`;
     setReadingValueKey(rowKey);
     setSelectedValue(undefined);
     try {
-      const result = await runWorkbench({ operationId: "session.registry.read", hive, path, key });
-      if (isCurrent(expected) && requestSequence === readRequestSequence.current) {
-        setSelectedValue(result);
-        setValueData((current) => ({ ...current, [rowKey]: result.value }));
+      const result = await valueCache.read(hive, path, key, force);
+      if (result && isCurrent(expected) && requestSequence === readRequestSequence.current) {
+        setSelectedValue({ ...result, hive, path, key });
       }
     } catch (error) {
       if (isCurrent(expected) && requestSequence === readRequestSequence.current) {
@@ -2602,24 +2625,100 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     } finally {
       if (isCurrent(expected) && requestSequence === readRequestSequence.current) setReadingValueKey(undefined);
     }
-  }, [hive, isCurrent, path, routeKey]);
+  }, [hive, isCurrent, path, routeKey, valueCache]);
+
+  useEffect(() => {
+    if (!eagerLoadValues || state.status !== "ready" || loadedNavigationSequence.current !== navigationRequestSequence.current) return;
+    let canceled = false;
+    const sequence = eagerRunSequence.current;
+    const isActive = () => !canceled && sequence === eagerRunSequence.current && isCurrent(routeKey);
+    const listing = state.value;
+    const populate = async () => {
+      const pending: Promise<unknown>[] = [];
+      for (const entry of listing.entries) {
+        if (entry.kind !== "value") continue;
+        while (isActive() && activeEagerReads.current.size >= 4) {
+          await Promise.race(activeEagerReads.current);
+        }
+        if (!isActive()) return;
+        const cached = valueCache.getSnapshot().get(registryValueCacheKey(hive, path, entry.name));
+        // Failures stay visible until an explicit Read or Refresh, preventing a
+        // rerender or page append from repeatedly retrying inaccessible values.
+        if (cached?.status === "ready" || cached?.status === "error") continue;
+        const request = valueCache.read(hive, path, entry.name).catch(() => undefined);
+        activeEagerReads.current.add(request);
+        pending.push(request);
+        void request.then(() => { activeEagerReads.current.delete(request); });
+      }
+      await Promise.all(pending);
+      if (isActive() && listing.valuesPage.nextCursor) {
+        await loadRegistryContinuation("value", listing.valuesPage.nextCursor);
+      }
+    };
+    void populate();
+    return () => { canceled = true; };
+  }, [eagerLoadValues, hive, isCurrent, loadRegistryContinuation, path, routeKey, state, valueCache]);
+
+  const refreshRegistry = () => {
+    valueCache.clear();
+    void load(requestedLocation.hive, requestedLocation.path);
+  };
 
   const destructive = useDestructiveAction(routeKey, () => {
-    setEditorMode(undefined);
+    setEditor(undefined);
     const location = mutationLocation.current;
+    valueCache.clear();
     setBranches([]);
     void load(location.hive, location.path);
   });
 
   const reviewRegistryAction = useCallback(async (input: PrepareSessionDestructiveActionInput) => {
     if (destructive.isPreparing || destructive.isExecuting) return;
+    editorRequestSequence.current += 1;
     const expected = routeKey;
     if (input.actionId === "session.registry.create-key" || input.actionId === "session.registry.write" || input.actionId === "session.registry.delete-key") {
       mutationLocation.current = { hive: input.hive, path: input.path };
     }
     await destructive.prepare(input);
-    if (isCurrent(expected)) setEditorMode(undefined);
+    if (isCurrent(expected)) setEditor(undefined);
   }, [destructive, isCurrent, routeKey]);
+
+  const openRegistryEditor = async (target: RegistryContextTarget, mode: RegistryEditorMode) => {
+    if (registryActionsLocked.current) return;
+    const sequence = ++editorRequestSequence.current;
+    const navigationSequence = navigationRequestSequence.current;
+    const readSequence = ++readRequestSequence.current;
+    setReadingValueKey(undefined);
+    if (mode !== "modify-value") {
+      setEditor({ mode, hive: target.hive, path: target.path });
+      return;
+    }
+    if (target.kind !== "value") return;
+    setReadingValueKey(`value:${target.key}`);
+    setSelectedValue(undefined);
+    try {
+      const result = await valueCache.read(target.hive, target.path, target.key);
+      if (
+        !result || !isCurrent(routeKey) || sequence !== editorRequestSequence.current ||
+        navigationSequence !== navigationRequestSequence.current
+      ) return;
+      setSelectedValue({ ...result, hive: target.hive, path: target.path, key: target.key });
+      setEditor({
+        mode,
+        hive: target.hive,
+        path: target.path,
+        keyName: target.key,
+        ...(result.type === "unknown" ? {} : { valueType: result.type }),
+        value: result.value,
+      });
+    } catch (error) {
+      if (isCurrent(routeKey) && sequence === editorRequestSequence.current) {
+        toast.danger("Could not load registry value for editing", { description: errorMessage(error) });
+      }
+    } finally {
+      if (isCurrent(routeKey) && readSequence === readRequestSequence.current) setReadingValueKey(undefined);
+    }
+  };
 
   const saveHive = useCallback(async () => {
     if (!path) return;
@@ -2657,14 +2756,32 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
       ),
     },
     {
+      id: "type",
+      header: "Type",
+      width: 104,
+      minWidth: 104,
+      maxWidth: 128,
+      cell: (entry) => {
+        const cached = cachedValues.get(registryValueCacheKey(hive, path, entry.name));
+        return (
+          <span className="block truncate font-mono text-xs text-muted">
+            {cached?.status === "ready" ? registryReadValueTypeLabel(cached.result.type) : ""}
+          </span>
+        );
+      },
+    },
+    {
       id: "data",
       header: "Data",
       minWidth: 220,
-      cell: (entry) => (
-        <span className={`block truncate font-mono text-xs ${valueData[entry.id] === undefined ? "text-muted" : "text-foreground"}`}>
-          {readingValueKey === entry.id ? "Reading…" : valueData[entry.id] ?? "(not loaded)"}
-        </span>
-      ),
+      cell: (entry) => {
+        const cached = cachedValues.get(registryValueCacheKey(hive, path, entry.name));
+        return (
+          <span className={`block truncate font-mono text-xs ${cached?.status === "ready" ? "text-foreground" : cached?.status === "error" ? "text-danger" : "text-muted"}`}>
+            {cached?.status === "ready" ? registryReadDisplayValue(cached.result) : cached?.status === "loading" ? "Reading…" : cached?.status === "error" ? "Read failed" : "(not loaded)"}
+          </span>
+        );
+      },
     },
     {
       id: "action",
@@ -2676,11 +2793,11 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
           isPending={readingValueKey === entry.id}
           label={`Read ${entry.name || "default value"}`}
           icon={faEye}
-          onPress={() => void readValue(entry.name)}
+          onPress={() => void readValue(entry.name, true)}
         />
       ),
     },
-  ], [readValue, readingValueKey, valueData]);
+  ], [cachedValues, hive, path, readValue, readingValueKey]);
 
   if (platform !== "windows") {
     return <PanelUnavailable title="Registry unavailable" description="Registry browsing is available only for Windows sessions." />;
@@ -2691,6 +2808,19 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const parentPath = path.split("\\").slice(0, -1).join("\\");
   const keyName = path.split("\\").at(-1) ?? "";
   const isLocked = destructive.isPreparing || destructive.isExecuting || state.status !== "ready";
+  registryActionsLocked.current = isLocked;
+  const contextNavigationSequence = navigationRequestSequence.current;
+  const contextAction = (target: RegistryContextTarget, action: RegistryContextAction) => {
+    if (!isCurrent(routeKey) || contextNavigationSequence !== navigationRequestSequence.current || registryActionsLocked.current) return;
+    if (action === "delete-key") {
+      if (target.kind !== "key" || !target.path) return;
+      const parts = target.path.split("\\");
+      const key = parts.pop()!;
+      void reviewRegistryAction({ actionId: "session.registry.delete-key", hive: target.hive, path: parts.join("\\"), key });
+    } else {
+      void openRegistryEditor(target, action);
+    }
+  };
   const navigateFromAddress = () => {
     const location = parseRegistryAddress(pathDraft, requestedLocation.hive);
     if (location) void load(location.hive, location.path);
@@ -2702,10 +2832,10 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-label="Registry editor">
       <div className="flex flex-wrap items-center gap-1 border-b border-separator px-3 py-2">
         <h2 className="mr-3 px-1 text-sm font-semibold text-foreground">Registry Editor</h2>
-        <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => setEditorMode("create-key")}>
+        <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => void openRegistryEditor({ kind: "key", hive, path }, "create-key")}>
           <FontAwesomeIcon aria-hidden icon={faFolderPlus} /> Create key
         </Button>
-        <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => setEditorMode("write-value")}>
+        <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => void openRegistryEditor({ kind: "key", hive, path }, "write-value")}>
           <FontAwesomeIcon aria-hidden icon={faPen} /> Write value
         </Button>
         <IconButton
@@ -2716,13 +2846,27 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
           onPress={() => void reviewRegistryAction({ actionId: "session.registry.delete-key", hive, path: parentPath, key: keyName })}
         />
         <div className="ml-auto flex items-center gap-1">
+          <Checkbox
+            className="mx-2 shrink-0"
+            isSelected={eagerLoadValues}
+            variant="secondary"
+            onChange={(selected) => {
+              eagerRunSequence.current += 1;
+              setEagerLoadValues(selected);
+            }}
+          >
+            <Checkbox.Content className="gap-2 text-xs">
+              <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+              Load all values
+            </Checkbox.Content>
+          </Checkbox>
           <Tooltip delay={250}>
             <Button isDisabled={state.status !== "ready" || !path} isPending={isSavingHive} size="sm" variant="ghost" onPress={() => void saveHive()}>
               <FontAwesomeIcon aria-hidden icon={faDownload} /> Save hive
             </Button>
             <Tooltip.Content>{path ? "Save the selected registry subkey" : "Select a registry subkey before saving"}</Tooltip.Content>
           </Tooltip>
-          <RefreshButton disabled={state.status === "loading"} label="Refresh registry" pending={state.status === "loading"} onPress={() => void load(requestedLocation.hive, requestedLocation.path)} />
+          <RefreshButton disabled={state.status === "loading"} label="Refresh registry" pending={state.status === "loading"} onPress={refreshRegistry} />
         </div>
       </div>
       <form
@@ -2748,6 +2892,14 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         <Button size="sm" type="submit" variant="secondary">Go</Button>
       </form>
       {addressError ? <p className="px-4 py-2 text-xs text-danger" role="alert">{addressError}</p> : null}
+      <RegistryContextMenu
+        disabled={isLocked}
+        hive={hive}
+        key={routeKey}
+        path={path}
+        valueNames={values.map((entry) => entry.name)}
+        onAction={contextAction}
+      >
       <div className="h-[min(64vh,680px)] min-h-[420px] bg-background">
         <Resizable orientation="horizontal">
           <Resizable.Panel defaultSize="300px" minSize="160px" maxSize="50%" groupResizeBehavior="preserve-pixel-size">
@@ -2771,59 +2923,72 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
           <Resizable.Handle type="line" variant="secondary" withIndicator />
           <Resizable.Panel minSize={35}>
             <div className="flex h-full min-w-0 flex-col" aria-label="Registry values">
-              {state.status === "loading" ? <PanelLoading label="Loading registry" /> : null}
-              {state.status === "error" ? (
-                <PanelError message={state.error} onRetry={() => void load(requestedLocation.hive, requestedLocation.path)} />
-              ) : null}
-              {state.status === "ready" ? (
-                <>
-                  <div className="min-h-0 flex-1 overflow-auto">
-                    <DataGrid
-                      aria-label={`Registry values in ${hive} ${path}`}
-                      className="h-full rounded-none bg-transparent p-0 [&_.table__body]:rounded-none [&_.table__body]:shadow-none"
-                      columns={columns}
-                      contentClassName="min-w-[460px]"
-                      data={values}
-                      getRowId={(entry) => entry.id}
-                      rowHeight={36}
-                      scrollContainerClassName="h-full max-h-full overflow-auto rounded-none"
-                      selectedKeys={new Set(readingValueKey !== undefined ? [readingValueKey] : selectedValue ? [`value:${selectedValue.key}`] : [])}
-                      selectionBehavior="replace"
-                      selectionMode="single"
-                      virtualized
-                      onSelectionChange={(keys) => {
-                        if (keys === "all") return;
-                        const entry = values.find((candidate) => keys.has(candidate.id));
-                        if (entry && entry.id !== readingValueKey && entry.name !== selectedValue?.key) void readValue(entry.name);
-                      }}
-                      onRowAction={(key) => {
-                        const entry = values.find((candidate) => candidate.id === String(key));
-                        if (entry && entry.id !== readingValueKey) void readValue(entry.name);
-                      }}
-                      renderEmptyState={() => <GridEmpty label="This registry key has no values." />}
-                    />
+              <Resizable id={`registry-values-${routeKey}`} orientation="vertical">
+                <Resizable.Panel minSize="160px">
+                  <div className="flex h-full min-h-0 flex-col">
+                    {state.status === "loading" ? <PanelLoading label="Loading registry" /> : null}
+                    {state.status === "error" ? (
+                      <PanelError message={state.error} onRetry={() => void load(requestedLocation.hive, requestedLocation.path)} />
+                    ) : null}
+                    {state.status === "ready" ? (
+                      <>
+                        <div className="min-h-0 flex-1 overflow-auto">
+                          <DataGrid
+                            aria-label={`Registry values in ${hive} ${path}`}
+                            className="session-registry-values-grid h-full rounded-none bg-transparent p-0"
+                            columns={columns}
+                            contentClassName="min-w-[580px]"
+                            data={values}
+                            getRowId={(entry) => entry.id}
+                            rowHeight={36}
+                            scrollContainerClassName="h-full max-h-full overflow-auto rounded-none"
+                            selectedKeys={new Set(readingValueKey !== undefined ? [readingValueKey] : selectedValue ? [`value:${selectedValue.key}`] : [])}
+                            selectionBehavior="replace"
+                            selectionMode="single"
+                            virtualized
+                            onSelectionChange={(keys) => {
+                              if (keys === "all") return;
+                              const entry = values.find((candidate) => keys.has(candidate.id));
+                              if (entry && entry.id !== readingValueKey && entry.name !== selectedValue?.key) void readValue(entry.name);
+                            }}
+                            onRowAction={(key) => {
+                              const entry = values.find((candidate) => candidate.id === String(key));
+                              if (entry && entry.id !== readingValueKey) void readValue(entry.name);
+                            }}
+                            renderEmptyState={() => <GridEmpty label="This registry key has no values." />}
+                          />
+                        </div>
+                        {state.value.valuesPage.nextCursor ? (
+                          <div className="shrink-0 border-t border-separator p-2">
+                            <Button isPending={isLoadingMoreValues} size="sm" variant="ghost" onPress={() => void loadRegistryContinuation("value", state.value.valuesPage.nextCursor!)}>Load more values</Button>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
                   </div>
-                  {state.value.valuesPage.nextCursor ? (
-                    <div className="border-t border-separator p-2">
-                      <Button isPending={isLoadingMoreValues} size="sm" variant="ghost" onPress={() => void loadRegistryContinuation("value", state.value.valuesPage.nextCursor!)}>Load more values</Button>
-                    </div>
-                  ) : null}
-                  <section className="min-h-28 shrink-0 border-t border-separator px-4 py-3" aria-label="Selected value data" aria-busy={readingValueKey !== undefined}>
+                </Resizable.Panel>
+                <Resizable.Handle aria-label="Resize value details" type="line" variant="secondary" withIndicator />
+                <Resizable.Panel defaultSize="140px" minSize="80px" maxSize="70%" groupResizeBehavior="preserve-pixel-size">
+                  <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden px-4 py-3" aria-label="Selected value data" aria-busy={readingValueKey !== undefined}>
                     {selectedValue ? (
                       <>
-                        <h3 className="truncate font-mono text-xs font-medium text-foreground">{selectedValue.key || "(Default)"}</h3>
-                        <pre className="mt-2 max-h-28 select-text overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{selectedValue.value || "(empty value)"}</pre>
+                        <div className="flex shrink-0 items-center gap-3">
+                          <h3 className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground">{selectedValue.key || "(Default)"}</h3>
+                          <span className="shrink-0 font-mono text-[11px] text-muted">{registryReadValueTypeLabel(selectedValue.type)}</span>
+                        </div>
+                        <pre className="mt-2 min-h-0 flex-1 select-text overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{registryReadDisplayValue(selectedValue) || "(empty value)"}</pre>
                       </>
                     ) : (
                       <p className="text-xs text-muted">{readingValueKey !== undefined ? "Reading value data…" : "Select a value to read its data."}</p>
                     )}
                   </section>
-                </>
-              ) : null}
+                </Resizable.Panel>
+              </Resizable>
             </div>
           </Resizable.Panel>
         </Resizable>
       </div>
+      </RegistryContextMenu>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-separator px-4 py-2 text-xs text-muted" role="status">
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={registryAddress(requestedLocation.hive, requestedLocation.path)}>
           {registryAddress(requestedLocation.hive, requestedLocation.path)}
@@ -2836,15 +3001,18 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         ) : <span>{state.status === "loading" ? "Loading…" : "Could not load key"}</span>}
       </div>
     </section>
-    {editorMode ? (
+    {editor ? (
       <RegistryMutationSheet
-        hive={hive}
+        hive={editor.hive}
+        initialKeyName={editor.keyName ?? ""}
+        initialValue={editor.value ?? ""}
+        {...(editor.valueType === undefined ? {} : { initialValueType: editor.valueType })}
         isLocked={destructive.isPreparing || destructive.isExecuting}
-        key={`${routeKey}:${hive}:${path}:${editorMode}`}
-        mode={editorMode}
-        path={path}
+        key={`${routeKey}:${editor.hive}:${editor.path}:${editor.mode}:${editor.keyName ?? ""}`}
+        mode={editor.mode}
+        path={editor.path}
         onClose={() => {
-          if (!destructive.isPreparing && !destructive.isExecuting) setEditorMode(undefined);
+          if (!destructive.isPreparing && !destructive.isExecuting) setEditor(undefined);
         }}
         onReview={reviewRegistryAction}
       />
@@ -2858,6 +3026,9 @@ function RegistryMutationSheet({
   hive,
   path,
   mode,
+  initialKeyName,
+  initialValue,
+  initialValueType,
   isLocked,
   onClose,
   onReview,
@@ -2865,18 +3036,24 @@ function RegistryMutationSheet({
   hive: SessionRegistryHive;
   path: string;
   mode: RegistryEditorMode;
+  initialKeyName?: string;
+  initialValue?: string;
+  initialValueType?: SessionRegistryWriteValue["type"];
   isLocked: boolean;
   onClose: () => void;
   onReview: (input: PrepareSessionDestructiveActionInput) => Promise<void>;
 }): React.JSX.Element {
   const [activeMode, setActiveMode] = useState(mode);
-  const [keyName, setKeyName] = useState("");
-  const [valueType, setValueType] = useState<SessionRegistryWriteValue["type"]>("string");
-  const [valueDraft, setValueDraft] = useState("");
-  const parsedValue = activeMode === "write-value" ? registryWriteValueFromDraft(valueType, valueDraft) : undefined;
-  const validationError = activeMode === "write-value" ? registryWriteValueDraftError(valueType, valueDraft) : undefined;
-  const canReview = activeMode === "create-key" ? keyName.trim().length > 0 : parsedValue !== undefined;
-  const location = path ? `${hive}\\${path}` : hive;
+  const [locationDraft, setLocationDraft] = useState(() => registryAddress(hive, path));
+  const [keyName, setKeyName] = useState(initialKeyName ?? "");
+  const [valueType, setValueType] = useState<SessionRegistryWriteValue["type"] | undefined>(
+    mode === "modify-value" ? initialValueType : "string",
+  );
+  const [valueDraft, setValueDraft] = useState(initialValue ?? "");
+  const location = locationDraft.trim() ? parseRegistryAddress(locationDraft, hive) : undefined;
+  const parsedValue = activeMode !== "create-key" && valueType ? registryWriteValueFromDraft(valueType, valueDraft) : undefined;
+  const validationError = activeMode !== "create-key" && valueType ? registryWriteValueDraftError(valueType, valueDraft) : undefined;
+  const canReview = location !== undefined && (activeMode === "create-key" ? keyName.trim().length > 0 : parsedValue !== undefined);
 
   const changeMode = (next: RegistryEditorMode) => {
     setActiveMode(next);
@@ -2886,13 +3063,13 @@ function RegistryMutationSheet({
   };
 
   const review = async () => {
-    if (!canReview || isLocked) return;
+    if (!canReview || isLocked || !location) return;
     if (activeMode === "create-key") {
-      await onReview({ actionId: "session.registry.create-key", hive, path, key: keyName.trim() });
+      await onReview({ actionId: "session.registry.create-key", ...location, key: keyName.trim() });
       return;
     }
     if (!parsedValue) return;
-    await onReview({ actionId: "session.registry.write", hive, path, key: keyName, value: parsedValue });
+    await onReview({ actionId: "session.registry.write", ...location, key: keyName, value: parsedValue });
   };
 
   return (
@@ -2902,15 +3079,21 @@ function RegistryMutationSheet({
           <Sheet.Dialog className="h-full">
             <Sheet.CloseTrigger />
             <Sheet.Header>
-              <Sheet.Heading>Review registry change</Sheet.Heading>
-              <p className="truncate font-mono text-xs text-muted" title={location}>{location}</p>
+              <Sheet.Heading>{activeMode === "modify-value" ? "Modify registry value" : "Review registry change"}</Sheet.Heading>
             </Sheet.Header>
             <Sheet.Body className="min-h-0 overflow-auto">
               <div className="flex flex-col gap-5 py-1">
-                <Segment aria-label="Registry change" selectedKey={activeMode} size="sm" onSelectionChange={(key) => changeMode(String(key) as RegistryEditorMode)}>
-                  <Segment.Item id="create-key">Create key</Segment.Item>
-                  <Segment.Item id="write-value">Write value</Segment.Item>
-                </Segment>
+                {activeMode !== "modify-value" ? (
+                  <Segment aria-label="Registry change" selectedKey={activeMode} size="sm" onSelectionChange={(key) => changeMode(String(key) as RegistryEditorMode)}>
+                    <Segment.Item id="create-key">Create key</Segment.Item>
+                    <Segment.Item id="write-value">Write value</Segment.Item>
+                  </Segment>
+                ) : null}
+                <TextField isInvalid={!location} value={locationDraft} variant="secondary" onChange={setLocationDraft}>
+                  <Label>Registry location</Label>
+                  <Input className="font-mono text-xs" placeholder="Computer\\HKEY_CURRENT_USER\\Software" />
+                  {!location ? <Description>Enter a registry hive and path, such as HKEY_CURRENT_USER\\Software.</Description> : null}
+                </TextField>
                 {activeMode === "create-key" ? (
                   <TextField value={keyName} variant="secondary" onChange={setKeyName}>
                     <Label>New subkey name</Label>
@@ -2926,11 +3109,11 @@ function RegistryMutationSheet({
                     </TextField>
                     <Select
                       aria-label="Registry value type"
-                      value={valueType}
+                      placeholder="Select value type"
+                      value={valueType ?? null}
                       variant="secondary"
                       onChange={(key) => {
-                        setValueType(String(key) as SessionRegistryWriteValue["type"]);
-                        setValueDraft("");
+                        setValueType(key === null ? undefined : String(key) as SessionRegistryWriteValue["type"]);
                       }}
                     >
                       <Label>Value type</Label>
@@ -2943,12 +3126,15 @@ function RegistryMutationSheet({
                           <ListBox.Item id="qword" textValue="QWORD">QWORD<ListBox.ItemIndicator /></ListBox.Item>
                         </ListBox>
                       </Select.Popover>
+                      {activeMode === "modify-value" && valueType === undefined
+                        ? <Description>The selected agent did not report this value's type. Choose it before reviewing.</Description>
+                        : null}
                     </Select>
-                    {valueType === "string" || valueType === "binary" ? (
+                    {valueType === undefined || valueType === "string" || valueType === "binary" ? (
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="registry-value-draft">{valueType === "binary" ? "Hexadecimal bytes" : "String value"}</Label>
+                        <Label htmlFor="registry-value-draft">{valueType === undefined ? "Value data" : valueType === "binary" ? "Hexadecimal bytes" : "String value"}</Label>
                         <TextArea
-                          aria-label={valueType === "binary" ? "Hexadecimal bytes" : "String value"}
+                          aria-label={valueType === undefined ? "Value data" : valueType === "binary" ? "Hexadecimal bytes" : "String value"}
                           className="min-h-44 font-mono text-xs"
                           id="registry-value-draft"
                           spellCheck={false}
@@ -3583,6 +3769,10 @@ function mergePagedResult<T, R extends { items: T[]; page: SessionPageSummary }>
   };
 }
 
+function readRegistryValue(hive: SessionRegistryHive, path: string, key: string): Promise<SessionRegistryReadResult> {
+  return runWorkbench({ operationId: "session.registry.read", hive, path, key });
+}
+
 function registryEntries(subkeys: string[], values: string[]): RegistryEntry[] {
   return [
     ...uniqueStrings(subkeys).map((name) => ({ id: `key:${name}`, kind: "key" as const, name })),
@@ -3601,10 +3791,9 @@ function registryWriteValueFromDraft(type: SessionRegistryWriteValue["type"], dr
 }
 
 function registryWriteValueDraftError(type: SessionRegistryWriteValue["type"], draft: string): string | undefined {
-  if (!draft) return "Enter a value before review.";
   if (draft.includes("\0")) return "Registry values cannot contain null characters.";
   if (draft.length > 65_536) return "Registry values are limited to 65,536 characters.";
-  if (type === "binary" && !/^(?:[0-9a-f]{2})+$/iu.test(draft)) return "Binary data must be contiguous even-length hexadecimal.";
+  if (type === "binary" && !/^(?:[0-9a-f]{2})*$/iu.test(draft)) return "Binary data must be contiguous even-length hexadecimal.";
   if (type === "dword" && (!/^\d+$/u.test(draft) || Number(draft) > 0xffff_ffff)) return "DWORD must be an unsigned 32-bit decimal integer.";
   if (type === "qword") {
     if (!/^\d{1,20}$/u.test(draft)) return "QWORD must be an unsigned 64-bit decimal integer.";
@@ -3623,6 +3812,21 @@ function registryLocation(hive: SessionRegistryHive, path: string): string {
 
 function registryValueTypeLabel(type: SessionRegistryWriteValue["type"]): string {
   return ({ string: "String", binary: "Binary", dword: "DWORD", qword: "QWORD" } as const)[type];
+}
+
+function registryReadValueTypeLabel(type: SessionRegistryReadResult["type"]): string {
+  return type === "unknown" ? "Unknown" : registryValueTypeLabel(type);
+}
+
+function registryReadDisplayValue(result: SessionRegistryReadResult): string {
+  if (result.type === "binary") return result.value.match(/.{1,2}/gu)?.join(" ") ?? "";
+  if (result.type === "dword" && /^\d+$/u.test(result.value)) {
+    return `0x${Number(result.value).toString(16).padStart(8, "0")} (${result.value})`;
+  }
+  if (result.type === "qword" && /^\d+$/u.test(result.value)) {
+    return `0x${BigInt(result.value).toString(16).padStart(16, "0")} (${result.value})`;
+  }
+  return result.value;
 }
 
 function registryReviewValue(value: SessionRegistryWriteValue): string {

@@ -2,8 +2,8 @@
 
 - Status: living document
 - Scope: remote Sliver operator workflows
-- Parity baseline: Sliver commit `bbb20155b7a18d4906ec936566bf0dc61fe38f35`
-- Last command-tree audit: 2026-09-08
+- Parity baseline: Sliver commit `f8430cecf7ceb5cb332c84fb36aba9b75188802d`
+- Last command-tree audit: 2026-09-20
 - Target desktop platforms: macOS arm64 and x64 (universal package), Windows
   x64, Linux x64
 
@@ -29,11 +29,11 @@ server process; administer certificate authorities; or expose other local
 The authoritative interactive parity sources are the registered remote-client
 command trees, not the presence of Go packages or helper functions:
 
-- [`client/command/server.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/bbb20155b7a18d4906ec936566bf0dc61fe38f35/client/command/server.go)
-- [`client/command/sliver.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/bbb20155b7a18d4906ec936566bf0dc61fe38f35/client/command/sliver.go)
+- [`client/command/server.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/f8430cecf7ceb5cb332c84fb36aba9b75188802d/client/command/server.go)
+- [`client/command/sliver.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/f8430cecf7ceb5cb332c84fb36aba9b75188802d/client/command/sliver.go)
 
 Root client modes such as config import and stdio MCP are audited separately
-from [`client/cli/cli.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/bbb20155b7a18d4906ec936566bf0dc61fe38f35/client/cli/cli.go).
+from [`client/cli/cli.go` at the pinned baseline](https://github.com/BishopFox/sliver/blob/f8430cecf7ceb5cb332c84fb36aba9b75188802d/client/cli/cli.go).
 
 The baseline must be updated deliberately. A newer Sliver checkout does not
 silently expand this roadmap until its reachable command trees and protobuf
@@ -320,7 +320,7 @@ Operator-only scope is enforced at the application boundary:
 | M2 | Core endpoint reconnaissance, files, and processes | **Complete (accepted session-first scope)** | 4-6 weeks |
 | M3 | Bounded session streaming and managed shells | **Complete (accepted session-shell scope)** | 3-5 weeks |
 | M4 | Execution, post-exploitation, and privilege workflows | **Awaiting operator acceptance** | 4-6 weeks |
-| M5 | Forwarding, SOCKS, WireGuard networking, and pivots | **In progress (rc4 forwarding slice delivered)** | 4-5 weeks |
+| M5 | Forwarding, SOCKS, WireGuard networking, and pivots | **In progress (rc5 forwarding slice delivered)** | 4-5 weeks |
 | M6 | Operator data, collaboration, monitoring, and cracking | Not started | 4-6 weeks |
 | M7 | Complete payload, profile, build, and encoder lifecycle | Not started | 3-5 weeks |
 | M8 | Extensions, Armory, automation, AI, and MCP | Not started | 5-8 weeks |
@@ -897,7 +897,7 @@ slice proceeds without changing that M4 acceptance status.
 - Dependencies: M1 and the M3 bounded-stream foundation; the operator-directed
   forwarding slice proceeds while M4 acceptance remains open
 
-The sliver-script rc4 forwarding slice was delivered on 2026-09-08. It provides
+The sliver-script rc5 forwarding slice is delivered. It provides
 strict main-owned local port-forward and SOCKS handles, authoritative
 session-scoped reverse-forward inventory, a dedicated Network window, and a
 deterministic native-menu Electron journey. Real-server and packaged-platform
@@ -1259,7 +1259,7 @@ fields per reachable command node:
 {
   "schemaVersion": 1,
   "id": "implant.filesystem.download",
-  "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
+  "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
   "source": "sliver/client/command/filesystem/commands.go",
   "surface": "implant",
   "operatorScope": true,

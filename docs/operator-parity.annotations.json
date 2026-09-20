@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "baselineCommit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
-  "reviewVersion": 6,
+  "baselineCommit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+  "reviewVersion": 7,
   "reviewPolicy": "Every generated reachable node has an explicit product classification. Regeneration never edits this file.",
   "scopeDecisions": [
     {
@@ -30,7 +30,7 @@
       "status": "in-progress",
       "milestone": "M5",
       "operatorScope": true,
-      "notes": "The sliver-script rc4 local port-forward, reverse-port-forward, and SOCKS5 management slice is implemented behind strict main-owned handles and a dedicated Network window. Contract, controller, IPC, renderer, native-menu, and Electron journey coverage is complete. Real-server and packaged-platform certification, broader-bind confirmation, reconnect and fault-injection evidence, pivots, and WireGuard workflows remain open."
+      "notes": "The sliver-script rc5 local port-forward, reverse-port-forward, and SOCKS5 management slice is implemented behind strict main-owned handles and a dedicated Network window. Contract, controller, IPC, renderer, native-menu, and Electron journey coverage is complete. Real-server and packaged-platform certification, broader-bind confirmation, reconnect and fault-injection evidence, pivots, and WireGuard workflows remain open."
     },
     {
       "id": "operator-transport.wireguard",
@@ -2962,7 +2962,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window inventories main-owned sliver-script rc4 port-forward handles across the bound backend, grouped by session and including state and byte counters. Automated contract, controller, IPC, renderer, and Electron coverage passes; real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window inventories main-owned sliver-script rc5 port-forward handles across the bound backend, grouped by session and including state and byte counters. Automated contract, controller, IPC, renderer, and Electron coverage passes; real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.portfwd.add",
@@ -3008,7 +3008,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window validates and starts sliver-script rc4 port forwards for the exact selected session, using a loopback local-bind default and main-owned lifecycle. Broader-bind confirmation plus real-server and packaged-platform certification remain pending."
+      "notes": "The dedicated Network window validates and starts sliver-script rc5 port forwards for the exact selected session, using a loopback local-bind default and main-owned lifecycle. Broader-bind confirmation plus real-server and packaged-platform certification remain pending."
     },
     {
       "id": "implant.portfwd.rm",
@@ -3052,7 +3052,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window stops the exact main-owned sliver-script rc4 port-forward handle and reports terminal failures. Real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window stops the exact main-owned sliver-script rc5 port-forward handle and reports terminal failures. Real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.procdump",
@@ -3790,7 +3790,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window shows server-authoritative sliver-script rc4 reverse-forward inventory across all active sessions, including partial per-session inventory errors. Rc4 does not expose reverse-forward byte counters; real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window shows server-authoritative sliver-script rc5 reverse-forward inventory across all active sessions, including partial per-session inventory errors. Rc5 does not expose reverse-forward byte counters; real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.rportfwd.add",
@@ -3836,7 +3836,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window validates and starts sliver-script rc4 reverse forwards for the exact selected session and refreshes authoritative inventory. Endpoint confirmation plus real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window validates and starts sliver-script rc5 reverse forwards for the exact selected session and refreshes authoritative inventory. Endpoint confirmation plus real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.rportfwd.rm",
@@ -3880,7 +3880,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window revalidates the exact listener, bind, and destination against authoritative inventory before stopping a sliver-script rc4 reverse forward. Real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window revalidates the exact listener, bind, and destination against authoritative inventory before stopping a sliver-script rc5 reverse forward. Real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.runas",
@@ -4407,7 +4407,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window inventories main-owned sliver-script rc4 SOCKS5 handles across the bound backend, grouped by session with state, authentication visibility, and byte counters. Automated coverage passes; real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window inventories main-owned sliver-script rc5 SOCKS5 handles across the bound backend, grouped by session with state, authentication visibility, and byte counters. Automated coverage passes; real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.socks5.start",
@@ -4453,7 +4453,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window starts sliver-script rc4 SOCKS5 proxies for the exact selected session with a loopback default, optional credentials, transient password handling, and an unauthenticated wildcard warning. Exact broader-bind confirmation plus real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window starts sliver-script rc5 SOCKS5 proxies for the exact selected session with a loopback default, optional credentials, transient password handling, and an unauthenticated wildcard warning. Exact broader-bind confirmation plus real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.socks5.stop",
@@ -4497,7 +4497,7 @@
         "network-window-renderer",
         "network-window-native-e2e"
       ],
-      "notes": "The dedicated Network window stops the exact main-owned sliver-script rc4 SOCKS5 handle and reports terminal failures. Real-server and packaged-platform certification remains pending."
+      "notes": "The dedicated Network window stops the exact main-owned sliver-script rc5 SOCKS5 handle and reports terminal failures. Real-server and packaged-platform certification remains pending."
     },
     {
       "id": "implant.spawndll",
@@ -6664,20 +6664,27 @@
         "not-applicable"
       ],
       "meaningfulOptions": [
+        "advice-disable",
         "attack-mode",
         "backend-devices",
+        "backend-devices-virthost",
+        "backend-devices-virtmulti",
         "backend-ignore-cuda",
         "backend-ignore-hip",
         "backend-ignore-metal",
         "backend-ignore-opencl",
         "backend-info",
+        "backend-info-level",
         "backend-vector-width",
         "benchmark",
         "benchmark-all",
+        "benchmark-max",
+        "benchmark-min",
         "bitmap-max",
         "bitmap-min",
         "brain-client",
         "brain-client-features",
+        "brain-feed",
         "brain-host",
         "brain-password",
         "brain-port",
@@ -6685,23 +6692,45 @@
         "brain-server-timer",
         "brain-session",
         "brain-session-whitelist",
+        "bridge-parameter1",
+        "bridge-parameter2",
+        "bridge-parameter3",
+        "bridge-parameter4",
+        "bypass-delay",
+        "bypass-threshold",
+        "color-cracked",
         "cpu-affinity",
+        "crackstation",
+        "credential",
+        "credential-collection",
         "custom-charset1",
         "custom-charset2",
         "custom-charset3",
         "custom-charset4",
+        "custom-charset5",
+        "custom-charset6",
+        "custom-charset7",
+        "custom-charset8",
+        "debug-file",
         "debug-mode",
         "deprecated-check-disable",
+        "dynamic-x",
         "encoding-from",
         "encoding-to",
+        "encrypt-with-pubkey",
         "force",
         "generate-rules",
         "generate-rules-fun-max",
         "generate-rules-fun-min",
+        "generate-rules-func-max",
+        "generate-rules-func-min",
         "generate-rules-func-sel",
         "generate-rules-seed",
         "hash",
+        "hash-copy",
         "hash-info",
+        "hash-info-level",
+        "hash-mode",
         "hash-type",
         "hccapx-message-pair",
         "hex-charset",
@@ -6711,9 +6740,14 @@
         "hwmon-disable",
         "hwmon-temp-abort",
         "identify",
+        "identify-mode",
+        "include-cracked-credentials",
         "increment",
+        "increment-inverse",
         "increment-max",
         "increment-min",
+        "induction-dir",
+        "input",
         "keep-guessing",
         "kernel-accel",
         "kernel-loops",
@@ -6723,6 +6757,7 @@
         "left",
         "limit",
         "logfile-disable",
+        "lookup",
         "loopback",
         "machine-readable",
         "markov-classic",
@@ -6730,13 +6765,19 @@
         "markov-hcstat2",
         "markov-inverse",
         "markov-threshold",
+        "metal-compiler-runtime",
+        "multiply-accel-disable",
         "multiply-accel-disabled",
         "nonce-error-corrections",
         "opencl-device-types",
         "optimized-kernel-enable",
+        "outfile",
         "outfile-autohex-disable",
+        "outfile-check-dir",
         "outfile-check-timer",
         "outfile-format",
+        "outfile-json",
+        "pipeline-stats",
         "potfile",
         "potfile-disable",
         "progress-only",
@@ -6746,9 +6787,14 @@
         "restore",
         "restore-disable",
         "restore-file",
+        "restore-position",
+        "restore-show-command",
+        "rule-left",
+        "rule-right",
         "rules-file",
         "runtime",
         "scrypt-tmto",
+        "seekdb-path",
         "segment-size",
         "self-test-disable",
         "separator",
@@ -6761,10 +6807,16 @@
         "status",
         "status-json",
         "status-timer",
+        "stdin",
         "stdin-timeout-abort",
-        "stdout",
+        "task-time-breakdown",
         "timeout",
+        "total-candidates",
+        "truecrypt-keyfiles",
         "username",
+        "veracrypt-keyfiles",
+        "veracrypt-pim-start",
+        "veracrypt-pim-stop",
         "wordlist-autohex-disable",
         "workload-profile"
       ],
@@ -6774,6 +6826,42 @@
       "guiSurface": "operator-data",
       "testIds": [
         "parity-contract:server.crack"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.benchmarks",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [
+        "all"
+      ],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.benchmarks"
       ],
       "notes": "Registered server workflow assigned to M6."
     },
@@ -6878,6 +6966,216 @@
       "guiSurface": "operator-data",
       "testIds": [
         "parity-contract:server.crack.hcstat2.rm"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.job",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [
+        "poll-interval",
+        "timeout",
+        "watch"
+      ],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.job"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.job.cancel",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.job.cancel"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.job.pause",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.job.pause"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.job.resume",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.job.resume"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.job.rm",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.job.rm"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.jobs",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [
+        "timeout"
+      ],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.jobs"
       ],
       "notes": "Registered server workflow assigned to M6."
     },
@@ -7018,6 +7316,42 @@
       "guiSurface": "operator-data",
       "testIds": [
         "parity-contract:server.crack.stations"
+      ],
+      "notes": "Registered server workflow assigned to M6."
+    },
+    {
+      "id": "server.crack.top",
+      "operatorScope": true,
+      "status": "planned",
+      "milestone": "M6",
+      "restrictionReview": {
+        "targetModes": [
+          "not-applicable"
+        ],
+        "targetOperatingSystems": [
+          "not-applicable"
+        ],
+        "transports": [
+          "any"
+        ]
+      },
+      "restrictionEvidenceReview": {
+        "targetModes": "server-command-tree-not-target-bound",
+        "targetOperatingSystems": "server-command-tree-not-target-bound",
+        "transports": "server-command-tree-visible-unless-console-hidden"
+      },
+      "meaningfulModes": [
+        "not-applicable"
+      ],
+      "meaningfulOptions": [
+        "poll-interval"
+      ],
+      "dependencies": [
+        "compatible-server"
+      ],
+      "guiSurface": "operator-data",
+      "testIds": [
+        "parity-contract:server.crack.top"
       ],
       "notes": "Registered server workflow assigned to M6."
     },
@@ -7584,6 +7918,7 @@
         "reconnect",
         "run-at-load",
         "save",
+        "service-name",
         "shellcode-bypass",
         "shellcode-compress",
         "shellcode-encoder",
@@ -7687,6 +8022,7 @@
         "run-at-load",
         "save",
         "seconds",
+        "service-name",
         "shellcode-bypass",
         "shellcode-compress",
         "shellcode-encoder",
@@ -9026,6 +9362,7 @@
         "reconnect",
         "run-at-load",
         "save",
+        "service-name",
         "shellcode-bypass",
         "shellcode-compress",
         "shellcode-encoder",
@@ -9126,6 +9463,7 @@
         "run-at-load",
         "save",
         "seconds",
+        "service-name",
         "shellcode-bypass",
         "shellcode-compress",
         "shellcode-encoder",

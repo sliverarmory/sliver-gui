@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
+import { sliverpb } from "sliver-script";
 
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 import {
@@ -401,14 +402,21 @@ export class SessionWorkbench {
             input.path,
             input.key,
           ));
-        assertImplantResponse(response, "Registry read");
-        const value: SessionRegistryReadResult = {
-          hive: input.hive,
-          path: boundedPath(input.path),
-          key: boundedText(input.key, 512),
-          value: boundedText(response.Value),
-        };
-        return { operationId: input.operationId, value };
+        try {
+          assertImplantResponse(response, "Registry read");
+          const read = normalizeRegistryRead(response);
+          const value: SessionRegistryReadResult = {
+            hive: input.hive,
+            path: boundedPath(input.path),
+            key: boundedText(input.key, 512),
+            ...read,
+          };
+          return { operationId: input.operationId, value };
+        } finally {
+          // Raw registry bytes stay in main and are cleared whether the agent
+          // returned a usable value, an error, or an unsupported future type.
+          if (Buffer.isBuffer(response.Binary)) response.Binary.fill(0);
+        }
       }
       case "session.registry.list-subkeys": {
         const response = await this.remote(input.operationId, () =>
@@ -1298,6 +1306,52 @@ function boundedText(value: unknown, maximum: number = SESSION_WORKBENCH_MAX_TEX
     .normalize("NFC")
     .slice(0, maximum)
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, "�");
+}
+
+function normalizeRegistryRead(response: {
+  readonly Value?: unknown;
+  readonly Binary?: unknown;
+  readonly Type?: unknown;
+}): Pick<SessionRegistryReadResult, "type" | "value"> {
+  switch (response.Type) {
+    case sliverpb.RegistryType.Binary:
+      return {
+        type: "binary",
+        value: consumeRegistryReadBytes(response.Binary, "Binary", undefined, (bytes) => bytes.toString("hex")),
+      };
+    case sliverpb.RegistryType.String:
+      return { type: "string", value: boundedText(response.Value) };
+    case sliverpb.RegistryType.DWORD:
+      return {
+        type: "dword",
+        value: consumeRegistryReadBytes(response.Binary, "DWORD", 4, (bytes) => bytes.readUInt32LE(0).toString(10)),
+      };
+    case sliverpb.RegistryType.QWORD:
+      return {
+        type: "qword",
+        value: consumeRegistryReadBytes(response.Binary, "QWORD", 8, (bytes) => bytes.readBigUInt64LE(0).toString(10)),
+      };
+    default:
+      // Value-only responses from older implants decode with Type=Unknown and
+      // an empty Binary field. Preserve that representation without guessing.
+      return { type: "unknown", value: boundedText(response.Value) };
+  }
+}
+
+function consumeRegistryReadBytes(
+  value: unknown,
+  label: string,
+  exactLength: number | undefined,
+  consume: (bytes: Buffer) => string,
+): string {
+  if (!Buffer.isBuffer(value)) throw new TypeError(`Registry ${label} value did not return a Buffer`);
+  if (value.length > SESSION_WORKBENCH_MAX_TEXT_LENGTH / 2) {
+    throw new Error(`Registry ${label} value exceeds the session workbench limit`);
+  }
+  if (exactLength !== undefined && value.length !== exactLength) {
+    throw new Error(`Registry ${label} value must contain exactly ${exactLength} bytes`);
+  }
+  return consume(value);
 }
 
 function boundedPath(value: unknown): string {

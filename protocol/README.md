@@ -5,7 +5,7 @@ used by operator-command parity and native-console source alignment. The full
 Sliver commit and tree are verified before inventory generation. Tools never
 implicitly read the ignored adjacent `./sliver` checkout.
 
-The TypeScript client is the exact `sliver-script@2.0.0-rc.4` registry package
+The TypeScript client is the exact `sliver-script@2.0.0-rc.5` registry package
 installed by the root `package-lock.json`. `sliver-script-provenance.json` pins
 its registry tarball, integrity and shasum, source tag and commit, and hashes of
 the installed package manifest plus its integration and protobuf locks. The

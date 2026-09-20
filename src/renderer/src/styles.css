@@ -739,6 +739,20 @@
   }
 }
 
+/* Registry values form a continuous editor pane, including virtualized rows. */
+.session-registry-values-grid.table-root,
+.session-registry-values-grid.table-root :is(.table__content, .table__header, .table__body, .table__row, .table__column, .table__cell) {
+  border-radius: 0;
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.session-registry-values-grid.table-root .table__body {
+  box-shadow: none;
+}
+
 @media (max-width: 900px) {
   .form-grid,
   .form-grid--three {

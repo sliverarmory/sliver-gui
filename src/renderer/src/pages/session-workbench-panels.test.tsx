@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -13,6 +13,7 @@ import type {
 } from "../../../shared/session-contracts";
 import type { SessionSummary } from "../../../shared/target-contracts";
 import type { SessionWorkspacePanelContext } from "./SessionWorkspacePage";
+import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 import {
   SessionEnvironmentPanel,
   SessionFilesPanel,
@@ -1322,7 +1323,7 @@ describe("session workbench panels", () => {
             page: { limit: 500, total: 1, truncated: false },
           });
         case "session.registry.read":
-          return workbench(input.operationId, { hive: input.hive, path: input.path, key: input.key, value: "C:\\Program Files\\Sliver" });
+          return workbench(input.operationId, { hive: input.hive, path: input.path, key: input.key, type: "string", value: "C:\\Program Files\\Sliver" });
         case "session.registry.read-hive":
           return workbench(input.operationId, { status: "canceled" });
         default: throw new Error(`Unexpected operation ${input.operationId}`);
@@ -1627,7 +1628,7 @@ describe("session workbench panels", () => {
     expect(within(screen.getByRole("treegrid", { name: "Registry keys" })).queryByText("Old")).not.toBeInTheDocument();
   });
 
-  it("keeps only the latest registry value read and shows pending state on that row", async () => {
+  it("keeps the latest registry selection while caching earlier completed reads", async () => {
     const user = userEvent.setup();
     const firstRead = deferred<unknown>();
     const secondRead = deferred<unknown>();
@@ -1663,6 +1664,7 @@ describe("session workbench panels", () => {
         hive: "HKCU",
         path: "",
         key: "Second",
+        type: "string",
         value: "newest-data",
       }));
     });
@@ -1673,11 +1675,570 @@ describe("session workbench panels", () => {
         hive: "HKCU",
         path: "",
         key: "First",
+        type: "string",
         value: "stale-data",
       }));
     });
     expect(within(screen.getByRole("region", { name: "Selected value data" })).getByText("newest-data")).toBeInTheDocument();
-    expect(screen.queryByText("stale-data")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Selected value data" })).queryByText("stale-data")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("grid", { name: "Registry values in HKCU" })).getByText("stale-data")).toBeInTheDocument();
+  });
+
+  async function navigateRegistryAddress(user: ReturnType<typeof userEvent.setup>, address: string, gridName: string) {
+    const input = screen.getByRole("textbox", { name: "Registry path" });
+    await user.clear(input);
+    await user.type(input, `${address}{Enter}`, { skipClick: true });
+    return screen.findByRole("grid", { name: gridName });
+  }
+
+  function registryContextWorkbench(input: SessionWorkbenchInput) {
+    if (input.operationId === "session.registry.list-subkeys") {
+      const items = input.path === "" ? ["Software", "Other"] : input.path === "Software" ? ["Current", "Target"] : [];
+      return workbench(input.operationId, { items, page: { limit: 500, total: items.length, truncated: false } });
+    }
+    if (input.operationId === "session.registry.list-values") {
+      return workbench(input.operationId, { items: ["Message"], page: { limit: 500, total: 1, truncated: false } });
+    }
+    if (input.operationId === "session.registry.read") {
+      return workbench(input.operationId, { hive: input.hive, path: input.path, key: input.key, type: "unknown", value: "existing data" });
+    }
+    throw new Error(`Unexpected operation ${input.operationId}`);
+  }
+
+  it.each(["Create key", "Write value"] as const)("prefills %s from a right-clicked registry key without navigating to it", async (action) => {
+    const user = userEvent.setup();
+    const api = installAPI(registryContextWorkbench);
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    const clicked = within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("Software");
+    fireEvent.contextMenu(clicked);
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: action }));
+    const editor = await screen.findByRole("dialog", { name: "Review registry change" });
+    expect(within(editor).getByRole("textbox", { name: "Registry location" })).toHaveValue("Computer\\HKEY_CURRENT_USER\\Software");
+    expect(within(editor).getByRole("textbox", { name: action === "Create key" ? "New subkey name" : "Value name" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "Registry path", hidden: true })).toHaveValue("Computer\\HKEY_CURRENT_USER");
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values")).toHaveLength(1);
+    expect(api.prepareSessionDestructiveAction).not.toHaveBeenCalled();
+  });
+
+  it.each(["Create key", "Write value"] as const)("prefills toolbar %s with the current location and reviews an edited normalized destination", async (action) => {
+    const user = userEvent.setup();
+    const api = installAPI(registryContextWorkbench, { prepare: (input) => preparedAction(input) });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    await navigateRegistryAddress(user, "HKCU\\Software\\Current", "Registry values in HKCU Software\\Current");
+    await user.click(screen.getByRole("button", { name: action }));
+    const editor = await screen.findByRole("dialog", { name: "Review registry change" });
+    const location = within(editor).getByRole("textbox", { name: "Registry location" });
+    expect(location).toHaveValue("Computer\\HKEY_CURRENT_USER\\Software\\Current");
+    await user.clear(location);
+    await user.type(location, "hklm/Software/Destination", { skipClick: true });
+    await user.click(within(editor).getByRole("radio", { name: action === "Create key" ? "Write value" : "Create key" }));
+    await user.click(within(editor).getByRole("radio", { name: action }));
+    expect(location).toHaveValue("hklm/Software/Destination");
+    if (action === "Create key") {
+      await user.type(within(editor).getByRole("textbox", { name: "New subkey name" }), "NewChild");
+      await user.click(within(editor).getByRole("button", { name: "Review create key" }));
+      await screen.findByRole("alertdialog", { name: "Create this registry key?" });
+      expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({ actionId: "session.registry.create-key", hive: "HKLM", path: "Software\\Destination", key: "NewChild" });
+    } else {
+      await user.type(within(editor).getByRole("textbox", { name: "Value name" }), "Greeting");
+      await user.type(within(editor).getByRole("textbox", { name: "String value" }), "updated data");
+      await user.click(within(editor).getByRole("button", { name: "Review write value" }));
+      await screen.findByRole("alertdialog", { name: "Write this registry value?" });
+      expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({ actionId: "session.registry.write", hive: "HKLM", path: "Software\\Destination", key: "Greeting", value: { type: "string", value: "updated data" } });
+    }
+    expect(api.executeSessionDestructiveActionPlan).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "String",
+      type: "string" as const,
+      value: "existing data",
+      field: "String value",
+      expected: { type: "string" as const, value: "existing data" },
+    },
+    {
+      label: "Binary",
+      type: "binary" as const,
+      value: "007f80ff",
+      field: "Hexadecimal bytes",
+      expected: { type: "binary" as const, hex: "007f80ff" },
+    },
+    {
+      label: "DWORD",
+      type: "dword" as const,
+      value: "1511506142",
+      field: "Unsigned 32-bit value",
+      expected: { type: "dword" as const, value: 1511506142 },
+    },
+    {
+      label: "QWORD",
+      type: "qword" as const,
+      value: "18446744073709551615",
+      field: "Unsigned 64-bit value",
+      expected: { type: "qword" as const, value: "18446744073709551615" },
+    },
+  ])("prefills and directly reviews a known $label registry value", async ({ label, type, value, field, expected }) => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: ["Message"], page: { limit: 500, total: 1, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") {
+        return workbench(input.operationId, { hive: input.hive, path: input.path, key: input.key, type, value });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    }, { prepare: (input) => preparedAction(input) });
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "Message" }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Modify value" }));
+    const editor = await screen.findByRole("dialog", { name: "Modify registry value" });
+    expect(within(editor).getByRole("button", { name: /Registry value type/ })).toHaveTextContent(label);
+    expect(within(editor).getByRole("textbox", { name: field })).toHaveValue(value);
+    expect(within(editor).queryByText("The selected agent did not report this value's type. Choose it before reviewing.")).not.toBeInTheDocument();
+    expect(within(editor).getByRole("button", { name: "Review write value" })).toBeEnabled();
+    await user.click(within(editor).getByRole("button", { name: "Review write value" }));
+    await screen.findByRole("alertdialog", { name: "Write this registry value?" });
+    expect(api.prepareSessionDestructiveAction).toHaveBeenCalledExactlyOnceWith({
+      actionId: "session.registry.write",
+      hive: "HKCU",
+      path: "",
+      key: "Message",
+      value: expected,
+    });
+    expect(api.executeSessionDestructiveActionPlan).not.toHaveBeenCalled();
+  });
+
+  it("preserves the manual type fallback for a legacy registry value", async () => {
+    const user = userEvent.setup();
+    const api = installAPI(registryContextWorkbench, { prepare: (input) => preparedAction(input) });
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "Message" }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Modify value" }));
+    const editor = await screen.findByRole("dialog", { name: "Modify registry value" });
+    expect(within(editor).getByRole("textbox", { name: "Registry location" })).toHaveValue("Computer\\HKEY_CURRENT_USER");
+    expect(within(editor).getByRole("textbox", { name: "Value name" })).toHaveValue("Message");
+    expect(within(editor).getByRole("textbox", { name: "Value data" })).toHaveValue("existing data");
+    expect(within(editor).getByText("Select value type")).toBeInTheDocument();
+    expect(within(editor).getByText("The selected agent did not report this value's type. Choose it before reviewing.")).toBeInTheDocument();
+    expect(within(editor).getByRole("button", { name: "Review write value" })).toBeDisabled();
+    await user.click(within(editor).getByRole("button", { name: /Registry value type/ }));
+    await user.click(await screen.findByRole("option", { name: "DWORD" }));
+    expect(within(editor).getByRole("textbox", { name: "Unsigned 32-bit value" })).toHaveValue("existing data");
+    expect(within(editor).getByRole("alert")).toHaveTextContent("DWORD must be an unsigned 32-bit decimal integer.");
+    expect(within(editor).getByRole("button", { name: "Review write value" })).toBeDisabled();
+    await user.click(within(editor).getByRole("button", { name: /Registry value type/ }));
+    await user.click(await screen.findByRole("option", { name: "String" }));
+    expect(within(editor).getByRole("textbox", { name: "String value" })).toHaveValue("existing data");
+    await user.click(within(editor).getByRole("button", { name: "Review write value" }));
+    await screen.findByRole("alertdialog", { name: "Write this registry value?" });
+    expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({ actionId: "session.registry.write", hive: "HKCU", path: "", key: "Message", value: { type: "string", value: "existing data" } });
+    expect(api.executeSessionDestructiveActionPlan).not.toHaveBeenCalled();
+  });
+
+  it("reopens Modify from a typed cached registry value without another read", async () => {
+    const user = userEvent.setup();
+    let readCount = 0;
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: ["Message"], page: { limit: 500, total: 1, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") {
+        readCount += 1;
+        return workbench(input.operationId, {
+          hive: input.hive,
+          path: input.path,
+          key: input.key,
+          type: "binary",
+          value: "deadbeef",
+        });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    const valueName = within(grid).getByRole("rowheader", { name: "Message" });
+
+    fireEvent.contextMenu(valueName);
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Modify value" }));
+    let editor = await screen.findByRole("dialog", { name: "Modify registry value" });
+    expect(within(editor).getByRole("button", { name: /Registry value type/ })).toHaveTextContent("Binary");
+    expect(within(editor).getByRole("textbox", { name: "Hexadecimal bytes" })).toHaveValue("deadbeef");
+    expect(readCount).toBe(1);
+    await user.click(within(editor).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Modify registry value" })).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(valueName);
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Modify value" }));
+    editor = await screen.findByRole("dialog", { name: "Modify registry value" });
+    expect(within(editor).getByRole("button", { name: /Registry value type/ })).toHaveTextContent("Binary");
+    expect(within(editor).getByRole("textbox", { name: "Hexadecimal bytes" })).toHaveValue("deadbeef");
+    expect(readCount).toBe(1);
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.read")).toHaveLength(1);
+  });
+
+  it("reviews deletion of the right-clicked registry key instead of the current selected key", async () => {
+    const user = userEvent.setup();
+    const api = installAPI(registryContextWorkbench, { prepare: (input) => preparedAction(input) });
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    await navigateRegistryAddress(user, "HKCU\\Software", "Registry values in HKCU Software");
+    await user.click(within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("Current"));
+    await screen.findByRole("grid", { name: "Registry values in HKCU Software\\Current" });
+    fireEvent.contextMenu(within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("Target"));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Delete key" }));
+    await screen.findByRole("alertdialog", { name: "Delete this registry key?" });
+    expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({ actionId: "session.registry.delete-key", hive: "HKCU", path: "Software", key: "Target" });
+    expect(api.executeSessionDestructiveActionPlan).not.toHaveBeenCalled();
+  });
+
+  it("omits registry Delete for hives and values and clears domain actions on headers and blank space", async () => {
+    const user = userEvent.setup();
+    installAPI(registryContextWorkbench);
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    fireEvent.contextMenu(within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("HKEY_CURRENT_USER"));
+    rendered.contextMenu.emit();
+    let menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getByRole("menuitem", { name: "Create key" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: /Delete|Modify/ })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "Message" }));
+    rendered.contextMenu.emit();
+    menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getByRole("menuitem", { name: "Modify value" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: /Delete/ })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    for (const target of [within(grid).getByRole("columnheader", { name: "Name" }), grid]) {
+      fireEvent.contextMenu(target);
+      rendered.contextMenu.emit();
+      menu = await screen.findByRole("menu", { name: "Application context menu" });
+      expect(within(menu).queryByRole("menuitem", { name: /Create key|Write value|Modify value|Delete key/ })).not.toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    }
+  });
+
+  it.each(["navigation", "route change"] as const)("ignores registry context menu actions captured before %s", async (change) => {
+    const user = userEvent.setup();
+    const api = installAPI(registryContextWorkbench);
+    const context = panelContext({ os: "windows", arch: "amd64" });
+    const rendered = render(<SessionRegistryPanel {...context} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    const address = screen.getByRole("textbox", { name: "Registry path" });
+    fireEvent.contextMenu(within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("Software"));
+    rendered.contextMenu.emit();
+    const action = await screen.findByRole("menuitem", { name: "Create key" });
+    if (change === "navigation") {
+      fireEvent.change(address, { target: { value: "HKCU\\Other" } });
+      fireEvent.submit(address.closest("form")!);
+      await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.list-values", hive: "HKCU", path: "Other", limit: 500 }));
+    } else rendered.rerender(<SessionRegistryPanel {...context} route={{ ...context.route, backendEpoch: context.route.backendEpoch + 1 }} />);
+    await user.click(action);
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    });
+    expect(screen.queryByRole("dialog", { name: "Review registry change" })).not.toBeInTheDocument();
+    expect(api.prepareSessionDestructiveAction).not.toHaveBeenCalled();
+  });
+
+  it.each(["navigation", "newer create", "newer delete"] as const)("does not reopen a registry Modify form after %s supersedes its value read", async (change) => {
+    const user = userEvent.setup();
+    const pendingRead = deferred<unknown>();
+    const api = installAPI((input) => input.operationId === "session.registry.read" ? pendingRead.promise : registryContextWorkbench(input), { prepare: (input) => preparedAction(input) });
+    const rendered = render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "Message" }));
+    rendered.contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Modify value" }));
+    await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.read", hive: "HKCU", path: "", key: "Message" }));
+    if (change === "navigation") await navigateRegistryAddress(user, "HKCU\\Other", "Registry values in HKCU Other");
+    else if (change === "newer create") {
+      await user.click(screen.getByRole("button", { name: "Create key" }));
+      await user.type(await screen.findByRole("textbox", { name: "New subkey name" }), "KeepThisDraft");
+    } else {
+      fireEvent.contextMenu(within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("Software"));
+      rendered.contextMenu.emit();
+      await user.click(await screen.findByRole("menuitem", { name: "Delete key" }));
+      await screen.findByRole("alertdialog", { name: "Delete this registry key?" });
+    }
+    await act(async () => {
+      pendingRead.resolve(workbench("session.registry.read", { hive: "HKCU", path: "", key: "Message", type: "string", value: "late data" }));
+    });
+    expect(screen.queryByRole("dialog", { name: "Modify registry value" })).not.toBeInTheDocument();
+    if (change === "newer create") expect(screen.getByRole("textbox", { name: "New subkey name" })).toHaveValue("KeepThisDraft");
+    else expect(screen.queryByRole("dialog", { name: "Review registry change" })).not.toBeInTheDocument();
+    if (change === "newer delete") {
+      expect(screen.getByRole("alertdialog", { name: "Delete this registry key?" })).toBeInTheDocument();
+      expect(api.prepareSessionDestructiveAction).toHaveBeenCalledExactlyOnceWith({ actionId: "session.registry.delete-key", hive: "HKCU", path: "", key: "Software" });
+    } else expect(api.prepareSessionDestructiveAction).not.toHaveBeenCalled();
+    expect(api.executeSessionDestructiveActionPlan).not.toHaveBeenCalled();
+  });
+
+  it("caches registry values across paths and hives with case-insensitive names while explicit Read refetches", async () => {
+    const user = userEvent.setup();
+    let readCount = 0;
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: [input.path === "software" ? "name" : "Name"], page: { limit: 500, total: 1, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") {
+        return workbench(input.operationId, { ...input, type: "string", value: `${input.hive}:${input.path.toLowerCase()}:${++readCount}` });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    let grid = await navigateRegistryAddress(user, "HKCU\\Software", "Registry values in HKCU Software");
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("HKCU:software:1")).toBeInTheDocument();
+
+    grid = await navigateRegistryAddress(user, "HKCU\\Other", "Registry values in HKCU Other");
+    expect(within(grid).queryByText("HKCU:software:1")).not.toBeInTheDocument();
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("HKCU:other:2")).toBeInTheDocument();
+    grid = await navigateRegistryAddress(user, "HKLM\\Software", "Registry values in HKLM Software");
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("HKLM:software:3")).toBeInTheDocument();
+
+    grid = await navigateRegistryAddress(user, "hkcu\\software", "Registry values in HKCU software");
+    expect(within(grid).getByText("HKCU:software:1")).toBeInTheDocument();
+    await user.click(within(grid).getByText("name", { exact: true }));
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("HKCU:software:1")).toBeInTheDocument();
+    expect(readCount).toBe(3);
+    await user.click(screen.getByRole("button", { name: "Read name" }));
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("HKCU:software:4")).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenLastCalledWith({ operationId: "session.registry.read", hive: "HKCU", path: "software", key: "name" });
+  });
+
+  it("refreshes registry listings and clears all value caches without accepting late reads from before refresh", async () => {
+    const user = userEvent.setup();
+    const staleRead = deferred<unknown>();
+    let childReads = 0;
+    let rootReads = 0;
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: ["Name"], page: { limit: 500, total: 1, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") {
+        if (input.path === "Child" && ++childReads === 1) return staleRead.promise;
+        return workbench(input.operationId, { ...input, type: "string", value: input.path === "Child" ? "fresh-child" : `root-${++rootReads}` });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    let grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(grid).findByText("root-1")).toBeInTheDocument();
+    grid = await navigateRegistryAddress(user, "HKCU\\Child", "Registry values in HKCU Child");
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    await waitFor(() => expect(childReads).toBe(1));
+    const listingsBeforeRefresh = api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values" && input.path === "Child").length;
+    await user.click(screen.getByRole("button", { name: "Refresh registry" }));
+    await screen.findByRole("grid", { name: "Registry values in HKCU Child" });
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values" && input.path === "Child")).toHaveLength(listingsBeforeRefresh + 1);
+    grid = await navigateRegistryAddress(user, "HKCU", "Registry values in HKCU");
+    expect(within(grid).queryByText("root-1")).not.toBeInTheDocument();
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(grid).findByText("root-2")).toBeInTheDocument();
+
+    await act(async () => {
+      staleRead.resolve(workbench("session.registry.read", { hive: "HKCU", path: "Child", key: "Name", type: "string", value: "before-refresh" }));
+    });
+    grid = await navigateRegistryAddress(user, "HKCU\\Child", "Registry values in HKCU Child");
+    expect(within(grid).queryByText("before-refresh")).not.toBeInTheDocument();
+    expect(within(grid).getByText("(not loaded)")).toBeInTheDocument();
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(grid).findByText("fresh-child")).toBeInTheDocument();
+    expect(childReads).toBe(2);
+  });
+
+  it("eagerly loads registry value pages without traversing subkeys or replacing selected details and retries failures only after refresh", async () => {
+    const user = userEvent.setup();
+    const firstRead = deferred<unknown>();
+    const secondRead = deferred<unknown>();
+    const reads = new Map<string, number>();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: ["Child"], page: { limit: 500, total: 2, truncated: true, nextCursor: "subkeys-2" } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, input.cursor ? {
+          items: ["Third", ""], page: { limit: 500, total: 5, truncated: false },
+        } : {
+          items: ["First", "Second", "Denied"], page: { limit: 500, total: 5, truncated: true, nextCursor: "values-2" },
+        });
+      }
+      if (input.operationId === "session.registry.read") {
+        reads.set(input.key, (reads.get(input.key) ?? 0) + 1);
+        if (input.key === "Denied") throw new Error("Access denied");
+        if (input.key === "First" && reads.get(input.key) === 1) return firstRead.promise;
+        if (input.key === "Second" && reads.get(input.key) === 1) return secondRead.promise;
+        return workbench(input.operationId, { ...input, type: "string", value: input.key ? `${input.key}-data` : "" });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    const eager = screen.getByRole("checkbox", { name: "Load all values" });
+    expect(eager).not.toBeChecked();
+    expect(reads.size).toBe(0);
+    await user.click(eager);
+    await waitFor(() => expect([...reads.keys()].sort()).toEqual(["Denied", "First", "Second"]));
+    const grid = screen.getByRole("grid", { name: "Registry values in HKCU" });
+    await user.click(within(grid).getByText("First"));
+    await act(async () => {
+      firstRead.resolve(workbench("session.registry.read", { hive: "HKCU", path: "", key: "First", type: "string", value: "First-data" }));
+    });
+    const details = screen.getByRole("region", { name: "Selected value data" });
+    expect(await within(details).findByText("First-data")).toBeInTheDocument();
+    await act(async () => {
+      secondRead.resolve(workbench("session.registry.read", { hive: "HKCU", path: "", key: "Second", type: "string", value: "Second-data" }));
+    });
+    await waitFor(() => expect([...reads.keys()].sort()).toEqual(["", "Denied", "First", "Second", "Third"]));
+    expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.registry.list-values", hive: "HKCU", path: "", limit: 500, cursor: "values-2" });
+    expect(within(grid).getByText("Second-data")).toBeInTheDocument();
+    expect(within(details).getByText("First-data")).toBeInTheDocument();
+    expect(reads.get("First")).toBe(1);
+    expect(reads.get("Denied")).toBe(1);
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-subkeys")).toHaveLength(1);
+    expect(api.runSessionWorkbench.mock.calls.every(([input]) => !String(input.operationId).startsWith("session.registry.") || !("path" in input) || input.path === "")).toBe(true);
+    await user.click(within(grid).getByText("(Default)"));
+    expect(await within(details).findByText("(empty value)")).toBeInTheDocument();
+    expect(reads.get("")).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh registry" }));
+    await waitFor(() => expect([...reads.values()]).toEqual([2, 2, 2, 2, 2]));
+    expect(screen.getByRole("checkbox", { name: "Load all values" })).toBeChecked();
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.list-values" && input.cursor === "values-2")).toHaveLength(2);
+  });
+
+  it.each(["toggle off", "navigate away"] as const)("stops queued registry eager reads when users %s", async (stop) => {
+    const user = userEvent.setup();
+    const pending = new Map<string, ReturnType<typeof deferred<unknown>>>();
+    const names = Array.from({ length: 8 }, (_, index) => `Value${index}`);
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        const items = input.path ? ["Next0", "Next1"] : names;
+        return workbench(input.operationId, { items, page: { limit: 500, total: items.length, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") {
+        const result = deferred<unknown>();
+        pending.set(input.key, result);
+        return result.promise;
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    await user.click(screen.getByRole("checkbox", { name: "Load all values" }));
+    await waitFor(() => expect(pending.size).toBe(4));
+    if (stop === "toggle off") await user.click(screen.getByRole("checkbox", { name: "Load all values" }));
+    else await navigateRegistryAddress(user, "HKCU\\Other", "Registry values in HKCU Other");
+    expect(pending.size).toBe(4);
+    await act(async () => {
+      for (const [key, result] of [...pending]) {
+        result.resolve(workbench("session.registry.read", { hive: "HKCU", path: "", key, type: "string", value: `${key}-data` }));
+      }
+    });
+    if (stop === "navigate away") {
+      await waitFor(() => expect(pending.size).toBe(6));
+      expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.read" && input.path === "Other")).toHaveLength(2);
+      await act(async () => {
+        for (const key of ["Next0", "Next1"]) {
+          pending.get(key)!.resolve(workbench("session.registry.read", { hive: "HKCU", path: "Other", key, type: "string", value: `${key}-data` }));
+        }
+      });
+    } else expect(pending.size).toBe(4);
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.read" && input.path === "")).toHaveLength(4);
+  });
+
+  it("clears cached registry values when the session route changes", async () => {
+    const user = userEvent.setup();
+    let readCount = 0;
+    installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: ["Name"], page: { limit: 500, total: 1, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") return workbench(input.operationId, { ...input, type: "string", value: `session-data-${++readCount}` });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const context = panelContext({ os: "windows", arch: "amd64" });
+    const { rerender } = render(<SessionRegistryPanel {...context} />);
+    let grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(grid).findByText("session-data-1")).toBeInTheDocument();
+    rerender(<SessionRegistryPanel {...context} route={{ ...context.route, backendEpoch: context.route.backendEpoch + 1 }} />);
+    grid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    expect(within(grid).queryByText("session-data-1")).not.toBeInTheDocument();
+    await user.click(within(grid).getByRole("rowheader", { name: "Name" }));
+    expect(await within(grid).findByText("session-data-2")).toBeInTheDocument();
+  });
+
+  it("resets eager registry loading on a new session route before reading the previous path", async () => {
+    const user = userEvent.setup();
+    let newRoute = false;
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        const items = input.path === "PreviousPath" ? ["PreviousValue"] : [newRoute ? "NewRootValue" : "RootValue"];
+        return workbench(input.operationId, { items, page: { limit: 500, total: 1, truncated: false } });
+      }
+      if (input.operationId === "session.registry.read") {
+        return workbench(input.operationId, { ...input, type: "string", value: `${input.key}-data` });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const context = panelContext({ os: "windows", arch: "amd64" });
+    const { rerender } = render(<SessionRegistryPanel {...context} />);
+    await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    const previousGrid = await navigateRegistryAddress(user, "HKCU\\PreviousPath", "Registry values in HKCU PreviousPath");
+    await user.click(screen.getByRole("checkbox", { name: "Load all values" }));
+    expect(await within(previousGrid).findByText("PreviousValue-data")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Load all values" })).toBeChecked();
+
+    api.runSessionWorkbench.mockClear();
+    newRoute = true;
+    rerender(<SessionRegistryPanel {...context} route={{ ...context.route, backendEpoch: context.route.backendEpoch + 1 }} />);
+    const nextGrid = await screen.findByRole("grid", { name: "Registry values in HKCU" });
+    expect(within(nextGrid).getByRole("rowheader", { name: "NewRootValue" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Load all values" })).not.toBeChecked();
+    expect(within(nextGrid).queryByText("PreviousValue-data")).not.toBeInTheDocument();
+    expect(api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === "session.registry.read")).toEqual([]);
+    expect(api.runSessionWorkbench.mock.calls.every(([input]) => !("path" in input) || input.path === "")).toBe(true);
   });
 
   it("builds UNC breadcrumbs from the server-share root", () => {

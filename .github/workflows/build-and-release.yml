@@ -171,7 +171,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: BishopFox/sliver
-          ref: bbb20155b7a18d4906ec936566bf0dc61fe38f35
+          ref: f8430cecf7ceb5cb332c84fb36aba9b75188802d
           path: sliver
           persist-credentials: false
 

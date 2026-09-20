@@ -3,15 +3,15 @@
   "component": "sliver-client console",
   "source": {
     "repository": "https://github.com/BishopFox/sliver.git",
-    "commit": "bbb20155b7a18d4906ec936566bf0dc61fe38f35",
-    "tree": "29be1ac3a7580b1f0b672d8ade45fd32389e6231",
+    "commit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+    "tree": "430f88ba6707f253c628022e201084657ac5a3c2",
     "entrypoint": "./client",
     "module": "github.com/bishopfox/sliver",
     "commandPackage": "github.com/bishopfox/sliver/client",
     "license": "GPL-3.0-or-later",
     "licenseFile": "LICENSE",
     "licenseSha256": "8b1ba204bb69a0ade2bfcf65ef294a920f6bb361b317dba43c7ef29d96332b9b",
-    "correspondingSource": "https://github.com/BishopFox/sliver/tree/bbb20155b7a18d4906ec936566bf0dc61fe38f35"
+    "correspondingSource": "https://github.com/BishopFox/sliver/tree/f8430cecf7ceb5cb332c84fb36aba9b75188802d"
   },
   "toolchain": {
     "go": "go1.27.1"
@@ -57,8 +57,8 @@
         {
           "sourcePath": "client/console/console.go",
           "replacementPath": "protocol/sliver-console-overlay/client/console/console.go",
-          "baseSha256": "41e0eb3b8b200a274b60d2b31db6f4b9438c85e69f27ead1bcf7c164814a850d",
-          "sha256": "c66567d50a5cc2c1e909b47934e4ef041fa7d056aeec7e3bcb6e64631886fb3a",
+          "baseSha256": "3d7dddfddf5717d2665bf64f14a6313ec274fdb18934de2f110a88122f669bd7",
+          "sha256": "45b94482121779b61179f69c10c72c3f581e328ab6fbabc2de54ce715bb9567b",
           "review": "Let the GUI force in-memory console logging off and place command history in its private workspace while the rest of the client root remains shared."
         }
       ]

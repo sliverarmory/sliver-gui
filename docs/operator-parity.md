@@ -1,6 +1,6 @@
 # Operator parity report
 
-Baseline: `bbb20155b7a18d4906ec936566bf0dc61fe38f35` (tree `29be1ac3a7580b1f0b672d8ade45fd32389e6231`)
+Baseline: `f8430cecf7ceb5cb332c84fb36aba9b75188802d` (tree `430f88ba6707f253c628022e201084657ac5a3c2`)
 
 This report merges deterministic command discovery with reviewed product annotations. Third-party alias and extension names are audited dynamically and are not static requirements. `parity-contract:*`, `scope-denial:*`, and `upstream-regression:*` values are stable test contract IDs; their presence assigns coverage and does not claim the test has passed.
 
@@ -9,7 +9,7 @@ This report merges deterministic command discovery with reviewed product annotat
 - **operator-workbench.m2-session-first** — complete (M2): The operator accepted and completed the delivered session-first M2 scope on 2026-08-10. Supported beacon execution, complete cross-platform and real-server evidence, a central authoritative capability service, anchor-stable continuation cursors, loot dispositions, and their individual parity rows remain explicitly deferred rather than claimed complete.
 - **operator-streaming.m3-session-shell** — complete (M3): The operator accepted the bounded session-shell M3 scope on 2026-08-15. The pinned upstream command tree has no beacon shell workflow; reattachment stays within the same live client and exact main-owned workspace or dedicated shell window, while requested-unconfirmed PTY state, best-effort resize and close, mTLS-only evidence, and deferred cross-platform certification remain explicit limits. Individual shell command rows stay in progress until their remaining parity and certification evidence is complete.
 - **operator-execution.m4-bounded-workbench** — in-progress (M4): The bounded execution and privilege workbench is delivered and awaits operator acceptance. The closed session/beacon action surface, main-owned review and artifact boundary, canonical wrappers, exact task-bound beacon protobuf decoding and output save, credential zeroization, and deterministic Electron journey are implemented. Session-only composites, unverifiable beacon TaskReq results for shellcode and Metasploit, synchronous session cancellation, long-tail command options, real-target certification, and all individual parity rows remain in progress.
-- **operator-networking.m5-forwarding** — in-progress (M5): The sliver-script rc4 local port-forward, reverse-port-forward, and SOCKS5 management slice is implemented behind strict main-owned handles and a dedicated Network window. Contract, controller, IPC, renderer, native-menu, and Electron journey coverage is complete. Real-server and packaged-platform certification, broader-bind confirmation, reconnect and fault-injection evidence, pivots, and WireGuard workflows remain open.
+- **operator-networking.m5-forwarding** — in-progress (M5): The sliver-script rc5 local port-forward, reverse-port-forward, and SOCKS5 management slice is implemented behind strict main-owned handles and a dedicated Network window. Contract, controller, IPC, renderer, native-menu, and Electron journey coverage is complete. Real-server and packaged-platform certification, broader-bind confirmation, reconnect and fault-injection evidence, pivots, and WireGuard workflows remain open.
 - **operator-transport.wireguard** — deferred (post-M0): WireGuard-enabled operator configurations and packaged helper certification are explicitly deferred; mTLS remains the M0 operator transport baseline. Implant-side WireGuard workflows retain their independently assigned roadmap status.
 
 ## Dynamic audit
@@ -179,13 +179,21 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.certificates.authorities` | operator-out-of-scope | none | not-applicable | not-applicable | none | scope-denial:server.certificates.authorities |
 | `server.clean` | operator-out-of-scope | none | not-applicable | not-applicable | none | scope-denial:server.clean |
 | `server.crack` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack |
+| `server.crack.benchmarks` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.benchmarks |
 | `server.crack.hcstat2` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.hcstat2 |
 | `server.crack.hcstat2.add` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.hcstat2.add |
 | `server.crack.hcstat2.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.hcstat2.rm |
+| `server.crack.job` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.job |
+| `server.crack.job.cancel` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.job.cancel |
+| `server.crack.job.pause` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.job.pause |
+| `server.crack.job.resume` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.job.resume |
+| `server.crack.job.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.job.rm |
+| `server.crack.jobs` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.jobs |
 | `server.crack.rules` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.rules |
 | `server.crack.rules.add` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.rules.add |
 | `server.crack.rules.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.rules.rm |
 | `server.crack.stations` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.stations |
+| `server.crack.top` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.top |
 | `server.crack.wordlists` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.wordlists |
 | `server.crack.wordlists.add` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.wordlists.add |
 | `server.crack.wordlists.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.crack.wordlists.rm |
