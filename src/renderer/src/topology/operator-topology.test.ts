@@ -37,8 +37,8 @@ describe("operator topology contributor", () => {
     expect(new Set(contribution.nodes?.map(({ id }) => id)).size).toBe(3);
     expect(contribution.nodes?.every((node) => node.kind === "operator" && node.icon === "operator")).toBe(true);
     expect(contribution.nodes?.some((node) => node.id === input.ids.client || node.kind === "client")).toBe(false);
-    expect(contribution.nodes?.[0]).toMatchObject({ status: "healthy", statusLabel: "Online", freshness: "current" });
-    expect(contribution.nodes?.[2]).toMatchObject({ status: "inactive", statusLabel: "Offline", freshness: "current" });
+    expect(contribution.nodes?.[0]).toMatchObject({ filterKind: "operator", status: "healthy", statusLabel: "Online", freshness: "current" });
+    expect(contribution.nodes?.[2]).toMatchObject({ filterKind: "operator-offline", status: "inactive", statusLabel: "Offline", freshness: "current" });
     expect(JSON.parse(JSON.stringify(contribution))).toEqual(contribution);
     expect(JSON.stringify(input.snapshot)).toBe(before);
   });
@@ -90,6 +90,7 @@ describe("operator topology contributor", () => {
     expect(contribution.nodes?.every((node) => node.status === "unknown" && node.freshness === "stale")).toBe(true);
     expect(contribution.nodes?.[0]?.statusLabel).toBe("Last known: online");
     expect(contribution.nodes?.[2]?.statusLabel).toBe("Last known: offline");
+    expect(contribution.nodes?.[2]?.filterKind).toBe("operator-offline");
     expect(contribution.edges?.every((edge) => edge.state === "unknown" && edge.freshness === "stale")).toBe(true);
   });
 

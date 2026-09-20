@@ -11,7 +11,9 @@ import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-applic
 
 const SESSION_MENU_LABELS = ["Interact", "Interact in new window", "Rename", "Close Session", "Kill Session"] as const;
 const SESSION_HOSTS = ["overview-relay-a", "overview-relay-b", "overview-relay-c", "overview-deepest", "overview-branch"] as const;
-const OPERATORS = ["overview-fixture", "overview-online-observer", "overview-offline-observer"] as const;
+const ONLINE_OPERATORS = ["overview-fixture", "overview-online-observer"] as const;
+const OFFLINE_OPERATOR = "overview-offline-observer";
+const OPERATORS = [...ONLINE_OPERATORS, OFFLINE_OPERATOR] as const;
 const RELAY = "Sessionless relay";
 const BUILDERS = ["overview-builder-linux", "overview-builder-windows"] as const;
 const CRACKSTATION_IDS = ["8fd48f35-c2c2-4d62-8584-8cd274486301", "8fd48f35-c2c2-4d62-8584-8cd274486302"] as const;
@@ -101,16 +103,30 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     assert.equal(new Set(crackstations.map((station) => station.name)).size, 1,
       "distinct crackstation host identities must remain separate even when their display names match");
 
+    const allNodeLabels = ["This client", snapshot.connection.server!, ...SESSION_HOSTS, RELAY,
+      ...OPERATORS, ...BUILDERS, "overview-crackstation", "overview-crackstation"];
+    const defaultNodeLabels = allNodeLabels.filter((label) => label !== OFFLINE_OPERATOR);
     for (const hostname of SESSION_HOSTS) await nodeByLabel(page, hostname).waitFor();
     await nodeByLabel(page, RELAY).waitFor();
-    for (const name of OPERATORS) await nodeByLabel(page, name).waitFor();
-    assert.equal(await nodeByLabel(page, "overview-offline-observer").getAttribute("data-status"), "inactive");
+    for (const name of ONLINE_OPERATORS) await nodeByLabel(page, name).waitFor();
     assert.equal(await nodeByLabel(page, "overview-online-observer").getAttribute("data-status"), "healthy");
     for (const id of BUILDERS) await serviceNode(page, "external-builder", id).waitFor();
     for (const id of CRACKSTATION_IDS) await serviceNode(page, "crackstation", id).waitFor();
     assert.equal(await nodeByLabel(page, "overview-crackstation").count(), 2);
-    assert.equal(await page.getByTestId("topology-node").count(), 15);
+    await expectNodeLabels(page, defaultNodeLabels);
+    assert.equal(await nodeByLabel(page, OFFLINE_OPERATOR).count(), 0,
+      "offline operator nodes must be hidden by default");
     await page.locator('[data-slot="toast"]').filter({ hasText: "Connected" }).waitFor({ state: "hidden" });
+    await fitGraph(page);
+    assert.equal((await edgeTestIds(page)).filter((id) => decodeEdgeId(id).includes("/operator-presence/")).length, 2,
+      "offline operator associations must be hidden with their nodes");
+    const defaultTypes = await openFilter(page, "Infrastructure type");
+    await assertDefaultTypeOptionsSelected(defaultTypes);
+    await toggleFilter(defaultTypes, "Operator (Offline)");
+    await assertAllOptionsSelected(defaultTypes);
+    await closeFilter(page, defaultTypes);
+    await expectNodeLabels(page, allNodeLabels);
+    assert.equal(await nodeByLabel(page, OFFLINE_OPERATOR).getAttribute("data-status"), "inactive");
     await fitGraph(page);
 
     const expectedHops = new Map([
@@ -198,8 +214,6 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     }
     await page.screenshot({ path: join(artifactDirectory, "overview-nested-topology-dark.png"), animations: "disabled" });
 
-    const allNodeLabels = ["This client", snapshot.connection.server!, ...SESSION_HOSTS, RELAY,
-      ...OPERATORS, ...BUILDERS, "overview-crackstation", "overview-crackstation"];
     const typeList = await openFilter(page, "Infrastructure type");
     await assertAllOptionsSelected(typeList);
     await toggleFilter(typeList, "All types");
@@ -219,6 +233,13 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     assert.equal(await typeList.getByRole("option", { name: "Crackstation", exact: true }).getAttribute("aria-selected"), "true");
     await toggleFilter(typeList, "External Builder");
     await expectNodeLabels(page, ["overview-crackstation", "overview-crackstation"]);
+    await toggleFilter(typeList, "Operator");
+    await expectNodeLabels(page, [...ONLINE_OPERATORS, "overview-crackstation", "overview-crackstation"]);
+    assert.equal(await typeList.getByRole("option", { name: "Operator (Offline)", exact: true }).getAttribute("aria-selected"), "false");
+    await toggleFilter(typeList, "Operator (Offline)");
+    await expectNodeLabels(page, [...OPERATORS, "overview-crackstation", "overview-crackstation"]);
+    await toggleFilter(typeList, "Operator");
+    await expectNodeLabels(page, [OFFLINE_OPERATOR, "overview-crackstation", "overview-crackstation"]);
     await toggleFilter(typeList, "Operator");
     await expectNodeLabels(page, [...OPERATORS, "overview-crackstation", "overview-crackstation"]);
     await page.screenshot({ path: join(artifactDirectory, "overview-types-multiselect.png"), animations: "disabled" });
@@ -242,16 +263,19 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     await page.getByLabel("Search infrastructure", { exact: true }).fill("no-matching-infrastructure");
     await expectNodeLabels(page, []);
     await page.getByRole("button", { name: "Clear filters", exact: true }).click();
-    await expectNodeLabels(page, allNodeLabels);
+    await expectNodeLabels(page, defaultNodeLabels);
     assert.equal(await page.getByLabel("Search infrastructure", { exact: true }).inputValue(), "");
     for (const label of ["Infrastructure type", "Status"]) {
       const list = await openFilter(page, label);
-      await assertAllOptionsSelected(list);
+      if (label === "Infrastructure type") await assertDefaultTypeOptionsSelected(list);
+      else await assertAllOptionsSelected(list);
       await closeFilter(page, list);
     }
     await page.getByRole("button", { name: "List", exact: true }).click();
     await page.getByTestId("topology-graph").waitFor({ state: "hidden" });
     const resources = page.getByRole("table", { name: "Infrastructure resources", exact: true });
+    assert.equal(await resources.getByRole("button", { name: OFFLINE_OPERATOR, exact: true }).count(), 0,
+      "the list must preserve the default offline operator filter");
     for (const name of BUILDERS) {
       const row = resources.getByRole("row").filter({ has: page.getByRole("button", { name, exact: true }) });
       await row.waitFor();
@@ -373,6 +397,16 @@ async function assertAllOptionsSelected(list: Locator): Promise<void> {
   for (const option of await list.getByRole("option").all()) {
     assert.equal(await option.getAttribute("aria-selected"), "true", `expected ${await option.innerText()} to be selected`);
   }
+}
+
+async function assertDefaultTypeOptionsSelected(list: Locator): Promise<void> {
+  for (const option of await list.getByRole("option").all()) {
+    const name = (await option.innerText()).trim();
+    const selected = name !== "All types" && name !== "Operator (Offline)";
+    assert.equal(await option.getAttribute("aria-selected"), String(selected),
+      `expected ${name} to be ${selected ? "selected" : "unselected"} by default`);
+  }
+  assert.equal(await list.getByRole("option", { name: "Operator (Offline)", exact: true }).count(), 1);
 }
 
 async function closeFilter(page: Page, list: Locator): Promise<void> {

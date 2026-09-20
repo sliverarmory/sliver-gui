@@ -52,6 +52,8 @@ export interface TopologyNode {
   readonly id: string;
   /** Open vocabulary, e.g. cloud, server, session, beacon, or future resources. */
   readonly kind: string;
+  /** Optional type-filter category; the node keeps its resource kind and identity. */
+  readonly filterKind?: string;
   readonly role: "resource" | "group";
   /** Visual containment only. A parent does not imply network traffic. */
   readonly parentId?: string;

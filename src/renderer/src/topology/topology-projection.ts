@@ -1,12 +1,14 @@
 import type { TopologyDocument, TopologyEdge, TopologyFreshness, TopologyNode, TopologyStatus } from "../../../shared/topology-contracts";
 
 export const TOPOLOGY_COLLECTION_THRESHOLD = 12;
+export const OFFLINE_OPERATOR_FILTER_KIND = "operator-offline";
 
 export type TopologyFilterSelection = "all" | ReadonlySet<string>;
 
 export interface TopologyFilters {
   query: string;
-  kinds: TopologyFilterSelection;
+  /** Default includes newly observed types but hides offline operators. */
+  kinds: TopologyFilterSelection | "default";
   statuses: TopologyFilterSelection;
   expanded: ReadonlySet<string>;
 }
@@ -33,9 +35,12 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
   const byId = new Map(source.nodes.map((node) => [node.id, node]));
   // Categorical selections are a hard visibility boundary. Search context can
   // only add nodes that satisfy both selected dimensions.
-  const permitted = source.nodes.filter((node) =>
-    (filters.kinds === "all" || filters.kinds.has(node.kind))
-    && (filters.statuses === "all" || filters.statuses.has(node.status)));
+  const permitted = source.nodes.filter((node) => {
+    const kind = node.filterKind ?? node.kind;
+    const selectedKind = filters.kinds === "default" ? kind !== OFFLINE_OPERATOR_FILTER_KIND
+      : filters.kinds === "all" || filters.kinds.has(kind);
+    return selectedKind && (filters.statuses === "all" || filters.statuses.has(node.status));
+  });
   const permittedIds = new Set(permitted.map((node) => node.id));
   const unresolved = new Set<string>();
   const communicationSources = new Set<string>();
@@ -55,13 +60,13 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
     }
     return true;
   });
-  const filtering = Boolean(query || filters.kinds !== "all" || filters.statuses !== "all");
+  const filtering = Boolean(query || (filters.kinds !== "all" && filters.kinds !== "default") || filters.statuses !== "all");
   const matches = permitted.filter((node) =>
     !query || [node.label, node.subtitle, node.kind, node.provider,
       ...node.properties.map((property) => `${property.label} ${property.value ?? ""}`)]
       .join(" ").toLocaleLowerCase().includes(query));
   const matchedIds = new Set(matches.map((node) => node.id));
-  const included = new Set((filtering ? matches : source.nodes).map((node) => node.id));
+  const included = new Set(matches.map((node) => node.id));
   // Matching an enclosure retains its contents, but those contents do not
   // become new filter matches or recursively pull in unrelated neighbors.
   if (filtering) for (const node of permitted) {

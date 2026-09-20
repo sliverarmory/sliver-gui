@@ -10,7 +10,7 @@ import { useSessionContextActions } from "../components/useSessionContextActions
 import { sessionContextMenuActions } from "../components/session-context-menu-actions";
 import { isUsableConnection } from "../connection-status";
 import { createOverviewTopology, overviewTopologyScopeId } from "../topology/overview-topology";
-import { projectTopology, type TopologyFilters } from "../topology/topology-projection";
+import { OFFLINE_OPERATOR_FILTER_KIND, projectTopology, type TopologyFilters } from "../topology/topology-projection";
 import { TopologyGraph, type TopologySelection } from "../topology/TopologyGraph";
 import { TopologyIcon } from "../topology/TopologyIcon";
 
@@ -170,14 +170,18 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   decorateNode?: (node: TopologyNode, content: ReactNode) => ReactNode;
 }) {
   const [query, setQuery] = useState("");
-  const [selectedKinds, setSelectedKinds] = useState<TopologyFilters["kinds"]>("all");
+  const [selectedKinds, setSelectedKinds] = useState<TopologyFilters["kinds"]>("default");
   const [selectedStatuses, setSelectedStatuses] = useState<TopologyFilters["statuses"]>("all");
   const [presentation, setPresentation] = useState<"graph" | "list">("graph");
   const [selection, setSelection] = useState<TopologySelection>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const projection = useMemo(() => projectTopology(document, { query, kinds: selectedKinds, statuses: selectedStatuses, expanded }),
     [document, query, selectedKinds, selectedStatuses, expanded]);
-  const kinds = useMemo(() => [...new Set(document.nodes.map((node) => node.kind))].sort(), [document.nodes]);
+  const kinds = useMemo(() => [...new Set(document.nodes.flatMap((node) =>
+    node.kind === "operator" ? ["operator", OFFLINE_OPERATOR_FILTER_KIND] : [node.filterKind ?? node.kind]))].sort(), [document.nodes]);
+  const kindValue = selectedKinds === "default"
+    ? kinds.includes(OFFLINE_OPERATOR_FILTER_KIND) ? new Set(kinds.filter((kind) => kind !== OFFLINE_OPERATOR_FILTER_KIND)) : "all"
+    : selectedKinds;
   const selectedNode = selection?.type === "node" ? projection.document.nodes.find((node) => node.id === selection.id) : undefined;
   const selectedEdge = selection?.type === "edge" ? projection.document.edges.find((edge) => edge.id === selection.id) : undefined;
   const members = selectedNode ? projection.groups.get(selectedNode.id) : undefined;
@@ -185,7 +189,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
     if (selection && !selectedNode && !selectedEdge) setSelection(null);
   }, [selection, selectedNode, selectedEdge]);
 
-  const filtering = Boolean(query || selectedKinds !== "all" || selectedStatuses !== "all");
+  const filtering = Boolean(query || selectedKinds !== "default" || selectedStatuses !== "all");
   const visibleNotices = document.notices.filter((notice) => notice.severity === "warning");
   const resourceCount = document.nodes.filter((node) => node.role === "resource").length;
   const updated = document.updatedAt ? new Date(document.updatedAt) : null;
@@ -204,8 +208,8 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
       <SearchField aria-label="Search infrastructure" value={query} onChange={setQuery} className="overview-search" variant="secondary">
         <SearchField.Group><SearchField.SearchIcon /><SearchField.Input placeholder="Search infrastructure…" /><SearchField.ClearButton /></SearchField.Group>
       </SearchField>
-      <OverviewFilter label="Infrastructure type" noun="types" value={selectedKinds} onChange={setSelectedKinds}
-        options={kinds.map((value): [string, string] => [value, titleCase(value)])} />
+      <OverviewFilter label="Infrastructure type" noun="types" value={kindValue} onChange={setSelectedKinds}
+        options={kinds.map((value): [string, string] => [value, value === OFFLINE_OPERATOR_FILTER_KIND ? "Operator (Offline)" : titleCase(value)])} />
       <OverviewFilter label="Status" noun="states" value={selectedStatuses} onChange={setSelectedStatuses}
         options={[["healthy", "Healthy"], ["warning", "Needs attention"], ["inactive", "Inactive"], ["unknown", "Unknown"]]} />
       <div className="overview-view-controls" role="group" aria-label="Overview presentation">
@@ -215,7 +219,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
     </div>
     {filtering ? <div className="overview-filter-summary" role="status">
       <span>{projection.matchCount} matches{query.trim() ? " · connection context included" : ""}</span>
-      <Button size="sm" variant="ghost" onPress={() => { setQuery(""); setSelectedKinds("all"); setSelectedStatuses("all"); }}>Clear filters</Button>
+      <Button size="sm" variant="ghost" onPress={() => { setQuery(""); setSelectedKinds("default"); setSelectedStatuses("all"); }}>Clear filters</Button>
     </div> : null}
     {visibleNotices.length ? <div className="overview-notices" aria-label="Topology data status">
       {visibleNotices.map((notice) => <p key={notice.id} data-severity={notice.severity}>{notice.message}</p>)}
@@ -285,7 +289,7 @@ function OverviewFilter({ label, noun, value, onChange, options }: {
       onChange(selected.size === options.length ? "all" : selected);
     }} variant="secondary">
     <Select.Trigger><Select.Value>{summary}</Select.Value><Select.Indicator /></Select.Trigger>
-    <Select.Popover><ListBox selectionMode="multiple" selectionBehavior="toggle">
+    <Select.Popover className="overview-filter__popover"><ListBox selectionMode="multiple" selectionBehavior="toggle">
       <ListBox.Item id={allKey} textValue={allLabel}><Label>{allLabel}</Label><ListBox.ItemIndicator /></ListBox.Item>
       {options.map(([id, text]) =>
         <ListBox.Item key={id} id={id} textValue={text}><Label>{text}</Label><ListBox.ItemIndicator /></ListBox.Item>)}

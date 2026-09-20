@@ -8,6 +8,7 @@
 .overview-toolbar { display: flex; align-items: center; gap: .5rem; padding: 0 1.25rem .75rem; flex-wrap: wrap; }
 .overview-search { width: clamp(180px, 25vw, 320px); }
 .overview-filter { width: 156px; }
+.overview-filter__popover { min-width: max(var(--trigger-width), 12rem); }
 .overview-view-controls { display: flex; gap: .25rem; margin-left: auto; }
 .overview-filter-summary { display: flex; align-items: center; gap: .75rem; padding: 0 1.25rem .5rem; font-size: .75rem; color: var(--color-muted); }
 .overview-notices { display: flex; flex-wrap: wrap; gap: .375rem 1rem; max-height: 88px; overflow: auto; padding: .625rem 1.25rem; background: var(--color-surface-secondary); color: var(--color-muted); font-size: .75rem; }

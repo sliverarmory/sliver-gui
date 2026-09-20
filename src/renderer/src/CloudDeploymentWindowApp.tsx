@@ -668,7 +668,13 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                       detail={`${refreshFailureMessage} The last successfully loaded deployment data remains visible.`}
                     />
                   ) : null}
-                  {detailsRefreshError ? <InlineMessage tone="warning" title="Status refresh failed" detail={detailsRefreshError} /> : null}
+                  <InstanceStatusRefreshMessage
+                    api={api}
+                    credential={snapshot.credentials.find(({ id }) => id === detailsDeployment.credentialId)}
+                    message={detailsRefreshError}
+                    onFeedback={showFeedback}
+                    onRefresh={refresh}
+                  />
                 </>
               )}
               revision={snapshot.state.revision}
@@ -2801,6 +2807,43 @@ function useCurrentEgressIpv4Lookup(api: CloudDeploymentAPI): {
   }, [refresh]);
 
   return { state, refresh };
+}
+
+function InstanceStatusRefreshMessage({
+  api,
+  credential,
+  message,
+  onFeedback,
+  onRefresh,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly credential: CloudCredentialSummary | undefined;
+  readonly message: string | undefined;
+  readonly onFeedback: (feedback: Feedback) => void;
+  readonly onRefresh: () => Promise<void>;
+}): React.JSX.Element | null {
+  const loginCredential = canLoginCloudCredential(credential) ? credential : undefined;
+  const cloudLogin = useCloudLoginActionController({
+    api,
+    credential: loginCredential,
+    isDisabled: false,
+    onFeedback,
+    onPendingChange: () => undefined,
+    onRefresh,
+  });
+  const loginAction = loginCredential ? (
+    <CloudLoginAction
+      controller={cloudLogin}
+      credential={loginCredential}
+      isDisabled={false}
+      isEmbedded={Boolean(message)}
+    />
+  ) : null;
+
+  if (message) {
+    return <InlineMessage action={loginAction} tone="warning" title="Status refresh failed" detail={message} />;
+  }
+  return cloudLogin.isPending || cloudLogin.error !== null ? loginAction : null;
 }
 
 function AwsInstanceDetails({

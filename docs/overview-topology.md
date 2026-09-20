@@ -64,7 +64,9 @@ relationships explicitly and document their source.
   available for locally managed networks; missing values remain absent. Cache
   timestamps do not imply live provider health. Unmanaged hosting remains unknown.
 - Every reported operator has a separate presence node, including offline
-  operators. The local client remains distinct because a matching display name
+  operators. Offline nodes are hidden by default; enable **Operator (Offline)**
+  in the type filter to display them. This also applies to last-known offline
+  presence when the inventory is stale. The local client remains distinct because a matching display name
   does not establish roster identity. Presence edges are associations, not
   traffic measurements or target ownership.
 - External builders and crackstations have distinct service nodes and icons.
@@ -116,8 +118,12 @@ for additional trusted adapters.
 `OverviewDocument` consumes a `TopologyDocument` with an optional node decorator. Search, type/status
 filters, the inspector, and the accessible list all use that document. Type and
 state filters allow multiple selections: a node must match any selected type
-and any selected state. All options start selected; an empty selection shows no
-nodes. Clear filters restores all options and clears the search.
+and any selected state. All options except **Operator (Offline)** start selected;
+**Operator** controls the other operator nodes independently. **All types** selects
+every type, including offline operators, and an empty selection shows no nodes.
+Clear filters restores the default selections and clears the search. Optional
+`filterKind` metadata separates type-filter categories without changing node kinds
+or identities.
 Search preserves upstream communication paths and parent enclosures among
 selected types and states, with cycle-safe traversal. Other associations retain
 one hop of eligible context. Unselected categories stay hidden, and a visible

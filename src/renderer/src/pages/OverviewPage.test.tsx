@@ -357,7 +357,7 @@ describe("Overview document rendering", () => {
       nodes: [
         { ...base.nodes[0]!, id: "server", kind: "server", label: "Control server" },
         { ...base.nodes[0]!, id: "online", kind: "operator", label: "Online operator" },
-        { ...base.nodes[0]!, id: "offline", kind: "operator", label: "Offline operator", status: "inactive" },
+        { ...base.nodes[0]!, id: "offline", kind: "operator", filterKind: "operator-offline", label: "Offline operator", status: "inactive" },
         { ...base.nodes[0]!, id: "warning", kind: "operator", label: "Warning operator", status: "warning" },
         { ...base.nodes[0]!, id: "client", kind: "client", label: "This client" },
       ],
@@ -365,10 +365,11 @@ describe("Overview document rendering", () => {
         label: "Presence", state: "unknown", freshness: "current", description: "Presence", properties: [] }],
     };
     render(<OverviewDocument document={source} />);
+    expect(screen.queryByRole("button", { name: "Offline operator" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
     const types = screen.getByRole("listbox", { name: "Infrastructure type" });
     expect(types).toHaveAttribute("aria-multiselectable", "true");
-    for (const option of within(types).getAllByRole("option")) expect(option).toHaveAttribute("aria-selected", "true");
+    expect(within(types).getByRole("option", { name: "Operator (Offline)" })).toHaveAttribute("aria-selected", "false");
     await user.click(within(types).getByRole("option", { name: "Client" }));
     expect(types).toBeInTheDocument();
     expect(within(types).getByRole("option", { name: "Operator" })).toHaveAttribute("aria-selected", "true");
@@ -385,12 +386,19 @@ describe("Overview document rendering", () => {
     expect(states).toBeInTheDocument();
     await user.keyboard("{Escape}");
     const graph = within(screen.getByLabelText("Test graph"));
+    expect(graph.getAllByRole("button").map((item) => item.textContent)).toEqual(["Control server", "Online operator"]);
+    await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
+    await user.click(screen.getByRole("option", { name: "Operator (Offline)" }));
+    await user.keyboard("{Escape}");
     expect(graph.getAllByRole("button").map((item) => item.textContent)).toEqual(["Control server", "Online operator", "Offline operator"]);
     expect(screen.getByRole("button", { name: /Status/ })).toHaveTextContent("2 states selected");
     await user.click(screen.getByRole("button", { name: "List" }));
     const rows = within(screen.getByRole("table", { name: "Infrastructure resources" })).getAllByRole("row");
     expect(rows).toHaveLength(4);
     expect(rows.map((row) => row.textContent).join(" ")).not.toMatch(/Warning operator|This client/);
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(screen.queryByRole("button", { name: "Offline operator" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Online operator" })).toBeInTheDocument();
   });
 
   it("supports empty selections, keyboard toggles, and resetting both filters", async () => {
@@ -414,15 +422,18 @@ describe("Overview document rendering", () => {
     expect(screen.getByRole("button", { name: "Regional queue" })).toBeInTheDocument();
   });
 
-  it("includes new types when all are selected and preserves an explicit subset on refresh", async () => {
+  it("includes new types by default, keeps last-known offline operators hidden, and preserves an explicit subset on refresh", async () => {
     const user = userEvent.setup();
     const source = topology();
     const added: TopologyDocument = { ...source, nodes: [...source.nodes,
       { ...source.nodes[0]!, id: "server", kind: "server", label: "Control server" },
+      { ...source.nodes[0]!, id: "offline", kind: "operator", filterKind: "operator-offline", label: "Offline operator",
+        status: "unknown", statusLabel: "Last known: offline", freshness: "stale" },
     ] };
     const { rerender } = render(<OverviewDocument document={source} />);
     rerender(<OverviewDocument document={added} />);
     expect(screen.getByRole("button", { name: "Control server" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Offline operator" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
     expect(screen.getByRole("option", { name: "Server" })).toHaveAttribute("aria-selected", "true");
     await user.click(screen.getByRole("option", { name: "Server" }));

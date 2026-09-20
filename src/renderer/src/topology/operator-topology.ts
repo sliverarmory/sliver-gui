@@ -38,6 +38,7 @@ export const operatorTopologyContributor: TopologyContributor = (context) => {
     nodes.push({
       id,
       kind: "operator",
+      filterKind: operator.online ? "operator" : "operator-offline",
       role: "resource",
       label: operator.name || operator.id,
       subtitle: "Server-reported operator",

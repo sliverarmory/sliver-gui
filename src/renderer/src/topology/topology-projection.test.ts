@@ -4,7 +4,7 @@ import type { TopologyDocument, TopologyEdge, TopologyNode } from "../../../shar
 import { projectTopology, TOPOLOGY_COLLECTION_THRESHOLD } from "./topology-projection";
 import type { TopologyFilters } from "./topology-projection";
 
-const defaults: TopologyFilters = { query: "", kinds: "all", statuses: "all", expanded: new Set() };
+const defaults: TopologyFilters = { query: "", kinds: "default", statuses: "all", expanded: new Set() };
 
 function node(id: string, values: Partial<TopologyNode> = {}): TopologyNode {
   return { id, kind: "future-kind", role: "resource", label: id, icon: "future-icon", status: "healthy", statusLabel: "Available", freshness: "current", properties: [], ...values };
@@ -282,12 +282,23 @@ describe("topology projection", () => {
     const source = document([
       node("client", { kind: "client" }), node("server", { kind: "server" }),
       node("operator", { kind: "operator" }), node("future", { kind: "future-kind" }),
-    ], [communication("client-server", "client", "server"), edge("server-operator", "server", "operator")]);
+      node("offline", { kind: "operator", filterKind: "operator-offline", status: "inactive" }),
+      node("stale-offline", { kind: "operator", filterKind: "operator-offline", status: "unknown", freshness: "stale" }),
+    ], [communication("client-server", "client", "server"), edge("server-operator", "server", "operator"),
+      edge("server-offline", "server", "offline"), edge("server-stale-offline", "server", "stale-offline")]);
     const result = projectTopology(source, { ...defaults, kinds: new Set(["client", "server"]) });
     expect(result.document.nodes).toEqual(source.nodes.slice(0, 2));
     expect(result.document.edges).toEqual(source.edges.slice(0, 1));
     expect(result.matchCount).toBe(2);
-    expect(projectTopology(source, defaults).document.nodes).toEqual(source.nodes);
+    const defaultProjection = projectTopology(source, defaults);
+    expect(defaultProjection.document.nodes).toEqual(source.nodes.slice(0, 4));
+    expect(defaultProjection.document.edges).toEqual(source.edges.slice(0, 2));
+    expect(projectTopology(source, { ...defaults, query: "server" }).document.nodes).not.toContain(source.nodes[4]);
+    expect(projectTopology(source, { ...defaults, kinds: "all" }).document.nodes).toEqual(source.nodes);
+    expect(projectTopology(source, { ...defaults, kinds: new Set(["operator"]) }).document.nodes).toEqual([source.nodes[2]]);
+    const offlineOnly = projectTopology(source, { ...defaults, kinds: new Set(["operator-offline"]) });
+    expect(offlineOnly.document.nodes).toEqual(source.nodes.slice(4));
+    expect(offlineOnly.document.edges).toEqual([]);
   });
 
   it("unions selected states and intersects the result with selected types", () => {
