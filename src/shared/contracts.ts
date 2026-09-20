@@ -199,6 +199,7 @@ export const IPC_STREAM = {
 
 export const IPC_EVENTS = {
   scriptsChanged: "sliver:scripts:changed",
+  scriptEditorRequested: "sliver:scripts:editor-requested",
   cloudDeploymentThemeChanged: "sliver:cloud-deployment:theme-changed",
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
@@ -1069,6 +1070,7 @@ export type SliverDesktopInvokeAPI = {
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onScriptsChanged: (listener: () => void) => () => void;
+  onScriptEditorRequested: (listener: () => void) => () => void;
   /**
    * Transfer one narrow MessagePort capability to the trusted main process.
    * The port is delivered back to this document through a fixed window-message
@@ -1113,6 +1115,7 @@ function defineSliverDesktopNonInvokeAPIKeys<
  */
 export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAPIKeys([
   "onScriptsChanged",
+  "onScriptEditorRequested",
   "openStream",
   "openConsoleStream",
   "onSnapshotChanged",

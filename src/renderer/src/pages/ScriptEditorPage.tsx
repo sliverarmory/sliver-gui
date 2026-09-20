@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Button, Chip, Dropdown, Input, Label, Modal, SearchField, TextField, Tooltip } from "@heroui/react";
 import { Resizable } from "@heroui-pro/react/resizable";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faCode, faCopy, faEllipsisVertical, faFileImport, faPlay, faPlus, faStop } from "@fortawesome/free-solid-svg-icons";
+import { faCode, faCopy, faEllipsisVertical, faFileExport, faFileImport, faPen, faPlay, faPlus, faRotateRight, faStop, faTrashCan } from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult } from "../../../shared/contracts";
-import { SCRIPT_LIMITS, parseScriptSource, type ScriptCatalog, type ScriptDocument } from "../../../shared/script-contracts";
+import { SCRIPT_LIMITS, parseScriptSource, type ScriptCatalog, type ScriptDocument, type ScriptSummary } from "../../../shared/script-contracts";
 import type { ScriptConsoleRecord, ScriptRunState } from "../../../shared/script-runtime-protocol";
 import { useApplicationSettings } from "../components/ApplicationSettingsProvider";
+import { ApplicationContextMenuScope, type ApplicationContextMenuAction } from "../components/ApplicationContextMenu";
 import { CodeEditor } from "../components/CodeEditor";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ScriptOutputTerminal, scriptOutputText } from "../components/ScriptOutputTerminal";
@@ -26,6 +27,14 @@ interface RunSnapshot {
 }
 
 type NameAction = "new" | "rename" | "duplicate";
+const SCRIPT_ACTIONS = [
+  { id: "rename", label: "Rename", icon: faPen },
+  { id: "duplicate", label: "Duplicate", icon: faCopy },
+  { id: "export", label: "Export…", icon: faFileExport },
+  { id: "reload", label: "Reload from disk", icon: faRotateRight },
+  { id: "delete", label: "Delete", icon: faTrashCan },
+] as const;
+type ScriptAction = typeof SCRIPT_ACTIONS[number]["id"];
 const EMPTY_CATALOG: ScriptCatalog = { scripts: [], warnings: [] };
 const RUN_LABELS: Record<ScriptRunState["status"], string> = {
   starting: "Starting", running: "Running", completed: "Completed", failed: "Failed",
@@ -33,7 +42,10 @@ const RUN_LABELS: Record<ScriptRunState["status"], string> = {
 };
 
 /** Drafts stay in this window's memory while the application switches pages. */
-export function ScriptEditorPage({ active }: { readonly active: boolean }): React.JSX.Element {
+export function ScriptEditorPage({ active, revealUnsavedRequest = 0 }: {
+  readonly active: boolean;
+  readonly revealUnsavedRequest?: number;
+}): React.JSX.Element {
   const settings = useApplicationSettings();
   const [catalog, setCatalog] = useState<ScriptCatalog>(EMPTY_CATALOG);
   const [drafts, setDrafts] = useState<Record<string, ScriptDraft>>({});
@@ -66,6 +78,7 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
   const runRequest = useRef(0);
   const runBusy = useRef(false);
   const loadingRuntime = useRef(false);
+  const handledRevealRequest = useRef(0);
   const runner = useRef<ScriptRunner | undefined>(undefined);
   activeRef.current = active;
   draftsRef.current = drafts;
@@ -183,12 +196,12 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
     return () => { documentRequest.current += 1; };
   }, [selectedId, catalog]);
 
-  const clearOutput = (): void => {
+  const clearOutput = useCallback((): void => {
     setRecords([]);
     setOutputReset((current) => current + 1);
     setCopied(false);
-  };
-  const selectScript = (id: string): void => {
+  }, []);
+  const selectScript = useCallback((id: string): void => {
     if (pendingRef.current || id === selectedIdRef.current) return;
     stopRun();
     clearOutput();
@@ -196,7 +209,20 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
     setRunSnapshot(undefined);
     setError(undefined);
     setSelectedId(id);
-  };
+  }, [clearOutput, stopRun]);
+  useEffect(() => {
+    if (!active || pending || pendingRef.current || revealUnsavedRequest === 0 ||
+      revealUnsavedRequest === handledRevealRequest.current) return;
+    handledRevealRequest.current = revealUnsavedRequest;
+    setQuery("");
+    setNameAction(undefined);
+    setDeleteTarget(undefined);
+    setReloadTarget(undefined);
+    const current = selectedIdRef.current ? draftsRef.current[selectedIdRef.current] : undefined;
+    if (isDirty(current)) return;
+    const unsaved = Object.values(draftsRef.current).find(isDirty);
+    if (unsaved) selectScript(unsaved.id);
+  }, [active, pending, revealUnsavedRequest, selectScript]);
   const acceptDocument = (document: ScriptDocument, source = document.source): void => {
     setDrafts((current) => ({ ...current, [document.id]: { ...document, source, savedSource: document.source } }));
     setCatalog((current) => ({ ...current, scripts: [
@@ -226,15 +252,6 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
     try {
       const saved = unwrap(await window.sliver.saveScript({ id: draft.id, source: draft.source, expectedRevision: draft.revision }));
       if (mounted.current) acceptDocument(saved, draftsRef.current[draft.id]?.source ?? saved.source);
-    } catch (cause) {
-      if (mounted.current) setError(messageOf(cause));
-    } finally { endMutation(); }
-  };
-  const exportScript = async (): Promise<void> => {
-    const draft = selectedIdRef.current ? draftsRef.current[selectedIdRef.current] : undefined;
-    if (!activeRef.current || !draft || !beginMutation()) return;
-    try {
-      unwrap(await window.sliver.exportScript({ name: draft.name, source: draft.source }));
     } catch (cause) {
       if (mounted.current) setError(messageOf(cause));
     } finally { endMutation(); }
@@ -282,12 +299,47 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
       }
     }
   };
-  const openNameDialog = (action: NameAction): void => {
+  const openNameDialog = (action: NameAction, target = selected): void => {
     setNameAction(action);
-    setNameTarget(action === "new" ? undefined : selected);
-    setName(action === "rename" ? selected?.name ?? "" : action === "duplicate" ? `${selected?.name ?? "Script"} copy` : "Untitled script");
+    setNameTarget(action === "new" ? undefined : target);
+    setName(action === "rename" ? target?.name ?? "" : action === "duplicate" ? `${target?.name ?? "Script"} copy` : "Untitled script");
     setNameError(undefined);
   };
+  const invokeScriptAction = async (action: ScriptAction, target: ScriptSummary | ScriptDraft): Promise<void> => {
+    if (!activeRef.current || !beginMutation()) return;
+    try {
+      // A context menu owns the clicked row's snapshot, regardless of which
+      // script is open. Read uncached rows without changing the editor selection.
+      let draft: ScriptDraft;
+      if ("source" in target) {
+        draft = target;
+      } else {
+        const document = unwrap(await window.sliver.readScript({ id: target.id }));
+        if (document.revision !== target.revision) {
+          refreshAfterMutation.current = true;
+          throw new Error("This script changed since the menu opened. Open its menu again.");
+        }
+        draft = { ...document, savedSource: document.source };
+      }
+      if (!mounted.current || !activeRef.current) return;
+      if (action === "rename" && (draft.conflict || draftsRef.current[draft.id]?.conflict)) {
+        throw new Error("This script changed in another window. Reload it before renaming it.");
+      }
+      if (action === "rename" || action === "duplicate") openNameDialog(action, draft);
+      else if (action === "delete") setDeleteTarget(draft);
+      else if (action === "reload") setReloadTarget(draft);
+      else unwrap(await window.sliver.exportScript({ name: draft.name, source: draft.source }));
+    } catch (cause) {
+      if (mounted.current) setError(messageOf(cause));
+    } finally { endMutation(); }
+  };
+  const scriptActions = (target: ScriptSummary | ScriptDraft | undefined) =>
+    SCRIPT_ACTIONS.map((action) => ({
+      ...action,
+      isDisabled: !target || pending || !active || (action.id === "rename" && "conflict" in target && Boolean(target.conflict)),
+      variant: action.id === "delete" ? "danger" : "default",
+      onAction: () => target ? invokeScriptAction(action.id, target) : undefined,
+    } satisfies ApplicationContextMenuAction));
   const submitName = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!nameAction || !name.trim() || !beginMutation()) return;
@@ -361,10 +413,13 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
     <Button aria-label="Import script" isIconOnly size="sm" variant="ghost" isDisabled={pending} onPress={() => void importScript()}><FontAwesomeIcon icon={faFileImport} /></Button>
     <Tooltip.Content>Import script</Tooltip.Content>
   </Tooltip>;
+  const newButton = <Tooltip delay={250}>
+    <Button aria-label="New script" isIconOnly size="sm" variant="ghost" isDisabled={pending} onPress={() => openNameDialog("new")}><FontAwesomeIcon aria-hidden icon={faPlus} /></Button>
+    <Tooltip.Content>New script</Tooltip.Content>
+  </Tooltip>;
   const library = <aside aria-label="Saved scripts" className="script-editor-library">
-    <div className="flex items-center justify-between gap-3 px-4 pt-4">
-      <h2 className="text-sm font-semibold">Scripts</h2>
-      <div className="flex items-center gap-1">{importButton}<Button size="sm" variant="ghost" isDisabled={pending} onPress={() => openNameDialog("new")}><FontAwesomeIcon icon={faPlus} /> New</Button></div>
+    <div className="flex items-center justify-end gap-1 px-4 pt-4">
+      {importButton}{newButton}
     </div>
     <div className="px-4 py-3"><SearchField aria-label="Search scripts" value={query} onChange={setQuery}>
       <SearchField.Group><SearchField.SearchIcon /><SearchField.Input placeholder="Search scripts" /><SearchField.ClearButton /></SearchField.Group>
@@ -372,13 +427,14 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
     <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
       {loading ? <p className="px-2 py-3 text-sm text-muted">Loading scripts…</p> : filteredScripts.length === 0
         ? <p className="px-2 py-3 text-sm text-muted">{query ? "No matching scripts." : "Create a script to begin."}</p>
-        : filteredScripts.map((script) => <Button key={script.id} aria-label={`Open ${script.name}`}
+        : filteredScripts.map((script) => <ApplicationContextMenuScope key={script.id} actions={scriptActions(drafts[script.id] ?? script)}>
+          <Button aria-label={`Open ${script.name}`}
           aria-current={selectedId === script.id} className="script-editor-library__item"
           isDisabled={pending} variant={selectedId === script.id ? "secondary" : "ghost"} onPress={() => selectScript(script.id)}>
           <FontAwesomeIcon className="shrink-0 text-muted" icon={faCode} />
           <span className="min-w-0 flex-1 truncate text-left">{script.name}</span>
           {isDirty(drafts[script.id]) ? <span aria-label="Unsaved changes" className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
-        </Button>)}
+        </Button></ApplicationContextMenuScope>)}
     </div>
   </aside>;
   const workspace = <div className="script-editor-workspace">
@@ -393,11 +449,11 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
       <Tooltip delay={250}><Dropdown>
         <Button aria-label="Script actions" isIconOnly size="sm" variant="ghost" isDisabled={!selected || pending}><FontAwesomeIcon icon={faEllipsisVertical} /></Button>
         <Dropdown.Popover><Dropdown.Menu aria-label="Script actions">
-          <Dropdown.Item id="rename" isDisabled={Boolean(selected?.conflict)} onAction={() => openNameDialog("rename")}>Rename</Dropdown.Item>
-          <Dropdown.Item id="duplicate" onAction={() => openNameDialog("duplicate")}>Duplicate</Dropdown.Item>
-          <Dropdown.Item id="export" onAction={() => void exportScript()}>Export…</Dropdown.Item>
-          <Dropdown.Item id="reload" onAction={() => setReloadTarget(selected)}>Reload from disk</Dropdown.Item>
-          <Dropdown.Item id="delete" variant="danger" onAction={() => setDeleteTarget(selected)}>Delete</Dropdown.Item>
+          {scriptActions(selected).map((action) => <Dropdown.Item key={action.id} id={action.id} textValue={action.label}
+            isDisabled={action.isDisabled} variant={action.variant} onAction={() => void action.onAction()}>
+            <FontAwesomeIcon aria-hidden className={action.variant === "danger" ? "size-4 text-danger" : "size-4 text-muted"} icon={action.icon} />
+            <Label>{action.label}</Label>
+          </Dropdown.Item>)}
         </Dropdown.Menu></Dropdown.Popover>
       </Dropdown><Tooltip.Content>Script actions</Tooltip.Content></Tooltip>
     </div>
@@ -445,7 +501,7 @@ export function ScriptEditorPage({ active }: { readonly active: boolean }): Reac
       </Resizable> : <div className="flex h-full min-h-0 flex-col"><div className="flex items-center gap-3 px-4 py-2">
         <select aria-label="Select script" className="script-editor-picker" value={selectedId ?? ""} disabled={pending} onChange={(event) => selectScript(event.target.value)}>
           {listedScripts.length === 0 ? <option value="">No scripts</option> : listedScripts.map((script) => <option key={script.id} value={script.id}>{script.name}{isDirty(drafts[script.id]) ? " • Unsaved" : ""}</option>)}
-        </select>{importButton}<Button size="sm" variant="secondary" isDisabled={pending} onPress={() => openNameDialog("new")}>New</Button>
+        </select>{importButton}{newButton}
       </div><div className="min-h-0 flex-1">{workspace}</div></div>}
     </div>
     <Modal.Backdrop isOpen={active && Boolean(nameAction)} onOpenChange={(open) => { if (!open && !pending) setNameAction(undefined); }} isDismissable={!pending} isKeyboardDismissDisabled={pending} variant="blur">

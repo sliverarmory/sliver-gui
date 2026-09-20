@@ -178,6 +178,7 @@ export function App() {
   const { current: view, navigate: setView, goBack, goForward, canGoBack, canGoForward } =
     useNavigationHistory<ViewId>("overview", isViewAvailable);
   const [scriptEditorVisited, setScriptEditorVisited] = useState(false);
+  const [scriptEditorRevealRequest, setScriptEditorRevealRequest] = useState(0);
   useEffect(() => {
     if (view === "script-editor") setScriptEditorVisited(true);
   }, [view]);
@@ -419,6 +420,13 @@ export function App() {
     setBeaconWorkspaceRoute(undefined);
     setView(nextView);
   }, [setView]);
+  useEffect(() => window.sliver.onScriptEditorRequested(() => {
+    setIsCommandPaletteOpen(false);
+    setIsConfigSelectorOpen(false);
+    setCompatibilityNoticeOpen(false);
+    changeView("script-editor");
+    setScriptEditorRevealRequest((current) => current + 1);
+  }), [changeView, setCompatibilityNoticeOpen]);
   const navigateBack = useCallback(() => {
     if (!canGoBack) return;
     setSessionWorkspaceRoute(undefined);
@@ -763,7 +771,7 @@ export function App() {
             ? "app-content app-content--generate"
             : "app-content"}
         >
-          {scriptEditorVisited || view === "script-editor" ? <ScriptEditorPage active={view === "script-editor"} /> : null}
+          {scriptEditorVisited || view === "script-editor" ? <ScriptEditorPage active={view === "script-editor"} revealUnsavedRequest={scriptEditorRevealRequest} /> : null}
           {view === "overview" ? <OverviewPage snapshot={snapshot} onSnapshot={setSnapshot} onNavigate={changeView}
             onOpenSession={openSessionWorkspace} onOpenBeacon={openBeaconWorkspace} /> : view === "settings" ? (
             <SettingsPage

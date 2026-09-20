@@ -156,6 +156,7 @@ import {
 
 import { ScriptStore } from "./script-store.js";
 import { ScriptEditorCloseGuard } from "./script-editor-close-guard.js";
+import { confirmDiscardScriptChanges } from "./script-editor-close-dialog.js";
 import { exportScriptFile, importScriptFile } from "./script-file-dialogs.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
@@ -336,20 +337,26 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
-  const scriptCloseGuard = new ScriptEditorCloseGuard((contentsIds) => {
-    const owner = contentsIds.map((id) => windowsByContentsId.get(id)).find((window) => window && !window.isDestroyed());
-    const prompt = {
-      type: "warning" as const,
-      title: "Unsaved scripts",
-      message: "Discard unsaved script changes?",
-      detail: "Your unsaved editor drafts will be lost. Saved scripts remain on disk.",
-      buttons: ["Keep Editing", "Discard Changes"],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    };
-    return (owner ? dialog.showMessageBoxSync(owner, prompt) : dialog.showMessageBoxSync(prompt)) === 1;
-  });
+  const scriptCloseGuard = new ScriptEditorCloseGuard((contentsIds) => confirmDiscardScriptChanges(contentsIds, {
+    getWindow: (id) => {
+      const window = windowsByContentsId.get(id);
+      return window && nativeWindowSurfaces.get(window) === "workspace" ? window : undefined;
+    },
+    getFocusedWindow: () => BrowserWindow.getFocusedWindow(),
+    showDialog: (owner) => {
+      const prompt = {
+        type: "warning" as const,
+        title: "Unsaved scripts",
+        message: "Discard unsaved script changes?",
+        detail: "Your unsaved editor drafts will be lost. Saved scripts remain on disk.",
+        buttons: ["Keep Editing", "Discard Changes"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      };
+      return owner ? dialog.showMessageBoxSync(owner, prompt) : dialog.showMessageBoxSync(prompt);
+    },
+  }));
   // Lazy initialization keeps startup and unrelated tests free of disk writes.
   const scriptStore = new ScriptStore(join(consoleClientRootDirectory, "gui", "scripts"), () => {
     for (const window of windows) {

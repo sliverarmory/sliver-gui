@@ -443,6 +443,7 @@ describe("sandboxed preload bridge", () => {
   });
 
   it.each([
+    ["onScriptEditorRequested", IPC.scriptEditorRequested],
     ["onCommandPaletteRequested", IPC.commandPaletteRequested],
     ["onConsoleNewTabRequested", IPC.consoleNewTabRequested],
     ["onConsoleCloseTabRequested", IPC.consoleCloseTabRequested],

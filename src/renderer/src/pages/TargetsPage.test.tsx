@@ -270,6 +270,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     getScriptRuntime: vi.fn(failed),
     setScriptEditorDirty: vi.fn(failed),
     onScriptsChanged: vi.fn(() => vi.fn()),
+    onScriptEditorRequested: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     backgroundTarget: vi.fn(failed),
     cancelBeaconTask: vi.fn(failed),

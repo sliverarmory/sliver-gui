@@ -106,6 +106,7 @@ test(`Script Editor works offline with real Monaco, QuickJS and Ghostty (${packa
     await openEditor(page);
     await page.getByRole("heading", { name: displayName, exact: true }).waitFor();
     await runAndWait(page, "Completed");
+    await assertScriptContextActions(application, page, temporary, scriptRoot, displayName, artifacts);
 
     // Exercise only denied local capabilities; no backend operations or targets.
     await editSource(page, 'console.log(typeof window, typeof document, typeof fetch, typeof process, typeof require, typeof sliver, typeof postMessage); console.warn("<b>literal</b>\\x1b]52;c;data\\x07");');
@@ -142,8 +143,7 @@ test(`Script Editor works offline with real Monaco, QuickJS and Ghostty (${packa
 
     // Typing a draft, navigating away, and returning preserves it without saving.
     await editSource(page, 'console.log("unsaved navigation draft");');
-    await page.getByRole("row", { name: "Overview", exact: true }).click();
-    await page.getByRole("row", { name: "Script Editor", exact: true }).click();
+    await assertKeepEditingRevealsDraft(application, page, displayName);
     await page.getByText("Unsaved changes", { exact: true }).waitFor();
     await runAndWait(page, "Completed");
     assert.match(await page.getByLabel("Script output transcript", { exact: true }).textContent() ?? "", /unsaved navigation draft/u);
@@ -167,7 +167,7 @@ test(`Script Editor works offline with real Monaco, QuickJS and Ghostty (${packa
     await second.getByText("Saved", { exact: true }).waitFor();
     await second.close();
 
-    await page.getByRole("button", { name: "New", exact: true }).click();
+    await page.getByRole("button", { name: "New script", exact: true }).click();
     const create = page.getByRole("dialog", { name: "New script" });
     await create.getByRole("textbox", { name: "Script name" }).fill("Delete me");
     await create.getByRole("button", { name: "Create", exact: true }).click();
@@ -350,6 +350,134 @@ async function assertScriptFileTransfers(application: ElectronApplication, page:
   await page.getByText("Unsaved changes", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByText("Saved", { exact: true }).waitFor();
+}
+async function assertScriptContextActions(application: ElectronApplication, page: Page, temporary: string, scriptRoot: string, activeName: string, artifacts: string): Promise<void> {
+  const labels = ["Rename", "Duplicate", "Export…", "Reload from disk", "Delete"];
+  const menuIcons = async (menuName: string): Promise<(string | null)[]> => {
+    const menu = page.getByRole("menu", { name: menuName, exact: true });
+    const icons = [];
+    for (const label of labels) {
+      const item = menu.getByRole("menuitem", { name: label, exact: true });
+      await item.waitFor();
+      icons.push(await item.locator("svg[data-icon]").getAttribute("data-icon"));
+    }
+    assert.ok(icons.every(Boolean), "Every script action must have an icon");
+    assert.equal(new Set(icons).size, labels.length, "Each script action has a distinct icon");
+    return icons;
+  };
+  const contextAction = async (name: string, action: string): Promise<void> => {
+    await page.getByRole("button", { name: `Open ${name}`, exact: true }).click({ button: "right" });
+    await page.getByRole("menu", { name: "Application context menu", exact: true }).getByRole("menuitem", { name: action, exact: true }).click();
+  };
+  await page.getByRole("button", { name: "Script actions", exact: true }).click();
+  const dropdownIcons = await menuIcons("Script actions");
+  await page.locator(".dropdown__popover[data-entering]").waitFor({ state: "detached" });
+  await page.screenshot({ path: join(artifacts, `${packagedExecutable ? "packaged" : "built"}-script-dropdown.png`) });
+  await page.keyboard.press("Escape");
+  await page.getByRole("menu", { name: "Script actions", exact: true }).waitFor({ state: "hidden" });
+
+  // A script that has never been opened in this renderer still has working row actions.
+  const savedSource = 'console.log("context target saved");\n';
+  await page.evaluate(async (source) => {
+    const result = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.createScript({ name: "Context target", source });
+    if (!result.ok) throw new Error(result.error);
+  }, savedSource);
+  await page.getByRole("button", { name: "Open Context target", exact: true }).click({ button: "right" });
+  assert.deepEqual(await menuIcons("Application context menu"), dropdownIcons, "Context and dropdown actions share their icons");
+  await page.locator(".context-menu__popover[data-entering]").waitFor({ state: "detached" });
+  await page.screenshot({ path: join(artifacts, `${packagedExecutable ? "packaged" : "built"}-script-context-menu.png`) });
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  const rename = page.getByRole("dialog", { name: "Rename script", exact: true });
+  await rename.getByRole("textbox", { name: "Script name" }).fill("Context renamed");
+  await rename.getByRole("button", { name: "Rename", exact: true }).click();
+  await page.getByRole("button", { name: "Open Context renamed", exact: true }).waitFor();
+  await page.getByRole("heading", { name: activeName, exact: true }).waitFor();
+  await contextAction("Context renamed", "Duplicate");
+  await page.getByRole("dialog", { name: "Save a copy", exact: true }).getByRole("button", { name: "Save copy", exact: true }).click();
+  const copyName = "Context renamed copy";
+  await page.getByRole("heading", { name: copyName, exact: true }).waitFor();
+  const names = (JSON.parse(await readFile(join(scriptRoot, "names.json"), "utf8")) as { names: Record<string, string> }).names;
+  const copyId = Object.keys(names).find((id) => names[id] === copyName)!;
+  assert.equal(await readFile(join(scriptRoot, `${copyId}.js`), "utf8"), savedSource);
+  const draft = 'console.log("context target unsaved");\n';
+  await editSource(page, draft);
+  await page.getByRole("button", { name: `Open ${activeName}`, exact: true }).click();
+  await runAndWait(page, "Completed");
+  const transcript = await page.getByLabel("Script output transcript", { exact: true }).textContent();
+  const exportedPath = join(temporary, "context-export.js");
+  await application.evaluate(({ dialog }, destination) => {
+    const original = dialog.showSaveDialog;
+    dialog.showSaveDialog = async () => {
+      dialog.showSaveDialog = original;
+      return { canceled: false, filePath: destination };
+    };
+  }, exportedPath);
+  await contextAction(copyName, "Export…");
+  await waitUntil(async () => (await readFile(exportedPath, "utf8").catch(() => "")) === draft);
+  assert.equal(await readFile(join(scriptRoot, `${copyId}.js`), "utf8"), savedSource, "Context export uses the clicked script's draft without saving");
+  await contextAction(copyName, "Reload from disk");
+  await page.getByRole("alertdialog", { name: "Reload script?" }).getByRole("button", { name: "Reload", exact: true }).click();
+  await page.getByRole("heading", { name: activeName, exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Script output transcript", { exact: true }).textContent(), transcript, "Reloading another script preserves the current output");
+  await page.getByRole("button", { name: `Open ${copyName}`, exact: true }).click();
+  await page.getByText("Saved", { exact: true }).waitFor();
+  await runAndWait(page, "Completed");
+  assert.equal(await page.getByLabel("Script output transcript", { exact: true }).textContent(), "context target saved\n");
+  await page.getByRole("button", { name: `Open ${activeName}`, exact: true }).click();
+  await runAndWait(page, "Completed");
+  for (const name of [copyName, "Context renamed"]) {
+    await contextAction(name, "Delete");
+    await page.getByRole("alertdialog", { name: "Delete script?" }).getByRole("button", { name: "Delete", exact: true }).click();
+    await page.getByRole("button", { name: `Open ${name}`, exact: true }).waitFor({ state: "hidden" });
+    await page.getByRole("heading", { name: activeName, exact: true }).waitFor();
+    assert.equal(await page.getByLabel("Script output transcript", { exact: true }).textContent(), transcript, "Deleting another script preserves the current output");
+  }
+  assert.equal((await readdir(scriptRoot)).filter((name) => name.endsWith(".js")).length, 1);
+}
+async function assertKeepEditingRevealsDraft(application: ElectronApplication, page: Page, draftName: string): Promise<void> {
+  const cleanName = "Clean close-guard script";
+  const cleanScript = await page.evaluate(async (name) => {
+    const result = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.createScript({ name, source: "" });
+    if (!result.ok || !result.value) throw new Error(result.error ?? "Could not create clean script");
+    return result.value;
+  }, cleanName);
+  const window = await application.browserWindow(page);
+  const windowId = await window.evaluate((window) => window.id);
+  for (const action of ["close", "quit"] as const) {
+    await page.getByRole("button", { name: `Open ${cleanName}`, exact: true }).click();
+    await page.getByRole("heading", { name: cleanName, exact: true }).waitFor();
+    await page.getByText("Saved", { exact: true }).waitFor();
+    await page.getByRole("row", { name: "Overview", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    const prompts = await application.evaluate(({ app, BrowserWindow, dialog }, request) => {
+      const original = dialog.showMessageBoxSync;
+      const prompts: string[] = [];
+      dialog.showMessageBoxSync = (...args: unknown[]) => {
+        const options = args[args.length - 1] as { message: string; buttons: string[] };
+        prompts.push(options.message);
+        const keepEditing = options.buttons.indexOf("Keep Editing");
+        if (keepEditing < 0) throw new Error("Expected Keep Editing in the unsaved script warning");
+        return keepEditing;
+      };
+      try {
+        if (request.action === "quit") app.quit();
+        else BrowserWindow.fromId(request.windowId)!.close();
+        return prompts;
+      } finally { dialog.showMessageBoxSync = original; }
+    }, { action, windowId });
+    assert.deepEqual(prompts, ["Discard unsaved script changes?"], `${action} must warn about the other script's unsaved draft`);
+    await page.getByRole("heading", { name: "Script Editor", exact: true }).waitFor();
+    await page.getByRole("heading", { name: draftName, exact: true }).waitFor();
+    await page.getByText("Unsaved changes", { exact: true }).waitFor();
+    assert.equal(page.isClosed(), false, "Keep Editing must retain the original window");
+    await runAndWait(page, "Completed");
+    assert.equal(await page.getByLabel("Script output transcript", { exact: true }).textContent(), "unsaved navigation draft\n");
+  }
+  await page.evaluate(async (script) => {
+    const result = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.deleteScript({ id: script.id, expectedRevision: script.revision });
+    if (!result.ok) throw new Error(result.error);
+  }, cleanScript);
+  await page.getByRole("button", { name: `Open ${cleanName}`, exact: true }).waitFor({ state: "hidden" });
 }
 async function waitUntil(check: () => Promise<boolean>): Promise<void> {
   const deadline = Date.now() + 5_000;

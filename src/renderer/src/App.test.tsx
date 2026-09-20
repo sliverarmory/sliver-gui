@@ -77,6 +77,7 @@ function installSliverAPI(
     getScriptRuntime: vi.fn(failedOperation),
     setScriptEditorDirty: vi.fn(async () => ({ ok: true as const })),
     onScriptsChanged: vi.fn(() => vi.fn()),
+    onScriptEditorRequested: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),
     chooseCertificatePair: vi.fn(failedOperation),
@@ -197,6 +198,33 @@ function installSliverAPI(
 }
 
 describe("App startup", () => {
+  it("reveals Script Editor on Keep Editing and dismisses blocking overlays on repeated requests", async () => {
+    const user = userEvent.setup();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    let revealScriptEditor!: () => void;
+    const unsubscribe = vi.fn();
+    vi.mocked(api.onScriptEditorRequested).mockImplementation((listener) => {
+      revealScriptEditor = listener;
+      return unsubscribe;
+    });
+    const view = render(<App />);
+    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+    act(() => revealScriptEditor());
+    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    expect(screen.getByRole("row", { name: "Script Editor" })).toHaveAttribute("data-current", "true");
+
+    await user.click(screen.getByRole("row", { name: "Overview" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    act(() => revealScriptEditor());
+    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
+    expect(api.listScripts).toHaveBeenCalledOnce();
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
   it("opens Script Editor offline from the palette and preserves its page across back and forward", async () => {
     const user = userEvent.setup();
     const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));

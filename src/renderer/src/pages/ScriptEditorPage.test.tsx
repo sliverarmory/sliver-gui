@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
@@ -35,6 +35,7 @@ vi.mock("../components/ScriptOutputTerminal", () => ({
 }));
 
 import { ScriptEditorPage } from "./ScriptEditorPage";
+import { renderWithApplicationContextMenu as render, type ApplicationContextMenuTestRender } from "../application-context-menu-test-utils";
 
 const FIRST_ID = "09cf16dd-3f93-48c1-8abc-03c07a530a72";
 const SECOND_ID = "630c1683-d71d-45c0-8d06-4b7b348c83ce";
@@ -80,6 +81,15 @@ async function action(name: string): Promise<void> {
   await user.click(screen.getByRole("button", { name: "Script actions" }));
   await user.click(await screen.findByRole("menuitem", { name }));
 }
+function wideViewport(): void {
+  const media = window.matchMedia("(min-width: 960px)");
+  vi.stubGlobal("matchMedia", () => ({ ...media, matches: true }));
+}
+async function contextMenu(view: ApplicationContextMenuTestRender, scriptName: string): Promise<HTMLElement> {
+  fireEvent.contextMenu(screen.getByRole("button", { name: `Open ${scriptName}` }));
+  view.contextMenu.emit();
+  return screen.findByRole("menu", { name: "Application context menu" });
+}
 
 beforeEach(() => {
   runners.instances = [];
@@ -89,6 +99,217 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); Reflect.deleteProperty(Element.prototype, "getAnimations"); });
 
 describe("ScriptEditorPage", () => {
+  it("reveals a retained unsaved draft from a hidden page and handles repeated Keep Editing requests", async () => {
+    const { documents, api } = setup();
+    documents.set(SECOND_ID, { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) });
+    const view = render(<ScriptEditorPage active />);
+    const editor = await source();
+    fireEvent.change(editor, { target: { value: "keep this unsaved source" } });
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Select script" }), SECOND_ID);
+    await waitFor(() => expect(editor).toHaveValue("2;"));
+    view.rerender(<ScriptEditorPage active={false} revealUnsavedRequest={1} />);
+    expect(screen.queryByRole("heading", { name: "Script Editor" })).not.toBeInTheDocument();
+    view.rerender(<ScriptEditorPage active revealUnsavedRequest={1} />);
+    expect(await source()).toHaveValue("keep this unsaved source");
+    expect(screen.getByRole("combobox", { name: "Select script" })).toHaveValue(FIRST_ID);
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Select script" }), SECOND_ID);
+    expect(editor).toHaveValue("2;");
+    view.rerender(<ScriptEditorPage active revealUnsavedRequest={2} />);
+    expect(editor).toHaveValue("keep this unsaved source");
+    expect(api.saveScript).not.toHaveBeenCalled();
+    expect(api.setScriptEditorDirty).toHaveBeenLastCalledWith(true);
+  });
+
+  it("keeps the current dirty draft and output while dismissing script dialogs and search filters", async () => {
+    const { documents, api } = setup();
+    documents.set(SECOND_ID, { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) });
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    fireEvent.change(await source(), { target: { value: "first dirty source" } });
+    await userEvent.click(screen.getByRole("button", { name: "Open Second" }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Script source" })).toHaveValue("2;"));
+    fireEvent.change(await source(), { target: { value: "second dirty source" } });
+    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(runner().run).toHaveBeenCalledOnce());
+    act(() => runner().callbacks.onOutput([{ sequence: 0, level: "log", text: "retained output" }]));
+    const stops = runner().stop.mock.calls.length;
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search scripts" }), { target: { value: "missing" } });
+    await action("Delete");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Second");
+    view.rerender(<ScriptEditorPage active revealUnsavedRequest={1} />);
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(await source()).toHaveValue("second dirty source");
+    expect(screen.getByRole("button", { name: "Open Second" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("searchbox", { name: "Search scripts" })).toHaveValue("");
+    expect(screen.getByLabelText("Script output transcript")).toHaveTextContent("retained output");
+    expect(runner().stop).toHaveBeenCalledTimes(stops);
+    expect(api.deleteScript).not.toHaveBeenCalled();
+  });
+
+  it("waits for an in-flight script operation before selecting an unsaved draft", async () => {
+    const { documents, api } = setup();
+    documents.set(SECOND_ID, { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) });
+    const view = render(<ScriptEditorPage active />);
+    const editor = await source();
+    fireEvent.change(editor, { target: { value: "unsaved first source" } });
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Select script" }), SECOND_ID);
+    await waitFor(() => expect(editor).toHaveValue("2;"));
+    let finish!: (value: Awaited<ReturnType<typeof api.exportScript>>) => void;
+    api.exportScript.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await action("Export…");
+    await waitFor(() => expect(api.exportScript).toHaveBeenCalledWith({ name: "Second", source: "2;" }));
+    view.rerender(<ScriptEditorPage active revealUnsavedRequest={1} />);
+    expect(editor).toHaveValue("2;");
+    expect(screen.getByRole("combobox", { name: "Select script" })).toBeDisabled();
+    await act(async () => finish({ ok: true, value: { canceled: true } }));
+    expect(editor).toHaveValue("unsaved first source");
+    expect(screen.getByRole("combobox", { name: "Select script" })).toHaveValue(FIRST_ID);
+    expect(api.saveScript).not.toHaveBeenCalled();
+  });
+
+  it("offers all five row actions with the same icons in both menus", async () => {
+    setup();
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    await source();
+    const expected = [
+      ["Rename", "pen"], ["Duplicate", "copy"], ["Export…", "file-export"],
+      ["Reload from disk", "rotate-right"], ["Delete", "trash-can"],
+    ] as const;
+    const menu = await contextMenu(view, "Hello World");
+    for (const [name, icon] of expected) {
+      expect(within(menu).getByRole("menuitem", { name }).querySelector("svg")).toHaveAttribute("data-icon", icon);
+    }
+    expect(within(menu).getByRole("menuitem", { name: "Delete" })).toHaveClass("menu-item--danger");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Script actions" }));
+    const dropdown = await screen.findByRole("menu", { name: "Script actions" });
+    for (const [name, icon] of expected) {
+      expect(within(dropdown).getByRole("menuitem", { name }).querySelector("svg")).toHaveAttribute("data-icon", icon);
+    }
+    expect(within(dropdown).getByRole("menuitem", { name: "Delete" })).toHaveClass("menu-item--danger");
+  });
+
+  it.each(["Rename", "Reload from disk", "Delete"])("targets an uncached row for %s without interrupting the selected script", async (operation) => {
+    const { api, documents } = setup();
+    documents.set(SECOND_ID, { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) });
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    const editor = await source();
+    fireEvent.change(editor, { target: { value: "keep this draft" } });
+    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(runner().run).toHaveBeenCalledOnce());
+    act(() => runner().callbacks.onOutput([{ sequence: 0, level: "log", text: "keep this output" }]));
+    const stops = runner().stop.mock.calls.length;
+    const menu = await contextMenu(view, "Second");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: operation }));
+    if (operation === "Rename") {
+      expect(await screen.findByRole("textbox", { name: "Script name" })).toHaveValue("Second");
+      fireEvent.change(screen.getByRole("textbox", { name: "Script name" }), { target: { value: "Renamed second" } });
+      await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+      await waitFor(() => expect(api.renameScript).toHaveBeenCalledWith({ id: SECOND_ID, name: "Renamed second", expectedRevision: "b".repeat(64) }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    } else {
+      const dialog = await screen.findByRole("alertdialog");
+      expect(dialog).toHaveTextContent("Second");
+      await userEvent.click(within(dialog).getByRole("button", { name: operation === "Delete" ? "Delete" : "Reload" }));
+      await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+      if (operation === "Delete") expect(api.deleteScript).toHaveBeenCalledWith({ id: SECOND_ID, expectedRevision: "b".repeat(64) });
+      else expect(api.readScript).toHaveBeenLastCalledWith({ id: SECOND_ID });
+    }
+    expect(editor).toHaveValue("keep this draft");
+    expect(screen.getByRole("button", { name: "Open Hello World" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByLabelText("Script output transcript")).toHaveTextContent("keep this output");
+    expect(runner().stop).toHaveBeenCalledTimes(stops);
+    expect(api.saveScript).not.toHaveBeenCalled();
+  });
+
+  it.each(["Export…", "Duplicate"])("uses the clicked row's cached unsaved source for %s", async (operation) => {
+    const { api, documents } = setup();
+    documents.set(SECOND_ID, { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) });
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    await source();
+    await userEvent.click(screen.getByRole("button", { name: "Open Second" }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Script source" })).toHaveValue("2;"));
+    fireEvent.change(await source(), { target: { value: "unsaved second" } });
+    await userEvent.click(screen.getByRole("button", { name: "Open Hello World" }));
+    const reads = api.readScript.mock.calls.length;
+    const menu = await contextMenu(view, "Second");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: operation }));
+    if (operation === "Export…") {
+      await waitFor(() => expect(api.exportScript).toHaveBeenCalledWith({ name: "Second", source: "unsaved second" }));
+      expect(await source()).toHaveValue(INITIAL_SOURCE);
+    } else {
+      expect(await screen.findByRole("textbox", { name: "Script name" })).toHaveValue("Second copy");
+      await userEvent.click(screen.getByRole("button", { name: "Save copy" }));
+      await waitFor(() => expect(api.createScript).toHaveBeenCalledWith({ name: "Second copy", source: "unsaved second" }));
+    }
+    expect(api.readScript).toHaveBeenCalledTimes(reads);
+    expect(api.saveScript).not.toHaveBeenCalled();
+  });
+
+  it.each(["unavailable", "changed"])("does not retarget an uncached row that becomes %s", async (failure) => {
+    const { api, documents } = setup();
+    documents.set(SECOND_ID, { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) });
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    const editor = await source();
+    const menu = await contextMenu(view, "Second");
+    if (failure === "unavailable") {
+      vi.mocked(window.sliver.readScript).mockResolvedValueOnce({ ok: false, error: "This script is no longer available." });
+    } else {
+      documents.set(SECOND_ID, { ...documents.get(SECOND_ID)!, revision: "c".repeat(64) });
+    }
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByText(failure === "unavailable" ? "This script is no longer available." : "This script changed since the menu opened. Open its menu again.")).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(api.deleteScript).not.toHaveBeenCalled();
+    expect(editor).toHaveValue(INITIAL_SOURCE);
+  });
+
+  it("disables other row actions while an uncached script is loading for export", async () => {
+    const { api, documents } = setup();
+    const second = { id: SECOND_ID, name: "Second", source: "2;", revision: "b".repeat(64) };
+    documents.set(SECOND_ID, second);
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    const editor = await source();
+    let finish!: (value: Awaited<ReturnType<typeof api.readScript>>) => void;
+    api.readScript.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const menu = await contextMenu(view, "Second");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Export…" }));
+    await waitFor(() => expect(api.readScript).toHaveBeenLastCalledWith({ id: SECOND_ID }));
+    expect(screen.getByRole("button", { name: "Open Hello World" })).toBeDisabled();
+    const blockedMenu = await contextMenu(view, "Hello World");
+    for (const name of ["Rename", "Duplicate", "Export…", "Reload from disk", "Delete"]) {
+      expect(within(blockedMenu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    }
+    await userEvent.keyboard("{Escape}");
+    await act(async () => finish({ ok: true, value: second }));
+    await waitFor(() => expect(api.exportScript).toHaveBeenCalledWith({ name: "Second", source: "2;" }));
+    expect(editor).toHaveValue(INITIAL_SOURCE);
+    expect(api.deleteScript).not.toHaveBeenCalled();
+  });
+
+  it("disables renaming a conflicted draft in both menus while retaining copy and export", async () => {
+    const { documents, changed } = setup();
+    wideViewport();
+    const view = render(<ScriptEditorPage active />);
+    fireEvent.change(await source(), { target: { value: "unsaved" } });
+    documents.set(FIRST_ID, { ...documents.get(FIRST_ID)!, revision: "c".repeat(64) });
+    act(changed);
+    await screen.findByText(/changed in another window/u);
+    const menu = await contextMenu(view, "Hello World");
+    expect(within(menu).getByRole("menuitem", { name: "Rename" })).toHaveAttribute("aria-disabled", "true");
+    for (const name of ["Duplicate", "Export…"]) expect(within(menu).getByRole("menuitem", { name })).not.toHaveAttribute("aria-disabled", "true");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Script actions" }));
+    expect(await screen.findByRole("menuitem", { name: "Rename" })).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("exports the current draft without saving or clearing its dirty state", async () => {
     const { api } = setup();
     render(<ScriptEditorPage active />);
@@ -245,7 +466,7 @@ describe("ScriptEditorPage", () => {
     await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(api.deleteScript).toHaveBeenCalledWith(expect.objectContaining({ id: SECOND_ID })));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
-    await userEvent.click(screen.getByRole("button", { name: "New" }));
+    await userEvent.click(screen.getByRole("button", { name: "New script" }));
     await userEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(api.createScript).toHaveBeenLastCalledWith({ name: "Untitled script", source: "" }));
   });
