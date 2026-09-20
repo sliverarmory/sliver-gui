@@ -194,7 +194,9 @@ test("packaged production app completes current mTLS read and mutation flows", {
       );
     }
     try {
-      await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 10_000 });
+      await page.getByRole("button", { name: /^Current server:/i }).waitFor({ timeout: 10_000 });
+      await page.locator('[aria-label="Jobs & listeners"]:visible').click();
+      await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor();
     } catch (error) {
       const body = (await page.locator("body").innerText()).slice(0, 4_000);
       throw new Error(

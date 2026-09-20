@@ -27,11 +27,13 @@ import {
 } from "@heroui/react";
 import { Segment, Sheet } from "@heroui-pro/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
+import { Resizable } from "@heroui-pro/react/resizable";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowRight,
+  faArrowUp,
   faCamera,
   faChevronDown,
   faClock,
@@ -43,7 +45,6 @@ import {
   faFolder,
   faFolderPlus,
   faFloppyDisk,
-  faKey,
   faMagnifyingGlass,
   faMemory,
   faMicrochip,
@@ -100,6 +101,7 @@ import type {
 } from "./SessionWorkspacePage";
 import { DateTimePickerField } from "../components/FormControls";
 import { EnvironmentVariableModal } from "../components/EnvironmentVariableModal";
+import { REGISTRY_HIVE_LABELS, SessionRegistryTree } from "./SessionRegistryTree";
 
 type LoadState<T> =
   | { status: "loading" }
@@ -2443,7 +2445,10 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const platform = normalizedPlatform(session.os);
   const [hive, setHive] = useState<SessionRegistryHive>("HKCU");
   const [path, setPath] = useState("");
-  const [pathDraft, setPathDraft] = useState("");
+  const [pathDraft, setPathDraft] = useState("Computer\\HKEY_CURRENT_USER");
+  const [addressError, setAddressError] = useState<string>();
+  const [branches, setBranches] = useState<Array<{ hive: SessionRegistryHive; path: string; subkeys: string[] }>>([]);
+  const [valueData, setValueData] = useState<Record<string, string>>({});
   const [requestedLocation, setRequestedLocation] = useState<{ hive: SessionRegistryHive; path: string }>({ hive: "HKCU", path: "" });
   const [state, setState] = useState<LoadState<RegistryListing>>({ status: "loading" });
   const [selectedValue, setSelectedValue] = useState<SessionRegistryReadResult>();
@@ -2456,6 +2461,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const subkeyRequestSequence = useRef(0);
   const valueRequestSequence = useRef(0);
   const readRequestSequence = useRef(0);
+  const mutationLocation = useRef({ hive: "HKCU" as SessionRegistryHive, path: "" });
   const isCurrent = useLatestIdentity(routeKey);
 
   const load = useCallback(async (nextHive: SessionRegistryHive, nextPath: string) => {
@@ -2467,8 +2473,11 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     readRequestSequence.current += 1;
     setReadingValueKey(undefined);
     setRequestedLocation({ hive: nextHive, path: nextPath });
+    setPathDraft(registryAddress(nextHive, nextPath));
+    setAddressError(undefined);
     setState({ status: "loading" });
     setSelectedValue(undefined);
+    setValueData({});
     setEditorMode(undefined);
     setIsLoadingMoreSubkeys(false);
     setIsLoadingMoreValues(false);
@@ -2480,7 +2489,16 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
       if (!isCurrent(expected) || requestSequence !== navigationRequestSequence.current) return;
       setHive(nextHive);
       setPath(nextPath);
-      setPathDraft(nextPath);
+      // A fresh listing invalidates cached descendants, including keys that may
+      // have disappeared. Windows registry paths are case insensitive.
+      setBranches((current) => [
+        ...current.filter((branch) => branch.hive !== nextHive || (
+          nextPath !== "" &&
+          branch.path.toLowerCase() !== nextPath.toLowerCase() &&
+          !branch.path.toLowerCase().startsWith(`${nextPath.toLowerCase()}\\`)
+        )),
+        { hive: nextHive, path: nextPath, subkeys: uniqueStrings(subkeys.items) },
+      ]);
       setState({
         status: "ready",
         value: {
@@ -2513,6 +2531,11 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
         navigationSequence !== navigationRequestSequence.current ||
         sequence !== sequenceRef.current
       ) return;
+      if (kind === "key") {
+        setBranches((current) => current.map((branch) => branch.hive === hive && branch.path.toLowerCase() === path.toLowerCase()
+          ? { ...branch, subkeys: uniqueStrings([...branch.subkeys, ...result.items]) }
+          : branch));
+      }
       setState((current) => {
         if (current.status !== "ready") return current;
         const existingNames = current.value.entries.filter((entry) => entry.kind === kind).map((entry) => entry.name);
@@ -2545,7 +2568,10 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   useEffect(() => {
     setHive("HKCU");
     setPath("");
-    setPathDraft("");
+    setPathDraft(registryAddress("HKCU", ""));
+    setAddressError(undefined);
+    setBranches([]);
+    setValueData({});
     setRequestedLocation({ hive: "HKCU", path: "" });
     setReadingValueKey(undefined);
     setSelectedValue(undefined);
@@ -2562,9 +2588,13 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
     const requestSequence = ++readRequestSequence.current;
     const rowKey = `value:${key}`;
     setReadingValueKey(rowKey);
+    setSelectedValue(undefined);
     try {
       const result = await runWorkbench({ operationId: "session.registry.read", hive, path, key });
-      if (isCurrent(expected) && requestSequence === readRequestSequence.current) setSelectedValue(result);
+      if (isCurrent(expected) && requestSequence === readRequestSequence.current) {
+        setSelectedValue(result);
+        setValueData((current) => ({ ...current, [rowKey]: result.value }));
+      }
     } catch (error) {
       if (isCurrent(expected) && requestSequence === readRequestSequence.current) {
         toast.danger("Could not read registry value", { description: errorMessage(error) });
@@ -2576,12 +2606,17 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
 
   const destructive = useDestructiveAction(routeKey, () => {
     setEditorMode(undefined);
-    void load(hive, path);
+    const location = mutationLocation.current;
+    setBranches([]);
+    void load(location.hive, location.path);
   });
 
   const reviewRegistryAction = useCallback(async (input: PrepareSessionDestructiveActionInput) => {
     if (destructive.isPreparing || destructive.isExecuting) return;
     const expected = routeKey;
+    if (input.actionId === "session.registry.create-key" || input.actionId === "session.registry.write" || input.actionId === "session.registry.delete-key") {
+      mutationLocation.current = { hive: input.hive, path: input.path };
+    }
     await destructive.prepare(input);
     if (isCurrent(expected)) setEditorMode(undefined);
   }, [destructive, isCurrent, routeKey]);
@@ -2612,168 +2647,195 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
       id: "name",
       header: "Name",
       isRowHeader: true,
-      minWidth: 320,
+      width: "40%",
+      minWidth: 180,
       cell: (entry) => (
-        <div className="flex items-center gap-2 py-1">
-          <FontAwesomeIcon aria-hidden className={entry.kind === "key" ? "text-accent" : "text-muted"} icon={entry.kind === "key" ? faFolder : faKey} />
+        <div className="flex min-w-0 items-center gap-2">
+          <FontAwesomeIcon aria-hidden className="shrink-0 text-muted" icon={faFile} />
           <span className="truncate font-mono text-xs text-foreground">{entry.name || "(Default)"}</span>
         </div>
       ),
     },
     {
-      id: "type",
-      header: "Type",
-      minWidth: 110,
-      cell: (entry) => <Chip size="sm" variant="soft">{entry.kind === "key" ? "Key" : "Value"}</Chip>,
+      id: "data",
+      header: "Data",
+      minWidth: 220,
+      cell: (entry) => (
+        <span className={`block truncate font-mono text-xs ${valueData[entry.id] === undefined ? "text-muted" : "text-foreground"}`}>
+          {readingValueKey === entry.id ? "Reading…" : valueData[entry.id] ?? "(not loaded)"}
+        </span>
+      ),
     },
     {
       id: "action",
-      header: "Action",
+      header: <span className="sr-only">Read value</span>,
       align: "end",
-      minWidth: 110,
+      width: 48,
       cell: (entry) => (
-        <div className="flex justify-end gap-1">
-          <IconButton
-            isPending={entry.kind === "value" && readingValueKey === entry.id}
-            label={entry.kind === "key" ? `Open ${entry.name}` : `Read ${entry.name || "default value"}`}
-            icon={entry.kind === "key" ? faArrowRight : faEye}
-            onPress={() => entry.kind === "key"
-              ? void load(hive, joinRegistryPath(path, entry.name))
-              : void readValue(entry.name)}
-          />
-          {entry.kind === "key" ? (
-            <IconButton
-              danger
-              isDisabled={destructive.isPreparing || destructive.isExecuting}
-              label={`Delete registry key ${entry.name}`}
-              icon={faTrash}
-              onPress={() => void destructive.prepare({ actionId: "session.registry.delete-key", hive, path, key: entry.name })}
-            />
-          ) : null}
-        </div>
+        <IconButton
+          isPending={readingValueKey === entry.id}
+          label={`Read ${entry.name || "default value"}`}
+          icon={faEye}
+          onPress={() => void readValue(entry.name)}
+        />
       ),
     },
-  ], [destructive, hive, load, path, readValue, readingValueKey]);
+  ], [readValue, readingValueKey, valueData]);
 
   if (platform !== "windows") {
     return <PanelUnavailable title="Registry unavailable" description="Registry browsing is available only for Windows sessions." />;
   }
 
-  const crumbs = registryBreadcrumbs(hive, path);
+  const subkeys = state.status === "ready" ? state.value.entries.filter((entry) => entry.kind === "key") : [];
+  const values = state.status === "ready" ? state.value.entries.filter((entry) => entry.kind === "value") : [];
+  const parentPath = path.split("\\").slice(0, -1).join("\\");
+  const keyName = path.split("\\").at(-1) ?? "";
+  const isLocked = destructive.isPreparing || destructive.isExecuting || state.status !== "ready";
+  const navigateFromAddress = () => {
+    const location = parseRegistryAddress(pathDraft, requestedLocation.hive);
+    if (location) void load(location.hive, location.path);
+    else setAddressError("Enter a registry hive and path, such as HKEY_CURRENT_USER\\Software.");
+  };
 
   return (
     <>
-    <PanelShell
-      icon={faKey}
-      title="Registry"
-      description="Browse bounded Windows registry entries and review every remote write before execution."
-      action={(
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <Button isDisabled={destructive.isPreparing || destructive.isExecuting || state.status !== "ready"} size="sm" variant="tertiary" onPress={() => setEditorMode("create-key")}>Create key</Button>
-          <Button isDisabled={destructive.isPreparing || destructive.isExecuting || state.status !== "ready"} size="sm" variant="tertiary" onPress={() => setEditorMode("write-value")}>Write value</Button>
+    <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-label="Registry editor">
+      <div className="flex flex-wrap items-center gap-1 border-b border-separator px-3 py-2">
+        <h2 className="mr-3 px-1 text-sm font-semibold text-foreground">Registry Editor</h2>
+        <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => setEditorMode("create-key")}>
+          <FontAwesomeIcon aria-hidden icon={faFolderPlus} /> Create key
+        </Button>
+        <Button isDisabled={isLocked} size="sm" variant="ghost" onPress={() => setEditorMode("write-value")}>
+          <FontAwesomeIcon aria-hidden icon={faPen} /> Write value
+        </Button>
+        <IconButton
+          danger
+          isDisabled={isLocked || !path}
+          label={path ? `Delete registry key ${keyName}` : "Delete registry key"}
+          icon={faTrash}
+          onPress={() => void reviewRegistryAction({ actionId: "session.registry.delete-key", hive, path: parentPath, key: keyName })}
+        />
+        <div className="ml-auto flex items-center gap-1">
           <Tooltip delay={250}>
-            <Button isDisabled={state.status !== "ready" || !path} isPending={isSavingHive} size="sm" variant="secondary" onPress={() => void saveHive()}>
+            <Button isDisabled={state.status !== "ready" || !path} isPending={isSavingHive} size="sm" variant="ghost" onPress={() => void saveHive()}>
               <FontAwesomeIcon aria-hidden icon={faDownload} /> Save hive
             </Button>
             <Tooltip.Content>{path ? "Save the selected registry subkey" : "Select a registry subkey before saving"}</Tooltip.Content>
           </Tooltip>
-          <RefreshButton disabled={state.status !== "ready"} label="Refresh registry" pending={state.status === "loading"} onPress={() => void load(hive, path)} />
+          <RefreshButton disabled={state.status === "loading"} label="Refresh registry" pending={state.status === "loading"} onPress={() => void load(requestedLocation.hive, requestedLocation.path)} />
         </div>
-      )}
-    >
-      <div className="flex min-w-0 flex-col gap-4">
-        <div className="grid gap-3 lg:grid-cols-[180px_minmax(0,1fr)_auto] lg:items-end">
-          <Select
-            aria-label="Registry hive"
-            value={hive}
-            variant="secondary"
-            onChange={(key) => {
-              const next = String(key) as SessionRegistryHive;
-              if (REGISTRY_HIVES.includes(next)) void load(next, "");
-            }}
-          >
-            <Label>Hive</Label>
-            <Select.Trigger>
-              <Select.Value />
-              <Select.Indicator><FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} /></Select.Indicator>
-            </Select.Trigger>
-            <Select.Popover>
-              <ListBox>
-                {REGISTRY_HIVES.map((item) => (
-                  <ListBox.Item id={item} key={item} textValue={item}>
-                    <span className="font-mono text-xs">{item}</span>
-                    <ListBox.ItemIndicator />
-                  </ListBox.Item>
-                ))}
-              </ListBox>
-            </Select.Popover>
-          </Select>
-          <TextField value={pathDraft} variant="secondary" onChange={setPathDraft}>
-            <Label>Registry path</Label>
-            <Input className="font-mono text-xs" placeholder="Software\\Microsoft" />
-          </TextField>
-          <Button size="sm" onPress={() => void load(hive, normalizeRegistryPath(pathDraft))}>Go</Button>
-        </div>
-        <Breadcrumbs
-          aria-label="Registry path"
-          onAction={(key) => {
-            const crumb = crumbs.find((item) => item.id === String(key));
-            if (crumb) void load(crumb.hive, crumb.path);
-          }}
-        >
-          {crumbs.map((crumb) => <Breadcrumbs.Item className="no-underline" id={crumb.id} key={crumb.id}>{crumb.label}</Breadcrumbs.Item>)}
-        </Breadcrumbs>
-        {!path ? (
-          <p className="text-xs leading-relaxed text-muted">Select a registry subkey before saving. Root hive export is not available from this workbench.</p>
-        ) : null}
-        {state.status === "loading" ? <PanelLoading label="Loading registry" /> : null}
-        {state.status === "error" ? (
-          <PanelError message={state.error} onRetry={() => void load(requestedLocation.hive, requestedLocation.path)} />
-        ) : null}
-        {state.status === "ready" ? (
-          <div className="flex min-w-0 flex-col gap-3">
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-              <InventoryCount loaded={state.value.entries.filter((entry) => entry.kind === "key").length} noun="subkeys" page={state.value.subkeysPage} />
-              <InventoryCount loaded={state.value.entries.filter((entry) => entry.kind === "value").length} noun="values" page={state.value.valuesPage} />
-            </div>
-            <DataGrid
-              aria-label={`Registry entries in ${hive} ${path}`}
-              columns={columns}
-              contentClassName="min-w-[680px]"
-              data={state.value.entries}
-              getRowId={(entry) => entry.id}
-              rowHeight={48}
-              scrollContainerClassName="max-h-[520px] overflow-auto"
-              variant="secondary"
-              virtualized
-              onRowAction={(key) => {
-                const entry = state.value.entries.find((candidate) => candidate.id === String(key));
-                if (!entry) return;
-                if (entry.kind === "key") void load(hive, joinRegistryPath(path, entry.name));
-                else void readValue(entry.name);
-              }}
-              renderEmptyState={() => <GridEmpty label="This registry key has no visible subkeys or values." />}
-            />
-            {state.value.subkeysPage.nextCursor || state.value.valuesPage.nextCursor ? (
-              <div className="flex flex-wrap justify-center gap-2">
-                {state.value.subkeysPage.nextCursor ? <Button isPending={isLoadingMoreSubkeys} size="sm" variant="tertiary" onPress={() => void loadRegistryContinuation("key", state.value.subkeysPage.nextCursor!)}>Load more subkeys</Button> : null}
-                {state.value.valuesPage.nextCursor ? <Button isPending={isLoadingMoreValues} size="sm" variant="tertiary" onPress={() => void loadRegistryContinuation("value", state.value.valuesPage.nextCursor!)}>Load more values</Button> : null}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {selectedValue ? (
-          <section className="rounded-xl border border-separator bg-default px-4 py-3" aria-labelledby="registry-value-heading">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-mono text-sm font-semibold text-foreground" id="registry-value-heading">{selectedValue.key || "(Default)"}</h3>
-              <Chip size="sm" variant="soft">{selectedValue.hive}</Chip>
-            </div>
-            <p className="mt-1 truncate font-mono text-[11px] text-muted">{selectedValue.path}</p>
-            <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface p-3 font-mono text-xs text-foreground">{selectedValue.value}</pre>
-          </section>
-        ) : null}
       </div>
-    </PanelShell>
+      <form
+        className="flex items-center gap-2 border-b border-separator px-3 py-2"
+        onSubmit={(event) => { event.preventDefault(); navigateFromAddress(); }}
+      >
+        <IconButton
+          isDisabled={!requestedLocation.path}
+          label="Up one registry key"
+          icon={faArrowUp}
+          onPress={() => void load(requestedLocation.hive, requestedLocation.path.split("\\").slice(0, -1).join("\\"))}
+        />
+        <TextField
+          aria-label="Registry path"
+          className="min-w-0 flex-1"
+          isInvalid={Boolean(addressError)}
+          value={pathDraft}
+          variant="secondary"
+          onChange={(value) => { setPathDraft(value); setAddressError(undefined); }}
+        >
+          <Input className="font-mono text-xs" placeholder="Computer\\HKEY_CURRENT_USER\\Software" />
+        </TextField>
+        <Button size="sm" type="submit" variant="secondary">Go</Button>
+      </form>
+      {addressError ? <p className="px-4 py-2 text-xs text-danger" role="alert">{addressError}</p> : null}
+      <div className="h-[min(64vh,680px)] min-h-[420px] bg-background">
+        <Resizable orientation="horizontal">
+          <Resizable.Panel defaultSize="300px" minSize="160px" maxSize="50%" groupResizeBehavior="preserve-pixel-size">
+            <div className="flex h-full min-w-0 flex-col" aria-label="Registry key navigation">
+              <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
+                <SessionRegistryTree
+                  branches={branches}
+                  hive={requestedLocation.hive}
+                  key={routeKey}
+                  path={requestedLocation.path}
+                  onNavigate={(nextHive, nextPath) => void load(nextHive, nextPath)}
+                />
+              </div>
+              {state.status === "ready" && state.value.subkeysPage.nextCursor ? (
+                <div className="border-t border-separator p-2">
+                  <Button fullWidth isPending={isLoadingMoreSubkeys} size="sm" variant="ghost" onPress={() => void loadRegistryContinuation("key", state.value.subkeysPage.nextCursor!)}>Load more subkeys</Button>
+                </div>
+              ) : null}
+            </div>
+          </Resizable.Panel>
+          <Resizable.Handle type="line" variant="secondary" withIndicator />
+          <Resizable.Panel minSize={35}>
+            <div className="flex h-full min-w-0 flex-col" aria-label="Registry values">
+              {state.status === "loading" ? <PanelLoading label="Loading registry" /> : null}
+              {state.status === "error" ? (
+                <PanelError message={state.error} onRetry={() => void load(requestedLocation.hive, requestedLocation.path)} />
+              ) : null}
+              {state.status === "ready" ? (
+                <>
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    <DataGrid
+                      aria-label={`Registry values in ${hive} ${path}`}
+                      className="h-full rounded-none bg-transparent p-0 [&_.table__body]:rounded-none [&_.table__body]:shadow-none"
+                      columns={columns}
+                      contentClassName="min-w-[460px]"
+                      data={values}
+                      getRowId={(entry) => entry.id}
+                      rowHeight={36}
+                      scrollContainerClassName="h-full max-h-full overflow-auto rounded-none"
+                      selectedKeys={new Set(readingValueKey !== undefined ? [readingValueKey] : selectedValue ? [`value:${selectedValue.key}`] : [])}
+                      selectionBehavior="replace"
+                      selectionMode="single"
+                      virtualized
+                      onSelectionChange={(keys) => {
+                        if (keys === "all") return;
+                        const entry = values.find((candidate) => keys.has(candidate.id));
+                        if (entry && entry.id !== readingValueKey && entry.name !== selectedValue?.key) void readValue(entry.name);
+                      }}
+                      onRowAction={(key) => {
+                        const entry = values.find((candidate) => candidate.id === String(key));
+                        if (entry && entry.id !== readingValueKey) void readValue(entry.name);
+                      }}
+                      renderEmptyState={() => <GridEmpty label="This registry key has no values." />}
+                    />
+                  </div>
+                  {state.value.valuesPage.nextCursor ? (
+                    <div className="border-t border-separator p-2">
+                      <Button isPending={isLoadingMoreValues} size="sm" variant="ghost" onPress={() => void loadRegistryContinuation("value", state.value.valuesPage.nextCursor!)}>Load more values</Button>
+                    </div>
+                  ) : null}
+                  <section className="min-h-28 shrink-0 border-t border-separator px-4 py-3" aria-label="Selected value data" aria-busy={readingValueKey !== undefined}>
+                    {selectedValue ? (
+                      <>
+                        <h3 className="truncate font-mono text-xs font-medium text-foreground">{selectedValue.key || "(Default)"}</h3>
+                        <pre className="mt-2 max-h-28 select-text overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{selectedValue.value || "(empty value)"}</pre>
+                      </>
+                    ) : (
+                      <p className="text-xs text-muted">{readingValueKey !== undefined ? "Reading value data…" : "Select a value to read its data."}</p>
+                    )}
+                  </section>
+                </>
+              ) : null}
+            </div>
+          </Resizable.Panel>
+        </Resizable>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-separator px-4 py-2 text-xs text-muted" role="status">
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={registryAddress(requestedLocation.hive, requestedLocation.path)}>
+          {registryAddress(requestedLocation.hive, requestedLocation.path)}
+        </span>
+        {state.status === "ready" ? (
+          <>
+            <InventoryCount loaded={subkeys.length} noun="subkeys" page={state.value.subkeysPage} />
+            <InventoryCount loaded={values.length} noun="values" page={state.value.valuesPage} />
+          </>
+        ) : <span>{state.status === "loading" ? "Loading…" : "Could not load key"}</span>}
+      </div>
+    </section>
     {editorMode ? (
       <RegistryMutationSheet
         hive={hive}
@@ -3653,25 +3715,23 @@ export function pathBreadcrumbs(path: string, windows: boolean): Array<{ label: 
   return crumbs;
 }
 
-function joinRegistryPath(parent: string, child: string): string {
-  const normalizedChild = normalizeRegistryPath(child);
-  return parent ? `${normalizeRegistryPath(parent)}\\${normalizedChild}` : normalizedChild;
-}
-
 function normalizeRegistryPath(path: string): string {
   return path.trim().replaceAll("/", "\\").replaceAll(/^\\+|\\+$/gu, "");
 }
 
-function registryBreadcrumbs(hive: SessionRegistryHive, path: string): Array<{ id: string; label: string; hive: SessionRegistryHive; path: string }> {
-  const crumbs: Array<{ id: string; label: string; hive: SessionRegistryHive; path: string }> = [
-    { id: `${hive}:`, label: hive, hive, path: "" },
-  ];
-  let current = "";
-  for (const part of normalizeRegistryPath(path).split("\\").filter(Boolean)) {
-    current = current ? `${current}\\${part}` : part;
-    crumbs.push({ id: `${hive}:${current}`, label: part, hive, path: current });
-  }
-  return crumbs;
+function registryAddress(hive: SessionRegistryHive, path: string): string {
+  return `Computer\\${REGISTRY_HIVE_LABELS[hive]}${path ? `\\${path}` : ""}`;
+}
+
+function parseRegistryAddress(address: string, currentHive: SessionRegistryHive): { hive: SessionRegistryHive; path: string } | undefined {
+  const parts = normalizeRegistryPath(address).split("\\").filter(Boolean);
+  const hasComputer = parts[0]?.toLowerCase() === "computer";
+  if (hasComputer) parts.shift();
+  const root = parts[0]?.toUpperCase();
+  const hive = REGISTRY_HIVES.find((candidate) => candidate === root || REGISTRY_HIVE_LABELS[candidate] === root);
+  if (hive) return { hive, path: parts.slice(1).join("\\") };
+  if (hasComputer || root?.startsWith("HKEY_") || root?.startsWith("HK")) return undefined;
+  return { hive: currentHive, path: parts.join("\\") };
 }
 
 function destructiveActionTitle(action: PrepareSessionDestructiveActionInput): string {

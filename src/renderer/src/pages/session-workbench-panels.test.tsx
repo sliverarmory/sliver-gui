@@ -1307,7 +1307,7 @@ describe("session workbench panels", () => {
     expect(screen.getByText("Loaded 1 of 1 services matching “remote”")).toBeInTheDocument();
   });
 
-  it("browses and reads Windows registry values", async () => {
+  it("separates the Windows registry key tree from values and reads selected data", async () => {
     const user = userEvent.setup();
     const api = installAPI((input) => {
       switch (input.operationId) {
@@ -1331,9 +1331,16 @@ describe("session workbench panels", () => {
 
     render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
     expect(await screen.findByRole("row", { name: /InstallPath/i })).toBeInTheDocument();
+    const tree = screen.getByRole("treegrid", { name: "Registry keys" });
+    const values = screen.getByRole("grid", { name: "Registry values in HKCU" });
+    expect(within(tree).getByText("Software")).toBeInTheDocument();
+    expect(within(tree).queryByText("InstallPath")).not.toBeInTheDocument();
+    expect(within(values).queryByText("Software")).not.toBeInTheDocument();
+    expect(within(values).getByRole("columnheader", { name: "Data" })).toBeInTheDocument();
+    expect(api.runSessionWorkbench.mock.calls.some(([input]) => input.operationId === "session.registry.read")).toBe(false);
     expect(screen.getByRole("button", { name: "Save hive" })).toBeDisabled();
-    expect(screen.getByText(/Select a registry subkey before saving/i)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Open Software" }));
+    expect(screen.getByRole("button", { name: "Delete registry key" })).toBeDisabled();
+    await user.click(within(tree).getByText("Software"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Save hive" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "Save hive" }));
     expect(api.runSessionWorkbench).toHaveBeenCalledWith(expect.objectContaining({
@@ -1342,7 +1349,8 @@ describe("session workbench panels", () => {
       requestedHive: "Software",
     }));
     await user.click(screen.getByRole("button", { name: "Read InstallPath" }));
-    expect(await screen.findByText("C:\\Program Files\\Sliver")).toBeInTheDocument();
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("C:\\Program Files\\Sliver")).toBeInTheDocument();
+    expect(within(screen.getByRole("grid", { name: "Registry values in HKCU Software" })).getByText("C:\\Program Files\\Sliver")).toBeInTheDocument();
   });
 
   it("pages registry subkeys and values independently and reviews exact create, write, and delete payloads", async () => {
@@ -1431,7 +1439,8 @@ describe("session workbench panels", () => {
     });
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
-    await user.click(screen.getByRole("button", { name: "Delete registry key Software" }));
+    await user.click(within(screen.getByRole("treegrid", { name: "Registry keys" })).getByText("Software"));
+    await user.click(await screen.findByRole("button", { name: "Delete registry key Software" }));
     expect(await screen.findByRole("alertdialog", { name: "Delete this registry key?" })).toBeInTheDocument();
     expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({
       actionId: "session.registry.delete-key",
@@ -1439,6 +1448,131 @@ describe("session workbench panels", () => {
       path: "",
       key: "Software",
     });
+  });
+
+  it("navigates full and abbreviated registry addresses with Enter and moves up to the hive root", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys" || input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    await screen.findByText("This registry key has no values.");
+    const address = screen.getByRole("textbox", { name: "Registry path" });
+    expect(address).toHaveValue("Computer\\HKEY_CURRENT_USER");
+    expect(screen.getByRole("button", { name: "Up one registry key" })).toBeDisabled();
+
+    await user.clear(address);
+    await user.type(address, "Computer\\HKEY_LOCAL_MACHINE\\Software\\Example{Enter}", { skipClick: true });
+    expect(await screen.findByRole("grid", { name: "Registry values in HKLM Software\\Example" })).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+      operationId: "session.registry.list-subkeys", hive: "HKLM", path: "Software\\Example", limit: 500,
+    });
+    await user.click(screen.getByRole("button", { name: "Up one registry key" }));
+    expect(await screen.findByRole("grid", { name: "Registry values in HKLM Software" })).toBeInTheDocument();
+    expect(address).toHaveValue("Computer\\HKEY_LOCAL_MACHINE\\Software");
+    await user.click(screen.getByRole("button", { name: "Up one registry key" }));
+    expect(await screen.findByRole("grid", { name: "Registry values in HKLM" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Up one registry key" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save hive" })).toBeDisabled();
+
+    await user.clear(address);
+    await user.type(address, "hkcu\\Control Panel{Enter}", { skipClick: true });
+    expect(await screen.findByRole("grid", { name: "Registry values in HKCU Control Panel" })).toBeInTheDocument();
+    expect(address).toHaveValue("Computer\\HKEY_CURRENT_USER\\Control Panel");
+    const callsBeforeInvalidAddress = api.runSessionWorkbench.mock.calls.length;
+    await user.clear(address);
+    await user.type(address, "Computer\\HKEY_UNKNOWN\\Software{Enter}", { skipClick: true });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Enter a registry hive and path");
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(callsBeforeInvalidAddress);
+  });
+
+  it("preserves registry sibling keys while navigating and removes stale descendants on a parent reload", async () => {
+    const user = userEvent.setup();
+    let omitOldKey = false;
+    installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        const items = input.path === "" ? ["Software", "System"]
+          : input.path === "Software" ? omitOldKey ? ["KeepKey"] : ["OldKey", "KeepKey"]
+          : input.path === "Software\\OldKey" ? ["Nested"]
+          : input.path === "System" ? ["Policy"] : [];
+        return workbench(input.operationId, { items, page: { limit: 500, total: items.length, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const tree = screen.getByRole("treegrid", { name: "Registry keys" });
+    await user.click(await within(tree).findByText("Software"));
+    await user.click(await within(tree).findByText("OldKey"));
+    expect(await within(tree).findByText("Nested")).toBeInTheDocument();
+    expect(within(tree).getByText("System")).toBeInTheDocument();
+
+    omitOldKey = true;
+    await user.click(within(tree).getByText("Software"));
+    await screen.findByRole("grid", { name: "Registry values in HKCU Software" });
+    expect(within(tree).queryByText("OldKey")).not.toBeInTheDocument();
+    expect(within(tree).queryByText("Nested")).not.toBeInTheDocument();
+    expect(within(tree).getByText("KeepKey")).toBeInTheDocument();
+    expect(within(tree).getByText("System")).toBeInTheDocument();
+
+    await user.click(within(tree).getByText("System"));
+    expect(await within(tree).findByText("Policy")).toBeInTheDocument();
+    expect(within(tree).getByText("KeepKey")).toBeInTheDocument();
+    await user.click(within(tree).getByRole("button", { name: "Collapse Software" }));
+    expect(within(tree).queryByText("KeepKey")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Refresh registry" }));
+    await screen.findByRole("grid", { name: "Registry values in HKCU System" });
+    expect(within(tree).queryByText("KeepKey")).not.toBeInTheDocument();
+  });
+
+  it("reviews a selected registry key against its parent and returns to that parent after deletion", async () => {
+    const user = userEvent.setup();
+    let deleted = false;
+    const api = installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys") {
+        const items = input.path === "" ? ["Software"] : input.path === "Software" && !deleted ? ["Example"] : [];
+        return workbench(input.operationId, { items, page: { limit: 500, total: items.length, truncated: false } });
+      }
+      if (input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: [], page: { limit: 500, total: 0, truncated: false } });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    }, {
+      prepare: (input) => preparedAction(input),
+      execute: () => {
+        deleted = true;
+        return {
+          ok: true,
+          value: { actionId: "session.registry.delete-key", status: "succeeded", message: "Key deleted", payloadDigest: "b".repeat(64) },
+        };
+      },
+    });
+    render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
+    const tree = screen.getByRole("treegrid", { name: "Registry keys" });
+    await user.click(await within(tree).findByText("Software"));
+    await user.click(await within(tree).findByText("Example"));
+    await screen.findByRole("grid", { name: "Registry values in HKCU Software\\Example" });
+    await user.click(screen.getByRole("button", { name: "Delete registry key Example" }));
+    const review = await screen.findByRole("alertdialog", { name: "Delete this registry key?" });
+    expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({
+      actionId: "session.registry.delete-key", hive: "HKCU", path: "Software", key: "Example",
+    });
+    expect(api.executeSessionDestructiveActionPlan).not.toHaveBeenCalled();
+    api.runSessionWorkbench.mockClear();
+    await user.click(within(review).getByRole("button", { name: "Confirm action" }));
+    await screen.findByRole("grid", { name: "Registry values in HKCU Software" });
+    expect(api.executeSessionDestructiveActionPlan).toHaveBeenCalledWith({ token: "review-session.registry.delete-key" });
+    expect(api.runSessionWorkbench.mock.calls.map(([input]) => input)).toEqual([
+      { operationId: "session.registry.list-subkeys", hive: "HKCU", path: "Software", limit: 500 },
+      { operationId: "session.registry.list-values", hive: "HKCU", path: "Software", limit: 500 },
+    ]);
+    expect(screen.getByRole("textbox", { name: "Registry path" })).toHaveValue("Computer\\HKEY_CURRENT_USER\\Software");
+    expect(within(tree).queryByText("Example")).not.toBeInTheDocument();
   });
 
   it("keeps the latest registry navigation when an older same-route request finishes late", async () => {
@@ -1465,11 +1599,12 @@ describe("session workbench panels", () => {
 
     render(<SessionRegistryPanel {...panelContext({ os: "windows", arch: "amd64" })} />);
     const pathInput = await screen.findByRole("textbox", { name: "Registry path" });
-    await screen.findByText("This registry key has no visible subkeys or values.");
-    await user.type(pathInput, "Old");
+    await screen.findByText("This registry key has no values.");
+    await user.clear(pathInput);
+    await user.type(pathInput, "Old", { skipClick: true });
     await user.click(screen.getByRole("button", { name: "Go" }));
     await user.clear(pathInput);
-    await user.type(pathInput, "New");
+    await user.type(pathInput, "New", { skipClick: true });
     await user.click(screen.getByRole("button", { name: "Go" }));
 
     await act(async () => {
@@ -1487,7 +1622,9 @@ describe("session workbench panels", () => {
       }));
     });
     expect(screen.queryByRole("row", { name: /StaleValue/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("grid", { name: /Registry entries in HKCU New/i })).toBeInTheDocument();
+    expect(screen.getByRole("grid", { name: /Registry values in HKCU New/i })).toBeInTheDocument();
+    expect(pathInput).toHaveValue("Computer\\HKEY_CURRENT_USER\\New");
+    expect(within(screen.getByRole("treegrid", { name: "Registry keys" })).queryByText("Old")).not.toBeInTheDocument();
   });
 
   it("keeps only the latest registry value read and shows pending state on that row", async () => {
@@ -1529,7 +1666,7 @@ describe("session workbench panels", () => {
         value: "newest-data",
       }));
     });
-    expect(await screen.findByText("newest-data")).toBeInTheDocument();
+    expect(await within(screen.getByRole("region", { name: "Selected value data" })).findByText("newest-data")).toBeInTheDocument();
 
     await act(async () => {
       firstRead.resolve(workbench("session.registry.read", {
@@ -1539,7 +1676,7 @@ describe("session workbench panels", () => {
         value: "stale-data",
       }));
     });
-    expect(screen.getByText("newest-data")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Selected value data" })).getByText("newest-data")).toBeInTheDocument();
     expect(screen.queryByText("stale-data")).not.toBeInTheDocument();
   });
 
