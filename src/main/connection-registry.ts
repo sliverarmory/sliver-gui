@@ -116,6 +116,7 @@ import {
   type SessionDestructiveActionOutcome,
   type SessionDestructiveActionPreparation,
   type SessionDestructiveActionPlan,
+  type SessionDroppedUploadInput,
   type SessionRegistryWriteValue,
   type SessionTargetPlatform,
   type SessionWorkbenchInput,
@@ -1666,6 +1667,29 @@ export class ConnectionRegistry {
     sender: WebContents,
     input: SessionWorkbenchInput,
   ): Promise<OperationResult<SessionWorkbenchInvocationResult>> {
+    return this.runSessionWorkbenchWithUploadSource(sender, input);
+  }
+
+  async runDroppedSessionUpload(
+    sender: WebContents,
+    sourcePath: string,
+    input: SessionDroppedUploadInput,
+  ): Promise<OperationResult<SessionWorkbenchInvocationResult>> {
+    return this.runSessionWorkbenchWithUploadSource(
+      sender,
+      {
+        operationId: "session.filesystem.upload-open",
+        ...input,
+      },
+      sourcePath,
+    );
+  }
+
+  private async runSessionWorkbenchWithUploadSource(
+    sender: WebContents,
+    input: SessionWorkbenchInput,
+    uploadSourcePath?: string,
+  ): Promise<OperationResult<SessionWorkbenchInvocationResult>> {
     const admissionId = randomUUID();
     let admittedContext: WindowContext | undefined;
     try {
@@ -1719,7 +1743,7 @@ export class ConnectionRegistry {
         };
         const workbench = new SessionWorkbench(
           pool.client,
-          this.sessionArtifactGateway(sender, scope, assertSelectedTarget),
+          this.sessionArtifactGateway(sender, scope, assertSelectedTarget, uploadSourcePath),
           {
             now: this.now,
             onMutationDispatch: () => {
@@ -3687,6 +3711,7 @@ export class ConnectionRegistry {
     sender: WebContents,
     scope: SessionArtifactScope,
     assertCurrent: () => void,
+    uploadSourcePath?: string,
   ): SessionWorkbenchArtifactGateway {
     const owner = requireOwnerWindow(sender);
     const nativeSaves = new WeakMap<object, { path: string; intent: SessionSaveIntent }>();
@@ -3736,18 +3761,22 @@ export class ConnectionRegistry {
       },
       prepareUploadOpen: async ({ maximumBytes }) => {
         assertCurrent();
-        let selection;
-        try {
-          selection = await dialog.showOpenDialog(owner, {
-            title: "Choose a file to upload",
-            properties: ["openFile"],
-          });
-        } catch {
-          throw new SessionWorkbenchBoundaryError("Could not open the native upload picker");
+        let filePath = uploadSourcePath;
+        if (filePath === undefined) {
+          let selection;
+          try {
+            selection = await dialog.showOpenDialog(owner, {
+              title: "Choose a file to upload",
+              properties: ["openFile"],
+            });
+          } catch {
+            throw new SessionWorkbenchBoundaryError("Could not open the native upload picker");
+          }
+          assertCurrent();
+          filePath = selection.filePaths[0];
+          if (selection.canceled || !filePath) return null;
         }
         assertCurrent();
-        const filePath = selection.filePaths[0];
-        if (selection.canceled || !filePath) return null;
         let selected;
         try {
           selected = await readBoundedRegularFile(filePath, {

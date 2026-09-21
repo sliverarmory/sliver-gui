@@ -4593,6 +4593,56 @@ describe("connection registry with an injected Sliver client", () => {
     expect(client.uploadSession).toHaveBeenCalledOnce();
   });
 
+  it("uploads one dropped local file through the existing bounded workbench path without a picker", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const uploadPath = join(root, "dropped.bin");
+    await writeFile(uploadPath, "dropped bytes", { mode: 0o600 });
+
+    const result = await registry.runDroppedSessionUpload(sender(1), uploadPath, {
+      remotePath: "/tmp",
+      isIOC: true,
+      isDirectory: false,
+      overwrite: false,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        status: "completed",
+        result: {
+          operationId: "session.filesystem.upload-open",
+          value: {
+            status: "uploaded",
+            remotePath: "/tmp",
+            suggestedBasename: "dropped.bin",
+            size: 13,
+            message: "Upload completed",
+          },
+        },
+      },
+    });
+    expect(electronMocks.showOpenDialog).not.toHaveBeenCalled();
+    expect(client.lastUploadData?.toString()).toBe("dropped bytes");
+    expect(client.uploadSession).toHaveBeenCalledExactlyOnceWith(
+      "session_m2",
+      "/tmp",
+      expect.any(Buffer),
+      {
+        isIOC: true,
+        fileName: "dropped.bin",
+        isDirectory: false,
+        overwrite: false,
+      },
+    );
+    expect(client.uploadSession.mock.calls[0]?.[2].every((byte) => byte === 0)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(uploadPath);
+  });
+
   it("does not expose native paths or raw transport errors through workbench results", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_m2", "m2-interactive")];

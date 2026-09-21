@@ -19,12 +19,44 @@ import {
   type SessionWorkbenchResult,
   parseExecuteSessionDestructiveActionPlanInput,
   parsePrepareSessionDestructiveActionInput,
+  parseSessionDroppedUploadInput,
+  parseSessionDroppedUploadIpcRequest,
   parseSessionWorkbenchInput,
   redactSessionEnvironment,
   sessionOperationSupportsPlatform,
 } from "./session-contracts.js";
 
 describe("session workbench contracts", () => {
+  it("keeps dropped upload options closed and the local path inside the private IPC envelope", () => {
+    const input = {
+      remotePath: "/tmp",
+      isIOC: true,
+      isDirectory: false as const,
+      overwrite: false as const,
+    };
+    expect(parseSessionDroppedUploadInput(input)).toEqual(input);
+    expect(parseSessionDroppedUploadIpcRequest({
+      sourcePath: "/Users/operator/drop.bin",
+      input,
+    })).toEqual({ sourcePath: "/Users/operator/drop.bin", input });
+
+    expect(() => parseSessionDroppedUploadInput({
+      ...input,
+      sourcePath: "/Users/operator/secret.bin",
+    })).toThrow(/Unexpected session input field/u);
+    expect(() => parseSessionDroppedUploadInput({ ...input, isDirectory: true }))
+      .toThrow(/isDirectory must be false/u);
+    expect(() => parseSessionDroppedUploadInput({ ...input, overwrite: true }))
+      .toThrow(/overwrite must be false/u);
+    expect(() => parseSessionDroppedUploadIpcRequest({ sourcePath: "", input }))
+      .toThrow(/sourcePath/u);
+    expect(() => parseSessionDroppedUploadIpcRequest({
+      sourcePath: "/Users/operator/drop.bin",
+      input,
+      targetId: "attacker-selected-session",
+    })).toThrow(/Unexpected session input field/u);
+  });
+
   it("keeps native artifact operations closed, bounded, and free of local paths", () => {
     expect(SESSION_WORKBENCH_ARTIFACT_IDS).toEqual([
       "session.screenshot.capture",

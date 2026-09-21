@@ -78,6 +78,7 @@ function installSliverAPI(
     deleteScript: vi.fn(failedOperation),
     getScriptRuntime: vi.fn(failedOperation),
     setScriptEditorDirty: vi.fn(async () => ({ ok: true as const })),
+    uploadDroppedSessionFile: vi.fn(failedOperation),
     onScriptsChanged: vi.fn(() => vi.fn()),
     onScriptEditorRequested: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),

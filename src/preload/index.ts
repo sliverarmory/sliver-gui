@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 import {
   IPC,
@@ -15,6 +15,11 @@ import {
   type ApplicationContextMenuAPI,
 } from "../shared/application-context-menu-contracts.js";
 import type { TargetOperationRecord } from "../shared/operation-contracts.js";
+import {
+  SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
+  parseSessionDroppedUploadInput,
+  parseSessionDroppedUploadIpcRequest,
+} from "../shared/session-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
 import { isResolvedApplicationIcon, parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import { parseSliverReleaseDownloadEvent } from "../shared/release-contracts.js";
@@ -151,6 +156,18 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
+  uploadDroppedSessionFile: (file, input) => {
+    const parsedInput = parseSessionDroppedUploadInput(input);
+    let sourcePath: string;
+    try {
+      sourcePath = webUtils.getPathForFile(file);
+    } catch {
+      throw new TypeError("Dropped upload must be backed by a local file");
+    }
+    if (!sourcePath) throw new TypeError("Dropped upload must be backed by a local file");
+    const request = parseSessionDroppedUploadIpcRequest({ sourcePath, input: parsedInput });
+    return ipcRenderer.invoke(SESSION_DROPPED_UPLOAD_IPC_CHANNEL, request);
+  },
   onScriptsChanged: (listener) => {
     const handler = (): void => listener();
     ipcRenderer.on(IPC.scriptsChanged, handler);

@@ -63,6 +63,16 @@ interface FakeMainState {
   configFactoryCalls: number;
   dialogCalls: number;
   methods: string[];
+  uploads: Array<{
+    path: string;
+    fileName: string;
+    destination: string;
+    size: number;
+    sha256: string;
+    isIOC: boolean;
+    isDirectory: boolean;
+    overwrite: boolean;
+  }>;
   disconnects: number;
   ssh: Array<{ writes: string[]; closed: boolean }>;
   connectedConfig?: {
@@ -145,6 +155,7 @@ const state: FakeMainState = {
   configFactoryCalls: 0,
   dialogCalls: 0,
   methods: [],
+  uploads: [],
   disconnects: 0,
   ssh: [],
   holdNextBeaconTask: false,
@@ -1450,13 +1461,23 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       sessionId: string,
       path: string,
       data: Buffer,
-      options: { fileName?: string; isDirectory?: boolean; overwrite?: boolean } = {},
+      options: { isIOC?: boolean; fileName?: string; isDirectory?: boolean; overwrite?: boolean } = {},
     ) {
       record("uploadSession");
       requireSession(sessionId);
       if (options.isDirectory) throw new Error("The deterministic fake accepts only bounded file uploads");
       const destination = options.fileName ? `${path.replace(/\/$/u, "")}/${options.fileName}` : path;
       const ownedCopy = Buffer.from(data);
+      state.uploads.push({
+        path,
+        fileName: options.fileName ?? "",
+        destination,
+        size: ownedCopy.length,
+        sha256: createHash("sha256").update(ownedCopy).digest("hex"),
+        isIOC: options.isIOC ?? false,
+        isDirectory: options.isDirectory ?? false,
+        overwrite: options.overwrite ?? false,
+      });
       remoteFiles.set(destination, ownedCopy);
       upsertWorkspaceFile(destination, ownedCopy.length);
       return sliverpb.Upload.create({

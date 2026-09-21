@@ -7,6 +7,23 @@ export const SESSION_WORKBENCH_MAX_ARTIFACT_BYTES = 67_108_864 as const;
 /** Leaves one byte inside sliver-script's artifact cap to detect truncation. */
 export const SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES = 67_108_863 as const;
 export const SESSION_EDITOR_MAX_BYTES = 65_536 as const;
+export const SESSION_DROPPED_UPLOAD_IPC_CHANNEL = "sliver:session-workbench:upload-dropped" as const;
+
+const SESSION_DROPPED_UPLOAD_MAX_LOCAL_PATH_LENGTH = 32_768;
+
+/** Renderer-authored remote options for one native-backed dropped file. */
+export interface SessionDroppedUploadInput {
+  remotePath: string;
+  isIOC: boolean;
+  isDirectory: false;
+  overwrite: false;
+}
+
+/** Private preload-to-main envelope. The source path must never be exposed to the renderer. */
+export interface SessionDroppedUploadIpcRequest {
+  sourcePath: string;
+  input: SessionDroppedUploadInput;
+}
 
 export const SESSION_WORKBENCH_QUERY_IDS = [
   "session.identity.current-token-owner",
@@ -739,6 +756,28 @@ export function parseSessionWorkbenchInput(value: unknown): SessionWorkbenchInpu
   const operationId = requiredString(record, "operationId", 96) as SessionWorkbenchOperationId;
   if (!isDirectOperationId(operationId)) throw new Error("Unknown session workbench operation");
   const parsed = parseDirectInput(operationId, record);
+  assertExactKeys(record, Object.keys(parsed));
+  return parsed;
+}
+
+export function parseSessionDroppedUploadInput(value: unknown): SessionDroppedUploadInput {
+  const record = objectRecord(value, "Dropped session upload input");
+  const parsed: SessionDroppedUploadInput = {
+    remotePath: requiredPath(record, "remotePath"),
+    isIOC: requiredBoolean(record, "isIOC"),
+    isDirectory: requiredFalse(record, "isDirectory"),
+    overwrite: requiredFalse(record, "overwrite"),
+  };
+  assertExactKeys(record, Object.keys(parsed));
+  return parsed;
+}
+
+export function parseSessionDroppedUploadIpcRequest(value: unknown): SessionDroppedUploadIpcRequest {
+  const record = objectRecord(value, "Dropped session upload IPC request");
+  const parsed: SessionDroppedUploadIpcRequest = {
+    sourcePath: requiredString(record, "sourcePath", SESSION_DROPPED_UPLOAD_MAX_LOCAL_PATH_LENGTH),
+    input: parseSessionDroppedUploadInput(record["input"]),
+  };
   assertExactKeys(record, Object.keys(parsed));
   return parsed;
 }

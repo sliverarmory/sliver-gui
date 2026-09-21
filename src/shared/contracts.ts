@@ -28,6 +28,7 @@ import type {
 import type {
   ExecuteSessionDestructiveActionPlanInput,
   PrepareSessionDestructiveActionInput,
+  SessionDroppedUploadInput,
   SessionDestructiveActionOutcome,
   SessionDestructiveActionPreparation,
   SessionWorkbenchInput,
@@ -1069,6 +1070,11 @@ export type SliverDesktopInvokeAPI = {
 };
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
+  /** Upload one native-backed dropped file without exposing its local path to the renderer. */
+  uploadDroppedSessionFile: (
+    file: File,
+    input: SessionDroppedUploadInput,
+  ) => Promise<OperationResult<SessionWorkbenchInvocationResult>>;
   onScriptsChanged: (listener: () => void) => () => void;
   onScriptEditorRequested: (listener: () => void) => () => void;
   /**
@@ -1109,11 +1115,12 @@ function defineSliverDesktopNonInvokeAPIKeys<
 }
 
 /**
- * Explicit security allowlist for preload capabilities that do not use invoke IPC.
- * The helper makes additions to SliverDesktopAPI fail typechecking until this list
- * is deliberately reviewed and updated.
+ * Explicit security allowlist for preload capabilities that are not generated from
+ * IPC_INVOKE. The helper makes additions to SliverDesktopAPI fail typechecking until
+ * each manually adapted capability is deliberately reviewed and added here.
  */
 export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAPIKeys([
+  "uploadDroppedSessionFile",
   "onScriptsChanged",
   "onScriptEditorRequested",
   "openStream",

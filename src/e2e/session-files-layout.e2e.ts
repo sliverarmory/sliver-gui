@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
+import {
+  _electron as electron,
+  type ElectronApplication,
+  type JSHandle,
+  type Locator,
+  type Page,
+} from "playwright-core";
 
 test("Files keeps folders and entries independently scrollable inside a fixed session viewport", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -14,6 +21,8 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
   const userDataDirectory = join(temporaryRoot, "user-data");
   const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
+  const droppedUploadPath = join(temporaryRoot, "DroppedUpload.bin");
+  const droppedUploadBytes = Buffer.from("SLIVER_GUI_E2E_DROP_UPLOAD_BYTES\n", "utf8");
   await Promise.all([
     mkdir(savedConfigDirectory, { recursive: true }),
     mkdir(managedConfigDirectory, { recursive: true }),
@@ -26,6 +35,7 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     fakeOperatorConfig(),
     { mode: 0o600 },
   );
+  await writeFile(droppedUploadPath, droppedUploadBytes, { mode: 0o600 });
 
   let application: ElectronApplication | undefined;
   let page: Page | undefined;
@@ -193,6 +203,99 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await folderTree.getByText("E2EFolder002", { exact: true }).waitFor({ state: "detached" });
     assert.equal(await folderTree.getByText("E2EFolder002", { exact: true }).count(), 0,
       "refreshing a directory must clear previously discovered branches");
+
+    await remotePath.fill("/Users/e2e/workspace");
+    await remotePath.press("Enter");
+    await entriesGrid.waitFor();
+    await count.waitFor();
+
+    const dialogCallsBeforeDrop = await application.evaluate(
+      () => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls,
+    );
+    await application.evaluate(({ dialog }) => {
+      dialog.showOpenDialog = async () => {
+        globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+        return { canceled: true, filePaths: [] };
+      };
+    });
+
+    const dropInput = await installDroppedFileInput(page, droppedUploadPath);
+    const dataTransfer = await createDroppedFileTransfer(dropInput);
+    const dropArea = browser.getByLabel(
+      "Upload a local file to /Users/e2e/workspace",
+      { exact: true },
+    );
+    await dropArea.dispatchEvent("dragenter", { dataTransfer });
+    await browser.getByText("Drop to upload", { exact: true }).waitFor();
+    await browser.getByText("One file, up to 64 MiB", { exact: true }).waitFor();
+    await dropArea.dispatchEvent("dragover", { dataTransfer });
+    await dropArea.dispatchEvent("drop", { dataTransfer });
+
+    const uploadDialog = page.getByRole("dialog", { name: "Upload file", exact: true });
+    await uploadDialog.waitFor();
+    await uploadDialog.getByText("DroppedUpload.bin", { exact: true }).waitFor();
+    const remoteDestination = uploadDialog.getByRole("textbox", {
+      name: /^Remote destination folder/iu,
+    });
+    assert.equal(await remoteDestination.inputValue(), "/Users/e2e/workspace");
+    await uploadDialog.getByText("Existing files are not overwritten.", { exact: true }).waitFor();
+    assert.equal(
+      await uploadDialog.getByRole("checkbox", { name: /overwrite/iu }).count(),
+      0,
+      "drop uploads must not expose an overwrite option",
+    );
+    assert.equal((await uploadDialog.innerText()).includes(droppedUploadPath), false,
+      "the native source path must not be rendered");
+    const markAsIOC = uploadDialog.getByRole("checkbox", { name: "Mark as IOC", exact: true });
+    assert.equal(await markAsIOC.isChecked(), false);
+    await markAsIOC.press("Space");
+    assert.equal(await markAsIOC.isChecked(), true);
+    await uploadDialog.getByRole("button", { name: "Upload", exact: true }).click();
+    await uploadDialog.waitFor({ state: "hidden" });
+    await dataTransfer.dispose();
+    await dropInput.evaluate((element) => element.remove());
+
+    await page.getByText("Upload complete", { exact: true }).waitFor();
+    await waitForFakeMethodCount(application, "uploadSession", 1);
+    assert.equal(
+      await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls),
+      dialogCallsBeforeDrop,
+      "a dropped file must not open the native file picker",
+    );
+    assert.deepEqual(
+      await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads),
+      [{
+        path: "/Users/e2e/workspace",
+        fileName: "DroppedUpload.bin",
+        destination: "/Users/e2e/workspace/DroppedUpload.bin",
+        size: droppedUploadBytes.length,
+        sha256: createHash("sha256").update(droppedUploadBytes).digest("hex"),
+        isIOC: true,
+        isDirectory: false,
+        overwrite: false,
+      }],
+    );
+
+    await page.getByText("Loaded 100 of 106 items · bounded", { exact: true }).waitFor();
+    await browser.getByRole("button", { name: "Load more", exact: true }).click();
+    await page.getByText("Loaded 106 of 106 items", { exact: true }).waitFor();
+    const uploadedRow = entriesGrid.getByRole("row").filter({ hasText: "DroppedUpload.bin" });
+    const uploadedFileName = uploadedRow.getByRole("rowheader", { name: "DroppedUpload.bin", exact: true });
+    await uploadedFileName.waitFor();
+
+    const uploadedDownloadPath = join(temporaryRoot, "downloaded-DroppedUpload.bin");
+    await application.evaluate(({ dialog }, outputPath) => {
+      dialog.showSaveDialog = async () => {
+        globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+        return { canceled: false, filePath: outputPath };
+      };
+    }, uploadedDownloadPath);
+    await uploadedFileName.click({ button: "right" });
+    contextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
+    await contextMenu.waitFor();
+    await contextMenu.getByRole("menuitem", { name: "Download", exact: true }).click();
+    await waitForFakeMethodCount(application, "downloadFileSession", 3);
+    await waitForFileBytes(uploadedDownloadPath, droppedUploadBytes);
     assert.deepEqual(rendererErrors, []);
   } catch (error) {
     if (page && !page.isClosed()) {
@@ -254,6 +357,70 @@ async function assertFixedLayout(
   assert.ok(headerAfter && countAfter);
   assert.ok(Math.abs(headerBefore.y - headerAfter.y) <= 1, `The table header must stay fixed while entries scroll at ${size}`);
   assert.ok(Math.abs(countBefore.y - countAfter.y) <= 1, `The listing count must stay fixed while panes scroll at ${size}`);
+}
+
+async function installDroppedFileInput(page: Page, sourcePath: string): Promise<Locator> {
+  await page.evaluate(() => {
+    const documentObject = (globalThis as unknown as {
+      document: {
+        createElement(tagName: "input"): {
+          type: string;
+          hidden: boolean;
+          setAttribute(name: string, value: string): void;
+        };
+        body: { append(node: unknown): void };
+      };
+    }).document;
+    const input = documentObject.createElement("input");
+    input.type = "file";
+    input.hidden = true;
+    input.setAttribute("data-e2e-drop-source", "");
+    documentObject.body.append(input);
+  });
+  const input = page.locator("input[data-e2e-drop-source]");
+  await input.setInputFiles(sourcePath);
+  return input;
+}
+
+async function createDroppedFileTransfer(input: Locator): Promise<JSHandle<unknown>> {
+  return input.evaluateHandle((element) => {
+    const file = (element as unknown as { files?: ArrayLike<unknown> }).files?.[0];
+    if (!file) {
+      throw new Error("Dropped-file fixture is unavailable");
+    }
+    const DataTransferConstructor = (globalThis as unknown as {
+      DataTransfer: new() => { items: { add(file: unknown): void } };
+    }).DataTransfer;
+    const transfer = new DataTransferConstructor();
+    transfer.items.add(file);
+    const item = (transfer as unknown as { items: ArrayLike<object> }).items[0];
+    if (item) {
+      // Chromium exposes webkitGetAsEntry for every DataTransferItem, but it
+      // returns null for a file programmatically copied from an input. Native
+      // filesystem drags return an entry. DataTransferList returns a fresh
+      // wrapper on access, so patch its prototype for this isolated page and
+      // let React Aria consume the same OS-backed File via getAsFile().
+      Object.defineProperty(Object.getPrototypeOf(item) as object, "webkitGetAsEntry", {
+        configurable: true,
+        value: () => ({ isFile: true, isDirectory: false }),
+      });
+    }
+    return transfer;
+  });
+}
+
+async function waitForFileBytes(
+  path: string,
+  expected: Buffer,
+  timeoutMilliseconds = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (Date.now() < deadline) {
+    const actual = await readFile(path).catch(() => undefined);
+    if (actual?.equals(expected)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for exact file bytes at ${path}`);
 }
 
 async function setScroll(locator: Locator, destination: number | "end"): Promise<number> {

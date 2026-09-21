@@ -5,9 +5,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
-import { SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES } from "../../../shared/session-contracts";
+import {
+  SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+} from "../../../shared/session-contracts";
 import type {
   PrepareSessionDestructiveActionInput,
+  SessionDroppedUploadInput,
   SessionWorkbenchInput,
   SessionWorkbenchResult,
   SessionWorkbenchResultFor,
@@ -115,6 +119,7 @@ function installAPI(
   overrides: {
     prepare?: (input: PrepareSessionDestructiveActionInput) => Promise<unknown> | unknown;
     execute?: (input: { token: string }) => Promise<unknown> | unknown;
+    uploadDropped?: (file: File, input: SessionDroppedUploadInput) => Promise<unknown> | unknown;
   } = {},
 ) {
   const runSessionWorkbench = vi.fn(async (input: SessionWorkbenchInput) => handler(input));
@@ -122,15 +127,23 @@ function installAPI(
     overrides.prepare?.(input) ?? { ok: false, error: "Not configured" });
   const executeSessionDestructiveActionPlan = vi.fn(async (input: { token: string }) =>
     overrides.execute?.(input) ?? { ok: false, error: "Not configured" });
+  const uploadDroppedSessionFile = vi.fn(async (file: File, input: SessionDroppedUploadInput) =>
+    overrides.uploadDropped?.(file, input) ?? { ok: false, error: "Not configured" });
   Object.defineProperty(window, "sliver", {
     configurable: true,
     value: {
       runSessionWorkbench,
       prepareSessionDestructiveAction,
       executeSessionDestructiveActionPlan,
+      uploadDroppedSessionFile,
     } as unknown as SliverDesktopAPI,
   });
-  return { executeSessionDestructiveActionPlan, prepareSessionDestructiveAction, runSessionWorkbench };
+  return {
+    executeSessionDestructiveActionPlan,
+    prepareSessionDestructiveAction,
+    runSessionWorkbench,
+    uploadDroppedSessionFile,
+  };
 }
 
 function workbench<I extends SessionWorkbenchResult["operationId"]>(
@@ -144,6 +157,30 @@ function workbench<I extends SessionWorkbenchResult["operationId"]>(
       result: { operationId, value } as SessionWorkbenchResult,
     },
   };
+}
+
+function droppedFilesDataTransfer(files: readonly File[]): DataTransfer {
+  return {
+    dropEffect: "none",
+    effectAllowed: "all",
+    files,
+    items: files.map((file) => ({
+      kind: "file",
+      type: file.type,
+      getAsFile: () => file,
+    })),
+    types: ["Files"],
+    clearData: () => undefined,
+    getData: () => "",
+    setData: () => undefined,
+    setDragImage: () => undefined,
+  } as unknown as DataTransfer;
+}
+
+function dropFiles(target: HTMLElement, files: readonly File[]): void {
+  const dataTransfer = droppedFilesDataTransfer(files);
+  fireEvent.dragEnter(target, { dataTransfer });
+  fireEvent.drop(target, { dataTransfer });
 }
 
 function preparedAction(
@@ -405,6 +442,185 @@ describe("session workbench panels", () => {
     await user.click(await screen.findByRole("menuitem", { name: /Upload replacement/ }));
     expect(await screen.findByRole("alertdialog", { name: "Overwrite this remote file?" })).toBeInTheDocument();
     expect(screen.getByTitle("f".repeat(64))).toHaveTextContent(`SHA-256 ${"f".repeat(64)}`);
+  });
+
+  it("confirms a dropped file before uploading it with bounded non-overwrite options", async () => {
+    const user = userEvent.setup();
+    const pendingUpload = deferred<unknown>();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    }, {
+      uploadDropped: () => pendingUpload.promise,
+    });
+    const file = new File(["payload"], "payload.bin", { type: "application/octet-stream" });
+    const localPath = "/Users/alice/private/payload.bin";
+    Object.defineProperty(file, "path", { value: localPath });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    const dropArea = await screen.findByLabelText("Upload a local file to /opt");
+    const dataTransfer = droppedFilesDataTransfer([file]);
+    fireEvent.dragEnter(dropArea, { dataTransfer });
+    expect(screen.getByText("Drop to upload")).toBeInTheDocument();
+    expect(screen.getByText("One file, up to 64 MiB")).toBeInTheDocument();
+    fireEvent.drop(dropArea, { dataTransfer });
+
+    const dialog = await screen.findByRole("dialog", { name: "Upload file" });
+    expect(within(dialog).getByText("payload.bin")).toBeInTheDocument();
+    expect(within(dialog).getByText("7 B")).toBeInTheDocument();
+    expect(within(dialog).getByText("Existing files are not overwritten.")).toBeInTheDocument();
+    expect(screen.queryByText(localPath)).not.toBeInTheDocument();
+    const destination = within(dialog).getByRole("textbox", { name: "Remote destination folder" });
+    expect(destination).toHaveValue("/opt");
+    await user.clear(destination);
+    await user.type(destination, "/var/tmp");
+    await user.click(within(dialog).getByRole("checkbox", { name: "Mark as IOC" }));
+    expect(api.uploadDroppedSessionFile).not.toHaveBeenCalled();
+
+    const initialListCalls = api.runSessionWorkbench.mock.calls.filter(
+      ([input]) => input.operationId === "session.filesystem.ls",
+    ).length;
+    await user.click(within(dialog).getByRole("button", { name: "Upload" }));
+    expect(api.uploadDroppedSessionFile).toHaveBeenCalledWith(file, {
+      remotePath: "/var/tmp",
+      isIOC: true,
+      isDirectory: false,
+      overwrite: false,
+    });
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    dropFiles(dropArea, [new File(["second"], "second.bin")]);
+    expect(api.uploadDroppedSessionFile).toHaveBeenCalledTimes(1);
+
+    pendingUpload.resolve(workbench("session.filesystem.upload-open", {
+      status: "uploaded",
+      remotePath: "/var/tmp/payload.bin",
+      suggestedBasename: "payload.bin",
+      size: file.size,
+      sha256: "d".repeat(64),
+      message: "Uploaded payload.bin",
+    }));
+
+    expect(await screen.findByText("Upload complete")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Upload file" })).not.toBeInTheDocument());
+    await waitFor(() => expect(api.runSessionWorkbench.mock.calls.filter(
+      ([input]) => input.operationId === "session.filesystem.ls",
+    ).length).toBeGreaterThan(initialListCalls));
+  });
+
+  it("discards the confirmation after an upload outcome becomes unknown", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    }, {
+      uploadDropped: () => ({
+        ok: true,
+        value: {
+          status: "outcome-unknown",
+          operationId: "session.filesystem.upload-open",
+          message: "The connection closed after dispatch",
+        },
+      }),
+    });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    const dropArea = await screen.findByLabelText("Upload a local file to /opt");
+    dropFiles(dropArea, [new File(["payload"], "payload.bin")]);
+    const dialog = await screen.findByRole("dialog", { name: "Upload file" });
+    await user.click(within(dialog).getByRole("button", { name: "Upload" }));
+
+    expect(await screen.findByText("Upload outcome unknown")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Upload file" })).not.toBeInTheDocument());
+    expect(api.uploadDroppedSessionFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects multiple and oversized drops and exposes the target only in browser mode", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    const dropArea = await screen.findByLabelText("Upload a local file to /opt");
+    dropFiles(dropArea, [new File(["one"], "one.bin"), new File(["two"], "two.bin")]);
+    expect(await screen.findByText("Choose one file")).toBeInTheDocument();
+
+    const oversized = new File(["x"], "oversized.bin");
+    Object.defineProperty(oversized, "size", { value: SESSION_WORKBENCH_MAX_ARTIFACT_BYTES + 1 });
+    dropFiles(dropArea, [oversized]);
+    expect(await screen.findByText("File is too large")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Upload file" })).not.toBeInTheDocument();
+    expect(api.uploadDroppedSessionFile).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("radio", { name: "Search" }));
+    expect(screen.queryByLabelText("Upload a local file to /opt")).not.toBeInTheDocument();
+  });
+
+  it("clears a pending dropped upload when the session route changes", async () => {
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const firstContext = panelContext();
+    const rendered = render(<SessionFilesPanel {...firstContext} />);
+    const dropArea = await screen.findByLabelText("Upload a local file to /opt");
+    dropFiles(dropArea, [new File(["route"], "route.bin")]);
+    expect(await screen.findByRole("dialog", { name: "Upload file" })).toBeInTheDocument();
+
+    const secondContext = panelContext({ id: "session-2", name: "billing" });
+    rendered.rerender(
+      <SessionFilesPanel
+        {...secondContext}
+        route={{
+          ...secondContext.route,
+          sessionId: "session-2",
+          targetFingerprint: "c".repeat(64),
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Upload file" })).not.toBeInTheDocument());
+    expect(api.uploadDroppedSessionFile).not.toHaveBeenCalled();
   });
 
   it("puts Download and Add to Loot first in file actions and dispatches the exact row path", async () => {

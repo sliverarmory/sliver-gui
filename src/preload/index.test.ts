@@ -15,6 +15,7 @@ import {
   APPLICATION_CONTEXT_MENU_IPC,
   type ApplicationContextMenuAPI,
 } from "../shared/application-context-menu-contracts.js";
+import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
 import { SCRIPT_TASK_IPC, type ScriptTaskManagerAPI } from "../shared/script-task-manager-contracts.js";
 
 type InvokeArgumentsByMethod = {
@@ -154,6 +155,7 @@ const electronMocks = vi.hoisted(() => ({
   postMessage: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
+  getPathForFile: vi.fn<(file: File) => string>(),
 }));
 
 vi.mock("electron", () => ({
@@ -165,6 +167,7 @@ vi.mock("electron", () => ({
     on: electronMocks.on,
     removeListener: electronMocks.removeListener,
   },
+  webUtils: { getPathForFile: electronMocks.getPathForFile },
 }));
 
 const createdChannels: TestMessageChannel[] = [];
@@ -249,6 +252,36 @@ describe("sandboxed preload bridge", () => {
       IPC.connectSavedConfig,
       "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2",
     );
+  });
+
+  it("resolves a dropped File path in preload and sends only the private typed envelope", async () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    if (!exposed) throw new Error("Expected the preload API to be exposed");
+    const file = {} as File;
+    const input = {
+      remotePath: "/tmp",
+      isIOC: true,
+      isDirectory: false as const,
+      overwrite: false as const,
+    };
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReset();
+    electronMocks.getPathForFile.mockReturnValue("/private/operator/drop.bin");
+
+    await exposed.uploadDroppedSessionFile(file, input);
+
+    expect(electronMocks.getPathForFile).toHaveBeenCalledExactlyOnceWith(file);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
+      SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
+      { sourcePath: "/private/operator/drop.bin", input },
+    );
+
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReturnValue("");
+    expect(() => exposed.uploadDroppedSessionFile(file, input)).toThrow(
+      /must be backed by a local file/u,
+    );
+    expect(electronMocks.invoke).not.toHaveBeenCalled();
   });
 
   it("forwards optional cloud navigation on its existing dedicated channel", async () => {

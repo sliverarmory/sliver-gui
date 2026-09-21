@@ -26,7 +26,7 @@ import {
   Tooltip,
   toast,
 } from "@heroui/react";
-import { Segment, Sheet } from "@heroui-pro/react";
+import { DropZone, Segment, Sheet } from "@heroui-pro/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import { Resizable } from "@heroui-pro/react/resizable";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
@@ -74,6 +74,7 @@ import {
   type SessionDestructiveActionOutcome,
   type SessionDestructiveActionPlan,
   type SessionDirectoryListing,
+  type SessionDroppedUploadInput,
   type SessionEnvironmentEntry,
   type SessionEnvironmentRevealResult,
   type SessionFileEntry,
@@ -523,6 +524,9 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const [isFolderDialogOpen, setIsFolderDialogOpen] = useState(false);
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [droppedUpload, setDroppedUpload] = useState<PendingDroppedUpload>();
+  const [droppedUploadRemotePath, setDroppedUploadRemotePath] = useState("");
+  const [droppedUploadIsIOC, setDroppedUploadIsIOC] = useState(false);
   const [isNavigating, setIsNavigating] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [busyFile, setBusyFile] = useState<string>();
@@ -540,6 +544,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const visibleCurrentPath = stateRouteKey === routeKey ? currentPath : "";
   const visiblePathDraft = stateRouteKey === routeKey ? pathDraft : "";
   const visibleRequestedPath = stateRouteKey === routeKey ? requestedPath : "";
+  const visibleDroppedUpload = droppedUpload?.routeKey === routeKey ? droppedUpload : undefined;
   const locationActionsAvailable = visibleState.status === "ready" &&
     visibleState.value.exists === true &&
     visibleState.value.path === currentPath &&
@@ -624,6 +629,10 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
     setMode("browser");
     setIsFolderDialogOpen(false);
     setFolderName("");
+    setDroppedUpload(undefined);
+    setDroppedUploadRemotePath("");
+    setDroppedUploadIsIOC(false);
+    setIsUploading(false);
     setInspector(undefined);
     setBusyFile(undefined);
     void initializeFiles();
@@ -679,6 +688,108 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
       if (isCurrent(expected)) setIsUploading(false);
     }
   }, [currentPath, isCurrent, loadPath, locationActionsAvailable, routeKey]);
+
+  const handleDroppedUpload = useCallback(async (items: readonly unknown[]) => {
+    if (
+      mode !== "browser" ||
+      !currentPath ||
+      !locationActionsAvailable ||
+      isUploading ||
+      visibleDroppedUpload ||
+      destructive.isPreparing ||
+      destructive.isExecuting ||
+      busyFile !== undefined
+    ) return;
+    if (items.length !== 1 || !isNativeFileDropItem(items[0])) {
+      toast.danger("Choose one file", { description: "Drop exactly one file at a time." });
+      return;
+    }
+
+    const expected = routeKey;
+    const expectedNavigation = navigationRequestSequence.current;
+    try {
+      const file = await items[0].getFile();
+      if (
+        !isCurrent(expected) ||
+        expectedNavigation !== navigationRequestSequence.current
+      ) return;
+      if (file.size > SESSION_WORKBENCH_MAX_ARTIFACT_BYTES) {
+        toast.danger("File is too large", { description: "Drop one file no larger than 64 MiB." });
+        return;
+      }
+      setDroppedUpload({ file, routeKey: expected });
+      setDroppedUploadRemotePath(currentPath);
+      setDroppedUploadIsIOC(false);
+    } catch (error) {
+      if (isCurrent(expected) && expectedNavigation === navigationRequestSequence.current) {
+        toast.danger("Could not read dropped file", { description: errorMessage(error) });
+      }
+    }
+  }, [
+    busyFile,
+    currentPath,
+    destructive.isExecuting,
+    destructive.isPreparing,
+    isCurrent,
+    isUploading,
+    locationActionsAvailable,
+    mode,
+    routeKey,
+    visibleDroppedUpload,
+  ]);
+
+  const confirmDroppedUpload = useCallback(async () => {
+    const pending = visibleDroppedUpload;
+    const remotePath = droppedUploadRemotePath.trim();
+    if (
+      !pending ||
+      !remotePath ||
+      pending.file.size > SESSION_WORKBENCH_MAX_ARTIFACT_BYTES ||
+      !currentPath ||
+      !locationActionsAvailable ||
+      isUploading
+    ) return;
+
+    const expected = routeKey;
+    setIsUploading(true);
+    try {
+      const result = await runDroppedUpload(pending.file, {
+        remotePath,
+        isIOC: droppedUploadIsIOC,
+        isDirectory: false,
+        overwrite: false,
+      });
+      if (!isCurrent(expected)) return;
+      setDroppedUpload(undefined);
+      setDroppedUploadRemotePath("");
+      setDroppedUploadIsIOC(false);
+      if (result.status === "uploaded") {
+        toast.success("Upload complete", { description: result.suggestedBasename });
+        await loadPath(currentPath);
+      } else {
+        toast.info("Upload canceled");
+      }
+    } catch (error) {
+      if (isCurrent(expected)) {
+        setDroppedUpload(undefined);
+        setDroppedUploadRemotePath("");
+        setDroppedUploadIsIOC(false);
+        notifyWorkbenchFailure("Upload failed", "Upload outcome unknown", error);
+      }
+    } finally {
+      if (isCurrent(expected)) setIsUploading(false);
+    }
+  }, [
+    currentPath,
+    droppedUploadIsIOC,
+    droppedUploadRemotePath,
+    isCurrent,
+    isUploading,
+    loadPath,
+    locationActionsAvailable,
+    routeKey,
+    visibleDroppedUpload,
+  ]);
 
   const download = useCallback(async (file: SessionFileEntry) => {
     const expected = routeKey;
@@ -782,7 +893,9 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const fileActionsDisabled = !locationActionsAvailable ||
     destructive.isPreparing ||
     destructive.isExecuting ||
+    isUploading ||
     busyFile !== undefined;
+  const dropUploadDisabled = fileActionsDisabled || visibleDroppedUpload !== undefined;
   fileActionsLocked.current = fileActionsDisabled;
   const contextNavigationSequence = navigationRequestSequence.current;
   const contextFileAction = (file: SessionFileEntry, action: FileContextAction) => {
@@ -927,57 +1040,81 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
                 </Resizable.Panel>
                 <Resizable.Handle aria-label="Resize folder navigation" type="line" variant="secondary" withIndicator />
                 <Resizable.Panel minSize={35}>
-                  <div className="flex h-full min-h-0 min-w-0 flex-col" aria-label="Directory contents">
-                    {visibleState.status === "loading" ? <PanelLoading label={visibleRequestedPath ? `Loading ${visibleRequestedPath}` : "Loading directory"} /> : null}
-                    {visibleState.status === "error" ? (
-                      <div className="overflow-auto p-4">
-                        <PanelError
-                          message={visibleState.error}
-                          onRetry={() => visibleRequestedPath ? void loadPath(visibleRequestedPath) : void initializeFiles()}
-                        />
-                      </div>
-                    ) : null}
-                    {visibleState.status === "ready" && !visibleState.value.exists ? (
-                      <div className="overflow-auto p-4">
-                        <PanelError
-                          message={`Remote path ${visibleRequestedPath || visibleState.value.path} does not exist.`}
-                          onRetry={() => visibleRequestedPath && void loadPath(visibleRequestedPath)}
-                        />
-                      </div>
-                    ) : null}
-                    {visibleState.status === "ready" && visibleState.value.exists ? (
-                      <>
-                        <div className="min-h-0 flex-1 overflow-hidden" data-files-scroll-region="entries">
-                          <FileContextMenu
-                            disabled={fileActionsDisabled}
-                            files={visibleState.value.items}
-                            onAction={contextFileAction}
-                          >
-                            <DataGrid
-                              aria-label={`Files in ${visibleState.value.path}`}
-                              className="session-files-grid h-full rounded-none bg-transparent p-0"
-                              columns={columns}
-                              contentClassName="min-w-[780px]"
-                              data={visibleState.value.items}
-                              getRowId={(file) => file.path}
-                              scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
-                              variant="secondary"
-                              onRowAction={(key) => {
-                                const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
-                                if (file) openInspector(file);
-                              }}
-                              renderEmptyState={() => <GridEmpty label="This directory is empty." />}
-                            />
-                          </FileContextMenu>
-                        </div>
-                        {visibleState.value.page.nextCursor ? (
-                          <div className="shrink-0 border-t border-separator p-2">
-                            <Button isPending={isLoadingMore} size="sm" variant="ghost" onPress={() => void loadPath(visibleState.value.path, visibleState.value.page.nextCursor)}>Load more</Button>
+                  <DropZone className="h-full min-h-0 min-w-0">
+                    <DropZone.Area
+                      aria-label={`Upload a local file to ${visibleCurrentPath}`}
+                      className="relative h-full min-h-0 min-w-0 items-stretch justify-start gap-0 rounded-none border-0 p-0 text-start"
+                      isDisabled={dropUploadDisabled}
+                      onDrop={(event) => void handleDroppedUpload(event.items)}
+                    >
+                      {({ isDropTarget }) => (
+                        <>
+                          <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col" aria-label="Directory contents">
+                            {visibleState.status === "loading" ? <PanelLoading label={visibleRequestedPath ? `Loading ${visibleRequestedPath}` : "Loading directory"} /> : null}
+                            {visibleState.status === "error" ? (
+                              <div className="overflow-auto p-4">
+                                <PanelError
+                                  message={visibleState.error}
+                                  onRetry={() => visibleRequestedPath ? void loadPath(visibleRequestedPath) : void initializeFiles()}
+                                />
+                              </div>
+                            ) : null}
+                            {visibleState.status === "ready" && !visibleState.value.exists ? (
+                              <div className="overflow-auto p-4">
+                                <PanelError
+                                  message={`Remote path ${visibleRequestedPath || visibleState.value.path} does not exist.`}
+                                  onRetry={() => visibleRequestedPath && void loadPath(visibleRequestedPath)}
+                                />
+                              </div>
+                            ) : null}
+                            {visibleState.status === "ready" && visibleState.value.exists ? (
+                              <>
+                                <div className="min-h-0 flex-1 overflow-hidden" data-files-scroll-region="entries">
+                                  <FileContextMenu
+                                    disabled={fileActionsDisabled}
+                                    files={visibleState.value.items}
+                                    onAction={contextFileAction}
+                                  >
+                                    <DataGrid
+                                      aria-label={`Files in ${visibleState.value.path}`}
+                                      className="session-files-grid h-full rounded-none bg-transparent p-0"
+                                      columns={columns}
+                                      contentClassName="min-w-[780px]"
+                                      data={visibleState.value.items}
+                                      getRowId={(file) => file.path}
+                                      scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
+                                      variant="secondary"
+                                      onRowAction={(key) => {
+                                        const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
+                                        if (file) openInspector(file);
+                                      }}
+                                      renderEmptyState={() => <GridEmpty label="This directory is empty." />}
+                                    />
+                                  </FileContextMenu>
+                                </div>
+                                {visibleState.value.page.nextCursor ? (
+                                  <div className="shrink-0 border-t border-separator p-2">
+                                    <Button isPending={isLoadingMore} size="sm" variant="ghost" onPress={() => void loadPath(visibleState.value.path, visibleState.value.page.nextCursor)}>Load more</Button>
+                                  </div>
+                                ) : null}
+                              </>
+                            ) : null}
                           </div>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
+                          {isDropTarget ? (
+                            <div
+                              className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-1 rounded-xl border border-accent bg-accent-soft px-6 py-4 text-center text-accent-soft-foreground"
+                              role="status"
+                            >
+                              <FontAwesomeIcon aria-hidden className="mb-1 text-xl" icon={faUpload} />
+                              <p className="text-sm font-semibold">Drop to upload</p>
+                              <p className="max-w-full truncate font-mono text-xs" title={visibleCurrentPath}>{visibleCurrentPath}</p>
+                              <p className="text-xs">One file, up to 64 MiB</p>
+                            </div>
+                          ) : null}
+                        </>
+                      )}
+                    </DropZone.Area>
+                  </DropZone>
                 </Resizable.Panel>
               </Resizable>
             </div>
@@ -1006,6 +1143,94 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
           </div>
         )}
       </section>
+      <Modal.Backdrop
+        isDismissable={!isUploading}
+        isKeyboardDismissDisabled={isUploading}
+        isOpen={visibleDroppedUpload !== undefined}
+        onOpenChange={(open) => {
+          if (!open && !isUploading) {
+            setDroppedUpload(undefined);
+            setDroppedUploadRemotePath("");
+            setDroppedUploadIsIOC(false);
+          }
+        }}
+      >
+        <Modal.Container placement="center" size="sm">
+          <Modal.Dialog>
+            <Modal.CloseTrigger isDisabled={isUploading} />
+            <Modal.Header className="pr-10">
+              <Modal.Heading>Upload file</Modal.Heading>
+            </Modal.Header>
+            <form onSubmit={(event) => {
+              event.preventDefault();
+              if (!isUploading) void confirmDroppedUpload();
+            }}>
+              <Modal.Body className="gap-4">
+                {visibleDroppedUpload ? (
+                  <div className="flex min-w-0 items-center gap-3 rounded-xl border border-separator bg-default px-3 py-2.5">
+                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent-soft-foreground">
+                      <FontAwesomeIcon aria-hidden icon={faFile} />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-foreground" title={visibleDroppedUpload.file.name}>
+                        {visibleDroppedUpload.file.name}
+                      </p>
+                      <p className="text-xs tabular-nums text-muted">{formatBytes(visibleDroppedUpload.file.size)}</p>
+                    </div>
+                  </div>
+                ) : null}
+                <TextField
+                  isDisabled={isUploading}
+                  isRequired
+                  value={droppedUploadRemotePath}
+                  variant="secondary"
+                  onChange={setDroppedUploadRemotePath}
+                >
+                  <Label>Remote destination folder</Label>
+                  <Input autoFocus className="font-mono text-xs" spellCheck={false} />
+                </TextField>
+                <Checkbox
+                  isDisabled={isUploading}
+                  isSelected={droppedUploadIsIOC}
+                  variant="secondary"
+                  onChange={setDroppedUploadIsIOC}
+                >
+                  <Checkbox.Content className="gap-2 text-sm">
+                    <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+                    Mark as IOC
+                  </Checkbox.Content>
+                </Checkbox>
+                <p className="text-xs text-muted">Existing files are not overwritten.</p>
+              </Modal.Body>
+              <Modal.Footer>
+                <Button
+                  isDisabled={isUploading}
+                  variant="secondary"
+                  onPress={() => {
+                    setDroppedUpload(undefined);
+                    setDroppedUploadRemotePath("");
+                    setDroppedUploadIsIOC(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  isDisabled={
+                    !visibleDroppedUpload ||
+                    !droppedUploadRemotePath.trim() ||
+                    visibleDroppedUpload.file.size > SESSION_WORKBENCH_MAX_ARTIFACT_BYTES ||
+                    !locationActionsAvailable
+                  }
+                  isPending={isUploading}
+                  type="submit"
+                >
+                  Upload
+                </Button>
+              </Modal.Footer>
+            </form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
       <Modal.Backdrop
         isDismissable={!isCreatingFolder}
         isKeyboardDismissDisabled={isCreatingFolder}
@@ -1061,6 +1286,16 @@ interface FileInspectorSelection {
   file: SessionFileEntry;
   section: FileInspectorSection;
   routeKey: string;
+}
+
+interface PendingDroppedUpload {
+  file: File;
+  routeKey: string;
+}
+
+interface NativeFileDropItem {
+  kind: "file";
+  getFile: () => Promise<File>;
 }
 
 interface SessionFileTreeCacheState {
@@ -3881,6 +4116,31 @@ async function runWorkbench<T extends SessionWorkbenchInput>(
   return result.value.result.value as SessionWorkbenchResultFor<T["operationId"]>;
 }
 
+async function runDroppedUpload(
+  file: File,
+  input: SessionDroppedUploadInput,
+): Promise<SessionWorkbenchResultFor<"session.filesystem.upload-open">> {
+  const operationId = "session.filesystem.upload-open" as const;
+  const result = await window.sliver.uploadDroppedSessionFile(file, input);
+  if (!result.ok || !result.value) throw new Error(result.error ?? "The dropped file upload failed");
+  if (result.value.status === "outcome-unknown") {
+    if (result.value.operationId !== operationId) {
+      throw new Error("The dropped file upload returned a mismatched outcome");
+    }
+    throw new SessionOutcomeUnknownError(result.value.message);
+  }
+  if (result.value.status === "failed") {
+    if (result.value.operationId !== operationId) {
+      throw new Error("The dropped file upload returned a mismatched failure");
+    }
+    throw new SessionConfirmedFailureError(result.value.message);
+  }
+  if (result.value.result.operationId !== operationId) {
+    throw new Error("The dropped file upload returned a mismatched result");
+  }
+  return result.value.result.value as SessionWorkbenchResultFor<typeof operationId>;
+}
+
 class SessionOutcomeUnknownError extends Error {
   constructor(message: string) {
     super(message);
@@ -3918,6 +4178,12 @@ function useLatestIdentity(identity: string): (expected: string) => boolean {
 
 function workspaceRouteKey(route: SessionWorkspacePanelContext["route"]): string {
   return `${route.backendEpoch}:${route.connectionIncarnation}:${route.sessionId}:${route.targetFingerprint}`;
+}
+
+function isNativeFileDropItem(value: unknown): value is NativeFileDropItem {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<NativeFileDropItem>;
+  return candidate.kind === "file" && typeof candidate.getFile === "function";
 }
 
 function normalizedPlatform(os: string): string {

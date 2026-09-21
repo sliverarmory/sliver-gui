@@ -26,6 +26,7 @@ import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deploymen
 import type { AddCredentialInput } from "../shared/operator-data-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { APPLICATION_SETTINGS_VERSION, DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
+import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
@@ -165,8 +166,11 @@ describe("trusted Electron IPC boundary", () => {
   it("registers every shared invoke channel exactly once", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
 
-    expect([...electronMocks.handlers.keys()].sort()).toEqual(Object.values(IPC_INVOKE).sort());
-    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length);
+    expect([...electronMocks.handlers.keys()].sort()).toEqual([
+      ...Object.values(IPC_INVOKE),
+      SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
+    ].sort());
+    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length + 1);
   });
 
   it("registers and unregisters the isolated shell and console port listeners", () => {
@@ -1327,6 +1331,39 @@ describe("trusted Electron IPC boundary", () => {
     })).toThrow(/unexpected session input field/i);
   });
 
+  it("routes a dropped upload only through the private exact request envelope", async () => {
+    const runDroppedSessionUpload = vi.fn(async () => ({ ok: false as const, error: "upload probe" }));
+    registerIpcHandlers(registryMock({ runDroppedSessionUpload }), vi.fn(), RENDERER_URL);
+    const { event, sender } = invokeEvent("sliver://app/index.html#/sessions", 77);
+    const input = {
+      remotePath: "/tmp",
+      isIOC: true,
+      isDirectory: false as const,
+      overwrite: false as const,
+    };
+    const handler = electronMocks.handlers.get(SESSION_DROPPED_UPLOAD_IPC_CHANNEL);
+
+    await handler?.(event, { sourcePath: "/private/operator/drop.bin", input });
+
+    expect(runDroppedSessionUpload).toHaveBeenCalledExactlyOnceWith(
+      sender,
+      "/private/operator/drop.bin",
+      input,
+    );
+    expect(() => handler?.(event, { sourcePath: "", input })).toThrow(/sourcePath/u);
+    expect(() => handler?.(event, {
+      sourcePath: "/private/operator/drop.bin",
+      input: { ...input, overwrite: true },
+    })).toThrow(/overwrite must be false/u);
+    expect(() => handler?.(event, {
+      sourcePath: "/private/operator/drop.bin",
+      input,
+      targetId: "attacker-selected-session",
+    })).toThrow(/Unexpected session input field/u);
+    expect(() => handler?.(event, { sourcePath: "/private/operator/drop.bin", input }, true))
+      .toThrow(/invalid dropped session upload request/u);
+  });
+
   it("parses shell invokes and binds preparation to the exact renderer document", async () => {
     const prepareSessionShell = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
     const listSessionShells = vi.fn(async () => ({ ok: false as const, error: "list probe" }));
@@ -1903,6 +1940,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     getBeaconTask: vi.fn(unavailable),
     cancelBeaconTask: vi.fn(unavailable),
     runSessionWorkbench: vi.fn(unavailable),
+    runDroppedSessionUpload: vi.fn(unavailable),
     prepareSessionDestructiveAction: vi.fn(unavailable),
     executeSessionDestructiveActionPlan: vi.fn(unavailable),
     prepareSessionShell: vi.fn(unavailable),

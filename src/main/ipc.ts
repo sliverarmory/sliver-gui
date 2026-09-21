@@ -51,6 +51,8 @@ import {
   parseTargetOperationInput,
 } from "../shared/operation-contracts.js";
 import {
+  SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
+  parseSessionDroppedUploadIpcRequest,
   parseExecuteSessionDestructiveActionPlanInput,
   parsePrepareSessionDestructiveActionInput,
   parseSessionWorkbenchInput,
@@ -242,6 +244,7 @@ export type IpcConnectionRegistry = Pick<
   | "getBeaconTask"
   | "cancelBeaconTask"
   | "runSessionWorkbench"
+  | "runDroppedSessionUpload"
   | "prepareSessionDestructiveAction"
   | "executeSessionDestructiveActionPlan"
   | "prepareSessionShell"
@@ -687,6 +690,11 @@ export function registerIpcHandlers(
   handleTrusted(IPC.runSessionWorkbench, rendererUrl, parseSessionWorkbenchArguments, ({ sender }, input) =>
     registry.runSessionWorkbench(sender, input),
   );
+  ipcMain.handle(SESSION_DROPPED_UPLOAD_IPC_CHANNEL, (event, ...rawArguments: unknown[]) => {
+    const { sender } = requireTrustedSender(event, rendererUrl);
+    const [request] = parseDroppedSessionUploadArguments(rawArguments);
+    return registry.runDroppedSessionUpload(sender, request.sourcePath, request.input);
+  });
   handleTrusted(
     IPC.prepareSessionDestructiveAction,
     rendererUrl,
@@ -772,6 +780,7 @@ export function registerIpcHandlers(
 
 export function unregisterIpcHandlers(): void {
   for (const channel of Object.values(IPC_INVOKE)) ipcMain.removeHandler(channel);
+  ipcMain.removeHandler(SESSION_DROPPED_UPLOAD_IPC_CHANNEL);
   if (registeredStreamAttachListener) {
     ipcMain.removeListener(IPC.attach, registeredStreamAttachListener);
     registeredStreamAttachListener = undefined;
@@ -1230,6 +1239,13 @@ function parseCancelBeaconTaskArguments(args: readonly unknown[]): [input: Retur
 function parseSessionWorkbenchArguments(args: readonly unknown[]): [input: ReturnType<typeof parseSessionWorkbenchInput>] {
   requireArgumentCount(args, 1, "session workbench input");
   return [parseSessionWorkbenchInput(args[0])];
+}
+
+function parseDroppedSessionUploadArguments(
+  args: readonly unknown[],
+): [request: ReturnType<typeof parseSessionDroppedUploadIpcRequest>] {
+  requireArgumentCount(args, 1, "dropped session upload request");
+  return [parseSessionDroppedUploadIpcRequest(args[0])];
 }
 
 function parsePrepareSessionDestructiveActionArguments(
