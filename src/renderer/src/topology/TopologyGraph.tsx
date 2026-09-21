@@ -50,6 +50,13 @@ const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<Gr
   const content = (
     <div className="topology-node" data-testid="topology-node" data-selected={selected} data-status={node.status}
       data-freshness={node.freshness} data-compact={compact}>
+      {node.kind === "session" ? <svg className="topology-node__lightning" aria-hidden="true" focusable="false"
+        viewBox="-14 -14 264 140" preserveAspectRatio="none">
+        <path pathLength="100" d="M -7 42 L -10 32 L -5 28 L -9 18 L 2 9 L 3 1 L 20 -5 L 36 -3 L 44 -10 L 51 -4 L 72 -7 L 80 -3 L 96 -8 L 108 -6" />
+        <path pathLength="100" d="M 128 -6 L 143 -9 L 150 -3 L 166 -7 L 176 -4 L 187 -10 L 196 -4 L 218 -5 L 229 3 L 235 5 L 241 21 L 238 28 L 245 36 L 243 43" />
+        <path pathLength="100" d="M 243 70 L 247 80 L 240 86 L 244 94 L 234 102 L 230 112 L 212 117 L 201 114 L 190 122 L 182 116 L 165 120 L 151 115 L 140 121 L 128 118" />
+        <path pathLength="100" d="M 108 118 L 95 121 L 85 115 L 70 120 L 59 116 L 46 122 L 37 116 L 19 118 L 6 111 L 0 110 L -6 96 L -3 86 L -10 80 L -7 70" />
+      </svg> : null}
       <Handle type="target" position={Position.Left} isConnectable={false} />
       <div className="topology-node__identity">
         <span className="topology-node__icon"><TopologyIcon name={node.icon} /></span>

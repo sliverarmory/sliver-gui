@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Button, Chip, Label, ListBox, SearchField, Select, toast } from "@heroui/react";
+import { Button, Chip, Label, ListBox, SearchField, Select, Switch, toast } from "@heroui/react";
 import { faCopy, faList, faPen, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
 import type { ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
 import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
@@ -173,6 +173,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   const [selectedKinds, setSelectedKinds] = useState<TopologyFilters["kinds"]>("default");
   const [selectedStatuses, setSelectedStatuses] = useState<TopologyFilters["statuses"]>("all");
   const [presentation, setPresentation] = useState<"graph" | "list">("graph");
+  const [animateSessions, setAnimateSessions] = useState(true);
   const [selection, setSelection] = useState<TopologySelection>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const projection = useMemo(() => projectTopology(document, { query, kinds: selectedKinds, statuses: selectedStatuses, expanded }),
@@ -195,7 +196,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   const updated = document.updatedAt ? new Date(document.updatedAt) : null;
   const updatedLabel = updated && Number.isFinite(updated.getTime()) ? updated.toLocaleTimeString() : "Not yet observed";
 
-  return <section className="overview-page" aria-label="Overview">
+  return <section className="overview-page" aria-label="Overview" data-animate-sessions={animateSessions}>
     <div className="overview-page__heading">
       <div><h1>Overview</h1><p>Infrastructure and reported connections</p></div>
       <div className="overview-page__summary"><span>{resourceCount} resources</span>
@@ -212,6 +213,13 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
         options={kinds.map((value): [string, string] => [value, value === OFFLINE_OPERATOR_FILTER_KIND ? "Operator (Offline)" : titleCase(value)])} />
       <OverviewFilter label="Status" noun="states" value={selectedStatuses} onChange={setSelectedStatuses}
         options={[["healthy", "Healthy"], ["warning", "Needs attention"], ["inactive", "Inactive"], ["unknown", "Unknown"]]} />
+      <Switch className="overview-animation-toggle" isSelected={animateSessions} onChange={setAnimateSessions}
+        isDisabled={presentation !== "graph"}>
+        <Switch.Content>
+          <Label>Animate sessions</Label>
+          <Switch.Control><Switch.Thumb /></Switch.Control>
+        </Switch.Content>
+      </Switch>
       <div className="overview-view-controls" role="group" aria-label="Overview presentation">
         <Button size="sm" variant={presentation === "graph" ? "secondary" : "ghost"} aria-pressed={presentation === "graph"} onPress={() => setPresentation("graph")}>Graph</Button>
         <Button size="sm" variant={presentation === "list" ? "secondary" : "ghost"} aria-pressed={presentation === "list"} onPress={() => setPresentation("list")}>List</Button>
