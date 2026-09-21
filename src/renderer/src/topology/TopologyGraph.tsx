@@ -81,12 +81,13 @@ const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<Gr
 
 const EnclosureNode = memo(function EnclosureNode({ data, selected }: NodeProps<GraphNode>) {
   const node = data.resource;
-  return <div className="topology-enclosure" data-testid="topology-node" data-provider={node.provider} data-selected={selected}>
+  const content = <div className="topology-enclosure" data-testid="topology-node" data-provider={node.provider} data-selected={selected}>
     <div className="topology-enclosure__heading">
       <span className="topology-enclosure__icon"><TopologyIcon name={node.icon} /></span>
       <div><strong title={node.label}>{node.label}</strong><p title={node.subtitle || node.statusLabel}>{node.subtitle || node.statusLabel}</p></div>
     </div>
   </div>;
+  return data.decorateNode ? data.decorateNode(node, content) : content;
 });
 
 const RelationshipEdge = memo(function RelationshipEdge(props: EdgeProps<GraphEdge>) {

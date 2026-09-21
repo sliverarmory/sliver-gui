@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Label, ListBox, SearchField, Select, Switch, toast } from "@heroui/react";
-import { faCopy, faList, faPen, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
+import { faCloudArrowUp, faCopy, faList, faPen, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
 import type { ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
 import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
@@ -44,6 +44,23 @@ export function OverviewPage({ snapshot, onSnapshot, onNavigate, onOpenSession, 
   const topology = useMemo(() => createOverviewTopology(source), [source]);
   const decorateNode = useCallback((node: TopologyNode, content: ReactNode): ReactNode => {
     const currentScope = overviewTopologyScopeId(snapshot) === topology.scope.id;
+    if (node.kind === "cloud" && node.role === "group") {
+      return <ApplicationContextMenuScope builtInPolicy="inspect-only" actions={[{
+        id: "cloud.deployments",
+        label: "Deployments",
+        icon: faCloudArrowUp,
+        onAction: async () => {
+          try {
+            const result = await window.sliver.openCloudDeploymentWindow();
+            if (!result.ok) toast.danger("Could not open Cloud Deployments", { description: result.error });
+          } catch (error) {
+            toast.danger("Could not open Cloud Deployments", {
+              description: error instanceof Error ? error.message : String(error),
+            });
+          }
+        },
+      }]}>{content}</ApplicationContextMenuScope>;
+    }
     if (node.kind === "server" && node.resource?.kind === "server") {
       return <ApplicationContextMenuScope builtInPolicy="inspect-only" actions={serverContextMenuActions({
         managed: currentScope ? snapshot.connection.managedServer : null,
@@ -173,7 +190,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   const [selectedKinds, setSelectedKinds] = useState<TopologyFilters["kinds"]>("default");
   const [selectedStatuses, setSelectedStatuses] = useState<TopologyFilters["statuses"]>("all");
   const [presentation, setPresentation] = useState<"graph" | "list">("graph");
-  const [animateSessions, setAnimateSessions] = useState(true);
+  const [animateSessions, setAnimateSessions] = useState(false);
   const [selection, setSelection] = useState<TopologySelection>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const projection = useMemo(() => projectTopology(document, { query, kinds: selectedKinds, statuses: selectedStatuses, expanded }),
@@ -216,7 +233,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
       <Switch className="overview-animation-toggle" isSelected={animateSessions} onChange={setAnimateSessions}
         isDisabled={presentation !== "graph"}>
         <Switch.Content>
-          <Label>Animate sessions</Label>
+          <Label>Lightning</Label>
           <Switch.Control><Switch.Thumb /></Switch.Control>
         </Switch.Content>
       </Switch>
