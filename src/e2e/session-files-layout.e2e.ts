@@ -182,6 +182,17 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await entriesGrid.waitFor();
     await count.waitFor();
     assert.equal(await rows.count(), 100, "Returning to a directory must start with its first bounded page");
+
+    const folderTree = browser.getByRole("treegrid", { name: "Remote folders", exact: true });
+    await folderTree.getByText("E2EFolder001", { exact: true }).click();
+    await browser.getByRole("grid", { name: "Files in /Users/e2e/workspace/E2EFolder001", exact: true })
+      .getByText("This directory is empty.", { exact: true }).waitFor();
+    assert.equal(await folderTree.getByText("E2EFolder002", { exact: true }).count(), 1,
+      "navigating into one folder must retain previously discovered siblings");
+    await browser.getByRole("button", { name: "Refresh directory", exact: true }).click();
+    await folderTree.getByText("E2EFolder002", { exact: true }).waitFor({ state: "detached" });
+    assert.equal(await folderTree.getByText("E2EFolder002", { exact: true }).count(), 0,
+      "refreshing a directory must clear previously discovered branches");
     assert.deepEqual(rendererErrors, []);
   } catch (error) {
     if (page && !page.isClosed()) {

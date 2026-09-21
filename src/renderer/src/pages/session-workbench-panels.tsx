@@ -109,7 +109,11 @@ import {
   type ApplicationContextMenuAction,
 } from "../components/ApplicationContextMenu";
 import { REGISTRY_HIVE_LABELS, SessionRegistryTree } from "./SessionRegistryTree";
-import { SessionFileTree } from "./SessionFileTree";
+import {
+  SessionFileTree,
+  sessionFileTreePathKey,
+  type SessionFileTreeSnapshot,
+} from "./SessionFileTree";
 import { registryValueCacheKey, useRegistryValueCache } from "./useRegistryValueCache";
 import { RegistryContextMenu, type RegistryContextAction, type RegistryContextTarget } from "./RegistryContextMenu";
 
@@ -508,6 +512,10 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const [mode, setMode] = useState<FileWorkbenchMode>("browser");
   const [state, setState] = useState<LoadState<SessionDirectoryListing>>({ status: "loading" });
   const [stateRouteKey, setStateRouteKey] = useState(routeKey);
+  const [treeCache, setTreeCache] = useState<SessionFileTreeCacheState>(() => ({
+    routeKey,
+    snapshots: new Map(),
+  }));
   const [currentPath, setCurrentPath] = useState("");
   const [requestedPath, setRequestedPath] = useState("");
   const [pathDraft, setPathDraft] = useState("");
@@ -565,6 +573,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
         setState({ status: "ready", value: listing });
         return;
       }
+      setTreeCache((current) => updateSessionFileTreeCache(current, expected, listing, isWindows, cursor !== undefined));
       setCurrentPath(listing.path);
       setRequestedPath(listing.path);
       setPathDraft(listing.path);
@@ -581,12 +590,13 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
         else setIsNavigating(false);
       }
     }
-  }, [isCurrent, routeKey]);
+  }, [isCurrent, isWindows, routeKey]);
 
   const initializeFiles = useCallback(async () => {
     const expected = routeKey;
     const requestSequence = ++navigationRequestSequence.current;
     setStateRouteKey(routeKey);
+    setTreeCache({ routeKey, snapshots: new Map() });
     setCurrentPath("");
     setRequestedPath("");
     setPathDraft("");
@@ -603,6 +613,12 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
       setIsNavigating(false);
     }
   }, [isCurrent, loadPath, routeKey]);
+
+  const refreshDirectory = useCallback(() => {
+    if (!currentPath) return;
+    setTreeCache({ routeKey, snapshots: new Map() });
+    void loadPath(currentPath);
+  }, [currentPath, loadPath, routeKey]);
 
   useEffect(() => {
     setMode("browser");
@@ -838,9 +854,9 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
 
   const crumbs = useMemo(() => pathBreadcrumbs(visibleCurrentPath, isWindows), [visibleCurrentPath, isWindows]);
   const parentPath = crumbs.length > 1 ? crumbs[crumbs.length - 2]?.path : undefined;
-  const directories = useMemo(() => visibleState.status === "ready" && visibleState.value.exists
-    ? visibleState.value.items.filter((file) => file.isDirectory)
-    : [], [visibleState]);
+  const treeSnapshots = useMemo(() => treeCache.routeKey === routeKey
+    ? [...treeCache.snapshots.values()]
+    : [], [routeKey, treeCache]);
 
   return (
     <>
@@ -868,7 +884,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
                 disabled={!locationActionsAvailable}
                 label="Refresh directory"
                 pending={isNavigating}
-                onPress={() => currentPath && void loadPath(currentPath)}
+                onPress={refreshDirectory}
               />
             ) : null}
           </div>
@@ -900,9 +916,10 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
                     <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-2 py-2" data-files-scroll-region="folders">
                       <SessionFileTree
                         breadcrumbs={crumbs}
-                        directories={directories}
                         isDisabled={!locationActionsAvailable}
                         path={visibleCurrentPath}
+                        snapshots={treeSnapshots}
+                        windows={isWindows}
                         onNavigate={(path) => void loadPath(path)}
                       />
                     </div>
@@ -1044,6 +1061,11 @@ interface FileInspectorSelection {
   file: SessionFileEntry;
   section: FileInspectorSection;
   routeKey: string;
+}
+
+interface SessionFileTreeCacheState {
+  routeKey: string;
+  snapshots: ReadonlyMap<string, SessionFileTreeSnapshot>;
 }
 
 interface CapturedFileContext {
@@ -4129,6 +4151,48 @@ function registryReviewValue(value: SessionRegistryWriteValue): string {
 
 function uniqueFiles(files: SessionFileEntry[]): SessionFileEntry[] {
   return [...new Map(files.map((file) => [file.path, file])).values()];
+}
+
+function updateSessionFileTreeCache(
+  current: SessionFileTreeCacheState,
+  routeKey: string,
+  listing: SessionDirectoryListing,
+  windows: boolean,
+  append: boolean,
+): SessionFileTreeCacheState {
+  const snapshots = new Map(current.routeKey === routeKey ? current.snapshots : []);
+  const pathKey = sessionFileTreePathKey(listing.path, windows);
+  const previous = snapshots.get(pathKey);
+  const pageDirectories = listing.items.filter((file) => file.isDirectory);
+  const directories = append && previous
+    ? uniqueTreeDirectories([...previous.directories, ...pageDirectories], windows)
+    : uniqueTreeDirectories(pageDirectories, windows);
+
+  if (!append && previous) {
+    const currentChildren = new Set(directories.map((directory) => sessionFileTreePathKey(directory.path, windows)));
+    const removedChildren = new Set(previous.directories
+      .map((directory) => sessionFileTreePathKey(directory.path, windows))
+      .filter((key) => !currentChildren.has(key)));
+    if (removedChildren.size > 0) {
+      for (const [key, snapshot] of snapshots) {
+        if (key === pathKey) continue;
+        if (snapshot.breadcrumbs.some((crumb) => removedChildren.has(sessionFileTreePathKey(crumb.path, windows)))) {
+          snapshots.delete(key);
+        }
+      }
+    }
+  }
+
+  snapshots.set(pathKey, {
+    path: listing.path,
+    breadcrumbs: pathBreadcrumbs(listing.path, windows),
+    directories,
+  });
+  return { routeKey, snapshots };
+}
+
+function uniqueTreeDirectories(files: readonly SessionFileEntry[], windows: boolean): SessionFileEntry[] {
+  return [...new Map(files.map((file) => [sessionFileTreePathKey(file.path, windows), file])).values()];
 }
 
 function uniqueMounts(mounts: SessionMount[]): SessionMount[] {

@@ -15,14 +15,20 @@ describe("SessionFileTree", () => {
   it("shows expanded ancestry and loaded folders, and navigates only when a different folder is selected", async () => {
     const user = userEvent.setup();
     const onNavigate = vi.fn();
+    const breadcrumbs = [{ label: "/", path: "/" }, { label: "work", path: "/work" }];
     render(<SessionFileTree
-      breadcrumbs={[{ label: "/", path: "/" }, { label: "work", path: "/work" }]}
-      directories={[
-        directory("projects", "/work/projects"),
-        { ...directory("notes.txt", "/work/notes.txt"), isDirectory: false },
-      ]}
+      breadcrumbs={breadcrumbs}
       isDisabled={false}
       path="/work"
+      snapshots={[{
+        path: "/work",
+        breadcrumbs,
+        directories: [
+          directory("projects", "/work/projects"),
+          { ...directory("notes.txt", "/work/notes.txt"), isDirectory: false },
+        ],
+      }]}
+      windows={false}
       onNavigate={onNavigate}
     />);
 
@@ -43,10 +49,12 @@ describe("SessionFileTree", () => {
     const onNavigate = vi.fn();
     const share = "\\\\SERVER\\Share";
     const child = `${share}\\Mixed Case`;
+    const breadcrumbs = [{ label: share, path: share }];
     const props = {
-      breadcrumbs: [{ label: share, path: share }],
-      directories: [directory("Mixed Case", child)],
+      breadcrumbs,
       path: share,
+      snapshots: [{ path: share, breadcrumbs, directories: [directory("Mixed Case", child)] }],
+      windows: true,
       onNavigate,
     };
     const { rerender } = render(<SessionFileTree {...props} isDisabled />);
@@ -66,27 +74,31 @@ describe("SessionFileTree", () => {
       breadcrumbs: [{ label: "/", path: "/" }, { label: "opt", path: "/opt" }],
       label: "opt",
       child: "/opt/child",
+      windows: false,
     },
     {
       path: "C:/Windows/",
       breadcrumbs: [{ label: "C:\\", path: "C:\\" }, { label: "Windows", path: "C:\\Windows" }],
       label: "Windows",
       child: "C:/Windows/child",
+      windows: true,
     },
     {
       path: "\\\\SERVER\\Share\\",
       breadcrumbs: [{ label: "\\\\SERVER\\Share", path: "\\\\SERVER\\Share" }],
       label: "\\\\SERVER\\Share",
       child: "\\\\SERVER\\Share\\child",
+      windows: true,
     },
-  ])("selects the current folder and shows children when $path differs from its formatted breadcrumb", async ({ path, breadcrumbs, label, child }) => {
+  ])("selects the current folder and shows children when $path differs from its formatted breadcrumb", async ({ path, breadcrumbs, label, child, windows }) => {
     const user = userEvent.setup();
     const onNavigate = vi.fn();
     render(<SessionFileTree
       breadcrumbs={breadcrumbs}
-      directories={[directory("child", child)]}
       isDisabled={false}
       path={path}
+      snapshots={[{ path, breadcrumbs, directories: [directory("child", child)] }]}
+      windows={windows}
       onNavigate={onNavigate}
     />);
 
@@ -104,9 +116,14 @@ describe("SessionFileTree", () => {
     const breadcrumbs = [{ label: "/", path: "/" }, { label: "work", path: "/work" }];
     const { rerender } = render(<SessionFileTree
       breadcrumbs={breadcrumbs}
-      directories={[directory("projects", "/work/projects")]}
       isDisabled={false}
       path="/work"
+      snapshots={[{
+        path: "/work",
+        breadcrumbs,
+        directories: [directory("projects", "/work/projects")],
+      }]}
+      windows={false}
       onNavigate={onNavigate}
     />);
     const tree = screen.getByRole("treegrid", { name: "Remote folders" });
@@ -116,24 +133,41 @@ describe("SessionFileTree", () => {
 
     rerender(<SessionFileTree
       breadcrumbs={breadcrumbs.map((crumb) => ({ ...crumb }))}
-      directories={[directory("projects", "/work/projects"), directory("new-folder", "/work/new-folder")]}
       isDisabled={false}
       path="/work"
+      snapshots={[{
+        path: "/work",
+        breadcrumbs,
+        directories: [directory("projects", "/work/projects"), directory("new-folder", "/work/new-folder")],
+      }]}
+      windows={false}
       onNavigate={onNavigate}
     />);
     expect(within(tree).getByRole("row", { name: "work" })).toHaveAttribute("aria-expanded", "false");
 
     rerender(<SessionFileTree
       breadcrumbs={[...breadcrumbs, { label: "projects", path: "/work/projects" }]}
-      directories={[directory("src", "/work/projects/src")]}
       isDisabled={false}
       path="/work/projects"
+      snapshots={[
+        {
+          path: "/work",
+          breadcrumbs,
+          directories: [directory("projects", "/work/projects"), directory("new-folder", "/work/new-folder")],
+        },
+        {
+          path: "/work/projects",
+          breadcrumbs: [...breadcrumbs, { label: "projects", path: "/work/projects" }],
+          directories: [directory("src", "/work/projects/src")],
+        },
+      ]}
+      windows={false}
       onNavigate={onNavigate}
     />);
     expect(within(tree).getByRole("row", { name: "work" })).toHaveAttribute("aria-expanded", "true");
     expect(within(tree).getByRole("row", { name: "projects" })).toHaveAttribute("aria-selected", "true");
     expect(within(tree).getByText("src")).toBeVisible();
-    expect(within(tree).queryByText("new-folder")).not.toBeInTheDocument();
+    expect(within(tree).getByText("new-folder")).toBeVisible();
     expect(onNavigate).not.toHaveBeenCalled();
   });
 });

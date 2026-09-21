@@ -809,6 +809,106 @@ describe("session workbench panels", () => {
     expect(api.runSessionWorkbench).toHaveBeenCalledTimes(callsAtRoot);
   });
 
+  it("accumulates visited folder branches and clears the cache immediately when the directory is refreshed", async () => {
+    const user = userEvent.setup();
+    const refreshedAlpha = deferred<unknown>();
+    let alphaLoads = 0;
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") {
+        return workbench(input.operationId, { path: "/base" });
+      }
+      if (input.operationId !== "session.filesystem.ls") {
+        throw new Error(`Unexpected operation ${input.operationId}`);
+      }
+      if (input.path === "/base") {
+        return workbench(input.operationId, {
+          path: "/base",
+          exists: true,
+          items: [
+            { name: "alpha", path: "/base/alpha", isDirectory: true, sizeBytes: "0", mode: "drwxr-xr-x" },
+            { name: "beta", path: "/base/beta", isDirectory: true, sizeBytes: "0", mode: "drwxr-xr-x" },
+          ],
+          page: { limit: 100, total: 2, truncated: false },
+        });
+      }
+      if (input.path === "/base/alpha") {
+        alphaLoads += 1;
+        if (alphaLoads > 1) return refreshedAlpha.promise;
+        return workbench(input.operationId, {
+          path: "/base/alpha",
+          exists: true,
+          items: [
+            { name: "cached-child", path: "/base/alpha/cached-child", isDirectory: true, sizeBytes: "0", mode: "drwxr-xr-x" },
+          ],
+          page: { limit: 100, total: 1, truncated: false },
+        });
+      }
+      throw new Error(`Unexpected listing path ${input.path}`);
+    });
+
+    render(<SessionFilesPanel {...panelContext()} />);
+    const folderTree = () => screen.getByRole("treegrid", { name: "Remote folders" });
+    await waitFor(() => expect(within(folderTree()).getByRole("row", { name: "alpha" })).toBeInTheDocument());
+    await user.click(within(folderTree()).getByText("alpha", { exact: true }));
+    await screen.findByRole("grid", { name: "Files in /base/alpha" });
+
+    expect(within(folderTree()).getByRole("row", { name: "alpha" })).toHaveAttribute("aria-selected", "true");
+    expect(within(folderTree()).getByRole("row", { name: "beta" })).toBeInTheDocument();
+    expect(within(folderTree()).getByRole("row", { name: "cached-child" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Refresh directory" }));
+    expect(within(folderTree()).getByRole("row", { name: "alpha" })).toBeInTheDocument();
+    expect(within(folderTree()).queryByRole("row", { name: "beta" })).not.toBeInTheDocument();
+    expect(within(folderTree()).queryByRole("row", { name: "cached-child" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      refreshedAlpha.resolve(workbench("session.filesystem.ls", {
+        path: "/base/alpha",
+        exists: true,
+        items: [
+          { name: "fresh-child", path: "/base/alpha/fresh-child", isDirectory: true, sizeBytes: "0", mode: "drwxr-xr-x" },
+        ],
+        page: { limit: 100, total: 1, truncated: false },
+      }));
+    });
+
+    await waitFor(() => expect(within(folderTree()).getByRole("row", { name: "fresh-child" })).toBeInTheDocument());
+    expect(within(folderTree()).getByRole("row", { name: "alpha" })).toHaveAttribute("aria-selected", "true");
+    expect(within(folderTree()).queryByRole("row", { name: "beta" })).not.toBeInTheDocument();
+    expect(within(folderTree()).queryByRole("row", { name: "cached-child" })).not.toBeInTheDocument();
+  });
+
+  it("appends paged directories to the cached tree branch", async () => {
+    const user = userEvent.setup();
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") {
+        return workbench(input.operationId, { path: "/base" });
+      }
+      if (input.operationId !== "session.filesystem.ls") {
+        throw new Error(`Unexpected operation ${input.operationId}`);
+      }
+      const secondPage = input.cursor === "directories-2";
+      return workbench(input.operationId, {
+        path: "/base",
+        exists: true,
+        items: [secondPage
+          ? { name: "beta", path: "/base/beta", isDirectory: true, sizeBytes: "0", mode: "drwxr-xr-x" }
+          : { name: "alpha", path: "/base/alpha", isDirectory: true, sizeBytes: "0", mode: "drwxr-xr-x" }],
+        page: secondPage
+          ? { limit: 100, total: 2, truncated: false }
+          : { limit: 100, total: 2, truncated: true, nextCursor: "directories-2" },
+      });
+    });
+
+    render(<SessionFilesPanel {...panelContext()} />);
+    const folderTree = screen.getByRole("treegrid", { name: "Remote folders" });
+    expect(await within(folderTree).findByRole("row", { name: "alpha" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+
+    expect(await within(folderTree).findByRole("row", { name: "beta" })).toBeInTheDocument();
+    expect(within(folderTree).getByRole("row", { name: "alpha" })).toBeInTheDocument();
+  });
+
   it("cancels a new folder without creating it and clears the next dialog draft", async () => {
     const user = userEvent.setup();
     const api = installAPI((input) => {
@@ -891,19 +991,30 @@ describe("session workbench panels", () => {
       olderPage.resolve(workbench("session.filesystem.ls", {
         path: "/base",
         exists: true,
-        items: [{
-          name: "old.txt",
-          path: "/base/old.txt",
-          isDirectory: false,
-          sizeBytes: "8",
-          mode: "-rw-r--r--",
-        }],
-        page: { limit: 100, total: 2, truncated: false },
+        items: [
+          {
+            name: "old.txt",
+            path: "/base/old.txt",
+            isDirectory: false,
+            sizeBytes: "8",
+            mode: "-rw-r--r--",
+          },
+          {
+            name: "stale-folder",
+            path: "/base/stale-folder",
+            isDirectory: true,
+            sizeBytes: "0",
+            mode: "drwxr-xr-x",
+          },
+        ],
+        page: { limit: 100, total: 3, truncated: false },
       }));
     });
 
     expect(screen.getByRole("grid", { name: "Files in /next" })).toBeInTheDocument();
     expect(screen.queryByRole("row", { name: /old\.txt/i })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("treegrid", { name: "Remote folders" }))
+      .queryByRole("row", { name: "stale-folder" })).not.toBeInTheDocument();
   });
 
   it("keeps a failed requested path separate from the committed directory and disables location mutations", async () => {
