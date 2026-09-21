@@ -195,6 +195,7 @@ const sshIdentityStore = new SshIdentityStore(
 const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
 const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
+const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
 }
@@ -689,7 +690,16 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       Collection: "manual",
     }),
   ];
-  let workspaceFiles = [
+  let workspaceFiles = filesLayoutFixture ? Array.from({ length: 105 }, (_, index) => {
+    const isDirectory = index < 80;
+    const number = String(index + 1).padStart(3, "0");
+    return fakeFile(
+      isDirectory ? `E2EFolder${number}` : `E2EFile${number}.txt`,
+      isDirectory,
+      isDirectory ? "0" : "2048",
+      isDirectory ? "drwxr-xr-x" : "-rw-r--r--",
+    );
+  }) : [
     fakeFile(
       "notes.txt",
       false,

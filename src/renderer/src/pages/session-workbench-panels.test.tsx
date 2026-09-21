@@ -375,9 +375,12 @@ describe("session workbench panels", () => {
     await user.click(screen.getByRole("button", { name: "Upload" }));
     expect(api.runSessionWorkbench).toHaveBeenCalledWith(expect.objectContaining({ operationId: "session.filesystem.upload-open", remotePath: "/opt" }));
 
-    await user.type(screen.getByRole("textbox", { name: "New folder name" }), "archive");
     await user.click(screen.getByRole("button", { name: "New folder" }));
+    const folderDialog = await screen.findByRole("dialog", { name: "New folder" });
+    await user.type(within(folderDialog).getByRole("textbox", { name: "New folder name" }), "archive");
+    await user.click(within(folderDialog).getByRole("button", { name: "Create folder" }));
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.filesystem.mkdir", path: "/opt/archive" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New folder" })).not.toBeInTheDocument());
 
     await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
     await user.click(await screen.findByRole("menuitem", { name: /Delete/ }));
@@ -432,6 +435,72 @@ describe("session workbench panels", () => {
     expect(pwdAttempts).toBe(2);
   });
 
+  it.each([
+    { platform: "linux", root: "/", child: "/reports" },
+    { platform: "windows", root: "C:\\", child: "C:\\Reports" },
+    { platform: "windows", root: "\\\\fileserver\\share", child: "\\\\fileserver\\share\\Reports" },
+  ])("submits typed $platform paths with Enter and stops Up at $root", async ({ platform, root, child }) => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: root });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(<SessionFilesPanel {...panelContext({ os: platform })} />);
+    const pathInput = screen.getByRole("textbox", { name: "Remote path" });
+    await waitFor(() => expect(pathInput).toHaveValue(root));
+    const up = screen.getByRole("button", { name: "Up one folder" });
+    expect(up).toBeDisabled();
+
+    await user.clear(pathInput);
+    await user.type(pathInput, `${child}{Enter}`, { skipClick: true });
+    await waitFor(() => expect(screen.getByRole("grid", { name: `Files in ${child}` })).toBeInTheDocument());
+    expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.filesystem.ls", path: child, limit: 100 });
+    expect(up).toBeEnabled();
+
+    await user.click(up);
+    await waitFor(() => expect(screen.getByRole("grid", { name: `Files in ${root}` })).toBeInTheDocument());
+    expect(pathInput).toHaveValue(root);
+    expect(up).toBeDisabled();
+    const callsAtRoot = api.runSessionWorkbench.mock.calls.length;
+    await user.click(up);
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(callsAtRoot);
+  });
+
+  it("cancels a new folder without creating it and clears the next dialog draft", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: "/opt",
+        exists: true,
+        items: [],
+        page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(<SessionFilesPanel {...panelContext()} />);
+    await screen.findByText("This directory is empty.");
+    expect(screen.queryByRole("textbox", { name: "New folder name" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "New folder" }));
+    const dialog = await screen.findByRole("dialog", { name: "New folder" });
+    expect(within(dialog).getByRole("button", { name: "Create folder" })).toBeDisabled();
+    await user.type(within(dialog).getByRole("textbox", { name: "New folder name" }), "discarded");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New folder" })).not.toBeInTheDocument());
+    expect(api.runSessionWorkbench.mock.calls.some(([input]) => input.operationId === "session.filesystem.mkdir")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "New folder" }));
+    expect(await screen.findByRole("textbox", { name: "New folder name" })).toHaveValue("");
+  });
+
   it("keeps the latest file navigation when an older same-route page request finishes late", async () => {
     const user = userEvent.setup();
     const olderPage = deferred<unknown>();
@@ -460,9 +529,11 @@ describe("session workbench panels", () => {
     });
 
     render(<SessionFilesPanel {...panelContext()} />);
-    expect(await screen.findByRole("row", { name: /next/i })).toBeInTheDocument();
+    const fileGrid = await screen.findByRole("grid", { name: "Files in /base" });
+    expect(within(fileGrid).getByRole("row", { name: /next/i })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Load more" }));
-    await user.click(screen.getByRole("row", { name: /next/i }));
+    act(() => within(fileGrid).getByRole("row", { name: /next/i }).focus());
+    await user.keyboard("{Enter}");
 
     await act(async () => {
       newerDirectory.resolve(workbench("session.filesystem.ls", {
@@ -521,7 +592,7 @@ describe("session workbench panels", () => {
     const pathInput = await screen.findByRole("textbox", { name: "Remote path" });
     await waitFor(() => expect(pathInput).toHaveValue("/base"));
     await user.clear(pathInput);
-    await user.type(pathInput, "/missing");
+    await user.type(pathInput, "/missing", { skipClick: true });
     await user.click(screen.getByRole("button", { name: "Go" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Directory does not exist");
@@ -557,7 +628,7 @@ describe("session workbench panels", () => {
     const pathInput = await screen.findByRole("textbox", { name: "Remote path" });
     await waitFor(() => expect(pathInput).toHaveValue("/base"));
     await user.clear(pathInput);
-    await user.type(pathInput, "/missing");
+    await user.type(pathInput, "/missing", { skipClick: true });
     await user.click(screen.getByRole("button", { name: "Go" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Remote path /missing does not exist");
@@ -599,8 +670,10 @@ describe("session workbench panels", () => {
 
     render(<SessionFilesPanel {...panelContext()} />);
     expect(await screen.findByText("This directory is empty.")).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "New folder name" }), "blocked");
     await user.click(screen.getByRole("button", { name: "New folder" }));
+    const folderDialog = await screen.findByRole("dialog", { name: "New folder" });
+    await user.type(within(folderDialog).getByRole("textbox", { name: "New folder name" }), "blocked");
+    await user.click(within(folderDialog).getByRole("button", { name: "Create folder" }));
 
     await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not create folder", { description: "Access denied" }));
     expect(warning).not.toHaveBeenCalledWith("Folder outcome unknown", expect.anything());

@@ -8,7 +8,6 @@ import {
 } from "react";
 import {
   AlertDialog,
-  Breadcrumbs,
   Button,
   Checkbox,
   Chip,
@@ -17,6 +16,7 @@ import {
   Input,
   Label,
   ListBox,
+  Modal,
   SearchField,
   Select,
   Spinner,
@@ -103,6 +103,7 @@ import type {
 import { DateTimePickerField } from "../components/FormControls";
 import { EnvironmentVariableModal } from "../components/EnvironmentVariableModal";
 import { REGISTRY_HIVE_LABELS, SessionRegistryTree } from "./SessionRegistryTree";
+import { SessionFileTree } from "./SessionFileTree";
 import { registryValueCacheKey, useRegistryValueCache } from "./useRegistryValueCache";
 import { RegistryContextMenu, type RegistryContextAction, type RegistryContextTarget } from "./RegistryContextMenu";
 
@@ -505,6 +506,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const [requestedPath, setRequestedPath] = useState("");
   const [pathDraft, setPathDraft] = useState("");
   const [folderName, setFolderName] = useState("");
+  const [isFolderDialogOpen, setIsFolderDialogOpen] = useState(false);
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isNavigating, setIsNavigating] = useState(true);
@@ -597,6 +599,8 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
 
   useEffect(() => {
     setMode("browser");
+    setIsFolderDialogOpen(false);
+    setFolderName("");
     setInspector(undefined);
     setBusyFile(undefined);
     void initializeFiles();
@@ -618,6 +622,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
       if (!isCurrent(expected)) return;
       toast.success("Folder created", { description: result.path ?? result.message });
       setFolderName("");
+      setIsFolderDialogOpen(false);
       await loadPath(currentPath);
     } catch (error) {
       if (isCurrent(expected)) notifyWorkbenchFailure("Could not create folder", "Folder outcome unknown", error);
@@ -774,108 +779,184 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
     },
   ], [busyFile, destructive.isExecuting, destructive.isPreparing, handleFileAction, locationActionsAvailable, platform]);
 
-  const crumbs = pathBreadcrumbs(visibleCurrentPath, isWindows);
+  const crumbs = useMemo(() => pathBreadcrumbs(visibleCurrentPath, isWindows), [visibleCurrentPath, isWindows]);
+  const parentPath = crumbs.length > 1 ? crumbs[crumbs.length - 2]?.path : undefined;
+  const directories = useMemo(() => visibleState.status === "ready" && visibleState.value.exists
+    ? visibleState.value.items.filter((file) => file.isDirectory)
+    : [], [visibleState]);
 
   return (
     <>
-      <PanelShell
-        icon={faFolder}
-        title="Files"
-        description="Browse, search, and inspect bounded remote filesystem results. Native file dialogs remain owned by the main process."
-        action={mode === "browser" ? (
-          <div className="flex items-center gap-2">
-            <Button isDisabled={!locationActionsAvailable} isPending={isUploading} size="sm" variant="secondary" onPress={() => void upload()}>
-              <FontAwesomeIcon aria-hidden icon={faUpload} /> Upload
-            </Button>
-            <RefreshButton
-              disabled={!locationActionsAvailable}
-              label="Refresh directory"
-              pending={isNavigating}
-              onPress={() => currentPath && void loadPath(currentPath)}
-            />
-          </div>
-        ) : null}
-      >
-        <div className="flex min-w-0 flex-col gap-5">
-          <Segment aria-label="Filesystem mode" selectedKey={mode} size="sm" onSelectionChange={(key) => setMode(String(key) as FileWorkbenchMode)}>
-            <Segment.Item id="browser">Browser</Segment.Item>
-            <Segment.Item id="search">Search</Segment.Item>
-            <Segment.Item id="storage">Storage</Segment.Item>
-          </Segment>
+      <section className="session-files-browser flex h-full max-h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-separator bg-surface" aria-label="File browser">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-separator px-3 py-2">
+          <h2 className="mr-3 px-1 text-sm font-semibold text-foreground">File Browser</h2>
           {mode === "browser" ? (
-          <div className="flex min-w-0 flex-col gap-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
-            <TextField className="min-w-0 flex-1" value={visiblePathDraft} variant="secondary" onChange={setPathDraft}>
-              <Label>Remote path</Label>
-              <Input className="font-mono text-xs" placeholder={isWindows ? "C:\\" : "/"} />
-            </TextField>
-            <Button isDisabled={!pathDraft.trim() || isNavigating} isPending={isNavigating} size="sm" onPress={() => void loadPath(pathDraft.trim())}>Go</Button>
-          </div>
-          {crumbs.length > 0 ? (
-            <Breadcrumbs aria-label="Remote filesystem path" onAction={(key) => {
-              if (locationActionsAvailable) void loadPath(String(key));
-            }}>
-              {crumbs.map((crumb) => <Breadcrumbs.Item className="no-underline" id={crumb.path} isDisabled={!locationActionsAvailable} key={crumb.path}>{crumb.label}</Breadcrumbs.Item>)}
-            </Breadcrumbs>
-          ) : null}
-          <div className="flex flex-col gap-3 rounded-xl border border-separator bg-default p-3 sm:flex-row sm:items-end">
-            <TextField className="min-w-0 flex-1" value={folderName} variant="secondary" onChange={setFolderName}>
-              <Label>New folder name</Label>
-              <Input placeholder="Folder name" />
-            </TextField>
-            <Button isDisabled={!locationActionsAvailable || !folderName.trim()} isPending={isCreatingFolder} size="sm" variant="secondary" onPress={() => void createFolder()}>
-              <FontAwesomeIcon aria-hidden icon={faFolderPlus} /> New folder
-            </Button>
-          </div>
-          {visibleState.status === "loading" ? <PanelLoading label={visibleRequestedPath ? `Loading ${visibleRequestedPath}` : "Loading directory"} /> : null}
-          {visibleState.status === "error" ? (
-            <PanelError
-              message={visibleState.error}
-              onRetry={() => visibleRequestedPath ? void loadPath(visibleRequestedPath) : void initializeFiles()}
-            />
-          ) : null}
-          {visibleState.status === "ready" && !visibleState.value.exists ? (
-            <PanelError
-              message={`Remote path ${visibleRequestedPath || visibleState.value.path} does not exist.`}
-              onRetry={() => visibleRequestedPath && void loadPath(visibleRequestedPath)}
-            />
-          ) : null}
-          {visibleState.status === "ready" && visibleState.value.exists ? (
             <>
-              <DataGrid
-                aria-label={`Files in ${visibleState.value.path}`}
-                columns={columns}
-                contentClassName="min-w-[900px]"
-                data={visibleState.value.items}
-                getRowId={(file) => file.path}
-                variant="secondary"
-                onRowAction={(key) => {
-                  const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
-                  if (file) openInspector(file);
-                }}
-                renderEmptyState={() => <GridEmpty label="This directory is empty." />}
-              />
-              {visibleState.value.page.nextCursor ? (
-                <div className="flex justify-center">
-                  <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => void loadPath(visibleState.value.path, visibleState.value.page.nextCursor)}>Load more</Button>
-                </div>
-              ) : null}
+              <Button isDisabled={!locationActionsAvailable} size="sm" variant="ghost" onPress={() => { setFolderName(""); setIsFolderDialogOpen(true); }}>
+                <FontAwesomeIcon aria-hidden icon={faFolderPlus} /> New folder
+              </Button>
+              <Button isDisabled={!locationActionsAvailable} isPending={isUploading} size="sm" variant="ghost" onPress={() => void upload()}>
+                <FontAwesomeIcon aria-hidden icon={faUpload} /> Upload
+              </Button>
             </>
           ) : null}
+          <div className="ml-auto flex items-center gap-2">
+            <Segment aria-label="Filesystem mode" selectedKey={mode} size="sm" onSelectionChange={(key) => setMode(String(key) as FileWorkbenchMode)}>
+              <Segment.Item id="browser">Browser</Segment.Item>
+              <Segment.Item id="search">Search</Segment.Item>
+              <Segment.Item id="storage">Storage</Segment.Item>
+            </Segment>
+            {mode === "browser" ? (
+              <RefreshButton
+                disabled={!locationActionsAvailable}
+                label="Refresh directory"
+                pending={isNavigating}
+                onPress={() => currentPath && void loadPath(currentPath)}
+              />
+            ) : null}
           </div>
-          ) : mode === "search" ? (
-            <SessionFileSearch currentPath={visibleCurrentPath} key={`${routeKey}:search`} routeKey={routeKey} />
-          ) : (
-            <SessionFileStorage
-              destructive={destructive}
-              key={`${routeKey}:storage`}
-              platform={platform}
-              refreshToken={destructiveRefreshToken}
-              routeKey={routeKey}
-            />
-          )}
         </div>
-      </PanelShell>
+        {mode === "browser" ? (
+          <>
+            <form
+              className="flex shrink-0 items-center gap-2 border-b border-separator px-3 py-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (pathDraft.trim() && !isNavigating) void loadPath(pathDraft.trim());
+              }}
+            >
+              <IconButton
+                isDisabled={!locationActionsAvailable || !parentPath}
+                label="Up one folder"
+                icon={faArrowUp}
+                onPress={() => parentPath && void loadPath(parentPath)}
+              />
+              <TextField aria-label="Remote path" className="min-w-0 flex-1" value={visiblePathDraft} variant="secondary" onChange={setPathDraft}>
+                <Input className="font-mono text-xs" placeholder={isWindows ? "C:\\" : "/"} spellCheck={false} />
+              </TextField>
+              <Button isDisabled={!pathDraft.trim() || isNavigating} isPending={isNavigating} size="sm" type="submit" variant="secondary">Go</Button>
+            </form>
+            <div className="min-h-0 flex-1 overflow-hidden bg-background">
+              <Resizable orientation="horizontal">
+                <Resizable.Panel defaultSize="260px" groupResizeBehavior="preserve-pixel-size" maxSize="50%" minSize="160px">
+                  <div className="flex h-full min-h-0 min-w-0 flex-col" aria-label="Folder navigation">
+                    <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-2 py-2" data-files-scroll-region="folders">
+                      <SessionFileTree
+                        breadcrumbs={crumbs}
+                        directories={directories}
+                        isDisabled={!locationActionsAvailable}
+                        path={visibleCurrentPath}
+                        onNavigate={(path) => void loadPath(path)}
+                      />
+                    </div>
+                  </div>
+                </Resizable.Panel>
+                <Resizable.Handle aria-label="Resize folder navigation" type="line" variant="secondary" withIndicator />
+                <Resizable.Panel minSize={35}>
+                  <div className="flex h-full min-h-0 min-w-0 flex-col" aria-label="Directory contents">
+                    {visibleState.status === "loading" ? <PanelLoading label={visibleRequestedPath ? `Loading ${visibleRequestedPath}` : "Loading directory"} /> : null}
+                    {visibleState.status === "error" ? (
+                      <div className="overflow-auto p-4">
+                        <PanelError
+                          message={visibleState.error}
+                          onRetry={() => visibleRequestedPath ? void loadPath(visibleRequestedPath) : void initializeFiles()}
+                        />
+                      </div>
+                    ) : null}
+                    {visibleState.status === "ready" && !visibleState.value.exists ? (
+                      <div className="overflow-auto p-4">
+                        <PanelError
+                          message={`Remote path ${visibleRequestedPath || visibleState.value.path} does not exist.`}
+                          onRetry={() => visibleRequestedPath && void loadPath(visibleRequestedPath)}
+                        />
+                      </div>
+                    ) : null}
+                    {visibleState.status === "ready" && visibleState.value.exists ? (
+                      <>
+                        <div className="min-h-0 flex-1 overflow-hidden" data-files-scroll-region="entries">
+                          <DataGrid
+                            aria-label={`Files in ${visibleState.value.path}`}
+                            className="session-files-grid h-full rounded-none bg-transparent p-0"
+                            columns={columns}
+                            contentClassName="min-w-[780px]"
+                            data={visibleState.value.items}
+                            getRowId={(file) => file.path}
+                            scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
+                            variant="secondary"
+                            onRowAction={(key) => {
+                              const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
+                              if (file) openInspector(file);
+                            }}
+                            renderEmptyState={() => <GridEmpty label="This directory is empty." />}
+                          />
+                        </div>
+                        {visibleState.value.page.nextCursor ? (
+                          <div className="shrink-0 border-t border-separator p-2">
+                            <Button isPending={isLoadingMore} size="sm" variant="ghost" onPress={() => void loadPath(visibleState.value.path, visibleState.value.page.nextCursor)}>Load more</Button>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                </Resizable.Panel>
+              </Resizable>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t border-separator px-4 py-2 text-xs text-muted">
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={visibleRequestedPath || visibleCurrentPath}>
+                {visibleRequestedPath || visibleCurrentPath || "Filesystem"}
+              </span>
+              {visibleState.status === "ready" && visibleState.value.exists ? (
+                <InventoryCount loaded={visibleState.value.items.length} noun="items" page={visibleState.value.page} />
+              ) : <span role="status">{visibleState.status === "loading" ? "Loading…" : "Could not load directory"}</span>}
+            </div>
+          </>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-4">
+            {mode === "search" ? (
+              <SessionFileSearch currentPath={visibleCurrentPath} key={`${routeKey}:search`} routeKey={routeKey} />
+            ) : (
+              <SessionFileStorage
+                destructive={destructive}
+                key={`${routeKey}:storage`}
+                platform={platform}
+                refreshToken={destructiveRefreshToken}
+                routeKey={routeKey}
+              />
+            )}
+          </div>
+        )}
+      </section>
+      <Modal.Backdrop
+        isDismissable={!isCreatingFolder}
+        isKeyboardDismissDisabled={isCreatingFolder}
+        isOpen={isFolderDialogOpen}
+        onOpenChange={(open) => { if (!isCreatingFolder) setIsFolderDialogOpen(open); }}
+      >
+        <Modal.Container size="sm">
+          <Modal.Dialog>
+            <Modal.CloseTrigger isDisabled={isCreatingFolder} />
+            <Modal.Header className="pr-10">
+              <Modal.Heading>New folder</Modal.Heading>
+              <p className="mt-1 truncate font-mono text-xs text-muted" title={visibleCurrentPath}>{visibleCurrentPath}</p>
+            </Modal.Header>
+            <form onSubmit={(event) => {
+              event.preventDefault();
+              if (!isCreatingFolder) void createFolder();
+            }}>
+              <Modal.Body>
+                <TextField isDisabled={isCreatingFolder} value={folderName} variant="secondary" onChange={setFolderName}>
+                  <Label>New folder name</Label>
+                  <Input autoFocus placeholder="Folder name" />
+                </TextField>
+              </Modal.Body>
+              <Modal.Footer>
+                <Button isDisabled={isCreatingFolder} variant="secondary" onPress={() => setIsFolderDialogOpen(false)}>Cancel</Button>
+                <Button isDisabled={!locationActionsAvailable || !folderName.trim()} isPending={isCreatingFolder} type="submit">Create folder</Button>
+              </Modal.Footer>
+            </form>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
       <SessionFileInspector
         destructive={destructive}
         platform={platform}

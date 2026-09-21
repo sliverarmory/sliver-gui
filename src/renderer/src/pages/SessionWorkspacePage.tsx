@@ -734,7 +734,7 @@ export function SessionWorkspacePage({
                     description: "The exact main-issued target reference is no longer available.",
                   })}
           </Tabs.Panel>
-          <Tabs.Panel className="pt-6" id="files">
+          <Tabs.Panel className="session-workspace__files-panel pt-6" id="files">
             {renderPanel(resolvedPanels.files, context, {
               icon: faFolderOpen,
               title: "No file inventory loaded",

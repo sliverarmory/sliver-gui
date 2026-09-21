@@ -2986,8 +2986,11 @@ async function verifyM2SessionWorkspace(
   await page.keyboard.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
-  await page.getByLabel("New folder name").fill("m2-e2e-folder");
   await page.getByRole("button", { name: "New folder", exact: true }).click();
+  const newFolderDialog = page.getByRole("dialog", { name: "New folder", exact: true });
+  await newFolderDialog.getByRole("textbox", { name: "New folder name", exact: true }).fill("m2-e2e-folder");
+  await newFolderDialog.getByRole("button", { name: "Create folder", exact: true }).click();
+  await newFolderDialog.waitFor({ state: "hidden" });
   const createdFolderRow = filesGrid.getByRole("row").filter({ hasText: "m2-e2e-folder" });
   await createdFolderRow.waitFor();
   await createdFolderRow.getByRole("button", { name: "More actions for m2-e2e-folder", exact: true }).click();
