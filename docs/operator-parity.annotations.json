@@ -8759,7 +8759,7 @@
     {
       "id": "server.loot.remote",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -8792,7 +8792,7 @@
       "testIds": [
         "parity-contract:server.loot.remote"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Session file-browser rows can add a bounded single remote file to the server loot store with automatic text or binary classification, a sanitized leaf name, host UUID provenance, and outcome-aware mutation journaling. Upstream name, type, and file-type overrides plus disposable real-server verification remain pending, so this row is in progress rather than complete."
     },
     {
       "id": "server.loot.rename",

@@ -229,7 +229,7 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.loot` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot |
 | `server.loot.fetch` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.fetch |
 | `server.loot.local` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.local |
-| `server.loot.remote` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.remote |
+| `server.loot.remote` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.remote |
 | `server.loot.rename` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.rename |
 | `server.loot.rm` | in-progress | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.loot.rm |
 | `server.mcp` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.mcp |

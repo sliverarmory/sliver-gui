@@ -35,6 +35,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowRight,
   faArrowUp,
+  faBoxArchive,
   faCamera,
   faChevronDown,
   faClock,
@@ -64,6 +65,7 @@ import {
 
 import {
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
   SESSION_EDITOR_MAX_BYTES,
   sessionOperationSupportsPlatform,
   type PrepareSessionDestructiveActionInput,
@@ -102,6 +104,10 @@ import type {
 } from "./SessionWorkspacePage";
 import { DateTimePickerField } from "../components/FormControls";
 import { EnvironmentVariableModal } from "../components/EnvironmentVariableModal";
+import {
+  useApplicationContextMenuScope,
+  type ApplicationContextMenuAction,
+} from "../components/ApplicationContextMenu";
 import { REGISTRY_HIVE_LABELS, SessionRegistryTree } from "./SessionRegistryTree";
 import { SessionFileTree } from "./SessionFileTree";
 import { registryValueCacheKey, useRegistryValueCache } from "./useRegistryValueCache";
@@ -515,6 +521,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const [inspector, setInspector] = useState<FileInspectorSelection>();
   const [destructiveRefreshToken, setDestructiveRefreshToken] = useState(0);
   const navigationRequestSequence = useRef(0);
+  const fileActionsLocked = useRef(true);
   const isCurrent = useLatestIdentity(routeKey);
   const destructive = useDestructiveAction(routeKey, () => {
     setInspector(undefined);
@@ -659,12 +666,17 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
 
   const download = useCallback(async (file: SessionFileEntry) => {
     const expected = routeKey;
+    const downloadingToastId = toast("Downloading", {
+      description: file.name,
+      isLoading: true,
+      timeout: 0,
+    });
     setBusyFile(file.path);
     try {
       const result = await runWorkbench({
         operationId: "session.filesystem.download",
         path: file.path,
-        maxBytes: SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+        maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
       });
       if (!isCurrent(expected)) return;
       if (result.status === "saved") toast.success("File saved", { description: result.suggestedBasename });
@@ -672,6 +684,33 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
     } catch (error) {
       if (isCurrent(expected)) toast.danger("Download failed", { description: errorMessage(error) });
     } finally {
+      toast.close(downloadingToastId);
+      if (isCurrent(expected)) setBusyFile(undefined);
+    }
+  }, [isCurrent, routeKey]);
+
+  const addToLoot = useCallback(async (file: SessionFileEntry) => {
+    const expected = routeKey;
+    const addingToLootToastId = toast("Adding to Loot", {
+      description: file.name,
+      isLoading: true,
+      timeout: 0,
+    });
+    setBusyFile(file.path);
+    try {
+      const result = await runWorkbench({
+        operationId: "session.filesystem.add-to-loot",
+        path: file.path,
+        maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+      });
+      if (!isCurrent(expected)) return;
+      toast.success("File added to loot", { description: result.fileName });
+    } catch (error) {
+      if (isCurrent(expected)) {
+        notifyWorkbenchFailure("Could not add file to loot", "Loot add outcome unknown", error);
+      }
+    } finally {
+      toast.close(addingToLootToastId);
       if (isCurrent(expected)) setBusyFile(undefined);
     }
   }, [isCurrent, routeKey]);
@@ -693,6 +732,9 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
         return;
       case "download":
         if (!file.isDirectory) void download(file);
+        return;
+      case "add-to-loot":
+        if (!file.isDirectory) void addToLoot(file);
         return;
       case "copy":
       case "move":
@@ -719,7 +761,22 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
           force: false,
         });
     }
-  }, [destructive, download, loadPath, locationActionsAvailable, openInspector]);
+  }, [addToLoot, destructive, download, loadPath, locationActionsAvailable, openInspector]);
+
+  const fileActionsDisabled = !locationActionsAvailable ||
+    destructive.isPreparing ||
+    destructive.isExecuting ||
+    busyFile !== undefined;
+  fileActionsLocked.current = fileActionsDisabled;
+  const contextNavigationSequence = navigationRequestSequence.current;
+  const contextFileAction = (file: SessionFileEntry, action: FileContextAction) => {
+    if (
+      !isCurrent(routeKey) ||
+      contextNavigationSequence !== navigationRequestSequence.current ||
+      fileActionsLocked.current
+    ) return;
+    handleFileAction(file, action);
+  };
 
   const columns = useMemo<DataGridColumn<SessionFileEntry>[]>(() => [
     {
@@ -770,14 +827,14 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
           <FileMoreActions
             canManagePermissions={sessionOperationSupportsPlatform("session.filesystem.chmod", platform)}
             file={file}
-            isDisabled={!locationActionsAvailable || destructive.isPreparing || destructive.isExecuting}
+            isDisabled={fileActionsDisabled}
             isPending={busyFile === file.path}
             onAction={(action) => handleFileAction(file, action)}
           />
         </div>
       ),
     },
-  ], [busyFile, destructive.isExecuting, destructive.isPreparing, handleFileAction, locationActionsAvailable, platform]);
+  ], [busyFile, fileActionsDisabled, handleFileAction, platform]);
 
   const crumbs = useMemo(() => pathBreadcrumbs(visibleCurrentPath, isWindows), [visibleCurrentPath, isWindows]);
   const parentPath = crumbs.length > 1 ? crumbs[crumbs.length - 2]?.path : undefined;
@@ -804,7 +861,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
             <Segment aria-label="Filesystem mode" selectedKey={mode} size="sm" onSelectionChange={(key) => setMode(String(key) as FileWorkbenchMode)}>
               <Segment.Item id="browser">Browser</Segment.Item>
               <Segment.Item id="search">Search</Segment.Item>
-              <Segment.Item id="storage">Storage</Segment.Item>
+              <Segment.Item id="storage">Mounts</Segment.Item>
             </Segment>
             {mode === "browser" ? (
               <RefreshButton
@@ -874,21 +931,27 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
                     {visibleState.status === "ready" && visibleState.value.exists ? (
                       <>
                         <div className="min-h-0 flex-1 overflow-hidden" data-files-scroll-region="entries">
-                          <DataGrid
-                            aria-label={`Files in ${visibleState.value.path}`}
-                            className="session-files-grid h-full rounded-none bg-transparent p-0"
-                            columns={columns}
-                            contentClassName="min-w-[780px]"
-                            data={visibleState.value.items}
-                            getRowId={(file) => file.path}
-                            scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
-                            variant="secondary"
-                            onRowAction={(key) => {
-                              const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
-                              if (file) openInspector(file);
-                            }}
-                            renderEmptyState={() => <GridEmpty label="This directory is empty." />}
-                          />
+                          <FileContextMenu
+                            disabled={fileActionsDisabled}
+                            files={visibleState.value.items}
+                            onAction={contextFileAction}
+                          >
+                            <DataGrid
+                              aria-label={`Files in ${visibleState.value.path}`}
+                              className="session-files-grid h-full rounded-none bg-transparent p-0"
+                              columns={columns}
+                              contentClassName="min-w-[780px]"
+                              data={visibleState.value.items}
+                              getRowId={(file) => file.path}
+                              scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
+                              variant="secondary"
+                              onRowAction={(key) => {
+                                const file = visibleState.value.items.find((candidate) => candidate.path === String(key));
+                                if (file) openInspector(file);
+                              }}
+                              renderEmptyState={() => <GridEmpty label="This directory is empty." />}
+                            />
+                          </FileContextMenu>
                         </div>
                         {visibleState.value.page.nextCursor ? (
                           <div className="shrink-0 border-t border-separator p-2">
@@ -974,12 +1037,66 @@ type FileWorkbenchMode = "browser" | "search" | "storage";
 type FileInspectorSection = "view" | "copy" | "move" | "permissions" | "times";
 type FileViewMode = "cat" | "head" | "tail" | "hex";
 type FileViewResult = SessionTextFileView | SessionHexFileView;
-type FileRowAction = "open" | "download" | "copy" | "move" | "upload-overwrite" | "permissions" | "times" | "delete";
+type FileContextAction = "download" | "add-to-loot";
+type FileRowAction = "open" | FileContextAction | "copy" | "move" | "upload-overwrite" | "permissions" | "times" | "delete";
 
 interface FileInspectorSelection {
   file: SessionFileEntry;
   section: FileInspectorSection;
   routeKey: string;
+}
+
+interface CapturedFileContext {
+  file: SessionFileEntry;
+  onAction: (file: SessionFileEntry, action: FileContextAction) => void;
+}
+
+function FileContextMenu({
+  children,
+  disabled,
+  files,
+  onAction,
+}: {
+  children: ReactNode;
+  disabled: boolean;
+  files: readonly SessionFileEntry[];
+  onAction: CapturedFileContext["onAction"];
+}): React.JSX.Element {
+  const [context, setContext] = useState<CapturedFileContext>();
+  const actions: ApplicationContextMenuAction[] = context ? [{
+    id: "download",
+    label: "Download",
+    icon: faDownload,
+    isDisabled: disabled,
+    onAction: () => context.onAction(context.file, "download"),
+  }, {
+    id: "add-to-loot",
+    label: "Add to Loot",
+    icon: faBoxArchive,
+    isDisabled: disabled,
+    onAction: () => context.onAction(context.file, "add-to-loot"),
+  }] : [];
+  const scope = useApplicationContextMenuScope({ actions });
+
+  return (
+    <div
+      {...scope}
+      className="contents"
+      onContextMenuCapture={(event) => {
+        const element = event.target instanceof Element ? event.target : undefined;
+        const row = element?.closest<HTMLElement>('[role="row"][data-key]');
+        const path = row?.dataset["key"];
+        const file = row && event.currentTarget.contains(row) && path !== undefined
+          ? files.find((candidate) => candidate.path === path)
+          : undefined;
+        // Keep the click-time callback so its route and navigation guards still
+        // apply if this menu outlives the directory from which it was opened.
+        setContext(file && !file.isDirectory ? { file, onAction } : undefined);
+      }}
+    >
+      {children}
+    </div>
+  );
 }
 
 function FileMoreActions({
@@ -1009,16 +1126,26 @@ function FileMoreActions({
       </Button>
       <Dropdown.Popover className="min-w-56" placement="bottom end">
         <Dropdown.Menu aria-label={`Actions for ${file.name}`} onAction={(key) => onAction(String(key) as FileRowAction)}>
-          <Dropdown.Item id="open" textValue={file.isDirectory ? "Open folder" : "Inspect file"}>
-            <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={file.isDirectory ? faFolder : faEye} />
-            <Label>{file.isDirectory ? "Open folder" : "Inspect file"}</Label>
-          </Dropdown.Item>
           {!file.isDirectory ? (
             <Dropdown.Item id="download" textValue="Download">
               <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faDownload} />
               <Label>Download</Label>
             </Dropdown.Item>
           ) : null}
+          {!file.isDirectory ? (
+            <Dropdown.Item id="add-to-loot" textValue="Add to Loot">
+              <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faBoxArchive} />
+              <Label>Add to Loot</Label>
+            </Dropdown.Item>
+          ) : null}
+          <Dropdown.Item
+            id="open"
+            textValue={file.isDirectory ? "Open folder" : "Inspect file"}
+            {...(file.isDirectory ? {} : { className: "mt-1 border-t border-separator pt-1" })}
+          >
+            <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={file.isDirectory ? faFolder : faEye} />
+            <Label>{file.isDirectory ? "Open folder" : "Inspect file"}</Label>
+          </Dropdown.Item>
           <Dropdown.Item id="copy" textValue="Copy">
             <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faCopy} />
             <Label>Copy…</Label>

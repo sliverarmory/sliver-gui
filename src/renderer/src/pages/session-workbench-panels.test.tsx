@@ -1,10 +1,11 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { toast } from "@heroui/react";
+import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
+import { SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES } from "../../../shared/session-contracts";
 import type {
   PrepareSessionDestructiveActionInput,
   SessionWorkbenchInput,
@@ -53,6 +54,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  toast.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -403,6 +405,340 @@ describe("session workbench panels", () => {
     await user.click(await screen.findByRole("menuitem", { name: /Upload replacement/ }));
     expect(await screen.findByRole("alertdialog", { name: "Overwrite this remote file?" })).toBeInTheDocument();
     expect(screen.getByTitle("f".repeat(64))).toHaveTextContent(`SHA-256 ${"f".repeat(64)}`);
+  });
+
+  it("puts Download and Add to Loot first in file actions and dispatches the exact row path", async () => {
+    const user = userEvent.setup();
+    const files = [{
+      name: "alpha.txt",
+      path: "/opt/alpha.txt",
+      isDirectory: false,
+      sizeBytes: "5",
+      mode: "-rw-r--r--",
+    }, {
+      name: "beta.txt",
+      path: "/opt/beta.txt",
+      isDirectory: false,
+      sizeBytes: "4",
+      mode: "-rw-r--r--",
+    }];
+    const api = installAPI((input) => {
+      switch (input.operationId) {
+        case "session.filesystem.pwd": return workbench(input.operationId, { path: "/opt" });
+        case "session.filesystem.ls": return workbench(input.operationId, {
+          path: input.path,
+          exists: true,
+          items: files,
+          page: { limit: 100, total: files.length, truncated: false },
+        });
+        case "session.filesystem.download": return workbench(input.operationId, { status: "canceled" });
+        case "session.filesystem.add-to-loot": return workbench(input.operationId, {
+          status: "added",
+          fileName: input.path.split("/").at(-1)!,
+          fileType: "text",
+          size: 4,
+          sha256: "c".repeat(64),
+        });
+        default: throw new Error(`Unexpected operation ${input.operationId}`);
+      }
+    });
+
+    render(<SessionFilesPanel {...panelContext()} />);
+    await screen.findByRole("row", { name: /beta\.txt/i });
+
+    await user.click(screen.getByRole("button", { name: "More actions for beta.txt" }));
+    const betaDownload = await screen.findByRole("menuitem", { name: "Download" });
+    let menu = betaDownload.closest<HTMLElement>('[role="menu"]')!;
+    expect(within(menu).getAllByRole("menuitem").slice(0, 3).map((item) => item.textContent)).toEqual([
+      "Download",
+      "Add to Loot",
+      "Inspect file",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "Add to Loot" }));
+    await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+      operationId: "session.filesystem.add-to-loot",
+      path: "/opt/beta.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions for alpha.txt" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "More actions for alpha.txt" }));
+    const alphaDownload = await screen.findByRole("menuitem", { name: "Download" });
+    menu = alphaDownload.closest<HTMLElement>('[role="menu"]')!;
+    await user.click(within(menu).getByRole("menuitem", { name: "Download" }));
+    await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+      operationId: "session.filesystem.download",
+      path: "/opt/alpha.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    }));
+  });
+
+  it("shows a downloading spinner until the existing success toast replaces it", async () => {
+    const user = userEvent.setup();
+    const pendingDownload = deferred<unknown>();
+    const file = {
+      name: "report.txt",
+      path: "/opt/report.txt",
+      isDirectory: false,
+      sizeBytes: "12",
+      mode: "-rw-r--r--",
+    };
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [file],
+        page: { limit: 100, total: 1, truncated: false },
+      });
+      if (input.operationId === "session.filesystem.download") return pendingDownload.promise;
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    await screen.findByRole("row", { name: /report\.txt/i });
+    await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Download" }));
+
+    expect(await screen.findByText("Downloading")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Loading" })).toBeInTheDocument();
+
+    pendingDownload.resolve(workbench("session.filesystem.download", {
+      status: "saved",
+      suggestedBasename: "report.txt",
+      size: 12,
+      sha256: "a".repeat(64),
+    }));
+
+    expect(await screen.findByText("File saved")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Downloading")).not.toBeInTheDocument());
+  });
+
+  it("clears the downloading spinner when the download fails", async () => {
+    const user = userEvent.setup();
+    const pendingDownload = deferred<unknown>();
+    const file = {
+      name: "report.txt",
+      path: "/opt/report.txt",
+      isDirectory: false,
+      sizeBytes: "12",
+      mode: "-rw-r--r--",
+    };
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [file],
+        page: { limit: 100, total: 1, truncated: false },
+      });
+      if (input.operationId === "session.filesystem.download") return pendingDownload.promise;
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    await screen.findByRole("row", { name: /report\.txt/i });
+    await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Download" }));
+    expect(await screen.findByText("Downloading")).toBeInTheDocument();
+
+    pendingDownload.reject(new Error("transport unavailable"));
+
+    expect(await screen.findByText("Download failed")).toBeInTheDocument();
+    expect(screen.getByText("transport unavailable")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Downloading")).not.toBeInTheDocument());
+  });
+
+  it("shows an Add to Loot spinner until the existing success toast replaces it", async () => {
+    const user = userEvent.setup();
+    const pendingAdd = deferred<unknown>();
+    const file = {
+      name: "report.txt",
+      path: "/opt/report.txt",
+      isDirectory: false,
+      sizeBytes: "12",
+      mode: "-rw-r--r--",
+    };
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [file],
+        page: { limit: 100, total: 1, truncated: false },
+      });
+      if (input.operationId === "session.filesystem.add-to-loot") return pendingAdd.promise;
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    await screen.findByRole("row", { name: /report\.txt/i });
+    await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add to Loot" }));
+
+    expect(await screen.findByText("Adding to Loot")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Loading" })).toBeInTheDocument();
+
+    pendingAdd.resolve(workbench("session.filesystem.add-to-loot", {
+      status: "added",
+      fileName: "report.txt",
+      fileType: "text",
+      size: 12,
+      sha256: "a".repeat(64),
+    }));
+
+    expect(await screen.findByText("File added to loot")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Adding to Loot")).not.toBeInTheDocument());
+  });
+
+  it("clears the Add to Loot spinner when the operation fails", async () => {
+    const user = userEvent.setup();
+    const pendingAdd = deferred<unknown>();
+    const file = {
+      name: "report.txt",
+      path: "/opt/report.txt",
+      isDirectory: false,
+      sizeBytes: "12",
+      mode: "-rw-r--r--",
+    };
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: [file],
+        page: { limit: 100, total: 1, truncated: false },
+      });
+      if (input.operationId === "session.filesystem.add-to-loot") return pendingAdd.promise;
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+
+    render(
+      <>
+        <SessionFilesPanel {...panelContext()} />
+        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+      </>,
+    );
+    await screen.findByRole("row", { name: /report\.txt/i });
+    await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Add to Loot" }));
+    expect(await screen.findByText("Adding to Loot")).toBeInTheDocument();
+
+    pendingAdd.reject(new Error("loot transport unavailable"));
+
+    expect(await screen.findByText("Could not add file to loot")).toBeInTheDocument();
+    expect(screen.getByText("loot transport unavailable")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Adding to Loot")).not.toBeInTheDocument());
+  });
+
+  it("scopes ordered context actions to files and clears them for folders and headers", async () => {
+    const user = userEvent.setup();
+    const files = [{
+      name: "evidence.bin",
+      path: "/opt/evidence.bin",
+      isDirectory: false,
+      sizeBytes: "16",
+      mode: "-rw-------",
+    }, {
+      name: "archive",
+      path: "/opt/archive",
+      isDirectory: true,
+      sizeBytes: "0",
+      mode: "drwx------",
+    }];
+    const api = installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: input.path,
+        exists: true,
+        items: files,
+        page: { limit: 100, total: files.length, truncated: false },
+      });
+      if (input.operationId === "session.filesystem.download") return workbench(input.operationId, { status: "canceled" });
+      if (input.operationId === "session.filesystem.add-to-loot") return workbench(input.operationId, {
+        status: "added",
+        fileName: "evidence.bin",
+        fileType: "binary",
+        size: 16,
+        sha256: "d".repeat(64),
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const rendered = render(<SessionFilesPanel {...panelContext()} />);
+    const grid = await screen.findByRole("grid", { name: "Files in /opt" });
+
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "evidence.bin" }));
+    rendered.contextMenu.emit([{
+      type: "action",
+      actionId: "30000000-0000-4000-8000-000000000001",
+      kind: "select-all",
+      label: "Select All",
+      enabled: true,
+    }, {
+      type: "action",
+      actionId: "30000000-0000-4000-8000-000000000002",
+      kind: "inspect",
+      label: "Inspect Element",
+      enabled: true,
+    }]);
+    let menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Download",
+      "Add to Loot",
+      "Select All",
+      "Inspect Element",
+    ]);
+    await user.click(within(menu).getByRole("menuitem", { name: "Download" }));
+    await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+      operationId: "session.filesystem.download",
+      path: "/opt/evidence.bin",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions for evidence.bin" })).toBeEnabled());
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "evidence.bin" }));
+    rendered.contextMenu.emit();
+    menu = await screen.findByRole("menu", { name: "Application context menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: "Add to Loot" }));
+    await waitFor(() => expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+      operationId: "session.filesystem.add-to-loot",
+      path: "/opt/evidence.bin",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    }));
+
+    for (const target of [
+      within(grid).getByRole("rowheader", { name: "archive" }),
+      within(grid).getByRole("columnheader", { name: "Name" }),
+    ]) {
+      fireEvent.contextMenu(target);
+      rendered.contextMenu.emit();
+      menu = await screen.findByRole("menu", { name: "Application context menu" });
+      expect(within(menu).queryByRole("menuitem", { name: "Download" })).not.toBeInTheDocument();
+      expect(within(menu).queryByRole("menuitem", { name: "Add to Loot" })).not.toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("menu", { name: "Application context menu" })).not.toBeInTheDocument());
+    }
+
+    await user.click(screen.getByRole("button", { name: "More actions for archive" }));
+    const openFolder = await screen.findByRole("menuitem", { name: "Open folder" });
+    menu = openFolder.closest<HTMLElement>('[role="menu"]')!;
+    expect(within(menu).queryByRole("menuitem", { name: "Download" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Add to Loot" })).not.toBeInTheDocument();
   });
 
   it("retries an initial working-directory failure and renders an explicit empty directory state", async () => {
@@ -967,7 +1303,7 @@ describe("session workbench panels", () => {
 
     const { rerender } = render(<SessionFilesPanel {...panelContext()} />);
     await screen.findByText("This directory is empty.");
-    await user.click(screen.getByRole("radio", { name: "Storage" }));
+    await user.click(screen.getByRole("radio", { name: "Mounts" }));
     expect(await screen.findByText("System")).toBeInTheDocument();
     expect(await screen.findByRole("row", { name: /payload\.bin/i })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Load more mounts" }));

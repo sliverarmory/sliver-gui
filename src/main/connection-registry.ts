@@ -1722,7 +1722,10 @@ export class ConnectionRegistry {
           this.sessionArtifactGateway(sender, scope, assertSelectedTarget),
           {
             now: this.now,
-            onMutationDispatch: () => { mutationDispatchPending = true; },
+            onMutationDispatch: () => {
+              assertSelectedTarget();
+              mutationDispatchPending = true;
+            },
             onDispatch: () => {
               if (!journalSubmitted) {
                 const submitted = operationEngine.markExternalSubmitted(journal.requestId);
@@ -1744,6 +1747,7 @@ export class ConnectionRegistry {
         const result = await workbench.run(
           {
             sessionId: selected.target.target.id,
+            hostId: selected.target.target.hostId,
             platform: selected.platform,
             username: selected.target.target.username,
             ...(selected.target.target.uid === undefined ? {} : { uid: selected.target.target.uid }),

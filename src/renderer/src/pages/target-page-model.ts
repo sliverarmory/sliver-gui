@@ -64,6 +64,7 @@ const SESSION_OPERATION_LABELS = {
   "session.screenshot.capture": "Capture screenshot",
   "session.artifact.save": "Save captured artifact",
   "session.filesystem.download": "Download file",
+  "session.filesystem.add-to-loot": "Add file to loot",
   "session.filesystem.upload-open": "Upload file",
   "session.filesystem.stage-text": "Stage text changes",
   "session.filesystem.stage-hex": "Stage hex changes",

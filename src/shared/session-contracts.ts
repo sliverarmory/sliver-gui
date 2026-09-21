@@ -4,6 +4,8 @@ export const SESSION_WORKBENCH_MAX_CURSOR_LENGTH = 256 as const;
 export const SESSION_WORKBENCH_MAX_PATH_LENGTH = 4_096 as const;
 export const SESSION_WORKBENCH_MAX_TEXT_LENGTH = 65_536 as const;
 export const SESSION_WORKBENCH_MAX_ARTIFACT_BYTES = 67_108_864 as const;
+/** Leaves one byte inside sliver-script's artifact cap to detect truncation. */
+export const SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES = 67_108_863 as const;
 export const SESSION_EDITOR_MAX_BYTES = 65_536 as const;
 
 export const SESSION_WORKBENCH_QUERY_IDS = [
@@ -43,6 +45,7 @@ export const SESSION_WORKBENCH_ARTIFACT_IDS = [
   "session.screenshot.capture",
   "session.artifact.save",
   "session.filesystem.download",
+  "session.filesystem.add-to-loot",
   "session.filesystem.upload-open",
   "session.filesystem.stage-text",
   "session.filesystem.stage-hex",
@@ -306,6 +309,14 @@ export type SessionNativeSaveResult =
       status: "canceled";
     };
 
+export interface SessionLootAddResult {
+  status: "added";
+  fileName: string;
+  fileType: "text" | "binary";
+  size: number;
+  sha256: string;
+}
+
 export type SessionNativeOpenUploadResult =
   | {
       status: "uploaded";
@@ -415,6 +426,11 @@ export interface SessionWorkbenchInputMap {
   "session.artifact.save": { operationId: "session.artifact.save"; handle: string };
   "session.filesystem.download": {
     operationId: "session.filesystem.download";
+    path: string;
+    maxBytes: number;
+  };
+  "session.filesystem.add-to-loot": {
+    operationId: "session.filesystem.add-to-loot";
     path: string;
     maxBytes: number;
   };
@@ -585,6 +601,7 @@ export interface SessionWorkbenchResultMap {
   "session.screenshot.capture": SessionCapturedArtifactResult;
   "session.artifact.save": SessionNativeSaveResult;
   "session.filesystem.download": SessionNativeSaveResult;
+  "session.filesystem.add-to-loot": SessionLootAddResult;
   "session.filesystem.upload-open": SessionNativeOpenUploadResult;
   "session.filesystem.stage-text": SessionStagedEditorArtifactResult;
   "session.filesystem.stage-hex": SessionStagedEditorArtifactResult;
@@ -617,6 +634,7 @@ export type SessionWorkbenchResult = {
 
 export type SessionWorkbenchOutcomeUnknownOperationId =
   | SessionWorkbenchMutationId
+  | "session.filesystem.add-to-loot"
   | "session.filesystem.upload-open";
 
 export type SessionWorkbenchInvocationResult =
@@ -673,6 +691,7 @@ export const SESSION_WORKBENCH_PLATFORM_REQUIREMENTS: Readonly<
   "session.screenshot.capture": LINUX_AND_WINDOWS,
   "session.artifact.save": ALL_PLATFORMS,
   "session.filesystem.download": ALL_PLATFORMS,
+  "session.filesystem.add-to-loot": ALL_PLATFORMS,
   "session.filesystem.upload-open": ALL_PLATFORMS,
   "session.filesystem.stage-text": ALL_PLATFORMS,
   "session.filesystem.stage-hex": ALL_PLATFORMS,
@@ -845,10 +864,11 @@ function parseDirectInput(
     case "session.artifact.save":
       return { operationId, handle: requiredArtifactHandle(record, "handle") };
     case "session.filesystem.download":
+    case "session.filesystem.add-to-loot":
       return {
         operationId,
         path: requiredPath(record, "path"),
-        maxBytes: requiredInteger(record, "maxBytes", 1, SESSION_WORKBENCH_MAX_ARTIFACT_BYTES),
+        maxBytes: requiredInteger(record, "maxBytes", 1, SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES),
       };
     case "session.filesystem.upload-open":
       return {

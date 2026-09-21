@@ -3906,6 +3906,132 @@ describe("connection registry with an injected Sliver client", () => {
     await expect(readFile(downloadDestination)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("adds a bounded remote file to loot with host provenance and preserves uncertain mutation outcomes", async () => {
+    const client = new FakeSliverClient();
+    const activeSession = session("session_m2", "m2-interactive");
+    client.sessionState.Sessions = [activeSession];
+    const downloaded = Buffer.from("loot text\n");
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Path: "C:\\Windows\\Temp\\CON.txt",
+      Data: downloaded,
+    }));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const added = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/source.txt",
+      maxBytes: 1_024,
+    });
+
+    expect(added).toEqual({
+      ok: true,
+      value: {
+        status: "completed",
+        result: {
+          operationId: "session.filesystem.add-to-loot",
+          value: {
+            status: "added",
+            fileName: "_CON.txt",
+            fileType: "text",
+            size: 10,
+            sha256: createHash("sha256").update("loot text\n").digest("hex"),
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(added)).not.toMatch(/source\.txt|Windows|Buffer/u);
+    expect(client.lootState).toHaveLength(1);
+    expect(client.lootState[0]).toMatchObject({
+      Name: "_CON.txt",
+      OriginHostUUID: activeSession.UUID,
+      FileType: clientpb.FileType.TEXT,
+      File: { Name: "_CON.txt" },
+    });
+    expect(client.lootState[0]?.File?.Data.toString()).toBe("loot text\n");
+    expect(downloaded.every((byte) => byte === 0)).toBe(true);
+    expect(client.lootAdd.mock.calls[0]?.[0].File?.Data.every((byte) => byte === 0)).toBe(true);
+
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Path: "/tmp/uncertain.bin",
+      Data: Buffer.from([0, 1, 2]),
+    }));
+    client.lootAdd.mockRejectedValueOnce(new Error("14 UNAVAILABLE: TOP-SECRET loot response loss"));
+    const uncertain = await registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/uncertain.bin",
+      maxBytes: 1_024,
+    });
+
+    expect(uncertain).toEqual({
+      ok: true,
+      value: {
+        status: "outcome-unknown",
+        operationId: "session.filesystem.add-to-loot",
+        message: "The session mutation was dispatched, but its final outcome could not be confirmed. Refresh the session state before taking another action.",
+      },
+    });
+    expect(client.lootAdd).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(uncertain)).not.toContain("TOP-SECRET");
+    const history = await registry.listTargetOperations(1, { limit: 100 });
+    expect(history).toMatchObject({
+      ok: true,
+      value: {
+        items: [
+          { operationId: "session.filesystem.add-to-loot", state: "outcome-unknown", attempts: 1 },
+          { operationId: "session.filesystem.add-to-loot", state: "completed", attempts: 1 },
+        ],
+      },
+    });
+  });
+
+  it("does not report loot mutation uncertainty when the target disappears during download preflight", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const downloadGate = deferred<sliverpb.Download>();
+    const downloaded = Buffer.from("preflight-only");
+    client.downloadFileSession.mockImplementationOnce(async () => downloadGate.promise);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+
+    const pending = registry.runSessionWorkbench(sender(1), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/preflight-only.txt",
+      maxBytes: 1_024,
+    });
+    await vi.waitFor(() => expect(client.downloadFileSession).toHaveBeenCalledOnce());
+    client.sessionState.Sessions = [];
+    await registry.refresh(1);
+    downloadGate.resolve(sliverpb.Download.create({
+      Exists: true,
+      IsDir: false,
+      Path: "/tmp/preflight-only.txt",
+      Data: downloaded,
+    }));
+
+    await expect(pending).resolves.toEqual({ ok: false, error: "The session workbench request failed" });
+    expect(client.lootAdd).not.toHaveBeenCalled();
+    expect(downloaded.every((byte) => byte === 0)).toBe(true);
+    await expect(registry.listTargetOperations(1, { limit: 100 })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        items: [{
+          operationId: "session.filesystem.add-to-loot",
+          state: "target-disappeared",
+          attempts: 0,
+        }],
+      },
+    });
+  });
+
   it("journals native cancellation without dispatch or sensitive workbench input", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_m2", "m2-interactive")];

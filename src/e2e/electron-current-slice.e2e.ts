@@ -3019,7 +3019,7 @@ async function verifyM2SessionWorkspace(
   await page.getByRole("button", { name: "Load more matches", exact: true }).click();
   await searchGrid.getByText("/Users/e2e/workspace/match-105.txt", { exact: true }).waitFor();
 
-  await filesystemMode.getByRole("radio", { name: "Storage", exact: true }).click();
+  await filesystemMode.getByRole("radio", { name: "Mounts", exact: true }).click();
   const mountsGrid = page.getByRole("grid", { name: "Session mounts" });
   await mountsGrid.waitFor();
   await mountsGrid.getByText("Macintosh HD", { exact: true }).waitFor();

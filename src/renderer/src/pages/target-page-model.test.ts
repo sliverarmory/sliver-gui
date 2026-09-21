@@ -75,6 +75,7 @@ describe("target page model", () => {
     expect(operationLabel("target.ping")).toBe("Ping");
     expect(operationLabel("session.filesystem.ls")).toBe("List directory");
     expect(operationLabel("session.filesystem.read-hex")).toBe("Read file as hex");
+    expect(operationLabel("session.filesystem.add-to-loot")).toBe("Add file to loot");
     expect(operationLabel("session.filesystem.chmod-recursive")).toBe("Change file modes recursively");
     expect(operationLabel("session.registry.write")).toBe("Write registry value");
   });

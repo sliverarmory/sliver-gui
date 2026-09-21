@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -73,7 +73,7 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await browser.getByRole("button", { name: "Up one folder", exact: true }).waitFor();
     await browser.getByRole("button", { name: "Go", exact: true }).waitFor();
     const modes = browser.getByRole("radiogroup", { name: "Filesystem mode" });
-    for (const name of ["Browser", "Search", "Storage"]) {
+    for (const name of ["Browser", "Search", "Mounts"]) {
       await modes.getByRole("radio", { name, exact: true }).waitFor();
     }
 
@@ -82,6 +82,49 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await entriesGrid.getByText("E2EFolder001", { exact: true }).waitFor();
     await entriesGrid.getByText("E2EFile100.txt", { exact: true }).waitFor();
     assert.equal(await entriesGrid.getByText("E2EFile101.txt", { exact: true }).count(), 0);
+
+    const firstFileRow = entriesGrid.getByRole("row").filter({ hasText: "E2EFile081.txt" });
+    await firstFileRow.getByRole("button", { name: "More actions for E2EFile081.txt", exact: true }).click();
+    const rowActions = page.getByRole("menu").filter({
+      has: page.getByRole("menuitem", { name: "Download", exact: true }),
+    });
+    await rowActions.waitFor();
+    assert.deepEqual((await rowActions.getByRole("menuitem").allTextContents()).slice(0, 3), [
+      "Download",
+      "Add to Loot",
+      "Inspect file",
+    ]);
+    await page.keyboard.press("Escape");
+    await rowActions.waitFor({ state: "hidden" });
+
+    const downloadedPath = join(temporaryRoot, "E2EFile081.txt");
+    await application.evaluate(({ dialog }, outputPath) => {
+      dialog.showSaveDialog = async () => {
+        globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+        return { canceled: false, filePath: outputPath };
+      };
+    }, downloadedPath);
+    const fileName = firstFileRow.getByRole("rowheader", { name: "E2EFile081.txt", exact: true });
+    await fileName.click({ button: "right" });
+    let contextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
+    await contextMenu.waitFor();
+    assert.deepEqual((await contextMenu.getByRole("menuitem").allTextContents()).slice(0, 2), [
+      "Download",
+      "Add to Loot",
+    ]);
+    await contextMenu.getByRole("menuitem", { name: "Download", exact: true }).click();
+    await page.getByText("File saved", { exact: true }).waitFor();
+    await waitForFakeMethodCount(application, "downloadFileSession", 1);
+    assert.deepEqual(await readFile(downloadedPath), Buffer.alloc(2_048, 0x41));
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), 1);
+
+    await fileName.click({ button: "right" });
+    contextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
+    await contextMenu.waitFor();
+    await contextMenu.getByRole("menuitem", { name: "Add to Loot", exact: true }).click();
+    await page.getByText("File added to loot", { exact: true }).waitFor();
+    await waitForFakeMethodCount(application, "downloadFileSession", 2);
+    await waitForFakeMethodCount(application, "lootAdd", 1);
 
     const sessionPage = page.locator('.app-content:has(> .session-workspace[data-presentation="embedded"])');
     const foldersScroll = browser.locator('[data-files-scroll-region="folders"]');
@@ -118,7 +161,7 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await modes.getByRole("radio", { name: "Search", exact: true }).click();
     await browser.getByRole("heading", { name: "Search file contents", exact: true }).waitFor();
     assert.equal(await browser.getByRole("textbox", { name: "Search path", exact: true }).inputValue(), "/Users/e2e/workspace");
-    await modes.getByRole("radio", { name: "Storage", exact: true }).click();
+    await modes.getByRole("radio", { name: "Mounts", exact: true }).click();
     await browser.getByRole("grid", { name: "Session mounts", exact: true }).getByText("Macintosh HD", { exact: true }).waitFor();
     await modes.getByRole("radio", { name: "Browser", exact: true }).click();
     await entriesGrid.waitFor();
@@ -232,4 +275,21 @@ function fakeOperatorConfig(): string {
     private_key: "FAKE_FILES_KEY_DO_NOT_RENDER",
     token: "FAKE_TOKEN_M0_DO_NOT_RENDER",
   });
+}
+
+async function waitForFakeMethodCount(
+  application: ElectronApplication,
+  method: string,
+  minimum: number,
+  timeoutMilliseconds = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let latest = 0;
+  while (Date.now() < deadline) {
+    const methods = await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]);
+    latest = methods.filter((candidate) => candidate === method).length;
+    if (latest >= minimum) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${method} call ${minimum}; observed ${latest}`);
 }

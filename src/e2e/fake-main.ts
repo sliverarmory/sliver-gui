@@ -37,6 +37,7 @@ import {
 import { loadTerminalRuntime } from "../main/terminal-runtime.js";
 import { resolveManagedServerFromDeployments } from "../main/managed-server-resolver.js";
 import type { ManagedSshTarget } from "../shared/ssh-contracts.js";
+import { SESSION_WORKBENCH_MAX_ARTIFACT_BYTES } from "../shared/session-contracts.js";
 import {
   E2E_AWS_CREDENTIAL_ID,
   E2E_AWS_DEPLOYMENT,
@@ -712,6 +713,12 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     ["/Users/e2e/workspace/notes.txt", Buffer.from(`${M2_FILE_CONTENT}\nsecond deterministic line\n`, "utf8")],
     ["/Users/e2e/workspace/projects/readme.md", Buffer.from("deterministic project readme\n", "utf8")],
   ]);
+  if (filesLayoutFixture) {
+    for (let index = 81; index <= 105; index += 1) {
+      const number = String(index).padStart(3, "0");
+      remoteFiles.set(`/Users/e2e/workspace/E2EFile${number}.txt`, Buffer.alloc(2_048, 0x41));
+    }
+  }
   let memoryFiles = [
     fakeFile("73", false, "4096", "-rw-------", "m2-memory-cache.bin"),
   ];
@@ -1410,6 +1417,10 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       path: string,
       options: { maxBytes?: number; fromEnd?: boolean } = {},
     ) {
+      const maximumBytes = options.maxBytes ?? SESSION_WORKBENCH_MAX_ARTIFACT_BYTES;
+      if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > SESSION_WORKBENCH_MAX_ARTIFACT_BYTES) {
+        throw new Error(`Artifact byte limit exceeds ${SESSION_WORKBENCH_MAX_ARTIFACT_BYTES} bytes`);
+      }
       record("downloadFileSession");
       requireSession(sessionId);
       const source = remoteFiles.get(path);
@@ -1422,7 +1433,6 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
           Response: response(false),
         });
       }
-      const maximumBytes = options.maxBytes ?? source.length;
       const start = options.fromEnd ? Math.max(0, source.length - maximumBytes) : 0;
       const stop = options.fromEnd ? source.length : Math.min(source.length, maximumBytes);
       return sliverpb.Download.create({

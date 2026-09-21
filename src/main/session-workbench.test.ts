@@ -2,12 +2,13 @@
 
 import { createHash } from "node:crypto";
 
-import { sliverpb } from "sliver-script";
+import { clientpb, sliverpb } from "sliver-script";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
   SESSION_WORKBENCH_MAX_TEXT_LENGTH,
   SESSION_WORKBENCH_PLATFORM_REQUIREMENTS,
   type SessionWorkbenchInput,
@@ -831,6 +832,264 @@ describe("SessionWorkbench", () => {
     expect(JSON.stringify(result)).not.toMatch(/remote|path|Buffer/u);
   });
 
+  it("downloads a remote file into loot with ordered dispatch, provenance, safe metadata, and zeroization", async () => {
+    const order: string[] = [];
+    const client = fakeClient();
+    const downloaded = Buffer.from("alpha\nbeta\n");
+    const returned = Buffer.from("server-returned-loot-bytes");
+    const expectedSha256 = digest(Buffer.from(downloaded));
+    let submitted: {
+      name: string;
+      originHostId: string;
+      fileType: clientpb.FileType;
+      fileName: string;
+      data: Buffer;
+    } | undefined;
+    vi.mocked(client.downloadFileSession).mockImplementationOnce(async () => {
+      order.push("download");
+      return sliverpb.Download.create({
+        Path: "C:\\Windows\\Temp\\..\\loot\\report?.txt",
+        Exists: true,
+        IsDir: false,
+        Data: downloaded,
+      });
+    });
+    vi.mocked(client.lootAdd).mockImplementationOnce(async (loot) => {
+      order.push("loot");
+      submitted = {
+        name: loot.Name,
+        originHostId: loot.OriginHostUUID,
+        fileType: loot.FileType,
+        fileName: loot.File?.Name ?? "",
+        data: Buffer.from(loot.File?.Data ?? Buffer.alloc(0)),
+      };
+      return clientpb.Loot.create({
+        ID: "591a16d2-e138-4a21-b38f-f166aa23e044",
+        Name: loot.Name,
+        OriginHostUUID: loot.OriginHostUUID,
+        FileType: loot.FileType,
+        Size: String(loot.File?.Data.length ?? 0),
+        File: { Name: loot.File?.Name ?? "", Data: returned },
+      });
+    });
+    const workbench = new SessionWorkbench(client, fakeArtifacts(), {
+      onMutationDispatch: (operationId) => order.push(`mutation:${operationId}`),
+      onDispatch: (operationId) => order.push(`dispatch:${operationId}`),
+    });
+
+    const result = await workbench.run(target({ hostId: "host-uuid-1" }), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "C:\\Windows\\Temp\\*.txt",
+      maxBytes: 1_024,
+    });
+
+    expect(order).toEqual([
+      "download",
+      "mutation:session.filesystem.add-to-loot",
+      "dispatch:session.filesystem.add-to-loot",
+      "loot",
+    ]);
+    expect(client.downloadFileSession).toHaveBeenCalledWith(
+      "session-1",
+      "C:\\Windows\\Temp\\*.txt",
+      { maxBytes: 1_025 },
+    );
+    expect(submitted).toEqual({
+      name: "report_.txt",
+      originHostId: "host-uuid-1",
+      fileType: clientpb.FileType.TEXT,
+      fileName: "report_.txt",
+      data: Buffer.from("alpha\nbeta\n"),
+    });
+    expect(result).toEqual({
+      operationId: "session.filesystem.add-to-loot",
+      value: {
+        status: "added",
+        fileName: "report_.txt",
+        fileType: "text",
+        size: 11,
+        sha256: expectedSha256,
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/Windows|Temp|host-uuid|OriginHost|Data|Buffer|path/iu);
+    expect(downloaded.every((byte) => byte === 0)).toBe(true);
+    expect(returned.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("zeroizes binary loot bytes when the server mutation fails", async () => {
+    const client = fakeClient();
+    const downloaded = Buffer.from([0x00, 0xff, 0x01, 0x02]);
+    let submittedData: Buffer | undefined;
+    vi.mocked(client.downloadFileSession).mockResolvedValueOnce(sliverpb.Download.create({
+      Path: "../../CON",
+      Exists: true,
+      IsDir: false,
+      Data: downloaded,
+    }));
+    vi.mocked(client.lootAdd).mockImplementationOnce(async (loot) => {
+      submittedData = loot.File?.Data;
+      expect(loot.Name).toBe("_CON");
+      expect(loot.FileType).toBe(clientpb.FileType.BINARY);
+      throw new Error("loot transport failed");
+    });
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    await expect(workbench.run(target(), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "../../CON",
+      maxBytes: 1_024,
+    })).rejects.toThrow("loot transport failed");
+
+    expect(submittedData).toBe(downloaded);
+    expect(downloaded.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("keeps complete-file sentinel probes inside the sliver-script artifact cap", async () => {
+    const nativeClient = fakeClient();
+    vi.mocked(nativeClient.downloadFileSession).mockResolvedValueOnce(sliverpb.Download.create({
+      Path: "/tmp/native.bin",
+      Exists: true,
+      IsDir: false,
+      Data: Buffer.from("native"),
+    }));
+    await new SessionWorkbench(nativeClient, fakeArtifacts()).run(target(), {
+      operationId: "session.filesystem.download",
+      path: "/tmp/native.bin",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    });
+    expect(nativeClient.downloadFileSession).toHaveBeenCalledWith(
+      "session-1",
+      "/tmp/native.bin",
+      { maxBytes: SESSION_WORKBENCH_MAX_ARTIFACT_BYTES },
+    );
+
+    const lootClient = fakeClient();
+    vi.mocked(lootClient.downloadFileSession).mockResolvedValueOnce(sliverpb.Download.create({
+      Path: "/tmp/loot.bin",
+      Exists: true,
+      IsDir: false,
+      Data: Buffer.from("loot"),
+    }));
+    await new SessionWorkbench(lootClient, fakeArtifacts()).run(target(), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/loot.bin",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    });
+    expect(lootClient.downloadFileSession).toHaveBeenCalledWith(
+      "session-1",
+      "/tmp/loot.bin",
+      { maxBytes: SESSION_WORKBENCH_MAX_ARTIFACT_BYTES },
+    );
+  });
+
+  it("uses a sentinel byte to accept exact-cap files and reject over-limit downloads", async () => {
+    const nativeClient = fakeClient();
+    const nativeBytes = Buffer.from("four");
+    vi.mocked(nativeClient.downloadFileSession).mockResolvedValueOnce(sliverpb.Download.create({
+      Path: "/tmp/four.bin",
+      Exists: true,
+      IsDir: false,
+      Data: nativeBytes,
+    }));
+    const nativeArtifacts = fakeArtifacts();
+    const nativeWorkbench = new SessionWorkbench(nativeClient, nativeArtifacts);
+
+    await expect(nativeWorkbench.run(target(), {
+      operationId: "session.filesystem.download",
+      path: "/tmp/four.bin",
+      maxBytes: 4,
+    })).resolves.toMatchObject({ value: { status: "saved", size: 4 } });
+    expect(nativeClient.downloadFileSession).toHaveBeenCalledWith(
+      "session-1",
+      "/tmp/four.bin",
+      { maxBytes: 5 },
+    );
+    expect(nativeBytes.every((byte) => byte === 0)).toBe(true);
+    expect(nativeArtifacts.writeNativeSave).toHaveBeenCalledOnce();
+
+    const lootClient = fakeClient();
+    const lootBytes = Buffer.from("fiver");
+    vi.mocked(lootClient.downloadFileSession).mockResolvedValueOnce(sliverpb.Download.create({
+      Path: "/tmp/four.bin",
+      Exists: true,
+      IsDir: false,
+      Data: lootBytes,
+    }));
+    const onDispatch = vi.fn();
+    const onMutationDispatch = vi.fn();
+    const lootWorkbench = new SessionWorkbench(lootClient, fakeArtifacts(), {
+      onDispatch,
+      onMutationDispatch,
+    });
+
+    await expect(lootWorkbench.run(target(), {
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/four.bin",
+      maxBytes: 4,
+    })).rejects.toThrow(/exceeds the session workbench limit/u);
+    expect(lootClient.downloadFileSession).toHaveBeenCalledWith(
+      "session-1",
+      "/tmp/four.bin",
+      { maxBytes: 5 },
+    );
+    expect(lootBytes.every((byte) => byte === 0)).toBe(true);
+    expect(lootClient.lootAdd).not.toHaveBeenCalled();
+    expect(onMutationDispatch).not.toHaveBeenCalled();
+    expect(onDispatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["../../operator-secret.txt", "operator-secret.txt"],
+    ["C:\\Windows\\Temp\\CON.txt", "_CON.txt"],
+    ["C:\\Windows\\Temp\\COM¹.txt", "_COM1.txt"],
+    ["C:\\Windows\\Temp\\LPT²", "_LPT2"],
+    ["CONIN$", "_CONIN$"],
+    ["conout$.txt", "_conout$.txt"],
+    ["ＣＯＮ", "_CON"],
+    ["dir／secret.txt", "secret.txt"],
+    ["\\\\server\\share\\report?.txt. ", "report_.txt"],
+    ["/tmp/..", "download.bin"],
+    ["/tmp/a\u202eb\n?.txt", "a_b__.txt"],
+  ])("uses a traversal-safe native save basename for %s", async (remotePath, expectedBasename) => {
+    const client = fakeClient();
+    const artifacts = fakeArtifacts();
+    vi.mocked(artifacts.prepareNativeSave).mockResolvedValueOnce(null);
+    const workbench = new SessionWorkbench(client, artifacts);
+
+    await expect(workbench.run(target(), {
+      operationId: "session.filesystem.download",
+      path: remotePath,
+      maxBytes: 1_024,
+    })).resolves.toEqual({
+      operationId: "session.filesystem.download",
+      value: { status: "canceled" },
+    });
+
+    expect(artifacts.prepareNativeSave).toHaveBeenCalledWith(expect.objectContaining({
+      suggestedBasename: expectedBasename,
+    }));
+    expect(client.downloadFileSession).not.toHaveBeenCalled();
+  });
+
+  it("bounds a multibyte native save basename by UTF-8 bytes", async () => {
+    const client = fakeClient();
+    const artifacts = fakeArtifacts();
+    vi.mocked(artifacts.prepareNativeSave).mockResolvedValueOnce(null);
+    const workbench = new SessionWorkbench(client, artifacts);
+
+    await workbench.run(target(), {
+      operationId: "session.filesystem.download",
+      path: `/tmp/${"🧰".repeat(80)}.bin`,
+      maxBytes: 1_024,
+    });
+
+    const suggestedBasename = vi.mocked(artifacts.prepareNativeSave).mock.calls[0]?.[0].suggestedBasename;
+    expect(suggestedBasename).toBeTruthy();
+    expect(Buffer.byteLength(suggestedBasename ?? "", "utf8")).toBeLessThanOrEqual(180);
+    expect(suggestedBasename).not.toMatch(/[/\\]/u);
+    expect(client.downloadFileSession).not.toHaveBeenCalled();
+  });
+
   it("zeroizes native-save bytes even when publishing fails", async () => {
     const client = fakeClient();
     const dump = Buffer.from("process-dump");
@@ -985,6 +1244,7 @@ describe("SessionWorkbench", () => {
 function target(overrides: Partial<SessionWorkbenchTarget> = {}): SessionWorkbenchTarget {
   return {
     sessionId: "session-1",
+    hostId: "host-uuid-1",
     platform: "linux",
     username: "operator",
     uid: "1000",
@@ -1020,6 +1280,12 @@ function fakeClient(): SessionWorkbenchClient {
       IsDir: false,
       Data: Buffer.from("download"),
     }),
+    lootAdd: vi.fn().mockImplementation(async (loot: clientpb.Loot) => clientpb.Loot.create({
+      ...loot,
+      ID: "591a16d2-e138-4a21-b38f-f166aa23e044",
+      Size: String(loot.File?.Data.length ?? 0),
+      File: loot.File ? { ...loot.File, Data: Buffer.from(loot.File.Data) } : undefined,
+    })),
     uploadSession: vi.fn().mockResolvedValue({ Path: "/tmp/upload", WrittenFiles: 1, UnwriteableFiles: 0 }),
     grepSession: vi.fn().mockResolvedValue({ Results: {}, SearchPathAbsolute: "/tmp" }),
     mkdirSession: vi.fn().mockResolvedValue({ Path: "/tmp/new" }),

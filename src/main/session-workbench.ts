@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
-import { sliverpb } from "sliver-script";
+import { clientpb, commonpb, sliverpb } from "sliver-script";
 
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 import {
   SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_DEFAULT_PAGE_LIMIT,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
   SESSION_WORKBENCH_MAX_PAGE_LIMIT,
   SESSION_WORKBENCH_MAX_PATH_LENGTH,
   SESSION_WORKBENCH_MAX_TEXT_LENGTH,
@@ -22,6 +23,7 @@ import {
   type SessionFileEntry,
   type SessionGrepMatch,
   type SessionHexFileView,
+  type SessionLootAddResult,
   type SessionMemoryFile,
   type SessionMount,
   type SessionMutationResult,
@@ -47,8 +49,11 @@ const MAX_SHORT_TEXT_LENGTH = 4_096;
 const MAX_REMOTE_ERROR_LENGTH = 1_024;
 const ENVIRONMENT_REVEAL_TTL_MILLISECONDS = 30_000;
 const SCREENSHOT_PREVIEW_MAX_BYTES = 8 * 1_024 * 1_024;
+const PORTABLE_BASENAME_MAX_BYTES = 180;
 const ARTIFACT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const UNSAFE_FILENAME_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff<>:"/\\|?*]/gu;
+const WINDOWS_DEVICE_STEM = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9]|conin\$|conout\$)$/iu;
 
 type SessionWorkbenchClientMethod =
   | "currentTokenOwnerSession"
@@ -60,6 +65,7 @@ type SessionWorkbenchClientMethod =
   | "cdSession"
   | "lsSession"
   | "downloadFileSession"
+  | "lootAdd"
   | "uploadSession"
   | "grepSession"
   | "mkdirSession"
@@ -84,6 +90,7 @@ export type SessionWorkbenchClient = Pick<SliverClientAdapter, SessionWorkbenchC
 
 export interface SessionWorkbenchTarget {
   readonly sessionId: string;
+  readonly hostId: string;
   readonly platform: SessionTargetPlatform;
   readonly username: string;
   readonly uid?: string;
@@ -557,6 +564,11 @@ export class SessionWorkbench {
           operationId: input.operationId,
           value: await this.downloadFile(target, input.path, input.maxBytes),
         };
+      case "session.filesystem.add-to-loot":
+        return {
+          operationId: input.operationId,
+          value: await this.addFileToLoot(target, input.path, input.maxBytes),
+        };
       case "session.filesystem.upload-open":
         return {
           operationId: input.operationId,
@@ -739,11 +751,54 @@ export class SessionWorkbench {
     });
     if (!prepared) return { status: "canceled" };
     const response = await this.remote("session.filesystem.download", () =>
-      this.client.downloadFileSession(target.sessionId, remotePath, { maxBytes: maximumBytes }));
+      this.client.downloadFileSession(target.sessionId, remotePath, {
+        maxBytes: completeArtifactRequestByteCount(maximumBytes),
+      }));
     assertImplantResponse(response, "Download");
     if (!response.Exists || response.IsDir) throw new SessionWorkbenchRemoteError("Download");
-    const data = artifactBuffer(response.Data, maximumBytes, "Download");
+    const data = completeArtifactBuffer(response.Data, maximumBytes, "Download");
     return await this.writeNativeArtifact(prepared, data, suggestedBasename, "application/octet-stream");
+  }
+
+  private async addFileToLoot(
+    target: NormalizedTarget,
+    remotePath: string,
+    maximumBytes: number,
+  ): Promise<SessionLootAddResult> {
+    // Download is a read-only preflight, not submission of the outcome-unknown
+    // LootAdd mutation. The mutation dispatch hook below revalidates the exact
+    // target and backend before the first journaled remote-state write.
+    const response = await this.client.downloadFileSession(
+      target.sessionId,
+      remotePath,
+      { maxBytes: completeArtifactRequestByteCount(maximumBytes) },
+    );
+    try {
+      assertImplantResponse(response, "Download for loot");
+      if (!response.Exists || response.IsDir) throw new SessionWorkbenchRemoteError("Download for loot");
+      const data = completeArtifactBuffer(response.Data, maximumBytes, "Download for loot");
+      const fileName = safeBasename(response.Path || remotePath, "loot.bin");
+      const fileType = isProbablyTextLoot(data) ? "text" : "binary";
+      const size = data.length;
+      const sha256 = sha256Hex(data);
+      const loot = clientpb.Loot.create({
+        Name: fileName,
+        OriginHostUUID: target.hostId,
+        FileType: fileType === "text" ? clientpb.FileType.TEXT : clientpb.FileType.BINARY,
+        File: commonpb.File.create({ Name: fileName, Data: data }),
+      });
+      let added: clientpb.Loot | undefined;
+      try {
+        this.mutationDispatch("session.filesystem.add-to-loot");
+        added = await this.remote("session.filesystem.add-to-loot", () =>
+          this.client.lootAdd(loot));
+        return { status: "added", fileName, fileType, size, sha256 };
+      } finally {
+        added?.File?.Data.fill(0);
+      }
+    } finally {
+      if (Buffer.isBuffer(response.Data)) response.Data.fill(0);
+    }
   }
 
   private async uploadOpenedFile(
@@ -884,6 +939,7 @@ function normalizeTarget(target: SessionWorkbenchTarget): NormalizedTarget {
   const pid = optionalPositiveInteger(target.pid);
   return Object.freeze({
     sessionId: target.sessionId,
+    hostId: boundedText(target.hostId, 128),
     platform: target.platform,
     username: boundedText(target.username, MAX_SHORT_TEXT_LENGTH),
     ...optionalTargetText("uid", target.uid, 128),
@@ -1138,6 +1194,29 @@ function artifactBuffer(value: Buffer, maximumBytes: number, label: string): Buf
   return value;
 }
 
+function completeArtifactBuffer(value: Buffer, maximumBytes: number, label: string): Buffer {
+  const data = artifactBuffer(value, completeArtifactRequestByteCount(maximumBytes), label);
+  // Sliver has no EOF/truncation marker for single-file downloads. Requesting
+  // one sentinel byte lets an exact-cap file succeed while any returned byte
+  // beyond the public limit proves that the source is too large.
+  if (data.length > maximumBytes) {
+    data.fill(0);
+    throw new Error(`${label} exceeds the session workbench limit`);
+  }
+  return data;
+}
+
+function completeArtifactRequestByteCount(maximumBytes: number): number {
+  if (
+    !Number.isSafeInteger(maximumBytes) ||
+    maximumBytes < 1 ||
+    maximumBytes > SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES
+  ) {
+    throw new Error("Complete-file byte limit is invalid");
+  }
+  return maximumBytes + 1;
+}
+
 function editorRequestByteCount(maximumBytes: number): number {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > SESSION_EDITOR_MAX_BYTES) {
     throw new Error("Editor byte limit is invalid");
@@ -1283,20 +1362,43 @@ function safeBasename(value: unknown, fallback: string): string {
   if (typeof value !== "string") return fallback;
   const tail = value
     .slice(0, SESSION_WORKBENCH_MAX_PATH_LENGTH)
-    .normalize("NFC")
+    .normalize("NFKC")
     .replaceAll("\\", "/")
     .split("/")
     .at(-1) ?? "";
-  const sanitized = [...tail]
+  let sanitized = [...tail]
     .slice(0, 200)
     .join("")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069<>:"/\\|?*]/gu, "_")
+    .replace(UNSAFE_FILENAME_CHARACTERS, "_")
     .replace(/[. ]+$/gu, "")
     .trim();
+  while (Buffer.byteLength(sanitized, "utf8") > PORTABLE_BASENAME_MAX_BYTES) {
+    sanitized = [...sanitized].slice(0, -1).join("");
+  }
   if (!sanitized || sanitized === "." || sanitized === "..") return fallback;
-  return /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(sanitized)
-    ? `_${sanitized}`
-    : sanitized;
+  const deviceStem = (sanitized.split(".", 1)[0] ?? "").replace(/[ ]+$/gu, "");
+  if (WINDOWS_DEVICE_STEM.test(deviceStem)) sanitized = `_${sanitized}`;
+  while (Buffer.byteLength(sanitized, "utf8") > PORTABLE_BASENAME_MAX_BYTES) {
+    sanitized = [...sanitized].slice(0, -1).join("");
+  }
+  return sanitized || fallback;
+}
+
+function isProbablyTextLoot(data: Uint8Array): boolean {
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(data);
+    if (decoded.includes("\0")) return false;
+    let controls = 0;
+    for (const character of decoded) {
+      const code = character.codePointAt(0) ?? 0;
+      if ((code < 32 && character !== "\n" && character !== "\r" && character !== "\t") || code === 127) {
+        controls += 1;
+      }
+    }
+    return controls <= Math.max(1, Math.floor(decoded.length / 100));
+  } catch {
+    return false;
+  }
 }
 
 function boundedText(value: unknown, maximum: number = SESSION_WORKBENCH_MAX_TEXT_LENGTH): string {

@@ -61,7 +61,10 @@ describe("session operation registry", () => {
     }
     for (const id of SESSION_WORKBENCH_ARTIFACT_IDS) {
       expect(getSessionOperationDescriptor(id).outcomeUnknownAfterSubmission, id)
-        .toBe(id === "session.filesystem.upload-open");
+        .toBe(
+          id === "session.filesystem.add-to-loot" ||
+          id === "session.filesystem.upload-open"
+        );
     }
   });
 

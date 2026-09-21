@@ -7,9 +7,11 @@ import {
   SESSION_EDITOR_MAX_BYTES,
   SESSION_WORKBENCH_ARTIFACT_IDS,
   SESSION_WORKBENCH_MAX_ARTIFACT_BYTES,
+  SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
   type SessionCapturedArtifactResult,
   type SessionDestructiveActionPlan,
   type SessionDestructiveActionPreparation,
+  type SessionLootAddResult,
   type SessionNativeOpenUploadResult,
   type SessionNativeSaveResult,
   type SessionStagedEditorArtifactResult,
@@ -28,6 +30,7 @@ describe("session workbench contracts", () => {
       "session.screenshot.capture",
       "session.artifact.save",
       "session.filesystem.download",
+      "session.filesystem.add-to-loot",
       "session.filesystem.upload-open",
       "session.filesystem.stage-text",
       "session.filesystem.stage-hex",
@@ -35,9 +38,28 @@ describe("session workbench contracts", () => {
       "session.registry.read-hive",
     ]);
     expect(SESSION_WORKBENCH_MAX_ARTIFACT_BYTES).toBe(64 * 1_024 * 1_024);
+    expect(SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES).toBe(SESSION_WORKBENCH_MAX_ARTIFACT_BYTES - 1);
 
     expect(parseSessionWorkbenchInput({ operationId: "session.screenshot.capture" })).toEqual({
       operationId: "session.screenshot.capture",
+    });
+    expect(parseSessionWorkbenchInput({
+      operationId: "session.filesystem.download",
+      path: "/tmp/report.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    })).toEqual({
+      operationId: "session.filesystem.download",
+      path: "/tmp/report.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    });
+    expect(parseSessionWorkbenchInput({
+      operationId: "session.filesystem.add-to-loot",
+      path: "C:\\Windows\\Temp\\report.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
+    })).toEqual({
+      operationId: "session.filesystem.add-to-loot",
+      path: "C:\\Windows\\Temp\\report.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
     });
     expect(parseSessionWorkbenchInput({
       operationId: "session.filesystem.upload-open",
@@ -56,13 +78,24 @@ describe("session workbench contracts", () => {
     expect(() => parseSessionWorkbenchInput({
       operationId: "session.filesystem.download",
       path: "/tmp/report.txt",
-      maxBytes: SESSION_WORKBENCH_MAX_ARTIFACT_BYTES + 1,
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES + 1,
     })).toThrow(/maxBytes/u);
     expect(() => parseSessionWorkbenchInput({
       operationId: "session.filesystem.download",
       path: "/tmp/report.txt",
       maxBytes: 1,
       destination: "loot",
+    })).toThrow(/Unexpected session input field/u);
+    expect(() => parseSessionWorkbenchInput({
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/report.txt",
+      maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES + 1,
+    })).toThrow(/maxBytes/u);
+    expect(() => parseSessionWorkbenchInput({
+      operationId: "session.filesystem.add-to-loot",
+      path: "/tmp/report.txt",
+      maxBytes: 1,
+      destination: "/Users/operator/report.txt",
     })).toThrow(/Unexpected session input field/u);
     expect(() => parseSessionWorkbenchInput({
       operationId: "session.filesystem.upload-open",
@@ -355,6 +388,9 @@ describe("session workbench contracts", () => {
     expectTypeOf<Extract<SessionWorkbenchResult, { operationId: "session.filesystem.download" }>[
       "value"
     ]>().toEqualTypeOf<SessionNativeSaveResult>();
+    expectTypeOf<Extract<SessionWorkbenchResult, { operationId: "session.filesystem.add-to-loot" }>[
+      "value"
+    ]>().toEqualTypeOf<SessionLootAddResult>();
     expectTypeOf<Extract<SessionWorkbenchResult, { operationId: "session.filesystem.upload-open" }>[
       "value"
     ]>().toEqualTypeOf<SessionNativeOpenUploadResult>();
