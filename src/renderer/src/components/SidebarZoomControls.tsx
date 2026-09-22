@@ -15,7 +15,7 @@ export function SidebarZoomControls({ api = window.applicationZoom }: { api?: Ap
     return unsubscribe;
   }, [api]);
 
-  if (!api) return null;
+  if (!api || Math.abs(zoomFactor - 1) < 0.0001) return null;
 
   return (
     <div
@@ -32,7 +32,6 @@ export function SidebarZoomControls({ api = window.applicationZoom }: { api?: Ap
       <Button
         aria-label="Reset zoom"
         className="h-6 min-w-0 shrink-0 px-2 text-[11px] font-normal text-muted"
-        isDisabled={Math.abs(zoomFactor - 1) < 0.0001}
         onPress={() => {
           api.reset();
           setZoomFactor(api.getFactor());

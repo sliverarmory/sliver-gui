@@ -50,24 +50,33 @@ describe("SidebarZoomControls", () => {
     expect(bridge.unsubscribe).toHaveBeenCalledOnce();
   });
 
-  it.each([true, false])("keeps the percentage and reset available with sidebar open=%s", async (open) => {
+  it.each([true, false])("shows the percentage and reset only away from 100% with sidebar open=%s", async (open) => {
     const user = userEvent.setup();
-    const bridge = zoomBridge(0.9);
+    const bridge = zoomBridge(1);
     render(<Sidebar.Provider collapsible="icon" open={open}><SidebarZoomControls api={bridge.api} /></Sidebar.Provider>);
+    expect(screen.queryByRole("group", { name: "Window zoom" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset zoom" })).not.toBeInTheDocument();
+    expect(screen.queryByText("100%")).not.toBeInTheDocument();
+
+    bridge.emit(0.9);
     const controls = screen.getByRole("group", { name: "Window zoom" });
     expect(within(controls).getByText("90%")).toBeVisible();
     const reset = within(controls).getByRole("button", { name: "Reset zoom" });
     expect(reset).toBeEnabled();
     await user.click(reset);
     expect(bridge.api.reset).toHaveBeenCalledExactlyOnceWith();
-    expect(within(controls).getByText("100%")).toBeVisible();
-    expect(reset).toBeDisabled();
-    await user.click(reset);
-    expect(bridge.api.reset).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("group", { name: "Window zoom" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset zoom" })).not.toBeInTheDocument();
+    expect(screen.queryByText("100%")).not.toBeInTheDocument();
 
     bridge.emit(1.25);
-    expect(within(controls).getByText("125%")).toBeVisible();
-    expect(reset).toBeEnabled();
+    expect(screen.getByText("125%")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Reset zoom" })).toBeEnabled();
+
+    bridge.emit(1);
+    expect(screen.queryByRole("group", { name: "Window zoom" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset zoom" })).not.toBeInTheDocument();
+    expect(bridge.api.reset).toHaveBeenCalledOnce();
   });
 
   it("omits zoom controls when no application zoom bridge is available", () => {
