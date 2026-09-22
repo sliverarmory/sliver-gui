@@ -159,6 +159,22 @@ function workbench<I extends SessionWorkbenchResult["operationId"]>(
   };
 }
 
+function networkInventory(input: Pick<SessionWorkbenchInput, "operationId">, localPort = 4444) {
+  if (input.operationId === "session.network.interfaces") {
+    return workbench(input.operationId, {
+      items: [{ index: 1, name: "eth0", macAddress: "00:11:22:33:44:55", addresses: ["10.0.0.8/24"] }],
+      page: { limit: 100, total: 1, truncated: false },
+    });
+  }
+  if (input.operationId === "session.network.connections") {
+    return workbench(input.operationId, {
+      items: [{ protocol: "tcp", state: "ESTABLISHED", local: { address: "10.0.0.8", port: localPort } }],
+      page: { limit: 100, total: 1, truncated: false },
+    });
+  }
+  throw new Error(`Unexpected operation ${input.operationId}`);
+}
+
 function droppedFilesDataTransfer(files: readonly File[]): DataTransfer {
   return {
     dropEffect: "none",
@@ -320,21 +336,376 @@ describe("session workbench panels", () => {
     render(<SessionNetworkPanel {...context} />);
 
     expect(screen.getByRole("heading", { name: "Network" })).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Network views" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Interfaces", selected: true })).toBeInTheDocument();
     expect(await screen.findByText("eth0")).toBeInTheDocument();
-    expect(screen.getByText("10.0.0.8:4444")).toBeInTheDocument();
+    expect(screen.queryByText("10.0.0.8:4444")).not.toBeInTheDocument();
     expect(screen.getByText("Loaded 1 of 2 interfaces · bounded")).toBeInTheDocument();
-    expect(screen.getByText("Loaded 1 of 2 connections · bounded")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Load more interfaces" }));
-    await user.click(screen.getByRole("button", { name: "Load more connections" }));
     expect(await screen.findByText("vpn0")).toBeInTheDocument();
-    expect(await screen.findByText("0.0.0.0:53")).toBeInTheDocument();
     expect(screen.getByText("Loaded 2 of 2 interfaces")).toBeInTheDocument();
-    expect(screen.getByText("Loaded 2 of 2 connections")).toBeInTheDocument();
     expect(screen.queryByText("The server returned a truncated interfaces result.")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    expect(screen.getByRole("tab", { name: "Netstat", selected: true })).toBeInTheDocument();
+    expect(screen.queryByText("eth0")).not.toBeInTheDocument();
+    expect(screen.getByText("10.0.0.8:4444")).toBeInTheDocument();
+    expect(screen.getByText("Loaded 1 of 2 connections · bounded")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load more connections" }));
+    expect(await screen.findByText("0.0.0.0:53")).toBeInTheDocument();
+    expect(screen.getByText("Loaded 2 of 2 connections")).toBeInTheDocument();
     expect(screen.queryByText("The server returned a truncated connections result.")).not.toBeInTheDocument();
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.network.interfaces", limit: 100, cursor: "interfaces-2" });
     expect(api.runSessionWorkbench).toHaveBeenCalledWith(expect.objectContaining({ operationId: "session.network.connections", cursor: "connections-2", limit: 100 }));
+
+    await user.click(screen.getByRole("tab", { name: "Interfaces" }));
+    expect(screen.getByText("vpn0")).toBeInTheDocument();
+    expect(screen.getByText("Loaded 2 of 2 interfaces")).toBeInTheDocument();
+  });
+
+  it("keeps netstat auto-refresh off by default and uses the configured seconds only for connections", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    const api = installAPI(networkInventory);
+    const calls = (operationId: SessionWorkbenchInput["operationId"]) => api.runSessionWorkbench.mock.calls.filter(([input]) => input.operationId === operationId).length;
+    render(<SessionNetworkPanel {...panelContext()} />);
+    await screen.findByText("eth0");
+    expect(calls("session.network.interfaces")).toBe(1);
+    expect(calls("session.network.connections")).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh interfaces" }));
+    expect(calls("session.network.interfaces")).toBe(2);
+    expect(calls("session.network.connections")).toBe(1);
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    const autoRefresh = screen.getByRole("switch", { name: "Auto-refresh" });
+    const interval = screen.getByRole("textbox", { name: "Refresh interval (seconds)" });
+    expect(autoRefresh).not.toBeChecked();
+    expect(interval).toHaveValue("10");
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(calls("session.network.connections")).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh netstat" }));
+    expect(calls("session.network.connections")).toBe(2);
+    await user.clear(interval);
+    await user.type(interval, "2");
+    await user.tab();
+    await user.click(autoRefresh);
+    expect(autoRefresh).toBeChecked();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_999); });
+    expect(calls("session.network.connections")).toBe(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(calls("session.network.connections")).toBe(3);
+    expect(calls("session.network.interfaces")).toBe(2);
+
+    await user.clear(interval);
+    await user.type(interval, "3");
+    await user.tab();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(calls("session.network.connections")).toBe(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(calls("session.network.connections")).toBe(4);
+
+    await user.clear(interval);
+    await user.tab();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(calls("session.network.connections")).toBe(4);
+    await user.type(interval, "2");
+    await user.tab();
+    await user.click(autoRefresh);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(calls("session.network.connections")).toBe(4);
+  });
+
+  it("fuzzy filters loaded netstat rows across visible fields without requesting another inventory", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => input.operationId === "session.network.connections"
+      ? workbench(input.operationId, {
+        items: [{
+          protocol: "tcp4",
+          state: "ESTABLISHED",
+          local: { address: "10.0.0.8", port: 4444 },
+          remote: { address: "198.51.100.8", port: 443 },
+          process: { pid: 4321, parentPid: 1, executable: "Browser Helper", owner: "alice", architecture: "amd64", commandLine: [] },
+        }, {
+          protocol: "udp4",
+          state: "",
+          local: { address: "0.0.0.0", port: 5353 },
+        }, {
+          protocol: "tcp6",
+          state: "LISTEN",
+          local: { address: "::1", port: 8080 },
+          process: { pid: 902, parentPid: 1, executable: "", owner: "alice", architecture: "amd64", commandLine: [] },
+        }],
+        page: { limit: 100, total: 3, truncated: false },
+      })
+      : networkInventory(input));
+    render(<SessionNetworkPanel {...panelContext()} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    const filter = screen.getByRole("searchbox", { name: "Filter netstat connections" });
+    const grid = screen.getByRole("grid", { name: "Session network connections" });
+    const addresses = ["10.0.0.8:4444", "0.0.0.0:5353", "::1:8080"] as const;
+
+    for (const [query, expectedAddress] of [
+      ["bRhlpr", addresses[0]],
+      ["ｔｃｐ４", addresses[0]],
+      ["198.51   443", addresses[0]],
+      ["10.0.0.8:4444", addresses[0]],
+      ["Estbd 4321", addresses[0]],
+      ["unk nrpt", addresses[1]],
+      ["Prcs 902 lsn", addresses[2]],
+    ] as const) {
+      fireEvent.change(filter, { target: { value: query } });
+      expect(screen.getByText(`Showing 1 of 3 loaded connections matching “${query.replace(/\s+/gu, " ")}”`)).toBeInTheDocument();
+      for (const address of addresses) {
+        if (address === expectedAddress) expect(within(grid).getByText(address)).toBeInTheDocument();
+        else expect(within(grid).queryByText(address)).not.toBeInTheDocument();
+      }
+    }
+
+    fireEvent.change(filter, { target: { value: "browser listen" } });
+    expect(screen.getByText("Showing 0 of 3 loaded connections matching “browser listen”")).toBeInTheDocument();
+    expect(within(grid).getByText("No loaded connections match this search.")).toBeInTheDocument();
+    await user.clear(filter);
+    expect(screen.getByText("Loaded 3 of 3 connections")).toBeInTheDocument();
+    for (const address of addresses) expect(within(grid).getByText(address)).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(2);
+  });
+
+  it("applies the netstat filter to newly loaded pages while reporting only the loaded inventory", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => input.operationId === "session.network.connections"
+      ? workbench(input.operationId, {
+        items: [{ protocol: "tcp", state: "ESTABLISHED", local: { address: "10.0.0.8", port: input.cursor ? 5555 : 4444 } }],
+        page: { limit: 100, total: 3, truncated: true, nextCursor: input.cursor ? "connections-3" : "connections-2" },
+      })
+      : networkInventory(input));
+    render(<SessionNetworkPanel {...panelContext()} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    const filter = screen.getByRole("searchbox", { name: "Filter netstat connections" });
+    await user.type(filter, "55");
+    expect(screen.getByText("Showing 0 of 1 loaded connections matching “55”")).toBeInTheDocument();
+    expect(screen.getByText("No loaded connections match this search.")).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "Load more connections" }));
+    expect(await screen.findByText("10.0.0.8:5555")).toBeInTheDocument();
+    expect(screen.queryByText("10.0.0.8:4444")).not.toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 2 loaded connections matching “55”")).toBeInTheDocument();
+    expect(filter).toHaveValue("55");
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("button", { name: "Load more connections" })).toBeInTheDocument();
+  });
+
+  it("keeps the latest netstat query during manual and timed refresh without resetting the polling cadence", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    const refresh = deferred<ReturnType<typeof networkInventory>>();
+    const connectionInventory = (ports: number[]) => workbench("session.network.connections", {
+      items: ports.map((port) => ({ protocol: "tcp", state: "ESTABLISHED", local: { address: "10.0.0.8", port } })),
+      page: { limit: 100, total: ports.length, truncated: false },
+    });
+    let connectionRequests = 0;
+    installAPI((input) => {
+      if (input.operationId !== "session.network.connections") return networkInventory(input);
+      connectionRequests += 1;
+      if (connectionRequests === 2) return refresh.promise;
+      return connectionInventory(connectionRequests === 1 ? [4444, 5555] : [6666, 7777]);
+    });
+    const context = panelContext();
+    const rendered = render(<SessionNetworkPanel {...context} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    let filter = screen.getByRole("searchbox", { name: "Filter netstat connections" });
+    await user.type(filter, "44");
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    fireEvent.change(filter, { target: { value: "55" } });
+    expect(screen.getByText("10.0.0.8:5555")).toBeInTheDocument();
+    expect(connectionRequests).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(connectionRequests).toBe(2);
+    fireEvent.change(filter, { target: { value: "66" } });
+    expect(screen.getByText("No loaded connections match this search.")).toBeInTheDocument();
+    await act(async () => {
+      refresh.resolve(connectionInventory([5555, 6666]));
+      await refresh.promise;
+    });
+    expect(filter).toHaveValue("66");
+    expect(screen.getByText("10.0.0.8:6666")).toBeInTheDocument();
+    expect(screen.queryByText("10.0.0.8:5555")).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(connectionRequests).toBe(3);
+    expect(screen.getByText("Showing 1 of 2 loaded connections matching “66”")).toBeInTheDocument();
+    expect(screen.queryByText("10.0.0.8:7777")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Refresh netstat" }));
+    expect(connectionRequests).toBe(4);
+    expect(filter).toHaveValue("66");
+
+    await user.click(screen.getByRole("tab", { name: "Interfaces" }));
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    filter = screen.getByRole("searchbox", { name: "Filter netstat connections" });
+    expect(filter).toHaveValue("66");
+    expect(screen.getByText("Showing 1 of 2 loaded connections matching “66”")).toBeInTheDocument();
+    expect(connectionRequests).toBe(4);
+    rendered.rerender(<SessionNetworkPanel {...context} route={{ ...context.route, backendEpoch: 8 }} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    expect(screen.getByRole("searchbox", { name: "Filter netstat connections" })).toHaveValue("");
+    expect(screen.getByText("Loaded 2 of 2 connections")).toBeInTheDocument();
+    expect(screen.getByText("10.0.0.8:7777")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Auto-refresh" })).not.toBeChecked();
+  });
+
+  it("pauses netstat refresh outside its tab and during target transitions and clears it on unmount", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    const api = installAPI(networkInventory);
+    const context = panelContext();
+    const rendered = render(<SessionNetworkPanel {...context} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    api.runSessionWorkbench.mockClear();
+
+    await user.click(screen.getByRole("tab", { name: "Interfaces" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(api.runSessionWorkbench).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    expect(screen.getByRole("switch", { name: "Auto-refresh" })).toBeChecked();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(<SessionNetworkPanel {...context} isTargetTransitionPending />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(1);
+    rendered.rerender(<SessionNetworkPanel {...context} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(2);
+    rendered.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(api.runSessionWorkbench).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves visible netstat rows and avoids overlapping slow refresh requests", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    const refresh = deferred<ReturnType<typeof networkInventory>>();
+    let connectionRequests = 0;
+    installAPI((input) => {
+      if (input.operationId === "session.network.connections" && ++connectionRequests === 2) return refresh.promise;
+      return networkInventory(input, connectionRequests > 1 ? 5555 : 4444);
+    });
+    render(<SessionNetworkPanel {...panelContext()} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(connectionRequests).toBe(2);
+    expect(screen.getByText("10.0.0.8:4444")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(connectionRequests).toBe(2);
+    await act(async () => {
+      refresh.resolve(networkInventory({ operationId: "session.network.connections" }, 5555));
+      await refresh.promise;
+    });
+    expect(screen.getByText("10.0.0.8:5555")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(connectionRequests).toBe(3);
+  });
+
+  it("waits for connection pagination before netstat auto-refresh can replace the inventory", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    const nextPage = deferred<ReturnType<typeof networkInventory>>();
+    let connectionRequests = 0;
+    installAPI((input) => {
+      if (input.operationId !== "session.network.connections") return networkInventory(input);
+      connectionRequests += 1;
+      if (input.cursor) return nextPage.promise;
+      return workbench(input.operationId, {
+        items: [{ protocol: "tcp", state: "ESTABLISHED", local: { address: "10.0.0.8", port: 4444 } }],
+        page: { limit: 100, total: 2, truncated: true, nextCursor: "connections-2" },
+      });
+    });
+    render(<SessionNetworkPanel {...panelContext()} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    await user.click(screen.getByRole("button", { name: "Load more connections" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(connectionRequests).toBe(2);
+    expect(screen.getByText("10.0.0.8:4444")).toBeInTheDocument();
+    await act(async () => {
+      nextPage.resolve(workbench("session.network.connections", {
+        items: [{ protocol: "tcp", state: "LISTEN", local: { address: "10.0.0.8", port: 5555 } }],
+        page: { limit: 100, total: 2, truncated: false },
+      }));
+      await nextPage.promise;
+    });
+    expect(screen.getByText("Loaded 2 of 2 connections")).toBeInTheDocument();
+    expect(screen.getByText("10.0.0.8:5555")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(connectionRequests).toBe(3);
+    expect(screen.queryByText("10.0.0.8:5555")).not.toBeInTheDocument();
+    expect(screen.getByText("Loaded 1 of 2 connections · bounded")).toBeInTheDocument();
+  });
+
+  it("resets netstat auto-refresh for a new route and ignores an old pending refresh", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    const staleRefresh = deferred<ReturnType<typeof networkInventory>>();
+    let connectionRequests = 0;
+    installAPI((input) => {
+      if (input.operationId === "session.network.connections" && ++connectionRequests === 2) return staleRefresh.promise;
+      return networkInventory(input, connectionRequests > 1 ? 5555 : 4444);
+    });
+    const context = panelContext();
+    const rendered = render(<SessionNetworkPanel {...context} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(connectionRequests).toBe(2);
+
+    rendered.rerender(<SessionNetworkPanel {...context} route={{ ...context.route, backendEpoch: 8 }} />);
+    await screen.findByText("eth0");
+    expect(screen.getByRole("tab", { name: "Interfaces", selected: true })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    expect(screen.getByRole("switch", { name: "Auto-refresh" })).not.toBeChecked();
+    expect(screen.getByText("10.0.0.8:5555")).toBeInTheDocument();
+    await act(async () => {
+      staleRefresh.resolve(networkInventory({ operationId: "session.network.connections" }, 9999));
+      await staleRefresh.promise;
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(connectionRequests).toBe(3);
+    expect(screen.queryByText("10.0.0.8:9999")).not.toBeInTheDocument();
+    expect(screen.getByText("10.0.0.8:5555")).toBeInTheDocument();
+  });
+
+  it("stops netstat auto-refresh after a failed request and allows an explicit retry", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const user = userEvent.setup();
+    let connectionRequests = 0;
+    installAPI((input) => {
+      if (input.operationId === "session.network.connections" && ++connectionRequests === 2) throw new Error("Socket inventory unavailable");
+      return networkInventory(input);
+    });
+    render(<SessionNetworkPanel {...panelContext()} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByRole("alert")).toHaveTextContent("Socket inventory unavailable");
+    expect(screen.getByRole("switch", { name: "Auto-refresh" })).not.toBeChecked();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(connectionRequests).toBe(2);
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("10.0.0.8:4444")).toBeInTheDocument();
+    expect(connectionRequests).toBe(3);
+    expect(screen.getByRole("switch", { name: "Auto-refresh" })).not.toBeChecked();
   });
 
   it("keeps file actions native and requires a reviewed plan before deletion", async () => {

@@ -13,14 +13,17 @@ import {
   Chip,
   Description,
   Dropdown,
+  FieldError,
   Input,
   Label,
   ListBox,
   Modal,
+  NumberField,
   SearchField,
   Select,
   Spinner,
   Switch,
+  Tabs,
   TextArea,
   TextField,
   Tooltip,
@@ -318,15 +321,23 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
   );
 }
 
-export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionNetworkPanel({ route, isTargetTransitionPending }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
+  const [selectedTab, setSelectedTab] = useState("interfaces");
+  const [connectionQuery, setConnectionQuery] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(10);
   const [interfaces, setInterfaces] = useState<LoadState<SessionBoundedPage<SessionNetworkInterface>>>({ status: "loading" });
   const [connections, setConnections] = useState<LoadState<SessionBoundedPage<SessionNetworkConnection>>>({ status: "loading" });
   const [isLoadingMoreInterfaces, setIsLoadingMoreInterfaces] = useState(false);
   const [isLoadingMoreConnections, setIsLoadingMoreConnections] = useState(false);
+  const [isRefreshingConnections, setIsRefreshingConnections] = useState(false);
   const interfaceRequestSequence = useRef(0);
   const connectionRequestSequence = useRef(0);
+  const connectionRequestPending = useRef(false);
   const isCurrent = useLatestIdentity(routeKey);
+  const isRefreshIntervalValid = Number.isInteger(refreshIntervalSeconds) &&
+    refreshIntervalSeconds >= 1 && refreshIntervalSeconds <= 3_600;
 
   const loadInterfaces = useCallback(async (cursor?: string) => {
     const expected = routeKey;
@@ -349,10 +360,15 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
   }, [isCurrent, routeKey]);
 
   const loadConnections = useCallback(async (cursor?: string) => {
+    if (connectionRequestPending.current) return;
+    connectionRequestPending.current = true;
     const expected = routeKey;
     const sequence = ++connectionRequestSequence.current;
     if (cursor) setIsLoadingMoreConnections(true);
-    else setConnections({ status: "loading" });
+    else {
+      setIsRefreshingConnections(true);
+      setConnections((current) => current.status === "ready" ? current : { status: "loading" });
+    }
     try {
       const result = await runWorkbench({
         operationId: "session.network.connections",
@@ -371,15 +387,27 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
     } catch (error) {
       if (!isCurrent(expected) || sequence !== connectionRequestSequence.current) return;
       if (cursor) toast.danger("Could not load more connections", { description: errorMessage(error) });
-      else setConnections({ status: "error", error: errorMessage(error) });
+      else {
+        setConnections({ status: "error", error: errorMessage(error) });
+        setAutoRefresh(false);
+      }
     } finally {
-      if (isCurrent(expected) && sequence === connectionRequestSequence.current) setIsLoadingMoreConnections(false);
+      if (isCurrent(expected) && sequence === connectionRequestSequence.current) {
+        connectionRequestPending.current = false;
+        setIsLoadingMoreConnections(false);
+        setIsRefreshingConnections(false);
+      }
     }
   }, [isCurrent, routeKey]);
 
   useEffect(() => {
     interfaceRequestSequence.current += 1;
     connectionRequestSequence.current += 1;
+    connectionRequestPending.current = false;
+    setSelectedTab("interfaces");
+    setConnectionQuery("");
+    setAutoRefresh(false);
+    setRefreshIntervalSeconds(10);
     setInterfaces({ status: "loading" });
     setConnections({ status: "loading" });
     setIsLoadingMoreInterfaces(false);
@@ -388,11 +416,22 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
     void loadConnections();
   }, [loadConnections, loadInterfaces, routeKey]);
 
+  useEffect(() => {
+    if (!autoRefresh || selectedTab !== "netstat" || !isRefreshIntervalValid || isTargetTransitionPending) return;
+    const interval = window.setInterval(() => void loadConnections(), refreshIntervalSeconds * 1_000);
+    return () => window.clearInterval(interval);
+  }, [autoRefresh, isRefreshIntervalValid, isTargetTransitionPending, loadConnections, refreshIntervalSeconds, selectedTab]);
+
+  const connectionQueryTokens = useMemo(
+    () => normalizeFuzzyQuery(connectionQuery).split(/\s+/u).filter(Boolean),
+    [connectionQuery],
+  );
   const connectionRows = useMemo(
     () => connections.status === "ready"
       ? connections.value.items.map((connection, index) => ({ connection, id: networkConnectionKey(connection, index) }))
+        .filter(({ connection }) => fuzzyNetworkConnectionMatches(connection, connectionQueryTokens))
       : [],
-    [connections],
+    [connections, connectionQueryTokens],
   );
   const connectionColumns = useMemo<DataGridColumn<(typeof connectionRows)[number]>[]>(() => [
     {
@@ -436,11 +475,22 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
     <PanelShell
       icon={faNetworkWired}
       title="Network"
-      description="Bounded interfaces and current socket inventory."
-      action={<RefreshButton label="Refresh network" pending={interfaces.status === "loading" || connections.status === "loading"} onPress={() => { void loadInterfaces(); void loadConnections(); }} />}
+      description="Network interfaces and current connections."
+      action={<RefreshButton
+        label={selectedTab === "interfaces" ? "Refresh interfaces" : "Refresh netstat"}
+        pending={selectedTab === "interfaces" ? interfaces.status === "loading" : isRefreshingConnections}
+        disabled={isTargetTransitionPending || (selectedTab === "interfaces" ? isLoadingMoreInterfaces : isLoadingMoreConnections)}
+        onPress={() => { if (selectedTab === "interfaces") void loadInterfaces(); else void loadConnections(); }}
+      />}
     >
-      <div className="flex min-w-0 flex-col gap-6">
-        <section className="flex min-w-0 flex-col gap-3" aria-labelledby="network-interfaces-heading">
+      <Tabs className="min-w-0" selectedKey={selectedTab} onSelectionChange={(key) => setSelectedTab(String(key))}>
+        <Tabs.ListContainer className="w-fit max-w-full">
+          <Tabs.List aria-label="Network views" className="p-0.5">
+            <Tabs.Tab className="h-6 px-2.5 text-xs" id="interfaces">Interfaces<Tabs.Indicator /></Tabs.Tab>
+            <Tabs.Tab className="h-6 px-2.5 text-xs" id="netstat">Netstat<Tabs.Indicator /></Tabs.Tab>
+          </Tabs.List>
+        </Tabs.ListContainer>
+        <Tabs.Panel className="flex min-w-0 flex-col gap-3 pt-5" id="interfaces">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-foreground" id="network-interfaces-heading">Interfaces</h3>
@@ -475,11 +525,56 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
               ) : null}
             </>
           ) : null}
-        </section>
-        <section className="flex min-w-0 flex-col gap-3 border-t border-separator pt-5" aria-labelledby="network-connections-heading">
-          <div>
-            <h3 className="text-sm font-semibold text-foreground" id="network-connections-heading">Connections</h3>
-            {connections.status === "ready" ? <InventoryCount loaded={connections.value.items.length} noun="connections" page={connections.value.page} /> : null}
+        </Tabs.Panel>
+        <Tabs.Panel className="flex min-w-0 flex-col gap-3 pt-5" id="netstat">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0 max-w-full">
+              <h3 className="text-sm font-semibold text-foreground">Connections</h3>
+              {connections.status === "ready" ? connectionQueryTokens.length > 0 ? (
+                <p aria-live="polite" className="break-words text-xs tabular-nums text-muted" role="status">
+                  {`Showing ${connectionRows.length} of ${connections.value.items.length} loaded connections matching “${connectionQuery.trim()}”`}
+                </p>
+              ) : <InventoryCount loaded={connections.value.items.length} noun="connections" page={connections.value.page} /> : null}
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center gap-4">
+              <SearchField
+                aria-label="Filter netstat connections"
+                className="w-72 max-w-full"
+                value={connectionQuery}
+                variant="secondary"
+                onChange={setConnectionQuery}
+              >
+                <SearchField.Group>
+                  <SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon>
+                  <SearchField.Input maxLength={200} placeholder="Filter connections…" />
+                  <SearchField.ClearButton />
+                </SearchField.Group>
+              </SearchField>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted">Every</span>
+                <NumberField
+                  aria-label="Refresh interval (seconds)"
+                  className="w-24"
+                  isInvalid={!isRefreshIntervalValid}
+                  minValue={1}
+                  maxValue={3_600}
+                  step={1}
+                  value={refreshIntervalSeconds}
+                  variant="secondary"
+                  onChange={(value) => setRefreshIntervalSeconds(value ?? Number.NaN)}
+                >
+                  <NumberField.Group className="grid-cols-1"><NumberField.Input className="w-full tabular-nums" /></NumberField.Group>
+                  <FieldError>Enter 1–3,600 whole seconds.</FieldError>
+                </NumberField>
+                <span className="text-sm text-muted">seconds</span>
+              </div>
+              <Switch isDisabled={isTargetTransitionPending} isSelected={autoRefresh} onChange={setAutoRefresh}>
+                <Switch.Content>
+                  <Label>Auto-refresh</Label>
+                  <Switch.Control><Switch.Thumb /></Switch.Control>
+                </Switch.Content>
+              </Switch>
+            </div>
           </div>
           {connections.status === "loading" ? <PanelLoading label="Loading network connections" /> : null}
           {connections.status === "error" ? <PanelError message={connections.error} onRetry={() => void loadConnections()} /> : null}
@@ -493,15 +588,15 @@ export function SessionNetworkPanel({ route }: SessionWorkspacePanelContext): Re
                 data={connectionRows}
                 getRowId={(row) => row.id}
                 variant="secondary"
-                renderEmptyState={() => <GridEmpty label="No network connections were reported." />}
+                renderEmptyState={() => <GridEmpty label={connectionQueryTokens.length > 0 ? "No loaded connections match this search." : "No network connections were reported."} />}
               />
               {connections.value.page.nextCursor ? (
-                <div className="flex justify-center"><Button isPending={isLoadingMoreConnections} size="sm" variant="tertiary" onPress={() => void loadConnections(connections.value.page.nextCursor)}>Load more connections</Button></div>
+                <div className="flex justify-center"><Button isDisabled={isRefreshingConnections || isTargetTransitionPending} isPending={isLoadingMoreConnections} size="sm" variant="tertiary" onPress={() => void loadConnections(connections.value.page.nextCursor)}>Load more connections</Button></div>
               ) : null}
             </>
           ) : null}
-        </section>
-      </div>
+        </Tabs.Panel>
+      </Tabs>
     </PanelShell>
   );
 }
@@ -2832,7 +2927,7 @@ export function SessionEnvironmentPanel({
       ),
     },
   ], [clear, clearingName, mutationUnavailableReason, reveal, revealed, revealingName]);
-  const normalizedEnvironmentQuery = normalizeEnvironmentQuery(environmentQuery);
+  const normalizedEnvironmentQuery = normalizeFuzzyQuery(environmentQuery);
   const filteredEnvironmentEntries = useMemo(
     () => state.status === "ready"
       ? fuzzyFilterEnvironmentEntries(state.value.items, environmentQuery, revealed)
@@ -4231,11 +4326,11 @@ function uniqueEnvironmentEntries(items: SessionEnvironmentEntry[]): SessionEnvi
   return [...new Map(items.map((item) => [item.name, item])).values()];
 }
 
-function normalizeEnvironmentQuery(value: string): string {
+function normalizeFuzzyQuery(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase();
 }
 
-function fuzzyEnvironmentTokenMatches(value: string, token: string): boolean {
+function fuzzyTokenMatches(value: string, token: string): boolean {
   if (value.includes(token)) return true;
   let offset = 0;
   for (const character of token) {
@@ -4246,26 +4341,38 @@ function fuzzyEnvironmentTokenMatches(value: string, token: string): boolean {
   return true;
 }
 
+function fuzzyNetworkConnectionMatches(connection: SessionNetworkConnection, tokens: readonly string[]): boolean {
+  if (tokens.length === 0) return true;
+  const searchableValues = [
+    connection.protocol,
+    connection.local ? `${connection.local.address}:${connection.local.port}` : "Not reported",
+    connection.remote ? `${connection.remote.address}:${connection.remote.port}` : "Not reported",
+    connection.state || "Unknown",
+    connection.process ? `${connection.process.executable || "Process"} (${connection.process.pid})` : "Not reported",
+  ].map(normalizeFuzzyQuery);
+  return tokens.every((token) => searchableValues.some((value) => fuzzyTokenMatches(value, token)));
+}
+
 function fuzzyFilterEnvironmentEntries(
   items: readonly SessionEnvironmentEntry[],
   query: string,
   revealed: Readonly<Record<string, SessionEnvironmentRevealResult>>,
   now = Date.now(),
 ): SessionEnvironmentEntry[] {
-  const tokens = normalizeEnvironmentQuery(query).split(/\s+/u).filter(Boolean);
+  const tokens = normalizeFuzzyQuery(query).split(/\s+/u).filter(Boolean);
   if (tokens.length === 0) return [...items];
 
   return items.filter((entry) => {
-    const searchableValues = [normalizeEnvironmentQuery(entry.name)];
+    const searchableValues = [normalizeFuzzyQuery(entry.name)];
     if (!entry.redacted) {
-      searchableValues.push(normalizeEnvironmentQuery(entry.value));
+      searchableValues.push(normalizeFuzzyQuery(entry.value));
     } else {
       const revealResult = revealed[entry.name];
       if (revealResult && Date.parse(revealResult.expiresAt) > now) {
-        searchableValues.push(normalizeEnvironmentQuery(revealResult.value));
+        searchableValues.push(normalizeFuzzyQuery(revealResult.value));
       }
     }
-    return tokens.every((token) => searchableValues.some((value) => fuzzyEnvironmentTokenMatches(value, token)));
+    return tokens.every((token) => searchableValues.some((value) => fuzzyTokenMatches(value, token)));
   });
 }
 

@@ -2934,6 +2934,8 @@ async function verifyM2SessionWorkspace(
   await page.getByRole("tab", { name: "Network", exact: true }).click();
   await page.getByRole("heading", { name: "Network", exact: true }).waitFor();
   await page.getByText("en0", { exact: true }).waitFor();
+  await page.getByRole("tablist", { name: "Network views", exact: true })
+    .getByRole("tab", { name: "Netstat", exact: true }).click();
   await page.getByText("ESTABLISHED", { exact: true }).waitFor();
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
