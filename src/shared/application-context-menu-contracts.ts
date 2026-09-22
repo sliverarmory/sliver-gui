@@ -57,7 +57,10 @@ export type ApplicationContextMenuItem =
   | ApplicationContextMenuActionItem
   | ApplicationContextMenuSeparatorItem;
 
-/** Main-to-renderer model created only from Electron's native context-menu event. */
+/**
+ * Main-to-renderer model created only from Electron's native context-menu event.
+ * Positions are viewport CSS pixels, normalized for the web contents' zoom.
+ */
 export interface ApplicationContextMenuRequest {
   readonly v: typeof APPLICATION_CONTEXT_MENU_VERSION;
   readonly requestId: string;

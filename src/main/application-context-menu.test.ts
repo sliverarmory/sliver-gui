@@ -75,6 +75,7 @@ class FakeWebFrameMain {
 
 class FakeWebContents extends EventEmitter {
   public readonly send = vi.fn();
+  public readonly getZoomFactor = vi.fn().mockReturnValue(1);
   public readonly focus = vi.fn();
   public readonly undo = vi.fn();
   public readonly redo = vi.fn();
@@ -204,6 +205,53 @@ describe("ApplicationContextMenuController", () => {
     });
     expect(actionItem(request, "redo")).toMatchObject({ label: "Redo", enabled: false });
     expect(JSON.stringify(request)).not.toContain("https://sliver.sh/docs");
+  });
+
+  it.each([
+    { zoom: 0.9, x: 101, y: 52 },
+    { zoom: 1, x: 91, y: 47 },
+    { zoom: 1.25, x: 73, y: 38 },
+    { zoom: 2, x: 46, y: 24 },
+  ])("presents integer CSS coordinates at zoom $zoom while native image and inspection actions retain their event coordinates", async ({ zoom, x, y }) => {
+    const contents = new FakeWebContents(141);
+    contents.getZoomFactor.mockReturnValue(zoom);
+    controller.install(contents as unknown as WebContents);
+    const params = contextParams({ x: 91, y: 47, mediaType: "image", hasImageContents: true });
+
+    emitContextMenu(contents, params);
+    const imageRequest = sentRequest(contents);
+    expect(imageRequest).toMatchObject({ x, y });
+    expect(Number.isSafeInteger(imageRequest.x)).toBe(true);
+    expect(Number.isSafeInteger(imageRequest.y)).toBe(true);
+    await expect(execute(contents, imageRequest, actionItem(imageRequest, "copy-image"))).resolves.toBe(true);
+    expect(contents.copyImageAt).toHaveBeenCalledExactlyOnceWith(91, 47);
+
+    emitContextMenu(contents, params);
+    const inspectionRequest = sentRequest(contents);
+    expect(inspectionRequest).toMatchObject({ x, y });
+    await expect(execute(contents, inspectionRequest, actionItem(inspectionRequest, "inspect"))).resolves.toBe(true);
+    expect(contents.inspectElement).toHaveBeenCalledExactlyOnceWith(91, 47);
+  });
+
+  it("uses each webContents current zoom independently for every context-menu presentation", () => {
+    const first = new FakeWebContents(142);
+    const second = new FakeWebContents(143);
+    first.getZoomFactor.mockReturnValue(0.9);
+    second.getZoomFactor.mockReturnValue(1.25);
+    controller.install(first as unknown as WebContents);
+    controller.install(second as unknown as WebContents);
+    const params = contextParams({ x: 450, y: 225 });
+
+    emitContextMenu(first, params);
+    emitContextMenu(second, params);
+    expect(sentRequest(first)).toMatchObject({ x: 500, y: 250 });
+    expect(sentRequest(second)).toMatchObject({ x: 360, y: 180 });
+
+    first.getZoomFactor.mockReturnValue(2);
+    emitContextMenu(first, params);
+    emitContextMenu(second, params);
+    expect(sentRequest(first)).toMatchObject({ x: 225, y: 113 });
+    expect(sentRequest(second)).toMatchObject({ x: 360, y: 180 });
   });
 
   it("executes one enabled edit capability only once", async () => {

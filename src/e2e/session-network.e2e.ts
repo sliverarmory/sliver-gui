@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-test("Network separates interfaces and netstat with opt-in refresh", { timeout: 120_000 }, async () => {
+test("Session network, process details, and zoom controls", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-network-e2e-"));
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
@@ -149,6 +149,176 @@ test("Network separates interfaces and netstat with opt-in refresh", { timeout: 
       await netstatTab.click();
     }
 
+    await nativeWindow.evaluate((window) => window.setSize(1440, 950));
+    await connections.getByText("sliver-m2-session (41001)", { exact: true }).click({ button: "right" });
+    const contextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
+    await contextMenu.getByRole("menuitem", { name: "Go to Process", exact: true }).click();
+    const processes = page.getByRole("region", { name: "Processes", exact: true });
+    const processFilter = processes.getByRole("searchbox", { name: "Filter processes", exact: true });
+    const processesGrid = processes.getByRole("grid", { name: "Session processes", exact: true });
+    const processRows = processesGrid.locator('[data-slot="table-body"] [data-slot="table-row"]');
+    await processes.getByText("Loaded 1 of 1 processes matching “pid:41001”", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("tab", { name: "Processes", exact: true }).getAttribute("aria-selected"), "true");
+    assert.equal(await processFilter.inputValue(), "pid:41001");
+    assert.equal(await processRows.count(), 1, "Go to Process must select the exact PID without its children");
+    await processesGrid.getByText("sliver-m2-session", { exact: true }).waitFor();
+    const processDetail = processes.getByRole("region", { name: "sliver-m2-session", exact: true });
+    await processDetail.getByText("PID 41001", { exact: true }).waitFor();
+    await processDetail.getByText("/usr/local/bin/sliver-m2-session --m2-e2e", { exact: true }).waitFor();
+    await page.screenshot({ animations: "disabled", path: join(artifactDirectory, "session-network-go-to-process.png") });
+
+    await processFilter.fill("owner:e2e-user");
+    await processes.getByText("Loaded 100 of 108 processes matching “owner:e2e-user” · bounded", { exact: true }).waitFor();
+    assert.equal(await processRows.count(), 100, "owner search must match the fixture's owner across the bounded inventory");
+    await processFilter.fill("owner:sliver-m2-session");
+    await processesGrid.getByText("No processes match this search.", { exact: true }).waitFor();
+    assert.equal(await processRows.count(), 0, "owner search must not match the executable name");
+
+    await processFilter.fill("owner:e2e-user");
+    await processes.getByText("Loaded 100 of 108 processes matching “owner:e2e-user” · bounded", { exact: true }).waitFor();
+    const processGridPane = processes.locator(".session-processes-grid");
+    const processGridScroll = processGridPane.locator('[data-slot="table-scroll-container"]');
+    const detailsPane = processes.locator(".session-process-details");
+    const closeDetails = processes.getByRole("button", { name: "Close process details", exact: true });
+    const selectedProcessName = processesGrid.getByText("sliver-m2-session", { exact: true });
+    await selectedProcessName.click();
+    await processDetail.waitFor();
+    for (const [width, height] of [[1440, 950], [1024, 768]] as const) {
+      await nativeWindow.evaluate((window, size) => window.setSize(size.width, size.height), { width, height });
+      await page.waitForFunction((expectedWidth) => (globalThis as unknown as { innerWidth: number }).innerWidth === expectedWidth, width);
+      await processGridScroll.evaluate((element) => { element.scrollTop = 0; element.scrollLeft = 0; });
+      await assertProcessSplitLayout(page, processGridPane, processGridScroll, detailsPane, closeDetails, width);
+      const resizeHandle = processes.getByLabel("Resize process details", { exact: true });
+      const handleBounds = await resizeHandle.boundingBox();
+      const detailsWidth = (await detailsPane.boundingBox())?.width;
+      const scrolledPosition = await processGridScroll.evaluate((element) => element.scrollTop);
+      assert.ok(handleBounds && detailsWidth);
+      const handleX = handleBounds.x + handleBounds.width / 2;
+      const handleY = handleBounds.y + handleBounds.height / 2;
+      await page.mouse.move(handleX, handleY);
+      await page.mouse.down();
+      await page.mouse.move(handleX - 48, handleY, { steps: 5 });
+      await page.mouse.up();
+      assert.ok(((await detailsPane.boundingBox())?.width ?? 0) > detailsWidth + 1,
+        "dragging the split handle must resize process details");
+      assert.equal(await processGridScroll.evaluate((element) => element.scrollTop), scrolledPosition,
+        "resizing process details must preserve the table scroll position");
+      const splitWidth = (await processGridPane.boundingBox())?.width;
+      assert.ok(splitWidth);
+      await closeDetails.click();
+      await detailsPane.waitFor({ state: "hidden" });
+      const fullWidth = (await processGridPane.boundingBox())?.width;
+      assert.ok(fullWidth && fullWidth > splitWidth + 100, "closing process details must restore the table width");
+      const closedScroll = await processGridScroll.evaluate((element) => ({
+        position: element.scrollTop,
+        maximum: element.scrollHeight - element.clientHeight,
+      }));
+      assert.ok(Math.abs(closedScroll.position - Math.min(scrolledPosition, closedScroll.maximum)) <= 1,
+        "closing process details must preserve table scrolling within the new viewport bounds");
+      await processGridScroll.evaluate((element) => { element.scrollTop = 0; element.scrollLeft = 0; });
+      await selectedProcessName.click();
+      await processDetail.getByText("PID 41001", { exact: true }).waitFor();
+      await page.screenshot({ animations: "disabled", path: join(artifactDirectory, `session-processes-split-${width}.png`) });
+    }
+
+    await nativeWindow.evaluate((window) => window.setSize(1440, 950));
+    const zoomRegion = page.getByRole("group", { name: "Window zoom", exact: true });
+    const resetZoom = zoomRegion.getByRole("button", { name: "Reset zoom", exact: true });
+    for (const zoom of [1, 0.9, 1.1]) {
+      await nativeWindow.evaluate((window, factor) => window.webContents.setZoomFactor(factor), zoom);
+      await page.waitForFunction((expectedWidth) => Math.abs((globalThis as unknown as { innerWidth: number }).innerWidth - expectedWidth) <= 2, 1440 / zoom);
+      await zoomRegion.getByText(`Zoom ${Math.round(zoom * 100)}%`, { exact: true }).waitFor();
+      await processGridScroll.evaluate((element) => { element.scrollTop = 600; });
+      await detailsPane.locator(":scope > .overflow-auto").evaluate((element) => { element.scrollTop = 80; });
+      const gridBounds = await processGridPane.boundingBox();
+      assert.ok(gridBounds);
+      const viewport = await page.evaluate(() => {
+        const windowObject = globalThis as unknown as { innerWidth: number; innerHeight: number };
+        return { width: windowObject.innerWidth, height: windowObject.innerHeight };
+      });
+      for (const point of [
+        { x: Math.round(gridBounds.x + 35), y: Math.round(gridBounds.y + 65) },
+        { x: Math.round(gridBounds.x + Math.min(gridBounds.width - 30, 320)), y: Math.round(gridBounds.y + 130) },
+      ]) {
+        await page.mouse.click(point.x, point.y, { button: "right" });
+        await assertContextMenuPosition(contextMenu, point, viewport, false, zoom);
+        await page.keyboard.press("Escape");
+        await contextMenu.waitFor({ state: "hidden" });
+      }
+      const corner = { x: viewport.width - 10, y: viewport.height - 10 };
+      await page.mouse.click(corner.x, corner.y, { button: "right" });
+      await assertContextMenuPosition(contextMenu, corner, viewport, true, zoom);
+      await page.screenshot({ animations: "disabled", path: join(artifactDirectory, `session-context-menu-corner-${zoom}.png`) });
+      await page.keyboard.press("Escape");
+      await contextMenu.waitFor({ state: "hidden" });
+    }
+    await resetZoom.click();
+    await zoomRegion.getByText("Zoom 100%", { exact: true }).waitFor();
+    assert.equal(await nativeWindow.evaluate((window) => window.webContents.getZoomFactor()), 1,
+      "the sidebar Reset zoom control must restore the native window zoom");
+
+    const invokedZoomIn = await application.evaluate(({ BrowserWindow, Menu }, url) => {
+      const focusedWindow = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL() === url);
+      if (!focusedWindow) return false;
+      focusedWindow.focus();
+      focusedWindow.webContents.focus();
+      const pendingMenus = [Menu.getApplicationMenu()];
+      while (pendingMenus.length > 0) {
+        for (const item of pendingMenus.pop()?.items ?? []) {
+          if (item.role?.toLowerCase() === "zoomin") {
+            // Electron's native role wrapper takes the focused webContents as its third argument.
+            Reflect.apply(item.click, item, [{}, focusedWindow, focusedWindow.webContents]);
+            return true;
+          }
+          if (item.submenu) pendingMenus.push(item.submenu);
+        }
+      }
+      return false;
+    }, page.url());
+    assert.equal(invokedZoomIn, true, "the application View menu must expose native Zoom In");
+    let menuZoom = 1;
+    const zoomDeadline = Date.now() + 5_000;
+    while (menuZoom <= 1 && Date.now() < zoomDeadline) {
+      menuZoom = await nativeWindow.evaluate((window) => window.webContents.getZoomFactor());
+      if (menuZoom <= 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(menuZoom > 1, "the View menu Zoom In role must change native zoom");
+    await zoomRegion.getByText(`Zoom ${Math.round(menuZoom * 100)}%`, { exact: true }).waitFor();
+    await resetZoom.click();
+    await zoomRegion.getByText("Zoom 100%", { exact: true }).waitFor();
+    assert.equal(await nativeWindow.evaluate((window) => window.webContents.getZoomFactor()), 1);
+
+    await page.getByRole("button", { name: /^Current server:/i }).click();
+    await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+    await nativeWindow.evaluate((window) => window.webContents.setZoomFactor(0.9));
+    await zoomRegion.getByText("Zoom 90%", { exact: true }).waitFor();
+    for (const theme of ["Dark", "Light"]) {
+      await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: theme, exact: true }).click();
+      await page.locator(`html.${theme.toLowerCase()}[data-theme='${theme.toLowerCase()}']`).waitFor();
+      await settleVisualTransitions(zoomRegion);
+      const screenshot = await nativeWindow.evaluate(async (window) =>
+        (await window.webContents.capturePage()).toPNG().toString("base64"));
+      await writeFile(join(artifactDirectory, `sidebar-window-zoom-90-${theme.toLowerCase()}.png`), Buffer.from(screenshot, "base64"));
+    }
+    await nativeWindow.evaluate((window) => window.setSize(1024, 768));
+    await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+    await page.getByRole("button", { name: "Expand sidebar", exact: true }).waitFor();
+    await zoomRegion.getByText("Zoom 90%", { exact: true }).waitFor();
+    await settleVisualTransitions(zoomRegion);
+    await page.waitForFunction((element) => element !== null &&
+      Math.abs(element.getBoundingClientRect().width - 56) <= 1, await page.locator(".app-sidebar:visible").elementHandle());
+    const collapsedBounds = await zoomRegion.boundingBox();
+    const resetBounds = await resetZoom.boundingBox();
+    assert.ok(collapsedBounds && resetBounds && resetBounds.x >= collapsedBounds.x &&
+      resetBounds.x + resetBounds.width <= collapsedBounds.x + collapsedBounds.width + 1,
+    "the zoom reset control must fit within the collapsed sidebar");
+    const collapsedScreenshot = await nativeWindow.evaluate(async (window) =>
+      (await window.webContents.capturePage()).toPNG().toString("base64"));
+    await writeFile(join(artifactDirectory, "sidebar-window-zoom-90-collapsed.png"), Buffer.from(collapsedScreenshot, "base64"));
+    await resetZoom.click();
+    await zoomRegion.getByText("Zoom 100%", { exact: true }).waitFor();
+    assert.equal(await resetZoom.isEnabled(), false, "Reset zoom must be disabled at 100%");
+
     assert.deepEqual(rendererErrors, [], "the Network views must not emit renderer errors");
   } catch (error) {
     if (page && !page.isClosed()) {
@@ -163,6 +333,90 @@ test("Network separates interfaces and netstat with opt-in refresh", { timeout: 
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function settleVisualTransitions(locator: Locator): Promise<void> {
+  await locator.evaluate(async (element) => {
+    const view = element.ownerDocument.defaultView;
+    if (!view) return;
+    await new Promise<void>((resolve) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())));
+    const animations = element.ownerDocument.getAnimations() as Array<{
+      effect: { getComputedTiming(): { iterations: number } } | null;
+      finished: Promise<unknown>;
+    }>;
+    await Promise.all(animations
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished.catch(() => undefined)));
+  });
+}
+
+async function assertContextMenuPosition(
+  menu: Locator,
+  point: { x: number; y: number },
+  viewport: { width: number; height: number },
+  corner: boolean,
+  zoom: number,
+): Promise<void> {
+  await menu.waitFor();
+  // Wait for the popover's entry animation before measuring its final anchor.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const bounds = await menu.boundingBox();
+  assert.ok(bounds);
+  assert.ok(bounds.x >= -1 && bounds.y >= -1 && bounds.x + bounds.width <= viewport.width + 1 &&
+    bounds.y + bounds.height <= viewport.height + 1, `context menus must remain inside the viewport at ${zoom} zoom`);
+  const anchorX = corner ? bounds.x + bounds.width : bounds.x;
+  const anchorY = corner ? bounds.y + bounds.height : bounds.y;
+  assert.ok(Math.abs(anchorX - point.x) <= 4 && Math.abs(anchorY - point.y) <= 4,
+    `context menu anchor (${anchorX}, ${anchorY}) must follow pointer (${point.x}, ${point.y}) at ${zoom} zoom`);
+}
+
+async function assertProcessSplitLayout(
+  page: Page,
+  grid: Locator,
+  gridScroll: Locator,
+  details: Locator,
+  close: Locator,
+  width: number,
+): Promise<void> {
+  const viewportHeight = await page.evaluate(() => (globalThis as unknown as { innerHeight: number }).innerHeight);
+  const gridBounds = await grid.boundingBox();
+  const detailBounds = await details.boundingBox();
+  const closeBounds = await close.boundingBox();
+  assert.ok(gridBounds && detailBounds && closeBounds);
+  assert.ok(gridBounds.height >= 100, `the process table must retain at least 100px of visible inventory at ${width}px`);
+  assert.ok(gridBounds.x + gridBounds.width <= detailBounds.x + 1,
+    `process details must sit beside the table at ${width}px`);
+  for (const bounds of [gridBounds, detailBounds, closeBounds]) {
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1 &&
+      bounds.y >= 0 && bounds.y + bounds.height <= viewportHeight + 1,
+    `the process split and close control must fit in the viewport at ${width}px`);
+  }
+
+  const maximumScroll = await gridScroll.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    return element.scrollTop;
+  });
+  assert.ok(maximumScroll > 0, `all 100 processes must scroll inside the table at ${width}px`);
+  assert.deepEqual(await details.boundingBox(), detailBounds,
+    `scrolling the process inventory must not move details at ${width}px`);
+  assert.deepEqual(await close.boundingBox(), closeBounds,
+    `scrolling the process inventory must not move its close control at ${width}px`);
+  const detailScroll = details.locator(":scope > .overflow-auto");
+  const detailScrollRange = await detailScroll.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    return { maximum: element.scrollHeight - element.clientHeight, actual: element.scrollTop };
+  });
+  if (detailScrollRange.maximum > 0) {
+    assert.ok(detailScrollRange.actual > 0, `overflowing process details must scroll independently at ${width}px`);
+    assert.deepEqual(await close.boundingBox(), closeBounds,
+      `scrolling process details must leave their close control visible at ${width}px`);
+    assert.equal(await gridScroll.evaluate((element) => element.scrollTop), maximumScroll,
+      `scrolling process details must not move the inventory at ${width}px`);
+  }
+  await detailScroll.evaluate((element) => { element.scrollTop = 0; });
+  const sessionPage = page.locator('.app-content:has(> .session-workspace[data-presentation="embedded"])');
+  const pageOverflow = await sessionPage.evaluate((element) => element.scrollHeight - element.clientHeight);
+  assert.ok(pageOverflow <= 1, `the Processes view must not scroll the outer workspace at ${width}px`);
+}
 
 async function assertHorizontalLayout(network: Locator, controls: Locator[], width: number): Promise<void> {
   const panel = await network.boundingBox();

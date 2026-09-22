@@ -64,6 +64,7 @@ import {
   faTrash,
   faTriangleExclamation,
   faUpload,
+  faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 
 import {
@@ -98,6 +99,7 @@ import {
   type SessionWorkbenchInput,
   type SessionWorkbenchResultFor,
 } from "../../../shared/session-contracts";
+import { parseSessionProcessQuery } from "../../../shared/session-process-query";
 import {
   parseTargetOperationInput,
   type TargetOperationRecord,
@@ -321,7 +323,7 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
   );
 }
 
-export function SessionNetworkPanel({ route, isTargetTransitionPending }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionNetworkPanel({ route, isTargetTransitionPending, onGoToProcess }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const [selectedTab, setSelectedTab] = useState("interfaces");
   const [connectionQuery, setConnectionQuery] = useState("");
@@ -581,15 +583,17 @@ export function SessionNetworkPanel({ route, isTargetTransitionPending }: Sessio
           {connections.status === "ready" ? (
             <>
               {connections.value.page.truncated ? <BoundedNotice nextCursor={connections.value.page.nextCursor} noun="connections" /> : null}
-              <DataGrid
-                aria-label="Session network connections"
-                columns={connectionColumns}
-                contentClassName="min-w-[820px]"
-                data={connectionRows}
-                getRowId={(row) => row.id}
-                variant="secondary"
-                renderEmptyState={() => <GridEmpty label={connectionQueryTokens.length > 0 ? "No loaded connections match this search." : "No network connections were reported."} />}
-              />
+              <NetworkConnectionContextMenu disabled={isTargetTransitionPending} rows={connectionRows} onGoToProcess={onGoToProcess}>
+                <DataGrid
+                  aria-label="Session network connections"
+                  columns={connectionColumns}
+                  contentClassName="min-w-[820px]"
+                  data={connectionRows}
+                  getRowId={(row) => row.id}
+                  variant="secondary"
+                  renderEmptyState={() => <GridEmpty label={connectionQueryTokens.length > 0 ? "No loaded connections match this search." : "No network connections were reported."} />}
+                />
+              </NetworkConnectionContextMenu>
               {connections.value.page.nextCursor ? (
                 <div className="flex justify-center"><Button isDisabled={isRefreshingConnections || isTargetTransitionPending} isPending={isLoadingMoreConnections} size="sm" variant="tertiary" onPress={() => void loadConnections(connections.value.page.nextCursor)}>Load more connections</Button></div>
               ) : null}
@@ -598,6 +602,51 @@ export function SessionNetworkPanel({ route, isTargetTransitionPending }: Sessio
         </Tabs.Panel>
       </Tabs>
     </PanelShell>
+  );
+}
+
+function NetworkConnectionContextMenu({
+  children,
+  disabled,
+  rows,
+  onGoToProcess,
+}: {
+  children: ReactNode;
+  disabled: boolean;
+  rows: readonly { id: string; connection: SessionNetworkConnection }[];
+  onGoToProcess: ((pid: number) => void) | undefined;
+}): React.JSX.Element {
+  const [context, setContext] = useState<{ pid: number; onGoToProcess: (pid: number) => void }>();
+  const scope = useApplicationContextMenuScope({
+    actions: context ? [{
+      id: "go-to-process",
+      label: "Go to Process",
+      icon: faMicrochip,
+      isDisabled: disabled,
+      onAction: () => context.onGoToProcess(context.pid),
+    }] : [],
+  });
+
+  return (
+    <div
+      {...scope}
+      className="contents"
+      onContextMenuCapture={(event) => {
+        const element = event.target instanceof Element ? event.target : undefined;
+        const row = element?.closest<HTMLElement>('[role="row"][data-key]');
+        const connection = row && event.currentTarget.contains(row)
+          ? rows.find((candidate) => candidate.id === row.dataset["key"])?.connection
+          : undefined;
+        const pid = connection?.process?.pid;
+        // Capture the clicked PID and route-bound callback, even if polling
+        // replaces this row while its context menu remains open.
+        setContext(onGoToProcess && pid !== undefined && Number.isSafeInteger(pid) && pid >= 0
+          ? { pid, onGoToProcess }
+          : undefined);
+      }}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -2337,15 +2386,17 @@ function FileViewSummary({ value }: { value: FileViewResult }): React.JSX.Elemen
   );
 }
 
-export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionProcessesPanel({ route, session, processNavigation }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const platform = normalizedPlatform(session.os);
   const isWindows = platform === "windows";
   const canDumpProcesses = sessionOperationSupportsPlatform("session.process.dump", platform);
   const [section, setSection] = useState<"processes" | "services">("processes");
   const [processView, setProcessView] = useState<"list" | "tree">("list");
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const navigationQuery = processNavigation ? `pid:${processNavigation.pid}` : "";
+  const [appliedNavigationRequestId, setAppliedNavigationRequestId] = useState(processNavigation?.requestId);
+  const [query, setQuery] = useState(navigationQuery);
+  const [debouncedQuery, setDebouncedQuery] = useState(navigationQuery);
   const [processes, setProcesses] = useState<LoadState<SessionBoundedPage<SessionProcess>>>({ status: "loading" });
   const [services, setServices] = useState<LoadState<SessionBoundedPage<SessionService>>>({ status: "loading" });
   const [isLoadingMoreProcesses, setIsLoadingMoreProcesses] = useState(false);
@@ -2378,6 +2429,10 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
       setProcesses((current) => cursor && current.status === "ready"
         ? { status: "ready", value: mergePagedResult(result, uniqueProcesses([...current.value.items, ...result.items])) }
         : { status: "ready", value: result });
+      const parsedQuery = parseSessionProcessQuery(requestedQuery);
+      if (parsedQuery.valid && parsedQuery.pid !== undefined) {
+        setSelectedProcess(result.items.find((process) => process.pid === parsedQuery.pid));
+      }
     } catch (error) {
       if (!isCurrent(expected) || sequence !== processRequestSequence.current) return;
       if (cursor) toast.danger("Could not load more processes", { description: errorMessage(error) });
@@ -2422,8 +2477,9 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
     serviceDetailRequestSequence.current += 1;
     setSection("processes");
     setProcessView("list");
-    setQuery("");
-    setDebouncedQuery("");
+    setQuery(navigationQuery);
+    setDebouncedQuery(navigationQuery);
+    setAppliedNavigationRequestId(processNavigation?.requestId);
     setProcesses({ status: "loading" });
     setServices({ status: "loading" });
     setIsLoadingMoreProcesses(false);
@@ -2432,7 +2488,7 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
     setSelectedService(undefined);
     setReadingServiceName(undefined);
     setStartingServiceName(undefined);
-  }, [routeKey]);
+  }, [navigationQuery, processNavigation?.requestId, routeKey]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
@@ -2448,7 +2504,7 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
     } else {
       void loadProcesses(undefined, debouncedQuery);
     }
-  }, [debouncedQuery, isWindows, loadProcesses, loadServices, routeKey, section]);
+  }, [appliedNavigationRequestId, debouncedQuery, isWindows, loadProcesses, loadServices, routeKey, section]);
 
   const destructive = useDestructiveAction(routeKey, () => {
     if (section === "services") void loadServices(undefined, debouncedQuery);
@@ -2621,26 +2677,38 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
   return (
     <>
       <PanelShell
+        fill
         icon={faMicrochip}
         title="Processes"
         description="Inspect bounded process details and Windows service state."
         action={<RefreshButton label={`Refresh ${section}`} pending={activeState.status === "loading"} onPress={() => void (section === "services" ? loadServices(undefined, debouncedQuery) : loadProcesses(undefined, debouncedQuery))} />}
       >
-        <div className="flex min-w-0 flex-col gap-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            {isWindows ? (
-              <Segment aria-label="Process inventory" selectedKey={section} size="sm" onSelectionChange={(key) => {
-                serviceDetailRequestSequence.current += 1;
-                setReadingServiceName(undefined);
-                setSelectedProcess(undefined);
-                setSelectedService(undefined);
-                setSection(String(key) as "processes" | "services");
-              }}>
-                <Segment.Item id="processes">Processes</Segment.Item>
-                <Segment.Item id="services">Services</Segment.Item>
-              </Segment>
-            ) : <span className="text-sm font-medium text-foreground">Processes</span>}
-            <SearchField aria-label={`Filter ${section}`} className="w-full sm:max-w-sm" value={query} variant="secondary" onChange={(value) => {
+        <div className="flex h-full min-h-0 min-w-0 flex-col gap-2">
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              {isWindows ? (
+                <Segment aria-label="Process inventory" className="shrink-0" selectedKey={section} size="sm" onSelectionChange={(key) => {
+                  serviceDetailRequestSequence.current += 1;
+                  setReadingServiceName(undefined);
+                  setSelectedProcess(undefined);
+                  setSelectedService(undefined);
+                  setSection(String(key) as "processes" | "services");
+                }}>
+                  <Segment.Item id="processes">Processes</Segment.Item>
+                  <Segment.Item id="services">Services</Segment.Item>
+                </Segment>
+              ) : null}
+              {section === "processes" ? (
+                <Segment aria-label="Process view" className="shrink-0" selectedKey={processView} size="sm" onSelectionChange={(key) => {
+                  setSelectedProcess(undefined);
+                  setProcessView(String(key) as "list" | "tree");
+                }}>
+                  <Segment.Item id="list">List</Segment.Item>
+                  <Segment.Item id="tree">Tree</Segment.Item>
+                </Segment>
+              ) : null}
+            </div>
+            <SearchField aria-label={`Filter ${section}`} className="w-full min-w-0 flex-[1_1_18rem] sm:max-w-sm" value={query} variant="secondary" onChange={(value) => {
               serviceDetailRequestSequence.current += 1;
               setReadingServiceName(undefined);
               setSelectedProcess(undefined);
@@ -2649,48 +2717,63 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
             }}>
               <SearchField.Group>
                 <SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon>
-                <SearchField.Input placeholder={section === "services" ? "Filter service, account, or path" : "Filter process, owner, PID, or command"} />
+                <SearchField.Input placeholder={section === "services" ? "Filter service, account, or path" : "Filter processes, pid:1234, or owner:foo"} />
                 <SearchField.ClearButton />
               </SearchField.Group>
             </SearchField>
           </div>
+          {activeState.status === "ready" ? (
+            <div className="flex min-w-0 shrink-0 justify-end break-words text-right [&>p]:min-w-0">
+              <InventoryCount loaded={activeState.value.items.length} noun={section} page={activeState.value.page} query={debouncedQuery} />
+            </div>
+          ) : null}
 
           {section === "processes" ? (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Segment aria-label="Process view" selectedKey={processView} size="sm" onSelectionChange={(key) => {
-                  setSelectedProcess(undefined);
-                  setProcessView(String(key) as "list" | "tree");
-                }}>
-                  <Segment.Item id="list">List</Segment.Item>
-                  <Segment.Item id="tree">Tree</Segment.Item>
-                </Segment>
-                {processes.status === "ready" ? <InventoryCount loaded={processes.value.items.length} noun="processes" page={processes.value.page} query={debouncedQuery} /> : null}
-              </div>
-              {processes.status === "loading" ? <PanelLoading label="Loading processes" /> : null}
-              {processes.status === "error" ? <PanelError message={processes.error} onRetry={() => void loadProcesses(undefined, debouncedQuery)} /> : null}
+              {processes.status === "loading" ? <div className="min-h-0 flex-1 overflow-auto"><PanelLoading label="Loading processes" /></div> : null}
+              {processes.status === "error" ? <div className="min-h-0 flex-1 overflow-auto"><PanelError message={processes.error} onRetry={() => void loadProcesses(undefined, debouncedQuery)} /></div> : null}
               {processes.status === "ready" ? (
-                <>
-                  {processes.value.page.truncated ? <BoundedNotice nextCursor={processes.value.page.nextCursor} noun="processes" /> : null}
-                  {processView === "tree" && processRows.length > 0 ? <p className="text-xs text-muted">Hierarchy reflects the currently loaded process pages.</p> : null}
-                  <DataGrid
-                    aria-label={processView === "tree" ? "Session process tree" : "Session processes"}
-                    columns={processColumns}
-                    contentClassName="min-w-[850px]"
-                    data={processRows}
-                    getRowId={(process) => String(process.pid)}
-                    variant="secondary"
-                    onRowAction={(key) => setSelectedProcess(processes.value.items.find((process) => process.pid === Number(key)))}
-                    renderEmptyState={() => <GridEmpty label={debouncedQuery ? "No processes match this search." : "No processes were reported."} />}
-                  />
-                  {processes.value.page.nextCursor ? <div className="flex justify-center"><Button isPending={isLoadingMoreProcesses} size="sm" variant="tertiary" onPress={() => void loadProcesses(processes.value.page.nextCursor, debouncedQuery)}>Load more processes</Button></div> : null}
-                </>
+                <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-separator bg-background">
+                  <Resizable orientation="horizontal">
+                    <Resizable.Panel id="process-table" minSize={35}>
+                      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+                        <div className="min-h-0 flex-1 overflow-hidden">
+                          <DataGrid
+                            aria-label={processView === "tree" ? "Session process tree" : "Session processes"}
+                            className="session-processes-grid h-full rounded-none bg-transparent p-0"
+                            columns={processColumns}
+                            contentClassName="min-w-[850px]"
+                            data={processRows}
+                            getRowId={(process) => String(process.pid)}
+                            scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"
+                            variant="secondary"
+                            onRowAction={(key) => setSelectedProcess(processes.value.items.find((process) => process.pid === Number(key)))}
+                            renderEmptyState={() => <GridEmpty label={debouncedQuery ? "No processes match this search." : "No processes were reported."} />}
+                          />
+                        </div>
+                        {processes.value.page.truncated || processes.value.page.nextCursor || processView === "tree" ? (
+                          <div className="flex max-h-28 shrink-0 flex-col items-center gap-2 overflow-auto border-t border-separator px-3 py-2">
+                            {processes.value.page.truncated && !processes.value.page.nextCursor ? <BoundedNotice nextCursor={undefined} noun="processes" /> : null}
+                            {processView === "tree" && processRows.length > 0 ? <p className="text-xs text-muted">Hierarchy reflects the currently loaded process pages.</p> : null}
+                            {processes.value.page.nextCursor ? <Button className="shrink-0" isPending={isLoadingMoreProcesses} size="sm" variant="tertiary" onPress={() => void loadProcesses(processes.value.page.nextCursor, debouncedQuery)}>Load more processes</Button> : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    </Resizable.Panel>
+                    {selectedProcess ? (
+                      <>
+                        <Resizable.Handle aria-label="Resize process details" type="line" variant="secondary" withIndicator />
+                        <Resizable.Panel defaultSize="340px" groupResizeBehavior="preserve-pixel-size" id="process-details" maxSize="65%" minSize="240px">
+                          <ProcessDetail key={selectedProcess.pid} process={selectedProcess} onClose={() => setSelectedProcess(undefined)} />
+                        </Resizable.Panel>
+                      </>
+                    ) : null}
+                  </Resizable>
+                </div>
               ) : null}
-              {selectedProcess ? <ProcessDetail process={selectedProcess} /> : null}
             </>
           ) : (
-            <>
-              {services.status === "ready" ? <div className="flex justify-end"><InventoryCount loaded={services.value.items.length} noun="services" page={services.value.page} query={debouncedQuery} /></div> : null}
+            <div className="min-h-0 flex-1 space-y-4 overflow-auto overscroll-contain">
               {services.status === "loading" ? <PanelLoading label="Loading services" /> : null}
               {services.status === "error" ? <PanelError message={services.error} onRetry={() => void loadServices(undefined, debouncedQuery)} /> : null}
               {services.status === "ready" ? (
@@ -2713,7 +2796,7 @@ export function SessionProcessesPanel({ route, session }: SessionWorkspacePanelC
                 </>
               ) : null}
               {selectedService ? <ServiceDetail service={selectedService} /> : null}
-            </>
+            </div>
           )}
         </div>
       </PanelShell>
@@ -3927,12 +4010,14 @@ function DestructiveActionDialog({ action }: { action: DestructiveActionState })
 }
 
 function PanelShell({
+  fill = false,
   icon,
   title,
   description,
   action,
   children,
 }: {
+  fill?: boolean;
   icon: Parameters<typeof FontAwesomeIcon>[0]["icon"];
   title: string;
   description: string;
@@ -3941,8 +4026,8 @@ function PanelShell({
 }): React.JSX.Element {
   const headingId = `session-panel-${title.toLocaleLowerCase().replaceAll(/[^a-z0-9]+/gu, "-")}`;
   return (
-    <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby={headingId}>
-      <div className="flex flex-col gap-4 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+    <section className={`min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface ${fill ? "flex h-full max-h-full min-h-0 flex-col" : ""}`} aria-labelledby={headingId}>
+      <div className="flex shrink-0 flex-col gap-4 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={icon} /></span>
           <div className="min-w-0">
@@ -3952,7 +4037,7 @@ function PanelShell({
         </div>
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
-      <div className="border-t border-separator p-5 sm:p-6">{children}</div>
+      <div className={`border-t border-separator ${fill ? "min-h-0 flex-1 overflow-hidden px-5 py-3 sm:px-6" : "p-5 sm:p-6"}`}>{children}</div>
     </section>
   );
 }
@@ -4096,23 +4181,27 @@ function Address({ value }: { value: SessionNetworkConnection["local"] }): React
   return <span className="font-mono text-xs text-muted">{value ? `${value.address}:${value.port}` : "Not reported"}</span>;
 }
 
-function ProcessDetail({ process }: { process: SessionProcess }): React.JSX.Element {
+function ProcessDetail({ process, onClose }: { process: SessionProcess; onClose: () => void }): React.JSX.Element {
   return (
-    <section className="rounded-xl border border-separator bg-default px-4 py-4" aria-labelledby="process-detail-heading">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-foreground" id="process-detail-heading">{process.executable || "Process details"}</h3>
-        <Chip size="sm" variant="soft">PID {process.pid}</Chip>
+    <section className="session-process-details flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface" aria-labelledby="process-detail-heading">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-separator px-4 py-2">
+        <p className="text-xs font-medium text-muted">Process details</p>
+        <IconButton label="Close process details" icon={faXmark} onPress={onClose} />
       </div>
-      <dl className="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Detail label="Owner" value={process.owner || "Not reported"} />
-        <Detail label="Parent PID" value={String(process.parentPid)} mono />
-        <Detail label="Architecture" value={process.architecture || "Not reported"} />
-        <Detail label="Session ID" value={process.sessionId === undefined ? "Not reported" : String(process.sessionId)} mono />
-      </dl>
-      <p className="mt-4 text-[11px] font-medium text-muted">Command line</p>
-      <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface p-3 font-mono text-xs text-foreground">
-        {process.commandLine.length > 0 ? process.commandLine.join(" ") : "Not reported"}
-      </pre>
+      <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-4">
+        <h3 className="mb-2 break-words text-sm font-semibold text-foreground" id="process-detail-heading">{process.executable || "Process details"}</h3>
+        <Chip size="sm" variant="soft">PID {process.pid}</Chip>
+        <dl className="mt-5 grid grid-cols-2 gap-4">
+          <Detail label="Owner" value={process.owner || "Not reported"} />
+          <Detail label="Parent PID" value={String(process.parentPid)} mono />
+          <Detail label="Architecture" value={process.architecture || "Not reported"} />
+          <Detail label="Session ID" value={process.sessionId === undefined ? "Not reported" : String(process.sessionId)} mono />
+        </dl>
+        <p className="mt-5 text-[11px] font-medium text-muted">Command line</p>
+        <pre className="mt-1 whitespace-pre-wrap break-all rounded-lg bg-default p-3 font-mono text-xs text-foreground">
+          {process.commandLine.length > 0 ? process.commandLine.join(" ") : "Not reported"}
+        </pre>
+      </div>
     </section>
   );
 }

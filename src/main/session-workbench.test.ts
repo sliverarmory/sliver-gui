@@ -470,6 +470,119 @@ describe("SessionWorkbench", () => {
     expect(JSON.stringify({ processes, files, network })).not.toMatch(/Processes|Files|Entries|Response/u);
   });
 
+  it("finds an exact qualified PID before pagination without matching parent PIDs or command arguments", async () => {
+    const client = fakeClient();
+    const process = {
+      Pid: 12345,
+      Ppid: 1234,
+      Executable: "worker-1234",
+      Owner: "owner-1234",
+      Architecture: "amd64",
+      SessionID: 0,
+      CmdLine: ["--pid=1234"],
+    };
+    vi.mocked(client.psSession).mockResolvedValue({
+      Processes: [
+        ...Array.from({ length: 105 }, (_, index) => ({ ...process, Pid: 2000 + index })),
+        process,
+        { ...process, Pid: 1234 },
+      ],
+    } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+
+    for (const query of ["pid:1234", "PID:001234", "pid:1234 pid:1234"]) {
+      const result = await workbench.run(target(), { operationId: "session.process.list", fullInfo: true, query, limit: 100 });
+      if (result.operationId !== "session.process.list") throw new Error("Unexpected process result");
+      expect(result.value.items.map((item) => item.pid)).toEqual([1234]);
+      expect(result.value.page).toEqual({ limit: 100, total: 1, truncated: false });
+    }
+    expect(client.psSession).toHaveBeenCalledWith(target().sessionId, true);
+  });
+
+  it("restricts owner qualifiers to owner substrings and preserves matching pagination", async () => {
+    const client = fakeClient();
+    const process = {
+      Ppid: 1,
+      Executable: "alice-worker",
+      Architecture: "amd64",
+      SessionID: 0,
+      CmdLine: ["--user=alice"],
+    };
+    vi.mocked(client.psSession).mockResolvedValue({
+      Processes: [
+        { ...process, Pid: 1, Owner: "DOMAIN\\Alice" },
+        { ...process, Pid: 2, Owner: "alice-service" },
+        { ...process, Pid: 3, Owner: "bob" },
+      ],
+    } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+    const first = await workbench.run(target(), {
+      operationId: "session.process.list", fullInfo: true, query: "owner:ALICE", limit: 1,
+    });
+    if (first.operationId !== "session.process.list") throw new Error("Unexpected process result");
+    expect(first.value.items.map((item) => item.pid)).toEqual([1]);
+    expect(first.value.page).toEqual({ limit: 1, total: 2, truncated: true, nextCursor: "1" });
+    const next = await workbench.run(target(), {
+      operationId: "session.process.list", fullInfo: true, query: "owner:ALICE", limit: 1, cursor: first.value.page.nextCursor!,
+    });
+    if (next.operationId !== "session.process.list") throw new Error("Unexpected process result");
+    expect(next.value.items.map((item) => item.pid)).toEqual([2]);
+    expect(next.value.page).toEqual({ limit: 1, total: 2, truncated: true });
+  });
+
+  it("combines process qualifiers with AND while retaining literal unqualified substring searches", async () => {
+    const client = fakeClient();
+    const process = {
+      Ppid: 1,
+      Executable: "Worker Service",
+      Architecture: "amd64",
+      SessionID: 0,
+      CmdLine: ["--serve"],
+    };
+    vi.mocked(client.psSession).mockResolvedValue({
+      Processes: [
+        { ...process, Pid: 1, Owner: "DOMAIN\\Alice" },
+        { ...process, Pid: 2, Owner: "OTHER\\Alice" },
+        { ...process, Pid: 3, Owner: "NT AUTHORITY\\Network Service" },
+        { ...process, Pid: 4, Owner: "DOMAIN\\Alice", Executable: "Worker  Service" },
+      ],
+    } as never);
+    const workbench = new SessionWorkbench(client, fakeArtifacts());
+    for (const [query, expectedPids] of [
+      ["owner:alice owner:domain", [1, 4]],
+      ["owner:alice pid:2", [2]],
+      ["pid:2 owner:domain", []],
+      ["worker service owner:domain", [1]],
+      ["owner:DOMAIN\\Alice", [1, 4]],
+      ["owner:\"NT AUTHORITY\\Network Service\"", [3]],
+      ["owner:'nt authority\\network service'", [3]],
+      ["worker service", [1, 2, 3]],
+      ["worker  service", [4]],
+      ["--SERve", [1, 2, 3, 4]],
+      ["  ", [1, 2, 3, 4]],
+    ] as const) {
+      const result = await workbench.run(target(), { operationId: "session.process.list", fullInfo: true, query });
+      if (result.operationId !== "session.process.list") throw new Error("Unexpected process result");
+      expect(result.value.items.map((item) => item.pid), query).toEqual(expectedPids);
+    }
+  });
+
+  it.each([
+    "pid:", "pid:no", "pid:-1", "pid:1.2", "pid:1x", "pid:1e0", "pid:9007199254740992",
+    "pid:1 pid:2", "pid: 1", "pid:\"\"", "owner:", "owner:\"\"", "owner:\"unterminated", "owner:\"alice\"extra",
+  ])("does not broaden malformed qualified process query %s", async (query) => {
+    const client = fakeClient();
+    vi.mocked(client.psSession).mockResolvedValue({
+      Processes: [{ Pid: 1, Ppid: 0, Executable: query, Owner: "alice", Architecture: "amd64", SessionID: 0, CmdLine: [] }],
+    } as never);
+    const result = await new SessionWorkbench(client, fakeArtifacts()).run(target(), {
+      operationId: "session.process.list", fullInfo: true, query,
+    });
+    if (result.operationId !== "session.process.list") throw new Error("Unexpected process result");
+    expect(result.value.items).toEqual([]);
+    expect(result.value.page.total).toBe(0);
+  });
+
   it("filters Sliver's synthetic self entry and rejects unsafe actionable child names", async () => {
     const file = (Name: string) => ({
       Name,

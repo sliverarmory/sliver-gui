@@ -473,6 +473,79 @@ describe("session workbench panels", () => {
     expect(api.runSessionWorkbench).toHaveBeenCalledTimes(2);
   });
 
+  it("offers Go to Process across netstat rows with a reported PID and omits it from other targets", async () => {
+    const user = userEvent.setup();
+    const onGoToProcess = vi.fn();
+    const process = { pid: 42, parentPid: 1, executable: "browser", owner: "alice", architecture: "amd64", commandLine: [] };
+    installAPI((input) => input.operationId === "session.network.connections"
+      ? workbench(input.operationId, {
+        items: [
+          { protocol: "tcp", state: "ESTABLISHED", local: { address: "10.0.0.8", port: 4444 }, process },
+          { protocol: "udp", state: "", local: { address: "0.0.0.0", port: 5353 } },
+          { protocol: "tcp", state: "LISTEN", local: { address: "0.0.0.0", port: 80 }, process: { ...process, pid: 0, executable: "system" } },
+        ],
+        page: { limit: 100, total: 3, truncated: false },
+      })
+      : networkInventory(input));
+    const context = panelContext();
+    const rendered = render(<SessionNetworkPanel {...context} onGoToProcess={onGoToProcess} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    const grid = screen.getByRole("grid", { name: "Session network connections" });
+
+    for (const [label, pid] of [["ESTABLISHED", 42], ["0.0.0.0:80", 0]] as const) {
+      fireEvent.contextMenu(within(grid).getByText(label));
+      rendered.contextMenu.emit();
+      const menu = await screen.findByRole("menu", { name: "Application context menu" });
+      await user.click(within(menu).getByRole("menuitem", { name: "Go to Process" }));
+      await waitFor(() => expect(onGoToProcess).toHaveBeenLastCalledWith(pid));
+    }
+    for (const target of [within(grid).getByText("0.0.0.0:5353"), within(grid).getByRole("columnheader", { name: "Process" }), grid]) {
+      fireEvent.contextMenu(target);
+      rendered.contextMenu.emit();
+      const menu = await screen.findByRole("menu", { name: "Application context menu" });
+      expect(within(menu).queryByRole("menuitem", { name: "Go to Process" })).not.toBeInTheDocument();
+      await user.keyboard("{Escape}");
+    }
+    expect(onGoToProcess).toHaveBeenCalledTimes(2);
+
+    rendered.rerender(<SessionNetworkPanel {...context} />);
+    fireEvent.contextMenu(within(grid).getByText("ESTABLISHED"));
+    rendered.contextMenu.emit();
+    expect(within(await screen.findByRole("menu", { name: "Application context menu" })).queryByRole("menuitem", { name: "Go to Process" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the clicked netstat PID when auto-refresh replaces the row while its menu is open", async () => {
+    const user = userEvent.setup();
+    const onGoToProcess = vi.fn();
+    let connectionRequests = 0;
+    installAPI((input) => {
+      if (input.operationId !== "session.network.connections") return networkInventory(input);
+      connectionRequests += 1;
+      return workbench(input.operationId, {
+        items: [{
+          protocol: "tcp", state: "ESTABLISHED", local: { address: "10.0.0.8", port: 4444 },
+          process: { pid: connectionRequests === 1 ? 42 : 84, parentPid: 1, executable: "browser", owner: "alice", architecture: "amd64", commandLine: [] },
+        }],
+        page: { limit: 100, total: 1, truncated: false },
+      });
+    });
+    const rendered = render(<SessionNetworkPanel {...panelContext()} onGoToProcess={onGoToProcess} />);
+    await screen.findByText("eth0");
+    await user.click(screen.getByRole("tab", { name: "Netstat" }));
+    const interval = screen.getByRole("textbox", { name: "Refresh interval (seconds)" });
+    await user.clear(interval);
+    await user.type(interval, "1");
+    await user.tab();
+    await user.click(screen.getByRole("switch", { name: "Auto-refresh" }));
+    fireEvent.contextMenu(screen.getByText("browser (42)"));
+    rendered.contextMenu.emit();
+    const action = await screen.findByRole("menuitem", { name: "Go to Process" });
+    expect(await screen.findByText("browser (84)", {}, { timeout: 2_500 })).toBeInTheDocument();
+    await user.click(action);
+    await waitFor(() => expect(onGoToProcess).toHaveBeenCalledExactlyOnceWith(42));
+  });
+
   it("applies the netstat filter to newly loaded pages while reporting only the loaded inventory", async () => {
     const user = userEvent.setup();
     const api = installAPI((input) => input.operationId === "session.network.connections"
@@ -2318,6 +2391,85 @@ describe("session workbench panels", () => {
     rerender(<SessionRegistryPanel {...panelContext()} />);
     expect(screen.getByText("Registry unavailable")).toBeInTheDocument();
     expect(api.runSessionWorkbench.mock.calls.some(([input]) => String(input.operationId).startsWith("session.registry."))).toBe(false);
+  });
+
+  it("opens process details beside the process inventory and supports closing and reopening the selected row", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId !== "session.process.list") throw new Error(`Unexpected operation ${input.operationId}`);
+      return workbench(input.operationId, {
+        items: [
+          { pid: 42, parentPid: 1, executable: "browser", owner: "alice", architecture: "amd64", commandLine: ["browser", "--fixture"] },
+          { pid: 77, parentPid: 1, executable: "worker", owner: "bob", architecture: "amd64", commandLine: ["worker", "--fixture"] },
+        ],
+        page: { limit: 100, total: 2, truncated: false },
+      });
+    });
+    render(<SessionProcessesPanel {...panelContext()} />);
+    const browserRow = await screen.findByRole("row", { name: /browser/u });
+    expect(screen.queryByRole("button", { name: "Close process details" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Resize process details")).not.toBeInTheDocument();
+
+    await user.click(browserRow);
+    let detail = screen.getByRole("region", { name: "browser" });
+    expect(within(detail).getByText("browser --fixture")).toBeInTheDocument();
+    expect(screen.getByLabelText("Resize process details")).toBeInTheDocument();
+    expect(screen.getByRole("grid", { name: "Session processes" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(within(detail).getByRole("button", { name: "Close process details" }));
+    expect(screen.queryByRole("region", { name: "browser" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Resize process details")).not.toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /browser/u })).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /worker/u })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("row", { name: /browser/u }));
+    detail = screen.getByRole("region", { name: "browser" });
+    expect(within(detail).getByRole("button", { name: "Close process details" })).toBeInTheDocument();
+    await user.click(screen.getByRole("row", { name: /worker/u }));
+    expect(screen.queryByRole("region", { name: "browser" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "worker" })).getByText("worker --fixture")).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenCalledOnce();
+  });
+
+  it("loads a requested process immediately, opens exact PID details, and accepts manual and repeated navigation queries", async () => {
+    const user = userEvent.setup();
+    const api = installAPI((input) => {
+      if (input.operationId !== "session.process.list") throw new Error(`Unexpected operation ${input.operationId}`);
+      const [pid, executable] = input.query === "pid:42" ? [42, "browser"] as const
+        : input.query === "pid:77 owner:alice" ? [77, "service"] as const : [43, "worker"] as const;
+      return workbench(input.operationId, {
+        items: [{ pid, parentPid: 1, executable, owner: "alice", architecture: "amd64", commandLine: [executable, "--fixture"] }],
+        page: { limit: 100, total: 1, truncated: false },
+      });
+    });
+    const context = panelContext();
+    const rendered = render(<SessionProcessesPanel {...context} processNavigation={{ pid: 42, requestId: 1 }} />);
+    expect(api.runSessionWorkbench.mock.calls[0]?.[0]).toEqual({ operationId: "session.process.list", fullInfo: true, limit: 100, query: "pid:42" });
+    expect(await screen.findByRole("heading", { name: "browser" })).toBeInTheDocument();
+    const filter = screen.getByRole("searchbox", { name: "Filter processes" });
+    expect(filter).toHaveValue("pid:42");
+
+    fireEvent.change(filter, { target: { value: "worker" } });
+    expect(await screen.findByRole("row", { name: /worker/u })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "browser" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "worker" })).not.toBeInTheDocument();
+    fireEvent.change(filter, { target: { value: "pid:77 owner:alice" } });
+    expect(await screen.findByRole("heading", { name: "service" })).toBeInTheDocument();
+    expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.process.list", fullInfo: true, limit: 100, query: "pid:77 owner:alice" });
+
+    rendered.rerender(<SessionProcessesPanel {...context} processNavigation={{ pid: 42, requestId: 2 }} />);
+    expect(filter).toHaveValue("pid:42");
+    expect(await screen.findByRole("heading", { name: "browser" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "service" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close process details" }));
+    expect(screen.queryByRole("region", { name: "browser" })).not.toBeInTheDocument();
+    expect(filter).toHaveValue("pid:42");
+    const previousRequests = api.runSessionWorkbench.mock.calls.length;
+    rendered.rerender(<SessionProcessesPanel {...context} processNavigation={{ pid: 42, requestId: 3 }} />);
+    expect(api.runSessionWorkbench.mock.calls.length).toBeGreaterThan(previousRequests);
+    expect(await screen.findByRole("heading", { name: "browser" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "browser" })).toBeInTheDocument();
+    expect(filter).toHaveValue("pid:42");
   });
 
   it("uses bounded server-side process search, tree paging, and locks termination while review is pending", async () => {

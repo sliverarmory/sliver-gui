@@ -17,6 +17,7 @@ import {
 } from "../shared/application-context-menu-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
 import { SCRIPT_TASK_IPC, type ScriptTaskManagerAPI } from "../shared/script-task-manager-contracts.js";
+import type { ApplicationZoomAPI } from "../shared/application-zoom-contracts.js";
 
 type InvokeArgumentsByMethod = {
   [Method in keyof typeof IPC_INVOKE]: IpcInvokeArgs<(typeof IPC_INVOKE)[Method]>;
@@ -156,6 +157,8 @@ const electronMocks = vi.hoisted(() => ({
   on: vi.fn(),
   removeListener: vi.fn(),
   getPathForFile: vi.fn<(file: File) => string>(),
+  getZoomFactor: vi.fn(() => 1),
+  setZoomFactor: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
@@ -168,6 +171,10 @@ vi.mock("electron", () => ({
     removeListener: electronMocks.removeListener,
   },
   webUtils: { getPathForFile: electronMocks.getPathForFile },
+  webFrame: {
+    getZoomFactor: electronMocks.getZoomFactor,
+    setZoomFactor: electronMocks.setZoomFactor,
+  },
 }));
 
 const createdChannels: TestMessageChannel[] = [];
@@ -235,7 +242,7 @@ describe("sandboxed preload bridge", () => {
   });
 
   it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
-    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(3);
+    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(4);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];
     expect(call).toBeDefined();
     if (!call) throw new Error("Expected the preload API to be exposed");
@@ -313,6 +320,18 @@ describe("sandboxed preload bridge", () => {
     const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
     await exposed.copyManagedServerSshCommand(input);
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.copyManagedServerSshCommand, input);
+  });
+
+  it("exposes only current zoom, reset, and change subscription capabilities", () => {
+    const call = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => name === "applicationZoom");
+    if (!call) throw new Error("Expected the zoom bridge to be exposed");
+    const exposed = call[1] as unknown as ApplicationZoomAPI;
+    expect(Object.keys(exposed)).toEqual(["getFactor", "reset", "onChanged"]);
+    expect(Object.isFrozen(exposed)).toBe(true);
+    electronMocks.getZoomFactor.mockReturnValueOnce(0.9);
+    expect(exposed.getFactor()).toBe(0.9);
+    exposed.reset();
+    expect(electronMocks.setZoomFactor).toHaveBeenCalledExactlyOnceWith(1);
   });
 
   it("exposes a frozen capability-only application context-menu bridge", async () => {

@@ -43,6 +43,7 @@ import {
   type SessionWorkbenchOperationId,
   type SessionWorkbenchResult,
 } from "../shared/session-contracts.js";
+import { parseSessionProcessQuery, sessionProcessMatchesQuery } from "../shared/session-process-query.js";
 
 const MAX_NESTED_ITEMS = 64;
 const MAX_SHORT_TEXT_LENGTH = 4_096;
@@ -366,9 +367,9 @@ export class SessionWorkbench {
         const response = await this.remote(input.operationId, () =>
           this.client.psSession(target.sessionId, input.fullInfo));
         assertImplantResponse(response, "Process listing");
-        const query = input.query?.trim().toLocaleLowerCase();
+        const query = parseSessionProcessQuery(input.query);
         const value = boundedPage(response.Processes, input, normalizeProcess, (process) =>
-          !query || processMatchesQuery(process, query),
+          sessionProcessMatchesQuery(process, query),
         );
         return { operationId: input.operationId, value };
       }
@@ -1156,16 +1157,6 @@ function normalizeService(
     account: boundedText(value.Account, MAX_SHORT_TEXT_LENGTH),
     ...(message === undefined ? {} : { message }),
   };
-}
-
-function processMatchesQuery(process: SessionProcess, query: string): boolean {
-  return [
-    String(process.pid),
-    process.executable,
-    process.owner,
-    process.architecture,
-    ...process.commandLine,
-  ].some((value) => value.toLocaleLowerCase().includes(query));
 }
 
 function serviceMatchesQuery(service: SessionService, query: string): boolean {

@@ -542,11 +542,14 @@ function buildContextMenuRequest(
     action: () => webContents.inspectElement(x, y),
   })]);
 
+  // Electron supplies DIP coordinates, while the renderer positions its menu
+  // in CSS pixels. Keep the native coordinates above for inspection/image copy.
+  const zoomFactor = webContents.getZoomFactor();
   const request = parseApplicationContextMenuRequest({
     v: APPLICATION_CONTEXT_MENU_VERSION,
     requestId: randomUUID(),
-    x,
-    y,
+    x: Math.round(x / zoomFactor),
+    y: Math.round(y / zoomFactor),
     items: joinMenuGroups(groups),
   });
   return { request, actions };

@@ -106,6 +106,8 @@ export interface SessionWorkspacePanelContext {
   onSnapshot: (snapshot: SliverSnapshot) => void;
   onOperationSubmitted: (operation: TargetOperationRecord) => boolean;
   isTargetTransitionPending: boolean;
+  onGoToProcess?: (pid: number) => void;
+  processNavigation?: { pid: number; requestId: number };
 }
 
 export type SessionWorkspacePanelRenderer = (context: SessionWorkspacePanelContext) => ReactNode;
@@ -168,6 +170,9 @@ export function SessionWorkspacePage({
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [terminalVisitedRouteIdentity, setTerminalVisitedRouteIdentity] = useState<string>();
   const [selectedPanel, setSelectedPanel] = useState("overview");
+  const supportsRegistry = Boolean(session?.os.toLocaleLowerCase().includes("windows"));
+  const visiblePanel = selectedPanel === "registry" && !supportsRegistry ? "overview" : selectedPanel;
+  const [processNavigation, setProcessNavigation] = useState<{ routeIdentity: string; pid: number; requestId: number }>();
   const [renameRouteIdentity, setRenameRouteIdentity] = useState<string>();
   const [pendingSessionSwitch, setPendingSessionSwitch] = useState<PendingSessionSwitch>();
   const [isCheckingSessionShells, setIsCheckingSessionShells] = useState(false);
@@ -175,6 +180,8 @@ export function SessionWorkspacePage({
   const [isPoppingOutInteraction, setIsPoppingOutInteraction] = useState(false);
   const [isWorkspaceHeaderStuck, setIsWorkspaceHeaderStuck] = useState(false);
   const isTargetTransitionPending = isCheckingSessionShells || isSwitchingSession;
+  const targetTransitionPendingRef = useRef(isTargetTransitionPending);
+  targetTransitionPendingRef.current = isTargetTransitionPending;
   const workspaceScrollMarkerRef = useRef<HTMLDivElement>(null);
   const operationsRequestSequence = useRef(0);
   const operationDetailRequestSequence = useRef(0);
@@ -528,6 +535,21 @@ export function SessionWorkspacePage({
     }
   }, [allowPopOut, routeIdentity]);
 
+  const goToProcess = useCallback((pid: number) => {
+    if (
+      !isCurrentRef.current ||
+      targetTransitionPendingRef.current ||
+      routeIdentity !== routeIdentityRef.current ||
+      !Number.isSafeInteger(pid) || pid < 0
+    ) return;
+    setProcessNavigation((current) => ({ routeIdentity, pid, requestId: (current?.requestId ?? 0) + 1 }));
+    setSelectedPanel("processes");
+  }, [routeIdentity]);
+
+  useEffect(() => {
+    if (!supportsRegistry && selectedPanel === "registry") setSelectedPanel("overview");
+  }, [selectedPanel, supportsRegistry]);
+
   if (!currentSession) {
     return (
       <section className="page-stack" aria-labelledby="session-workspace-unavailable-heading">
@@ -562,6 +584,10 @@ export function SessionWorkspacePage({
     onSnapshot,
     onOperationSubmitted: acceptSubmittedOperation,
     isTargetTransitionPending,
+    onGoToProcess: goToProcess,
+    ...(processNavigation?.routeIdentity === routeIdentity ? {
+      processNavigation: { pid: processNavigation.pid, requestId: processNavigation.requestId },
+    } : {}),
   };
   const resolvedPanels = { ...defaultSessionWorkspacePanels, ...panels };
   const isWindows = currentSession.os.toLocaleLowerCase().includes("windows");
@@ -577,7 +603,7 @@ export function SessionWorkspacePage({
       aria-labelledby="session-workspace-heading"
       className="page-stack session-workspace"
       data-presentation={presentation}
-      data-selected-panel={selectedPanel}
+      data-selected-panel={visiblePanel}
       inert={isTargetTransitionPending ? true : undefined}
     >
       <div className="session-workspace__trail-frame">
@@ -606,10 +632,11 @@ export function SessionWorkspacePage({
 
       <Tabs
         className="session-workspace__tabs"
-        defaultSelectedKey="overview"
+        selectedKey={visiblePanel}
         variant="secondary"
         onSelectionChange={(key) => {
           setSelectedPanel(String(key));
+          if (String(key) !== "processes") setProcessNavigation(undefined);
           if (String(key) === "terminal") setTerminalVisitedRouteIdentity(routeIdentity);
         }}
       >
@@ -704,7 +731,7 @@ export function SessionWorkspacePage({
           </div>
         </div>
 
-        <WorkspacePanelViewport presentation={presentation} scrollKey={`${routeIdentity}:${selectedPanel}`}>
+        <WorkspacePanelViewport presentation={presentation} scrollKey={`${routeIdentity}:${visiblePanel}`}>
           <Tabs.Panel className="pt-6" id="overview">
             {renderPanel(resolvedPanels.overview, context, {
               icon: faComputer,
@@ -741,7 +768,7 @@ export function SessionWorkspacePage({
               description: "Browse a directory to inspect bounded remote filesystem results for this session.",
             })}
           </Tabs.Panel>
-          <Tabs.Panel className="pt-6" id="processes">
+          <Tabs.Panel className="session-workspace__processes-panel pt-6" id="processes">
             {renderPanel(resolvedPanels.processes, context, {
               icon: faMicrochip,
               title: "No process inventory loaded",

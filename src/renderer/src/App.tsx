@@ -55,6 +55,7 @@ import {
 } from "./components/AppCommandPalette";
 import { CommandPaletteShortcutKbd, isApplePlatform } from "./components/CommandPaletteShortcut";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
+import { SidebarZoomControls } from "./components/SidebarZoomControls";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
 import { ConnectionProvider } from "./components/ConnectionProvider";
 import { BuildsPage } from "./pages/BuildsPage";
@@ -1084,6 +1085,7 @@ export function NavigationContent({
         </Sidebar.Group>
       </Sidebar.Content>
       <Sidebar.Footer>
+        <SidebarZoomControls />
         <ConnectionMenu
           snapshot={snapshot}
           onDisconnect={disconnectCurrentServer}

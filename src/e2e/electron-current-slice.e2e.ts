@@ -3047,8 +3047,8 @@ async function verifyM2SessionWorkspace(
     return maximum;
   });
   assert.ok(
-    tableMaxScrollTop <= 1,
-    `the process table must not own vertical scrolling; max scrollTop was ${tableMaxScrollTop}`,
+    tableMaxScrollTop > 0,
+    `the process table must own vertical scrolling; max scrollTop was ${tableMaxScrollTop}`,
   );
 
   const sessionContent = page.locator(
@@ -3063,7 +3063,7 @@ async function verifyM2SessionWorkspace(
     };
   });
   assert.equal(pageLayout.overflowY, "auto");
-  assert.ok(pageLayout.scrollRange > 0, "the application content must own scrolling for eager process rows");
+  assert.ok(pageLayout.scrollRange <= 1, "the application content must not scroll the fixed process inventory");
   assert.equal(pageLayout.bottomPadding, "10px");
 
   await page.getByRole("button", { name: "Load more processes", exact: true }).click();

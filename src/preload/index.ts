@@ -1,4 +1,6 @@
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
+
+import { createApplicationZoomAPI, type ApplicationZoomResizeTarget } from "./application-zoom.js";
 
 import {
   IPC,
@@ -263,6 +265,10 @@ const api: SliverDesktopAPI = {
 installRestrictedTargetContextMenuSignal();
 
 contextBridge.exposeInMainWorld("sliver", Object.freeze(api));
+contextBridge.exposeInMainWorld("applicationZoom", createApplicationZoomAPI(
+  webFrame,
+  (globalThis as unknown as { window: ApplicationZoomResizeTarget }).window,
+));
 contextBridge.exposeInMainWorld("applicationContextMenu", Object.freeze({
   onMenuRequested: (listener) => {
     if (typeof listener !== "function") throw new TypeError("context-menu listener must be a function");

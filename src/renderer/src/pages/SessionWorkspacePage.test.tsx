@@ -9,6 +9,7 @@ import type { SessionSummary, TargetActionPlan, TargetRef } from "../../../share
 import type { TargetOperationRecord } from "../../../shared/operation-contracts";
 import {
   SessionWorkspacePage,
+  type SessionWorkspacePanelContext,
   type SessionWorkspaceRoute,
 } from "./SessionWorkspacePage";
 
@@ -698,6 +699,87 @@ describe("SessionWorkspacePage", () => {
 
     await user.click(screen.getByRole("button", { name: "Back to live sessions" }));
     expect(onBack).toHaveBeenCalledOnce();
+  });
+
+  it("returns to Overview when a selected Windows Registry tab disappears on a Linux route", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const windowsSession = { ...session, os: "windows" };
+    const panels = {
+      overview: () => <section aria-label="Injected overview panel">Overview</section>,
+      registry: () => <section aria-label="Injected registry panel">Registry</section>,
+    };
+    const onSnapshot = vi.fn();
+    const rendered = render(<SessionWorkspacePage route={route} session={windowsSession} snapshot={workspaceSnapshot(windowsSession)} onSnapshot={onSnapshot} panels={panels} />);
+    await user.click(screen.getByRole("tab", { name: "Registry" }));
+    expect(screen.getByRole("tab", { name: "Registry", selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Injected registry panel" })).toBeInTheDocument();
+    rendered.rerender(<SessionWorkspacePage route={otherRoute} session={otherSession} snapshot={selectedOtherSessionSnapshot()} onSnapshot={onSnapshot} panels={panels} />);
+    expect(screen.queryByRole("tab", { name: "Registry" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Overview", selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Injected overview panel" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Injected registry panel" })).not.toBeInTheDocument();
+  });
+
+  it("routes a netstat process selection to Processes with a new typed navigation request each time", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const networkPanel = vi.fn((_context: SessionWorkspacePanelContext) => <section aria-label="Injected network panel">Network inventory</section>);
+    const processesPanel = vi.fn((_context: SessionWorkspacePanelContext) => <section aria-label="Injected processes panel">Processes</section>);
+    render(<SessionWorkspacePage route={route} session={session} snapshot={workspaceSnapshot()} onSnapshot={vi.fn()} panels={{ network: networkPanel, processes: processesPanel }} />);
+    await user.click(screen.getByRole("tab", { name: "Network" }));
+    const navigate = networkPanel.mock.calls.at(-1)?.[0].onGoToProcess;
+    expect(navigate).toBeTypeOf("function");
+    act(() => navigate?.(42));
+    expect(screen.getByRole("tab", { name: "Processes", selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Injected processes panel" })).toBeInTheDocument();
+    const firstNavigation = processesPanel.mock.calls.at(-1)?.[0].processNavigation;
+    expect(firstNavigation).toMatchObject({ pid: 42, requestId: expect.any(Number) });
+
+    act(() => navigate?.(42));
+    expect(screen.getByRole("tab", { name: "Processes", selected: true })).toBeInTheDocument();
+    const nextNavigation = processesPanel.mock.calls.at(-1)?.[0].processNavigation;
+    expect(nextNavigation?.pid).toBe(42);
+    expect(nextNavigation?.requestId).toBeGreaterThan(firstNavigation!.requestId);
+  });
+
+  it("ignores process-navigation callbacks captured for a previous session route", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const networkPanel = vi.fn((_context: SessionWorkspacePanelContext) => <section aria-label="Injected network panel">Network inventory</section>);
+    const processesPanel = vi.fn((_context: SessionWorkspacePanelContext) => <section aria-label="Injected processes panel">Processes</section>);
+    const panels = { network: networkPanel, processes: processesPanel };
+    const onSnapshot = vi.fn();
+    const rendered = render(<SessionWorkspacePage route={route} session={session} snapshot={workspaceSnapshot()} onSnapshot={onSnapshot} panels={panels} />);
+    await user.click(screen.getByRole("tab", { name: "Network" }));
+    const staleNavigate = networkPanel.mock.calls.at(-1)?.[0].onGoToProcess;
+    rendered.rerender(<SessionWorkspacePage route={otherRoute} session={otherSession} snapshot={selectedOtherSessionSnapshot()} onSnapshot={onSnapshot} panels={panels} />);
+    await user.click(screen.getByRole("tab", { name: "Network" }));
+    act(() => staleNavigate?.(42));
+    expect(screen.getByRole("tab", { name: "Network", selected: true })).toBeInTheDocument();
+    expect(processesPanel.mock.calls.at(-1)?.[0].processNavigation).toBeUndefined();
+    act(() => networkPanel.mock.calls.at(-1)?.[0].onGoToProcess?.(84));
+    expect(screen.getByRole("tab", { name: "Processes", selected: true })).toBeInTheDocument();
+    expect(processesPanel.mock.calls.at(-1)?.[0].processNavigation).toMatchObject({ pid: 84, requestId: expect.any(Number) });
+  });
+
+  it("ignores a captured process-navigation callback while a session switch is pending", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const selection = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    vi.mocked(api.selectTarget).mockReturnValue(selection.promise);
+    const networkPanel = vi.fn((_context: SessionWorkspacePanelContext) => <section aria-label="Injected network panel">Network inventory</section>);
+    const processesPanel = vi.fn((_context: SessionWorkspacePanelContext) => <section aria-label="Injected processes panel">Processes</section>);
+    render(<SessionWorkspacePage route={route} session={session} snapshot={switchableWorkspaceSnapshot()} onSnapshot={vi.fn()} onSessionChange={vi.fn()} panels={{ network: networkPanel, processes: processesPanel }} />);
+    await user.click(screen.getByRole("tab", { name: "Network" }));
+    const navigate = networkPanel.mock.calls.at(-1)?.[0].onGoToProcess;
+    await user.click(screen.getByRole("button", { name: "Sessions, switch session" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /analytics/i }));
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(otherSessionRef));
+    act(() => navigate?.(42));
+    expect(screen.getByRole("tab", { name: "Network", selected: true })).toBeInTheDocument();
+    expect(processesPanel.mock.calls.at(-1)?.[0].processNavigation).toBeUndefined();
+    await act(async () => { selection.resolve({ ok: false, error: "Switch canceled" }); });
   });
 
   it("keeps Sessions in the breadcrumb and switches with an exact main-issued reference", async () => {

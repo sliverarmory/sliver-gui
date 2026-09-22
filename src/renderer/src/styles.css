@@ -841,23 +841,23 @@
   border-radius: 0;
 }
 
-/* Registry and Files use the remaining session viewport, with scrolling
+/* Registry, Files, and Processes use the remaining session viewport, with scrolling
    contained inside their navigation and content panes. */
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"]) {
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"]) {
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"]) > .session-workspace__trail-frame,
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"])
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"]) > .session-workspace__trail-frame,
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"])
   > .session-workspace__tabs
   > .session-workspace__sticky {
   flex: none;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"]) > .session-workspace__tabs,
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"])
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"]) > .session-workspace__tabs,
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"])
   > .session-workspace__tabs
   > :is(.session-workspace__panel-content, .session-workspace__viewport) {
   min-height: 0;
@@ -865,21 +865,21 @@
   overflow: hidden;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"])
-  :is(.session-workspace__viewport-content, .session-workspace__registry-panel, .session-workspace__files-panel) {
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"])
+  :is(.session-workspace__viewport-content, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel) {
   height: 100%;
   max-height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"]) :is(.session-workspace__registry-panel, .session-workspace__files-panel) {
+.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"]) :is(.session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel) {
   margin-top: 0;
 }
 
-/* Registry values and file listings form continuous editor panes. */
-:is(.session-registry-values-grid, .session-files-grid).table-root,
-:is(.session-registry-values-grid, .session-files-grid).table-root :is(.table__content, .table__header, .table__body, .table__row, .table__column, .table__cell) {
+/* Inventory tables form continuous editor panes. */
+:is(.session-registry-values-grid, .session-files-grid, .session-processes-grid).table-root,
+:is(.session-registry-values-grid, .session-files-grid, .session-processes-grid).table-root :is(.table__content, .table__header, .table__body, .table__row, .table__column, .table__cell) {
   border-radius: 0;
   border-start-start-radius: 0;
   border-start-end-radius: 0;
@@ -887,16 +887,20 @@
   border-end-end-radius: 0;
 }
 
-:is(.session-registry-values-grid, .session-files-grid).table-root .table__body {
+:is(.session-registry-values-grid, .session-files-grid, .session-processes-grid).table-root .table__body {
   box-shadow: none;
 }
 
-:is(.session-registry-values-grid, .session-files-grid).table-root .table__header {
+:is(.session-registry-values-grid, .session-files-grid, .session-processes-grid).table-root .table__header {
   position: sticky;
   z-index: 2;
   top: 0;
   background: var(--color-background);
   box-shadow: 0 1px 0 var(--color-separator);
+}
+
+html.dark .session-processes-grid.table-root--secondary {
+  background-color: var(--color-surface);
 }
 
 @media (max-width: 900px) {
