@@ -8,6 +8,24 @@ import type { TokenCredential } from "@azure/identity";
 import { SliverClient, parseConfig, type SliverClientConfig } from "sliver-script";
 import ssh2 from "ssh2";
 
+import {
+  parseListCloudDnsZonesInput,
+  parseListCloudDnsRecordsInput,
+  parseCreateCloudDnsRecordInput,
+  parseUpdateCloudDnsRecordInput,
+  parseDeleteCloudDnsRecordInput,
+  type CloudDnsProvider,
+  type CloudDnsZone,
+  type CloudDnsRecord,
+  type ListCloudDnsZonesInput,
+  type ListCloudDnsRecordsInput,
+  type CreateCloudDnsRecordInput,
+  type UpdateCloudDnsRecordInput,
+  type DeleteCloudDnsRecordInput,
+} from "../shared/cloud-dns-contracts.js";
+import { AwsDnsProvider } from "./cloud/aws-dns-provider.js";
+import { AzureDnsProvider } from "./cloud/azure-dns-provider.js";
+
 import type {
   CloudCredentialIdInput,
   CloudCredentialTestResult,
@@ -169,6 +187,11 @@ const PROVISIONING_TRANSCRIPT_EMIT_DELAY_MS = 100;
 const SSH_HOST_KEY_REVIEW_TTL_MS = 5 * 60 * 1000;
 const DEPLOYMENT_REFRESH_TIMEOUT_MS = 30_000;
 const DEPLOYMENT_REFRESH_CONCURRENCY = 4;
+const DNS_ZONE_LIMIT = 1_000;
+const DNS_ALL_ZONES_LIMIT = 200;
+const DNS_RECORD_LIMIT = 20_000;
+const DNS_READ_CONCURRENCY = 4;
+const DNS_ALL_ZONES_DEADLINE_MS = 120_000;
 const AZURE_PUBLIC_IP_REFRESH_ATTEMPTS = 7;
 const AZURE_PUBLIC_IP_REFRESH_DELAY_MS = 5_000;
 const SSH_HOST_KEY_STORE_FILE_NAME = "ssh-host-keys.json";
@@ -339,6 +362,8 @@ export interface CloudDeploymentServiceOptions {
   readonly provisioner?: CloudSliverProvisioner;
   /** Main-process-only authoritative operator-name lookup. */
   readonly operatorDirectoryClientFactory?: CloudOperatorDirectoryClientFactory;
+  readonly awsDnsProviderFactory?: (connection: AwsEc2ProviderConnection) => CloudDnsProvider;
+  readonly azureDnsProviderFactory?: (connection: AzureVmProviderConnection) => CloudDnsProvider;
   readonly awsProviderFactory?: CloudAwsProviderFactory;
   readonly awsPermissionCheckerFactory?: CloudAwsPermissionCheckerFactory;
   readonly awsProfileSource?: CloudAwsProfileSource;
@@ -402,6 +427,8 @@ export class CloudDeploymentService {
   readonly #egressIpv4Detector: CloudEgressIpv4Detector;
   readonly #provisioner: CloudSliverProvisioner;
   readonly #operatorDirectoryClientFactory: CloudOperatorDirectoryClientFactory;
+  readonly #awsDnsProviderFactory: (connection: AwsEc2ProviderConnection) => CloudDnsProvider;
+  readonly #azureDnsProviderFactory: (connection: AzureVmProviderConnection) => CloudDnsProvider;
   readonly #awsProviderFactory: CloudAwsProviderFactory;
   readonly #awsPermissionCheckerFactory: CloudAwsPermissionCheckerFactory;
   readonly #awsProfiles: CloudAwsProfileSource;
@@ -458,6 +485,8 @@ export class CloudDeploymentService {
     this.#operatorDirectoryClientFactory = options.operatorDirectoryClientFactory ?? (
       (config) => new SliverClient(config)
     );
+    this.#awsDnsProviderFactory = options.awsDnsProviderFactory ?? ((connection) => new AwsDnsProvider(connection));
+    this.#azureDnsProviderFactory = options.azureDnsProviderFactory ?? ((connection) => new AzureDnsProvider(connection));
     this.#awsProviderFactory = options.awsProviderFactory ?? ((connection) => new AwsEc2Provider(connection));
     this.#awsPermissionCheckerFactory = options.awsPermissionCheckerFactory ?? (
       (connection) => new AwsEc2PermissionChecker(connection)
@@ -1423,6 +1452,142 @@ export class CloudDeploymentService {
     } catch (error) {
       return failure(error, "The Azure option discovery request was rejected");
     }
+  }
+
+  async listDnsZones(input: ListCloudDnsZonesInput): Promise<OperationResult<readonly CloudDnsZone[]>> {
+    try {
+      const parsed = parseListCloudDnsZonesInput(input);
+      return await this.#withDnsProvider(parsed.credentialId, async (provider) => {
+        const zones = await provider.listZones();
+        if (zones.length > DNS_ZONE_LIMIT) throw new Error(`DNS listing exceeds the ${DNS_ZONE_LIMIT}-zone limit.`);
+        return { ok: true, value: zones };
+      });
+    } catch (error) {
+      return failure(error, "DNS zones could not be listed");
+    }
+  }
+
+  async listDnsRecords(input: ListCloudDnsRecordsInput): Promise<OperationResult<readonly CloudDnsRecord[]>> {
+    try {
+      const parsed = parseListCloudDnsRecordsInput(input);
+      return await this.#withDnsProvider(parsed.credentialId, async (provider) => {
+        if (parsed.zoneId !== null) {
+          const records = await provider.listRecords(parsed.zoneId);
+          if (records.length > DNS_RECORD_LIMIT) throw new Error(`DNS listing exceeds the ${DNS_RECORD_LIMIT}-record limit.`);
+          return { ok: true, value: records };
+        }
+        const deadline = Date.now() + DNS_ALL_ZONES_DEADLINE_MS;
+        const requireTimeRemaining = (): void => {
+          if (Date.now() >= deadline) throw new Error("The all-zones DNS query exceeded its 120-second time limit. Select an individual zone.");
+        };
+        const zones = await provider.listZones();
+        requireTimeRemaining();
+        if (zones.length > DNS_ALL_ZONES_LIMIT) throw new Error(`Listing records across all zones exceeds the ${DNS_ALL_ZONES_LIMIT}-zone limit. Select an individual zone.`);
+        const recordsByZone: (readonly CloudDnsRecord[])[] = new Array(zones.length);
+        let cursor = 0;
+        let recordCount = 0;
+        let failed = false;
+        // Wait for every in-flight read before disposing the provider. A failed
+        // zone rejects the whole request instead of presenting an incomplete list.
+        const workers = Array.from({ length: Math.min(DNS_READ_CONCURRENCY, zones.length) }, async () => {
+          while (!failed && cursor < zones.length) {
+            const index = cursor++;
+            const zone = zones[index]!;
+            try {
+              this.#assertActive();
+              requireTimeRemaining();
+              const records = await provider.listRecords(zone.id);
+              requireTimeRemaining();
+              recordCount += records.length;
+              if (recordCount > DNS_RECORD_LIMIT) throw new Error(`DNS listing exceeds the ${DNS_RECORD_LIMIT}-record limit. Select an individual zone.`);
+              recordsByZone[index] = records;
+            } catch (error) {
+              failed = true;
+              throw error;
+            }
+          }
+        });
+        const outcomes = await Promise.allSettled(workers);
+        const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+        if (rejected?.status === "rejected") throw rejected.reason;
+        return { ok: true, value: Object.freeze(recordsByZone.flat()) };
+      });
+    } catch (error) {
+      return failure(error, "DNS records could not be listed");
+    }
+  }
+
+  async createDnsRecord(input: CreateCloudDnsRecordInput): Promise<OperationResult> {
+    try {
+      const parsed = parseCreateCloudDnsRecordInput(input);
+      return await this.#withDnsProvider(parsed.credentialId, async (provider) => {
+        await provider.createRecord(parsed.zoneId, parsed.record);
+        return { ok: true };
+      });
+    } catch (error) {
+      return failure(error, "The DNS record could not be created");
+    }
+  }
+
+  async updateDnsRecord(input: UpdateCloudDnsRecordInput): Promise<OperationResult> {
+    try {
+      const parsed = parseUpdateCloudDnsRecordInput(input);
+      return await this.#withDnsProvider(parsed.credentialId, async (provider) => {
+        await provider.updateRecord(parsed.zoneId, parsed.recordId, parsed.expectedVersion, parsed.record);
+        return { ok: true };
+      });
+    } catch (error) {
+      return failure(error, "The DNS record could not be updated");
+    }
+  }
+
+  async deleteDnsRecord(input: DeleteCloudDnsRecordInput): Promise<OperationResult> {
+    try {
+      const parsed = parseDeleteCloudDnsRecordInput(input);
+      return await this.#withDnsProvider(parsed.credentialId, async (provider) => {
+        await provider.deleteRecord(parsed.zoneId, parsed.recordId, parsed.expectedVersion);
+        return { ok: true };
+      });
+    } catch (error) {
+      return failure(error, "The DNS record could not be deleted");
+    }
+  }
+
+  async #withDnsProvider<T = never>(
+    credentialId: string,
+    operation: (provider: CloudDnsProvider) => Promise<OperationResult<T>>,
+  ): Promise<OperationResult<T>> {
+    this.#assertActive();
+    const summary = (await this.#vault.list()).find(({ id }) => id === credentialId);
+    if (!summary) return { ok: false, error: "The cloud credential no longer exists" };
+    if (summary.provider === "aws") {
+      return this.#vault.withCredential(summary.id, "aws", async (secret) => {
+        let provider: CloudDnsProvider | undefined;
+        try {
+          const connection = await this.#awsConnection(summary.defaultRegion, secret, summary.id);
+          this.#assertActive();
+          provider = this.#awsDnsProviderFactory(connection);
+          return await operation(provider);
+        } catch (error) {
+          return failure(error, "The AWS DNS request failed", credentialValues(secret));
+        } finally {
+          provider?.dispose();
+        }
+      });
+    }
+    return this.#vault.withCredential(summary.id, "azure", async (secret) => {
+      let provider: CloudDnsProvider | undefined;
+      try {
+        const connection = this.#azureConnection(summary.defaultLocation, secret, summary.id);
+        this.#assertActive();
+        provider = this.#azureDnsProviderFactory(connection);
+        return await operation(provider);
+      } catch (error) {
+        return failure(error, "The Azure DNS request failed", credentialValues(secret));
+      } finally {
+        provider?.dispose();
+      }
+    });
   }
 
   async createDeployment(

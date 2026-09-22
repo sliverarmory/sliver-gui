@@ -8,6 +8,7 @@ import { join } from "node:path";
 import ssh2 from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { CloudDnsProvider, CloudDnsZone, CloudDnsRecord, CloudDnsRecordSpec } from "../shared/cloud-dns-contracts.js";
 import { CLOUD_DEPLOYMENT_STATUSES } from "../shared/cloud-deployment-contracts.js";
 import type {
   AwsConsoleLoginSession,
@@ -92,6 +93,145 @@ beforeEach(async () => {
 
 afterEach(async () => {
   if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+});
+
+describe("CloudDeploymentService DNS management", () => {
+  const record: CloudDnsRecordSpec = { name: "www", type: "A", ttl: 300, values: ["203.0.113.10"] };
+  const zone: CloudDnsZone = { id: "ZEXAMPLE", name: "example.test", provider: "aws", private: false, recordCount: 1, resourceGroupName: null };
+  const listedRecord: CloudDnsRecord = { id: "www.example.test.|A", zoneId: zone.id, zoneName: zone.name, name: "www", type: "A", ttl: 300, values: record.values, editable: true, readOnlyReason: null, version: "a".repeat(64) };
+
+  async function fixture(provider: "aws" | "azure" = "aws") {
+    const deps = await dependencies();
+    await deps.vault.create(provider === "aws" ? awsCredential() : azureCredential());
+    const dns = {
+      listZones: vi.fn<CloudDnsProvider["listZones"]>(async () => [{ ...zone, provider }]),
+      listRecords: vi.fn<CloudDnsProvider["listRecords"]>(async () => [listedRecord]),
+      createRecord: vi.fn<CloudDnsProvider["createRecord"]>(async () => undefined),
+      updateRecord: vi.fn<CloudDnsProvider["updateRecord"]>(async () => undefined),
+      deleteRecord: vi.fn<CloudDnsProvider["deleteRecord"]>(async () => undefined),
+      dispose: vi.fn(),
+    } satisfies CloudDnsProvider;
+    const awsDnsProviderFactory = vi.fn(() => dns);
+    const azureDnsProviderFactory = vi.fn(() => dns);
+    const service = await CloudDeploymentService.create({
+      ...deps, rootDirectory, operatorConfigDirectory, provisioner: fakeProvisioner(),
+      awsDnsProviderFactory, azureDnsProviderFactory,
+      azureCliCredentialFactory: () => ({ getToken: async () => ({ token: "test-token", expiresOnTimestamp: NOW.getTime() + 60_000 }) }),
+    });
+    return { ...deps, service, dns, awsDnsProviderFactory, azureDnsProviderFactory };
+  }
+
+  it.each(["aws", "azure"] as const)("routes %s DNS through the credential vault without requiring a deployment", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState();
+    try {
+      await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toEqual({ ok: true, value: [{ ...zone, provider }] });
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: zone.id })).resolves.toEqual({ ok: true, value: [listedRecord] });
+      expect(f.dns.listRecords).toHaveBeenCalledExactlyOnceWith(zone.id);
+      expect(provider === "aws" ? f.awsDnsProviderFactory : f.azureDnsProviderFactory).toHaveBeenCalledTimes(2);
+      expect(provider === "aws" ? f.azureDnsProviderFactory : f.awsDnsProviderFactory).not.toHaveBeenCalled();
+      if (provider === "aws") expect(f.awsDnsProviderFactory).toHaveBeenCalledWith(expect.objectContaining({ region: "us-west-2", credentials: { accessKeyId: "AKIAEXAMPLE00000001", secretAccessKey: "secret-cloud-value" } }));
+      else expect(f.azureDnsProviderFactory).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, credential: expect.objectContaining({ getToken: expect.any(Function) }) }));
+      expect(f.store.getState()).toBe(before);
+      expect(f.dns.dispose).toHaveBeenCalledTimes(2);
+    } finally { f.service.dispose(); }
+  });
+
+  it("forwards validated DNS changes and expected versions without changing deployments", async () => {
+    const f = await fixture();
+    const before = f.store.getState();
+    const identity = { credentialId: CREDENTIAL_ID, zoneId: zone.id };
+    const existing = { ...identity, recordId: listedRecord.id, expectedVersion: listedRecord.version };
+    try {
+      await expect(f.service.createDnsRecord({ ...identity, record })).resolves.toEqual({ ok: true });
+      await expect(f.service.updateDnsRecord({ ...existing, record })).resolves.toEqual({ ok: true });
+      await expect(f.service.deleteDnsRecord(existing)).resolves.toEqual({ ok: true });
+      expect(f.dns.createRecord).toHaveBeenCalledExactlyOnceWith(zone.id, record);
+      expect(f.dns.updateRecord).toHaveBeenCalledExactlyOnceWith(zone.id, listedRecord.id, listedRecord.version, record);
+      expect(f.dns.deleteRecord).toHaveBeenCalledExactlyOnceWith(zone.id, listedRecord.id, listedRecord.version);
+      expect(f.store.getState()).toBe(before);
+      expect(f.dns.dispose).toHaveBeenCalledTimes(3);
+    } finally { f.service.dispose(); }
+  });
+
+  it("aggregates all zones with at most four concurrent reads and keeps zone order", async () => {
+    const f = await fixture();
+    const zones = Array.from({ length: 7 }, (_, index) => ({ ...zone, id: `Z${index}` }));
+    f.dns.listZones.mockResolvedValue(zones);
+    let active = 0;
+    let maximum = 0;
+    f.dns.listRecords.mockImplementation(async (zoneId) => {
+      maximum = Math.max(maximum, ++active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      return [{ ...listedRecord, zoneId }];
+    });
+    try {
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toEqual({ ok: true, value: zones.map(({ id }) => ({ ...listedRecord, zoneId: id })) });
+      expect(maximum).toBe(4);
+      expect(f.dns.dispose).toHaveBeenCalledOnce();
+    } finally { f.service.dispose(); }
+  });
+
+  it("stops all-zone work at the aggregate deadline without returning partial results", async () => {
+    const f = await fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    f.dns.listZones.mockResolvedValue(Array.from({ length: 8 }, (_, index) => ({ ...zone, id: `Z${index}` })));
+    f.dns.listRecords.mockImplementation(async () => {
+      if (f.dns.listRecords.mock.calls.length === 4) clock.mockReturnValue(120_001);
+      return [listedRecord];
+    });
+    try {
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("120-second time limit") });
+      expect(f.dns.listRecords).toHaveBeenCalledTimes(4);
+      expect(f.dns.dispose).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); f.service.dispose(); }
+  });
+
+  it("rejects incomplete all-zone results, redacts secrets, and drains in-flight reads before disposal", async () => {
+    const f = await fixture();
+    f.dns.listZones.mockResolvedValue([zone, { ...zone, id: "ZOTHER" }]);
+    const pending = deferred<readonly CloudDnsRecord[]>();
+    f.dns.listRecords.mockImplementation(async (zoneId) => {
+      if (zoneId === zone.id) throw new Error("DNS unavailable secret-cloud-value");
+      return pending.promise;
+    });
+    try {
+      const result = f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null });
+      await vi.waitFor(() => expect(f.dns.listRecords).toHaveBeenCalledTimes(2));
+      expect(f.dns.dispose).not.toHaveBeenCalled();
+      pending.resolve([listedRecord]);
+      await expect(result).resolves.toEqual({ ok: false, error: "DNS unavailable [redacted]" });
+      expect(f.dns.dispose).toHaveBeenCalledOnce();
+    } finally { f.service.dispose(); }
+  });
+
+  it("bounds zone and record listings without silently truncating", async () => {
+    const f = await fixture();
+    f.dns.listZones.mockResolvedValue(Array.from({ length: 201 }, (_, index) => ({ ...zone, id: `Z${index}` })));
+    try {
+      await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true, value: expect.any(Array) });
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("individual zone") });
+      expect(f.dns.listRecords).not.toHaveBeenCalled();
+      f.dns.listZones.mockResolvedValue(Array.from({ length: 1_001 }, (_, index) => ({ ...zone, id: `Z${index}` })));
+      await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("1000-zone limit") });
+      f.dns.listRecords.mockResolvedValue(Array.from({ length: 20_001 }, () => listedRecord));
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: zone.id })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("20000-record limit") });
+      f.dns.listZones.mockResolvedValue([zone, { ...zone, id: "ZOTHER" }]);
+      f.dns.listRecords.mockResolvedValue(Array.from({ length: 10_001 }, () => listedRecord));
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("20000-record limit") });
+    } finally { f.service.dispose(); }
+  });
+
+  it("rejects invalid, missing, and disposed credentials before provider access", async () => {
+    const f = await fixture();
+    await expect(f.service.listDnsZones({ credentialId: "invalid" })).resolves.toMatchObject({ ok: false });
+    await expect(f.service.listDnsZones({ credentialId: MISSING_CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: "The cloud credential no longer exists" });
+    f.service.dispose();
+    await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("disposed") });
+    expect(f.awsDnsProviderFactory).not.toHaveBeenCalled();
+    expect(f.azureDnsProviderFactory).not.toHaveBeenCalled();
+  });
 });
 
 describe("CloudDeploymentService", () => {

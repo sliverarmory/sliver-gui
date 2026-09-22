@@ -10,6 +10,21 @@ import {
 } from "electron";
 
 import {
+  parseListCloudDnsZonesInput,
+  parseListCloudDnsRecordsInput,
+  parseCreateCloudDnsRecordInput,
+  parseUpdateCloudDnsRecordInput,
+  parseDeleteCloudDnsRecordInput,
+  type CloudDnsZone,
+  type CloudDnsRecord,
+  type ListCloudDnsZonesInput,
+  type ListCloudDnsRecordsInput,
+  type CreateCloudDnsRecordInput,
+  type UpdateCloudDnsRecordInput,
+  type DeleteCloudDnsRecordInput,
+} from "../shared/cloud-dns-contracts.js";
+
+import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
   type CloudCredentialIdInput,
   type CloudCredentialTestResult,
@@ -123,6 +138,11 @@ export interface CloudDeploymentController {
   discoverAwsOptions(input: DiscoverAwsOptionsInput): MaybePromise<OperationResult<AwsDeploymentOptions>>;
   discoverAzureAccounts(): MaybePromise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): MaybePromise<OperationResult<AzureDeploymentOptions>>;
+  listDnsZones(input: ListCloudDnsZonesInput): MaybePromise<OperationResult<readonly CloudDnsZone[]>>;
+  listDnsRecords(input: ListCloudDnsRecordsInput): MaybePromise<OperationResult<readonly CloudDnsRecord[]>>;
+  createDnsRecord(input: CreateCloudDnsRecordInput): MaybePromise<OperationResult>;
+  updateDnsRecord(input: UpdateCloudDnsRecordInput): MaybePromise<OperationResult>;
+  deleteDnsRecord(input: DeleteCloudDnsRecordInput): MaybePromise<OperationResult>;
   createDeployment(input: CreateCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   generateOperatorConfig(
     input: CreateCloudOperatorConfigInput,
@@ -512,6 +532,41 @@ export function registerCloudDeploymentIpcHandlers(
         if (Buffer.isBuffer(data)) data.fill(0);
       }
     },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsZones,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseListCloudDnsZonesInput(requireSingleArgument(args))),
+    (_sender, input) => controller.listDnsZones(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsRecords,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseListCloudDnsRecordsInput(requireSingleArgument(args))),
+    (_sender, input) => controller.listDnsRecords(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.createDnsRecord,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCreateCloudDnsRecordInput(requireSingleArgument(args))),
+    (_sender, input) => controller.createDnsRecord(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.updateDnsRecord,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseUpdateCloudDnsRecordInput(requireSingleArgument(args))),
+    (_sender, input) => controller.updateDnsRecord(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.deleteDnsRecord,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseDeleteCloudDnsRecordInput(requireSingleArgument(args))),
+    (_sender, input) => controller.deleteDnsRecord(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment,

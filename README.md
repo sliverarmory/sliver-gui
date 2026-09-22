@@ -18,6 +18,8 @@ Font Awesome.
   terminals.
 - Separate Armory, Network, and Cloud Deployment windows, including AWS and
   Azure account integration.
+- A Cloud Deployment DNS manager for Route 53 and Azure DNS, with zone and
+  all-zones record views and record editing.
 - A Monaco Script Editor with a local script library, an isolated JavaScript
   runtime, and a script task manager.
 - Configurable keyboard shortcuts, application appearance, and update controls.
@@ -155,6 +157,7 @@ validation and review flows. Do not weaken these boundaries for development.
 - [Armory package management](docs/armory.md)
 - [Script Editor](docs/script-editor.md)
 - [AWS authentication](docs/aws-login.md) and [Azure authentication](docs/azure-login.md)
+- [Cloud DNS management](docs/cloud-dns.md)
 - [Protocol baseline and provenance](protocol/README.md)
 - [Operator parity report](docs/operator-parity.md)
 - [Platform support and release policy](docs/adr/0001-platform-support.md)

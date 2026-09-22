@@ -1,4 +1,13 @@
 import type {
+  CloudDnsZone,
+  CloudDnsRecord,
+  ListCloudDnsZonesInput,
+  ListCloudDnsRecordsInput,
+  CreateCloudDnsRecordInput,
+  UpdateCloudDnsRecordInput,
+  DeleteCloudDnsRecordInput,
+} from "./cloud-dns-contracts.js";
+import type {
   AwsCliProfileSummary,
   AzureCliAccountSummary,
   BeginAzureLoginInput,
@@ -55,6 +64,11 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   discoverAwsOptions: "sliver:cloud-deployment:aws:options:discover",
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
+  listDnsZones: "sliver:cloud-deployment:dns:zones:list",
+  listDnsRecords: "sliver:cloud-deployment:dns:records:list",
+  createDnsRecord: "sliver:cloud-deployment:dns:record:create",
+  updateDnsRecord: "sliver:cloud-deployment:dns:record:update",
+  deleteDnsRecord: "sliver:cloud-deployment:dns:record:delete",
   createDeployment: "sliver:cloud-deployment:create",
   renameDeployment: "sliver:cloud-deployment:rename",
   createOperatorConfig: "sliver:cloud-deployment:operator:create",
@@ -279,6 +293,11 @@ export interface CloudDeploymentAPI {
   discoverAwsOptions(input: DiscoverAwsOptionsInput): Promise<OperationResult<AwsDeploymentOptions>>;
   discoverAzureAccounts(): Promise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): Promise<OperationResult<AzureDeploymentOptions>>;
+  listDnsZones(input: ListCloudDnsZonesInput): Promise<OperationResult<readonly CloudDnsZone[]>>;
+  listDnsRecords(input: ListCloudDnsRecordsInput): Promise<OperationResult<readonly CloudDnsRecord[]>>;
+  createDnsRecord(input: CreateCloudDnsRecordInput): Promise<OperationResult>;
+  updateDnsRecord(input: UpdateCloudDnsRecordInput): Promise<OperationResult>;
+  deleteDnsRecord(input: DeleteCloudDnsRecordInput): Promise<OperationResult>;
   createDeployment(input: CreateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
   createOperatorConfig(
     input: CreateCloudOperatorConfigInput,

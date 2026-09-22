@@ -58,6 +58,7 @@ import {
   fakeBeaconPsTaskResult,
   fakeBeaconPwdTaskResult,
 } from "./beacon-interact-fixture.js";
+import { createCloudDnsFixture } from "./cloud-dns-fixture.js";
 
 interface FakeMainState {
   configFactoryCalls: number;
@@ -237,6 +238,7 @@ const registry = new ConnectionRegistry({
 });
 
 const cloudDeploymentController: ApplicationCloudDeploymentController = {
+  ...createCloudDnsFixture(process.argv.includes("--dns-fixture")),
   ...(overviewCloudDeployment ? {
     resolveManagedServer: (digest: string) => resolveManagedServerFromDeployments(digest, [overviewCloudDeployment]),
   } : {}),

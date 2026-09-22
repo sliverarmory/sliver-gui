@@ -93,6 +93,9 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
       if (message.type() === "error") consoleErrors.push(message.text());
     });
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    const mainWindow = await application.browserWindow(page);
+    assert.equal(await mainWindow.evaluate((window) => window.webContents.getZoomFactor()), 1,
+      "the main app starts at 100% zoom");
     await page.context().addInitScript(() => {
       const browser = globalThis as unknown as ProtocolBrowser;
       browser.__protocolViolations = [];
@@ -108,9 +111,19 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     await page.reload();
     mark("initial renderer assets and policy");
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    assert.equal(await mainWindow.evaluate((window) => window.webContents.getZoomFactor()), 1,
+      "reloading keeps the default 100% zoom");
     assert.equal(page.url(), RENDERER_URL);
     await assertBuiltAssets(page);
     await assertStrictPolicy(page);
+
+    mark("manual zoom");
+    await mainWindow.evaluate((window) => window.webContents.setZoomFactor(1.1));
+    await page.reload();
+    await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    assert.equal(await mainWindow.evaluate((window) => window.webContents.getZoomFactor()), 1.1,
+      "reloading preserves a manually selected zoom level");
+    await mainWindow.evaluate((window) => window.webContents.setZoomFactor(1));
 
     mark("settings and terminal runtime");
     const settingsResult = await page.evaluate(async () => {

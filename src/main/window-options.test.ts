@@ -43,6 +43,7 @@ describe("main window transparency", () => {
           contextIsolation: true,
           sandbox: true,
           webSecurity: true,
+          zoomFactor: 1,
         },
       });
     },

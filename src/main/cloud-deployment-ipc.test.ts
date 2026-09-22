@@ -1202,6 +1202,38 @@ describe("Cloud Deployment IPC boundary", () => {
     expect(Object.isFrozen(discoverAzureOptions.mock.calls[0]?.[0])).toBe(true);
   });
 
+  it("validates and forwards DNS operations only from the current Cloud Deployment window", async () => {
+    const response = { ok: false as const, error: "DNS test response" };
+    const listDnsZones = vi.fn<CloudDeploymentController["listDnsZones"]>(async () => response);
+    const listDnsRecords = vi.fn<CloudDeploymentController["listDnsRecords"]>(async () => response);
+    const createDnsRecord = vi.fn<CloudDeploymentController["createDnsRecord"]>(async () => response);
+    const updateDnsRecord = vi.fn<CloudDeploymentController["updateDnsRecord"]>(async () => response);
+    const deleteDnsRecord = vi.fn<CloudDeploymentController["deleteDnsRecord"]>(async () => response);
+    registerCloudDeploymentIpcHandlers(controllerMock({ listDnsZones, listDnsRecords, createDnsRecord, updateDnsRecord, deleteDnsRecord }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const record = { name: "www", type: "A", ttl: 300, values: ["203.0.113.10"] };
+    const identity = { credentialId: CREDENTIAL_ID, zoneId: "ZEXAMPLE" };
+    const existing = { ...identity, recordId: "www.example.test.|A", expectedVersion: "a".repeat(64) };
+    const cases = [
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsZones, { credentialId: CREDENTIAL_ID }, listDnsZones],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsRecords, { ...identity, zoneId: null }, listDnsRecords],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createDnsRecord, { ...identity, record }, createDnsRecord],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.updateDnsRecord, { ...existing, record }, updateDnsRecord],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteDnsRecord, existing, deleteDnsRecord],
+    ] as const;
+    for (const [channel, input, method] of cases) {
+      for (const event of [invokeEvent("sliver://app/index.html", 77).event, invokeEvent(CLOUD_RENDERER_URL, 78).event]) {
+        await expect(invoke(channel, event, input)).resolves.toEqual(REJECTED);
+      }
+      expect(method).not.toHaveBeenCalled();
+      await expect(invoke(channel, invokeEvent(CLOUD_RENDERER_URL, 77).event, input)).resolves.toEqual(response);
+      expect(method).toHaveBeenCalledExactlyOnceWith(input);
+      expect(Object.isFrozen(method.mock.calls[0]?.[0])).toBe(true);
+      await expect(invoke(channel, invokeEvent(CLOUD_RENDERER_URL, 77).event, { ...input, unexpected: true })).resolves.toEqual(REJECTED);
+      await expect(invoke(channel, invokeEvent(CLOUD_RENDERER_URL, 77).event, input, "extra")).resolves.toEqual(REJECTED);
+      expect(method).toHaveBeenCalledOnce();
+    }
+  });
+
   it("validates and forwards cloud firewall rule operations", async () => {
     const response = { ok: false as const, error: "firewall probe" };
     const listFirewallRules = vi.fn<CloudDeploymentController["listFirewallRules"]>(async () => response);
@@ -1393,6 +1425,11 @@ function controllerMock(
     discoverAwsOptions: vi.fn(unavailable),
     discoverAzureAccounts: vi.fn(unavailable),
     discoverAzureOptions: vi.fn(unavailable),
+    listDnsZones: vi.fn(unavailable),
+    listDnsRecords: vi.fn(unavailable),
+    createDnsRecord: vi.fn(unavailable),
+    updateDnsRecord: vi.fn(unavailable),
+    deleteDnsRecord: vi.fn(unavailable),
     createDeployment: vi.fn(unavailable),
     renameDeployment: vi.fn(unavailable),
     generateOperatorConfig: vi.fn(async () => ({

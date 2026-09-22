@@ -714,7 +714,7 @@ async function verifyAzureLoginForm(cloudPage: Page, artifactDirectory: string):
   assert.equal(await cloudPage.getByRole("combobox", { name: "Azure Authentication", exact: true }).isEnabled(), true);
   await cloudPage.screenshot({ path: join(artifactDirectory, "azure-login-form.png"), fullPage: true });
   await cloudPage.getByRole("button", { name: "Close Form", exact: true }).click();
-  await cloudPage.getByRole("tab", { name: /^Deployments/u }).click();
+  await cloudPage.getByRole("tab", { name: /^Servers/u }).click();
 }
 
 async function assertAwsFirewallDetails(cloudPage: Page, artifactDirectory?: string): Promise<void> {
@@ -923,7 +923,7 @@ async function assertCloudDeploymentSurface(
   cloudPage: Page,
 ): Promise<void> {
   await cloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
-  const deploymentsTab = cloudPage.getByRole("tab", { name: /^Deployments\b/ });
+  const deploymentsTab = cloudPage.getByRole("tab", { name: /^Servers\b/ });
   const credentialsTab = cloudPage.getByRole("tab", { name: /^Credentials\b/ });
   await Promise.all([deploymentsTab.waitFor(), credentialsTab.waitFor()]);
   assert.equal(await deploymentsTab.getAttribute("aria-selected"), "true");

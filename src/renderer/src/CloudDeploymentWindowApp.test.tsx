@@ -477,6 +477,11 @@ const api: CloudDeploymentAPI = {
   createFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
   updateFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
   deleteFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
+  listDnsZones: vi.fn(async () => ({ ok: true as const, value: [] })),
+  listDnsRecords: vi.fn(async () => ({ ok: true as const, value: [] })),
+  createDnsRecord: vi.fn(async () => ({ ok: true as const })),
+  updateDnsRecord: vi.fn(async () => ({ ok: true as const })),
+  deleteDnsRecord: vi.fn(async () => ({ ok: true as const })),
   prepareDestroyDeployment: vi.fn(async () => ({
     ok: true as const,
     value: {
@@ -638,7 +643,8 @@ describe("CloudDeploymentWindowApp", () => {
     const view = renderCloudDeploymentApp();
 
     expect(await screen.findByRole("heading", { name: "Cloud Deployment" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Deployments/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^Servers\s*0$/u })).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /^DNS\s*0$/u })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Credentials/i })).toBeInTheDocument();
     expect(screen.getByText("No Managed Servers")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Deployment" })).toBeInTheDocument();
@@ -710,7 +716,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.discoverAzureAccounts).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox", { name: "Label" })).toBe(labelInput);
     expect(labelInput).toHaveValue("Unsaved credential");
-    await user.click(screen.getByRole("tab", { name: /Deployments/i }));
+    await user.click(screen.getByRole("tab", { name: /Servers/i }));
     const serverActions = await openServerActions(user, "range-control");
     expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
     await user.keyboard("{Escape}");
@@ -3041,7 +3047,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.createOperatorConfig).not.toHaveBeenCalled();
   });
 
-  it("handles a native stop request on the deployments tab with a modal for the full pending duration", async () => {
+  it("handles a native stop request on the servers tab with a modal for the full pending duration", async () => {
     currentSnapshot = runningCloudSnapshot();
     const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
     vi.mocked(api.runLifecycleAction).mockImplementationOnce(() => lifecycleResult.promise);
@@ -3060,7 +3066,7 @@ describe("CloudDeploymentWindowApp", () => {
 
     const progress = await screen.findByRole("dialog", { name: "Stopping range-control" });
     expect(within(progress).getByText(/provider request is in progress/u)).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Deployments/u, hidden: true })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /Servers/u, hidden: true })).toHaveAttribute("aria-selected", "true");
     expect(api.runLifecycleAction).toHaveBeenCalledWith({
       deploymentId: DEPLOYMENT_ID,
       expectedRevision: 9,
@@ -3212,7 +3218,7 @@ describe("CloudDeploymentWindowApp", () => {
     }));
 
     expect(await screen.findByRole("alertdialog", { name: "Verify SSH host" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Deployments/u, hidden: true })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /Servers/u, hidden: true })).toHaveAttribute("aria-selected", "true");
     expect(api.openSshWindow).toHaveBeenCalledExactlyOnceWith({ deploymentId: DEPLOYMENT_ID });
   });
 
@@ -3317,7 +3323,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(scrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
     expect(backButton.compareDocumentPosition(instanceHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Cloud Deployment" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /^Deployments/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^Servers/u })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /^Credentials/u })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Instance summary" })).not.toBeInTheDocument();
     expect(screen.queryByText("Compute and network identifiers for this managed server.")).not.toBeInTheDocument();

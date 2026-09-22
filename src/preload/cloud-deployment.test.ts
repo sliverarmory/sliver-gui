@@ -76,6 +76,11 @@ describe("Cloud Deployment preload bridge", () => {
       "discoverAwsOptions",
       "discoverAzureAccounts",
       "discoverAzureOptions",
+      "listDnsZones",
+      "listDnsRecords",
+      "createDnsRecord",
+      "updateDnsRecord",
+      "deleteDnsRecord",
       "createDeployment",
       "renameDeployment",
       "createOperatorConfig",
@@ -348,6 +353,26 @@ describe("Cloud Deployment preload bridge", () => {
       CLOUD_DEPLOYMENT_IPC_EVENTS.changed,
       handler,
     );
+  });
+
+  it("forwards DNS operations on fixed channels without exposing provider credentials", async () => {
+    const credentialId = "11111111-1111-4111-8111-111111111111";
+    const identity = { credentialId, zoneId: "ZEXAMPLE" };
+    const existing = { ...identity, recordId: "www.example.test.|A", expectedVersion: "a".repeat(64) };
+    const record = { name: "www", type: "A" as const, ttl: 300, values: ["203.0.113.10"] };
+    const api = exposedApi();
+    await api.listDnsZones({ credentialId });
+    await api.listDnsRecords({ credentialId, zoneId: null });
+    await api.createDnsRecord({ ...identity, record });
+    await api.updateDnsRecord({ ...existing, record });
+    await api.deleteDnsRecord(existing);
+    expect(electronMocks.invoke.mock.calls.slice(-5)).toEqual([
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsZones, { credentialId }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsRecords, { credentialId, zoneId: null }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.createDnsRecord, { ...identity, record }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.updateDnsRecord, { ...existing, record }],
+      [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteDnsRecord, existing],
+    ]);
   });
 
   it("validates and replays native theme events", async () => {

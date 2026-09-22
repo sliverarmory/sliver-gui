@@ -64,7 +64,10 @@ export function mainWindowOptions(
           },
         }
       : {}),
-    webPreferences: secureWebPreferences(preload),
+    webPreferences: {
+      ...secureWebPreferences(preload),
+      zoomFactor: 1,
+    },
   };
 }
 

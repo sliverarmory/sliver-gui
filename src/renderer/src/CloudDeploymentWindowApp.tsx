@@ -108,6 +108,8 @@ import { applyRendererTheme } from "./components/ApplicationSettingsProvider";
 import { CloudProvisioningTerminal } from "./components/CloudProvisioningTerminal";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { RenameCloudDeploymentModal } from "./components/RenameCloudDeploymentModal";
+import { CloudDnsPanel } from "./components/CloudDnsPanel";
+import { useCloudDnsZoneCount } from "./components/useCloudDnsZoneCount";
 
 type FeedbackTone = "danger" | "success" | "warning" | "info";
 
@@ -321,6 +323,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const pendingOperatorReturnFocus = useRef<string | null>(null);
 
   const api = window.cloudDeployment;
+  const dnsZones = useCloudDnsZoneCount(api, snapshot?.credentials ?? []);
   const showFeedback = useCallback((nextFeedback: Feedback): void => {
     if (nextFeedback.tone === "danger") {
       setFeedback(nextFeedback);
@@ -616,7 +619,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                   isDisabled={isLoading || isRefreshingProvider}
                   isIconOnly
                   variant="outline"
-                  onPress={() => void refreshAll()}
+                  onPress={() => { dnsZones.refresh(); void refreshAll(); }}
                 >
                   <FontAwesomeIcon aria-hidden icon={faArrowsRotate} className={isLoading || isRefreshingProvider ? "animate-spin" : ""} />
                 </Button>
@@ -715,8 +718,20 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
             <Tabs.ListContainer className="w-fit max-w-full">
               <Tabs.List aria-label="Cloud Deployment sections">
                 <Tabs.Tab id="deployments">
-                  Deployments
+                  Servers
                   <Chip className="ml-1" size="sm" variant="soft">{snapshot.state.deployments.length}</Chip>
+                  <Tabs.Indicator />
+                </Tabs.Tab>
+                <Tabs.Tab id="dns">
+                  DNS
+                  <Chip
+                    className="ml-1"
+                    size="sm"
+                    variant="soft"
+                    title={dnsZones.loading ? "Loading DNS zones" : dnsZones.count === null
+                      ? "DNS zone count unavailable. Refresh or open DNS to review account access."
+                      : `${dnsZones.count} DNS zones across saved accounts`}
+                  >{dnsZones.loading ? "…" : dnsZones.count ?? "—"}</Chip>
                   <Tabs.Indicator />
                 </Tabs.Tab>
                 <Tabs.Tab id="credentials">
@@ -750,6 +765,14 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                   setOperatorDeploymentId(deploymentId);
                 }}
                 onRefresh={refresh}
+                onShowCredentials={() => setSelectedTab("credentials")}
+              />
+            </Tabs.Panel>
+            <Tabs.Panel className="pt-6" id="dns">
+              <CloudDnsPanel
+                api={api}
+                credentials={snapshot.credentials}
+                onZonesLoaded={dnsZones.updateZones}
                 onShowCredentials={() => setSelectedTab("credentials")}
               />
             </Tabs.Panel>
