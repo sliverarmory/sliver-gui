@@ -155,6 +155,36 @@
     padding-top: var(--auxiliary-window-content-top, 2rem);
   }
 
+  .cloud-deployment-manager-scroll {
+    scroll-padding-top: 3.75rem;
+  }
+
+  .cloud-deployment-tabs.tabs--secondary > .cloud-deployment-tabs__nav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    flex-shrink: 0;
+    overflow: visible;
+    border-bottom: 0;
+    background: var(--color-background);
+  }
+
+  .cloud-deployment-tabs__nav .tabs__list {
+    width: max-content;
+    min-width: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .cloud-deployment-tabs__nav::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    top: 100%;
+    height: 1.5rem;
+    pointer-events: none;
+    background: linear-gradient(var(--color-background), transparent);
+  }
+
   .sidebar.app-sidebar {
     --sidebar-width: 248px;
     --sidebar-width-collapsed: 56px;

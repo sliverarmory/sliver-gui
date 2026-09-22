@@ -71,6 +71,52 @@ test("DNS manager browses zones and manages records through the isolated cloud b
       "record actions must fit within the DNS content at the default window width");
     await page.screenshot({ path: join(artifacts, "all-records.png"), animations: "disabled" });
 
+    const cloudWindow = await application.browserWindow(page);
+    const originalSize = await cloudWindow.evaluate((window) => window.getSize());
+    await cloudWindow.evaluate((window) => window.setSize(800, 600));
+    await page.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth <= 800);
+    const tabList = page.getByRole("tablist", { name: "Cloud Deployment sections" });
+    const tabBar = page.locator(".cloud-deployment-tabs__nav");
+    const content = page.locator("main");
+    const header = content.locator("header").first();
+    const viewport = await content.boundingBox();
+    const tabsBeforeScroll = await tabList.boundingBox();
+    assert.ok(viewport && tabsBeforeScroll && tabsBeforeScroll.y > viewport.y);
+    assert.equal(await content.evaluate((element) => element.scrollHeight > element.clientHeight), true,
+      "the compact DNS record list must exercise vertical scrolling");
+    await content.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    const pinnedTabs = await tabBar.boundingBox();
+    const scrolledHeader = await header.boundingBox();
+    const scrolledRefresh = await page.getByRole("button", { name: "Refresh cloud deployments", exact: true }).boundingBox();
+    assert.ok(pinnedTabs && Math.abs(pinnedTabs.y - viewport.y) < 1,
+      "tabs must stick to the top of the scrolling viewport");
+    assert.ok(scrolledHeader && scrolledHeader.y + scrolledHeader.height <= viewport.y,
+      "the heading, badge, and description must scroll off the page");
+    assert.ok(scrolledRefresh && scrolledRefresh.y + scrolledRefresh.height <= viewport.y,
+      "the refresh button must scroll away with the header");
+    assert.match(await tabBar.evaluate((element) => (globalThis as unknown as {
+      getComputedStyle(element: unknown, pseudo: string): { backgroundImage: string };
+    }).getComputedStyle(element, "::after").backgroundImage), /linear-gradient/u,
+      "content passing under the pinned tabs must have a fade shadow");
+    await page.screenshot({ path: join(artifacts, "sticky-tabs-scrolled.png"), animations: "disabled" });
+    await content.evaluate((element) => { element.scrollTop = 0; });
+    assert.equal((await tabList.boundingBox())?.y, tabsBeforeScroll.y,
+      "scrolling back restores the tabs' original position below the header");
+    assert.ok((await header.boundingBox())!.y >= viewport.y);
+    await content.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    for (const name of [/^Servers\b/u, /^Credentials\b/u, /^DNS\b/u]) {
+      await page.getByRole("tab", { name }).click();
+      await page.waitForFunction((element) => element?.scrollTop === 0, await content.elementHandle());
+      assert.equal(await content.evaluate((element) => element.scrollTop), 0, "a newly selected tab starts at the top");
+      assert.equal((await tabList.boundingBox())?.y, tabsBeforeScroll.y);
+      await content.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    }
+    await content.evaluate((element) => { element.scrollTop = 0; });
+    await cloudWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    await page.waitForFunction((width) => (globalThis as unknown as { innerWidth: number }).innerWidth === width, originalSize[0]);
+    await page.getByRole("button", { name: "All records", exact: true }).click();
+    await page.getByRole("button", { name: "Edit www.second.test A", exact: true }).waitFor();
+
     await page.getByRole("button", { name: "Add record", exact: true }).click();
     const create = page.getByRole("dialog", { name: "Add DNS Record", exact: true });
     await create.getByLabel("Record name", { exact: true }).fill("qa");

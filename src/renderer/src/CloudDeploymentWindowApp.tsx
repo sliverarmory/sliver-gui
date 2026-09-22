@@ -307,6 +307,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const [isRefreshingProvider, setIsRefreshingProvider] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [selectedTab, setSelectedTab] = useState("deployments");
+  const contentRef = useRef<HTMLDivElement>(null);
   const [detailsDeploymentId, setDetailsDeploymentId] = useState<string | null>(null);
   const [operatorDeploymentId, setOperatorDeploymentId] = useState<string | null>(null);
   const [operatorMutationLocks, setOperatorMutationLocks] = useState<Readonly<Record<string, OperatorMutationLock>>>({});
@@ -596,11 +597,16 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const refreshFailureMessage = loadError?.message ?? providerRefreshError;
   const detailsRefreshError = snapshot?.refreshErrors.find(({ deploymentId }) => deploymentId === detailsDeploymentId)?.message;
 
+  useEffect(() => {
+    const scroller = contentRef.current?.parentElement;
+    if (scroller) scroller.scrollTop = 0;
+  }, [selectedTab, showingDetails]);
+
   return (
-    <AuxiliaryWindowFrame className={`bg-background text-foreground ${showingDetails ? "overflow-hidden" : "overflow-y-auto"}`}>
-      <div className={`auxiliary-window-content mx-auto flex w-full max-w-7xl flex-col px-6 lg:px-8 ${showingDetails ? "h-full min-h-0" : "gap-6 pb-12"}`}>
+    <AuxiliaryWindowFrame className={`bg-background text-foreground ${showingDetails ? "overflow-hidden" : "cloud-deployment-manager-scroll overflow-y-auto"}`}>
+      <div ref={contentRef} className={`auxiliary-window-content mx-auto flex w-full max-w-7xl flex-col px-6 lg:px-8 ${showingDetails ? "h-full min-h-0" : "gap-6 pb-12"}`}>
         {!showingDetails ? (
-          <header className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+          <header className="flex shrink-0 flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
             <div className="flex min-w-0 flex-1 items-start gap-3">
               <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent-soft text-accent-soft-foreground">
                 <FontAwesomeIcon aria-hidden icon={faCloudArrowUp} className="size-5" />
@@ -711,11 +717,12 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
           )
         ) : snapshot && api ? (
           <Tabs
+            className="cloud-deployment-tabs"
             selectedKey={selectedTab}
             variant="secondary"
             onSelectionChange={(key) => setSelectedTab(String(key))}
           >
-            <Tabs.ListContainer className="w-fit max-w-full">
+            <Tabs.ListContainer className="cloud-deployment-tabs__nav">
               <Tabs.List aria-label="Cloud Deployment sections">
                 <Tabs.Tab id="deployments">
                   Servers

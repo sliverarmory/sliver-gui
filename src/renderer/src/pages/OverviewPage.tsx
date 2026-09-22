@@ -230,7 +230,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
         options={kinds.map((value): [string, string] => [value, value === OFFLINE_OPERATOR_FILTER_KIND ? "Operator (Offline)" : titleCase(value)])} />
       <OverviewFilter label="Status" noun="states" value={selectedStatuses} onChange={setSelectedStatuses}
         options={[["healthy", "Healthy"], ["warning", "Needs attention"], ["inactive", "Inactive"], ["unknown", "Unknown"]]} />
-      <Switch className="overview-animation-toggle" isSelected={animateSessions} onChange={setAnimateSessions}
+      <Switch size="sm" className="overview-animation-toggle" isSelected={animateSessions} onChange={setAnimateSessions}
         isDisabled={presentation !== "graph"}>
         <Switch.Content>
           <Label>Lightning</Label>
