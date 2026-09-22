@@ -90,6 +90,7 @@ vi.mock("electron", () => {
     readonly copyImageAt = vi.fn();
     readonly inspectElement = vi.fn();
     readonly replaceMisspelling = vi.fn();
+    readonly setZoomFactor = vi.fn();
     destroyed = false;
     url = "";
 
@@ -149,6 +150,7 @@ vi.mock("electron", () => {
 
     async loadURL(url: string): Promise<void> {
       this.webContents.url = url;
+      this.webContents.emit("dom-ready");
       this.webContents.emit("did-finish-load");
       if (!harness.suppressReadyToShow) this.emit("ready-to-show");
     }
@@ -363,6 +365,32 @@ vi.mock("./script-store.js", () => ({
 }));
 
 describe("application protocol lifecycle", () => {
+  it("normalizes startup zoom once and preserves manual zoom across reloads and later windows", async () => {
+    const { startApplication } = await import("./application.js");
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const application = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+    const firstWindow = harness.windows.at(-1)!;
+    try {
+      expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledExactlyOnceWith(1);
+
+      firstWindow.webContents.setZoomFactor(1.1);
+      firstWindow.webContents.emit("dom-ready");
+      firstWindow.webContents.emit("did-finish-load");
+      expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledTimes(2);
+      expect(firstWindow.webContents.setZoomFactor).toHaveBeenLastCalledWith(1.1);
+
+      const laterWindow = application.createWindow();
+      expect(laterWindow.webContents.setZoomFactor).not.toHaveBeenCalled();
+      expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledTimes(2);
+    } finally {
+      await application.stop();
+    }
+  });
+
   it("reuses script companions per workspace, keeps output across popout close, and retires only the navigated owner", async () => {
     const { startApplication } = await import("./application.js");
     const controller = {

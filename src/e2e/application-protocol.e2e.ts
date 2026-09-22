@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import type { ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile, type ChildProcess } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import { createPackage } from "@electron/asar";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
 import type { CloudDeploymentAPI } from "../shared/cloud-deployment-ipc.js";
+import type { ApplicationZoomAPI } from "../shared/application-zoom-contracts.js";
 import type { SliverDesktopAPI } from "../shared/contracts.js";
 
 const RENDERER_URL = "sliver://app/index.html";
@@ -23,6 +26,7 @@ interface PolicyViolation {
 interface ProtocolBrowser {
   sliver: SliverDesktopAPI;
   cloudDeployment: CloudDeploymentAPI;
+  applicationZoom: ApplicationZoomAPI;
   __protocolViolations: PolicyViolation[];
   location: { href: string; origin: string };
   document: {
@@ -70,6 +74,9 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   try {
+    mark("seed saved host zoom");
+    await seedSavedHostZoom(temporaryRoot, userDataDirectory);
+    mark("launch");
     application = await electron.launch({
       args: [
         "--enable-sandbox",
@@ -95,7 +102,9 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     const mainWindow = await application.browserWindow(page);
     assert.equal(await mainWindow.evaluate((window) => window.webContents.getZoomFactor()), 1,
-      "the main app starts at 100% zoom");
+      "the main app starts at 100% zoom despite its saved 110% host zoom");
+    assert.equal(await page.evaluate(() => (globalThis as unknown as ProtocolBrowser).applicationZoom.getFactor()), 1,
+      "the renderer reports 100% zoom after startup normalization");
     await page.context().addInitScript(() => {
       const browser = globalThis as unknown as ProtocolBrowser;
       browser.__protocolViolations = [];
@@ -325,6 +334,38 @@ async function assertStrictPolicy(page: Page): Promise<void> {
   assert.match(csp, /(?:^|;)\s*connect-src 'none'(?:;|$)/u);
   assert.match(csp, /(?:^|;)\s*style-src 'self'(?: 'sha256-[A-Za-z0-9+/=]+')*(?:;|$)/u);
   assert.match(csp, /(?:^|;)\s*worker-src 'self'(?:;|$)/u);
+}
+
+async function seedSavedHostZoom(temporaryRoot: string, userDataDirectory: string): Promise<void> {
+  const seedPath = join(temporaryRoot, "seed-zoom.cjs");
+  // Playwright applies temporary frame zoom. Seed persisted host zoom in a
+  // separate native Electron process before attaching browser automation.
+  await writeFile(seedPath, `
+    const { app, BrowserWindow, protocol, session } = require("electron");
+    app.setPath("userData", process.argv.at(-1));
+    app.setPath("sessionData", process.argv.at(-1));
+    protocol.registerSchemesAsPrivileged([{
+      scheme: "sliver",
+      privileges: { standard: true, secure: true, supportFetchAPI: true },
+    }]);
+    void app.whenReady().then(async () => {
+      session.defaultSession.protocol.handle("sliver", () => new Response("<!doctype html><title>Zoom fixture</title>"));
+      const window = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+      await window.loadURL("sliver://app/index.html");
+      window.webContents.setZoomLevel(0.5);
+      app.quit();
+    }).catch((error) => {
+      console.error(error);
+      app.exit(1);
+    });
+  `, { mode: 0o600 });
+  const electronExecutable = createRequire(import.meta.url)("electron") as string;
+  await promisify(execFile)(electronExecutable, ["--enable-sandbox", seedPath, userDataDirectory], { timeout: 15_000 });
+  const preferences = JSON.parse(await readFile(join(userDataDirectory, "Preferences"), "utf8")) as {
+    partition?: { per_host_zoom_levels?: Record<string, { app?: unknown }> };
+  };
+  assert.ok(Object.values(preferences.partition?.per_host_zoom_levels ?? {}).some((hosts) => hosts.app === 0.5),
+    "the temporary profile must contain saved 110% zoom for the app host before launch");
 }
 
 async function assertPackagedModuleWorker(application: ElectronApplication, temporaryRoot: string): Promise<void> {

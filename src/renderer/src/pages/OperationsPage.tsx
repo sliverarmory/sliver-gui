@@ -865,20 +865,12 @@ function ProtocolFields({
             value={draft.domains}
             onChange={(domains) => setDraft((current) => ({ ...current, domains }))}
           />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <SwitchRow
-              description="Reject callbacks that do not present a valid one-time token."
-              selected={draft.enforceOtp}
-              label="Enforce OTP"
-              onChange={(enforceOtp) => setDraft((current) => ({ ...current, enforceOtp }))}
-            />
-            <SwitchRow
-              description="Enable DNS canary behavior for this listener."
-              selected={draft.canaries}
-              label="DNS canaries"
-              onChange={(canaries) => setDraft((current) => ({ ...current, canaries }))}
-            />
-          </div>
+          <SwitchRow
+            description="Enable DNS canary behavior for this listener."
+            selected={draft.canaries}
+            label="DNS canaries"
+            onChange={(canaries) => setDraft((current) => ({ ...current, canaries }))}
+          />
         </div>
       );
 
@@ -926,38 +918,30 @@ function ProtocolFields({
               }
             />
           </div>
-          <div className={`grid gap-3 ${draft.kind === "https" ? "sm:grid-cols-3" : "sm:grid-cols-1"}`}>
-            <SwitchRow
-              description="Require one-time authentication for HTTP callbacks."
-              selected={draft.enforceOtp}
-              label="Enforce OTP"
-              onChange={(enforceOtp) => setDraft((current) => ({ ...current, enforceOtp }))}
-            />
-            {draft.kind === "https" && (
-              <>
-                <SwitchRow
-                  description="Request and manage a public TLS certificate with ACME."
-                  selected={draft.acme}
-                  label="ACME certificate"
-                  onChange={(acme) => {
-                    setDraft((current) => ({
-                      ...current,
-                      acme,
-                      certificateToken: acme ? "" : current.certificateToken,
-                    }));
-                  }}
-                />
-                <SwitchRow
-                  description="Randomize the listener's TLS JARM fingerprint."
-                  selected={draft.randomizeJarm}
-                  label="Randomize JARM"
-                  onChange={(randomizeJarm) =>
-                    setDraft((current) => ({ ...current, randomizeJarm }))
-                  }
-                />
-              </>
-            )}
-          </div>
+          {draft.kind === "https" && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <SwitchRow
+                description="Request and manage a public TLS certificate with ACME."
+                selected={draft.acme}
+                label="ACME certificate"
+                onChange={(acme) => {
+                  setDraft((current) => ({
+                    ...current,
+                    acme,
+                    certificateToken: acme ? "" : current.certificateToken,
+                  }));
+                }}
+              />
+              <SwitchRow
+                description="Randomize the listener's TLS JARM fingerprint."
+                selected={draft.randomizeJarm}
+                label="Randomize JARM"
+                onChange={(randomizeJarm) =>
+                  setDraft((current) => ({ ...current, randomizeJarm }))
+                }
+              />
+            </div>
+          )}
           {draft.kind === "https" && (
             <div className="rounded-xl border border-separator bg-default p-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

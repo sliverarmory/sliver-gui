@@ -334,6 +334,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   // Every application build uses the bundled protocol entry. Environment
   // variables must never redirect renderer navigation or IPC trust.
   const rendererUrl = APP_RENDERER_URL;
+  let initializedWorkspaceZoom = false;
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
@@ -738,6 +739,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       nativeTheme.shouldUseDarkColors,
     ));
     trackWindow(window, inheritFromContentsId);
+    window.webContents.once("dom-ready", () => {
+      if (initializedWorkspaceZoom) return;
+      initializedWorkspaceZoom = true;
+      // Restore 100% after Chromium applies any saved per-origin zoom. Do this
+      // once per launch so reloads and additional windows preserve manual zoom.
+      window.webContents.setZoomFactor(1);
+    });
     window.on("close", (event) => {
       if (!scriptCloseGuard.allowClose(window.webContents.id)) event.preventDefault();
     });
