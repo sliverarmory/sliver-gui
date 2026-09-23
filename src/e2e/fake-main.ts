@@ -207,10 +207,14 @@ const sshIdentityStore = new SshIdentityStore(
 // E2E callers keep the unassociated fixture and never load cloud credentials.
 const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
 const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
+const overviewEgressFixture = process.argv.includes("--overview-egress-fixture");
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
+}
+if (overviewEgressFixture && (registryLayoutFixture || overviewPivotFixture)) {
+  throw new Error("The Overview egress fixture cannot be combined with other topology fixtures");
 }
 const overviewCloudRecord = overviewCloudArgument === "--overview-cloud-fixture=aws"
   ? E2E_AWS_DEPLOYMENT
@@ -662,8 +666,16 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   ];
   let sessions = registryLayoutFixture
     ? [seedRegistryLayoutSession(testState.sessionName)]
-    : overviewPivotFixture ? seedOverviewPivotSessions() : [seedSession(testState.sessionName)];
-  let beacons = overviewPivotFixture || registryLayoutFixture ? [] : [seedBeacon(testState.beaconName)];
+    : overviewPivotFixture ? seedOverviewPivotSessions()
+      : overviewEgressFixture ? seedOverviewEgressSessions() : [seedSession(testState.sessionName)];
+  let beacons = overviewPivotFixture || registryLayoutFixture ? []
+    : overviewEgressFixture ? [{
+      ...seedBeacon("egress-beacon"),
+      ID: "overview_egress_beacon",
+      Hostname: "overview-egress-beacon",
+      UUID: "overview-egress-beacon-host-id",
+      RemoteAddress: "198.51.100.10:43001",
+    }] : [seedBeacon(testState.beaconName)];
   let lootStore: clientpb.Loot[] = [
     clientpb.Loot.create({
       ID: "591a16d2-e138-4a21-b38f-f166aa23e044",
@@ -2240,6 +2252,20 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   function fakeEvent(eventType: string): clientpb.Event {
     return clientpb.Event.create({ EventType: eventType, Data: Buffer.from("FAKE_EVENT_SECRET_M0_DO_NOT_RENDER") });
   }
+}
+
+function seedOverviewEgressSessions(): clientpb.Session[] {
+  return [
+    { name: "alpha", address: "198.51.100.10:41001" },
+    { name: "beta", address: "198.51.100.10:42001" },
+    { name: "gamma", address: "203.0.113.20:41001" },
+  ].map(({ name, address }) => ({
+    ...seedSession(`egress-${name}`),
+    ID: `overview_egress_${name}`,
+    Hostname: `overview-egress-${name}`,
+    UUID: `overview-egress-${name}-host-id`,
+    RemoteAddress: address,
+  }));
 }
 
 function seedOverviewPivotSessions(): clientpb.Session[] {

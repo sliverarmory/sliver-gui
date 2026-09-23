@@ -25,6 +25,25 @@ describe("topology worker input", () => {
     expect(JSON.stringify(input)).not.toContain("Operator display name");
     expect(JSON.parse(JSON.stringify(input))).toEqual(input);
   });
+
+  it("forwards only numeric label geometry for IP connections while retaining display text in the UI", () => {
+    const source = disconnectedSnapshot();
+    source.connection = { status: "connected", managedServer: null, server: "control.example.test" };
+    const document = createOverviewTopology(source);
+    const label = "2001:db8:abcd:1234:abcd:1234:abcd:1234 · HTTPS / mTLS";
+    const input = topologyLayoutInput({ ...document, edges: [
+      ...document.edges,
+      { ...document.edges[0]!, id: "egress-link", kind: "egress-connection", label },
+    ] });
+    const bundled = input.edges.find((edge) => edge.id === "egress-link")!;
+    expect(typeof bundled.labelWidth).toBe("number");
+    expect(bundled.labelWidth).toBeGreaterThan(300);
+    expect(input.edges.filter((edge) => edge.id !== "egress-link").every((edge) => edge.labelWidth === undefined)).toBe(true);
+    expect(input.edges.every((edge) => Object.keys(edge).every((key) => ["id", "source", "target", "labelWidth"].includes(key)))).toBe(true);
+    expect(JSON.stringify(input)).not.toContain(label);
+    expect(JSON.stringify(input)).not.toContain("egress-connection");
+    expect(JSON.parse(JSON.stringify(input))).toEqual(input);
+  });
 });
 
 describe("real ELK topology layout", () => {
@@ -73,6 +92,72 @@ describe("real ELK topology layout", () => {
     expect(find(result, "empty-cloud").width).toBeGreaterThanOrEqual(236);
     expect(find(result, "empty-cloud").height).toBeGreaterThanOrEqual(112);
     expect(find(result, "standalone")).toMatchObject({ width: 236, height: 112 });
+  });
+
+  it("lays out separate IP enclosures connected to a cloud-enclosed server", async () => {
+    const input: TopologyLayoutInput = {
+      nodes: [
+        { id: "client", role: "resource" },
+        { id: "cloud", role: "group" },
+        { id: "server", role: "resource", parentId: "cloud" },
+        { id: "egress-a", role: "group" },
+        { id: "session-a", role: "resource", parentId: "egress-a" },
+        { id: "beacon-a", role: "resource", parentId: "egress-a" },
+        { id: "egress-b", role: "group" },
+        { id: "session-b", role: "resource", parentId: "egress-b" },
+      ],
+      edges: [
+        { id: "operator", source: "client", target: "server" },
+        { id: "address-a", source: "server", target: "egress-a", labelWidth: 260 },
+        { id: "address-b", source: "server", target: "egress-b", labelWidth: 140 },
+      ],
+    };
+    const result = await layoutTopology(input);
+    expect(new Set(result.map(({ id }) => id))).toEqual(new Set(input.nodes.map(({ id }) => id)));
+    for (const node of input.nodes.filter((item) => item.parentId)) {
+      const child = find(result, node.id);
+      const parent = find(result, node.parentId!);
+      expect(child.x).toBeGreaterThanOrEqual(28);
+      expect(child.y).toBeGreaterThanOrEqual(88);
+      expect(child.x + child.width).toBeLessThanOrEqual(parent.width);
+      expect(child.y + child.height).toBeLessThanOrEqual(parent.height);
+    }
+    const cloud = find(result, "cloud");
+    const a = find(result, "egress-a");
+    const b = find(result, "egress-b");
+    // Both separate connections have enough horizontal room for the longest
+    // address label and its clearance, including the cloud enclosure boundary.
+    expect(a.x - cloud.x - cloud.width).toBeGreaterThanOrEqual(260 + 48);
+    expect(b.x - cloud.x - cloud.width).toBeGreaterThanOrEqual(260 + 48);
+    expect(a.y + a.height <= b.y || b.y + b.height <= a.y).toBe(true);
+  });
+
+  it("retains an outgoing relay path from a session inside an IP enclosure", async () => {
+    const input: TopologyLayoutInput = {
+      nodes: [
+        { id: "server", role: "resource" },
+        { id: "egress", role: "group" },
+        { id: "entry", role: "resource", parentId: "egress" },
+        { id: "peer", role: "resource", parentId: "egress" },
+        { id: "relay", role: "resource" },
+        { id: "child", role: "resource" },
+      ],
+      edges: [
+        { id: "address", source: "server", target: "egress" },
+        { id: "entry-relay", source: "entry", target: "relay" },
+        { id: "relay-child", source: "relay", target: "child" },
+      ],
+    };
+    const result = await layoutTopology(input);
+    expect(new Set(result.map(({ id }) => id))).toEqual(new Set(input.nodes.map(({ id }) => id)));
+    const group = find(result, "egress");
+    const entry = find(result, "entry");
+    const relay = find(result, "relay");
+    expect(entry.x + entry.width).toBeLessThanOrEqual(group.width);
+    expect(entry.y + entry.height).toBeLessThanOrEqual(group.height);
+    expect(group.x).toBeGreaterThan(find(result, "server").x);
+    expect(relay.x).toBeGreaterThan(group.x + entry.x + entry.width);
+    expect(find(result, "child").x).toBeGreaterThan(relay.x + relay.width);
   });
 
   it("lays out a multi-hop communication chain and its branching path without dropping intermediate nodes", async () => {

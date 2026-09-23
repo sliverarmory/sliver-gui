@@ -4,6 +4,7 @@ import { TOPOLOGY_SCHEMA_VERSION } from "../../../shared/topology-contracts";
 import { operatorTopologyContributor } from "./operator-topology";
 import { createPivotTopology } from "./pivot-topology";
 import { serviceTopologyContributor } from "./service-topology";
+import { egressIpAddress } from "./egress-address";
 import type {
   TopologyDocument,
   TopologyEdge,
@@ -272,6 +273,7 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
     for (const target of domain.items) {
       const id = scopedId(context.scopeId, target.mode, target.id);
       const transport = transportLabel(target.transport);
+      const egressIp = egressIpAddress(target.remoteAddress);
       nodes.push({
         id,
         kind: target.mode,
@@ -279,6 +281,7 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
         label: target.hostname || target.name || target.id,
         subtitle: [titleCase(target.mode), target.os, target.arch].filter(Boolean).join(" · "),
         icon: osIcon(target.os),
+        ...(egressIp ? { egressIp } : {}),
         ...targetStatus(target, freshness),
         freshness,
         properties: [
@@ -291,6 +294,7 @@ export const targetTopologyContributor: TopologyContributor = (context) => {
           ...property("User", target.username),
           { label: "Transport", value: transport },
           ...property("Remote address", target.remoteAddress),
+          ...property("Egress IP", egressIp),
           ...property("Last check-in", target.lastCheckinAt),
           ...property("Inventory updated", domain.updatedAt),
           ...(target.mode === "beacon" ? property("Next expected check-in", target.nextCheckinAt) : []),

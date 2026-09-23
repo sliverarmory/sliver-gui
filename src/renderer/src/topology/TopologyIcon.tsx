@@ -6,7 +6,7 @@ const icons = new Map([
   ["aws", faAmazon], ["azure", faMicrosoft], ["cloud", faCloud],
   ["client", faLaptop], ["server", faServer], ["computer", faComputer], ["session", faComputer],
   ["windows", faWindows], ["linux", faLinux], ["apple", faApple], ["beacon", faSatellite],
-  ["operator", faUser], ["relay", faNetworkWired],
+  ["operator", faUser], ["relay", faNetworkWired], ["egress", faNetworkWired],
   ["external-builder", faHammer], ["crackstation", faMicrochip],
 ]);
 

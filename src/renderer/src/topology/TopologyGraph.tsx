@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ReactFlow, ReactFlowProvider, Background, BackgroundVariant, BaseEdge, Handle, MiniMap,
-  Position, applyNodeChanges, getSmoothStepPath, useNodesInitialized, useReactFlow, useStore,
+  Position, applyNodeChanges, getSmoothStepPath, useNodesInitialized, useReactFlow, useStore, useUpdateNodeInternals,
   type Edge, type EdgeProps, type Node, type NodeProps, type OnEdgesChange, type OnNodesChange, type Viewport,
 } from "@xyflow/react";
 import { Button } from "@heroui/react";
@@ -11,7 +11,7 @@ import { createElkGraph, extractTopologyLayout, topologyLayoutInput, type Layout
 import { TopologyIcon } from "./TopologyIcon";
 
 type NodeDecorator = (node: TopologyNode, content: ReactNode) => ReactNode;
-type GraphNode = Node<{ resource: TopologyNode; decorateNode?: NodeDecorator }, "resource" | "enclosure">;
+type GraphNode = Node<{ resource: TopologyNode; decorateNode?: NodeDecorator; connectionHandles?: string[] }, "resource" | "enclosure">;
 type GraphEdge = Edge<{ relationship: TopologyEdge }, "relationship">;
 export type TopologySelection = { type: "node" | "edge"; id: string } | null;
 interface CachedViewport {
@@ -44,9 +44,12 @@ function cacheGeometry(scopeId: string, key: string, nodes: LayoutNode[]): Geome
   return cache;
 }
 
-const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<GraphNode>) {
+const ResourceNode = memo(function ResourceNode({ id, data, selected }: NodeProps<GraphNode>) {
   const node = data.resource;
   const compact = useStore((state) => state.transform[2] < 0.55);
+  const updateNodeInternals = useUpdateNodeInternals();
+  const handlesKey = JSON.stringify(data.connectionHandles);
+  useEffect(() => { updateNodeInternals(id); }, [id, handlesKey, updateNodeInternals]);
   const content = (
     <div className="topology-node" data-testid="topology-node" data-selected={selected} data-status={node.status}
       data-freshness={node.freshness} data-compact={compact}>
@@ -74,6 +77,8 @@ const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<Gr
         {node.freshness === "current" ? node.statusLabel : `${node.statusLabel} · ${node.freshness}`}
       </div>
       <Handle type="source" position={Position.Right} isConnectable={false} />
+      {data.connectionHandles?.map((id, index, handles) => <Handle key={id} id={id} type="source"
+        position={Position.Right} isConnectable={false} style={{ top: `${20 + (index + 1) * 60 / (handles.length + 1)}%` }} />)}
     </div>
   );
   return data.decorateNode ? data.decorateNode(node, content) : content;
@@ -81,7 +86,8 @@ const ResourceNode = memo(function ResourceNode({ data, selected }: NodeProps<Gr
 
 const EnclosureNode = memo(function EnclosureNode({ data, selected }: NodeProps<GraphNode>) {
   const node = data.resource;
-  const content = <div className="topology-enclosure" data-testid="topology-node" data-provider={node.provider} data-selected={selected}>
+  const content = <div className="topology-enclosure" data-testid="topology-node" data-provider={node.provider} data-kind={node.kind} data-selected={selected}>
+    {node.kind === "egress" ? <Handle type="target" position={Position.Left} isConnectable={false} /> : null}
     <div className="topology-enclosure__heading">
       <span className="topology-enclosure__icon"><TopologyIcon name={node.icon} /></span>
       <div><strong title={node.label}>{node.label}</strong><p title={node.subtitle || node.statusLabel}>{node.subtitle || node.statusLabel}</p></div>
@@ -248,13 +254,21 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
     // ELK returns parents first, as required by React Flow's containment model.
     const resources = new Map(document.nodes.map((node) => [node.id, node]));
     const currentNodes = new Map(nodesRef.current.map((node) => [node.data.resource.id, node]));
+    const connections = new Map<string, string[]>();
+    for (const edge of document.edges) {
+      if (edge.kind !== "egress-connection") continue;
+      const handles = connections.get(edge.source) ?? [];
+      handles.push(flowElementId(edge.target));
+      connections.set(edge.source, handles);
+    }
+    for (const handles of connections.values()) handles.sort();
     const next = geometry.flatMap((position): GraphNode[] => {
       const resource = resources.get(position.id);
       if (!resource) return [];
       const current = currentNodes.get(resource.id);
       return [{
         id: flowElementId(resource.id), type: resource.role === "group" ? "enclosure" : "resource",
-        data: { resource, ...(decorateNode ? { decorateNode } : {}) }, position: current?.dragging ? current.position : { x: position.x, y: position.y },
+        data: { resource, ...(decorateNode ? { decorateNode } : {}), ...(connections.has(resource.id) ? { connectionHandles: connections.get(resource.id)! } : {}) }, position: current?.dragging ? current.position : { x: position.x, y: position.y },
         dragging: current?.dragging ?? false,
         width: position.width, height: position.height,
         style: { width: position.width, height: position.height },
@@ -265,11 +279,12 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
     });
     nodesRef.current = next;
     setNodes(next);
-  }, [document.nodes, geometry, selection, decorateNode]);
+  }, [document.nodes, document.edges, geometry, selection, decorateNode]);
 
   const edges = useMemo((): GraphEdge[] => document.edges.filter((edge) => edge.role !== "containment").map((relationship) => ({
     id: flowElementId(relationship.id), source: flowElementId(relationship.source), target: flowElementId(relationship.target),
     type: "relationship", data: { relationship },
+    ...(relationship.kind === "egress-connection" ? { sourceHandle: flowElementId(relationship.target) } : {}),
     selected: selection?.type === "edge" && selection.id === relationship.id,
     className: `topology-relationship topology-relationship--${relationship.freshness}`,
     ariaLabel: `${relationship.label}: ${relationship.description}`,

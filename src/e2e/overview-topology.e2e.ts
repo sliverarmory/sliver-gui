@@ -103,7 +103,7 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     assert.equal(new Set(crackstations.map((station) => station.name)).size, 1,
       "distinct crackstation host identities must remain separate even when their display names match");
 
-    const allNodeLabels = ["This client", snapshot.connection.server!, ...SESSION_HOSTS, RELAY,
+    const allNodeLabels = ["This client", snapshot.connection.server!, "127.0.0.1", ...SESSION_HOSTS, RELAY,
       ...OPERATORS, ...BUILDERS, "overview-crackstation", "overview-crackstation"];
     const defaultNodeLabels = allNodeLabels.filter((label) => label !== OFFLINE_OPERATOR);
     for (const hostname of SESSION_HOSTS) await nodeByLabel(page, hostname).waitFor();
@@ -130,7 +130,6 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     await fitGraph(page);
 
     const expectedHops = new Map([
-      ["101", [snapshot.connection.server!, "overview-relay-a"]],
       ["102", ["overview-relay-a", "overview-relay-b"]],
       ["103", ["overview-relay-b", RELAY]],
       ["104", [RELAY, "overview-relay-c"]],
@@ -138,6 +137,10 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
       ["106", ["overview-relay-b", "overview-branch"]],
     ]);
     const renderedEdges = await edgeTestIds(page);
+    const rootConnections = renderedEdges.filter((id) => decodeEdgeId(id).includes("/egress-connection/"));
+    assert.equal(rootConnections.length, 1);
+    assert.deepEqual(await inspectEdge(page, rootConnections[0]!), [snapshot.connection.server!, "127.0.0.1"],
+      "only the direct server-to-root link is summarized by its incoming IP");
     const hopEdges = renderedEdges.filter((id) => decodeEdgeId(id).includes("/pivot-hop/"));
     assert.equal(hopEdges.length, expectedHops.size);
     for (const [peerId, expected] of expectedHops) {
@@ -164,7 +167,7 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
       assert.equal(await inspectorProperty(page, "State"), "unknown",
         "registered infrastructure must not imply measured traffic or active work");
     }
-    assert.equal(renderedEdges.length, expectedHops.size + operatorEdges.length + serviceEdges.length + 1,
+    assert.equal(renderedEdges.length, expectedHops.size + rootConnections.length + operatorEdges.length + serviceEdges.length + 1,
       "only observed hops, service and operator associations, and this client's server link belong in the graph");
     await closeInspector(page);
     await fitGraph(page);
@@ -299,10 +302,10 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
 
     await page.getByLabel("Search infrastructure", { exact: true }).fill("overview-deepest");
     await nodeByLabel(page, "overview-branch").waitFor({ state: "hidden" });
-    for (const label of ["This client", snapshot.connection.server!, "overview-relay-a", "overview-relay-b", RELAY, "overview-relay-c", "overview-deepest"]) {
+    for (const label of ["This client", snapshot.connection.server!, "127.0.0.1", "overview-relay-a", "overview-relay-b", RELAY, "overview-relay-c", "overview-deepest"]) {
       await nodeByLabel(page, label).waitFor();
     }
-    assert.equal(await page.getByTestId("topology-node").count(), 7);
+    assert.equal(await page.getByTestId("topology-node").count(), 8);
     for (const name of OPERATORS) assert.equal(await nodeByLabel(page, name).count(), 0);
     for (const id of BUILDERS) assert.equal(await serviceNode(page, "external-builder", id).count(), 0);
     for (const id of CRACKSTATION_IDS) assert.equal(await serviceNode(page, "crackstation", id).count(), 0);
@@ -310,7 +313,8 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     const filteredEdges = await edgeTestIds(page);
     assert.equal(filteredEdges.length, 6);
     assert.equal(filteredEdges.some((id) => decodeEdgeId(id).endsWith("/pivot-hop/106")), false);
-    for (const peerId of ["101", "102", "103", "104", "105"]) {
+    assert.equal(filteredEdges.filter((id) => decodeEdgeId(id).includes("/egress-connection/")).length, 1);
+    for (const peerId of ["102", "103", "104", "105"]) {
       assert.ok(filteredEdges.some((id) => decodeEdgeId(id).endsWith(`/pivot-hop/${peerId}`)));
     }
     await fitGraph(page);

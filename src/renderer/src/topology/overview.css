@@ -60,7 +60,9 @@ html[data-reduce-motion="true"] .overview-page .topology-node__lightning path { 
 .topology-node[data-compact="true"] .topology-node__text strong { font-size: 18px; }
 .topology-node[data-compact="true"] .topology-node__identity { margin-top: 12px; }
 .topology-graph .react-flow__handle { width: 5px; height: 5px; border: none; background: var(--color-muted); pointer-events: none; opacity: .5; }
-.topology-enclosure { height: 100%; width: 100%; border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-separator)); border-radius: 22px; background: color-mix(in srgb, var(--color-accent) 3%, transparent); }
+.topology-enclosure { position: relative; height: 100%; width: 100%; border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-separator)); border-radius: 22px; background: color-mix(in srgb, var(--color-accent) 3%, transparent); }
+.topology-enclosure[data-kind="egress"] { border-color: color-mix(in srgb, var(--color-muted) 30%, var(--color-separator)); background: color-mix(in srgb, var(--color-surface) 30%, transparent); }
+.topology-enclosure[data-kind="egress"] .topology-enclosure__heading strong { font-variant-numeric: tabular-nums; }
 .topology-enclosure__heading { padding: 20px 24px; display: flex; align-items: center; gap: 12px; }
 .topology-enclosure__icon { display: grid; place-items: center; width: 36px; height: 36px; color: var(--color-accent); background: var(--color-surface); border-radius: 10px; font-size: 22px; }
 .topology-enclosure__heading strong { font-size: 13px; }

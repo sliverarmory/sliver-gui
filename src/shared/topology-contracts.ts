@@ -62,6 +62,8 @@ export interface TopologyNode {
   /** A local icon registry key, never an external asset URL. */
   readonly icon: string;
   readonly provider?: string;
+  /** Canonical IP from the reported remote endpoint, for display grouping only. */
+  readonly egressIp?: string;
   readonly status: TopologyStatus;
   readonly statusLabel: string;
   readonly freshness: TopologyFreshness;

@@ -90,6 +90,15 @@ relationships explicitly and document their source.
   Beacon routes and sessions absent from the pivot inventory retain explicitly
   labeled logical relationships to the server; their intermediate hops remain
   unknown. Listener inventory remains server metadata.
+- The graph groups directly connected resources by the incoming IP reported in
+  `remoteAddress`, omitting the source port. Each IP has its own enclosure and
+  a separate server connection labeled with that IP and its reported transports.
+  Sessions and beacons sharing an IP remain separate resources inside the same
+  enclosure. This is a display of shared egress, not an inferred router or NAT
+  device. Missing or invalid IP addresses do not create guessed groups.
+  Only direct server connections are summarized; relay-to-child pivot edges
+  retain their exact endpoints. Egress groups expose passive metadata and do not
+  acquire target identities or actions.
 - Pivot inventory refreshes with full inventory and background session updates,
   and is bounded to 500 entries. An optional route refresh failure does not fail
   otherwise successful session inventory reads. The
@@ -127,13 +136,23 @@ or identities.
 Search preserves upstream communication paths and parent enclosures among
 selected types and states, with cycle-safe traversal. Other associations retain
 one hop of eligible context. Unselected categories stay hidden, and a visible
-child whose enclosure is hidden renders independently. Only original edges
-between visible endpoints remain; filtering never adds shortcut connections.
+child whose enclosure is hidden renders independently. Filtering retains
+original relationships between visible endpoints without adding shortcut
+connections; the egress projection then summarizes the visible direct server
+links by IP.
 Large homogeneous leaf collections collapse into summaries, with their
 individual records available on expansion. Intermediate relays and branching
 nodes stay explicit. Unknown kinds retain a generic card
 and icon; the renderer does not require a switch case for each infrastructure
 type.
+
+Egress grouping is a renderer projection applied after filters and collections.
+Searching an IP matches its underlying resource addresses; searching a single
+resource keeps only that resource and its eligible connection context. Group
+counts reflect the visible members. Session-only filtering retains the IP
+enclosures while hiding unselected resource types and their connections. The
+projection preserves the source inventory, member identities, and target
+references.
 
 React Flow renders the projected document. ELK runs in a dedicated, locally
 bundled Web Worker. The renderer uses the lightweight ELK API, and passes only
@@ -195,3 +214,11 @@ a display name. It checks service identity, inspector metadata, type filters,
 list rendering, the rendered parent edges, complete
 upstream context when filtering the deepest session, and the existing session
 menu. It audits fixture calls to ensure only passive inventory is read.
+
+The egress journey supplies three sessions and one beacon across two incoming
+IPs. It checks grouping across different source ports and resource kinds,
+distinct IP/transport connection labels, passive inspection, visible enclosure
+bounds, IP and resource searches, and session-only filtering. It also verifies
+that source inventory and target references remain unchanged and that only
+passive inventory methods are called. Screenshots include the full grouping,
+search result, and session-only view.

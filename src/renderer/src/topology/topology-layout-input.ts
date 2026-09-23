@@ -13,7 +13,7 @@ export interface LayoutNode {
 /** Workers receive geometry and identity only; display metadata stays in the UI. */
 export interface TopologyLayoutInput {
   nodes: { id: string; role: string; parentId?: string }[];
-  edges: { id: string; source: string; target: string }[];
+  edges: { id: string; source: string; target: string; labelWidth?: number }[];
 }
 
 /** Kept separate from the ELK module to avoid importing ELK on the UI thread. */
@@ -21,7 +21,11 @@ export function topologyLayoutInput(document: TopologyDocument): TopologyLayoutI
   return {
     nodes: document.nodes.map(({ id, role, parentId }) => ({ id, role, ...(parentId ? { parentId } : {}) })),
     edges: document.edges.filter((edge) => edge.role !== "containment")
-      .map(({ id, source, target }) => ({ id, source, target })),
+      .map(({ id, source, target, kind, label }) => ({ id, source, target,
+        // Reserve room for IP/transport labels without sending display text to
+        // the worker. Seven pixels per glyph is conservative at our 10px font.
+        ...(kind === "egress-connection" ? { labelWidth: Array.from(label).length * 7 + 14 } : {}),
+      })),
   };
 }
 
@@ -47,7 +51,7 @@ export function createElkGraph(input: TopologyLayoutInput): ElkNode {
       "elk.direction": "RIGHT",
       "elk.hierarchyHandling": "INCLUDE_CHILDREN",
       "elk.spacing.nodeNode": "32",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "100",
+      "elk.layered.spacing.nodeNodeBetweenLayers": String(Math.max(100, ...input.edges.map((edge) => (edge.labelWidth ?? 0) + 48))),
       "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
       "elk.padding": "[top=32,left=32,bottom=32,right=32]",
     },

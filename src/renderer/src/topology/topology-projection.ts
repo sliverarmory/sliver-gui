@@ -1,4 +1,5 @@
 import type { TopologyDocument, TopologyEdge, TopologyFreshness, TopologyNode, TopologyStatus } from "../../../shared/topology-contracts";
+import { groupEgressTopology } from "./egress-topology";
 
 export const TOPOLOGY_COLLECTION_THRESHOLD = 12;
 export const OFFLINE_OPERATOR_FILTER_KIND = "operator-offline";
@@ -117,7 +118,7 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
   });
   const edges = knownEdges.filter((edge) => included.has(edge.source) && included.has(edge.target));
   const groups = new Map<string, readonly TopologyNode[]>();
-  if (filtering) return { document: { ...source, nodes, edges }, groups, matchCount: matches.length };
+  if (filtering) return { document: groupEgressTopology({ ...source, nodes, edges }, source, groups), groups, matchCount: matches.length };
 
   const buckets = new Map<string, TopologyNode[]>();
   const linksByNode = new Map<string, TopologyEdge[]>();
@@ -139,7 +140,7 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
     const edge = links[0]!;
     const peer = edge.source === node.id ? edge.target : edge.source;
     const direction = edge.source === node.id ? "outgoing" : "incoming";
-    const id = `collection:${JSON.stringify([node.kind, node.icon, node.provider, node.parentId, peer, direction, edge.role, edge.kind, edge.transport, edge.label])}`;
+    const id = `collection:${JSON.stringify([node.kind, node.icon, node.provider, node.parentId, node.egressIp, peer, direction, edge.role, edge.kind, edge.transport, edge.label])}`;
     const bucket = buckets.get(id) ?? [];
     bucket.push(node);
     buckets.set(id, bucket);
@@ -155,6 +156,7 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
     aggregates.push({
       id, kind: first.kind, role: "resource", icon: first.icon,
       ...(first.parentId ? { parentId: first.parentId } : {}),
+      ...(first.egressIp ? { egressIp: first.egressIp } : {}),
       label: `${members.length} ${first.kind === "beacon" ? "beacons" : first.kind === "session" ? "sessions" : "resources"}`,
       subtitle: "Select to expand this collection",
       status: aggregateStatus(members),
@@ -194,7 +196,7 @@ export function projectTopology(source: TopologyDocument, filters: TopologyFilte
     });
   }
   return {
-    document: { ...source, nodes: [...nodes.filter((node) => !replacements.has(node.id)), ...aggregates], edges: [...projectedEdges.values()] },
+    document: groupEgressTopology({ ...source, nodes: [...nodes.filter((node) => !replacements.has(node.id)), ...aggregates], edges: [...projectedEdges.values()] }, source, groups),
     groups, matchCount: matches.length,
   };
 }
