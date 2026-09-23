@@ -54,7 +54,7 @@ describe("application update status", () => {
       }),
     });
 
-    render(<ApplicationUpdateStatus showIdleControl />);
+    renderUpdateStatus(true);
     expect(calls).toEqual(["subscribe", "get"]);
 
     emit({
@@ -88,15 +88,27 @@ describe("application update status", () => {
       }),
     });
 
-    render(<ApplicationUpdateStatus />);
+    renderUpdateStatus();
     expect(await screen.findByText("Downloading 0.2.0")).toBeInTheDocument();
     expect(screen.getByText("25%")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "Downloading application update 0.2.0" }))
       .toHaveAttribute("aria-valuenow", "24.6");
+    const progressToast = screen.getByText("Downloading 0.2.0").closest('[data-slot="toast"]');
+    expect(progressToast).toBeInTheDocument();
+
+    emit({
+      status: "downloading",
+      revision: 3,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      progressPercent: 53.4,
+    });
+    expect(await screen.findByText("53%")).toBeInTheDocument();
+    expect(screen.getByText("Downloading 0.2.0").closest('[data-slot="toast"]')).toBe(progressToast);
 
     emit({
       status: "ready",
-      revision: 3,
+      revision: 4,
       currentVersion: "0.1.0",
       availableVersion: "0.2.0",
     });
@@ -118,7 +130,7 @@ describe("application update status", () => {
     });
     const user = userEvent.setup();
 
-    render(<ApplicationUpdateStatus showIdleControl />);
+    renderUpdateStatus(true);
     await user.click(await screen.findByRole("button", { name: "Check for updates" }));
 
     expect(checkForApplicationUpdates).toHaveBeenCalledExactlyOnceWith();
@@ -137,15 +149,10 @@ describe("application update status", () => {
     });
     const user = userEvent.setup();
 
-    render(
-      <>
-        <ApplicationUpdateStatus />
-        <Toast.Provider maxVisibleToasts={4} placement="bottom" />
-      </>,
-    );
+    renderUpdateStatus();
     await waitFor(() => expect(api.getApplicationUpdateState).toHaveBeenCalledOnce());
     expect(screen.queryByText("Updates unavailable")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("application-update-status")).not.toBeInTheDocument();
+    expect(screen.queryByText("Application update")).not.toBeInTheDocument();
 
     emit(disabledState);
     expect(await screen.findByText("Updates unavailable")).toBeInTheDocument();
@@ -169,7 +176,7 @@ describe("application update status", () => {
     });
     const user = userEvent.setup();
 
-    render(<ApplicationUpdateStatus />);
+    renderUpdateStatus();
     await user.click(await screen.findByRole("button", { name: "Restart" }));
     expect(screen.getByRole("alertdialog", { name: "Restart to apply the update?" })).toBeInTheDocument();
     expect(screen.getByText(/closes every Sliver Desktop window and all managed shells/u)).toBeInTheDocument();
@@ -191,9 +198,9 @@ describe("application update status", () => {
 
   it("keeps passive update controls out of dedicated surfaces and unsubscribes", async () => {
     installUpdateAPI();
-    const view = render(<ApplicationUpdateStatus />);
+    const view = renderUpdateStatus();
     await waitFor(() => expect(updateListener).toBeDefined());
-    expect(screen.queryByTestId("application-update-status")).not.toBeInTheDocument();
+    expect(screen.queryByText("Application update")).not.toBeInTheDocument();
 
     emit({ status: "checking", revision: 2, currentVersion: "0.1.0" });
     expect(await screen.findByText("Checking for updates…")).toBeInTheDocument();
@@ -201,7 +208,53 @@ describe("application update status", () => {
     view.unmount();
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
+
+  it("lets the user dismiss the check toast and keeps download progress dismissed", async () => {
+    installUpdateAPI();
+    const user = userEvent.setup();
+    renderUpdateStatus(true);
+
+    const checkButton = await screen.findByRole("button", { name: "Check for updates" });
+    expect(checkButton.closest('[data-slot="toast"]')).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Check for updates" })).not.toBeInTheDocument());
+
+    emit({ status: "checking", revision: 2, currentVersion: "0.1.0" });
+    expect(await screen.findByText("Checking for updates…")).toBeInTheDocument();
+    emit({
+      status: "downloading",
+      revision: 3,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      progressPercent: 24.6,
+    });
+    expect(await screen.findByText("25%")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByText("Downloading 0.2.0")).not.toBeInTheDocument());
+
+    emit({
+      status: "downloading",
+      revision: 4,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      progressPercent: 32,
+    });
+    expect(screen.queryByText("Downloading 0.2.0")).not.toBeInTheDocument();
+
+    emit({ status: "ready", revision: 5, currentVersion: "0.1.0", availableVersion: "0.2.0" });
+    expect(await screen.findByText("Update 0.2.0 ready")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restart" })).toBeInTheDocument();
+  });
 });
+
+function renderUpdateStatus(showIdleControl = false) {
+  return render(
+    <>
+      <ApplicationUpdateStatus showIdleControl={showIdleControl} />
+      <Toast.Provider maxVisibleToasts={4} placement="bottom" />
+    </>,
+  );
+}
 
 function installUpdateAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI {
   const api = {

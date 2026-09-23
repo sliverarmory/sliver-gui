@@ -2277,7 +2277,7 @@ function DeploymentCard({
             tone="warning"
           />
         ) : null}
-        {cloudLoginAction(false)}
+        {!hasEmbeddedCloudLogin ? cloudLoginAction(false) : null}
         {isDeploymentView && deployment.provider === "aws" ? <AwsStatusChecks deployment={deployment} /> : null}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <DeploymentDetail label="Management ID" value={deployment.id} mono />

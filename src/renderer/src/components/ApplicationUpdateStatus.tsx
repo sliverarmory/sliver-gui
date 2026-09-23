@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AlertDialog, Button, ProgressBar, toast } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -26,7 +26,11 @@ export function ApplicationUpdateStatus({
   const [isChecking, setIsChecking] = useState(false);
   const [isRestartDialogOpen, setIsRestartDialogOpen] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
+  const [toastStore] = useState(createUpdateToastStore);
   const highestRevision = useRef(-1);
+  const updateToastId = useRef<string | undefined>(undefined);
+  const displayedStatus = useRef<ApplicationUpdateState["status"] | undefined>(undefined);
+  const dismissedStatus = useRef<ApplicationUpdateState["status"] | undefined>(undefined);
   const unavailableToastId = useRef<string | undefined>(undefined);
 
   const showUnavailableToast = useCallback((disabledReason: string): void => {
@@ -57,31 +61,6 @@ export function ApplicationUpdateStatus({
     return true;
   }, [showUnavailableToast]);
 
-  useEffect(() => {
-    let mounted = true;
-    // Subscribe before reading the snapshot so an event that races the invoke
-    // cannot be overwritten by an older get result.
-    const unsubscribe = window.sliver.onApplicationUpdateChanged((next) => {
-      if (mounted) acceptState(next, true);
-    });
-    void window.sliver.getApplicationUpdateState().then((next) => {
-      if (mounted) acceptState(next);
-    }).catch(() => {
-      // A missing snapshot is not a reason to widen the renderer contract with
-      // an untrusted transport error. A later valid event can still recover it.
-    });
-    return () => {
-      mounted = false;
-      unsubscribe();
-      if (unavailableToastId.current) toast.close(unavailableToastId.current);
-      unavailableToastId.current = undefined;
-    };
-  }, [acceptState]);
-
-  useEffect(() => {
-    if (state?.status !== "ready") setIsRestartDialogOpen(false);
-  }, [state?.status]);
-
   const checkForUpdates = useCallback(async (): Promise<void> => {
     setIsChecking(true);
     try {
@@ -101,6 +80,77 @@ export function ApplicationUpdateStatus({
       setIsChecking(false);
     }
   }, [acceptState]);
+
+  useEffect(() => {
+    let mounted = true;
+    // Subscribe before reading the snapshot so an event that races the invoke
+    // cannot be overwritten by an older get result.
+    const unsubscribe = window.sliver.onApplicationUpdateChanged((next) => {
+      if (mounted) acceptState(next, true);
+    });
+    void window.sliver.getApplicationUpdateState().then((next) => {
+      if (mounted) acceptState(next);
+    }).catch(() => {
+      // A missing snapshot is not a reason to widen the renderer contract with
+      // an untrusted transport error. A later valid event can still recover it.
+    });
+    return () => {
+      mounted = false;
+      unsubscribe();
+      if (updateToastId.current) toast.close(updateToastId.current);
+      updateToastId.current = undefined;
+      if (unavailableToastId.current) toast.close(unavailableToastId.current);
+      unavailableToastId.current = undefined;
+    };
+  }, [acceptState]);
+
+  useEffect(() => {
+    toastStore.update(state, isChecking);
+  }, [isChecking, state, toastStore]);
+
+  useEffect(() => {
+    // HeroUI removes the toast before calling onClose on the next animation
+    // frame. Reconcile the queue here so a newer update state is not lost in
+    // that interval after the user dismisses the toast.
+    if (updateToastId.current &&
+        !toast.getQueue().visibleToasts.some(({ key }) => key === updateToastId.current)) {
+      updateToastId.current = undefined;
+      dismissedStatus.current = displayedStatus.current;
+    }
+    if (!state || state.status === "disabled" || (!showIdleControl && isPassiveState(state))) {
+      if (updateToastId.current) toast.close(updateToastId.current);
+      updateToastId.current = undefined;
+      return;
+    }
+    if (updateToastId.current) {
+      displayedStatus.current = state.status;
+      return;
+    }
+    if (dismissedStatus.current === state.status) return;
+
+    dismissedStatus.current = undefined;
+    const toastId = toast("Application update", {
+      description: (
+        <UpdateToastContent
+          store={toastStore}
+          onCheck={() => void checkForUpdates()}
+          onRestart={() => setIsRestartDialogOpen(true)}
+        />
+      ),
+      timeout: 0,
+      onClose: () => {
+        if (updateToastId.current !== toastId) return;
+        updateToastId.current = undefined;
+        dismissedStatus.current = displayedStatus.current;
+      },
+    });
+    updateToastId.current = toastId;
+    displayedStatus.current = state.status;
+  }, [checkForUpdates, showIdleControl, state, toastStore]);
+
+  useEffect(() => {
+    if (state?.status !== "ready") setIsRestartDialogOpen(false);
+  }, [state?.status]);
 
   const restartToUpdate = useCallback(async (): Promise<void> => {
     setIsRestarting(true);
@@ -122,70 +172,100 @@ export function ApplicationUpdateStatus({
     }
   }, []);
 
-  if (!state) return null;
-  if (state.status === "disabled") return null;
-  if (!showIdleControl && isPassiveState(state)) return null;
+  if (state?.status !== "ready") return null;
 
   return (
+    <AlertDialog.Backdrop
+      isKeyboardDismissDisabled={false}
+      isOpen={isRestartDialogOpen}
+      onOpenChange={(open) => {
+        if (!isRestarting) setIsRestartDialogOpen(open);
+      }}
+      variant="blur"
+    >
+      <AlertDialog.Container placement="center" size="sm">
+        <AlertDialog.Dialog className="sm:max-w-[440px]">
+          <AlertDialog.Header>
+            <AlertDialog.Icon status="warning">
+              <FontAwesomeIcon aria-hidden className="size-5" icon={faTriangleExclamation} />
+            </AlertDialog.Icon>
+            <AlertDialog.Heading>Restart to apply the update?</AlertDialog.Heading>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            <p className="text-sm leading-6 text-muted">
+              Restarting closes every Sliver Desktop window and all managed shells. Save any
+              terminal output and finish in-flight work before continuing.
+            </p>
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <Button
+              isDisabled={isRestarting}
+              size="sm"
+              variant="tertiary"
+              onPress={() => setIsRestartDialogOpen(false)}
+            >
+              Later
+            </Button>
+            <Button
+              isPending={isRestarting}
+              size="sm"
+              variant="danger"
+              onPress={() => void restartToUpdate()}
+            >
+              Restart and update
+            </Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Dialog>
+      </AlertDialog.Container>
+    </AlertDialog.Backdrop>
+  );
+}
+
+interface UpdateToastStore {
+  getSnapshot(): { readonly state: ApplicationUpdateState | undefined; readonly isChecking: boolean };
+  subscribe(listener: () => void): () => void;
+  update(state: ApplicationUpdateState | undefined, isChecking: boolean): void;
+}
+
+function createUpdateToastStore(): UpdateToastStore {
+  let snapshot = { state: undefined as ApplicationUpdateState | undefined, isChecking: false };
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    update: (state, isChecking) => {
+      if (snapshot.state === state && snapshot.isChecking === isChecking) return;
+      snapshot = { state, isChecking };
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+function UpdateToastContent({
+  store,
+  onCheck,
+  onRestart,
+}: {
+  readonly store: UpdateToastStore;
+  readonly onCheck: () => void;
+  readonly onRestart: () => void;
+}): React.JSX.Element | null {
+  const { state, isChecking } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  if (!state) return null;
+  return (
     <>
-      <section
-        aria-label="Application update"
-        className="fixed end-4 bottom-4 z-50 w-[min(22rem,calc(100vw-2rem))] rounded-2xl bg-surface p-3 shadow-surface"
-        data-testid="application-update-status"
-      >
-        <span aria-atomic="true" aria-live="polite" className="sr-only" role="status">
-          {updateAnnouncement(state)}
-        </span>
-        <UpdateStateContent
-          isChecking={isChecking}
-          state={state}
-          onCheck={() => void checkForUpdates()}
-          onRestart={() => setIsRestartDialogOpen(true)}
-        />
-      </section>
-      <AlertDialog.Backdrop
-        isKeyboardDismissDisabled={false}
-        isOpen={isRestartDialogOpen}
-        onOpenChange={(open) => {
-          if (!isRestarting) setIsRestartDialogOpen(open);
-        }}
-        variant="blur"
-      >
-        <AlertDialog.Container placement="center" size="sm">
-          <AlertDialog.Dialog className="sm:max-w-[440px]">
-            <AlertDialog.Header>
-              <AlertDialog.Icon status="warning">
-                <FontAwesomeIcon aria-hidden className="size-5" icon={faTriangleExclamation} />
-              </AlertDialog.Icon>
-              <AlertDialog.Heading>Restart to apply the update?</AlertDialog.Heading>
-            </AlertDialog.Header>
-            <AlertDialog.Body>
-              <p className="text-sm leading-6 text-muted">
-                Restarting closes every Sliver Desktop window and all managed shells. Save any
-                terminal output and finish in-flight work before continuing.
-              </p>
-            </AlertDialog.Body>
-            <AlertDialog.Footer>
-              <Button
-                isDisabled={isRestarting}
-                size="sm"
-                variant="tertiary"
-                onPress={() => setIsRestartDialogOpen(false)}
-              >
-                Later
-              </Button>
-              <Button
-                isPending={isRestarting}
-                size="sm"
-                variant="danger"
-                onPress={() => void restartToUpdate()}
-              >
-                Restart and update
-              </Button>
-            </AlertDialog.Footer>
-          </AlertDialog.Dialog>
-        </AlertDialog.Container>
-      </AlertDialog.Backdrop>
+      <span aria-atomic="true" aria-live="polite" className="sr-only" role="status">
+        {updateAnnouncement(state)}
+      </span>
+      <UpdateStateContent
+        isChecking={isChecking}
+        state={state}
+        onCheck={onCheck}
+        onRestart={onRestart}
+      />
     </>
   );
 }

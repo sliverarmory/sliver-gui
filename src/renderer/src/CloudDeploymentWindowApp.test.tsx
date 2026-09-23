@@ -1338,7 +1338,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
   });
 
-  it("offers AWS Login inside and below failed deployment errors without retrying lifecycle actions", async () => {
+  it("offers one AWS Login inside failed deployment errors without retrying lifecycle actions", async () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
       credentials: [{ ...awsCredential, profileName: "operators" }],
@@ -1351,12 +1351,8 @@ describe("CloudDeploymentWindowApp", () => {
     if (!operationMessage || !refreshMessage) throw new Error("Expected both AWS deployment error messages");
     const embeddedLogin = within(operationMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" });
     expect(within(refreshMessage).queryByRole("button", { name: /AWS Login for Production AWS/u })).not.toBeInTheDocument();
-    const standaloneLogin = screen.getByRole("button", { name: "AWS Login for Production AWS" });
-    expect(standaloneLogin.closest('[role="alert"], [role="status"]')).toBeNull();
-    await act(async () => {
-      embeddedLogin.click();
-      standaloneLogin.click();
-    });
+    expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
+    await act(async () => embeddedLogin.click());
 
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
     expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
@@ -1364,6 +1360,19 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
     expect(api.runLifecycleAction).not.toHaveBeenCalled();
     expect(screen.getByText("The AWS session has expired.")).toBeInTheDocument();
+  });
+
+  it("hides the standalone AWS Login when the status refresh warning has its own login action", async () => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      credentials: [{ ...awsCredential, profileName: "operators" }],
+      refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS status session has expired." }],
+    };
+    renderCloudDeploymentApp();
+    const refreshMessage = (await screen.findByText("The AWS status session has expired.")).closest<HTMLElement>('[role="status"]');
+    if (!refreshMessage) throw new Error("Expected the AWS status refresh warning");
+    expect(within(refreshMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
   });
 
   it("keeps one AWS reauthentication alive when a snapshot clears its error message", async () => {
@@ -1602,15 +1611,13 @@ describe("CloudDeploymentWindowApp", () => {
     const operationMessage = (await screen.findByText("Azure credentials have expired.")).closest<HTMLElement>('[role="alert"]');
     if (!operationMessage) throw new Error("Expected the Azure deployment error alert");
     const embeddedLogin = within(operationMessage).getByRole("button", { name: "Azure Login for Production Azure from error message" });
-    const standaloneLogin = screen.getByRole("button", { name: "Azure Login for Production Azure" });
-    expect(standaloneLogin.closest('[role="alert"], [role="status"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: "Azure Login for Production Azure" })).not.toBeInTheDocument();
     act(() => {
       embeddedLogin.click();
-      standaloneLogin.click();
     });
     expect(await screen.findByText(/Complete Azure Login in your browser/u)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel Azure Login" })).toBeInTheDocument();
-    expect(standaloneLogin).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Azure Login for Production Azure" })).not.toBeInTheDocument();
     await act(async () => login.resolve({ ok: true, value: { ...azureCredential, loginAccountId: "home-account-id" } }));
 
     expect(await screen.findByText("Azure Login complete")).toBeInTheDocument();
