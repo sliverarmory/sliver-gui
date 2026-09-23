@@ -538,7 +538,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           : undefined,
     );
     if (!applicationContextMenus) throw new Error("Application context menus are not initialized");
-    if (surface !== "text-editor") applicationContextMenus.install(window.webContents);
+    applicationContextMenus.install(window.webContents);
     if (registerWithConnectionRegistry && surface !== "network") window.webContents.on("before-input-event", (event, input) => {
       if (shortcutRecordingWindows.has(window)) return;
       const commandPaletteDisposition = applicationSettingsStore

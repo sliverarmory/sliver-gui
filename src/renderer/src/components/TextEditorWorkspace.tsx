@@ -1,7 +1,16 @@
-import { faArrowRotateLeft, faArrowRotateRight, faGear } from "@fortawesome/free-solid-svg-icons";
+import {
+  faArrowPointer,
+  faArrowRotateLeft,
+  faArrowRotateRight,
+  faCopy,
+  faGear,
+  faPaste,
+  faScissors,
+  faTrashCan,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { NativeSelect } from "@heroui-pro/react/native-select";
-import { Button, Tooltip } from "@heroui/react";
+import { Button, Tooltip, toast } from "@heroui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
@@ -26,6 +35,7 @@ import {
 } from "../editor/monaco-language-catalog";
 import { formatCommandPaletteShortcut, isApplePlatform } from "./CommandPaletteShortcut";
 import { CodeEditor, type CodeEditorHandle, type CodeEditorKeybindings } from "./CodeEditor";
+import { useApplicationContextMenuScope } from "./ApplicationContextMenu";
 
 export interface TextEditorWorkspaceProps {
   /** Mount with key={document.id} when replacing a document. */
@@ -83,11 +93,19 @@ export function TextEditorWorkspace({
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState<"save" | "open" | null>(null);
   const [error, setError] = useState<string>();
+  const [editorMenu, setEditorMenu] = useState({
+    documentTarget: true,
+    canUndo: false,
+    canRedo: false,
+    hasSelection: false,
+    hasText: document.text.length > 0,
+  });
   const editor = useRef<CodeEditorHandle>(null);
   const pendingRef = useRef(false);
   const dirtyRef = useRef(false);
   const dirty = text !== savedText;
   const readOnly = document.readOnly || pending === "open";
+  const editingContext = useRef({ documentId: document.id, readOnly });
   const apple = isApplePlatform();
   const activeEditorSettings = editorSettings ?? localEditorSettings;
   const fontFamily = TEXT_EDITOR_FONTS.find(({ id }) => id === activeEditorSettings.fontId)?.family ?? "Fira Code";
@@ -96,7 +114,11 @@ export function TextEditorWorkspace({
     else setLocalEditorSettings(next);
   }, [onEditorSettingsChange]);
   const shortcutFor = (action: TextEditorShortcutAction): string => resolveKeyboardShortcut(action, shortcuts, apple);
-  const shortcutLabel = (action: TextEditorShortcutAction): string => formatCommandPaletteShortcut(shortcutFor(action), apple);
+  const shortcutLabel = (action: TextEditorShortcutAction): string => formatCommandPaletteShortcut(
+    shortcutFor(action),
+    apple,
+    { macCommandKey: "symbol" },
+  );
   const shortcutAria = (action: TextEditorShortcutAction): string => shortcutAriaKeyShortcuts(shortcutFor(action), apple);
   const editorKeybindings = useMemo<CodeEditorKeybindings>(() => ({
     save: resolveKeyboardShortcut("textEditorSave", shortcuts, apple),
@@ -106,7 +128,121 @@ export function TextEditorWorkspace({
     replace: resolveKeyboardShortcut("textEditorReplace", shortcuts, apple),
     commandPalette: resolveKeyboardShortcut("textEditorCommandPalette", shortcuts, apple),
   }), [apple, shortcuts]);
+  const standardShortcut = (key: string): string => apple ? `⌘${key}` : `Ctrl+${key}`;
+  editingContext.current = { documentId: document.id, readOnly };
+  const copySelection = async (cut: boolean): Promise<void> => {
+    const handle = editor.current;
+    const selection = handle?.captureSelection();
+    if (!handle || !selection?.text || (cut && readOnly)) return;
+    try {
+      requireClipboardGesture();
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(selection.text);
+      if (
+        cut && editor.current === handle &&
+        editingContext.current.documentId === document.id && !editingContext.current.readOnly
+      ) handle.deleteSelection(selection.state);
+    } catch {
+      toast.danger(cut ? "Could not cut the editor selection" : "Could not copy the editor selection", {
+        description: "Clipboard access failed. Keep the selection active and try again.",
+      });
+    }
+  };
+  const pasteClipboard = async (): Promise<void> => {
+    const handle = editor.current;
+    const selection = handle?.captureSelection();
+    if (!handle || !selection || readOnly) return;
+    try {
+      requireClipboardGesture();
+      if (!navigator.clipboard?.readText) throw new Error("Clipboard unavailable");
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText) return;
+      if (
+        editor.current !== handle || editingContext.current.documentId !== document.id ||
+        editingContext.current.readOnly
+      ) return;
+      handle.pasteText(clipboardText, selection.state);
+    } catch {
+      toast.danger("Could not paste into the editor", {
+        description: "Clipboard access failed. Copy text and try Paste again.",
+      });
+    }
+  };
+  const editorMenuScope = useApplicationContextMenuScope(editorMenu.documentTarget ? {
+    builtInPolicy: "inspect-only",
+    signalBuiltInPolicyToMain: false,
+    actions: [{
+      id: "text-editor-undo",
+      label: "Undo",
+      icon: faArrowRotateLeft,
+      isDisabled: !ready || readOnly || !editorMenu.canUndo,
+      shortcut: shortcutLabel("textEditorUndo"),
+      onAction: () => editor.current?.undo(),
+    }, {
+      id: "text-editor-redo",
+      label: "Redo",
+      icon: faArrowRotateRight,
+      isDisabled: !ready || readOnly || !editorMenu.canRedo,
+      shortcut: shortcutLabel("textEditorRedo"),
+      onAction: () => editor.current?.redo(),
+    }, {
+      id: "text-editor-cut",
+      label: "Cut",
+      icon: faScissors,
+      isDisabled: !ready || readOnly || !editorMenu.hasSelection,
+      separatorBefore: true,
+      shortcut: standardShortcut("X"),
+      onAction: () => copySelection(true),
+    }, {
+      id: "text-editor-copy",
+      label: "Copy",
+      icon: faCopy,
+      isDisabled: !ready || !editorMenu.hasSelection,
+      shortcut: standardShortcut("C"),
+      onAction: () => copySelection(false),
+    }, {
+      id: "text-editor-paste",
+      label: "Paste",
+      icon: faPaste,
+      isDisabled: !ready || readOnly,
+      shortcut: standardShortcut("V"),
+      onAction: pasteClipboard,
+    }, {
+      id: "text-editor-delete",
+      label: "Delete",
+      icon: faTrashCan,
+      isDisabled: !ready || readOnly || !editorMenu.hasSelection,
+      onAction: () => editor.current?.deleteSelection(),
+    }, {
+      id: "text-editor-select-all",
+      label: "Select All",
+      icon: faArrowPointer,
+      isDisabled: !ready || !editorMenu.hasText,
+      separatorBefore: true,
+      shortcut: standardShortcut("A"),
+      onAction: () => editor.current?.selectAll(),
+    }],
+  } : {
+    builtInPolicy: "all",
+    signalBuiltInPolicyToMain: false,
+    actions: [],
+  });
   dirtyRef.current = dirty;
+
+  const updateEditorMenu = (target: EventTarget | null): void => {
+    if (isMonacoOverlayEditable(target)) {
+      setEditorMenu((current) => current.documentTarget ? { ...current, documentTarget: false } : current);
+      return;
+    }
+    const state = editor.current?.contextMenuState();
+    setEditorMenu({
+      documentTarget: true,
+      canUndo: state?.canUndo ?? false,
+      canRedo: state?.canRedo ?? false,
+      hasSelection: state?.hasSelection ?? false,
+      hasText: state?.hasText ?? text.length > 0,
+    });
+  };
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => {
@@ -279,7 +415,10 @@ export function TextEditorWorkspace({
       </div>
     </div>
     {error && <p role="alert" className="shrink-0 px-6 py-3 text-sm text-danger">{error}</p>}
-    <div className="min-h-0 min-w-0 flex-1">
+    <div {...editorMenuScope} className="min-h-0 min-w-0 flex-1"
+      onFocusCapture={(event) => updateEditorMenu(event.target)}
+      onPointerDownCapture={(event) => updateEditorMenu(event.target)}
+      onContextMenu={(event) => updateEditorMenu(event.target)}>
       <CodeEditor modelKey={document.id} value={text} language={language} theme={theme} readOnly={readOnly}
         ariaLabel="Document text" editorHandleRef={editor} wordWrap={activeEditorSettings.wordWrap}
         minimap={activeEditorSettings.minimap} fontSize={activeEditorSettings.fontSize}
@@ -310,4 +449,16 @@ function preservesOverlayEditing(event: KeyboardEvent, apple: boolean): boolean 
   if (!editable || editable.matches(".monaco-editor .inputarea")) return false;
   return matchesKeyboardShortcut(defaultKeyboardShortcut("textEditorUndo", apple), event, apple) ||
     matchesKeyboardShortcut(defaultKeyboardShortcut("textEditorRedo", apple), event, apple);
+}
+
+function isMonacoOverlayEditable(target: EventTarget | null): boolean {
+  const element = target instanceof Element ? target : null;
+  const editable = element?.closest('input, textarea, [contenteditable]:not([contenteditable="false"])');
+  return Boolean(editable && !editable.matches(".monaco-editor .inputarea"));
+}
+
+function requireClipboardGesture(): void {
+  if (navigator.userActivation && !navigator.userActivation.isActive) {
+    throw new Error("Clipboard access requires an explicit operator action");
+  }
 }

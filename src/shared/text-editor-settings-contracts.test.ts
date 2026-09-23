@@ -50,7 +50,7 @@ describe("text editor settings contracts", () => {
       renderWhitespace: "selection",
       stickyScroll: false,
       bracketPairColorization: true,
-      fontLigatures: false,
+      fontLigatures: true,
     });
     expect(Object.isFrozen(DEFAULT_TEXT_EDITOR_SETTINGS_VALUES)).toBe(true);
     expect(Object.isFrozen(DEFAULT_TEXT_EDITOR_SETTINGS_STATE)).toBe(true);
@@ -80,6 +80,16 @@ describe("text editor settings contracts", () => {
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(update)).toBe(true);
     expect(Object.isFrozen(update.settings)).toBe(true);
+  });
+
+  it("preserves an explicit persisted disabled ligature preference", () => {
+    const persisted = parsePersistedTextEditorSettingsState({
+      ...DEFAULT_TEXT_EDITOR_SETTINGS_STATE,
+      revision: 4,
+      fontLigatures: false,
+    });
+
+    expect(persisted.fontLigatures).toBe(false);
   });
 
   it.each(TEXT_EDITOR_FONTS)("accepts the bundled $label font", ({ id }) => {

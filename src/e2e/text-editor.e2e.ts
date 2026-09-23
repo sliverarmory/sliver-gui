@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
+import type { ApplicationContextMenuAPI } from "../shared/application-context-menu-contracts.js";
 import type { TextEditorAPI } from "../shared/text-editor-contracts.js";
 import { cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
@@ -92,8 +93,16 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     }));
     assert.equal(new URL(page.url()).searchParams.get("surface"), "text-editor");
     const bridge = await page.evaluate(() => {
-      const browser = globalThis as unknown as { textEditor: TextEditorAPI; sliver?: unknown; network?: unknown; armory?: unknown };
+      const browser = globalThis as unknown as {
+        applicationContextMenu: ApplicationContextMenuAPI;
+        textEditor: TextEditorAPI;
+        sliver?: unknown;
+        network?: unknown;
+        armory?: unknown;
+      };
       return { frozen: Object.isFrozen(browser.textEditor), keys: Object.keys(browser.textEditor).sort(),
+        contextMenuFrozen: Object.isFrozen(browser.applicationContextMenu),
+        contextMenuKeys: Object.keys(browser.applicationContextMenu).sort(),
         sliver: typeof browser.sliver, network: typeof browser.network, armory: typeof browser.armory };
     });
     assert.deepEqual(bridge, {
@@ -110,6 +119,8 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
         "setDirty",
         "updateEditorSettings",
       ],
+      contextMenuFrozen: true,
+      contextMenuKeys: ["executeAction", "onMenuRequested", "setOpen"],
       sliver: "undefined", network: "undefined", armory: "undefined",
     });
     const nativeWindow = await application.browserWindow(page);
@@ -168,6 +179,8 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     assert.equal(await page.getByRole("combobox", { name: "Document language", exact: true }).inputValue(), "xml");
     assert.equal(await documentText(application, page), initial);
 
+    await verifyEditorContextMenu(application, page, initial);
+
     // A text-looking extension cannot make binary content editable.
     await chooseOpenFile(application, binaryPath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
@@ -206,6 +219,18 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await controls.getByRole("button", { name: "Find", exact: true }).click();
     const find = page.locator(".find-widget").getByRole("textbox", { name: "Find", exact: true });
     await find.fill("alpha");
+    await find.selectText();
+    await find.click({ button: "right" });
+    const findContextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
+    await findContextMenu.waitFor();
+    for (const label of ["Cut", "Copy", "Paste", "Select All", "Inspect Element"]) {
+      assert.equal(await findContextMenu.getByRole("menuitem", { name: label, exact: true }).count(), 1,
+        `Find input must expose native ${label}`);
+    }
+    await application.evaluate(({ clipboard }) => clipboard.writeText("find copy sentinel"));
+    await findContextMenu.getByRole("menuitem", { name: "Copy", exact: true }).click();
+    await waitUntil(async () => await application!.evaluate(({ clipboard }) => clipboard.readText()) === "alpha");
+    await findContextMenu.waitFor({ state: "hidden" });
     await find.press("End");
     await find.pressSequentially("x");
     await page.keyboard.press(`${modifier}+z`);
@@ -222,10 +247,24 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await waitUntil(async () => (await controls.getByRole("button", { name: "Word Wrap", exact: true })
       .getAttribute("aria-pressed")) === "true");
     await waitUntil(async () => (await page!.locator(".view-lines .view-line").count()) > replaced.split("\n").length);
+    if (process.platform === "darwin") {
+      const undo = controls.getByRole("button", { name: "Undo", exact: true });
+      await undo.hover();
+      const tooltip = page.getByRole("tooltip").filter({ hasText: /^Undo ·/u });
+      await tooltip.waitFor();
+      const tooltipText = await tooltip.innerText();
+      assert.match(tooltipText, /⌘/u, "Editor tooltips must use the macOS Command symbol");
+      assert.doesNotMatch(tooltipText, /\bCommand\b/u,
+        "Editor tooltips must not spell out the macOS Command key");
+    }
 
     await controls.getByRole("button", { name: "Editor settings", exact: true }).click();
     const settingsDialog = page.getByRole("dialog", { name: "Editor settings", exact: true });
     await settingsDialog.waitFor();
+    const settingsScrollShadow = settingsDialog.locator('[data-scroll-shadow-size="28"]');
+    await settingsScrollShadow.waitFor();
+    assert.equal(await settingsScrollShadow.getAttribute("data-orientation"), "vertical",
+      "The editor settings body must use a vertical HeroUI ScrollShadow");
     await settingsDialog.getByRole("button", { name: /Font family/u }).click();
     await page.getByRole("option", { name: "JetBrains Mono", exact: true }).click();
     const fontSize = settingsDialog.getByRole("textbox", { name: "Font size", exact: true });
@@ -242,6 +281,7 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     const persistedSettings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
     assert.equal(persistedSettings["fontId"], "jetbrains-mono");
     assert.equal(persistedSettings["fontSize"], 18);
+    assert.equal(persistedSettings["fontLigatures"], true);
     assert.equal(persistedSettings["wordWrap"], true);
     assert.equal(persistedSettings["stickyScroll"], true);
     if (process.platform !== "win32") {
@@ -382,6 +422,100 @@ async function requestNativeClose(application: ElectronApplication, windowId: nu
     }
     finally { dialog.showMessageBoxSync = original; }
   }, { windowId, response, action });
+}
+
+async function verifyEditorContextMenu(
+  application: ElectronApplication,
+  page: Page,
+  original: string,
+): Promise<void> {
+  const editor = page.getByRole("textbox", { name: "Document text", exact: true });
+  const status = page.getByLabel("Editor status", { exact: true });
+  const replacement = "Edited through the application context menu";
+  const originalModelLength = original.replace(/\r\n|\r|\n/gu, "\r\n").length;
+
+  await editor.focus();
+  await page.keyboard.press("ArrowRight");
+  let menu = await openEditorContextMenu(page);
+  for (const label of ["Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All", "Inspect Element"]) {
+    assert.equal(await menu.getByRole("menuitem", { name: label, exact: true }).count(), 1,
+      `Monaco context menu must expose ${label}`);
+  }
+  if (process.platform === "darwin") {
+    const undoText = await menu.getByRole("menuitem", { name: "Undo", exact: true }).innerText();
+    assert.match(undoText, /⌘/u, "Editor context-menu shortcuts must use the macOS Command symbol");
+    assert.doesNotMatch(await menu.innerText(), /\bCommand\b/u,
+      "Editor context-menu shortcuts must not spell out the macOS Command key");
+  }
+  await menu.getByRole("menuitem", { name: "Select All", exact: true }).click();
+  await menu.waitFor({ state: "hidden" });
+  await waitUntil(() => editor.evaluate((element) => element === element.ownerDocument.activeElement));
+  await page.keyboard.insertText("x");
+  await status.getByText("1 characters", { exact: true }).waitFor();
+  await page.keyboard.press(`${modifier}+z`);
+  await waitUntil(async () => await documentText(application, page) === original);
+
+  await editor.focus();
+  await page.keyboard.press(`${modifier}+a`);
+  menu = await openEditorContextMenu(page);
+  await application.evaluate(({ clipboard }) => clipboard.writeText("copy action sentinel"));
+  await menu.getByRole("menuitem", { name: "Copy", exact: true }).click();
+  await waitUntil(async () => (await application.evaluate(({ clipboard }) => clipboard.readText()))
+    .replace(/\r\n/gu, "\n") === original);
+
+  await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), replacement);
+  await editor.focus();
+  await page.keyboard.press(`${modifier}+a`);
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Paste", exact: true }).click();
+  await status.getByText(`${replacement.length} characters`, { exact: true }).waitFor();
+  assert.equal(await documentText(application, page), replacement);
+
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Undo", exact: true }).click();
+  await status.getByText(`${originalModelLength} characters`, { exact: true }).waitFor();
+  assert.equal(await documentText(application, page), original);
+
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Redo", exact: true }).click();
+  await status.getByText(`${replacement.length} characters`, { exact: true }).waitFor();
+  assert.equal(await documentText(application, page), replacement);
+
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  await status.getByText("0 characters", { exact: true }).waitFor();
+
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Undo", exact: true }).click();
+  await status.getByText(`${replacement.length} characters`, { exact: true }).waitFor();
+  assert.equal(await documentText(application, page), replacement);
+
+  await editor.focus();
+  await page.keyboard.press(`${modifier}+a`);
+  await application.evaluate(({ clipboard }) => clipboard.writeText("cut sentinel"));
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Cut", exact: true }).click();
+  await status.getByText("0 characters", { exact: true }).waitFor();
+  await waitUntil(async () => await application.evaluate(({ clipboard }) => clipboard.readText()) === replacement);
+
+  menu = await openEditorContextMenu(page);
+  await menu.getByRole("menuitem", { name: "Undo", exact: true }).click();
+  await status.getByText(`${replacement.length} characters`, { exact: true }).waitFor();
+  assert.equal(await documentText(application, page), replacement);
+  await page.keyboard.press(`${modifier}+z`);
+  await status.getByText(`${originalModelLength} characters`, { exact: true }).waitFor();
+  assert.equal(await documentText(application, page), original);
+  await page.getByText("Saved", { exact: true }).waitFor();
+}
+
+async function openEditorContextMenu(page: Page) {
+  await page.locator(".monaco-editor .view-lines").click({
+    button: "right",
+    position: { x: 120, y: 18 },
+  });
+  const menu = page.getByRole("menu", { name: "Application context menu", exact: true });
+  await menu.waitFor();
+  return menu;
 }
 
 async function replaceDocument(application: ElectronApplication, page: Page, text: string): Promise<void> {

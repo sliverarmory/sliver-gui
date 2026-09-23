@@ -249,6 +249,24 @@ describe("ApplicationContextMenu", () => {
     expect(within(menu).queryByRole("menuitem", { name: "Paste" })).not.toBeInTheDocument();
   });
 
+  it("can filter a safe editor scope without restricting its nested native inputs in main", async () => {
+    const contextMenu = mockContextMenuAPI();
+    render(
+      <ApplicationContextMenu api={contextMenu.api}>
+        <RendererOnlyInspectTarget />
+      </ApplicationContextMenu>,
+    );
+    const target = screen.getByLabelText("Safe editor surface");
+    expect(target).not.toHaveAttribute("data-application-context-menu-policy");
+
+    fireEvent.contextMenu(target);
+    contextMenu.emit(request(REQUEST_ID_ONE, nativeEditItems()));
+
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(1);
+    expect(within(menu).getByRole("menuitem", { name: "Inspect Element" })).toBeInTheDocument();
+  });
+
   it("contains failures from component-owned asynchronous actions", async () => {
     const user = userEvent.setup();
     const contextMenu = mockContextMenuAPI();
@@ -336,6 +354,14 @@ function InspectOnlyTarget(): React.JSX.Element {
       data-application-context-menu-policy="inspect-only"
     />
   );
+}
+
+function RendererOnlyInspectTarget(): React.JSX.Element {
+  const scope = useApplicationContextMenuScope({
+    builtInPolicy: "inspect-only",
+    signalBuiltInPolicyToMain: false,
+  });
+  return <div {...scope} aria-label="Safe editor surface" />;
 }
 
 function mockContextMenuAPI(

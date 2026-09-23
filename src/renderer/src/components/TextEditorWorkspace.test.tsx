@@ -1,11 +1,28 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
+import type { ApplicationContextMenuItem } from "../../../shared/application-context-menu-contracts";
 import type { TextEditorDocument } from "../../../shared/text-editor-contracts";
+import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 
 const editorHandle = vi.hoisted(() => ({
-  focus: vi.fn(), undo: vi.fn(), redo: vi.fn(), find: vi.fn(), replace: vi.fn(), commandPalette: vi.fn(),
+  focus: vi.fn(),
+  contextMenuState: vi.fn(() => ({ canUndo: true, canRedo: true, hasSelection: true, hasText: true })),
+  captureSelection: vi.fn(() => ({
+    text: "selected editor text",
+    state: {
+      modelUri: "inmemory://document",
+      modelVersionId: 1,
+      selections: [{
+        selectionStartLineNumber: 1, selectionStartColumn: 1,
+        positionLineNumber: 1, positionColumn: 21,
+      }],
+    },
+  })),
+  undo: vi.fn(), redo: vi.fn(), pasteText: vi.fn(), deleteSelection: vi.fn(),
+  selectAll: vi.fn(), find: vi.fn(), replace: vi.fn(), commandPalette: vi.fn(),
 }));
 
 vi.mock("./CodeEditor", async () => {
@@ -21,7 +38,8 @@ vi.mock("./CodeEditor", async () => {
   }) => {
     React.useImperativeHandle(props.editorHandleRef, () => editorHandle, []);
     React.useEffect(() => { props.onReady(); }, []);
-    return <textarea aria-label="Document text" value={props.value} readOnly={props.readOnly}
+    return <div className="monaco-editor"><textarea className="inputarea" aria-label="Document text"
+      value={props.value} readOnly={props.readOnly}
       data-wrap={String(props.wordWrap)} data-minimap={String(props.minimap)} data-language={props.language}
       data-font-size={props.fontSize} data-default-save-keybinding={String(props.useDefaultSaveKeybinding)}
       data-font-family={props.fontFamily} data-tab-size={props.tabSize} data-insert-spaces={String(props.insertSpaces)}
@@ -29,7 +47,7 @@ vi.mock("./CodeEditor", async () => {
       data-sticky-scroll={String(props.stickyScroll)} data-bracket-colors={String(props.bracketPairColorization)}
       data-font-ligatures={String(props.fontLigatures)}
       data-keybindings={JSON.stringify(props.keybindings)}
-      onChange={(event) => props.onChange(event.target.value)} />;
+      onChange={(event) => props.onChange(event.target.value)} /></div>;
   } };
 });
 
@@ -38,11 +56,46 @@ import { TextEditorWorkspace } from "./TextEditorWorkspace";
 const document: TextEditorDocument = { id: "document-one", title: "notes.txt", text: "original", language: "plaintext", readOnly: false };
 beforeEach(() => {
   vi.clearAllMocks();
+  editorHandle.contextMenuState.mockReturnValue({
+    canUndo: true, canRedo: true, hasSelection: true, hasText: true,
+  });
+  editorHandle.captureSelection.mockReturnValue({
+    text: "selected editor text",
+    state: {
+      modelUri: "inmemory://document",
+      modelVersionId: 1,
+      selections: [{
+        selectionStartLineNumber: 1, selectionStartColumn: 1,
+        positionLineNumber: 1, positionColumn: 21,
+      }],
+    },
+  });
   Object.defineProperty(navigator, "platform", { configurable: true, value: "Linux x86_64" });
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { readText: vi.fn(async () => "replacement text"), writeText: vi.fn(async () => undefined) },
+  });
+  Object.defineProperty(navigator, "userActivation", {
+    configurable: true,
+    value: { isActive: true },
+  });
+  vi.stubGlobal("ResizeObserver", class ResizeObserver {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  });
+  Object.defineProperty(Element.prototype, "getAnimations", {
+    configurable: true,
+    value: () => [],
+  });
 });
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   Reflect.deleteProperty(navigator, "platform");
+  Reflect.deleteProperty(navigator, "clipboard");
+  Reflect.deleteProperty(navigator, "userActivation");
+  Reflect.deleteProperty(Element.prototype, "getAnimations");
 });
 
 describe("TextEditorWorkspace", () => {
@@ -127,6 +180,7 @@ describe("TextEditorWorkspace", () => {
     expect(screen.getByRole("option", { name: "PowerShell" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Editor settings" })).toBeInTheDocument();
     expect(editor).toHaveAttribute("data-minimap", "true");
+    expect(editor).toHaveAttribute("data-font-ligatures", "true");
     expect(editor).toHaveAttribute("data-default-save-keybinding", "false");
     expect(JSON.parse(editor.getAttribute("data-keybindings") ?? "{}")).toMatchObject({
       save: "mod+s", undo: "mod+z", redo: "mod+y", find: "mod+f",
@@ -222,6 +276,122 @@ describe("TextEditorWorkspace", () => {
     expect(screen.getByLabelText("Document text")).toHaveAttribute("data-wrap", "true");
   });
 
+  it("uses the Command symbol in macOS editor tooltips and context-menu shortcuts", async () => {
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    const rendered = render(<TextEditorWorkspace document={document} onSave={vi.fn()} />);
+
+    const editor = screen.getByLabelText("Document text");
+    fireEvent.pointerDown(editor, { button: 2 });
+    fireEvent.contextMenu(editor, { clientX: 40, clientY: 24 });
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    const undo = within(menu).getByRole("menuitem", { name: "Undo" });
+    expect(undo).toHaveTextContent("⌘ + Z");
+    expect(undo).not.toHaveTextContent("Command");
+  });
+
+  it("uses the application context menu for Monaco while preserving native overlay input actions", async () => {
+    const user = userEvent.setup();
+    const clipboard = {
+      readText: vi.fn(async () => "replacement text"),
+      writeText: vi.fn(async () => undefined),
+    };
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    let rendered = render(<TextEditorWorkspace document={document} onSave={vi.fn()} />);
+    const editor = screen.getByLabelText("Document text");
+    const openMenu = async (target: Element, items?: readonly ApplicationContextMenuItem[]) => {
+      fireEvent.pointerDown(target, { button: 2 });
+      fireEvent.contextMenu(target, { clientX: 40, clientY: 24 });
+      rendered.contextMenu.emit(items);
+      return screen.findByRole("menu", { name: "Application context menu" });
+    };
+
+    let menu = await openMenu(editor);
+    for (const label of ["Undo", "Redo", "Cut", "Copy", "Paste", "Delete", "Select All", "Inspect Element"]) {
+      expect(within(menu).getByRole("menuitem", { name: label })).toBeInTheDocument();
+    }
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(8);
+    await user.click(within(menu).getByRole("menuitem", { name: "Cut" }));
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledExactlyOnceWith("selected editor text"));
+    expect(editorHandle.deleteSelection).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ modelUri: "inmemory://document", modelVersionId: 1 }),
+    );
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "Application context menu" })).not.toBeInTheDocument());
+    expect(rendered.contextMenu.api.executeAction).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    rendered = render(<TextEditorWorkspace document={{ ...document, readOnly: true }} onSave={vi.fn()} />);
+    const readOnlyEditor = screen.getByLabelText("Document text");
+    await waitFor(() => expect(readOnlyEditor).toHaveAttribute("readonly"));
+    menu = await openMenu(readOnlyEditor);
+    for (const label of ["Undo", "Redo", "Cut", "Paste", "Delete"]) {
+      expect(within(menu).getByRole("menuitem", { name: label }), label).toHaveAttribute("aria-disabled", "true");
+    }
+    expect(within(menu).getByRole("menuitem", { name: "Copy" })).not.toHaveAttribute("aria-disabled", "true");
+    expect(within(menu).getByRole("menuitem", { name: "Select All" })).not.toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "Application context menu" })).not.toBeInTheDocument());
+
+    const overlay = globalThis.document.createElement("input");
+    overlay.setAttribute("aria-label", "Find overlay input");
+    screen.getByLabelText("Document text").parentElement?.append(overlay);
+    menu = await openMenu(overlay, nativeOverlayItems());
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(4);
+    expect(within(menu).queryByRole("menuitem", { name: "Undo" })).not.toBeInTheDocument();
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy" }));
+    await waitFor(() => expect(rendered.contextMenu.api.executeAction).toHaveBeenCalledOnce());
+    expect(editorHandle.captureSelection).toHaveBeenCalledOnce();
+  });
+
+  it("binds delayed cut and paste work to the selection captured before clipboard I/O", async () => {
+    const user = userEvent.setup();
+    const write = deferred<void>();
+    const read = deferred<string>();
+    const clipboard = {
+      readText: vi.fn(() => read.promise),
+      writeText: vi.fn(() => write.promise),
+    };
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+    const rendered = render(<TextEditorWorkspace document={document} onSave={vi.fn()} />);
+    const editor = screen.getByLabelText("Document text");
+    const original = editorHandle.captureSelection();
+    const changed = {
+      text: "later selection",
+      state: {
+        modelUri: "inmemory://document",
+        modelVersionId: 2,
+        selections: [{
+          selectionStartLineNumber: 2, selectionStartColumn: 1,
+          positionLineNumber: 2, positionColumn: 16,
+        }],
+      },
+    };
+    const openMenu = async () => {
+      fireEvent.pointerDown(editor, { button: 2 });
+      fireEvent.contextMenu(editor, { clientX: 40, clientY: 24 });
+      rendered.contextMenu.emit();
+      return screen.findByRole("menu", { name: "Application context menu" });
+    };
+
+    let menu = await openMenu();
+    await user.click(within(menu).getByRole("menuitem", { name: "Cut" }));
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledExactlyOnceWith("selected editor text"));
+    editorHandle.captureSelection.mockReturnValue(changed);
+    await act(async () => write.resolve());
+    expect(editorHandle.deleteSelection).toHaveBeenCalledExactlyOnceWith(original?.state);
+
+    editorHandle.captureSelection.mockReturnValue(original);
+    menu = await openMenu();
+    await user.click(within(menu).getByRole("menuitem", { name: "Paste" }));
+    await waitFor(() => expect(clipboard.readText).toHaveBeenCalledOnce());
+    editorHandle.captureSelection.mockReturnValue(changed);
+    await act(async () => read.resolve("delayed clipboard text"));
+    expect(editorHandle.pasteText).toHaveBeenCalledExactlyOnceWith(
+      "delayed clipboard text",
+      original?.state,
+    );
+  });
+
   it("leaves standard undo and redo inside Monaco overlay inputs", () => {
     render(<TextEditorWorkspace document={document} onSave={vi.fn()} />);
     const palette = documentNode("quick-input-widget");
@@ -248,4 +418,31 @@ function documentNode(containerClass: string): HTMLInputElement {
   container.append(input);
   globalThis.document.body.append(container);
   return input;
+}
+
+function nativeOverlayItems(): readonly ApplicationContextMenuItem[] {
+  return [
+    {
+      type: "action", actionId: "10000000-0000-4000-8000-000000000001",
+      kind: "copy", label: "Copy", enabled: true, shortcut: "mod+c",
+    },
+    {
+      type: "action", actionId: "10000000-0000-4000-8000-000000000002",
+      kind: "paste", label: "Paste", enabled: true, shortcut: "mod+v",
+    },
+    {
+      type: "action", actionId: "10000000-0000-4000-8000-000000000003",
+      kind: "select-all", label: "Select All", enabled: true, shortcut: "mod+a",
+    },
+    {
+      type: "action", actionId: "10000000-0000-4000-8000-000000000004",
+      kind: "inspect", label: "Inspect Element", enabled: true,
+    },
+  ];
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
 }

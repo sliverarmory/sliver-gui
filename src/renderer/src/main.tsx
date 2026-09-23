@@ -82,9 +82,9 @@ function ApplicationRoot(): React.JSX.Element {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    {surface === "text-editor" ? <ApplicationRoot /> : <ApplicationContextMenu>
+    <ApplicationContextMenu>
       <ApplicationRoot />
-    </ApplicationContextMenu>}
+    </ApplicationContextMenu>
     <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

@@ -52,7 +52,7 @@ export const DEFAULT_TEXT_EDITOR_SETTINGS_VALUES: TextEditorSettingsValues = Obj
   renderWhitespace: "selection",
   stickyScroll: false,
   bracketPairColorization: true,
-  fontLigatures: false,
+  fontLigatures: true,
 });
 
 /** Concise UI-facing alias for the persisted values without version metadata. */

@@ -34,7 +34,10 @@ describe("TextEditorSettingsModal", () => {
     const user = userEvent.setup();
     render(<ControlledSettingsModal />);
     const dialog = screen.getByRole("dialog", { name: "Editor settings" });
+    const settingsContent = dialog.querySelector(".modal__body");
 
+    expect(settingsContent).toHaveClass("scroll-shadow", "scroll-shadow--vertical");
+    expect(settingsContent).toHaveAttribute("data-scroll-shadow-size", "28");
     expect(within(dialog).getByText("Typography and indentation")).toBeInTheDocument();
     expect(within(dialog).getByText("Editor features")).toBeInTheDocument();
     expect(within(dialog).getByRole("textbox", { name: "Font size" })).toHaveValue("13");

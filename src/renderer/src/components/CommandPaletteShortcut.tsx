@@ -22,6 +22,10 @@ export interface CommandPaletteShortcutRecorderProps {
   readonly onChange: (shortcut: string) => void;
 }
 
+export interface CommandPaletteShortcutFormatOptions {
+  readonly macCommandKey?: "name" | "symbol";
+}
+
 export function CommandPaletteShortcutRecorder({
   isDisabled = false,
   shortcut,
@@ -154,9 +158,15 @@ export function commandPaletteShortcutFromKeyboardEvent(
   return isCommandPaletteShortcut(shortcut) ? shortcut : undefined;
 }
 
-export function formatCommandPaletteShortcut(shortcut: string, apple = isApplePlatform()): string {
+export function formatCommandPaletteShortcut(
+  shortcut: string,
+  apple = isApplePlatform(),
+  options: CommandPaletteShortcutFormatOptions = {},
+): string {
   const labels = shortcut.split("+").map((token) => {
-    if (token === "mod") return apple ? "Command" : "Ctrl";
+    if (token === "mod") {
+      return apple ? options.macCommandKey === "symbol" ? "⌘" : "Command" : "Ctrl";
+    }
     if (token === "alt") return apple ? "Option" : "Alt";
     if (token === "shift") return "Shift";
     return shortcutKeyLabel(token);

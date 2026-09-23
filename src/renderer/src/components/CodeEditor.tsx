@@ -1,4 +1,4 @@
-import type { editor, IDisposable, KeyCode } from "monaco-editor/editor/editor.api";
+import type { editor, IDisposable, KeyCode, Selection } from "monaco-editor/editor/editor.api";
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 
 import { isKeyboardShortcut } from "../../../shared/keyboard-shortcuts";
@@ -8,10 +8,40 @@ import { preferredMonacoExtension } from "../editor/monaco-language-catalog";
 type MonacoRuntime = typeof import("../editor/monaco-runtime");
 export type CodeEditorProfile = "default" | "script";
 
+export interface CodeEditorContextMenuState {
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  readonly hasSelection: boolean;
+  readonly hasText: boolean;
+}
+
+export interface CodeEditorSelectionRangeState {
+  readonly selectionStartLineNumber: number;
+  readonly selectionStartColumn: number;
+  readonly positionLineNumber: number;
+  readonly positionColumn: number;
+}
+
+export interface CodeEditorSelectionState {
+  readonly modelUri: string;
+  readonly modelVersionId: number;
+  readonly selections: readonly CodeEditorSelectionRangeState[];
+}
+
+export interface CodeEditorSelectionCapture {
+  readonly text: string;
+  readonly state: CodeEditorSelectionState;
+}
+
 export interface CodeEditorHandle {
   focus(): void;
+  contextMenuState(): CodeEditorContextMenuState;
   undo(): void;
   redo(): void;
+  captureSelection(): CodeEditorSelectionCapture | undefined;
+  pasteText(text: string, expectedState?: CodeEditorSelectionState): void;
+  deleteSelection(expectedState?: CodeEditorSelectionState): void;
+  selectAll(): void;
   find(): void;
   replace(): void;
   commandPalette(): void;
@@ -106,16 +136,58 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   const keybindings = props.keybindings;
 
   useImperativeHandle(props.editorHandleRef, () => {
-    const command = (id: string, changesContent = false): void => {
+    const command = (
+      id: string,
+      changesContent = false,
+      args: unknown = null,
+      expectedSelectionState?: CodeEditorSelectionState,
+    ): void => {
       const instance = editorRef.current;
       if (!instance || (changesContent && currentProps.current.readOnly)) return;
+      if (expectedSelectionState && !selectionStateMatches(instance, expectedSelectionState)) return;
       instance.focus();
-      instance.trigger("application.editor", id, null);
+      // Focus restoration can synchronously run editor listeners. Recheck the
+      // captured model and selections before applying delayed clipboard work.
+      if (expectedSelectionState && !selectionStateMatches(instance, expectedSelectionState)) return;
+      instance.trigger("application.editor", id, args);
     };
     return {
       focus: () => { editorRef.current?.focus(); },
+      contextMenuState: () => {
+        const instance = editorRef.current;
+        const model = instance?.getModel();
+        const selections = instance?.getSelections();
+        const writable = currentProps.current.readOnly !== true;
+        return {
+          canUndo: Boolean(writable && model?.canUndo()),
+          canRedo: Boolean(writable && model?.canRedo()),
+          hasSelection: Boolean(selections?.some((selection) => !selection.isEmpty())),
+          hasText: Boolean(model && model.getValueLength() > 0),
+        };
+      },
       undo: () => command("undo", true),
       redo: () => command("redo", true),
+      captureSelection: () => {
+        const instance = editorRef.current;
+        const model = instance?.getModel();
+        const selections = instance?.getSelections();
+        if (!model || !selections) return undefined;
+        return {
+          text: selections.map((selection) => model.getValueInRange(selection)).join("\n"),
+          state: selectionState(model, selections),
+        };
+      },
+      pasteText: (text, expectedState) => command("paste", true, {
+        text,
+        pasteOnNewLine: false,
+        multicursorText: null,
+      }, expectedState),
+      deleteSelection: (expectedState) => {
+        const selections = editorRef.current?.getSelections();
+        if (!selections?.some((selection) => !selection.isEmpty())) return;
+        command("deleteLeft", true, null, expectedState);
+      },
+      selectAll: () => command("editor.action.selectAll"),
       find: () => command("actions.find"),
       replace: () => command("editor.action.startFindReplaceAction", true),
       commandPalette: () => command("editor.action.quickCommand"),
@@ -341,6 +413,40 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       {error && <div className="absolute inset-0 flex items-center justify-center p-4 text-sm text-danger" role="alert">{error}</div>}
     </div>
   );
+}
+
+function selectionState(
+  model: editor.ITextModel,
+  selections: readonly Selection[],
+): CodeEditorSelectionState {
+  return {
+    modelUri: model.uri.toString(),
+    modelVersionId: model.getVersionId(),
+    selections: selections.map((selection) => ({
+      selectionStartLineNumber: selection.selectionStartLineNumber,
+      selectionStartColumn: selection.selectionStartColumn,
+      positionLineNumber: selection.positionLineNumber,
+      positionColumn: selection.positionColumn,
+    })),
+  };
+}
+
+function selectionStateMatches(
+  instance: editor.IStandaloneCodeEditor,
+  expected: CodeEditorSelectionState,
+): boolean {
+  const model = instance.getModel();
+  const selections = instance.getSelections();
+  if (!model || !selections || model.uri.toString() !== expected.modelUri ||
+    model.getVersionId() !== expected.modelVersionId || selections.length !== expected.selections.length) return false;
+  return selections.every((selection, index) => {
+    const expectedSelection = expected.selections[index];
+    return expectedSelection !== undefined &&
+      selection.selectionStartLineNumber === expectedSelection.selectionStartLineNumber &&
+      selection.selectionStartColumn === expectedSelection.selectionStartColumn &&
+      selection.positionLineNumber === expectedSelection.positionLineNumber &&
+      selection.positionColumn === expectedSelection.positionColumn;
+  });
 }
 
 function editorDimensions(size: Pick<DOMRectReadOnly, "width" | "height">): editor.IDimension {

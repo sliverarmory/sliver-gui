@@ -56,7 +56,11 @@ describe("command palette shortcuts", () => {
 
   it("formats the primary modifier for Apple and non-Apple platforms", () => {
     expect(formatCommandPaletteShortcut("mod+alt+k", true)).toBe("Command + Option + K");
+    expect(formatCommandPaletteShortcut("mod+alt+k", true, { macCommandKey: "symbol" }))
+      .toBe("⌘ + Option + K");
     expect(formatCommandPaletteShortcut("mod+alt+k", false)).toBe("Ctrl + Alt + K");
+    expect(formatCommandPaletteShortcut("mod+alt+k", false, { macCommandKey: "symbol" }))
+      .toBe("Ctrl + Alt + K");
   });
 
   it("renders navigation arrow shortcuts with symbols and readable labels", () => {

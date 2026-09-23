@@ -5,18 +5,44 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => {
   type Model = {
     value: string;
+    versionId: number;
     language: string;
     uri: string;
     dispose: ReturnType<typeof vi.fn>;
     updateOptions: ReturnType<typeof vi.fn>;
     pushStackElement: ReturnType<typeof vi.fn>;
     pushEditOperations: ReturnType<typeof vi.fn>;
+    canUndo: ReturnType<typeof vi.fn>;
+    canRedo: ReturnType<typeof vi.fn>;
     getValue: () => string;
+    getValueLength: () => number;
+    getValueInRange: (range: SelectionFixture) => string;
+    getVersionId: () => number;
     getLanguageId: () => string;
     getFullModelRange: () => object;
   };
+  type SelectionInput = {
+    value: string;
+    selectionStartLineNumber: number;
+    selectionStartColumn: number;
+    positionLineNumber: number;
+    positionColumn: number;
+  };
+  type SelectionFixture = SelectionInput & { isEmpty: () => boolean };
+  const selection = (input: SelectionInput): SelectionFixture => ({
+    ...input,
+    isEmpty: () => input.selectionStartLineNumber === input.positionLineNumber &&
+      input.selectionStartColumn === input.positionColumn,
+  });
   const models: Model[] = [];
   let selected: Model | null = null;
+  let selections = [selection({
+    value: "selected text",
+    selectionStartLineNumber: 1,
+    selectionStartColumn: 1,
+    positionLineNumber: 1,
+    positionColumn: 14,
+  })];
   let change: (() => void) | undefined;
   let cursorChange: ((event: { position: { lineNumber: number; column: number } }) => void) | undefined;
   type Action = { id: string; run: () => void; keybindings?: number[] };
@@ -39,6 +65,8 @@ const mocked = vi.hoisted(() => {
     setModel: vi.fn((model: Model) => { selected = model; }),
     getModel: () => selected,
     getValue: () => selected?.value ?? "",
+    getSelection: () => selections[0] ?? null,
+    getSelections: () => selections,
     getPosition: () => ({ lineNumber: 1, column: 1 }),
     onDidChangeModelContent: vi.fn((callback: () => void) => {
       change = callback;
@@ -59,13 +87,19 @@ const mocked = vi.hoisted(() => {
   const attachScriptDiagnostics = vi.fn(() => ({ dispose: diagnosticsDispose }));
   const createModel = vi.fn((value: string, language: string, uri: string) => {
     const model: Model = {
-      value, language, uri,
+      value, versionId: 1, language, uri,
       dispose: vi.fn(), updateOptions: vi.fn(), pushStackElement: vi.fn(),
+      canUndo: vi.fn(() => true),
+      canRedo: vi.fn(() => true),
       getValue: () => model.value,
+      getValueLength: () => model.value.length,
+      getValueInRange: (range) => range.value,
+      getVersionId: () => model.versionId,
       getLanguageId: () => model.language,
       getFullModelRange: () => ({ full: true }),
       pushEditOperations: vi.fn((_before: unknown, edits: Array<{ text: string }>) => {
         model.value = edits[0]?.text ?? "";
+        model.versionId += 1;
         change?.();
       }),
     };
@@ -76,9 +110,29 @@ const mocked = vi.hoisted(() => {
     models, actions, create, createModel, setTheme, setModelLanguage, attachScriptDiagnostics,
     instance, actionDispose, listenerDispose, cursorListenerDispose, diagnosticsDispose,
     addKeybindingRules, keybindingRulesDispose,
-    type: (value: string) => { if (selected) selected.value = value; change?.(); },
+    type: (value: string) => {
+      if (selected) {
+        selected.value = value;
+        selected.versionId += 1;
+      }
+      change?.();
+    },
+    setSelections: (next: SelectionInput[]) => { selections = next.map(selection); },
     moveCursor: (lineNumber: number, column: number) => cursorChange?.({ position: { lineNumber, column } }),
-    reset: () => { selected = null; change = undefined; cursorChange = undefined; models.length = 0; actions.clear(); },
+    reset: () => {
+      selected = null;
+      selections = [selection({
+        value: "selected text",
+        selectionStartLineNumber: 1,
+        selectionStartColumn: 1,
+        positionLineNumber: 1,
+        positionColumn: 14,
+      })];
+      change = undefined;
+      cursorChange = undefined;
+      models.length = 0;
+      actions.clear();
+    },
   };
 });
 
@@ -319,6 +373,182 @@ describe("CodeEditor", () => {
     expect(handle.current).toBeNull();
     mocked.instance.trigger.mockClear();
     originalHandle.find();
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+  });
+
+  it("captures every selection and exposes context-menu commands with read-only guards", async () => {
+    const handle = createRef<CodeEditorHandle>();
+    const { rerender, unmount } = render(
+      <CodeEditor value="text" modelKey="document" onChange={vi.fn()} editorHandleRef={handle} />,
+    );
+    await waitFor(() => expect(mocked.models).toHaveLength(1));
+    const originalHandle = handle.current!;
+    mocked.setSelections([{
+      value: "",
+      selectionStartLineNumber: 1,
+      selectionStartColumn: 2,
+      positionLineNumber: 1,
+      positionColumn: 2,
+    }, {
+      value: "second selection",
+      selectionStartLineNumber: 3,
+      selectionStartColumn: 4,
+      positionLineNumber: 3,
+      positionColumn: 20,
+    }]);
+
+    expect(originalHandle.contextMenuState()).toEqual({
+      canUndo: true,
+      canRedo: true,
+      hasSelection: true,
+      hasText: true,
+    });
+    const capture = originalHandle.captureSelection();
+    expect(capture).toEqual({
+      text: "\nsecond selection",
+      state: {
+        modelUri: mocked.models[0]?.uri,
+        modelVersionId: 1,
+        selections: [{
+          selectionStartLineNumber: 1,
+          selectionStartColumn: 2,
+          positionLineNumber: 1,
+          positionColumn: 2,
+        }, {
+          selectionStartLineNumber: 3,
+          selectionStartColumn: 4,
+          positionLineNumber: 3,
+          positionColumn: 20,
+        }],
+      },
+    });
+    act(() => {
+      originalHandle.deleteSelection(capture?.state);
+      originalHandle.pasteText("clipboard text", capture?.state);
+      originalHandle.selectAll();
+    });
+    expect(mocked.instance.focus).toHaveBeenCalledTimes(3);
+    expect(mocked.instance.trigger.mock.calls).toEqual([
+      ["application.editor", "deleteLeft", null],
+      ["application.editor", "paste", {
+        text: "clipboard text",
+        pasteOnNewLine: false,
+        multicursorText: null,
+      }],
+      ["application.editor", "editor.action.selectAll", null],
+    ]);
+
+    mocked.instance.focus.mockClear();
+    mocked.instance.trigger.mockClear();
+    rerender(
+      <CodeEditor value="text" modelKey="document" onChange={vi.fn()} editorHandleRef={handle} readOnly />,
+    );
+    expect(handle.current).toBe(originalHandle);
+    expect(originalHandle.contextMenuState()).toEqual({
+      canUndo: false,
+      canRedo: false,
+      hasSelection: true,
+      hasText: true,
+    });
+    act(() => {
+      originalHandle.pasteText("blocked clipboard text", capture?.state);
+      originalHandle.deleteSelection(capture?.state);
+      originalHandle.selectAll();
+    });
+    expect(mocked.instance.focus).toHaveBeenCalledOnce();
+    expect(mocked.instance.trigger.mock.calls).toEqual([
+      ["application.editor", "editor.action.selectAll", null],
+    ]);
+
+    mocked.setSelections([{
+      value: "",
+      selectionStartLineNumber: 1,
+      selectionStartColumn: 1,
+      positionLineNumber: 1,
+      positionColumn: 1,
+    }]);
+    act(() => { mocked.type(""); });
+    expect(originalHandle.contextMenuState()).toEqual({
+      canUndo: false,
+      canRedo: false,
+      hasSelection: false,
+      hasText: false,
+    });
+    expect(originalHandle.captureSelection()?.text).toBe("");
+    mocked.instance.focus.mockClear();
+    mocked.instance.trigger.mockClear();
+    act(() => { originalHandle.deleteSelection(); });
+    expect(mocked.instance.focus).not.toHaveBeenCalled();
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+
+    unmount();
+    expect(originalHandle.captureSelection()).toBeUndefined();
+    act(() => { originalHandle.pasteText("ignored after disposal"); });
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+    expect(originalHandle.contextMenuState()).toEqual({
+      canUndo: false,
+      canRedo: false,
+      hasSelection: false,
+      hasText: false,
+    });
+  });
+
+  it("suppresses delayed clipboard edits after the model, version, or selections change", async () => {
+    const handle = createRef<CodeEditorHandle>();
+    const rendered = render(
+      <CodeEditor value="text" modelKey="document" onChange={vi.fn()} editorHandleRef={handle} />,
+    );
+    await waitFor(() => expect(mocked.models).toHaveLength(1));
+    const editor = handle.current!;
+    const initial = editor.captureSelection()!;
+
+    mocked.setSelections([{
+      value: "moved selection",
+      selectionStartLineNumber: 2,
+      selectionStartColumn: 1,
+      positionLineNumber: 2,
+      positionColumn: 16,
+    }]);
+    act(() => {
+      editor.pasteText("stale cursor paste", initial.state);
+      editor.deleteSelection(initial.state);
+    });
+    expect(mocked.instance.focus).not.toHaveBeenCalled();
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+
+    const beforeContentChange = editor.captureSelection()!;
+    act(() => { mocked.type("changed text"); });
+    act(() => {
+      editor.pasteText("stale version paste", beforeContentChange.state);
+      editor.deleteSelection(beforeContentChange.state);
+    });
+    expect(mocked.instance.focus).not.toHaveBeenCalled();
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+
+    const beforeModelChange = editor.captureSelection()!;
+    rendered.rerender(
+      <CodeEditor value="other" modelKey="other-document" onChange={vi.fn()} editorHandleRef={handle} />,
+    );
+    expect(editor.captureSelection()?.state.modelUri).not.toBe(beforeModelChange.state.modelUri);
+    act(() => {
+      editor.pasteText("stale model paste", beforeModelChange.state);
+      editor.deleteSelection(beforeModelChange.state);
+    });
+    expect(mocked.instance.focus).not.toHaveBeenCalled();
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+
+    const current = editor.captureSelection()!;
+    mocked.instance.focus.mockImplementationOnce(() => {
+      mocked.setSelections([{
+        value: "focus changed selection",
+        selectionStartLineNumber: 4,
+        selectionStartColumn: 1,
+        positionLineNumber: 4,
+        positionColumn: 24,
+      }]);
+    });
+    act(() => { editor.pasteText("focus race paste", current.state); });
+    expect(mocked.instance.focus).toHaveBeenCalledOnce();
     expect(mocked.instance.trigger).not.toHaveBeenCalled();
   });
 

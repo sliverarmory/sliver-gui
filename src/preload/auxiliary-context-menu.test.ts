@@ -44,6 +44,7 @@ describe.each([
   { name: "Armory", bridge: "armory", load: () => import("./armory.js") },
   { name: "Network", bridge: "network", load: () => import("./network.js") },
   { name: "Cloud Deployment", bridge: "cloudDeployment", load: () => import("./cloud-deployment.js") },
+  { name: "Text Editor", bridge: "textEditor", load: () => import("./text-editor.js") },
 ])("$name context-menu preload", ({ bridge, load }) => {
   const addEventListener = vi.fn();
   const observe = vi.fn();

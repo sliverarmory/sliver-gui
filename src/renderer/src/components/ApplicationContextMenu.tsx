@@ -62,6 +62,12 @@ export interface ApplicationContextMenuScopeOptions {
   readonly actions?: readonly ApplicationContextMenuAction[];
   /** Controls which main-owned actions are shown without affecting scoped actions. */
   readonly builtInPolicy?: ApplicationContextMenuBuiltInPolicy;
+  /**
+   * Marks the DOM target so the preload can prevent main from minting filtered
+   * capabilities. Disable only for a safe editable whose nested native inputs
+   * must still receive their own context menus.
+   */
+  readonly signalBuiltInPolicyToMain?: boolean;
 }
 
 export interface ApplicationContextMenuScopeDataProps {
@@ -102,11 +108,11 @@ export function useApplicationContextMenuScope(
   return useMemo(
     () => ({
       [SCOPE_ATTRIBUTE]: scopeId,
-      ...(options.builtInPolicy === undefined
+      ...(options.builtInPolicy === undefined || options.signalBuiltInPolicyToMain === false
         ? {}
         : { [POLICY_ATTRIBUTE]: options.builtInPolicy }),
     }),
-    [options.builtInPolicy, scopeId],
+    [options.builtInPolicy, options.signalBuiltInPolicyToMain, scopeId],
   );
 }
 
@@ -122,10 +128,12 @@ export function ApplicationContextMenuScope({
   builtInPolicy,
   children,
   className,
+  signalBuiltInPolicyToMain,
 }: ApplicationContextMenuScopeProps): React.JSX.Element {
   const scopeProps = useApplicationContextMenuScope({
     ...(actions === undefined ? {} : { actions }),
     ...(builtInPolicy === undefined ? {} : { builtInPolicy }),
+    ...(signalBuiltInPolicyToMain === undefined ? {} : { signalBuiltInPolicyToMain }),
   });
   return (
     <div

@@ -7,6 +7,7 @@ import {
   ListBox,
   Modal,
   NumberField,
+  ScrollShadow,
   Select,
 } from "@heroui/react";
 
@@ -88,7 +89,10 @@ export function TextEditorSettingsModal({
             </div>
           </Modal.Header>
 
-          <Modal.Body className="flex flex-col gap-6">
+          <Modal.Body
+            className="flex flex-col gap-6"
+            render={(props) => <ScrollShadow {...props} hideScrollBar={false} size={28} />}
+          >
             <section aria-labelledby="text-editor-settings-typography" className="space-y-4">
               <div>
                 <h3 className="text-sm font-semibold text-foreground" id="text-editor-settings-typography">

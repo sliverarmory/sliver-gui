@@ -8,8 +8,9 @@ editable. UTF-16 and other encodings are not supported.
 
 The toolbar provides Save, Save As, Undo, Redo, Find, Replace, Word Wrap, the
 Monaco command palette, editor settings, and syntax highlighting. The minimap
-is enabled by default. The language selector is populated from every language
-grammar bundled with Monaco, including Bash, PowerShell, Python, Go, and Rust.
+and font ligatures are enabled by default. The language selector is populated
+from every language grammar bundled with Monaco, including Bash, PowerShell,
+Python, Go, and Rust.
 `.sh`, `.bash`, `.zsh`, `.bashrc`, `.bash_profile`, `.bash_login`, and `.profile`
 files select Bash automatically; `.ps1`, `.psm1`, and `.psd1` files select
 PowerShell automatically. Highlighting never executes the document.
@@ -21,6 +22,12 @@ group in application Settings; defaults include Command/Control+O for Open,
 Command/Control+S for Save, Command/Control+Shift+S for Save As, and Alt+Z for
 Word Wrap. The footer shows cursor position, character count, encoding, and line
 endings.
+
+Right-click the document to open the same styled application menu used by the
+rest of the GUI. It provides Undo, Redo, Cut, Copy, Paste, Delete, Select All,
+and Inspect Element, with unavailable actions disabled for the current
+selection and read-only state. Monaco's Find, Replace, and Command Palette text
+fields keep their native text-input context menu.
 
 Choose the gear button or press Command/Control+, to change the embedded font,
 font size, tab size, indentation mode, minimap, word wrap, line numbers,
@@ -85,5 +92,6 @@ validation, IPC ownership, native close handling, and Monaco model cleanup.
 `npm run test:e2e:text-editor` exercises real Monaco and native Electron windows
 offline, including file round trips, Bash, PowerShell, Python, and Rust
 detection and tokenization, settings persistence under the Sliver client root,
-the default minimap, the command palette, compact header layout, controls,
-close prompts, and strict CSP.
+the default minimap and font ligatures, the command palette, the application
+context menu and clipboard actions, compact header layout, controls, close
+prompts, and strict CSP.
