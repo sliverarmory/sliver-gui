@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import type { IpcMainInvokeEvent, WebContents, WebFrameMain } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
-import { TEXT_EDITOR_IPC, TEXT_EDITOR_MAX_BYTES } from "../shared/text-editor-contracts.js";
+import { DEFAULT_TEXT_EDITOR_SETTINGS_STATE } from "../shared/text-editor-settings-contracts.js";
+import {
+  TEXT_EDITOR_IPC, TEXT_EDITOR_MAX_BYTES, type TextEditorRemoteOverwriteRequest,
+} from "../shared/text-editor-contracts.js";
 import type { SessionDestructiveActionPlan } from "../shared/session-contracts.js";
 import { TextEditorWindows } from "./text-editor-windows.js";
 
@@ -18,7 +21,7 @@ const mocks = vi.hoisted(() => ({
 
 interface MockWindow {
   destroyed: boolean;
-  webContents: WebContents & { currentUrl: string };
+  webContents: WebContents & { currentUrl: string; send: ReturnType<typeof vi.fn> };
   emit(event: string, ...args: unknown[]): boolean;
   isDestroyed(): boolean;
   destroy(): void;
@@ -36,6 +39,7 @@ vi.mock("electron", async () => {
         mainFrame: { processId: 10, frameToken: "main", url: "", isDestroyed: () => false },
         isDestroyed: () => this.destroyed,
         getURL: () => this.webContents.currentUrl,
+        send: vi.fn(),
         setWindowOpenHandler: vi.fn(),
       });
       setTitle = vi.fn();
@@ -60,6 +64,7 @@ vi.mock("electron", async () => {
 const URL = "sliver://app/index.html?surface=text-editor";
 let manager: TextEditorWindows;
 let directory: string;
+const updateEditorSettings = vi.fn(async () => ({ ok: true as const, value: DEFAULT_TEXT_EDITOR_SETTINGS_STATE }));
 
 beforeEach(async () => {
   mocks.handlers.clear();
@@ -67,9 +72,13 @@ beforeEach(async () => {
   mocks.showOpenDialog.mockReset().mockResolvedValue({ canceled: true, filePaths: [] });
   mocks.showSaveDialog.mockReset().mockResolvedValue({ canceled: true });
   mocks.showMessageBoxSync.mockReset().mockReturnValue(0);
+  updateEditorSettings.mockReset().mockResolvedValue({ ok: true, value: DEFAULT_TEXT_EDITOR_SETTINGS_STATE });
   directory = await mkdtemp(join(tmpdir(), "text-editor-test-"));
   manager = new TextEditorWindows({ rendererUrl: URL, preloadPath: "/text-editor.cjs",
-    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE, prepareWindow: vi.fn() });
+    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE,
+    getEditorSettings: () => DEFAULT_TEXT_EDITOR_SETTINGS_STATE,
+    updateEditorSettings,
+    prepareWindow: vi.fn() });
   await manager.open();
 });
 
@@ -97,25 +106,96 @@ async function invokeFrom(event: IpcMainInvokeEvent, channel: string, ...args: u
 
 function cancelableEvent(): { preventDefault: ReturnType<typeof vi.fn> } { return { preventDefault: vi.fn() }; }
 
+function remotePlan(
+  oldDigest = "a".repeat(64),
+  newDigest = "b".repeat(64),
+  expiresAt = new Date(Date.now() + 60_000).toISOString(),
+): SessionDestructiveActionPlan {
+  return {
+    token: "main-only-plan-token",
+    expiresAt,
+    payloadDigest: "c".repeat(64),
+    action: {
+      actionId: "session.filesystem.edit-text-overwrite",
+      contentHandle: "main-only-content-handle",
+      remotePath: "/opt/notes.txt",
+      encoding: "utf-8",
+      expectedSha256: oldDigest,
+    },
+    target: {
+      backend: { id: "production", displayName: "Production" },
+      sessionId: "session-1",
+      fingerprint: "main-only-fingerprint",
+      name: "payments",
+      hostname: "host",
+      os: "linux",
+    },
+    warning: "The upload is not atomic.",
+    artifact: { suggestedBasename: "notes.txt", size: 6, sha256: newDigest },
+  };
+}
+
+async function openRemoteEditor(plan = remotePlan()): Promise<{
+  binding: object;
+  load: ReturnType<typeof vi.fn>;
+  save: ReturnType<typeof vi.fn>;
+}> {
+  const source = currentWindow().webContents;
+  manager.dispose();
+  const binding = {};
+  const load = vi.fn().mockResolvedValue({
+    title: "notes.txt",
+    text: "original",
+    expectedSha256: plan.action.actionId === "session.filesystem.edit-text-overwrite"
+      ? plan.action.expectedSha256 : "a".repeat(64),
+    binding,
+  });
+  const save = vi.fn(async (_binding: unknown, _path: string, _digest: string, _text: string,
+    confirm: (candidate: SessionDestructiveActionPlan) => Promise<boolean>) =>
+    await confirm(plan) ? { expectedSha256: plan.artifact?.sha256 ?? "b".repeat(64) } : null);
+  manager = new TextEditorWindows({
+    rendererUrl: URL,
+    preloadPath: "/text-editor.cjs",
+    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE,
+    getEditorSettings: () => DEFAULT_TEXT_EDITOR_SETTINGS_STATE,
+    updateEditorSettings: vi.fn(async () => ({ ok: true as const, value: DEFAULT_TEXT_EDITOR_SETTINGS_STATE })),
+    prepareWindow: vi.fn(),
+    remote: { load, save },
+  });
+  await manager.openRemote(source, "/opt/notes.txt");
+  return { binding, load, save };
+}
+
 describe("standalone local text editor host", () => {
-  it("opens a remote document and confirms the exact overwrite before accepting a save", async () => {
-    const source = currentWindow().webContents;
-    manager.dispose();
+  it("validates, updates, and broadcasts standalone editor settings", async () => {
+    expect(await invoke(TEXT_EDITOR_IPC.getEditorSettings)).toEqual(DEFAULT_TEXT_EDITOR_SETTINGS_STATE);
+    const { v: _version, revision: _revision, ...settings } = DEFAULT_TEXT_EDITOR_SETTINGS_STATE;
+    const next = { ...DEFAULT_TEXT_EDITOR_SETTINGS_STATE, revision: 1, fontSize: 16 };
+    updateEditorSettings.mockResolvedValueOnce({ ok: true, value: next });
+
+    expect(await invoke(TEXT_EDITOR_IPC.updateEditorSettings, {
+      expectedRevision: 0,
+      settings: { ...settings, fontSize: 16 },
+    })).toEqual({ ok: true, value: next });
+    expect(updateEditorSettings).toHaveBeenCalledExactlyOnceWith({
+      expectedRevision: 0,
+      settings: { ...settings, fontSize: 16 },
+    });
+    expect(currentWindow().webContents.send).toHaveBeenCalledWith(TEXT_EDITOR_IPC.editorSettingsChanged, next);
+
+    updateEditorSettings.mockClear();
+    expect(await invoke(TEXT_EDITOR_IPC.updateEditorSettings, {
+      expectedRevision: 1,
+      settings: { ...settings, path: "/tmp/hidden" },
+    })).toMatchObject({ ok: false });
+    expect(updateEditorSettings).not.toHaveBeenCalled();
+  });
+
+  it("requests a one-shot renderer confirmation before accepting the exact remote overwrite", async () => {
     const oldDigest = "a".repeat(64);
     const newDigest = "b".repeat(64);
-    const plan = {
-      target: { name: "payments", hostname: "host", backend: { displayName: "Production" } },
-      artifact: { sha256: newDigest }, warning: "The upload is not atomic.",
-    } as SessionDestructiveActionPlan;
-    const binding = {};
-    const save = vi.fn(async (_binding: unknown, _path: string, _digest: string, _text: string,
-      confirm: (plan: SessionDestructiveActionPlan) => Promise<boolean>) =>
-      await confirm(plan) ? { expectedSha256: newDigest } : null);
-    const load = vi.fn().mockResolvedValue({ title: "notes.txt", text: "original", expectedSha256: oldDigest, binding });
-    manager = new TextEditorWindows({ rendererUrl: URL, preloadPath: "/text-editor.cjs",
-      getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE, prepareWindow: vi.fn(),
-      remote: { load, save } });
-    await manager.openRemote(source, "/opt/notes.txt");
+    const source = currentWindow().webContents;
+    const { binding, load, save } = await openRemoteEditor(remotePlan(oldDigest, newDigest));
     expect(load).toHaveBeenCalledWith(source, "/opt/notes.txt");
     expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: {
       title: "notes.txt", text: "original", remote: true,
@@ -123,17 +203,77 @@ describe("standalone local text editor host", () => {
     await invoke(TEXT_EDITOR_IPC.setDirty, true);
     expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: true })).toMatchObject({ ok: false });
     expect(mocks.showSaveDialog).not.toHaveBeenCalled();
-    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false })).toEqual({ ok: true, value: null });
+
+    const canceledSave = invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false });
+    const canceledRequest = currentWindow().webContents.send.mock.calls[0]?.[1] as TextEditorRemoteOverwriteRequest;
+    expect(currentWindow().webContents.send).toHaveBeenCalledWith(TEXT_EDITOR_IPC.remoteOverwriteRequested, {
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      path: "/opt/notes.txt",
+      target: {
+        name: "payments",
+        hostname: "host",
+        sessionId: "session-1",
+        backend: { id: "production", displayName: "Production" },
+      },
+      originalSha256: oldDigest,
+      newSha256: newDigest,
+      warning: "The upload is not atomic.",
+    });
+    expect(JSON.stringify(canceledRequest)).not.toMatch(/main-only|contentHandle|token|fingerprint/u);
+    expect(await invoke(TEXT_EDITOR_IPC.respondToRemoteOverwrite, {
+      requestId: "11111111-1111-4111-8111-111111111111", confirmed: true,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/no longer active/u) });
+    expect(await invoke(TEXT_EDITOR_IPC.respondToRemoteOverwrite, {
+      requestId: canceledRequest.requestId, confirmed: false,
+    })).toEqual({ ok: true });
+    expect(await invoke(TEXT_EDITOR_IPC.respondToRemoteOverwrite, {
+      requestId: canceledRequest.requestId, confirmed: true,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/no longer active/u) });
+    expect(await canceledSave).toEqual({ ok: true, value: null });
     expect(save).toHaveBeenCalledWith(binding, "/opt/notes.txt", oldDigest, "edited", expect.any(Function));
     expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { text: "original" } });
-    expect(manager.allowQuit()).toBe(false);
-    mocks.showMessageBoxSync.mockReturnValue(1);
-    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false })).toEqual({ ok: true, value: { title: "notes.txt" } });
-    expect(mocks.showMessageBoxSync).toHaveBeenCalledWith(currentWindow(), expect.objectContaining({
-      title: "Overwrite remote file?", buttons: ["Cancel", "Overwrite File"], defaultId: 0, cancelId: 0,
-    }));
+
+    const confirmedSave = invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false });
+    const confirmedRequest = currentWindow().webContents.send.mock.calls[1]?.[1] as TextEditorRemoteOverwriteRequest;
+    expect(confirmedRequest.requestId).not.toBe(canceledRequest.requestId);
+    expect(await invoke(TEXT_EDITOR_IPC.respondToRemoteOverwrite, {
+      requestId: confirmedRequest.requestId, confirmed: true,
+    })).toEqual({ ok: true });
+    expect(await confirmedSave).toEqual({ ok: true, value: { title: "notes.txt" } });
+    expect(mocks.showMessageBoxSync).not.toHaveBeenCalled();
     expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { text: "edited" } });
     expect(save).toHaveBeenLastCalledWith(binding, "/opt/notes.txt", oldDigest, "edited", expect.any(Function));
+  });
+
+  it.each(["did-start-navigation", "render-process-gone", "destroyed"])(
+    "cancels a pending remote overwrite when web contents emits %s",
+    async (eventName) => {
+      await openRemoteEditor();
+      const save = invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false });
+      const request = currentWindow().webContents.send.mock.calls[0]?.[1] as TextEditorRemoteOverwriteRequest;
+      currentWindow().webContents.emit(eventName);
+      expect(await save).toEqual({ ok: true, value: null });
+      expect(await invoke(TEXT_EDITOR_IPC.respondToRemoteOverwrite, {
+        requestId: request.requestId, confirmed: true,
+      })).toMatchObject({ ok: false });
+    },
+  );
+
+  it("expires a pending remote overwrite and rejects a late response", async () => {
+    vi.useFakeTimers();
+    try {
+      await openRemoteEditor(remotePlan("a".repeat(64), "b".repeat(64),
+        new Date(Date.now() + 1_000).toISOString()));
+      const save = invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false });
+      const request = currentWindow().webContents.send.mock.calls[0]?.[1] as TextEditorRemoteOverwriteRequest;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await save).toEqual({ ok: true, value: null });
+      expect(await invoke(TEXT_EDITOR_IPC.respondToRemoteOverwrite, {
+        requestId: request.requestId, confirmed: true,
+      })).toMatchObject({ ok: false, error: expect.stringMatching(/no longer active/u) });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("exposes only display document data, with independent initial documents", async () => {
@@ -155,6 +295,17 @@ describe("standalone local text editor host", () => {
       expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({
         ok: true,
         value: { title, language: "shell" },
+      });
+    },
+  );
+
+  it.each(["setup.ps1", "module.psm1", "manifest.psd1", "UPPER.PS1"])(
+    "infers PowerShell highlighting for %s",
+    async (title) => {
+      await manager.open({ title, text: "Get-Process | Where-Object CPU -gt 10\n" });
+      expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({
+        ok: true,
+        value: { title, language: "powershell" },
       });
     },
   );

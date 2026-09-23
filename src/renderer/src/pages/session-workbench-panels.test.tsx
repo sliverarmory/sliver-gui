@@ -1367,6 +1367,19 @@ describe("session workbench panels", () => {
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
       "Download",
       "Add to Loot",
+      "Edit text",
+      "Upload replacement",
+      "Select All",
+      "Inspect Element",
+    ]);
+    expect([...menu.querySelectorAll('[role="menuitem"], [role="separator"]')].map((item) =>
+      item.getAttribute("role") === "separator" ? "separator" : item.textContent)).toEqual([
+      "Download",
+      "Add to Loot",
+      "separator",
+      "Edit text",
+      "Upload replacement",
+      "separator",
       "Select All",
       "Inspect Element",
     ]);
@@ -1388,6 +1401,26 @@ describe("session workbench panels", () => {
       maxBytes: SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
     }));
 
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions for evidence.bin" })).toBeEnabled());
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "evidence.bin" }));
+    rendered.contextMenu.emit();
+    menu = await screen.findByRole("menu", { name: "Application context menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: "Edit text" }));
+    await waitFor(() => expect(api.openRemoteTextEditor).toHaveBeenCalledWith({ remotePath: "/opt/evidence.bin" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions for evidence.bin" })).toBeEnabled());
+    fireEvent.contextMenu(within(grid).getByRole("rowheader", { name: "evidence.bin" }));
+    rendered.contextMenu.emit();
+    menu = await screen.findByRole("menu", { name: "Application context menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: "Upload replacement" }));
+    await waitFor(() => expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({
+      actionId: "session.filesystem.upload-overwrite",
+      remotePath: "/opt/evidence.bin",
+      isIOC: false,
+      isDirectory: false,
+      overwrite: true,
+    }));
+
     for (const target of [
       within(grid).getByRole("rowheader", { name: "archive" }),
       within(grid).getByRole("columnheader", { name: "Name" }),
@@ -1397,6 +1430,8 @@ describe("session workbench panels", () => {
       menu = await screen.findByRole("menu", { name: "Application context menu" });
       expect(within(menu).queryByRole("menuitem", { name: "Download" })).not.toBeInTheDocument();
       expect(within(menu).queryByRole("menuitem", { name: "Add to Loot" })).not.toBeInTheDocument();
+      expect(within(menu).queryByRole("menuitem", { name: "Edit text" })).not.toBeInTheDocument();
+      expect(within(menu).queryByRole("menuitem", { name: "Upload replacement" })).not.toBeInTheDocument();
       await user.keyboard("{Escape}");
       await waitFor(() => expect(screen.queryByRole("menu", { name: "Application context menu" })).not.toBeInTheDocument());
     }
@@ -1406,6 +1441,8 @@ describe("session workbench panels", () => {
     menu = openFolder.closest<HTMLElement>('[role="menu"]')!;
     expect(within(menu).queryByRole("menuitem", { name: "Download" })).not.toBeInTheDocument();
     expect(within(menu).queryByRole("menuitem", { name: "Add to Loot" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Edit text" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "Upload replacement" })).not.toBeInTheDocument();
   });
 
   it("retries an initial working-directory failure and renders an explicit empty directory state", async () => {
@@ -1793,7 +1830,7 @@ describe("session workbench panels", () => {
     expect(warning).not.toHaveBeenCalledWith("Folder outcome unknown", expect.anything());
   });
 
-  it("inspects bounded text and hex views and stages exact digest-bound save plans", async () => {
+  it("opens bounded text in the standalone editor and stages exact digest-bound hex save plans", async () => {
     const user = userEvent.setup();
     const digest = "c".repeat(64);
     const file = {
@@ -1836,18 +1873,6 @@ describe("session workbench panels", () => {
           truncated: false,
           sha256: digest,
         });
-        case "session.filesystem.stage-text": return workbench(input.operationId, {
-          status: "staged",
-          artifact: {
-            handle: "T".repeat(43),
-            suggestedBasename: "edit.txt",
-            mediaType: "text/plain;charset=utf-8",
-            size: 7,
-            sha256: "d".repeat(64),
-            createdAt: "2026-08-09T20:00:00.000Z",
-            expiresAt: "2099-08-10T00:00:00.000Z",
-          },
-        });
         case "session.filesystem.stage-hex": return workbench(input.operationId, {
           status: "staged",
           artifact: {
@@ -1875,30 +1900,15 @@ describe("session workbench panels", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
-    const textEditor = screen.getByRole("textbox", { name: "UTF-8 text" });
-    await user.clear(textEditor);
-    await user.type(textEditor, "updated");
-    await user.click(screen.getByRole("button", { name: "Review save" }));
-    await waitFor(() => expect(api.prepareSessionDestructiveAction).toHaveBeenCalledWith({
-      actionId: "session.filesystem.edit-text-overwrite",
-      contentHandle: "T".repeat(43),
-      remotePath: file.path,
-      encoding: "utf-8",
-      expectedSha256: digest,
-    }));
-    expect(api.runSessionWorkbench).toHaveBeenCalledWith({
+    await waitFor(() => expect(api.openRemoteTextEditor).toHaveBeenCalledWith({ remotePath: file.path }));
+    expect(screen.queryByRole("textbox", { name: "UTF-8 text" })).not.toBeInTheDocument();
+    expect(api.runSessionWorkbench).not.toHaveBeenCalledWith(expect.objectContaining({
       operationId: "session.filesystem.stage-text",
-      content: "updated",
-      encoding: "utf-8",
-    });
-    expect(await screen.findByRole("alertdialog", { name: "Save changes to this remote file?" })).toBeInTheDocument();
-    expect(screen.getByText("Production")).toBeInTheDocument();
-    expect(screen.getByTitle("a".repeat(64))).toHaveTextContent("a".repeat(64));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    }));
 
     await user.click(screen.getByRole("radio", { name: "Hex" }));
     expect(await screen.findByText("68656c6c6f")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByRole("button", { name: "Edit hex" }));
     const hexEditor = screen.getByRole("textbox", { name: "Hex bytes" });
     await user.clear(hexEditor);
     await user.type(hexEditor, "00ff");
@@ -1915,6 +1925,7 @@ describe("session workbench panels", () => {
     await user.click(screen.getByRole("radio", { name: "Head" }));
     expect(await screen.findByText("Truncated at 64 KiB")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit hex" })).not.toBeInTheDocument();
   });
 
   it("keeps the latest inspector view when an older same-file response finishes late", async () => {

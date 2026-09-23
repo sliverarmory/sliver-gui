@@ -67,6 +67,7 @@ const KEYBOARD_SHORTCUT_ACTIONS = new Set([
   "terminalNewTab", "terminalCloseTab", "terminalSettings", "terminalCloseWindow",
   "textEditorOpen", "textEditorSaveAs", "textEditorSave", "textEditorUndo", "textEditorRedo",
   "textEditorFind", "textEditorReplace", "textEditorWordWrap", "textEditorCommandPalette",
+  "textEditorSettings",
   ...Array.from({ length: 10 }, (_, index) => `terminalTab${index + 1}`),
 ]);
 const RESERVED_KEYBOARD_SHORTCUTS = new Set([

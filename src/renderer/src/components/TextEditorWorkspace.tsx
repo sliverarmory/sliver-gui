@@ -1,10 +1,15 @@
-import { faArrowRotateLeft, faArrowRotateRight } from "@fortawesome/free-solid-svg-icons";
+import { faArrowRotateLeft, faArrowRotateRight, faGear } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import { Button, Tooltip } from "@heroui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
+import {
+  DEFAULT_TEXT_EDITOR_SETTINGS,
+  TEXT_EDITOR_FONTS,
+  type TextEditorSettingsValues,
+} from "../../../shared/text-editor-settings-contracts";
 import {
   defaultKeyboardShortcut,
   matchesKeyboardShortcut,
@@ -14,6 +19,11 @@ import {
 } from "../../../shared/keyboard-shortcuts";
 import type { TextEditorDocument } from "../../../shared/text-editor-contracts";
 import { shortcutAriaKeyShortcuts } from "../navigation-shortcuts";
+import {
+  detectMonacoLanguage,
+  monacoLanguageOptions,
+  type MonacoLanguageOption,
+} from "../editor/monaco-language-catalog";
 import { formatCommandPaletteShortcut, isApplePlatform } from "./CommandPaletteShortcut";
 import { CodeEditor, type CodeEditorHandle, type CodeEditorKeybindings } from "./CodeEditor";
 
@@ -25,18 +35,29 @@ export interface TextEditorWorkspaceProps {
   onOpen?: () => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
   shortcuts?: KeyboardShortcutSettings;
+  editorSettings?: TextEditorSettingsValues;
+  onEditorSettingsChange?: (settings: TextEditorSettingsValues) => void;
+  onOpenSettings?: () => void;
 }
 
-const LANGUAGES = [
-  ["plaintext", "Plain Text"], ["xml", "XML"], ["json", "JSON"],
-  ["markdown", "Markdown"], ["yaml", "YAML"], ["html", "HTML"],
-  ["css", "CSS"], ["shell", "Bash"], ["javascript", "JavaScript"], ["typescript", "TypeScript"],
-] as const;
+const FALLBACK_LANGUAGES: readonly MonacoLanguageOption[] = [
+  { id: "plaintext", label: "Plain Text", extensions: [".txt"], filenames: [] },
+  { id: "xml", label: "XML", extensions: [".xml"], filenames: [] },
+  { id: "json", label: "JSON", extensions: [".json"], filenames: [] },
+  { id: "markdown", label: "Markdown", extensions: [".md"], filenames: [] },
+  { id: "yaml", label: "YAML", extensions: [".yaml"], filenames: [] },
+  { id: "html", label: "HTML", extensions: [".html"], filenames: [] },
+  { id: "css", label: "CSS", extensions: [".css"], filenames: [] },
+  { id: "shell", label: "Bash", extensions: [".sh", ".bash"], filenames: [] },
+  { id: "powershell", label: "PowerShell", extensions: [".ps1"], filenames: [] },
+  { id: "javascript", label: "JavaScript", extensions: [".js"], filenames: [] },
+  { id: "typescript", label: "TypeScript", extensions: [".ts"], filenames: [] },
+];
 
 const TEXT_EDITOR_SHORTCUT_ACTIONS = [
   "textEditorOpen", "textEditorSaveAs", "textEditorSave", "textEditorUndo",
   "textEditorRedo", "textEditorFind", "textEditorReplace", "textEditorWordWrap",
-  "textEditorCommandPalette",
+  "textEditorCommandPalette", "textEditorSettings",
 ] as const satisfies readonly KeyboardShortcutAction[];
 type TextEditorShortcutAction = (typeof TEXT_EDITOR_SHORTCUT_ACTIONS)[number];
 
@@ -48,13 +69,16 @@ export function TextEditorWorkspace({
   onOpen,
   onDirtyChange,
   shortcuts = DEFAULT_APPLICATION_SETTINGS_STATE,
+  editorSettings,
+  onEditorSettingsChange,
+  onOpenSettings,
 }: TextEditorWorkspaceProps): React.JSX.Element {
   const [text, setText] = useState(document.text);
   const [savedText, setSavedText] = useState(document.text);
   const [title, setTitle] = useState(document.title);
-  const [language, setLanguage] = useState(LANGUAGES.some(([id]) => id === document.language) ? document.language : "plaintext");
-  const [wordWrap, setWordWrap] = useState(false);
-  const [fontSize, setFontSize] = useState(13);
+  const [language, setLanguage] = useState(document.language || "plaintext");
+  const [languages, setLanguages] = useState<readonly MonacoLanguageOption[]>(FALLBACK_LANGUAGES);
+  const [localEditorSettings, setLocalEditorSettings] = useState<TextEditorSettingsValues>(DEFAULT_TEXT_EDITOR_SETTINGS);
   const [cursor, setCursor] = useState({ lineNumber: 1, column: 1 });
   const [ready, setReady] = useState(false);
   const [pending, setPending] = useState<"save" | "open" | null>(null);
@@ -65,6 +89,12 @@ export function TextEditorWorkspace({
   const dirty = text !== savedText;
   const readOnly = document.readOnly || pending === "open";
   const apple = isApplePlatform();
+  const activeEditorSettings = editorSettings ?? localEditorSettings;
+  const fontFamily = TEXT_EDITOR_FONTS.find(({ id }) => id === activeEditorSettings.fontId)?.family ?? "Fira Code";
+  const updateEditorSettings = useCallback((next: TextEditorSettingsValues): void => {
+    if (onEditorSettingsChange) onEditorSettingsChange(next);
+    else setLocalEditorSettings(next);
+  }, [onEditorSettingsChange]);
   const shortcutFor = (action: TextEditorShortcutAction): string => resolveKeyboardShortcut(action, shortcuts, apple);
   const shortcutLabel = (action: TextEditorShortcutAction): string => formatCommandPaletteShortcut(shortcutFor(action), apple);
   const shortcutAria = (action: TextEditorShortcutAction): string => shortcutAriaKeyShortcuts(shortcutFor(action), apple);
@@ -79,6 +109,21 @@ export function TextEditorWorkspace({
   dirtyRef.current = dirty;
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    let active = true;
+    void import("../editor/monaco-runtime").then((runtime) => {
+      if (!active) return;
+      const definitions = runtime.monaco.languages.getLanguages();
+      const options = monacoLanguageOptions(definitions);
+      setLanguages(options);
+      setLanguage((current) => {
+        if (current !== "plaintext" && options.some(({ id }) => id === current)) return current;
+        return detectMonacoLanguage(document.title, document.text, definitions) ??
+          (options.some(({ id }) => id === document.language) ? document.language : "plaintext");
+      });
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [document.language, document.text, document.title]);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent): void => {
       if (!dirtyRef.current && !pendingRef.current) return;
@@ -130,8 +175,12 @@ export function TextEditorWorkspace({
         case "textEditorRedo": editor.current?.redo(); break;
         case "textEditorFind": editor.current?.find(); break;
         case "textEditorReplace": editor.current?.replace(); break;
-        case "textEditorWordWrap": setWordWrap((current) => !current); break;
+        case "textEditorWordWrap": updateEditorSettings({
+          ...activeEditorSettings,
+          wordWrap: !activeEditorSettings.wordWrap,
+        }); break;
         case "textEditorCommandPalette": editor.current?.commandPalette(); break;
+        case "textEditorSettings": onOpenSettings?.(); break;
       }
     };
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -159,7 +208,7 @@ export function TextEditorWorkspace({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [apple, open, save, shortcuts]);
+  }, [activeEditorSettings, apple, onOpenSettings, open, save, shortcuts, updateEditorSettings]);
   const eol = useMemo(() => {
     const endings = new Set(text.match(/\r\n|\r|\n/gu));
     if (endings.size > 1) return "Mixed EOL";
@@ -208,9 +257,9 @@ export function TextEditorWorkspace({
         render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorReplace")} />}
         onPress={() => editor.current?.replace()}>Replace</Button>
         <Tooltip.Content>{`Replace · ${shortcutLabel("textEditorReplace")}`}</Tooltip.Content></Tooltip>
-      <Tooltip delay={250}><Button size="sm" variant={wordWrap ? "secondary" : "ghost"} aria-pressed={wordWrap}
+      <Tooltip delay={250}><Button size="sm" variant={activeEditorSettings.wordWrap ? "secondary" : "ghost"} aria-pressed={activeEditorSettings.wordWrap}
         render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorWordWrap")} />}
-        onPress={() => setWordWrap((current) => !current)}>Word Wrap</Button>
+        onPress={() => updateEditorSettings({ ...activeEditorSettings, wordWrap: !activeEditorSettings.wordWrap })}>Word Wrap</Button>
         <Tooltip.Content>{`Word Wrap · ${shortcutLabel("textEditorWordWrap")}`}</Tooltip.Content></Tooltip>
       <Tooltip delay={250}><Button size="sm" variant="ghost" isDisabled={!ready}
         render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorCommandPalette")} />}
@@ -218,23 +267,27 @@ export function TextEditorWorkspace({
         <Tooltip.Content>{`Command Palette · ${shortcutLabel("textEditorCommandPalette")}`}</Tooltip.Content></Tooltip>
       <div className="ml-auto flex items-center gap-2">
         <NativeSelect variant="secondary">
-          <NativeSelect.Trigger aria-label="Editor font size" value={fontSize} onChange={(event) => setFontSize(Number(event.target.value))}>
-            {[11, 12, 13, 14, 16, 18, 20, 24].map((size) => <NativeSelect.Option key={size} value={size}>{size} px</NativeSelect.Option>)}
-            <NativeSelect.Indicator />
-          </NativeSelect.Trigger>
-        </NativeSelect>
-        <NativeSelect variant="secondary">
           <NativeSelect.Trigger aria-label="Document language" value={language} onChange={(event) => setLanguage(event.target.value)}>
-            {LANGUAGES.map(([id, label]) => <NativeSelect.Option key={id} value={id}>{label}</NativeSelect.Option>)}
+            {languages.map(({ id, label }) => <NativeSelect.Option key={id} value={id}>{label}</NativeSelect.Option>)}
             <NativeSelect.Indicator />
           </NativeSelect.Trigger>
         </NativeSelect>
+        <Tooltip delay={250}><Button isIconOnly size="sm" variant="ghost" aria-label="Editor settings"
+          render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorSettings")} />}
+          onPress={() => onOpenSettings?.()}><FontAwesomeIcon icon={faGear} /></Button>
+          <Tooltip.Content>{`Editor settings · ${shortcutLabel("textEditorSettings")}`}</Tooltip.Content></Tooltip>
       </div>
     </div>
     {error && <p role="alert" className="shrink-0 px-6 py-3 text-sm text-danger">{error}</p>}
     <div className="min-h-0 min-w-0 flex-1">
       <CodeEditor modelKey={document.id} value={text} language={language} theme={theme} readOnly={readOnly}
-        ariaLabel="Document text" editorHandleRef={editor} wordWrap={wordWrap} minimap fontSize={fontSize}
+        ariaLabel="Document text" editorHandleRef={editor} wordWrap={activeEditorSettings.wordWrap}
+        minimap={activeEditorSettings.minimap} fontSize={activeEditorSettings.fontSize}
+        fontFamily={`"${fontFamily}", monospace`} tabSize={activeEditorSettings.tabSize}
+        insertSpaces={activeEditorSettings.insertSpaces} lineNumbers={activeEditorSettings.lineNumbers}
+        renderWhitespace={activeEditorSettings.renderWhitespace} stickyScroll={activeEditorSettings.stickyScroll}
+        bracketPairColorization={activeEditorSettings.bracketPairColorization}
+        fontLigatures={activeEditorSettings.fontLigatures}
         useDefaultSaveKeybinding={false} keybindings={editorKeybindings}
         onCursorChange={setCursor} onReady={() => { setReady(true); editor.current?.focus(); }}
         onSave={() => void save()} onChange={(value) => {

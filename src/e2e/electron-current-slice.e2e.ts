@@ -1495,7 +1495,7 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    18,
+    19,
     "the connected workspace should expose the bounded app command catalog",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
@@ -2968,18 +2968,75 @@ async function verifyM2SessionWorkspace(
   await waitForFakeMethodCount(electronApplication, "downloadFileSession", downloadCount);
   await inspector.getByText(M2_INITIAL_FILE_TEXT, { exact: true }).waitFor();
 
+  const openedTextEditor = electronApplication.waitForEvent("window", { timeout: 15_000 });
   await inspector.getByRole("button", { name: "Edit", exact: true }).click();
-  await inspector.getByRole("textbox", { name: "UTF-8 text", exact: true }).fill(M2_EDITED_CONTENT);
-  await inspector.getByRole("button", { name: "Review save", exact: true }).click();
-  const saveDialog = page.getByRole("alertdialog", { name: "Save changes to this remote file?", exact: true });
-  await saveDialog.waitFor();
-  const saveReviewText = await saveDialog.innerText();
-  assert.ok(saveReviewText.includes("/Users/e2e/workspace/notes.txt"));
-  assert.match(saveReviewText, /plan payload sha-256/i);
-  assert.ok(!saveReviewText.includes(M2_EDITED_CONTENT), "review metadata must not echo staged editor content");
-  await saveDialog.getByRole("button", { name: "Confirm action", exact: true }).click();
-  await saveDialog.waitFor({ state: "hidden" });
-  await waitForFakeMethodCount(electronApplication, "uploadSession", 1);
+  const textEditor = await openedTextEditor;
+  textEditor.setDefaultTimeout(15_000);
+  await textEditor.getByRole("heading", { name: "notes.txt", exact: true }).waitFor();
+  await textEditor.locator(".monaco-editor").waitFor();
+  const documentEditor = textEditor.getByRole("textbox", { name: "Document text", exact: true });
+  await documentEditor.focus();
+  await textEditor.keyboard.press(`${process.platform === "darwin" ? "Meta" : "Control"}+a`);
+  await textEditor.keyboard.insertText(M2_EDITED_CONTENT);
+  await textEditor.getByText("Unsaved changes", { exact: true }).waitFor();
+  const remotePath = "/Users/e2e/workspace/notes.txt";
+  const originalSha256 = createHash("sha256").update(M2_INITIAL_FILE_TEXT).digest("hex");
+  const editedSha256 = createHash("sha256").update(M2_EDITED_CONTENT).digest("hex");
+  const backendId = createHash("sha256").update(fakeOperatorConfig()).digest("hex");
+  const stateBeforeReview = await readFakeState(electronApplication);
+  const nativeDialogCalls = stateBeforeReview.dialogCalls;
+  const uploadMethodCount = fakeMethodCount(stateBeforeReview, "uploadSession");
+  const uploadCount = await electronApplication.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads.length);
+  await textEditor.getByRole("button", { name: "Save", exact: true }).click();
+  const overwriteReview = textEditor.getByRole("alertdialog", { name: "Overwrite remote file?", exact: true });
+  await overwriteReview.waitFor();
+  const overwriteReviewText = await overwriteReview.innerText();
+  for (const expected of [
+    remotePath,
+    "m1-session",
+    "m1-session-host",
+    "m1_session",
+    "chosen-m0-operator.cfg",
+    backendId,
+    originalSha256,
+    editedSha256,
+  ]) {
+    assert.ok(overwriteReviewText.includes(expected), `the overwrite review must include ${expected}`);
+  }
+  assert.ok(!overwriteReviewText.includes(M2_EDITED_CONTENT), "review metadata must not echo staged editor content");
+  await overwriteReview.getByRole("button", { name: "Cancel", exact: true }).click();
+  await overwriteReview.waitFor({ state: "hidden" });
+  await textEditor.getByText("Unsaved changes", { exact: true }).waitFor();
+  assert.equal(await electronApplication.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads.length), uploadCount,
+    "canceling the overwrite review must not upload data");
+  assert.equal((await readFakeState(electronApplication)).dialogCalls, nativeDialogCalls,
+    "the HeroUI overwrite review must not invoke a native dialog");
+
+  await textEditor.getByRole("button", { name: "Save", exact: true }).click();
+  await overwriteReview.waitFor();
+  assert.equal(await overwriteReview.innerText(), overwriteReviewText,
+    "the second save must require the same complete review");
+  await overwriteReview.getByRole("button", { name: "Overwrite file", exact: true }).click();
+  await overwriteReview.waitFor({ state: "hidden" });
+  await textEditor.getByText("Saved", { exact: true }).waitFor();
+  await waitForFakeMethodCount(electronApplication, "uploadSession", uploadMethodCount + 1);
+  const uploads = await electronApplication.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads);
+  assert.equal(uploads.length, uploadCount + 1, "confirming the overwrite review must upload exactly once");
+  const upload = uploads.at(-1);
+  assert.deepEqual(upload && {
+    destination: upload.destination,
+    size: upload.size,
+    sha256: upload.sha256,
+    overwrite: upload.overwrite,
+  }, {
+    destination: remotePath,
+    size: Buffer.byteLength(M2_EDITED_CONTENT, "utf8"),
+    sha256: editedSha256,
+    overwrite: true,
+  });
+  assert.equal((await readFakeState(electronApplication)).dialogCalls, nativeDialogCalls,
+    "confirming the HeroUI overwrite review must not invoke a native dialog");
+  await textEditor.close();
   await page.keyboard.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
@@ -4402,7 +4459,9 @@ async function verifyM2SessionActivityAndBack(page: Page): Promise<void> {
   await activityGrid.waitFor();
   await activityGrid.getByText("Ping", { exact: true }).waitFor();
   await activityGrid.getByText("Set environment variable", { exact: true }).waitFor();
-  await activityGrid.getByText("Stage text changes", { exact: true }).waitFor();
+  // Canceling the first overwrite review stages and then revokes one draft;
+  // the confirmed retry stages a second. Either entry proves the activity is recorded.
+  await activityGrid.getByText("Stage text changes", { exact: true }).first().waitFor();
   const savedFileActivity = activityGrid.getByRole("row").filter({ hasText: "Save text file" });
   await savedFileActivity.waitFor();
   await savedFileActivity.getByText("Completed", { exact: true }).waitFor();

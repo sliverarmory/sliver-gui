@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -18,10 +18,16 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
   const artifacts = join(repositoryRoot, "artifacts", "e2e");
   const filePath = join(temporary, "document.xml");
   const shellPath = join(temporary, "deploy.sh");
+  const powershellPath = join(temporary, "deploy.ps1");
+  const pythonPath = join(temporary, "deploy.py");
+  const rustPath = join(temporary, "main.rs");
   const copyPath = join(temporary, "document-copy.xml");
   const binaryPath = join(temporary, "binary.xml");
   const initial = '<?xml version="1.0" encoding="UTF-8"?>\n<note>Local café document</note>\n';
   const shell = '#!/usr/bin/env bash\nif [[ -n "$HOME" ]]; then\n  echo "$HOME"\nfi\n';
+  const powershell = 'if ($env:USERPROFILE) {\n  Get-ChildItem -Path $env:USERPROFILE\n}\n';
+  const python = 'def greet(name: str) -> str:\n    return f"Hello, {name}"\n';
+  const rust = 'fn main() {\n    println!("Hello from Rust");\n}\n';
   const initialBytes = utf8WithBomAndCrlf(initial);
   let application: ElectronApplication | undefined;
   let page: Page | undefined;
@@ -35,6 +41,9 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await writeFile(join(temporary, "client", "armories.json"), "[]", { mode: 0o600 });
     await writeFile(filePath, initialBytes);
     await writeFile(shellPath, shell, "utf8");
+    await writeFile(powershellPath, powershell, "utf8");
+    await writeFile(pythonPath, python, "utf8");
+    await writeFile(rustPath, rust, "utf8");
     await writeFile(binaryPath, Buffer.from("<note>\u0000binary</note>", "utf8"));
     application = await electron.launch({
       args: ["--enable-sandbox", ...(process.platform === "darwin" ? ["--password-store=basic", "--use-mock-keychain"] : []),
@@ -88,7 +97,19 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
         sliver: typeof browser.sliver, network: typeof browser.network, armory: typeof browser.armory };
     });
     assert.deepEqual(bridge, {
-      frozen: true, keys: ["getApplicationSettings", "getDocument", "onApplicationSettingsChanged", "openFile", "save", "setDirty"],
+      frozen: true, keys: [
+        "getApplicationSettings",
+        "getDocument",
+        "getEditorSettings",
+        "onApplicationSettingsChanged",
+        "onEditorSettingsChanged",
+        "onRemoteOverwriteRequested",
+        "openFile",
+        "respondToRemoteOverwrite",
+        "save",
+        "setDirty",
+        "updateEditorSettings",
+      ],
       sliver: "undefined", network: "undefined", armory: "undefined",
     });
     const nativeWindow = await application.browserWindow(page);
@@ -111,6 +132,35 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     assert.equal(await documentText(application, page), shell);
     await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "if [[" })
       .locator("span > span").count().then((count) => count > 1));
+
+    await chooseOpenFile(application, powershellPath);
+    await page.getByRole("button", { name: "Open…", exact: true }).click();
+    await page.getByRole("heading", { name: "deploy.ps1", exact: true }).waitFor();
+    assert.equal(await page.getByRole("combobox", { name: "Document language", exact: true }).inputValue(), "powershell");
+    assert.equal(await documentText(application, page), powershell);
+    await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "$env:USERPROFILE" })
+      .first().locator("span > span").count().then((count) => count > 1));
+
+    await chooseOpenFile(application, pythonPath);
+    await page.getByRole("button", { name: "Open…", exact: true }).click();
+    await page.getByRole("heading", { name: "deploy.py", exact: true }).waitFor();
+    await waitUntil(async () => page!.getByRole("combobox", { name: "Document language", exact: true }).inputValue()
+      .then((value) => value === "python"));
+    assert.equal(await documentText(application, page), python);
+    await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "def greet" })
+      .locator("span > span").count().then((count) => count > 1));
+
+    await chooseOpenFile(application, rustPath);
+    await page.getByRole("button", { name: "Open…", exact: true }).click();
+    await page.getByRole("heading", { name: "main.rs", exact: true }).waitFor();
+    await waitUntil(async () => page!.getByRole("combobox", { name: "Document language", exact: true }).inputValue()
+      .then((value) => value === "rust"));
+    assert.equal(await documentText(application, page), rust);
+    await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "fn main" })
+      .locator("span > span").count().then((count) => count > 1));
+    assert.equal(await page.getByRole("option", { name: "Python", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("option", { name: "Rust", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("option", { name: "Go", exact: true }).count(), 1);
 
     await chooseOpenFile(application, filePath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
@@ -169,13 +219,34 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     const replaced = edited.replaceAll("alpha", "beta");
     assert.equal(await documentText(application, page), replaced);
     await controls.getByRole("button", { name: "Word Wrap", exact: true }).click();
-    assert.equal(await controls.getByRole("button", { name: "Word Wrap", exact: true }).getAttribute("aria-pressed"), "true");
+    await waitUntil(async () => (await controls.getByRole("button", { name: "Word Wrap", exact: true })
+      .getAttribute("aria-pressed")) === "true");
     await waitUntil(async () => (await page!.locator(".view-lines .view-line").count()) > replaced.split("\n").length);
-    await page.getByRole("combobox", { name: "Editor font size", exact: true }).selectOption("18");
+
+    await controls.getByRole("button", { name: "Editor settings", exact: true }).click();
+    const settingsDialog = page.getByRole("dialog", { name: "Editor settings", exact: true });
+    await settingsDialog.waitFor();
+    await settingsDialog.getByRole("button", { name: /Font family/u }).click();
+    await page.getByRole("option", { name: "JetBrains Mono", exact: true }).click();
+    const fontSize = settingsDialog.getByRole("textbox", { name: "Font size", exact: true });
+    await fontSize.fill("18");
+    await settingsDialog.getByText("Sticky scroll", { exact: true }).click();
+    await settingsDialog.getByRole("button", { name: "Save", exact: true }).click();
+    await settingsDialog.waitFor({ state: "hidden" });
     await waitUntil(() => page!.locator(".view-lines").evaluate((element) => {
-      const browser = globalThis as unknown as { getComputedStyle(element: unknown): { fontSize: string } };
-      return browser.getComputedStyle(element).fontSize === "18px";
+      const browser = globalThis as unknown as { getComputedStyle(element: unknown): { fontFamily: string; fontSize: string } };
+      const style = browser.getComputedStyle(element);
+      return style.fontSize === "18px" && style.fontFamily.includes("JetBrains Mono");
     }));
+    const settingsPath = join(temporary, "client", "gui", "text-editor-settings.json");
+    const persistedSettings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+    assert.equal(persistedSettings["fontId"], "jetbrains-mono");
+    assert.equal(persistedSettings["fontSize"], 18);
+    assert.equal(persistedSettings["wordWrap"], true);
+    assert.equal(persistedSettings["stickyScroll"], true);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(settingsPath)).mode & 0o777, 0o600, "Editor settings must remain private");
+    }
     assert.match(await page.getByLabel("Editor status", { exact: true }).innerText(), /Ln \d+, Col \d+/u);
 
     await chooseSaveFile(application, null);
@@ -218,6 +289,22 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     assert.deepEqual(await requestNativeClose(application, nativeId, "Discard Changes"), ["Discard changes to document-copy.xml?"]);
     await closed;
     assert.deepEqual(await readFile(copyPath), utf8WithBomAndCrlf(replaced), "Discard must not save the draft");
+
+    const reopenedEvent = application.waitForEvent("window", { timeout: 10_000 });
+    await invokeEditorMenu(application, ownerId);
+    const reopened = await reopenedEvent;
+    reopened.setDefaultTimeout(10_000);
+    await reopened.locator(".monaco-editor").waitFor();
+    await waitUntil(() => reopened.locator(".view-lines").evaluate((element) => {
+      const browser = globalThis as unknown as { getComputedStyle(element: unknown): { fontFamily: string; fontSize: string } };
+      const style = browser.getComputedStyle(element);
+      return style.fontSize === "18px" && style.fontFamily.includes("JetBrains Mono");
+    }));
+    assert.equal(await reopened.getByRole("button", { name: "Word Wrap", exact: true }).getAttribute("aria-pressed"), "true");
+    const reopenedNative = await application.browserWindow(reopened);
+    const reopenedClosed = reopened.waitForEvent("close", { timeout: 10_000 });
+    await reopenedNative.evaluate((window) => window.close());
+    await reopenedClosed;
     assert.deepEqual(errors, [], "The standalone editor must have no page or CSP errors");
     assertionsPassed = true;
   } catch (error) {

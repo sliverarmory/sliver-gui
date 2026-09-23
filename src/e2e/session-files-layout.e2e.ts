@@ -120,9 +120,11 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await fileName.click({ button: "right" });
     let contextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
     await contextMenu.waitFor();
-    assert.deepEqual((await contextMenu.getByRole("menuitem").allTextContents()).slice(0, 2), [
+    assert.deepEqual((await contextMenu.getByRole("menuitem").allTextContents()).slice(0, 4), [
       "Download",
       "Add to Loot",
+      "Edit text",
+      "Upload replacement",
     ]);
     await contextMenu.getByRole("menuitem", { name: "Download", exact: true }).click();
     await page.getByText("File saved", { exact: true }).waitFor();
@@ -321,9 +323,14 @@ test("Files opens a remote text file in standalone Monaco and confirms each over
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-remote-editor-e2e-"));
   const remotePath = "/Users/e2e/workspace/E2EFile081.txt";
   const savedPath = join(temporaryRoot, "remote-editor-result.txt");
+  const original = "A".repeat(2_048);
   const updated = "Edited in standalone Monaco \u2603\n";
+  const operatorConfig = fakeOperatorConfig();
+  const originalSha256 = createHash("sha256").update(original).digest("hex");
+  const updatedSha256 = createHash("sha256").update(updated).digest("hex");
+  const backendId = createHash("sha256").update(operatorConfig).digest("hex");
   await Promise.all(["saved", "managed", "user-data", "client"].map((name) => mkdir(join(temporaryRoot, name))));
-  await writeFile(join(temporaryRoot, "saved", "remote-editor-e2e-operator.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+  await writeFile(join(temporaryRoot, "saved", "remote-editor-e2e-operator.cfg"), operatorConfig, { mode: 0o600 });
   await writeFile(join(temporaryRoot, "client", "armories.json"), "[]", { mode: 0o600 });
 
   let application: ElectronApplication | undefined;
@@ -359,9 +366,11 @@ test("Files opens a remote text file in standalone Monaco and confirms each over
     await workspace.getByRole("tab", { name: "Files", exact: true }).click();
     const browser = workspace.getByRole("region", { name: "File browser", exact: true });
     const file = browser.getByRole("row").filter({ hasText: "E2EFile081.txt" });
-    await file.getByRole("button", { name: "More actions for E2EFile081.txt", exact: true }).click();
     const opened = application.waitForEvent("window", { timeout: 15_000 });
-    await workspace.getByRole("menuitem", { name: "Edit text…", exact: true }).click();
+    await file.getByRole("rowheader", { name: "E2EFile081.txt", exact: true }).click({ button: "right" });
+    const contextMenu = workspace.getByRole("menu", { name: "Application context menu", exact: true });
+    await contextMenu.waitFor();
+    await contextMenu.getByRole("menuitem", { name: "Edit text", exact: true }).click();
     editor = await opened;
     editor.setDefaultTimeout(15_000);
     editor.on("dialog", (dialog) => { void dialog.accept().catch(() => undefined); });
@@ -370,27 +379,48 @@ test("Files opens a remote text file in standalone Monaco and confirms each over
     await editor.locator(".monaco-editor").waitFor();
     await editor.getByRole("button", { name: "Undo", exact: true }).waitFor({ state: "visible" });
     assert.equal(new URL(editor.url()).searchParams.get("surface"), "text-editor");
-    assert.equal(await remoteEditorText(application, editor), "A".repeat(2_048));
+    assert.equal(await remoteEditorText(application, editor), original);
     assert.equal(await editor.getByRole("button", { name: "Save As…" }).count(), 0,
       "a remote document must not offer a local Save As path");
 
     await replaceRemoteEditorText(application, editor, updated);
     await editor.getByText("Unsaved changes", { exact: true }).waitFor();
-    await setRemoteOverwriteResponse(application, "Cancel");
+    const nativeDialogCalls = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls);
     await editor.getByRole("button", { name: "Save", exact: true }).click();
+    const overwriteReview = editor.getByRole("alertdialog", { name: "Overwrite remote file?", exact: true });
+    await overwriteReview.waitFor();
+    const reviewText = await overwriteReview.innerText();
+    for (const expected of [
+      remotePath,
+      "m1-session",
+      "m1-session-host",
+      "m1_session",
+      "remote-editor-e2e-operator",
+      backendId,
+      originalSha256,
+      updatedSha256,
+    ]) {
+      assert.ok(reviewText.includes(expected), `the overwrite review must include ${expected}`);
+    }
+    assert.ok(!reviewText.includes(updated), "the overwrite review must not expose edited file contents");
+    await overwriteReview.getByRole("button", { name: "Cancel", exact: true }).click();
+    await overwriteReview.waitFor({ state: "hidden" });
     await editor.getByText("Unsaved changes", { exact: true }).waitFor();
-    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), 1,
-      "saving remote text must show the native overwrite confirmation");
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), nativeDialogCalls,
+      "the HeroUI overwrite review must not invoke a native dialog");
     assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads.length), 0,
       "canceling the overwrite must not upload data");
     assert.equal(await remoteEditorText(application, editor), updated, "canceling must preserve the edited draft");
 
-    await setRemoteOverwriteResponse(application, "Overwrite File");
     await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await overwriteReview.waitFor();
+    assert.equal(await overwriteReview.innerText(), reviewText, "the second save must require the same complete review");
+    await overwriteReview.getByRole("button", { name: "Overwrite file", exact: true }).click();
+    await overwriteReview.waitFor({ state: "hidden" });
     await editor.getByText("Saved", { exact: true }).waitFor();
     await waitForFakeMethodCount(application, "uploadSession", 1);
-    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), 2,
-      "the second save must require a fresh confirmation");
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), nativeDialogCalls,
+      "confirming the HeroUI overwrite review must not invoke a native dialog");
     const uploads = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads);
     assert.equal(uploads.length, 1);
     assert.deepEqual({
@@ -401,7 +431,7 @@ test("Files opens a remote text file in standalone Monaco and confirms each over
     }, {
       destination: remotePath,
       size: Buffer.byteLength(updated, "utf8"),
-      sha256: createHash("sha256").update(updated).digest("hex"),
+      sha256: updatedSha256,
       overwrite: true,
     });
 
@@ -423,19 +453,6 @@ test("Files opens a remote text file in standalone Monaco and confirms each over
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
-
-async function setRemoteOverwriteResponse(application: ElectronApplication, response: "Cancel" | "Overwrite File"): Promise<void> {
-  await application.evaluate(({ dialog }, selectedResponse) => {
-    dialog.showMessageBoxSync = (...args: unknown[]) => {
-      const options = args[args.length - 1] as { title?: string; buttons?: string[] };
-      if (options.title !== "Overwrite remote file?" || !options.buttons?.includes(selectedResponse)) {
-        throw new Error("The remote overwrite confirmation was missing or malformed");
-      }
-      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
-      return options.buttons.indexOf(selectedResponse);
-    };
-  }, response);
-}
 
 async function replaceRemoteEditorText(application: ElectronApplication, editor: Page, text: string): Promise<void> {
   await application.evaluate(({ clipboard }, value) => clipboard.writeText(value), text);

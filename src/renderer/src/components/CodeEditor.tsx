@@ -3,6 +3,7 @@ import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "reac
 
 import { isKeyboardShortcut } from "../../../shared/keyboard-shortcuts";
 import { SCRIPT_LANGUAGE_ID } from "../editor/script-language-config";
+import { preferredMonacoExtension } from "../editor/monaco-language-catalog";
 
 type MonacoRuntime = typeof import("../editor/monaco-runtime");
 export type CodeEditorProfile = "default" | "script";
@@ -49,6 +50,14 @@ export interface CodeEditorProps {
   wordWrap?: boolean;
   minimap?: boolean;
   fontSize?: number;
+  fontFamily?: string;
+  tabSize?: number;
+  insertSpaces?: boolean;
+  lineNumbers?: "on" | "relative" | "off";
+  renderWhitespace?: "none" | "selection" | "boundary" | "trailing" | "all";
+  stickyScroll?: boolean;
+  bracketPairColorization?: boolean;
+  fontLigatures?: boolean;
   /** Keep the built-in save key only when a host does not own configurable shortcuts. */
   useDefaultSaveKeybinding?: boolean;
   /** Monaco-owned shortcut remaps; hosts retain window-only commands separately. */
@@ -77,6 +86,9 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
     value, modelKey, language = "javascript", profile = "default", readOnly = false,
     ariaLabel = "Code editor", theme = "dark", className = "", wordWrap = false,
     minimap = false, fontSize = 13,
+    fontFamily = '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+    tabSize = 2, insertSpaces = true, lineNumbers = "on", renderWhitespace = "selection",
+    stickyScroll = false, bracketPairColorization = true, fontLigatures = false,
   } = props;
   const container = useRef<HTMLDivElement>(null);
   const currentProps = useRef(props);
@@ -133,16 +145,20 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
         contextmenu: false,
         links: false,
         minimap: { enabled: latest.minimap ?? false },
-        fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+        fontFamily: latest.fontFamily ?? '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
         fontSize: latest.fontSize ?? 13,
         lineHeight: Math.round((latest.fontSize ?? 13) * 21 / 13),
-        tabSize: 2,
-        insertSpaces: true,
+        tabSize: latest.tabSize ?? 2,
+        insertSpaces: latest.insertSpaces ?? true,
+        lineNumbers: latest.lineNumbers ?? "on",
+        renderWhitespace: latest.renderWhitespace ?? "selection",
+        bracketPairColorization: { enabled: latest.bracketPairColorization ?? true },
+        fontLigatures: latest.fontLigatures ?? false,
         scrollBeyondLastLine: false,
         padding: { top: 12, bottom: 12 },
         renderLineHighlight: "line",
         roundedSelection: false,
-        stickyScroll: { enabled: false },
+        stickyScroll: { enabled: latest.stickyScroll ?? false },
         wordWrap: latest.wordWrap ? "on" : "off",
         hover: { enabled: "off" },
         unicodeHighlight: { ambiguousCharacters: true, invisibleCharacters: true },
@@ -257,12 +273,16 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       if (previous) previous.viewState = instance.saveViewState();
       let entry = models.current.get(identity);
       if (!entry) {
-        const extension = profile === "script" ? "js" : editorExtension(language);
+        const extension = profile === "script" ? "js" :
+          preferredMonacoExtension(language, runtime.monaco.languages.getLanguages()) ?? editorExtension(language);
         const uri = runtime.monaco.Uri.parse(
           `inmemory://editor-${ownerId.current}/${encodeURIComponent(identity)}.${extension}`,
         );
         const model = runtime.monaco.editor.createModel(value, resolvedLanguage, uri);
-        model.updateOptions({ tabSize: 2, insertSpaces: true });
+        model.updateOptions({
+          tabSize: currentProps.current.tabSize ?? 2,
+          insertSpaces: currentProps.current.insertSpaces ?? true,
+        });
         entry = { model, viewState: null };
         if (profile === "script") entry.diagnostics = runtime.attachScriptDiagnostics(runtime.monaco, model);
         models.current.set(identity, entry);
@@ -295,12 +315,20 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
 
   useEffect(() => {
     if (!ready) return;
+    for (const { model } of models.current.values()) model.updateOptions({ tabSize, insertSpaces });
+  }, [ready, tabSize, insertSpaces]);
+
+  useEffect(() => {
+    if (!ready) return;
     editorRef.current?.updateOptions({
       readOnly, ariaLabel, wordWrap: wordWrap ? "on" : "off", minimap: { enabled: minimap }, fontSize,
-      lineHeight: Math.round(fontSize * 21 / 13),
+      fontFamily, lineHeight: Math.round(fontSize * 21 / 13), lineNumbers, renderWhitespace,
+      stickyScroll: { enabled: stickyScroll }, bracketPairColorization: { enabled: bracketPairColorization },
+      fontLigatures,
     });
     runtimeRef.current?.monaco.editor.setTheme(theme === "light" ? "vs" : "vs-dark");
-  }, [ready, readOnly, ariaLabel, theme, wordWrap, minimap, fontSize]);
+  }, [ready, readOnly, ariaLabel, theme, wordWrap, minimap, fontSize, fontFamily, lineNumbers,
+    renderWhitespace, stickyScroll, bracketPairColorization, fontLigatures]);
 
   useEffect(() => {
     if (ready) currentProps.current.onReady?.();
@@ -322,7 +350,7 @@ function editorDimensions(size: Pick<DOMRectReadOnly, "width" | "height">): edit
 function editorExtension(language: string): string {
   const extensions: Readonly<Record<string, string>> = {
     javascript: "js", typescript: "ts", plaintext: "txt", json: "json",
-    xml: "xml", markdown: "md", yaml: "yaml", css: "css", html: "html", shell: "sh",
+    xml: "xml", markdown: "md", yaml: "yaml", css: "css", html: "html", shell: "sh", powershell: "ps1",
   };
   return extensions[language] ?? "txt";
 }

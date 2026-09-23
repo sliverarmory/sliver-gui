@@ -87,6 +87,11 @@ vi.mock("../editor/monaco-runtime", () => ({
     editor: { create: mocked.create, createModel: mocked.createModel, setTheme: mocked.setTheme,
       setModelLanguage: mocked.setModelLanguage, addKeybindingRules: mocked.addKeybindingRules },
     Uri: { parse: (uri: string) => uri },
+    languages: { getLanguages: () => [
+      { id: "plaintext", extensions: [".txt"] },
+      { id: "xml", extensions: [".xml"] },
+      { id: "javascript", extensions: [".js"] },
+    ] },
     KeyMod: { CtrlCmd: 2048, Shift: 1024, Alt: 512 },
     KeyCode: {
       Enter: 3, LeftArrow: 15, UpArrow: 16, RightArrow: 17, DownArrow: 18,
@@ -200,6 +205,10 @@ describe("CodeEditor", () => {
     expect(mocked.instance.updateOptions).toHaveBeenLastCalledWith({
       readOnly: true, ariaLabel: "Example source", wordWrap: "off",
       minimap: { enabled: false }, fontSize: 13, lineHeight: 21,
+      fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+      lineNumbers: "on", renderWhitespace: "selection",
+      stickyScroll: { enabled: false }, bracketPairColorization: { enabled: true },
+      fontLigatures: false,
     });
     expect(observe).toHaveBeenCalledOnce();
     act(() => { resize(640, 480); });
@@ -317,13 +326,19 @@ describe("CodeEditor", () => {
     const ready = vi.fn();
     const firstCursor = vi.fn();
     const nextCursor = vi.fn();
-    const { rerender } = render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} wordWrap minimap fontSize={16} onReady={ready} onCursorChange={firstCursor} />);
+    const { rerender } = render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} wordWrap minimap
+      fontSize={16} fontFamily='"Fira Code", monospace' tabSize={4} insertSpaces={false}
+      lineNumbers="relative" renderWhitespace="all" stickyScroll bracketPairColorization={false}
+      fontLigatures onReady={ready} onCursorChange={firstCursor} />);
     await waitFor(() => expect(ready).toHaveBeenCalledOnce());
     expect(mocked.instance.getModel()).toBe(mocked.models[0]);
     expect(firstCursor).toHaveBeenCalledWith({ lineNumber: 1, column: 1 });
     expect(mocked.create).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({
       wordWrap: "on", minimap: { enabled: true }, fontSize: 16, lineHeight: 26,
+      fontFamily: '"Fira Code", monospace', lineNumbers: "relative", renderWhitespace: "all",
+      stickyScroll: { enabled: true }, bracketPairColorization: { enabled: false }, fontLigatures: true,
     }));
+    expect(mocked.models[0]?.updateOptions).toHaveBeenLastCalledWith({ tabSize: 4, insertSpaces: false });
     rerender(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} wordWrap={false} minimap={false} fontSize={18} onReady={ready} onCursorChange={nextCursor} />);
     act(() => { mocked.moveCursor(8, 12); });
     expect(nextCursor).toHaveBeenCalledExactlyOnceWith({ lineNumber: 8, column: 12 });

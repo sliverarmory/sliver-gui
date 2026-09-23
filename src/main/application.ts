@@ -82,6 +82,7 @@ import {
 } from "./application-updater.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
+import { TextEditorSettingsStore } from "./text-editor-settings.js";
 import { ApplicationIconController } from "./application-icon.js";
 import { createSystemIconAppearance } from "./system-icon-appearance.js";
 import {
@@ -168,6 +169,7 @@ import { TEXT_EDITOR_SESSION_PARTITION } from "./window-options.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
+const TEXT_EDITOR_SETTINGS_FILE_NAME = "text-editor-settings.json";
 
 // Scheme privileges must be declared synchronously before Electron is ready,
 // including when a test entry imports this application module.
@@ -2749,6 +2751,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const loadedApplicationSettingsStore = await ApplicationSettingsStore.load(
     join(app.getPath("userData"), APPLICATION_SETTINGS_FILE_NAME),
   );
+  const loadedTextEditorSettingsStore = await TextEditorSettingsStore.load(
+    join(consoleClientRootDirectory, "gui", TEXT_EDITOR_SETTINGS_FILE_NAME),
+  );
   applicationSettingsStore = loadedApplicationSettingsStore;
   systemIconAppearance.start(applyApplicationIcon);
   applyApplicationIcon();
@@ -2847,6 +2852,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     rendererUrl: textEditorRendererUrl,
     preloadPath: options.textEditorPreloadPath ?? join(mainBundleDirectory, "../preload/text-editor.cjs"),
     getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+    getEditorSettings: () => loadedTextEditorSettingsStore.getState(),
+    updateEditorSettings: (input) => loadedTextEditorSettingsStore.update(input),
     prepareWindow: (window) => trackWindow(window, undefined, undefined, undefined, undefined, "text-editor", false),
     icon: applicationIcons.getIconPath(),
     remote: {

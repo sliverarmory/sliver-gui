@@ -1422,11 +1422,14 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
       </Modal.Backdrop>
       <SessionFileInspector
         destructive={destructive}
+        isTextEditorDisabled={fileActionsDisabled}
+        isTextEditorPending={busyFile !== undefined && inspector?.file.path === busyFile}
         platform={platform}
         routeKey={routeKey}
         selection={inspector?.routeKey === routeKey ? inspector : undefined}
         onClose={() => setInspector(undefined)}
         onDirectMutation={() => currentPath && void loadPath(currentPath)}
+        onEditText={(file) => handleFileAction(file, "edit-text")}
       />
       <DestructiveActionDialog action={destructive} />
     </>
@@ -1437,8 +1440,8 @@ type FileWorkbenchMode = "browser" | "search" | "storage";
 type FileInspectorSection = "view" | "copy" | "move" | "permissions" | "times";
 type FileViewMode = "cat" | "head" | "tail" | "hex";
 type FileViewResult = SessionTextFileView | SessionHexFileView;
-type FileContextAction = "download" | "add-to-loot";
-type FileRowAction = "open" | "edit-text" | FileContextAction | "copy" | "move" | "upload-overwrite" | "permissions" | "times" | "delete";
+type FileContextAction = "download" | "add-to-loot" | "edit-text" | "upload-overwrite";
+type FileRowAction = "open" | FileContextAction | "copy" | "move" | "permissions" | "times" | "delete";
 
 interface FileInspectorSelection {
   file: SessionFileEntry;
@@ -1490,6 +1493,19 @@ function FileContextMenu({
     icon: faBoxArchive,
     isDisabled: disabled,
     onAction: () => context.onAction(context.file, "add-to-loot"),
+  }, {
+    id: "edit-text",
+    label: "Edit text",
+    icon: faPen,
+    isDisabled: disabled,
+    separatorBefore: true,
+    onAction: () => context.onAction(context.file, "edit-text"),
+  }, {
+    id: "upload-overwrite",
+    label: "Upload replacement",
+    icon: faUpload,
+    isDisabled: disabled,
+    onAction: () => context.onAction(context.file, "upload-overwrite"),
   }] : [];
   const scope = useApplicationContextMenuScope({ actions });
 
@@ -2022,15 +2038,21 @@ function SessionFileInspector({
   platform,
   selection,
   destructive,
+  isTextEditorDisabled,
+  isTextEditorPending,
   onClose,
   onDirectMutation,
+  onEditText,
 }: {
   routeKey: string;
   platform: string;
   selection: FileInspectorSelection | undefined;
   destructive: DestructiveActionState;
+  isTextEditorDisabled: boolean;
+  isTextEditorPending: boolean;
   onClose: () => void;
   onDirectMutation: () => void;
+  onEditText: (file: SessionFileEntry) => void;
 }): React.JSX.Element {
   const file = selection?.file;
   const canManagePermissions = sessionOperationSupportsPlatform("session.filesystem.chmod", platform);
@@ -2220,6 +2242,7 @@ function SessionFileInspector({
   }, [accessTime, file, isCurrent, modificationTime, onDirectMutation, routeKey]);
 
   const viewEditable = viewState.status === "ready" && fileViewIsEditable(viewState.value);
+  const viewingHex = viewState.status === "ready" && isHexFileView(viewState.value);
   const editValid = viewState.status === "ready" && editorDraftIsValid(viewState.value, editDraft);
   const actionLocked = busyAction !== undefined || destructive.isPreparing || destructive.isExecuting;
 
@@ -2262,11 +2285,22 @@ function SessionFileInspector({
                         </Segment>
                         <div className="flex items-center gap-2">
                           {viewEditable ? (
-                            <Button size="sm" variant="secondary" onPress={() => setIsEditing((current) => !current)}>
-                              <FontAwesomeIcon aria-hidden icon={faPen} /> {isEditing ? "Cancel edit" : "Edit"}
+                            <Button
+                              isDisabled={!viewingHex && isTextEditorDisabled}
+                              isPending={!viewingHex && isTextEditorPending}
+                              size="sm"
+                              variant="secondary"
+                              onPress={() => {
+                                if (viewingHex) setIsEditing((current) => !current);
+                                else onEditText(file);
+                              }}
+                            >
+                              <FontAwesomeIcon aria-hidden icon={faPen} /> {viewingHex
+                                ? isEditing ? "Cancel hex edit" : "Edit hex"
+                                : "Edit"}
                             </Button>
                           ) : null}
-                          {isEditing ? (
+                          {viewingHex && isEditing ? (
                             <Button isDisabled={!editValid || actionLocked} isPending={busyAction === "save"} size="sm" onPress={() => void stageAndReview()}>
                               Review save
                             </Button>
@@ -2278,7 +2312,7 @@ function SessionFileInspector({
                       {viewState.status === "ready" ? (
                         <div className="flex min-w-0 flex-col gap-3">
                           <FileViewSummary value={viewState.value} />
-                          {isEditing ? (
+                          {viewingHex && isEditing ? (
                             <div className="flex flex-col gap-2">
                               <Label htmlFor="session-file-editor">{isHexFileView(viewState.value) ? "Hex bytes" : "UTF-8 text"}</Label>
                               <TextArea

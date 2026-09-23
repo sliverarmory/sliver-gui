@@ -15,6 +15,7 @@ export const KEYBOARD_SHORTCUT_DEFINITIONS = [
   { id: "textEditorReplace", label: "Replace in file", description: "Find and replace text in the current document.", group: "Text Editor", scope: "text-editor" },
   { id: "textEditorWordWrap", label: "Toggle word wrap", description: "Turn editor word wrapping on or off.", group: "Text Editor", scope: "text-editor" },
   { id: "textEditorCommandPalette", label: "Open editor command palette", description: "Find and run Monaco editor commands.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorSettings", label: "Editor settings", description: "Open standalone text editor settings.", group: "Text Editor", scope: "text-editor" },
   { id: "terminalNewTab", label: "New terminal tab", description: "Open a new tab in the terminal window.", group: "Terminal", scope: "terminal" },
   { id: "terminalCloseTab", label: "Close terminal tab", description: "Close the active terminal tab.", group: "Terminal", scope: "terminal" },
   { id: "terminalSettings", label: "Terminal settings", description: "Open settings from the terminal window.", group: "Terminal", scope: "terminal" },
@@ -79,6 +80,7 @@ export function defaultKeyboardShortcut(action: KeyboardShortcutAction, apple: b
     case "textEditorReplace": return "mod+alt+f";
     case "textEditorWordWrap": return "alt+z";
     case "textEditorCommandPalette": return "f1";
+    case "textEditorSettings": return "mod+,";
     case "openConsole":
     case "terminalNewTab": return "mod+t";
     case "terminalCloseTab": return "mod+w";

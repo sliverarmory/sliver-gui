@@ -40,6 +40,7 @@ describe("keyboard shortcut catalog", () => {
     expect(defaultKeyboardShortcut("textEditorReplace", apple)).toBe("mod+alt+f");
     expect(defaultKeyboardShortcut("textEditorWordWrap", apple)).toBe("alt+z");
     expect(defaultKeyboardShortcut("textEditorCommandPalette", apple)).toBe("f1");
+    expect(defaultKeyboardShortcut("textEditorSettings", apple)).toBe("mod+,");
     expect(defaultKeyboardShortcut("terminalTab10", apple)).toBe("mod+0");
   });
 

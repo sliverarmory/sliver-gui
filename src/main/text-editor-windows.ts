@@ -7,8 +7,13 @@ import { BrowserWindow, dialog, ipcMain, nativeTheme, type IpcMainInvokeEvent, t
 import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
 import {
-  parseTextEditorSaveInput, TEXT_EDITOR_IPC, TEXT_EDITOR_MAX_BYTES,
-  type TextEditorDocument, type TextEditorSaveInput,
+  parseTextEditorSettingsUpdateInput,
+  type TextEditorSettingsState,
+  type TextEditorSettingsUpdateInput,
+} from "../shared/text-editor-settings-contracts.js";
+import {
+  parseTextEditorRemoteOverwriteResponse, parseTextEditorSaveInput, TEXT_EDITOR_IPC, TEXT_EDITOR_MAX_BYTES,
+  type TextEditorDocument, type TextEditorRemoteOverwriteRequest, type TextEditorSaveInput,
 } from "../shared/text-editor-contracts.js";
 import { SESSION_EDITOR_MAX_BYTES, type SessionDestructiveActionPlan } from "../shared/session-contracts.js";
 import { hardenWindow, isSameRendererDocument } from "./security.js";
@@ -19,6 +24,8 @@ interface TextEditorWindowsOptions {
   readonly preloadPath: string;
   readonly icon?: string;
   readonly getApplicationSettings: () => ApplicationSettingsState;
+  readonly getEditorSettings: () => TextEditorSettingsState;
+  readonly updateEditorSettings: (input: TextEditorSettingsUpdateInput) => Promise<OperationResult<TextEditorSettingsState>>;
   readonly prepareWindow: (window: BrowserWindow) => void;
   readonly remote?: {
     load(source: WebContents, remotePath: string): Promise<{
@@ -48,10 +55,16 @@ interface EditorState {
   dirtyRevision: number;
   busy: boolean;
   allowClose: boolean;
+  pendingRemoteOverwrite?: {
+    readonly requestId: string;
+    readonly resolve: (confirmed: boolean) => void;
+    readonly timer: ReturnType<typeof setTimeout>;
+  };
 }
 
 const INVOKE_CHANNELS = [TEXT_EDITOR_IPC.getDocument, TEXT_EDITOR_IPC.openFile,
-  TEXT_EDITOR_IPC.save, TEXT_EDITOR_IPC.setDirty, TEXT_EDITOR_IPC.getApplicationSettings];
+  TEXT_EDITOR_IPC.save, TEXT_EDITOR_IPC.setDirty, TEXT_EDITOR_IPC.respondToRemoteOverwrite,
+  TEXT_EDITOR_IPC.getApplicationSettings, TEXT_EDITOR_IPC.getEditorSettings, TEXT_EDITOR_IPC.updateEditorSettings];
 
 class EditorError extends Error {}
 export class RemoteTextEditorError extends Error {}
@@ -80,9 +93,28 @@ export class TextEditorWindows {
             this.#setTitle(state);
             return { ok: true };
           }
+          if (channel === TEXT_EDITOR_IPC.respondToRemoteOverwrite) {
+            if (args.length !== 1) throw new EditorError("Invalid remote overwrite response");
+            const response = parseTextEditorRemoteOverwriteResponse(args[0]);
+            const pending = state.pendingRemoteOverwrite;
+            if (!pending || pending.requestId !== response.requestId) {
+              throw new EditorError("The remote overwrite review is no longer active");
+            }
+            delete state.pendingRemoteOverwrite;
+            clearTimeout(pending.timer);
+            pending.resolve(response.confirmed);
+            return { ok: true };
+          }
+          if (channel === TEXT_EDITOR_IPC.updateEditorSettings) {
+            if (args.length !== 1) throw new EditorError("Invalid text editor settings update");
+            const result = await this.#options.updateEditorSettings(parseTextEditorSettingsUpdateInput(args[0]));
+            if (result.ok && result.value) this.#publishEditorSettings(result.value);
+            return result;
+          }
           if (args.length !== 0) throw new EditorError("Unexpected text editor arguments");
           if (channel === TEXT_EDITOR_IPC.getDocument) return { ok: true, value: { ...state.document } };
           if (channel === TEXT_EDITOR_IPC.getApplicationSettings) return this.#options.getApplicationSettings();
+          if (channel === TEXT_EDITOR_IPC.getEditorSettings) return this.#options.getEditorSettings();
           return await this.#openFile(state, event);
         } catch (error) {
           return { ok: false, error: error instanceof EditorError || error instanceof RemoteTextEditorError
@@ -123,7 +155,13 @@ export class TextEditorWindows {
       // unless the user already explicitly approved discarding those changes.
       if (state.allowClose || this.#canDiscard(state, true)) event.preventDefault();
     });
-    window.once("closed", () => this.#states.delete(contentsId));
+    window.webContents.on("did-start-navigation", () => this.#cancelRemoteOverwrite(state));
+    window.webContents.on("render-process-gone", () => this.#cancelRemoteOverwrite(state));
+    window.webContents.once("destroyed", () => this.#cancelRemoteOverwrite(state));
+    window.once("closed", () => {
+      this.#cancelRemoteOverwrite(state);
+      this.#states.delete(contentsId);
+    });
     this.#setTitle(state);
     try {
       this.#options.prepareWindow(window);
@@ -165,7 +203,10 @@ export class TextEditorWindows {
   dispose(): void {
     this.#disposed = true;
     for (const channel of INVOKE_CHANNELS) ipcMain.removeHandler(channel);
-    for (const state of this.#states.values()) if (!state.window.isDestroyed()) state.window.destroy();
+    for (const state of this.#states.values()) {
+      this.#cancelRemoteOverwrite(state);
+      if (!state.window.isDestroyed()) state.window.destroy();
+    }
     this.#states.clear();
   }
 
@@ -202,6 +243,78 @@ export class TextEditorWindows {
   #setTitle(state: EditorState): void {
     state.window.setTitle(`${state.dirty ? "● " : ""}${state.document.title} — Text Editor`);
     state.window.setDocumentEdited(state.dirty);
+  }
+
+  #cancelRemoteOverwrite(state: EditorState): void {
+    const pending = state.pendingRemoteOverwrite;
+    if (!pending) return;
+    delete state.pendingRemoteOverwrite;
+    clearTimeout(pending.timer);
+    pending.resolve(false);
+  }
+
+  #publishEditorSettings(settings: TextEditorSettingsState): void {
+    for (const state of this.#states.values()) {
+      if (!state.window.isDestroyed() && !state.window.webContents.isDestroyed()) {
+        try {
+          state.window.webContents.send(TEXT_EDITOR_IPC.editorSettingsChanged, settings);
+        } catch {
+          // A retiring editor cannot receive preference broadcasts. The store
+          // has already committed, and remaining windows still need the update.
+        }
+      }
+    }
+  }
+
+  async #confirmRemoteOverwrite(
+    state: EditorState,
+    event: IpcMainInvokeEvent,
+    remotePath: string,
+    originalSha256: string,
+    plan: SessionDestructiveActionPlan,
+  ): Promise<boolean> {
+    this.#requireSender(event);
+    if (state.pendingRemoteOverwrite) throw new RemoteTextEditorError("Another remote overwrite review is already active");
+    const newSha256 = plan.artifact?.sha256;
+    if (!newSha256 || !/^[0-9a-f]{64}$/u.test(newSha256)) {
+      throw new RemoteTextEditorError("The staged remote edit could not be verified");
+    }
+    const expiresAt = Date.parse(plan.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new RemoteTextEditorError("The remote overwrite review has expired");
+    }
+    const request: TextEditorRemoteOverwriteRequest = {
+      requestId: randomUUID(),
+      path: remotePath,
+      target: {
+        name: plan.target.name,
+        hostname: plan.target.hostname,
+        sessionId: plan.target.sessionId,
+        backend: {
+          id: plan.target.backend.id,
+          displayName: plan.target.backend.displayName,
+        },
+      },
+      originalSha256,
+      newSha256,
+      warning: plan.warning,
+    };
+    return await new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (state.pendingRemoteOverwrite?.requestId !== request.requestId) return;
+        delete state.pendingRemoteOverwrite;
+        resolve(false);
+      }, Math.min(expiresAt - Date.now(), 2_147_483_647));
+      timer.unref();
+      state.pendingRemoteOverwrite = { requestId: request.requestId, resolve, timer };
+      try {
+        state.window.webContents.send(TEXT_EDITOR_IPC.remoteOverwriteRequested, request);
+      } catch {
+        delete state.pendingRemoteOverwrite;
+        clearTimeout(timer);
+        reject(new RemoteTextEditorError("The remote overwrite review could not be displayed"));
+      }
+    });
   }
 
   async #openFile(state: EditorState, event: IpcMainInvokeEvent): Promise<OperationResult<TextEditorDocument | null>> {
@@ -250,15 +363,7 @@ export class TextEditorWindows {
       try {
         const remote = state.remote;
         const saved = await this.#options.remote.save(remote.binding, remote.path, remote.expectedSha256, input.text, async (plan) => {
-          this.#requireSender(event);
-          return dialog.showMessageBoxSync(state.window, {
-            type: "warning", title: "Overwrite remote file?",
-            message: `Save changes to ${remote.path}?`,
-            detail: `${plan.target.name} on ${plan.target.hostname} (${plan.target.backend.displayName})\n` +
-              `Original SHA-256: ${remote.expectedSha256}\n` +
-              `New SHA-256: ${plan.artifact?.sha256 ?? "unavailable"}\n\n${plan.warning}`,
-            buttons: ["Cancel", "Overwrite File"], defaultId: 0, cancelId: 0, noLink: true,
-          }) === 1;
+          return await this.#confirmRemoteOverwrite(state, event, remote.path, remote.expectedSha256, plan);
         });
         this.#requireSender(event);
         if (!saved) return { ok: true, value: null };
@@ -360,6 +465,7 @@ function languageForTitle(title: string): string {
     ".xml": "xml", ".html": "html", ".htm": "html", ".css": "css",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".ts": "typescript", ".tsx": "typescript",
     ".yml": "yaml", ".yaml": "yaml", ".sh": "shell", ".bash": "shell", ".zsh": "shell",
+    ".ps1": "powershell", ".psm1": "powershell", ".psd1": "powershell",
   };
   return languages[extname(title).toLowerCase()] ?? "plaintext";
 }

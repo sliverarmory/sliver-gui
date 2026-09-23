@@ -13,6 +13,8 @@ vi.mock("./CodeEditor", async () => {
   return { CodeEditor: (props: {
     value: string; readOnly: boolean; onChange: (value: string) => void; onReady: () => void;
     wordWrap: boolean; minimap: boolean; language: string; fontSize: number;
+    fontFamily: string; tabSize: number; insertSpaces: boolean; lineNumbers: string;
+    renderWhitespace: string; stickyScroll: boolean; bracketPairColorization: boolean; fontLigatures: boolean;
     useDefaultSaveKeybinding: boolean;
     keybindings: Record<string, string>;
     editorHandleRef?: Parameters<typeof React.useImperativeHandle>[0];
@@ -22,6 +24,10 @@ vi.mock("./CodeEditor", async () => {
     return <textarea aria-label="Document text" value={props.value} readOnly={props.readOnly}
       data-wrap={String(props.wordWrap)} data-minimap={String(props.minimap)} data-language={props.language}
       data-font-size={props.fontSize} data-default-save-keybinding={String(props.useDefaultSaveKeybinding)}
+      data-font-family={props.fontFamily} data-tab-size={props.tabSize} data-insert-spaces={String(props.insertSpaces)}
+      data-line-numbers={props.lineNumbers} data-whitespace={props.renderWhitespace}
+      data-sticky-scroll={String(props.stickyScroll)} data-bracket-colors={String(props.bracketPairColorization)}
+      data-font-ligatures={String(props.fontLigatures)}
       data-keybindings={JSON.stringify(props.keybindings)}
       onChange={(event) => props.onChange(event.target.value)} />;
   } };
@@ -103,11 +109,10 @@ describe("TextEditorWorkspace", () => {
     render(<TextEditorWorkspace document={{ ...document, readOnly: true }} onSave={onSave} />);
     fireEvent.click(screen.getByRole("button", { name: "Word Wrap" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Document language" }), { target: { value: "xml" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "Editor font size" }), { target: { value: "18" } });
     const editor = screen.getByLabelText("Document text");
     expect(editor).toHaveAttribute("data-wrap", "true");
     expect(editor).toHaveAttribute("data-language", "xml");
-    expect(editor).toHaveAttribute("data-font-size", "18");
+    expect(editor).toHaveAttribute("data-font-size", "13");
     expect(editor).toHaveValue("original");
     expect(screen.getByRole("button", { name: "Replace" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save As…" })).toBeDisabled();
@@ -115,10 +120,12 @@ describe("TextEditorWorkspace", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it("offers Bash, enables the minimap, and routes editor buttons through the Monaco handle", () => {
+  it("offers shell languages, enables the minimap, and routes editor buttons through the Monaco handle", () => {
     render(<TextEditorWorkspace document={document} onSave={vi.fn()} onOpen={vi.fn()} />);
     const editor = screen.getByLabelText("Document text");
     expect(screen.getByRole("option", { name: "Bash" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "PowerShell" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Editor settings" })).toBeInTheDocument();
     expect(editor).toHaveAttribute("data-minimap", "true");
     expect(editor).toHaveAttribute("data-default-save-keybinding", "false");
     expect(JSON.parse(editor.getAttribute("data-keybindings") ?? "{}")).toMatchObject({
@@ -127,6 +134,8 @@ describe("TextEditorWorkspace", () => {
     });
     fireEvent.change(screen.getByRole("combobox", { name: "Document language" }), { target: { value: "shell" } });
     expect(editor).toHaveAttribute("data-language", "shell");
+    fireEvent.change(screen.getByRole("combobox", { name: "Document language" }), { target: { value: "powershell" } });
+    expect(editor).toHaveAttribute("data-language", "powershell");
 
     editorHandle.undo.mockClear();
     editorHandle.redo.mockClear();
@@ -148,6 +157,7 @@ describe("TextEditorWorkspace", () => {
   it("shows and executes configured shortcuts for every editor button", async () => {
     const onOpen = vi.fn().mockResolvedValue(undefined);
     const onSave = vi.fn().mockResolvedValue(null);
+    const onOpenSettings = vi.fn();
     const shortcuts = {
       ...DEFAULT_APPLICATION_SETTINGS_STATE,
       keyboardShortcuts: {
@@ -160,9 +170,11 @@ describe("TextEditorWorkspace", () => {
         textEditorReplace: "mod+alt+p",
         textEditorWordWrap: "mod+alt+w",
         textEditorCommandPalette: "mod+alt+k",
+        textEditorSettings: "mod+alt+g",
       },
     };
-    render(<TextEditorWorkspace document={document} onSave={onSave} onOpen={onOpen} shortcuts={shortcuts} />);
+    render(<TextEditorWorkspace document={document} onSave={onSave} onOpen={onOpen}
+      onOpenSettings={onOpenSettings} shortcuts={shortcuts} />);
 
     expect(JSON.parse(screen.getByLabelText("Document text").getAttribute("data-keybindings") ?? "{}")).toEqual({
       save: "mod+alt+s", undo: "mod+alt+u", redo: "mod+alt+r", find: "mod+alt+f",
@@ -171,7 +183,7 @@ describe("TextEditorWorkspace", () => {
 
     for (const [name, key] of [
       ["Open…", "O"], ["Save As…", "A"], ["Save", "S"], ["Undo", "U"], ["Redo", "R"],
-      ["Find", "F"], ["Replace", "P"], ["Word Wrap", "W"], ["Commands", "K"],
+      ["Find", "F"], ["Replace", "P"], ["Word Wrap", "W"], ["Commands", "K"], ["Editor settings", "G"],
     ] as const) {
       expect(screen.getByRole("button", { name })).toHaveAttribute("aria-keyshortcuts", `Control+Alt+${key}`);
     }
@@ -200,11 +212,13 @@ describe("TextEditorWorkspace", () => {
     pressConfiguredShortcut("p");
     pressConfiguredShortcut("w");
     pressConfiguredShortcut("k");
+    pressConfiguredShortcut("g");
     expect(editorHandle.undo).toHaveBeenCalledOnce();
     expect(editorHandle.redo).toHaveBeenCalledOnce();
     expect(editorHandle.find).toHaveBeenCalledOnce();
     expect(editorHandle.replace).toHaveBeenCalledOnce();
     expect(editorHandle.commandPalette).toHaveBeenCalledOnce();
+    expect(onOpenSettings).toHaveBeenCalledOnce();
     expect(screen.getByLabelText("Document text")).toHaveAttribute("data-wrap", "true");
   });
 
