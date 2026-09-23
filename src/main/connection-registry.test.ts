@@ -4427,6 +4427,86 @@ describe("connection registry with an injected Sliver client", () => {
     expect(hexOriginal.every((byte) => byte === 0)).toBe(true);
   });
 
+  it("opens a complete remote text file for the standalone editor and uploads only after confirmation", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const original = "old text";
+    const digest = createHash("sha256").update(original).digest("hex");
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true, IsDir: false, Path: "/tmp/edit.txt", Data: Buffer.from(original),
+    }));
+    const owner = sender(1);
+    const loaded = await registry.loadRemoteTextEditor(owner, "/tmp/edit.txt");
+    expect(loaded).toMatchObject({ title: "edit.txt", text: original, expectedSha256: digest });
+    const declined = vi.fn().mockResolvedValue(false);
+    await expect(registry.saveRemoteTextEditor(
+      loaded.binding, "/tmp/edit.txt", digest, "new text", declined,
+    )).resolves.toBeNull();
+    expect(declined).toHaveBeenCalledWith(expect.objectContaining({
+      action: expect.objectContaining({ actionId: "session.filesystem.edit-text-overwrite", remotePath: "/tmp/edit.txt" }),
+    }));
+    expect(client.uploadSession).not.toHaveBeenCalled();
+
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true, IsDir: false, Path: "/tmp/edit.txt", Data: Buffer.from(original),
+    }));
+    const confirmed = vi.fn().mockResolvedValue(true);
+    const saved = await registry.saveRemoteTextEditor(
+      loaded.binding, "/tmp/edit.txt", digest, "new text", confirmed,
+    );
+    expect(saved).toEqual({ expectedSha256: createHash("sha256").update("new text").digest("hex") });
+    expect(client.lastUploadData?.toString()).toBe("new text");
+    expect(client.uploadSession).toHaveBeenCalledWith("session_m2", "/tmp/edit.txt", expect.any(Buffer), {
+      isIOC: false, isDirectory: false, overwrite: true,
+    });
+    await expect(registry.saveRemoteTextEditor(
+      loaded.binding, "/tmp/edit.txt", digest, "stale draft", confirmed,
+    )).rejects.toThrow(/document changed/u);
+  });
+
+  it("rejects a standalone remote edit after the owner selects another session", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_a", "session-a"), session("session_b", "session-b")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const targets = registry.snapshot(1).targetContext.selectableTargets;
+    await registry.selectTarget(1, targets[0]!);
+    const original = "original";
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true, IsDir: false, Data: Buffer.from(original),
+    }));
+    const loaded = await registry.loadRemoteTextEditor(sender(1), "/tmp/edit.txt");
+    await registry.selectTarget(1, targets[1]!);
+    await expect(registry.saveRemoteTextEditor(
+      loaded.binding, "/tmp/edit.txt", loaded.expectedSha256, "changed", async () => true,
+    )).rejects.toThrow(/session changed/u);
+    expect(client.uploadSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects a standalone remote edit after the source renderer reloads", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    client.downloadFileSession.mockResolvedValueOnce(sliverpb.Download.create({
+      Exists: true, IsDir: false, Data: Buffer.from("original"),
+    }));
+    const owner = sender(1);
+    const loaded = await registry.loadRemoteTextEditor(owner, "/tmp/edit.txt");
+    (owner.mainFrame as unknown as { frameToken: string }).frameToken = "reloaded-frame";
+    await expect(registry.saveRemoteTextEditor(
+      loaded.binding, "/tmp/edit.txt", loaded.expectedSha256, "changed", async () => true,
+    )).rejects.toThrow(/session changed/u);
+    expect(client.uploadSession).not.toHaveBeenCalled();
+  });
+
   it("fails an edit on digest conflict, revokes staged bytes, and never uploads", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_m2", "m2-interactive")];
@@ -7957,7 +8037,12 @@ function domainCallCounts(client: FakeSliverClient): Record<"jobs" | "builds" | 
 }
 
 function sender(id: number): WebContents {
-  return { id, isDestroyed: () => false } as unknown as WebContents;
+  return {
+    id,
+    isDestroyed: () => false,
+    getURL: () => "sliver://app/index.html",
+    mainFrame: { processId: id, frameToken: `frame-${id}`, isDestroyed: () => false },
+  } as unknown as WebContents;
 }
 
 function job(id: number, port: number, protocol = "mtls"): clientpb.Job {

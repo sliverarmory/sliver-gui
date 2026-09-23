@@ -480,6 +480,7 @@ void startApplication({
   cloudDeploymentPreloadPath: `${repositoryRoot}/dist/preload/cloud-deployment.cjs`,
   networkPreloadPath: `${repositoryRoot}/dist/preload/network.cjs`,
   scriptTaskManagerPreloadPath: `${repositoryRoot}/dist/preload/script-task-manager.cjs`,
+  textEditorPreloadPath: `${repositoryRoot}/dist/preload/text-editor.cjs`,
   armoryPreloadPath: `${repositoryRoot}/dist/preload/armory.cjs`,
   cloudDeploymentController,
 }).catch((error: unknown) => {

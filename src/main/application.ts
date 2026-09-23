@@ -163,6 +163,8 @@ import { ScriptStore } from "./script-store.js";
 import { ScriptEditorCloseGuard } from "./script-editor-close-guard.js";
 import { confirmDiscardScriptChanges } from "./script-editor-close-dialog.js";
 import { exportScriptFile, importScriptFile } from "./script-file-dialogs.js";
+import { RemoteTextEditorError, TextEditorWindows } from "./text-editor-windows.js";
+import { TEXT_EDITOR_SESSION_PARTITION } from "./window-options.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
@@ -180,6 +182,7 @@ type NativeWindowSurface =
   | "console"
   | "network"
   | "script-task-manager"
+  | "text-editor"
   | "ssh";
 
 export interface StartApplicationOptions {
@@ -191,6 +194,7 @@ export interface StartApplicationOptions {
   armoryPreloadPath?: string;
   sshPreloadPath?: string;
   scriptTaskManagerPreloadPath?: string;
+  textEditorPreloadPath?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
   consoleClientRootDirectory?: string;
@@ -344,6 +348,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const networkRendererUrl = rendererUrlForSurface(rendererUrl, "network");
   const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
   const scriptTaskManagerRendererUrl = rendererUrlForSurface(rendererUrl, "script-task-manager");
+  const textEditorRendererUrl = rendererUrlForSurface(rendererUrl, "text-editor");
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
@@ -402,6 +407,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let applicationUpdater: ApplicationUpdater | undefined;
   let applicationUpdateState: ApplicationUpdateState | undefined;
   let applicationSettingsStore: ApplicationSettingsStore | undefined;
+  let textEditorWindows: TextEditorWindows | undefined;
   const shortcutRecordingWindows = new Set<BrowserWindow>();
   let applicationContextMenus: ApplicationContextMenuController | undefined;
   let cloudDeploymentController = options.cloudDeploymentController;
@@ -523,12 +529,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           ? networkRendererUrl
         : surface === "script-task-manager"
           ? scriptTaskManagerRendererUrl
+        : surface === "text-editor"
+          ? textEditorRendererUrl
         : surface === "ssh"
           ? sshRendererUrl
           : undefined,
     );
     if (!applicationContextMenus) throw new Error("Application context menus are not initialized");
-    applicationContextMenus.install(window.webContents);
+    if (surface !== "text-editor") applicationContextMenus.install(window.webContents);
     if (registerWithConnectionRegistry && surface !== "network") window.webContents.on("before-input-event", (event, input) => {
       if (shortcutRecordingWindows.has(window)) return;
       const commandPaletteDisposition = applicationSettingsStore
@@ -2276,6 +2284,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       APPLICATION_DISPLAY_NAME,
       {
         newWindow: () => createWindow(),
+        openTextEditor: () => {
+          if (shutdown.isStopping) return;
+          void textEditorWindows?.open().catch(() => {
+            dialog.showErrorBox("Text Editor unavailable", "The text editor window could not be opened.");
+          });
+        },
         duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
         openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
         openArmory: (tab) => void openArmoryWindow(tab),
@@ -2575,9 +2589,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function restartApplicationForUpdate(): OperationResult {
-    if (!scriptCloseGuard.allowQuit()) return { ok: false, error: "Restart canceled to keep unsaved script changes" };
+    if (!allowEditorQuit()) return { ok: false, error: "Restart canceled to keep unsaved changes" };
     const result = applicationUpdater?.restartToApply() ?? { ok: false, error: "Application updates are unavailable" };
-    if (!result.ok) scriptCloseGuard.cancelQuit();
+    if (!result.ok) {
+      scriptCloseGuard.cancelQuit();
+      textEditorWindows?.cancelQuit();
+    }
     return result;
   }
 
@@ -2702,8 +2719,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   };
   let quitCleanupComplete = false;
   let quitCleanupBarrier: Promise<void> | undefined;
+  function allowEditorQuit(): boolean {
+    if (textEditorWindows?.allowQuit() !== false && scriptCloseGuard.allowQuit()) return true;
+    textEditorWindows?.cancelQuit();
+    scriptCloseGuard.cancelQuit();
+    return false;
+  }
   const onBeforeQuit = (event: Electron.Event): void => {
-    if (!scriptCloseGuard.allowQuit()) event.preventDefault();
+    if (!allowEditorQuit()) event.preventDefault();
   };
   const onWillQuit = (event: Electron.Event): void => {
     // Do not stop services until every document has accepted closing. This also
@@ -2811,13 +2834,36 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   configureSessionSecurity(armorySession);
   const scriptTaskManagerSession = session.fromPartition(SCRIPT_TASK_MANAGER_SESSION_PARTITION);
   configureSessionSecurity(scriptTaskManagerSession, undefined, scriptTaskManagerRendererUrl);
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, scriptTaskManagerSession]);
+  const textEditorSession = session.fromPartition(TEXT_EDITOR_SESSION_PARTITION);
+  configureSessionSecurity(textEditorSession, undefined, textEditorRendererUrl);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, scriptTaskManagerSession, textEditorSession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
       createAppProtocolHandler(dirname(rendererEntryPath), (url) => net.fetch(url)),
     );
   }
+  textEditorWindows = new TextEditorWindows({
+    rendererUrl: textEditorRendererUrl,
+    preloadPath: options.textEditorPreloadPath ?? join(mainBundleDirectory, "../preload/text-editor.cjs"),
+    getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+    prepareWindow: (window) => trackWindow(window, undefined, undefined, undefined, undefined, "text-editor", false),
+    icon: applicationIcons.getIconPath(),
+    remote: {
+      load: async (source, remotePath) => {
+        try { return await registry.loadRemoteTextEditor(source, remotePath); }
+        catch (error) {
+          throw new RemoteTextEditorError(error instanceof Error ? error.message : "The remote file could not be opened");
+        }
+      },
+      save: async (binding, remotePath, expectedSha256, text, confirm) => {
+        try { return await registry.saveRemoteTextEditor(binding, remotePath, expectedSha256, text, confirm); }
+        catch (error) {
+          throw new RemoteTextEditorError(error instanceof Error ? error.message : "The remote file could not be saved");
+        }
+      },
+    },
+  });
   registerIpcHandlers(
     registry,
     (inheritFromContentsId) => createWindow(inheritFromContentsId),
@@ -2899,6 +2945,16 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         }
         scriptCloseGuard.setDirty(identity.contentsId, isDirty);
         return { ok: true };
+      },
+    },
+    {
+      open: async (source, remotePath) => {
+        const owner = windowsByContentsId.get(source.id);
+        if (!owner || owner.webContents !== source || owner.isDestroyed() ||
+          nativeWindowSurfaces.get(owner) !== "workspace" || !textEditorWindows) {
+          throw new Error("This window cannot open a remote text editor");
+        }
+        await textEditorWindows.openRemote(source, remotePath);
       },
     },
   );
@@ -3033,6 +3089,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
       unregisterScriptTaskManagerIpc();
+      textEditorWindows?.dispose();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
@@ -3077,7 +3134,7 @@ function readLinuxPackageType(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh" | "script-task-manager",
+  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh" | "script-task-manager" | "text-editor",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);

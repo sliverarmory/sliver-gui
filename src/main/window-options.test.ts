@@ -16,7 +16,28 @@ import {
   networkWindowOptions,
   sessionShellWindowOptions,
   sshWindowOptions,
+  TEXT_EDITOR_SESSION_PARTITION,
+  textEditorWindowOptions,
 } from "./window-options.js";
+
+describe("standalone text editor window", () => {
+  it.each(["darwin", "linux", "win32"] as const)("retains a dedicated sandbox and native controls on %s", (platform) => {
+    const options = textEditorWindowOptions("/text-editor.cjs", platform, "/brand.png", false);
+    expect(options).toMatchObject({
+      title: "Text Editor", show: false, width: 1120, height: 780,
+      minWidth: 720, minHeight: 480, backgroundColor: "#fafafa",
+      webPreferences: {
+        preload: "/text-editor.cjs", partition: TEXT_EDITOR_SESSION_PARTITION,
+        nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
+        contextIsolation: true, sandbox: true, webSecurity: true, webviewTag: false,
+      },
+    });
+    if (platform === "darwin") expect(options.titleBarStyle).toBe("hiddenInset");
+    else expect(options).toMatchObject({ icon: "/brand.png" });
+    expect(options).not.toHaveProperty("parent");
+    expect(options).not.toHaveProperty("frame");
+  });
+});
 
 describe("main window transparency", () => {
   it.each(["darwin", "linux", "win32"] as const)("isolates the console-only Script Task Manager on %s", (platform) => {

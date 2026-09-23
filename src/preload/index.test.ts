@@ -129,6 +129,7 @@ const invokeArguments = {
   getBeaconTask: [{ taskId: "task_1" }],
   cancelBeaconTask: [{ taskId: "task_1" }],
   runSessionWorkbench: [{ operationId: "session.filesystem.pwd" }],
+  openRemoteTextEditor: [{ remotePath: "/tmp/edit.txt" }],
   prepareSessionDestructiveAction: [{
     actionId: "session.filesystem.rm",
     path: "/tmp/m2-test",

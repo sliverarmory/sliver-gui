@@ -6,6 +6,15 @@ export const KEYBOARD_SHORTCUT_DEFINITIONS = [
   { id: "navigateBack", label: "Go back", description: "Return to the previous application page.", group: "Navigation", scope: "application" },
   { id: "navigateForward", label: "Go forward", description: "Return to the next application page.", group: "Navigation", scope: "application" },
   { id: "refreshServer", label: "Refresh server", description: "Refresh the connected server's information.", group: "Navigation", scope: "application" },
+  { id: "textEditorOpen", label: "Open file", description: "Open a local file in the standalone text editor.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorSaveAs", label: "Save file as", description: "Save the current document to a new local file.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorSave", label: "Save file", description: "Save the current document or overwrite its remote file.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorUndo", label: "Undo edit", description: "Undo the last text editor change.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorRedo", label: "Redo edit", description: "Redo the last text editor change.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorFind", label: "Find in file", description: "Find text in the current document.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorReplace", label: "Replace in file", description: "Find and replace text in the current document.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorWordWrap", label: "Toggle word wrap", description: "Turn editor word wrapping on or off.", group: "Text Editor", scope: "text-editor" },
+  { id: "textEditorCommandPalette", label: "Open editor command palette", description: "Find and run Monaco editor commands.", group: "Text Editor", scope: "text-editor" },
   { id: "terminalNewTab", label: "New terminal tab", description: "Open a new tab in the terminal window.", group: "Terminal", scope: "terminal" },
   { id: "terminalCloseTab", label: "Close terminal tab", description: "Close the active terminal tab.", group: "Terminal", scope: "terminal" },
   { id: "terminalSettings", label: "Terminal settings", description: "Open settings from the terminal window.", group: "Terminal", scope: "terminal" },
@@ -61,6 +70,15 @@ export function defaultKeyboardShortcut(action: KeyboardShortcutAction, apple: b
     case "navigateBack": return apple ? "mod+[" : "alt+arrowleft";
     case "navigateForward": return apple ? "mod+]" : "alt+arrowright";
     case "refreshServer": return "f5";
+    case "textEditorOpen": return "mod+o";
+    case "textEditorSaveAs": return "mod+shift+s";
+    case "textEditorSave": return "mod+s";
+    case "textEditorUndo": return "mod+z";
+    case "textEditorRedo": return apple ? "mod+shift+z" : "mod+y";
+    case "textEditorFind": return "mod+f";
+    case "textEditorReplace": return "mod+alt+f";
+    case "textEditorWordWrap": return "alt+z";
+    case "textEditorCommandPalette": return "f1";
     case "openConsole":
     case "terminalNewTab": return "mod+t";
     case "terminalCloseTab": return "mod+w";
@@ -132,7 +150,7 @@ export function keyboardShortcutConflict(
     return "F5 is reserved for server refresh and native window commands.";
   }
   if (
-    RESERVED_SHORTCUTS.has(shortcut) ||
+    isReservedKeyboardShortcut(action, shortcut) ||
     (!apple && shortcut === "mod+shift+c") ||
     (definition.scope !== "terminal" && shortcut === "mod+w") ||
     (apple && (shortcut === "mod+`" || shortcut === "mod+shift+`"))
@@ -149,7 +167,7 @@ export function parseKeyboardShortcutOverrides(value: unknown): KeyboardShortcut
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("Invalid keyboard shortcuts");
   const result: Partial<Record<Exclude<KeyboardShortcutAction, "commandPalette">, string>> = {};
   for (const [id, shortcut] of Object.entries(value)) {
-    if (id === "commandPalette" || !ACTION_IDS.has(id) || !isKeyboardShortcut(shortcut) || RESERVED_SHORTCUTS.has(shortcut) ||
+    if (id === "commandPalette" || !ACTION_IDS.has(id) || !isKeyboardShortcut(shortcut) || isReservedKeyboardShortcut(id, shortcut) ||
       (shortcut === "f5" && RENDERER_ONLY_ACTIONS.has(id))) {
       throw new TypeError("Invalid keyboard shortcuts");
     }
@@ -183,4 +201,11 @@ function isShortcutKey(value: string): boolean {
 
 function isFunctionKey(value: string): boolean {
   return /^f(?:[1-9]|1[0-9]|2[0-4])$/u.test(value);
+}
+
+function isReservedKeyboardShortcut(action: string, shortcut: string): boolean {
+  if (!RESERVED_SHORTCUTS.has(shortcut)) return false;
+  if (action === "textEditorUndo" && shortcut === "mod+z") return false;
+  if (action === "textEditorRedo" && (shortcut === "mod+shift+z" || shortcut === "mod+y")) return false;
+  return true;
 }

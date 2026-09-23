@@ -65,6 +65,8 @@ const APPLICATION_ICONS = new Set(["auto", "light", "dark", "passion"]);
 const KEYBOARD_SHORTCUT_ACTIONS = new Set([
   "newWindow", "duplicateWindow", "navigateBack", "navigateForward", "refreshServer", "openConsole",
   "terminalNewTab", "terminalCloseTab", "terminalSettings", "terminalCloseWindow",
+  "textEditorOpen", "textEditorSaveAs", "textEditorSave", "textEditorUndo", "textEditorRedo",
+  "textEditorFind", "textEditorReplace", "textEditorWordWrap", "textEditorCommandPalette",
   ...Array.from({ length: 10 }, (_, index) => `terminalTab${index + 1}`),
 ]);
 const RESERVED_KEYBOARD_SHORTCUTS = new Set([
@@ -647,7 +649,10 @@ function parseKeyboardShortcuts(value: unknown): ApplicationSettingsState["keybo
   const overrides = record(value, "keyboard shortcuts");
   const parsed: Record<string, string> = {};
   for (const [action, shortcut] of Object.entries(overrides)) {
-    if (!KEYBOARD_SHORTCUT_ACTIONS.has(action) || !isKeyboardShortcut(shortcut) || RESERVED_KEYBOARD_SHORTCUTS.has(shortcut) ||
+    const ownedEditingShortcut = action === "textEditorUndo" && shortcut === "mod+z" ||
+      action === "textEditorRedo" && (shortcut === "mod+y" || shortcut === "mod+shift+z");
+    if (!KEYBOARD_SHORTCUT_ACTIONS.has(action) || !isKeyboardShortcut(shortcut) ||
+      (RESERVED_KEYBOARD_SHORTCUTS.has(shortcut) && !ownedEditingShortcut) ||
       (shortcut === "f5" && ["navigateBack", "navigateForward", "openConsole"].includes(action))) {
       throw new TypeError("Invalid keyboard shortcuts");
     }

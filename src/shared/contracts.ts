@@ -178,6 +178,7 @@ export const IPC_INVOKE = {
   getBeaconTask: "sliver:beacon-task:get",
   cancelBeaconTask: "sliver:beacon-task:cancel",
   runSessionWorkbench: "sliver:session-workbench:run",
+  openRemoteTextEditor: "sliver:text-editor:remote:open",
   prepareSessionDestructiveAction: "sliver:session-workbench:prepare-action",
   executeSessionDestructiveActionPlan: "sliver:session-workbench:execute-action-plan",
   prepareSessionShell: "sliver:session-shell:prepare",
@@ -705,6 +706,10 @@ export interface OpenSessionShellWindowInput {
   readonly preferredResourceId?: string;
 }
 
+export interface OpenRemoteTextEditorInput {
+  readonly remotePath: string;
+}
+
 export type WindowLaunchContext =
   | { readonly kind: "workspace" }
   | {
@@ -994,6 +999,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.runSessionWorkbench]: {
     args: [input: SessionWorkbenchInput];
     result: OperationResult<SessionWorkbenchInvocationResult>;
+  };
+  [IPC.openRemoteTextEditor]: {
+    args: [input: OpenRemoteTextEditorInput];
+    result: OperationResult;
   };
   [IPC.prepareSessionDestructiveAction]: {
     args: [input: PrepareSessionDestructiveActionInput];

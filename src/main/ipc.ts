@@ -24,6 +24,7 @@ import {
   type IpcInvokeResult,
   type ListenerInput,
   type OpenSessionShellWindowInput,
+  type OpenRemoteTextEditorInput,
   type OpenWindowInput,
   type OperationResult,
   type RemoveSavedConfigInput,
@@ -56,6 +57,7 @@ import {
   parseExecuteSessionDestructiveActionPlanInput,
   parsePrepareSessionDestructiveActionInput,
   parseSessionWorkbenchInput,
+  SESSION_EDITOR_MAX_BYTES,
 } from "../shared/session-contracts.js";
 import {
   parseExecuteExecutionPlanInput,
@@ -124,6 +126,10 @@ export interface ScriptLibraryController {
   setEditorDirty(source: TrustedWindowIdentity, isDirty: boolean): OperationResult;
   exportScript(source: TrustedWindowIdentity, input: ExportScriptInput, authorize: () => void): Promise<OperationResult<ExportScriptResult>>;
   importScript(source: TrustedWindowIdentity, authorize: () => void): Promise<OperationResult<ImportScriptResult>>;
+}
+
+export interface RemoteTextEditorController {
+  open(source: WebContents, remotePath: string): Promise<void>;
 }
 
 interface TrustedSender {
@@ -298,6 +304,7 @@ export function registerIpcHandlers(
   cloudDeploymentWindows?: CloudDeploymentWindowController,
   managedServerSshCommands?: ManagedServerSshCommandController,
   scripts?: ScriptLibraryController,
+  remoteTextEditor?: RemoteTextEditorController,
 ): void {
   const unavailableScripts = { ok: false as const, error: "The script library is unavailable" };
   handleTrusted(IPC.listScripts, rendererUrl, parseNoArguments, () =>
@@ -690,6 +697,15 @@ export function registerIpcHandlers(
   handleTrusted(IPC.runSessionWorkbench, rendererUrl, parseSessionWorkbenchArguments, ({ sender }, input) =>
     registry.runSessionWorkbench(sender, input),
   );
+  handleTrusted(IPC.openRemoteTextEditor, rendererUrl, parseOpenRemoteTextEditorArguments, async ({ sender }, input) => {
+    if (!remoteTextEditor) return { ok: false, error: "The text editor is unavailable" };
+    try {
+      await remoteTextEditor.open(sender, input.remotePath);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "The remote file could not be opened" };
+    }
+  });
   ipcMain.handle(SESSION_DROPPED_UPLOAD_IPC_CHANNEL, (event, ...rawArguments: unknown[]) => {
     const { sender } = requireTrustedSender(event, rendererUrl);
     const [request] = parseDroppedSessionUploadArguments(rawArguments);
@@ -1239,6 +1255,22 @@ function parseCancelBeaconTaskArguments(args: readonly unknown[]): [input: Retur
 function parseSessionWorkbenchArguments(args: readonly unknown[]): [input: ReturnType<typeof parseSessionWorkbenchInput>] {
   requireArgumentCount(args, 1, "session workbench input");
   return [parseSessionWorkbenchInput(args[0])];
+}
+
+function parseOpenRemoteTextEditorArguments(args: readonly unknown[]): [input: OpenRemoteTextEditorInput] {
+  const value = requireRecord(requireSingleArgument(args, "remote text editor input"), "remote text editor input");
+  requireExactKeys(value, ["remotePath"], "remote text editor input");
+  try {
+    const checked = parseSessionWorkbenchInput({
+      operationId: "session.filesystem.cat",
+      path: value["remotePath"],
+      maxBytes: SESSION_EDITOR_MAX_BYTES,
+    });
+    if (checked.operationId !== "session.filesystem.cat") throw invalidArguments("remote text editor input");
+    return [{ remotePath: checked.path }];
+  } catch {
+    throw invalidArguments("remote text editor input");
+  }
 }
 
 function parseDroppedSessionUploadArguments(

@@ -31,6 +31,15 @@ describe("keyboard shortcut catalog", () => {
     }
     expect(defaultKeyboardShortcut("navigateBack", apple)).toBe(apple ? "mod+[" : "alt+arrowleft");
     expect(defaultKeyboardShortcut("navigateForward", apple)).toBe(apple ? "mod+]" : "alt+arrowright");
+    expect(defaultKeyboardShortcut("textEditorOpen", apple)).toBe("mod+o");
+    expect(defaultKeyboardShortcut("textEditorSaveAs", apple)).toBe("mod+shift+s");
+    expect(defaultKeyboardShortcut("textEditorSave", apple)).toBe("mod+s");
+    expect(defaultKeyboardShortcut("textEditorUndo", apple)).toBe("mod+z");
+    expect(defaultKeyboardShortcut("textEditorRedo", apple)).toBe(apple ? "mod+shift+z" : "mod+y");
+    expect(defaultKeyboardShortcut("textEditorFind", apple)).toBe("mod+f");
+    expect(defaultKeyboardShortcut("textEditorReplace", apple)).toBe("mod+alt+f");
+    expect(defaultKeyboardShortcut("textEditorWordWrap", apple)).toBe("alt+z");
+    expect(defaultKeyboardShortcut("textEditorCommandPalette", apple)).toBe("f1");
     expect(defaultKeyboardShortcut("terminalTab10", apple)).toBe("mod+0");
   });
 
@@ -47,6 +56,8 @@ describe("keyboard shortcut catalog", () => {
     expect(keyboardShortcutConflict("refreshServer", "mod+k", defaults, true)).toContain("Open command palette");
     expect(keyboardShortcutConflict("openConsole", "mod+t", defaults, true)).toBeUndefined();
     expect(keyboardShortcutConflict("terminalNewTab", "mod+t", defaults, true)).toBeUndefined();
+    expect(keyboardShortcutConflict("commandPalette", "mod+s", defaults, true)).toContain("Save file");
+    expect(keyboardShortcutConflict("terminalNewTab", "mod+s", defaults, true)).toBeUndefined();
     expect(keyboardShortcutConflict("commandPalette", "mod+n", {
       ...defaults, keyboardShortcuts: { newWindow: "mod+alt+n" },
     }, true)).toBeUndefined();
@@ -88,6 +99,18 @@ describe("keyboard shortcut catalog", () => {
   it.each(["mod+c", "mod+v", "mod+shift+v", "mod+z", "mod+shift+z", "mod+a", "mod+q", "mod+m", "mod+r", "mod+shift+r", "mod+-", "mod+=", "mod+shift+i", "mod+alt+i", "alt+f4", "f11", "f12"])("protects system shortcut %s from new assignments", (shortcut) => {
     expect(keyboardShortcutConflict("refreshServer", shortcut, defaults, true)).toContain("reserved");
     expect(() => parseKeyboardShortcutOverrides({ refreshServer: shortcut })).toThrow("Invalid keyboard shortcuts");
+  });
+
+  it("allows only the text editor's owned undo and redo bindings through the reserved-shortcut guard", () => {
+    expect(keyboardShortcutConflict("textEditorUndo", "mod+z", defaults, true)).toBeUndefined();
+    expect(keyboardShortcutConflict("textEditorRedo", "mod+shift+z", defaults, true)).toBeUndefined();
+    expect(keyboardShortcutConflict("textEditorRedo", "mod+y", defaults, false)).toBeUndefined();
+    expect(parseKeyboardShortcutOverrides({
+      textEditorUndo: "mod+z",
+      textEditorRedo: "mod+shift+z",
+    })).toEqual({ textEditorUndo: "mod+z", textEditorRedo: "mod+shift+z" });
+    expect(keyboardShortcutConflict("textEditorFind", "mod+z", defaults, true)).toContain("reserved");
+    expect(() => parseKeyboardShortcutOverrides({ textEditorFind: "mod+z" })).toThrow("Invalid keyboard shortcuts");
   });
 });
 

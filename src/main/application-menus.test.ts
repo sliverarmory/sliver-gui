@@ -140,6 +140,18 @@ describe("server refresh shortcut input", () => {
       isAutoRepeat: true,
     }))).toBe("suppress");
   });
+
+  it("does not treat a text-editor F5 binding as active in a workspace window", () => {
+    const f5 = shortcutInput({ key: "F5", code: "F5", meta: false });
+    const settings = {
+      ...DEFAULT_APPLICATION_SETTINGS_VALUES,
+      keyboardShortcuts: {
+        refreshServer: "f6",
+        textEditorCommandPalette: "f5",
+      },
+    };
+    expect(serverRefreshShortcutDispositionForInput(f5, "darwin", settings)).toBe("suppress");
+  });
 });
 
 describe("configured native shortcuts", () => {

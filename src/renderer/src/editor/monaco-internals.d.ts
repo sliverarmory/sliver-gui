@@ -29,3 +29,4 @@ declare module "monaco-editor/editor/contrib/suggest/browser/suggestController";
 declare module "monaco-editor/editor/contrib/snippet/browser/snippetController2";
 declare module "monaco-editor/editor/contrib/tokenization/browser/tokenization";
 declare module "monaco-editor/editor/contrib/wordOperations/browser/wordOperations";
+declare module "monaco-editor/editor/standalone/browser/quickAccess/standaloneCommandsQuickAccess";

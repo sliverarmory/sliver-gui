@@ -1,4 +1,5 @@
 import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => {
@@ -11,41 +12,57 @@ const mocked = vi.hoisted(() => {
     pushStackElement: ReturnType<typeof vi.fn>;
     pushEditOperations: ReturnType<typeof vi.fn>;
     getValue: () => string;
+    getLanguageId: () => string;
     getFullModelRange: () => object;
   };
   const models: Model[] = [];
   let selected: Model | null = null;
   let change: (() => void) | undefined;
-  const actions = new Map<string, { run: () => void }>();
+  let cursorChange: ((event: { position: { lineNumber: number; column: number } }) => void) | undefined;
+  type Action = { id: string; run: () => void; keybindings?: number[] };
+  const actions = new Map<string, Action>();
   const actionDispose = vi.fn();
   const listenerDispose = vi.fn();
+  const cursorListenerDispose = vi.fn();
   const diagnosticsDispose = vi.fn();
+  const keybindingRulesDispose = vi.fn();
+  const addKeybindingRules = vi.fn((_rules: Array<{ keybinding: number; command: string; when?: string }>) =>
+    ({ dispose: keybindingRulesDispose }));
   const instance = {
     dispose: vi.fn(),
     layout: vi.fn(),
+    focus: vi.fn(),
+    trigger: vi.fn(),
     updateOptions: vi.fn(),
     saveViewState: vi.fn(() => ({ cursor: 12 })),
     restoreViewState: vi.fn(),
     setModel: vi.fn((model: Model) => { selected = model; }),
     getModel: () => selected,
     getValue: () => selected?.value ?? "",
+    getPosition: () => ({ lineNumber: 1, column: 1 }),
     onDidChangeModelContent: vi.fn((callback: () => void) => {
       change = callback;
       return { dispose: listenerDispose };
     }),
-    addAction: vi.fn((action: { id: string; run: () => void }) => {
+    onDidChangeCursorPosition: vi.fn((callback: typeof cursorChange) => {
+      cursorChange = callback;
+      return { dispose: cursorListenerDispose };
+    }),
+    addAction: vi.fn((action: Action) => {
       actions.set(action.id, action);
       return { dispose: actionDispose };
     }),
   };
   const create = vi.fn(() => instance);
   const setTheme = vi.fn();
+  const setModelLanguage = vi.fn((model: Model, language: string) => { model.language = language; });
   const attachScriptDiagnostics = vi.fn(() => ({ dispose: diagnosticsDispose }));
   const createModel = vi.fn((value: string, language: string, uri: string) => {
     const model: Model = {
       value, language, uri,
       dispose: vi.fn(), updateOptions: vi.fn(), pushStackElement: vi.fn(),
       getValue: () => model.value,
+      getLanguageId: () => model.language,
       getFullModelRange: () => ({ full: true }),
       pushEditOperations: vi.fn((_before: unknown, edits: Array<{ text: string }>) => {
         model.value = edits[0]?.text ?? "";
@@ -56,24 +73,32 @@ const mocked = vi.hoisted(() => {
     return model;
   });
   return {
-    models, actions, create, createModel, setTheme, attachScriptDiagnostics,
-    instance, actionDispose, listenerDispose, diagnosticsDispose,
+    models, actions, create, createModel, setTheme, setModelLanguage, attachScriptDiagnostics,
+    instance, actionDispose, listenerDispose, cursorListenerDispose, diagnosticsDispose,
+    addKeybindingRules, keybindingRulesDispose,
     type: (value: string) => { if (selected) selected.value = value; change?.(); },
-    reset: () => { selected = null; change = undefined; models.length = 0; actions.clear(); },
+    moveCursor: (lineNumber: number, column: number) => cursorChange?.({ position: { lineNumber, column } }),
+    reset: () => { selected = null; change = undefined; cursorChange = undefined; models.length = 0; actions.clear(); },
   };
 });
 
 vi.mock("../editor/monaco-runtime", () => ({
   monaco: {
-    editor: { create: mocked.create, createModel: mocked.createModel, setTheme: mocked.setTheme },
+    editor: { create: mocked.create, createModel: mocked.createModel, setTheme: mocked.setTheme,
+      setModelLanguage: mocked.setModelLanguage, addKeybindingRules: mocked.addKeybindingRules },
     Uri: { parse: (uri: string) => uri },
-    KeyMod: { CtrlCmd: 2048 },
-    KeyCode: { KeyS: 49, Enter: 3 },
+    KeyMod: { CtrlCmd: 2048, Shift: 1024, Alt: 512 },
+    KeyCode: {
+      Enter: 3, LeftArrow: 15, UpArrow: 16, RightArrow: 17, DownArrow: 18,
+      Digit0: 21, KeyA: 31, KeyS: 49, F1: 59, Semicolon: 85, Equal: 86, Comma: 87,
+      Minus: 88, Period: 89, Slash: 90, Backquote: 91, BracketLeft: 92, Backslash: 93,
+      BracketRight: 94, Quote: 95,
+    },
   },
   attachScriptDiagnostics: mocked.attachScriptDiagnostics,
 }));
 
-import { CodeEditor } from "./CodeEditor";
+import { CodeEditor, type CodeEditorHandle } from "./CodeEditor";
 
 const disconnect = vi.fn();
 const observe = vi.fn();
@@ -157,17 +182,25 @@ describe("CodeEditor", () => {
   });
 
   it("uses fresh callbacks, updates options and disposes all owned resources", async () => {
+    const initialSave = vi.fn();
+    const initialRun = vi.fn();
     const save = vi.fn();
     const run = vi.fn();
-    const { rerender, unmount } = render(<CodeEditor value="one" modelKey="a" profile="script" onChange={vi.fn()} />);
+    const { rerender, unmount } = render(<CodeEditor value="one" modelKey="a" profile="script" onChange={vi.fn()}
+      onSave={initialSave} onRun={initialRun} />);
     await waitFor(() => expect(mocked.models).toHaveLength(1));
     rerender(<CodeEditor value="one" modelKey="a" profile="script" onChange={vi.fn()} onSave={save} onRun={run} readOnly theme="light" ariaLabel="Example source" />);
     mocked.actions.get("application.editor.save")?.run();
     mocked.actions.get("application.editor.run")?.run();
     expect(save).toHaveBeenCalledOnce();
     expect(run).toHaveBeenCalledOnce();
+    expect(initialSave).not.toHaveBeenCalled();
+    expect(initialRun).not.toHaveBeenCalled();
     expect(mocked.setTheme).toHaveBeenLastCalledWith("vs");
-    expect(mocked.instance.updateOptions).toHaveBeenLastCalledWith({ readOnly: true, ariaLabel: "Example source" });
+    expect(mocked.instance.updateOptions).toHaveBeenLastCalledWith({
+      readOnly: true, ariaLabel: "Example source", wordWrap: "off",
+      minimap: { enabled: false }, fontSize: 13, lineHeight: 21,
+    });
     expect(observe).toHaveBeenCalledOnce();
     act(() => { resize(640, 480); });
     unmount();
@@ -175,8 +208,131 @@ describe("CodeEditor", () => {
     expect(mocked.models[0]?.dispose).toHaveBeenCalledOnce();
     expect(mocked.diagnosticsDispose).toHaveBeenCalledOnce();
     expect(mocked.listenerDispose).toHaveBeenCalledOnce();
+    expect(mocked.cursorListenerDispose).toHaveBeenCalledOnce();
     expect(mocked.actionDispose).toHaveBeenCalledTimes(2);
     expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("omits the built-in save chord when its host owns configurable shortcuts", async () => {
+    const save = vi.fn();
+    render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} onSave={save} useDefaultSaveKeybinding={false} />);
+    await waitFor(() => expect(mocked.models).toHaveLength(1));
+    const action = mocked.actions.get("application.editor.save");
+    expect(action?.keybindings).toBeUndefined();
+    expect(mocked.actions.has("application.editor.run")).toBe(false);
+    act(() => { action?.run(); });
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it("adds and removes the Run action when its callback availability changes", async () => {
+    const run = vi.fn();
+    const { rerender } = render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} />);
+    await waitFor(() => expect(mocked.models).toHaveLength(1));
+    expect(mocked.actions.has("application.editor.run")).toBe(false);
+    rerender(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} onRun={run} />);
+    expect(mocked.actions.has("application.editor.run")).toBe(true);
+    mocked.actions.get("application.editor.run")?.run();
+    expect(run).toHaveBeenCalledOnce();
+    rerender(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} />);
+    expect(mocked.actionDispose).toHaveBeenCalledOnce();
+  });
+
+  it("replaces Monaco command bindings and disposes stale palette hints", async () => {
+    const first = {
+      save: "mod+alt+s", undo: "mod+z", redo: "mod+shift+z", find: "mod+f",
+      replace: "mod+alt+f", commandPalette: "f2",
+    };
+    const { rerender, unmount } = render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()}
+      useDefaultSaveKeybinding={false} keybindings={first} />);
+    await waitFor(() => expect(mocked.addKeybindingRules).toHaveBeenCalledOnce());
+    const rules = mocked.addKeybindingRules.mock.calls[0]?.[0];
+    expect(rules).toEqual(expect.arrayContaining([
+      { keybinding: 0, command: "-application.editor.save" },
+      { keybinding: 0, command: "-undo" },
+      { keybinding: 0, command: "-redo" },
+      { keybinding: 0, command: "-actions.find" },
+      { keybinding: 0, command: "-editor.action.startFindReplaceAction" },
+      { keybinding: 0, command: "-editor.action.quickCommand" },
+      { keybinding: 2048 | 512 | 49, command: "application.editor.save", when: "editorTextFocus" },
+      { keybinding: 60, command: "editor.action.quickCommand", when: "editorTextFocus" },
+    ]));
+    rerender(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} useDefaultSaveKeybinding={false}
+      keybindings={{ ...first, commandPalette: "f3" }} />);
+    expect(mocked.keybindingRulesDispose).toHaveBeenCalledOnce();
+    expect(mocked.addKeybindingRules).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(mocked.keybindingRulesDispose).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the document and undo history when only its language changes", async () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<CodeEditor value="text" modelKey="document" language="plaintext" onChange={onChange} />);
+    await waitFor(() => expect(mocked.models).toHaveLength(1));
+    const model = mocked.models[0];
+    expect(model?.uri).toMatch(/\.txt$/u);
+    act(() => { mocked.type("edited"); });
+    rerender(<CodeEditor value="edited" modelKey="document" language="xml" onChange={onChange} />);
+    expect(mocked.models).toHaveLength(1);
+    expect(mocked.instance.getModel()).toBe(model);
+    expect(mocked.setModelLanguage).toHaveBeenCalledExactlyOnceWith(model, "xml");
+    expect(model?.pushEditOperations).not.toHaveBeenCalled();
+    expect(mocked.instance.setModel).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("edited");
+  });
+
+  it("exposes focused editing controls while respecting current read-only state", async () => {
+    const handle = createRef<CodeEditorHandle>();
+    const { rerender, unmount } = render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} editorHandleRef={handle} />);
+    await waitFor(() => expect(mocked.models).toHaveLength(1));
+    const originalHandle = handle.current!;
+    act(() => {
+      originalHandle.focus();
+      originalHandle.undo();
+      originalHandle.redo();
+      originalHandle.find();
+      originalHandle.replace();
+      originalHandle.commandPalette();
+    });
+    expect(mocked.instance.focus).toHaveBeenCalledTimes(6);
+    expect(mocked.instance.trigger.mock.calls).toEqual([
+      ["application.editor", "undo", null],
+      ["application.editor", "redo", null],
+      ["application.editor", "actions.find", null],
+      ["application.editor", "editor.action.startFindReplaceAction", null],
+      ["application.editor", "editor.action.quickCommand", null],
+    ]);
+    mocked.instance.trigger.mockClear();
+    rerender(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} editorHandleRef={handle} readOnly />);
+    expect(handle.current).toBe(originalHandle);
+    act(() => { originalHandle.undo(); originalHandle.redo(); originalHandle.replace(); originalHandle.find(); });
+    expect(mocked.instance.trigger).toHaveBeenCalledExactlyOnceWith("application.editor", "actions.find", null);
+    unmount();
+    expect(handle.current).toBeNull();
+    mocked.instance.trigger.mockClear();
+    originalHandle.find();
+    expect(mocked.instance.trigger).not.toHaveBeenCalled();
+  });
+
+  it("updates wrap, minimap and font controls without replacing the model and reports cursor changes", async () => {
+    const ready = vi.fn();
+    const firstCursor = vi.fn();
+    const nextCursor = vi.fn();
+    const { rerender } = render(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} wordWrap minimap fontSize={16} onReady={ready} onCursorChange={firstCursor} />);
+    await waitFor(() => expect(ready).toHaveBeenCalledOnce());
+    expect(mocked.instance.getModel()).toBe(mocked.models[0]);
+    expect(firstCursor).toHaveBeenCalledWith({ lineNumber: 1, column: 1 });
+    expect(mocked.create).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({
+      wordWrap: "on", minimap: { enabled: true }, fontSize: 16, lineHeight: 26,
+    }));
+    rerender(<CodeEditor value="text" modelKey="document" onChange={vi.fn()} wordWrap={false} minimap={false} fontSize={18} onReady={ready} onCursorChange={nextCursor} />);
+    act(() => { mocked.moveCursor(8, 12); });
+    expect(nextCursor).toHaveBeenCalledExactlyOnceWith({ lineNumber: 8, column: 12 });
+    expect(firstCursor).toHaveBeenCalledOnce();
+    expect(mocked.instance.updateOptions).toHaveBeenLastCalledWith(expect.objectContaining({
+      wordWrap: "off", minimap: { enabled: false }, fontSize: 18, lineHeight: 29,
+    }));
+    expect(mocked.models).toHaveLength(1);
+    expect(ready).toHaveBeenCalledOnce();
   });
 
   it("uses bounded viewport dimensions and ignores fractional resize noise", async () => {

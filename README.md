@@ -156,6 +156,7 @@ validation and review flows. Do not weaken these boundaries for development.
 - [Overview topology](docs/overview-topology.md)
 - [Armory package management](docs/armory.md)
 - [Script Editor](docs/script-editor.md)
+- [Standalone Text Editor](docs/text-editor.md)
 - [AWS authentication](docs/aws-login.md) and [Azure authentication](docs/azure-login.md)
 - [Cloud DNS management](docs/cloud-dns.md)
 - [Protocol baseline and provenance](protocol/README.md)

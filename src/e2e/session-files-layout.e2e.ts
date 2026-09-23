@@ -13,6 +13,8 @@ import {
   type Page,
 } from "playwright-core";
 
+const editorModifier = process.platform === "darwin" ? "Meta" : "Control";
+
 test("Files keeps folders and entries independently scrollable inside a fixed session viewport", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-files-layout-e2e-"));
@@ -290,6 +292,9 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
         return { canceled: false, filePath: outputPath };
       };
     }, uploadedDownloadPath);
+    // A hovered upload toast can cover rows near the bottom of the viewport.
+    await page.mouse.move(0, 0);
+    await page.getByText("Upload complete", { exact: true }).waitFor({ state: "hidden" });
     await uploadedFileName.click({ button: "right" });
     contextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
     await contextMenu.waitFor();
@@ -310,6 +315,149 @@ test("Files keeps folders and entries independently scrollable inside a fixed se
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test("Files opens a remote text file in standalone Monaco and confirms each overwrite", { timeout: 120_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-remote-editor-e2e-"));
+  const remotePath = "/Users/e2e/workspace/E2EFile081.txt";
+  const savedPath = join(temporaryRoot, "remote-editor-result.txt");
+  const updated = "Edited in standalone Monaco \u2603\n";
+  await Promise.all(["saved", "managed", "user-data", "client"].map((name) => mkdir(join(temporaryRoot, name))));
+  await writeFile(join(temporaryRoot, "saved", "remote-editor-e2e-operator.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+  await writeFile(join(temporaryRoot, "client", "armories.json"), "[]", { mode: 0o600 });
+
+  let application: ElectronApplication | undefined;
+  let editor: Page | undefined;
+  let previousClipboard: string | undefined;
+  const rendererErrors: string[] = [];
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        ...(process.platform === "darwin" ? ["--password-store=basic", "--use-mock-keychain"] : []),
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${join(temporaryRoot, "saved")}`,
+        `--managed-config-directory=${join(temporaryRoot, "managed")}`,
+        `--user-data-directory=${join(temporaryRoot, "user-data")}`,
+        `--console-client-root-directory=${join(temporaryRoot, "client")}`,
+        "--files-layout-fixture",
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    previousClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
+    const workspace = await application.firstWindow();
+    workspace.setDefaultTimeout(15_000);
+    workspace.on("pageerror", (error) => rendererErrors.push(error.message));
+    await workspace.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
+    await workspace.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await workspace.locator('[aria-label="Sessions"]:visible').click();
+    await workspace.getByRole("button", { name: "Interact with m1-session", exact: true }).click();
+    await workspace.getByRole("tab", { name: "Files", exact: true }).click();
+    const browser = workspace.getByRole("region", { name: "File browser", exact: true });
+    const file = browser.getByRole("row").filter({ hasText: "E2EFile081.txt" });
+    await file.getByRole("button", { name: "More actions for E2EFile081.txt", exact: true }).click();
+    const opened = application.waitForEvent("window", { timeout: 15_000 });
+    await workspace.getByRole("menuitem", { name: "Edit text…", exact: true }).click();
+    editor = await opened;
+    editor.setDefaultTimeout(15_000);
+    editor.on("dialog", (dialog) => { void dialog.accept().catch(() => undefined); });
+    editor.on("pageerror", (error) => rendererErrors.push(error.message));
+    await editor.getByRole("heading", { name: "E2EFile081.txt", exact: true }).waitFor();
+    await editor.locator(".monaco-editor").waitFor();
+    await editor.getByRole("button", { name: "Undo", exact: true }).waitFor({ state: "visible" });
+    assert.equal(new URL(editor.url()).searchParams.get("surface"), "text-editor");
+    assert.equal(await remoteEditorText(application, editor), "A".repeat(2_048));
+    assert.equal(await editor.getByRole("button", { name: "Save As…" }).count(), 0,
+      "a remote document must not offer a local Save As path");
+
+    await replaceRemoteEditorText(application, editor, updated);
+    await editor.getByText("Unsaved changes", { exact: true }).waitFor();
+    await setRemoteOverwriteResponse(application, "Cancel");
+    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editor.getByText("Unsaved changes", { exact: true }).waitFor();
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), 1,
+      "saving remote text must show the native overwrite confirmation");
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads.length), 0,
+      "canceling the overwrite must not upload data");
+    assert.equal(await remoteEditorText(application, editor), updated, "canceling must preserve the edited draft");
+
+    await setRemoteOverwriteResponse(application, "Overwrite File");
+    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editor.getByText("Saved", { exact: true }).waitFor();
+    await waitForFakeMethodCount(application, "uploadSession", 1);
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls), 2,
+      "the second save must require a fresh confirmation");
+    const uploads = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.uploads);
+    assert.equal(uploads.length, 1);
+    assert.deepEqual({
+      destination: uploads[0]?.destination,
+      size: uploads[0]?.size,
+      sha256: uploads[0]?.sha256,
+      overwrite: uploads[0]?.overwrite,
+    }, {
+      destination: remotePath,
+      size: Buffer.byteLength(updated, "utf8"),
+      sha256: createHash("sha256").update(updated).digest("hex"),
+      overwrite: true,
+    });
+
+    await editor.close();
+    await application.evaluate(({ dialog }, outputPath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: outputPath });
+    }, savedPath);
+    await file.getByRole("button", { name: "More actions for E2EFile081.txt", exact: true }).click();
+    await workspace.getByRole("menuitem", { name: "Download", exact: true }).click();
+    await waitForFileBytes(savedPath, Buffer.from(updated, "utf8"));
+    assert.deepEqual(rendererErrors, [], "the remote editor must not produce renderer errors");
+  } finally {
+    if (application) {
+      if (previousClipboard !== undefined) {
+        await application.evaluate(({ clipboard }, value) => clipboard.writeText(value), previousClipboard).catch(() => undefined);
+      }
+      await application.close().catch(() => undefined);
+    }
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+async function setRemoteOverwriteResponse(application: ElectronApplication, response: "Cancel" | "Overwrite File"): Promise<void> {
+  await application.evaluate(({ dialog }, selectedResponse) => {
+    dialog.showMessageBoxSync = (...args: unknown[]) => {
+      const options = args[args.length - 1] as { title?: string; buttons?: string[] };
+      if (options.title !== "Overwrite remote file?" || !options.buttons?.includes(selectedResponse)) {
+        throw new Error("The remote overwrite confirmation was missing or malformed");
+      }
+      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+      return options.buttons.indexOf(selectedResponse);
+    };
+  }, response);
+}
+
+async function replaceRemoteEditorText(application: ElectronApplication, editor: Page, text: string): Promise<void> {
+  await application.evaluate(({ clipboard }, value) => clipboard.writeText(value), text);
+  await editor.getByRole("textbox", { name: "Document text", exact: true }).focus();
+  await editor.keyboard.press(`${editorModifier}+a`);
+  await editor.keyboard.press(`${editorModifier}+v`);
+}
+
+async function remoteEditorText(application: ElectronApplication, editor: Page): Promise<string> {
+  const sentinel = `remote-editor-clipboard-${Date.now()}`;
+  await application.evaluate(({ clipboard }, value) => clipboard.writeText(value), sentinel);
+  await editor.getByRole("textbox", { name: "Document text", exact: true }).focus();
+  await editor.keyboard.press(`${editorModifier}+a`);
+  await editor.keyboard.press(`${editorModifier}+c`);
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const text = await application.evaluate(({ clipboard }) => clipboard.readText());
+    if (text !== sentinel) return text.replace(/\r\n/gu, "\n");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out copying the remote editor document");
+}
 
 async function assertFixedLayout(
   sessionPage: Locator,

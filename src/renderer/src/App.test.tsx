@@ -185,6 +185,7 @@ function installSliverAPI(
     prepareSessionDestructiveAction: vi.fn(failedOperation),
     prepareSessionShell: vi.fn(failedOperation),
     runSessionWorkbench: vi.fn(failedOperation),
+    openRemoteTextEditor: vi.fn(failedOperation),
     runExecutionRead: vi.fn(failedOperation),
     actOnSessionShell: vi.fn(failedOperation),
     submitTargetOperation: vi.fn(failedOperation),

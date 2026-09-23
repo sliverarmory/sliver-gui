@@ -1004,6 +1004,20 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
       case "download":
         if (!file.isDirectory) void download(file);
         return;
+      case "edit-text":
+        if (!file.isDirectory) {
+          const expected = routeKey;
+          setBusyFile(file.path);
+          void window.sliver.openRemoteTextEditor({ remotePath: file.path }).then((result) => {
+            if (!isCurrent(expected)) return;
+            if (!result.ok) toast.danger("Could not open text editor", { description: result.error });
+          }).catch((error: unknown) => {
+            if (isCurrent(expected)) toast.danger("Could not open text editor", { description: errorMessage(error) });
+          }).finally(() => {
+            if (isCurrent(expected)) setBusyFile(undefined);
+          });
+        }
+        return;
       case "add-to-loot":
         if (!file.isDirectory) void addToLoot(file);
         return;
@@ -1032,7 +1046,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
           force: false,
         });
     }
-  }, [addToLoot, destructive, download, loadPath, locationActionsAvailable, openInspector]);
+  }, [addToLoot, destructive, download, isCurrent, loadPath, locationActionsAvailable, openInspector, routeKey]);
 
   const fileActionsDisabled = !locationActionsAvailable ||
     destructive.isPreparing ||
@@ -1424,7 +1438,7 @@ type FileInspectorSection = "view" | "copy" | "move" | "permissions" | "times";
 type FileViewMode = "cat" | "head" | "tail" | "hex";
 type FileViewResult = SessionTextFileView | SessionHexFileView;
 type FileContextAction = "download" | "add-to-loot";
-type FileRowAction = "open" | FileContextAction | "copy" | "move" | "upload-overwrite" | "permissions" | "times" | "delete";
+type FileRowAction = "open" | "edit-text" | FileContextAction | "copy" | "move" | "upload-overwrite" | "permissions" | "times" | "delete";
 
 interface FileInspectorSelection {
   file: SessionFileEntry;
@@ -1547,6 +1561,12 @@ function FileMoreActions({
             <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={file.isDirectory ? faFolder : faEye} />
             <Label>{file.isDirectory ? "Open folder" : "Inspect file"}</Label>
           </Dropdown.Item>
+          {!file.isDirectory ? (
+            <Dropdown.Item id="edit-text" textValue="Edit text">
+              <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faPen} />
+              <Label>Edit text…</Label>
+            </Dropdown.Item>
+          ) : null}
           <Dropdown.Item id="copy" textValue="Copy">
             <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faCopy} />
             <Label>Copy…</Label>

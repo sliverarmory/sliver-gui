@@ -1,10 +1,38 @@
-import type { editor, IDisposable } from "monaco-editor/editor/editor.api";
-import { useEffect, useRef, useState } from "react";
+import type { editor, IDisposable, KeyCode } from "monaco-editor/editor/editor.api";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 
+import { isKeyboardShortcut } from "../../../shared/keyboard-shortcuts";
 import { SCRIPT_LANGUAGE_ID } from "../editor/script-language-config";
 
 type MonacoRuntime = typeof import("../editor/monaco-runtime");
 export type CodeEditorProfile = "default" | "script";
+
+export interface CodeEditorHandle {
+  focus(): void;
+  undo(): void;
+  redo(): void;
+  find(): void;
+  replace(): void;
+  commandPalette(): void;
+}
+
+export interface CodeEditorCursor {
+  readonly lineNumber: number;
+  readonly column: number;
+}
+
+const CODE_EDITOR_SHORTCUT_COMMANDS = ["save", "undo", "redo", "find", "replace", "commandPalette"] as const;
+export type CodeEditorShortcutCommand = (typeof CODE_EDITOR_SHORTCUT_COMMANDS)[number];
+export type CodeEditorKeybindings = Readonly<Record<CodeEditorShortcutCommand, string>>;
+
+const CODE_EDITOR_COMMAND_IDS: Readonly<Record<CodeEditorShortcutCommand, string>> = {
+  save: "application.editor.save",
+  undo: "undo",
+  redo: "redo",
+  find: "actions.find",
+  replace: "editor.action.startFindReplaceAction",
+  commandPalette: "editor.action.quickCommand",
+};
 
 export interface CodeEditorProps {
   value: string;
@@ -17,6 +45,16 @@ export interface CodeEditorProps {
   ariaLabel?: string;
   onSave?: () => void;
   onRun?: () => void;
+  editorHandleRef?: Ref<CodeEditorHandle>;
+  wordWrap?: boolean;
+  minimap?: boolean;
+  fontSize?: number;
+  /** Keep the built-in save key only when a host does not own configurable shortcuts. */
+  useDefaultSaveKeybinding?: boolean;
+  /** Monaco-owned shortcut remaps; hosts retain window-only commands separately. */
+  keybindings?: CodeEditorKeybindings;
+  onCursorChange?: (position: CodeEditorCursor) => void;
+  onReady?: () => void;
   theme?: "light" | "dark";
   className?: string;
 }
@@ -37,7 +75,8 @@ let editorSequence = 0;
 export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   const {
     value, modelKey, language = "javascript", profile = "default", readOnly = false,
-    ariaLabel = "Code editor", theme = "dark", className = "",
+    ariaLabel = "Code editor", theme = "dark", className = "", wordWrap = false,
+    minimap = false, fontSize = 13,
   } = props;
   const container = useRef<HTMLDivElement>(null);
   const currentProps = useRef(props);
@@ -51,6 +90,25 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   if (ownerId.current === null) ownerId.current = String(++editorSequence);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasRunAction = Boolean(props.onRun);
+  const keybindings = props.keybindings;
+
+  useImperativeHandle(props.editorHandleRef, () => {
+    const command = (id: string, changesContent = false): void => {
+      const instance = editorRef.current;
+      if (!instance || (changesContent && currentProps.current.readOnly)) return;
+      instance.focus();
+      instance.trigger("application.editor", id, null);
+    };
+    return {
+      focus: () => { editorRef.current?.focus(); },
+      undo: () => command("undo", true),
+      redo: () => command("redo", true),
+      find: () => command("actions.find"),
+      replace: () => command("editor.action.startFindReplaceAction", true),
+      commandPalette: () => command("editor.action.quickCommand"),
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -74,10 +132,10 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
         autoDetectHighContrast: false,
         contextmenu: false,
         links: false,
-        minimap: { enabled: false },
+        minimap: { enabled: latest.minimap ?? false },
         fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
-        fontSize: 13,
-        lineHeight: 21,
+        fontSize: latest.fontSize ?? 13,
+        lineHeight: Math.round((latest.fontSize ?? 13) * 21 / 13),
         tabSize: 2,
         insertSpaces: true,
         scrollBeyondLastLine: false,
@@ -85,7 +143,7 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
         renderLineHighlight: "line",
         roundedSelection: false,
         stickyScroll: { enabled: false },
-        wordWrap: "off",
+        wordWrap: latest.wordWrap ? "on" : "off",
         hover: { enabled: "off" },
         unicodeHighlight: { ambiguousCharacters: true, invisibleCharacters: true },
         suggest: { showWords: false },
@@ -94,17 +152,16 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       disposables.push(instance.onDidChangeModelContent(() => {
         if (!synchronizing.current) currentProps.current.onChange(instance.getValue());
       }));
+      disposables.push(instance.onDidChangeCursorPosition(({ position }) => {
+        currentProps.current.onCursorChange?.({ lineNumber: position.lineNumber, column: position.column });
+      }));
       disposables.push(instance.addAction({
         id: "application.editor.save",
         label: "Save",
-        keybindings: [runtime.monaco.KeyMod.CtrlCmd | runtime.monaco.KeyCode.KeyS],
+        ...(latest.useDefaultSaveKeybinding === false ? {} : {
+          keybindings: [runtime.monaco.KeyMod.CtrlCmd | runtime.monaco.KeyCode.KeyS],
+        }),
         run: () => { currentProps.current.onSave?.(); },
-      }));
-      disposables.push(instance.addAction({
-        id: "application.editor.run",
-        label: "Run",
-        keybindings: [runtime.monaco.KeyMod.CtrlCmd | runtime.monaco.KeyCode.Enter],
-        run: () => { currentProps.current.onRun?.(); },
       }));
       const layout = (): void => {
         if (frame !== undefined) return;
@@ -154,17 +211,53 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    const instance = editorRef.current;
+    const runtime = runtimeRef.current;
+    if (!ready || !hasRunAction || !instance || !runtime) return;
+    const action = instance.addAction({
+      id: "application.editor.run",
+      label: "Run",
+      keybindings: [runtime.monaco.KeyMod.CtrlCmd | runtime.monaco.KeyCode.Enter],
+      run: () => { currentProps.current.onRun?.(); },
+    });
+    return () => action.dispose();
+  }, [hasRunAction, ready]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!ready || !runtime || !keybindings) return;
+    const replacements = CODE_EDITOR_SHORTCUT_COMMANDS.flatMap((command) => {
+      const keybinding = toMonacoKeybinding(runtime, keybindings[command]);
+      return keybinding === undefined ? [] : [{
+        keybinding,
+        command: CODE_EDITOR_COMMAND_IDS[command],
+        when: "editorTextFocus",
+      }];
+    });
+    const rules = runtime.monaco.editor.addKeybindingRules([
+      ...CODE_EDITOR_SHORTCUT_COMMANDS.map((command) => ({
+        keybinding: 0,
+        command: `-${CODE_EDITOR_COMMAND_IDS[command]}`,
+      })),
+      ...replacements,
+    ]);
+    return () => rules.dispose();
+  }, [keybindings, ready]);
+
+  useEffect(() => {
     const runtime = runtimeRef.current;
     const instance = editorRef.current;
     if (!ready || !runtime || !instance) return;
     const resolvedLanguage = profile === "script" ? SCRIPT_LANGUAGE_ID : language;
-    const identity = JSON.stringify([modelKey, resolvedLanguage]);
+    // Language selection must not replace the document's undo/selection state.
+    // The script profile retains separate diagnostics and a separate model.
+    const identity = JSON.stringify([modelKey, profile]);
     if (selectedModel.current !== identity) {
       const previous = selectedModel.current === null ? undefined : models.current.get(selectedModel.current);
       if (previous) previous.viewState = instance.saveViewState();
       let entry = models.current.get(identity);
       if (!entry) {
-        const extension = language === "typescript" && profile !== "script" ? "ts" : "js";
+        const extension = profile === "script" ? "js" : editorExtension(language);
         const uri = runtime.monaco.Uri.parse(
           `inmemory://editor-${ownerId.current}/${encodeURIComponent(identity)}.${extension}`,
         );
@@ -179,11 +272,14 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
         instance.setModel(entry.model);
         if (entry.viewState) instance.restoreViewState(entry.viewState);
         selectedModel.current = identity;
+        const position = instance.getPosition();
+        if (position) currentProps.current.onCursorChange?.({ lineNumber: position.lineNumber, column: position.column });
       } finally {
         synchronizing.current = false;
       }
     }
     const model = instance.getModel();
+    if (model && model.getLanguageId() !== resolvedLanguage) runtime.monaco.editor.setModelLanguage(model, resolvedLanguage);
     if (model && model.getValue() !== value) {
       synchronizing.current = true;
       try {
@@ -199,9 +295,16 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
 
   useEffect(() => {
     if (!ready) return;
-    editorRef.current?.updateOptions({ readOnly, ariaLabel });
+    editorRef.current?.updateOptions({
+      readOnly, ariaLabel, wordWrap: wordWrap ? "on" : "off", minimap: { enabled: minimap }, fontSize,
+      lineHeight: Math.round(fontSize * 21 / 13),
+    });
     runtimeRef.current?.monaco.editor.setTheme(theme === "light" ? "vs" : "vs-dark");
-  }, [ready, readOnly, ariaLabel, theme]);
+  }, [ready, readOnly, ariaLabel, theme, wordWrap, minimap, fontSize]);
+
+  useEffect(() => {
+    if (ready) currentProps.current.onReady?.();
+  }, [ready]);
 
   return (
     <div className={`relative h-full min-h-0 min-w-0 w-full overflow-hidden ${className}`} data-code-editor={profile}>
@@ -214,4 +317,54 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
 
 function editorDimensions(size: Pick<DOMRectReadOnly, "width" | "height">): editor.IDimension {
   return { width: Math.max(0, Math.floor(size.width)), height: Math.max(0, Math.floor(size.height)) };
+}
+
+function editorExtension(language: string): string {
+  const extensions: Readonly<Record<string, string>> = {
+    javascript: "js", typescript: "ts", plaintext: "txt", json: "json",
+    xml: "xml", markdown: "md", yaml: "yaml", css: "css", html: "html", shell: "sh",
+  };
+  return extensions[language] ?? "txt";
+}
+
+function toMonacoKeybinding(runtime: MonacoRuntime, shortcut: string): number | undefined {
+  if (!isKeyboardShortcut(shortcut)) return undefined;
+  const tokens = shortcut.split("+");
+  const key = tokens.at(-1);
+  if (!key) return undefined;
+  const keyCode = monacoKeyCode(runtime, key);
+  if (keyCode === undefined) return undefined;
+  return keyCode |
+    (tokens.includes("mod") ? runtime.monaco.KeyMod.CtrlCmd : 0) |
+    (tokens.includes("alt") ? runtime.monaco.KeyMod.Alt : 0) |
+    (tokens.includes("shift") ? runtime.monaco.KeyMod.Shift : 0);
+}
+
+function monacoKeyCode(runtime: MonacoRuntime, key: string): KeyCode | undefined {
+  if (/^[a-z]$/u.test(key)) {
+    return (runtime.monaco.KeyCode.KeyA + key.charCodeAt(0) - "a".charCodeAt(0)) as KeyCode;
+  }
+  if (/^[0-9]$/u.test(key)) {
+    return (runtime.monaco.KeyCode.Digit0 + Number(key)) as KeyCode;
+  }
+  const functionKey = /^f([1-9]|1[0-9]|2[0-4])$/u.exec(key);
+  if (functionKey) return (runtime.monaco.KeyCode.F1 + Number(functionKey[1]) - 1) as KeyCode;
+  const fixed: Readonly<Record<string, KeyCode>> = {
+    arrowleft: runtime.monaco.KeyCode.LeftArrow,
+    arrowright: runtime.monaco.KeyCode.RightArrow,
+    arrowup: runtime.monaco.KeyCode.UpArrow,
+    arrowdown: runtime.monaco.KeyCode.DownArrow,
+    ";": runtime.monaco.KeyCode.Semicolon,
+    "=": runtime.monaco.KeyCode.Equal,
+    ",": runtime.monaco.KeyCode.Comma,
+    "-": runtime.monaco.KeyCode.Minus,
+    ".": runtime.monaco.KeyCode.Period,
+    "/": runtime.monaco.KeyCode.Slash,
+    "`": runtime.monaco.KeyCode.Backquote,
+    "[": runtime.monaco.KeyCode.BracketLeft,
+    "\\": runtime.monaco.KeyCode.Backslash,
+    "]": runtime.monaco.KeyCode.BracketRight,
+    "'": runtime.monaco.KeyCode.Quote,
+  };
+  return fixed[key];
 }

@@ -332,6 +332,21 @@ interface WindowContext {
   operationReconcilePendingReason?: BeaconTasksInvalidationReason;
 }
 
+/** An editor window holds this object only in Electron main, never in a renderer. */
+interface RemoteTextEditorBinding {
+  readonly owner: WebContents;
+  readonly rendererUrl: string;
+  readonly rendererProcessId: number;
+  readonly rendererFrameToken: string;
+  readonly context: WindowContext;
+  readonly pool: BackendPool;
+  readonly epoch: number;
+  readonly connectionAttempt: number;
+  readonly target: TargetRef;
+  readonly remotePath: string;
+  expectedSha256: string;
+}
+
 interface ActiveConfigReference {
   readonly path: string;
   readonly digest: string;
@@ -561,6 +576,7 @@ interface TargetCatalogSnapshot {
 export class ConnectionRegistry {
   private readonly windows = new Map<number, WindowContext>();
   private readonly pools = new Map<string, BackendPool>();
+  private readonly remoteTextEditorBindings = new WeakSet<object>();
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
   private readonly sessionArtifacts: SessionArtifactStore;
   private readonly executionArtifacts: ExecutionArtifactStore;
@@ -1668,6 +1684,166 @@ export class ConnectionRegistry {
     input: SessionWorkbenchInput,
   ): Promise<OperationResult<SessionWorkbenchInvocationResult>> {
     return this.runSessionWorkbenchWithUploadSource(sender, input);
+  }
+
+  /** Open the exact selected session's complete UTF-8 file in a main-owned editor. */
+  async loadRemoteTextEditor(
+    owner: WebContents,
+    remotePath: string,
+  ): Promise<{ title: string; text: string; expectedSha256: string; binding: unknown }> {
+    const frame = owner.mainFrame;
+    if (!frame || frame.isDestroyed()) throw new Error("The source window is no longer available");
+    const context = this.requireWindow(owner.id);
+    const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+    if (!pool) throw new Error("Connect to a Sliver server first");
+    const selected = this.requireSelectedSession(owner.id, pool);
+    const binding: RemoteTextEditorBinding = {
+      owner,
+      rendererUrl: owner.getURL(),
+      rendererProcessId: frame.processId,
+      rendererFrameToken: frame.frameToken,
+      context,
+      pool,
+      epoch: pool.epoch,
+      connectionAttempt: context.connectionAttempt,
+      target: selected.target.ref,
+      remotePath,
+      expectedSha256: "",
+    };
+    this.assertRemoteTextEditorBinding(binding);
+    const loaded = await this.runSessionWorkbench(owner, {
+      operationId: "session.filesystem.cat",
+      path: remotePath,
+      maxBytes: SESSION_EDITOR_MAX_BYTES,
+    });
+    this.assertRemoteTextEditorBinding(binding);
+    if (!loaded.ok || !loaded.value || loaded.value.status !== "completed" ||
+      loaded.value.result.operationId !== "session.filesystem.cat") {
+      throw new Error(loaded.ok ? "The remote file could not be opened" : loaded.error);
+    }
+    const view = loaded.value.result.value;
+    if (view.truncated || !view.sha256) {
+      throw new Error("The remote file exceeds the 64 KiB editor limit");
+    }
+    binding.expectedSha256 = view.sha256;
+    this.remoteTextEditorBindings.add(binding);
+    const title = selected.platform === "windows"
+      ? win32Path.basename(remotePath)
+      : posixPath.basename(remotePath);
+    return { title, text: view.content, expectedSha256: view.sha256, binding };
+  }
+
+  /** Stage, review, confirm, and compare-before-write through the existing session action path. */
+  async saveRemoteTextEditor(
+    opaqueBinding: unknown,
+    remotePath: string,
+    expectedSha256: string,
+    text: string,
+    confirm: (plan: SessionDestructiveActionPlan) => Promise<boolean>,
+  ): Promise<{ expectedSha256: string } | null> {
+    if (!opaqueBinding || typeof opaqueBinding !== "object" ||
+      !this.remoteTextEditorBindings.has(opaqueBinding)) {
+      throw new Error("The remote editor session is no longer available");
+    }
+    const binding = opaqueBinding as RemoteTextEditorBinding;
+    if (binding.remotePath !== remotePath || binding.expectedSha256 !== expectedSha256 ||
+      !/^[0-9a-f]{64}$/u.test(expectedSha256)) {
+      throw new Error("The remote editor document changed; reopen it before saving");
+    }
+    if (Buffer.byteLength(text, "utf8") > SESSION_EDITOR_MAX_BYTES) {
+      throw new Error("The remote file exceeds the 64 KiB editor limit");
+    }
+    this.assertRemoteTextEditorBinding(binding);
+    const staged = await this.runSessionWorkbench(binding.owner, {
+      operationId: "session.filesystem.stage-text",
+      content: text,
+      encoding: "utf-8",
+    });
+    if (!staged.ok || !staged.value || staged.value.status !== "completed" ||
+      staged.value.result.operationId !== "session.filesystem.stage-text") {
+      throw new Error(staged.ok ? "The remote edit could not be staged" : staged.error);
+    }
+    const handle = staged.value.result.value.artifact.handle;
+    let planToken: string | undefined;
+    let dispatched = false;
+    try {
+      this.assertRemoteTextEditorBinding(binding);
+      const prepared = await this.prepareSessionDestructiveAction(binding.owner.id, {
+        actionId: "session.filesystem.edit-text-overwrite",
+        contentHandle: handle,
+        remotePath,
+        encoding: "utf-8",
+        expectedSha256,
+      });
+      if (!prepared.ok || !prepared.value || prepared.value.status !== "prepared") {
+        throw new Error(prepared.ok ? "The remote edit could not be reviewed" : prepared.error);
+      }
+      const plan = prepared.value.plan;
+      planToken = plan.token;
+      this.assertRemoteTextEditorBinding(binding);
+      if (!await confirm(plan)) return null;
+      this.assertRemoteTextEditorBinding(binding);
+      dispatched = true;
+      const executed = await this.executeSessionDestructiveActionPlan(binding.owner.id, plan.token);
+      if (!executed.ok || !executed.value || executed.value.status !== "succeeded") {
+        throw new Error(executed.ok
+          ? executed.value?.message ?? "The remote overwrite could not be confirmed"
+          : executed.error);
+      }
+      const nextSha256 = staged.value.result.value.artifact.sha256;
+      binding.expectedSha256 = nextSha256;
+      return { expectedSha256: nextSha256 };
+    } finally {
+      if (!dispatched) {
+        if (planToken) this.discardRemoteTextEditorPlan(binding.context, planToken);
+        else {
+          try {
+            this.sessionArtifacts.remove({
+              ownerWindowId: binding.owner.id,
+              backendId: binding.pool.key,
+              backendEpoch: binding.epoch,
+              connectionIncarnation: binding.connectionAttempt,
+              sessionId: binding.target.id,
+              sessionFingerprint: binding.target.fingerprint,
+            }, handle);
+          } catch {
+            // The exact artifact may already have been revoked with its session.
+          }
+        }
+      }
+    }
+  }
+
+  private assertRemoteTextEditorBinding(binding: RemoteTextEditorBinding): void {
+    const { owner, context, pool } = binding;
+    const frame = owner.mainFrame;
+    if (owner.isDestroyed() || !frame || frame.isDestroyed() ||
+      owner.getURL() !== binding.rendererUrl ||
+      frame.processId !== binding.rendererProcessId ||
+      frame.frameToken !== binding.rendererFrameToken ||
+      this.windows.get(owner.id) !== context ||
+      context.poolKey !== pool.key || context.connectionAttempt !== binding.connectionAttempt ||
+      this.pools.get(pool.key) !== pool || pool.epoch !== binding.epoch ||
+      !context.activeTarget || !sameTargetRefIdentity(context.activeTarget, binding.target)) {
+      throw new Error("The remote editor session changed; reopen the file before saving");
+    }
+    const selected = this.requireSelectedSession(owner.id, pool);
+    if (!sameTargetRefIdentity(selected.target.ref, binding.target)) {
+      throw new Error("The remote editor session changed; reopen the file before saving");
+    }
+  }
+
+  private discardRemoteTextEditorPlan(context: WindowContext, token: string): void {
+    const plan = context.sessionPlans.get(token);
+    if (!plan) return;
+    context.sessionPlans.delete(token);
+    const timer = context.sessionPlanTimers.get(token);
+    if (timer) clearTimeout(timer);
+    context.sessionPlanTimers.delete(token);
+    if (plan.artifactHandle && plan.artifactScope) {
+      try { this.sessionArtifacts.remove(plan.artifactScope, plan.artifactHandle); }
+      catch { /* A session rebinding may already have revoked the artifact. */ }
+    }
   }
 
   async runDroppedSessionUpload(

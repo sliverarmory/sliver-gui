@@ -365,6 +365,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     refresh: vi.fn(failed),
     removeSavedConfig: vi.fn(failed),
     runSessionWorkbench: vi.fn(failed),
+    openRemoteTextEditor: vi.fn(failed),
     runExecutionRead: vi.fn(failed),
     actOnSessionShell: vi.fn(failed),
     saveProfile: vi.fn(failed),

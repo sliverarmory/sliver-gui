@@ -151,6 +151,19 @@
     -webkit-app-region: drag;
   }
 
+  /* The editor header is its titlebar so Monaco starts near the window top. */
+  .auxiliary-window-frame[data-titlebar-style="hiddenInset"]:has(> .text-editor-window-surface > .text-editor-window:first-child) > .auxiliary-window-titlebar {
+    height: 0;
+  }
+
+  .text-editor-header {
+    -webkit-app-region: drag;
+  }
+
+  .auxiliary-window-frame[data-titlebar-style="hiddenInset"]:has(> .text-editor-window-surface > .text-editor-window:first-child) > .text-editor-window-surface .text-editor-header {
+    --text-editor-header-start: 5.5rem;
+  }
+
   .auxiliary-window-content {
     padding-top: var(--auxiliary-window-content-top, 2rem);
   }

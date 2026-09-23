@@ -30,6 +30,7 @@ export type ReleaseMenuCatalog =
 
 export interface ApplicationMenuActions {
   readonly newWindow: () => void;
+  readonly openTextEditor?: () => void;
   readonly duplicateConnectedWindow: () => void;
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
   readonly openArmory: (tab: ArmoryTabId) => void;
@@ -97,7 +98,7 @@ export function serverRefreshShortcutDispositionForInput(
   // A different application action may explicitly reuse it after remapping.
   if (
     matchesNativeKeyboardShortcut("f5", platform, input) &&
-    !KEYBOARD_SHORTCUT_DEFINITIONS.some(({ id, scope }) => scope !== "terminal" &&
+    !KEYBOARD_SHORTCUT_DEFINITIONS.some(({ id, scope }) => (scope === "global" || scope === "application") &&
       isApplicationShortcutInput(id, platform, input, settings))
   ) return "suppress";
   return undefined;
@@ -200,6 +201,11 @@ export function buildApplicationMenuTemplate(
           accelerator: accelerator("duplicateWindow"),
           click: actions.duplicateConnectedWindow,
         },
+        ...(actions.openTextEditor ? [{
+          id: "text-editor.new",
+          label: "New Text Editor",
+          click: actions.openTextEditor,
+        }] : []),
         { type: "separator" },
         platform === "darwin"
           ? consoleActions

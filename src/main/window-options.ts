@@ -6,6 +6,7 @@ const TRANSPARENT_WINDOW_COLOR = "#00000000";
 export const CLOUD_DEPLOYMENT_SESSION_PARTITION = "sliver-cloud-deployment";
 export const NETWORK_SESSION_PARTITION = "sliver-network";
 export const SCRIPT_TASK_MANAGER_SESSION_PARTITION = "sliver-script-task-manager";
+export const TEXT_EDITOR_SESSION_PARTITION = "sliver-text-editor";
 export const DARK_NATIVE_WINDOW_COLOR = "#09090b";
 export const LIGHT_NATIVE_WINDOW_COLOR = "#fafafa";
 export const DARK_TITLE_BAR_SYMBOL_COLOR = "#f4f4f5";
@@ -13,6 +14,30 @@ export const LIGHT_TITLE_BAR_SYMBOL_COLOR = "#18181b";
 
 export function nativeWindowBackgroundColor(dark: boolean): string {
   return dark ? DARK_NATIVE_WINDOW_COLOR : LIGHT_NATIVE_WINDOW_COLOR;
+}
+
+/** A general-purpose local text editor with its own minimal preload and session. */
+export function textEditorWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1120,
+    height: 780,
+    minWidth: 720,
+    minHeight: 480,
+    show: false,
+    title: "Text Editor",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: {
+      ...secureWebPreferences(preload),
+      partition: TEXT_EDITOR_SESSION_PARTITION,
+    },
+  };
 }
 
 export function titleBarSymbolColor(dark: boolean): string {

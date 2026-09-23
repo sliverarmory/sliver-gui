@@ -388,7 +388,13 @@ describe("SSH preload bridge", () => {
       revision: 4,
       theme: "light" as const,
       appIcon: "passion" as const,
-      keyboardShortcuts: { terminalNewTab: "mod+shift+t", terminalSettings: "alt+," },
+      keyboardShortcuts: {
+        terminalNewTab: "mod+shift+t",
+        terminalSettings: "alt+,",
+        textEditorOpen: "mod+alt+o",
+        textEditorUndo: "mod+z",
+        textEditorRedo: "mod+shift+z",
+      },
     };
     handler({}, { ...valid, rendererPath: "/tmp/private" });
     handler({}, { ...valid, terminal: { ...valid.terminal, fontSize: 100 } });
@@ -397,6 +403,8 @@ describe("SSH preload bridge", () => {
     handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "mod+c" } });
     handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "shift+mod+t" } });
     handler({}, { ...valid, keyboardShortcuts: { navigateBack: "f5" } });
+    handler({}, { ...valid, keyboardShortcuts: { textEditorFind: "mod+z" } });
+    handler({}, { ...valid, keyboardShortcuts: { textEditorUndo: "mod+y" } });
     handler({}, valid);
 
     const listener = vi.fn();
@@ -407,6 +415,16 @@ describe("SSH preload bridge", () => {
     expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0].terminal)).toBe(true);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0].keyboardShortcuts)).toBe(true);
+
+    const windowsRedo = {
+      ...valid,
+      revision: 5,
+      keyboardShortcuts: { ...valid.keyboardShortcuts, textEditorRedo: "mod+y" },
+    };
+    handler({}, windowsRedo);
+    handler({}, { ...valid, revision: 6, keyboardShortcuts: { textEditorFind: "mod+z" } });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenLastCalledWith(windowsRedo);
     unsubscribe();
   });
 

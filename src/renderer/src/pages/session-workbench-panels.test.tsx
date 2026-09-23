@@ -129,6 +129,7 @@ function installAPI(
     overrides.execute?.(input) ?? { ok: false, error: "Not configured" });
   const uploadDroppedSessionFile = vi.fn(async (file: File, input: SessionDroppedUploadInput) =>
     overrides.uploadDropped?.(file, input) ?? { ok: false, error: "Not configured" });
+  const openRemoteTextEditor = vi.fn(async (_input: { remotePath: string }) => ({ ok: true as const }));
   Object.defineProperty(window, "sliver", {
     configurable: true,
     value: {
@@ -136,6 +137,7 @@ function installAPI(
       prepareSessionDestructiveAction,
       executeSessionDestructiveActionPlan,
       uploadDroppedSessionFile,
+      openRemoteTextEditor,
     } as unknown as SliverDesktopAPI,
   });
   return {
@@ -143,6 +145,7 @@ function installAPI(
     prepareSessionDestructiveAction,
     runSessionWorkbench,
     uploadDroppedSessionFile,
+    openRemoteTextEditor,
   };
 }
 
@@ -851,6 +854,10 @@ describe("session workbench panels", () => {
 
     render(<SessionFilesPanel {...panelContext()} />);
     expect(await screen.findByRole("row", { name: /report\.txt/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Edit text/u }));
+    await waitFor(() => expect(api.openRemoteTextEditor).toHaveBeenCalledWith({ remotePath: file.path }));
 
     await user.click(screen.getByRole("button", { name: "More actions for report.txt" }));
     await user.click(await screen.findByRole("menuitem", { name: "Download" }));

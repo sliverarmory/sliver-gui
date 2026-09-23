@@ -13,6 +13,7 @@ import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
 import { NetworkWindowApp } from "./NetworkWindowApp";
 import { ScriptTaskManagerWindowApp } from "./ScriptTaskManagerWindowApp";
+import { TextEditorWindowApp } from "./TextEditorWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 import { ApplicationContextMenu } from "./components/ApplicationContextMenu";
@@ -38,6 +39,11 @@ function RendererSurface(): React.JSX.Element {
 }
 
 function ApplicationRoot(): React.JSX.Element {
+  if (surface === "text-editor") {
+    return window.textEditor ? <ApplicationSettingsProvider api={window.textEditor}>
+      <TextEditorWindowApp />
+    </ApplicationSettingsProvider> : <TextEditorWindowApp />;
+  }
   if (surface === "script-task-manager") {
     return window.scriptTasks ? <ApplicationSettingsProvider api={window.scriptTasks}>
       <ScriptTaskManagerWindowApp />
@@ -76,9 +82,9 @@ function ApplicationRoot(): React.JSX.Element {
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <ApplicationContextMenu>
+    {surface === "text-editor" ? <ApplicationRoot /> : <ApplicationContextMenu>
       <ApplicationRoot />
-    </ApplicationContextMenu>
+    </ApplicationContextMenu>}
     <Toast.Provider placement="bottom" maxVisibleToasts={4} />
   </React.StrictMode>,
 );

@@ -34,10 +34,10 @@ describe("KeyboardShortcutsSettings", () => {
   it("groups the current bindings and disables reset when defaults are active", () => {
     renderShortcuts();
 
-    for (const group of ["Application", "Navigation", "Terminal", "Terminal tabs"]) {
+    for (const group of ["Application", "Navigation", "Text Editor", "Terminal", "Terminal tabs"]) {
       expect(screen.getByRole("heading", { name: group })).toBeInTheDocument();
     }
-    expect(screen.getAllByRole("button", { name: /^Change shortcut for /u })).toHaveLength(21);
+    expect(screen.getAllByRole("button", { name: /^Change shortcut for /u })).toHaveLength(30);
     expect(screen.getByRole("button", { name: "Reset all to defaults" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Reset shortcut for New window" })).toBeDisabled();
     expect(within(screen.getByRole("group", { name: "New window" })).getByLabelText("Command + N"))
@@ -49,6 +49,7 @@ describe("KeyboardShortcutsSettings", () => {
     { query: "Navigation", labels: ["Go back", "Go forward", "Refresh server"] },
     { query: "command + shift + n", labels: ["New window for this server"] },
     { query: "mod+shift+n", labels: ["New window for this server"] },
+    { query: "Monaco editor commands", labels: ["Open editor command palette"] },
   ])("filters by label, functionality, or shortcut: $query", async ({ query, labels }) => {
     const user = userEvent.setup();
     renderShortcuts();
