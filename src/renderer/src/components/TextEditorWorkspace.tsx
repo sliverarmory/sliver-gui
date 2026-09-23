@@ -9,7 +9,6 @@ import {
   faTrashCan,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { NativeSelect } from "@heroui-pro/react/native-select";
 import { Button, Tooltip, toast } from "@heroui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -36,6 +35,7 @@ import {
 import { formatCommandPaletteShortcut, isApplePlatform } from "./CommandPaletteShortcut";
 import { CodeEditor, type CodeEditorHandle, type CodeEditorKeybindings } from "./CodeEditor";
 import { useApplicationContextMenuScope } from "./ApplicationContextMenu";
+import { TextEditorLanguageSelector } from "./TextEditorLanguageSelector";
 
 export interface TextEditorWorkspaceProps {
   /** Mount with key={document.id} when replacing a document. */
@@ -51,17 +51,17 @@ export interface TextEditorWorkspaceProps {
 }
 
 const FALLBACK_LANGUAGES: readonly MonacoLanguageOption[] = [
-  { id: "plaintext", label: "Plain Text", extensions: [".txt"], filenames: [] },
-  { id: "xml", label: "XML", extensions: [".xml"], filenames: [] },
-  { id: "json", label: "JSON", extensions: [".json"], filenames: [] },
-  { id: "markdown", label: "Markdown", extensions: [".md"], filenames: [] },
-  { id: "yaml", label: "YAML", extensions: [".yaml"], filenames: [] },
-  { id: "html", label: "HTML", extensions: [".html"], filenames: [] },
-  { id: "css", label: "CSS", extensions: [".css"], filenames: [] },
-  { id: "shell", label: "Bash", extensions: [".sh", ".bash"], filenames: [] },
-  { id: "powershell", label: "PowerShell", extensions: [".ps1"], filenames: [] },
-  { id: "javascript", label: "JavaScript", extensions: [".js"], filenames: [] },
-  { id: "typescript", label: "TypeScript", extensions: [".ts"], filenames: [] },
+  { id: "plaintext", label: "Plain Text", aliases: ["text"], extensions: [".txt"], filenames: [] },
+  { id: "xml", label: "XML", aliases: [], extensions: [".xml"], filenames: [] },
+  { id: "json", label: "JSON", aliases: [], extensions: [".json"], filenames: [] },
+  { id: "markdown", label: "Markdown", aliases: ["md"], extensions: [".md"], filenames: [] },
+  { id: "yaml", label: "YAML", aliases: ["yml"], extensions: [".yaml"], filenames: [] },
+  { id: "html", label: "HTML", aliases: [], extensions: [".html"], filenames: [] },
+  { id: "css", label: "CSS", aliases: [], extensions: [".css"], filenames: [] },
+  { id: "shell", label: "Bash", aliases: ["shell", "sh"], extensions: [".sh", ".bash"], filenames: [] },
+  { id: "powershell", label: "PowerShell", aliases: ["ps1", "pwsh"], extensions: [".ps1"], filenames: [] },
+  { id: "javascript", label: "JavaScript", aliases: ["js"], extensions: [".js"], filenames: [] },
+  { id: "typescript", label: "TypeScript", aliases: ["ts"], extensions: [".ts"], filenames: [] },
 ];
 
 const TEXT_EDITOR_SHORTCUT_ACTIONS = [
@@ -402,12 +402,7 @@ export function TextEditorWorkspace({
         onPress={() => editor.current?.commandPalette()}>Commands</Button>
         <Tooltip.Content>{`Command Palette · ${shortcutLabel("textEditorCommandPalette")}`}</Tooltip.Content></Tooltip>
       <div className="ml-auto flex items-center gap-2">
-        <NativeSelect variant="secondary">
-          <NativeSelect.Trigger aria-label="Document language" value={language} onChange={(event) => setLanguage(event.target.value)}>
-            {languages.map(({ id, label }) => <NativeSelect.Option key={id} value={id}>{label}</NativeSelect.Option>)}
-            <NativeSelect.Indicator />
-          </NativeSelect.Trigger>
-        </NativeSelect>
+        <TextEditorLanguageSelector language={language} languages={languages} onChange={setLanguage} />
         <Tooltip delay={250}><Button isIconOnly size="sm" variant="ghost" aria-label="Editor settings"
           render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorSettings")} />}
           onPress={() => onOpenSettings?.()}><FontAwesomeIcon icon={faGear} /></Button>

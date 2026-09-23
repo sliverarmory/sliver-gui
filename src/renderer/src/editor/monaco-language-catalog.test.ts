@@ -4,12 +4,15 @@ import {
   detectMonacoLanguage,
   monacoLanguageOptions,
   preferredMonacoExtension,
+  rankMonacoLanguageOptions,
 } from "./monaco-language-catalog";
 
 const definitions = [
   { id: "plaintext", extensions: [".txt"], aliases: ["Plain Text", "text"] },
   { id: "python", extensions: [".py", ".gypi"], aliases: ["Python", "py"], firstLine: "^#!/.*\\bpython[0-9.-]*\\b" },
+  { id: "powershell", extensions: [".ps1", ".psm1"], aliases: ["PowerShell", "pwsh"] },
   { id: "shell", extensions: [".sh", ".bash"], aliases: ["Shell", "sh"] },
+  { id: "typescript", extensions: [".ts", ".tsx"], aliases: ["TypeScript", "ts"] },
   { id: "dockerfile", extensions: [".dockerfile"], filenames: ["Dockerfile"], aliases: ["Dockerfile"] },
   { id: "liquid", extensions: [".liquid", ".html.liquid"], aliases: ["Liquid"] },
   { id: "pascal", extensions: [".pp"], aliases: ["Pascal"] },
@@ -25,11 +28,28 @@ describe("Monaco language catalog", () => {
     expect(catalog.map(({ id, label }) => [id, label])).toEqual([
       ["shell", "Bash"], ["broken", "Broken"], ["dockerfile", "Dockerfile"],
       ["liquid", "Liquid"], ["pascal", "Pascal"], ["plaintext", "Plain Text"],
-      ["python", "Python"], ["ruby", "Ruby"],
+      ["powershell", "PowerShell"], ["python", "Python"], ["ruby", "Ruby"],
+      ["typescript", "TypeScript"],
     ]);
     expect(catalog.find(({ id }) => id === "python")?.extensions).toEqual([".py", ".gypi"]);
+    expect(catalog.find(({ id }) => id === "python")?.aliases).toEqual(["Python", "py"]);
     expect(Object.isFrozen(catalog)).toBe(true);
     expect(Object.isFrozen(catalog[1]?.extensions)).toBe(true);
+    expect(Object.isFrozen(catalog[1]?.aliases)).toBe(true);
+  });
+
+  it("ranks exact, prefix, substring, and fuzzy subsequence language matches", () => {
+    const catalog = monacoLanguageOptions(definitions);
+
+    expect(rankMonacoLanguageOptions(catalog, "ps1").map(({ id }) => id)).toEqual(["powershell"]);
+    expect(rankMonacoLanguageOptions(catalog, "pwrsh").map(({ id }) => id)).toEqual(["powershell"]);
+    expect(rankMonacoLanguageOptions(catalog, "pythn").map(({ id }) => id)).toEqual(["python"]);
+    expect(rankMonacoLanguageOptions(catalog, "ts").at(0)?.id).toBe("typescript");
+    expect(rankMonacoLanguageOptions(catalog, "docker file").map(({ id }) => id)).toEqual(["dockerfile"]);
+    expect(rankMonacoLanguageOptions(catalog, "not-a-language")).toEqual([]);
+    expect(rankMonacoLanguageOptions(catalog, "").map(({ id }) => id))
+      .toEqual(catalog.map(({ id }) => id));
+    expect(Object.isFrozen(rankMonacoLanguageOptions(catalog, "py"))).toBe(true);
   });
 
   it("detects exact filenames, longest extensions, registration-order ties, and shebangs", () => {

@@ -133,13 +133,13 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await chooseOpenFile(application, filePath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
     await page.getByRole("heading", { name: "document.xml", exact: true }).waitFor();
-    assert.equal(await page.getByRole("combobox", { name: "Document language", exact: true }).inputValue(), "xml");
+    await assertEditorLanguage(page, "XML");
     assert.equal(await documentText(application, page), initial);
 
     await chooseOpenFile(application, shellPath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
     await page.getByRole("heading", { name: "deploy.sh", exact: true }).waitFor();
-    assert.equal(await page.getByRole("combobox", { name: "Document language", exact: true }).inputValue(), "shell");
+    await assertEditorLanguage(page, "Bash");
     assert.equal(await documentText(application, page), shell);
     await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "if [[" })
       .locator("span > span").count().then((count) => count > 1));
@@ -147,7 +147,7 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await chooseOpenFile(application, powershellPath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
     await page.getByRole("heading", { name: "deploy.ps1", exact: true }).waitFor();
-    assert.equal(await page.getByRole("combobox", { name: "Document language", exact: true }).inputValue(), "powershell");
+    await assertEditorLanguage(page, "PowerShell");
     assert.equal(await documentText(application, page), powershell);
     await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "$env:USERPROFILE" })
       .first().locator("span > span").count().then((count) => count > 1));
@@ -155,8 +155,7 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await chooseOpenFile(application, pythonPath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
     await page.getByRole("heading", { name: "deploy.py", exact: true }).waitFor();
-    await waitUntil(async () => page!.getByRole("combobox", { name: "Document language", exact: true }).inputValue()
-      .then((value) => value === "python"));
+    await assertEditorLanguage(page, "Python");
     assert.equal(await documentText(application, page), python);
     await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "def greet" })
       .locator("span > span").count().then((count) => count > 1));
@@ -164,20 +163,52 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
     await chooseOpenFile(application, rustPath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
     await page.getByRole("heading", { name: "main.rs", exact: true }).waitFor();
-    await waitUntil(async () => page!.getByRole("combobox", { name: "Document language", exact: true }).inputValue()
-      .then((value) => value === "rust"));
+    await assertEditorLanguage(page, "Rust");
     assert.equal(await documentText(application, page), rust);
     await waitUntil(async () => page!.locator(".view-lines .view-line", { hasText: "fn main" })
       .locator("span > span").count().then((count) => count > 1));
-    assert.equal(await page.getByRole("option", { name: "Python", exact: true }).count(), 1);
-    assert.equal(await page.getByRole("option", { name: "Rust", exact: true }).count(), 1);
-    assert.equal(await page.getByRole("option", { name: "Go", exact: true }).count(), 1);
 
     await chooseOpenFile(application, filePath);
     await page.getByRole("button", { name: "Open…", exact: true }).click();
     await page.getByRole("heading", { name: "document.xml", exact: true }).waitFor();
-    assert.equal(await page.getByRole("combobox", { name: "Document language", exact: true }).inputValue(), "xml");
+    await assertEditorLanguage(page, "XML");
     assert.equal(await documentText(application, page), initial);
+
+    const languageSelector = await openLanguageSelector(page);
+    for (const label of ["Python", "Rust", "Go"] as const) {
+      assert.equal(await languageSelector.list.getByRole("option", { name: label, exact: true }).count(), 1,
+        `The syntax selector must include ${label}`);
+    }
+    const listBounds = await languageSelector.list.evaluate((element) => {
+      const browser = globalThis as unknown as {
+        getComputedStyle(element: unknown): { overflowY: string };
+      };
+      const style = browser.getComputedStyle(element);
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        overflowY: style.overflowY,
+      };
+    });
+    assert.ok(listBounds.clientHeight > 0 && listBounds.clientHeight <= 320,
+      `The syntax list must remain bounded to 320px; received ${listBounds.clientHeight}px`);
+    assert.ok(listBounds.scrollHeight > listBounds.clientHeight,
+      "The complete Monaco language catalog must scroll inside the bounded list");
+    assert.match(listBounds.overflowY, /^(?:auto|scroll)$/u,
+      "The bounded syntax list must provide vertical scrolling");
+
+    await languageSelector.search.fill("pwrsh");
+    const powershellOption = languageSelector.list.getByRole("option", { name: "PowerShell", exact: true });
+    await powershellOption.waitFor();
+    assert.equal(await languageSelector.list.getByRole("option").count(), 1,
+      "A noncontiguous fuzzy query must narrow the syntax list to PowerShell");
+    assert.equal(await powershellOption.locator('svg[data-icon="terminal"][aria-hidden="true"]').count(), 1,
+      "The PowerShell syntax option must use its terminal icon");
+    await powershellOption.click();
+    await assertEditorLanguage(page, "PowerShell");
+    await selectEditorLanguage(page, "xml", "XML");
+    assert.equal(await documentText(application, page), initial,
+      "Searching and selecting syntax languages must not change the document");
 
     await verifyEditorContextMenu(application, page, initial);
 
@@ -199,12 +230,12 @@ test("standalone text editor edits local UTF-8 files with real Monaco and protec
       `  <message>${"A local editor keeps document changes explicit. ".repeat(28)}</message>\n</note>\n`;
     await replaceDocument(application, page, edited);
     await page.getByText("Unsaved changes", { exact: true }).waitFor();
-    await page.getByRole("combobox", { name: "Document language", exact: true }).selectOption("plaintext");
+    await selectEditorLanguage(page, "plain", "Plain Text");
     await page.getByRole("button", { name: "Undo", exact: true }).click();
     assert.equal(await documentText(application, page), saved, "Changing language must preserve the existing undo history");
     await page.getByRole("button", { name: "Redo", exact: true }).click();
     assert.equal(await documentText(application, page), edited);
-    await page.getByRole("combobox", { name: "Document language", exact: true }).selectOption("xml");
+    await selectEditorLanguage(page, "xml", "XML");
 
     const controls = page.getByRole("group", { name: "Editor controls", exact: true });
     await controls.getByRole("button", { name: "Commands", exact: true }).click();
@@ -506,6 +537,37 @@ async function verifyEditorContextMenu(
   await status.getByText(`${originalModelLength} characters`, { exact: true }).waitFor();
   assert.equal(await documentText(application, page), original);
   await page.getByText("Saved", { exact: true }).waitFor();
+}
+
+function editorLanguageTrigger(page: Page) {
+  return page.locator('[data-slot="autocomplete-trigger"]:visible');
+}
+
+function editorLanguageValue(page: Page) {
+  return editorLanguageTrigger(page).locator('[data-slot="autocomplete-value"]');
+}
+
+async function assertEditorLanguage(page: Page, label: string): Promise<void> {
+  await waitUntil(async () => (await editorLanguageValue(page).innerText()).trim() === label);
+}
+
+async function openLanguageSelector(page: Page) {
+  await editorLanguageTrigger(page).click();
+  const search = page.getByRole("searchbox", { name: "Search syntax languages", exact: true });
+  await search.waitFor();
+  const list = page.locator('[data-slot="autocomplete-popover"]:visible [data-slot="list-box"]');
+  await list.waitFor();
+  return { search, list };
+}
+
+async function selectEditorLanguage(page: Page, query: string, label: string): Promise<void> {
+  const selector = await openLanguageSelector(page);
+  await selector.search.fill(query);
+  const option = selector.list.getByRole("option", { name: label, exact: true });
+  await option.waitFor();
+  await option.click();
+  await selector.search.waitFor({ state: "hidden" });
+  await assertEditorLanguage(page, label);
 }
 
 async function openEditorContextMenu(page: Page) {

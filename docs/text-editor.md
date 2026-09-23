@@ -8,9 +8,10 @@ editable. UTF-16 and other encodings are not supported.
 
 The toolbar provides Save, Save As, Undo, Redo, Find, Replace, Word Wrap, the
 Monaco command palette, editor settings, and syntax highlighting. The minimap
-and font ligatures are enabled by default. The language selector is populated
-from every language grammar bundled with Monaco, including Bash, PowerShell,
-Python, Go, and Rust.
+and font ligatures are enabled by default. The icon-bearing language selector
+supports fuzzy searches across names, aliases, extensions, and exact filenames.
+It is populated from every language grammar bundled with Monaco, including
+Bash, PowerShell, Python, Go, and Rust.
 `.sh`, `.bash`, `.zsh`, `.bashrc`, `.bash_profile`, `.bash_login`, and `.profile`
 files select Bash automatically; `.ps1`, `.psm1`, and `.psd1` files select
 PowerShell automatically. Highlighting never executes the document.

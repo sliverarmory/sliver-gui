@@ -157,11 +157,12 @@ describe("TextEditorWorkspace", () => {
     expect(screen.getByLabelText("Document text")).toHaveValue("original");
   });
 
-  it("preserves content when editor controls change and enforces read-only mode", () => {
+  it("preserves content when editor controls change and enforces read-only mode", async () => {
+    const user = userEvent.setup();
     const onSave = vi.fn();
     render(<TextEditorWorkspace document={{ ...document, readOnly: true }} onSave={onSave} />);
     fireEvent.click(screen.getByRole("button", { name: "Word Wrap" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Document language" }), { target: { value: "xml" } });
+    await selectEditorLanguage(user, "xml", "XML");
     const editor = screen.getByLabelText("Document text");
     expect(editor).toHaveAttribute("data-wrap", "true");
     expect(editor).toHaveAttribute("data-language", "xml");
@@ -173,11 +174,10 @@ describe("TextEditorWorkspace", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it("offers shell languages, enables the minimap, and routes editor buttons through the Monaco handle", () => {
+  it("offers icon-bearing shell languages, enables the minimap, and routes editor buttons through Monaco", async () => {
+    const user = userEvent.setup();
     render(<TextEditorWorkspace document={document} onSave={vi.fn()} onOpen={vi.fn()} />);
     const editor = screen.getByLabelText("Document text");
-    expect(screen.getByRole("option", { name: "Bash" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "PowerShell" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Editor settings" })).toBeInTheDocument();
     expect(editor).toHaveAttribute("data-minimap", "true");
     expect(editor).toHaveAttribute("data-font-ligatures", "true");
@@ -186,9 +186,18 @@ describe("TextEditorWorkspace", () => {
       save: "mod+s", undo: "mod+z", redo: "mod+y", find: "mod+f",
       replace: "mod+alt+f", commandPalette: "f1",
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "Document language" }), { target: { value: "shell" } });
+    const search = await openLanguageSelector(user);
+    expect(screen.getByRole("option", { name: "Bash" })
+      .querySelector('svg[data-icon="terminal"]')).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "PowerShell" })
+      .querySelector('svg[data-icon="terminal"]')).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "Bash" }));
     expect(editor).toHaveAttribute("data-language", "shell");
-    fireEvent.change(screen.getByRole("combobox", { name: "Document language" }), { target: { value: "powershell" } });
+    await user.click(languageTrigger());
+    const nextSearch = await screen.findByRole("searchbox", { name: "Search syntax languages" });
+    expect(search).not.toBeInTheDocument();
+    await user.type(nextSearch, "pwrsh");
+    await user.click(await screen.findByRole("option", { name: "PowerShell" }));
     expect(editor).toHaveAttribute("data-language", "powershell");
 
     editorHandle.undo.mockClear();
@@ -445,4 +454,29 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => { resolve = next; });
   return { promise, resolve };
+}
+
+function languageTrigger(): HTMLElement {
+  const trigger = globalThis.document.querySelector<HTMLElement>(
+    '[data-slot="autocomplete-trigger"]',
+  );
+  if (!trigger) throw new Error("Language autocomplete trigger was not rendered");
+  return trigger;
+}
+
+async function openLanguageSelector(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<HTMLElement> {
+  await user.click(languageTrigger());
+  return screen.findByRole("searchbox", { name: "Search syntax languages" });
+}
+
+async function selectEditorLanguage(
+  user: ReturnType<typeof userEvent.setup>,
+  query: string,
+  label: string,
+): Promise<void> {
+  const search = await openLanguageSelector(user);
+  await user.type(search, query);
+  await user.click(await screen.findByRole("option", { name: label }));
 }
