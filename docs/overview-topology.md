@@ -170,6 +170,15 @@ The first completed layout fits the measured graph to the viewport. Subsequent
 status updates preserve the viewport, and the zoom controls retain accessible
 names while displaying `+` and `−`.
 
+Opening the graph inspector fits the graph into its remaining visible area,
+including when the user has already panned or zoomed. Compact windows account
+for the inspector overlay so resources remain beside it. Selecting a different
+resource while the inspector is already open preserves the current viewport.
+The graph toolbar's **Disable sidebar** switch starts off. Enabling it closes
+the graph inspector and keeps node and connection selection available without
+opening details. Disabling the switch restores details for the current selection.
+List view remains inspectable independently of this graph preference.
+
 The application decorates session and beacon nodes with the shared target-table
 context menu. Both start with **Interact** in the current window and **Interact**
 with the pop-out icon for a standalone interaction window. The latter has the
@@ -221,4 +230,6 @@ distinct IP/transport connection labels, passive inspection, visible enclosure
 bounds, IP and resource searches, and session-only filtering. It also verifies
 that source inventory and target references remain unchanged and that only
 passive inventory methods are called. Screenshots include the full grouping,
-search result, and session-only view.
+search result, and session-only view. It also checks automatic inspector fitting
+after pan/zoom, selection changes with the inspector already open, sidebar
+disable/restore behavior, List inspection, and compact native-window geometry.

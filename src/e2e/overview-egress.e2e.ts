@@ -128,6 +128,7 @@ test("Overview groups passive session and beacon inventory by incoming IP with d
     await closeInspector(page);
     await fitGraph(page);
     await page.screenshot({ path: join(artifactDirectory, "overview-egress-groups-dark.png"), animations: "disabled" });
+    await verifySidebarControls(application, page, groupedEdges[0]!, artifactDirectory);
 
     const search = page.getByLabel("Search infrastructure", { exact: true });
     await search.fill(SHARED_IP);
@@ -208,6 +209,131 @@ test("Overview groups passive session and beacon inventory by incoming IP with d
 
 function nodeByLabel(page: Page, label: string): Locator {
   return page.getByTestId("topology-node").filter({ has: page.locator("strong").filter({ hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u") }) });
+}
+
+async function verifySidebarControls(application: ElectronApplication, page: Page, edgeId: string, artifactDirectory: string): Promise<void> {
+  const inspector = page.getByRole("complementary", { name: "Infrastructure details", exact: true });
+  const disableSidebar = page.getByRole("switch", { name: "Disable sidebar", exact: true });
+  assert.equal(await disableSidebar.isChecked(), false, "the graph sidebar must remain enabled by default");
+  await changeViewport(page);
+  const manuallyChanged = await viewportTransform(page);
+  await graphNode(page, SESSIONS[0]).press("Enter");
+  await inspector.getByRole("heading", { name: SESSIONS[0], exact: true }).waitFor();
+  await waitForGraphPaint(page);
+  const automaticallyFitted = await viewportTransform(page);
+  assert.notEqual(automaticallyFitted, manuallyChanged,
+    "opening the inspector must refit the graph even after a manual viewport change");
+  await fitGraph(page);
+  assert.equal(await viewportTransform(page), automaticallyFitted,
+    "opening the inspector must match Fit view for the resized canvas");
+  await assertOutsideInspector(page);
+  await page.screenshot({ path: join(artifactDirectory, "overview-egress-inspector-auto-fit.png"), animations: "disabled" });
+
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await waitForGraphPaint(page);
+  const inspectorViewport = await viewportTransform(page);
+  await graphNode(page, SESSIONS[1]).press("Enter");
+  await inspector.getByRole("heading", { name: SESSIONS[1], exact: true }).waitFor();
+  await waitForGraphPaint(page);
+  assert.equal(await viewportTransform(page), inspectorViewport,
+    "changing the inspected resource while the sidebar is open must preserve the user's viewport");
+
+  await page.getByText("Disable sidebar", { exact: true }).click();
+  assert.equal(await disableSidebar.isChecked(), true);
+  await inspector.waitFor({ state: "hidden" });
+  assert.equal(await nodeByLabel(page, SESSIONS[1]).getAttribute("data-selected"), "true",
+    "disabling the sidebar must preserve the existing graph selection");
+  await graphNode(page, SESSIONS[0]).press("Enter");
+  assert.equal(await nodeByLabel(page, SESSIONS[0]).getAttribute("data-selected"), "true");
+  assert.equal(await inspector.count(), 0, "node selection must not reopen a disabled sidebar");
+  await page.getByTestId(edgeId).press("Enter");
+  await page.getByTestId(edgeId).and(page.locator(".selected")).waitFor();
+  assert.equal(await inspector.count(), 0, "edge selection must not reopen a disabled sidebar");
+  await disableSidebar.press("Space");
+  assert.equal(await disableSidebar.isChecked(), false);
+  await inspector.getByRole("heading", { name: "Connection details", exact: true }).waitFor();
+  await waitForGraphPaint(page);
+  await assertOutsideInspector(page);
+  await disableSidebar.press("Space");
+  await inspector.waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "List", exact: true }).click();
+  const resources = page.getByRole("table", { name: "Infrastructure resources", exact: true });
+  await resources.getByRole("button", { name: SESSIONS[0], exact: true }).click();
+  await inspector.getByRole("heading", { name: SESSIONS[0], exact: true }).waitFor();
+  await page.screenshot({ path: join(artifactDirectory, "overview-egress-list-sidebar.png"), animations: "disabled" });
+  await closeInspector(page);
+  await page.getByRole("button", { name: "Graph", exact: true }).click();
+  await page.getByTestId("topology-graph").waitFor();
+  assert.equal(await disableSidebar.isChecked(), true,
+    "returning from List must retain the graph sidebar preference");
+  await disableSidebar.press("Space");
+  await fitGraph(page);
+
+  const nativeWindow = await application.browserWindow(page);
+  const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+  const originalWidth = await page.evaluate(() => (globalThis as unknown as { innerWidth: number }).innerWidth);
+  try {
+    await nativeWindow.evaluate((window) => window.setSize(1000, 760));
+    await page.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth <= 1000);
+    await fitGraph(page);
+    await changeViewport(page);
+    await graphNode(page, SHARED_IP).press("Enter");
+    await inspector.getByRole("heading", { name: SHARED_IP, exact: true }).waitFor();
+    await waitForGraphPaint(page);
+    const compactAutomaticFit = await viewportTransform(page);
+    await fitGraph(page);
+    assert.equal(await viewportTransform(page), compactAutomaticFit,
+      "automatic compact-window fitting must match Fit view with the overlaid inspector");
+    await assertOutsideInspector(page);
+    assert.equal(await page.locator(".overview-toolbar").evaluate((toolbar) => toolbar.scrollWidth <= toolbar.clientWidth), true,
+      "the sidebar switch and filters must fit the compact toolbar");
+    await page.screenshot({ path: join(artifactDirectory, "overview-egress-compact-inspector.png"), animations: "disabled" });
+  } finally {
+    await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    await page.waitForFunction((width) => (globalThis as unknown as { innerWidth: number }).innerWidth === width, originalWidth);
+  }
+  await closeInspector(page);
+  await fitGraph(page);
+}
+
+function graphNode(page: Page, label: string): Locator {
+  return page.locator(".react-flow__node").filter({ has: nodeByLabel(page, label) });
+}
+
+async function viewportTransform(page: Page): Promise<string> {
+  return page.locator(".react-flow__viewport").evaluate((element) => element.style.transform);
+}
+
+async function waitForGraphPaint(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const browser = globalThis as unknown as { requestAnimationFrame: (callback: () => void) => number };
+    for (let frame = 0; frame < 4; frame += 1) {
+      await new Promise<void>((resolve) => browser.requestAnimationFrame(resolve));
+    }
+  });
+}
+
+async function changeViewport(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const bounds = await page.locator(".react-flow__pane").boundingBox();
+  assert.ok(bounds);
+  await page.mouse.move(bounds.x + 24, bounds.y + 24);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + 84, bounds.y + 54, { steps: 5 });
+  await page.mouse.up();
+  await waitForGraphPaint(page);
+}
+
+async function assertOutsideInspector(page: Page): Promise<void> {
+  const inspector = await page.getByRole("complementary", { name: "Infrastructure details", exact: true }).boundingBox();
+  const graph = await page.getByTestId("topology-graph").boundingBox();
+  assert.ok(inspector && graph);
+  for (const node of await page.getByTestId("topology-node").all()) {
+    const bounds = await node.boundingBox();
+    assert.ok(bounds);
+    assert.ok(bounds.x >= graph.x - 1 && bounds.x + bounds.width <= inspector.x + 1,
+      "fitted graph resources and enclosures must remain within the visible area beside the inspector");
+  }
 }
 
 async function assertContained(page: Page, group: Locator, label: string): Promise<void> {

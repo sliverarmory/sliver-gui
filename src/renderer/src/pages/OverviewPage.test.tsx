@@ -10,10 +10,12 @@ import { renderWithApplicationContextMenu } from "../application-context-menu-te
 import { OverviewDocument, OverviewPage } from "./OverviewPage";
 
 vi.mock("../topology/TopologyGraph", () => ({
-  TopologyGraph: ({ document, onSelect, decorateNode }: {
+  TopologyGraph: ({ document, selection, inspectorOpen, onSelect, decorateNode }: {
     document: TopologyDocument; onSelect: (selection: { type: "node" | "edge"; id: string }) => void;
+    selection: { type: "node" | "edge"; id: string } | null; inspectorOpen: boolean;
     decorateNode?: (node: TopologyNode, content: ReactNode) => ReactNode;
-  }) => <div aria-label="Test graph" data-scope={document.scope.id}>
+  }) => <div aria-label="Test graph" data-scope={document.scope.id} data-inspector-open={inspectorOpen}
+    data-selection={selection ? `${selection.type}:${selection.id}` : ""}>
     {document.nodes.map((node) => {
       const content = <button onClick={() => onSelect({ type: "node", id: node.id })}>{node.label}</button>;
       return <div key={node.id}>{decorateNode ? decorateNode(node, content) : content}</div>;
@@ -43,6 +45,24 @@ function sessionSnapshot(): SliverSnapshot {
 }
 
 describe("Overview target context menu", () => {
+  it("keeps node selection and the session context menu available while the sidebar is disabled", async () => {
+    const user = userEvent.setup();
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={sessionSnapshot()} onNavigate={vi.fn()}
+      onSnapshot={vi.fn()} onOpenSession={vi.fn()} />);
+    await user.click(screen.getByRole("switch", { name: "Disable sidebar" }));
+    const node = screen.getByRole("button", { name: "session-host" });
+    await user.click(node);
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Test graph")).toHaveAttribute("data-selection", expect.stringContaining("session-one"));
+    fireEvent.contextMenu(node);
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(menu).getByRole("menuitem", { name: "Interact" })).not.toHaveAttribute("aria-disabled", "true");
+    expect(within(menu).getByRole("menuitem", { name: "Interact in new window" })).not.toHaveAttribute("aria-disabled", "true");
+    expect(within(menu).getByRole("menuitem", { name: "Rename" })).not.toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+  });
+
   it.each(["connected", "degraded", "reconnecting"] as const)("keeps the session menu while %s and event updates are stale", async (status) => {
     const user = userEvent.setup();
     const snapshot = sessionSnapshot();
@@ -349,6 +369,74 @@ function topology(): TopologyDocument {
 }
 
 describe("Overview document rendering", () => {
+  it.each(["node", "edge"] as const)("closes and suppresses the graph sidebar while preserving %s selection and re-enables current details", async (firstType) => {
+    const user = userEvent.setup();
+    const base = topology();
+    const document: TopologyDocument = {
+      ...base,
+      nodes: [...base.nodes, { ...base.nodes[0]!, id: "other", label: "Other queue" }],
+      edges: [{ id: "link", source: "future", target: "other", kind: "queue-link", role: "relationship",
+        label: "Queue link", state: "unknown", freshness: "current", description: "Reported relationship", properties: [] }],
+    };
+    render(<OverviewDocument document={document} />);
+    const toggle = screen.getByRole("switch", { name: "Disable sidebar" });
+    const graph = screen.getByLabelText("Test graph");
+    expect(toggle).not.toBeChecked();
+    expect(toggle).toBeEnabled();
+    expect(graph).toHaveAttribute("data-inspector-open", "false");
+    const firstName = firstType === "node" ? "Regional queue" : "Inspect connection Queue link";
+    const firstSelection = firstType === "node" ? "node:future" : "edge:link";
+    const nextName = firstType === "node" ? "Inspect connection Queue link" : "Other queue";
+    const nextSelection = firstType === "node" ? "edge:link" : "node:other";
+    await user.click(screen.getByRole("button", { name: firstName }));
+    expect(screen.getByRole("complementary", { name: "Infrastructure details" })).toBeInTheDocument();
+    expect(graph).toHaveAttribute("data-inspector-open", "true");
+    await user.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+    expect(graph).toHaveAttribute("data-inspector-open", "false");
+    expect(graph).toHaveAttribute("data-selection", firstSelection);
+    await user.click(screen.getByRole("button", { name: nextName }));
+    expect(graph).toHaveAttribute("data-selection", nextSelection);
+    expect(graph).toHaveAttribute("data-inspector-open", "false");
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+    await user.click(toggle);
+    const inspector = screen.getByRole("complementary", { name: "Infrastructure details" });
+    expect(within(inspector).getByRole("heading", { name: firstType === "node" ? "Connection details" : "Resource details" })).toBeInTheDocument();
+    expect(graph).toHaveAttribute("data-inspector-open", "true");
+    expect(graph).toHaveAttribute("data-selection", nextSelection);
+    await user.click(within(inspector).getByRole("button", { name: "Close" }));
+    expect(graph).toHaveAttribute("data-inspector-open", "false");
+    expect(graph).toHaveAttribute("data-selection", "");
+  });
+
+  it("allows List details and disables the sidebar toggle there while preserving its Graph setting", async () => {
+    const user = userEvent.setup();
+    render(<OverviewDocument document={topology()} />);
+    await user.click(screen.getByRole("button", { name: "Regional queue" }));
+    await user.click(screen.getByRole("switch", { name: "Disable sidebar" }));
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "List" }));
+    const toggle = screen.getByRole("switch", { name: "Disable sidebar" });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeDisabled();
+    let inspector = screen.getByRole("complementary", { name: "Infrastructure details" });
+    await user.click(within(inspector).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole("table", { name: "Infrastructure resources" })).getByRole("button", { name: "Regional queue" }));
+    inspector = screen.getByRole("complementary", { name: "Infrastructure details" });
+    expect(within(inspector).getByRole("heading", { name: "Regional queue" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Graph" }));
+    expect(toggle).toBeEnabled();
+    expect(toggle).toBeChecked();
+    expect(screen.queryByRole("complementary", { name: "Infrastructure details" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Test graph")).toHaveAttribute("data-inspector-open", "false");
+    expect(screen.getByLabelText("Test graph")).toHaveAttribute("data-selection", "node:future");
+    await user.click(toggle);
+    expect(screen.getByLabelText("Test graph")).toHaveAttribute("data-inspector-open", "true");
+    expect(screen.getByRole("complementary", { name: "Infrastructure details" })).toBeInTheDocument();
+  });
+
   it("combines selected types and states in both graph and list without restoring excluded neighbors", async () => {
     const user = userEvent.setup();
     const base = topology();

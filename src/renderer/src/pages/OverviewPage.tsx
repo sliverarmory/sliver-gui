@@ -191,6 +191,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   const [selectedStatuses, setSelectedStatuses] = useState<TopologyFilters["statuses"]>("all");
   const [presentation, setPresentation] = useState<"graph" | "list">("graph");
   const [animateSessions, setAnimateSessions] = useState(false);
+  const [sidebarDisabled, setSidebarDisabled] = useState(false);
   const [selection, setSelection] = useState<TopologySelection>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const projection = useMemo(() => projectTopology(document, { query, kinds: selectedKinds, statuses: selectedStatuses, expanded }),
@@ -202,6 +203,7 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
     : selectedKinds;
   const selectedNode = selection?.type === "node" ? projection.document.nodes.find((node) => node.id === selection.id) : undefined;
   const selectedEdge = selection?.type === "edge" ? projection.document.edges.find((edge) => edge.id === selection.id) : undefined;
+  const inspectorOpen = Boolean(selectedNode || selectedEdge) && (!sidebarDisabled || presentation === "list");
   const members = selectedNode ? projection.groups.get(selectedNode.id) : undefined;
   useEffect(() => {
     if (selection && !selectedNode && !selectedEdge) setSelection(null);
@@ -237,6 +239,13 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
           <Switch.Control><Switch.Thumb /></Switch.Control>
         </Switch.Content>
       </Switch>
+      <Switch size="sm" className="overview-animation-toggle" isSelected={sidebarDisabled} onChange={setSidebarDisabled}
+        isDisabled={presentation !== "graph"}>
+        <Switch.Content>
+          <Label>Disable sidebar</Label>
+          <Switch.Control><Switch.Thumb /></Switch.Control>
+        </Switch.Content>
+      </Switch>
       <div className="overview-view-controls" role="group" aria-label="Overview presentation">
         <Button size="sm" variant={presentation === "graph" ? "secondary" : "ghost"} aria-pressed={presentation === "graph"} onPress={() => setPresentation("graph")}>Graph</Button>
         <Button size="sm" variant={presentation === "list" ? "secondary" : "ghost"} aria-pressed={presentation === "list"} onPress={() => setPresentation("list")}>List</Button>
@@ -252,11 +261,11 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
     <div className="overview-workspace">
       <div className="overview-workspace__view">
         {presentation === "graph"
-          ? <TopologyGraph document={projection.document} selection={selection} onSelect={setSelection}
+          ? <TopologyGraph document={projection.document} selection={selection} onSelect={setSelection} inspectorOpen={inspectorOpen}
               {...(decorateNode ? { decorateNode } : {})} />
           : <TopologyList document={projection.document} selection={selection} onSelect={setSelection} />}
       </div>
-      {selectedNode || selectedEdge ? <aside className="overview-inspector" aria-label="Infrastructure details">
+      {inspectorOpen ? <aside className="overview-inspector" aria-label="Infrastructure details">
         <div className="overview-inspector__heading"><h2>{selectedNode ? "Resource details" : "Connection details"}</h2>
           <Button size="sm" variant="ghost" onPress={() => setSelection(null)}>Close</Button>
         </div>

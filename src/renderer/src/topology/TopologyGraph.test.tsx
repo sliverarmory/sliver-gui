@@ -80,6 +80,26 @@ async function complete(worker: FakeWorker, id?: number): Promise<void> {
   });
 }
 
+function queuedAnimationFrames(): { flush: () => Promise<void> } {
+  let nextId = 0;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = ++nextId;
+    callbacks.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => { callbacks.delete(id); });
+  return {
+    flush: async () => {
+      await act(async () => {
+        const pending = [...callbacks];
+        callbacks.clear();
+        for (const [, callback] of pending) callback(16);
+      });
+    },
+  };
+}
+
 let scopeCount = 0;
 function fixture(): TopologyDocument {
   return {
@@ -170,6 +190,30 @@ describe("TopologyGraph display lifecycle", () => {
     act(() => mock.props!.onEdgesChange!([{ type: "select", id: "relationship", selected: false }]));
     expect(onSelect).toHaveBeenLastCalledWith(null);
     expect(mock.props?.onlyRenderVisibleElements).not.toBe(true);
+  });
+
+  it("keeps a newly selected edge when the old node is deselected in the same update", async () => {
+    const onSelect = vi.fn();
+    render(<TopologyGraph document={fixture()} selection={{ type: "node", id: "target" }} onSelect={onSelect} />);
+    await complete(FakeWorker.instances[0]!);
+    const { onEdgesChange, onNodesChange } = mock.props!;
+    act(() => {
+      onEdgesChange!([{ type: "select", id: "relationship", selected: true }]);
+      onNodesChange!([{ type: "select", id: "target", selected: false }]);
+    });
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith({ type: "edge", id: "relationship" });
+  });
+
+  it("keeps a newly selected node when the old edge is deselected in the same update", async () => {
+    const onSelect = vi.fn();
+    render(<TopologyGraph document={fixture()} selection={{ type: "edge", id: "relationship" }} onSelect={onSelect} />);
+    await complete(FakeWorker.instances[0]!);
+    const { onEdgesChange, onNodesChange } = mock.props!;
+    act(() => {
+      onNodesChange!([{ type: "select", id: "target", selected: true }]);
+      onEdgesChange!([{ type: "select", id: "relationship", selected: false }]);
+    });
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith({ type: "node", id: "target" });
   });
 
   it("binds arbitrary JSON identities safely while keeping selection and geometry identities original", async () => {
@@ -329,6 +373,109 @@ describe("TopologyGraph display lifecycle", () => {
     await act(async () => { fireEvent.click(zoomIn); fireEvent.click(zoomOut); });
     expect(mock.flow.zoomIn).toHaveBeenCalledTimes(1);
     expect(mock.flow.zoomOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("fits once when details open after a user viewport, keeps open updates still, and fits again on reopen", async () => {
+    const doc = fixture();
+    const onSelect = vi.fn();
+    const view = render(<TopologyGraph document={doc} selection={null} onSelect={onSelect} />);
+    await complete(FakeWorker.instances[0]!);
+    const chosenViewport = { x: 240, y: 75, zoom: 0.55 };
+    mock.viewport = chosenViewport;
+    act(() => mock.props!.onMoveEnd!(new MouseEvent("mouseup"), chosenViewport));
+    await act(async () => {
+      view.rerender(<TopologyGraph document={doc} selection={{ type: "node", id: "target" }} inspectorOpen onSelect={onSelect} />);
+    });
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(2);
+    const updated = { ...doc, nodes: doc.nodes.map((node) => ({ ...node, statusLabel: "Fresh check-in" })) };
+    await act(async () => {
+      view.rerender(<TopologyGraph document={updated} selection={{ type: "edge", id: "relationship" }} inspectorOpen onSelect={onSelect} />);
+    });
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      view.rerender(<TopologyGraph document={updated} selection={null} inspectorOpen={false} onSelect={onSelect} />);
+    });
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      view.rerender(<TopologyGraph document={updated} selection={{ type: "node", id: "server" }} inspectorOpen onSelect={onSelect} />);
+    });
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(3);
+    expect(FakeWorker.instances).toHaveLength(1);
+  });
+
+  it("fits a cached remount with details already open despite a restored user viewport", async () => {
+    const doc = fixture();
+    const onSelect = vi.fn();
+    const view = render(<TopologyGraph document={doc} selection={null} onSelect={onSelect} />);
+    await complete(FakeWorker.instances[0]!);
+    const chosenViewport = { x: 125, y: 90, zoom: 0.6 };
+    mock.viewport = chosenViewport;
+    act(() => mock.props!.onMoveEnd!(new MouseEvent("mouseup"), chosenViewport));
+    view.unmount();
+    await act(async () => {
+      render(<TopologyGraph document={doc} selection={{ type: "node", id: "target" }} inspectorOpen onSelect={onSelect} />);
+    });
+    expect(FakeWorker.instances).toHaveLength(1);
+    expect(mock.flow.setViewport).toHaveBeenLastCalledWith(chosenViewport);
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for measured geometry and two animation frames before fitting an opened inspector", async () => {
+    const doc = fixture();
+    const onSelect = vi.fn();
+    const view = render(<TopologyGraph document={doc} selection={null} onSelect={onSelect} />);
+    await complete(FakeWorker.instances[0]!);
+    const frames = queuedAnimationFrames();
+    mock.geometryReady = false;
+    view.rerender(<TopologyGraph document={doc} selection={{ type: "node", id: "target" }} inspectorOpen onSelect={onSelect} />);
+    await frames.flush();
+    await frames.flush();
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(1);
+    mock.geometryReady = true;
+    view.rerender(<TopologyGraph document={{ ...doc }} selection={{ type: "node", id: "target" }} inspectorOpen onSelect={onSelect} />);
+    await frames.flush();
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(1);
+    await frames.flush();
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["automatic", "user"] as const)("cancels an inspector fit closed between frames with an %s viewport", async (viewportSource) => {
+    const doc = fixture();
+    const onSelect = vi.fn();
+    const view = render(<TopologyGraph document={doc} selection={null} onSelect={onSelect} />);
+    await complete(FakeWorker.instances[0]!);
+    if (viewportSource === "user") {
+      act(() => mock.props!.onMoveEnd!(new MouseEvent("mouseup"), mock.viewport));
+    }
+    const frames = queuedAnimationFrames();
+    view.rerender(<TopologyGraph document={doc} selection={{ type: "node", id: "target" }} inspectorOpen onSelect={onSelect} />);
+    await frames.flush();
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(1);
+    view.rerender(<TopologyGraph document={doc} selection={null} inspectorOpen={false} onSelect={onSelect} />);
+    await frames.flush();
+    await frames.flush();
+    expect(mock.flow.fitView).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { inspectorLeft: 600, padding: { top: "20px", bottom: "20px", left: "20px", right: "220px" } },
+    { inspectorLeft: 820, padding: 0.18 },
+  ])("reserves only overlapping inspector space when its left edge is $inspectorLeft", async ({ inspectorLeft, padding }) => {
+    const doc = fixture();
+    const onSelect = vi.fn();
+    const content = (inspectorOpen: boolean) => <div className="overview-workspace">
+      <TopologyGraph document={doc} selection={inspectorOpen ? { type: "node", id: "target" } : null} inspectorOpen={inspectorOpen} onSelect={onSelect} />
+      {inspectorOpen ? <aside className="overview-inspector" data-testid="inspector" /> : null}
+    </div>;
+    const view = render(content(false));
+    await complete(FakeWorker.instances[0]!);
+    const frames = queuedAnimationFrames();
+    view.rerender(content(true));
+    vi.spyOn(screen.getByTestId("topology-graph"), "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 600));
+    vi.spyOn(screen.getByTestId("inspector"), "getBoundingClientRect").mockReturnValue(new DOMRect(inspectorLeft, 0, 300, 600));
+    await frames.flush();
+    await frames.flush();
+    expect(mock.flow.fitView).toHaveBeenLastCalledWith({ padding, maxZoom: 1 });
   });
 
   it("refits automatically as initial inventory arrives, then keeps same-structure status updates still", async () => {

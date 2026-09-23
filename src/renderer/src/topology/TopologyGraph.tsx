@@ -126,6 +126,8 @@ interface TopologyGraphProps {
   document: TopologyDocument;
   selection: TopologySelection;
   onSelect: (selection: TopologySelection) => void;
+  /** Opening details requests a fit after the available canvas has resized. */
+  inspectorOpen?: boolean;
   /** Optional UI decoration; never included in the JSON topology document. */
   decorateNode?: NodeDecorator;
 }
@@ -134,8 +136,17 @@ export function TopologyGraph(props: TopologyGraphProps) {
   return <ReactFlowProvider key={props.document.scope.id}><GraphCanvas {...props} /></ReactFlowProvider>;
 }
 
-function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGraphProps) {
+function GraphCanvas({ document, selection, onSelect, decorateNode, inspectorOpen = false }: TopologyGraphProps) {
   const flow = useReactFlow<GraphNode, GraphEdge>();
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const select = useCallback((next: TopologySelection) => {
+    // React Flow can emit selection and deselection in separate callbacks in
+    // the same batch. Clearing the old item must not clear the new selection.
+    selectionRef.current = next;
+    onSelect(next);
+  }, [onSelect]);
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const nodesRef = useRef(nodes);
   const [geometry, setGeometry] = useState<LayoutNode[]>([]);
@@ -143,6 +154,8 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
   const [busy, setBusy] = useState(false);
   const [reset, setReset] = useState(0);
   const [fitRevision, setFitRevision] = useState(0);
+  const [fitInspector, setFitInspector] = useState(false);
+  const [cancelledFitRevision, setCancelledFitRevision] = useState(0);
   const graph = topologyLayoutInput(document);
   // Snapshot ordering changes are metadata updates, not a new layout request.
   graph.nodes.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
@@ -161,7 +174,30 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
   const rememberAutomaticViewport = useCallback(() => {
     const source = cacheForScope(scopeId).viewport?.source === "user" ? "user" : "automatic";
     rememberViewport(source, fitStructureKey.current);
+    setFitInspector(false);
   }, [rememberViewport, scopeId]);
+  const fitAvailableSpace = useCallback(() => {
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    const inspector = inspectorOpen
+      ? canvasRef.current?.closest(".overview-workspace")?.querySelector<HTMLElement>(".overview-inspector")?.getBoundingClientRect()
+      : undefined;
+    // Compact windows overlay the inspector. Reserve that covered area as
+    // padding; docked inspectors already reduce the graph's measured width.
+    const overlap = bounds && inspector ? Math.max(0, Math.min(bounds.width, bounds.right - inspector.left)) : 0;
+    return flow.fitView({
+      padding: overlap > 0 ? { top: "20px", bottom: "20px", left: "20px", right: `${overlap + 20}px` } : 0.18,
+      maxZoom: 1,
+    });
+  }, [flow, inspectorOpen]);
+
+  useEffect(() => {
+    setFitInspector(inspectorOpen);
+    if (inspectorOpen) {
+      fitStructureKey.current = structureKey;
+      setFitRevision((value) => value + 1);
+    } else setCancelledFitRevision(fitRevision);
+    // Selection and metadata updates while details stay open must not refit.
+  }, [inspectorOpen]);
 
   useEffect(() => {
     let settled = false;
@@ -302,24 +338,30 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
     if (changes.some((change) => change.type === "position" && change.dragging !== true)) rememberNodes(next);
     const selected = changes.find((change) => change.type === "select" && change.selected);
     const selectedResource = selected?.type === "select" ? next.find((node) => node.id === selected.id)?.data.resource : undefined;
-    if (selectedResource) onSelect({ type: "node", id: selectedResource.id });
-    else if (selection?.type === "node" && changes.some((change) => change.type === "select" && !change.selected && change.id === flowElementId(selection.id))) onSelect(null);
-  }, [onSelect, rememberNodes, selection]);
+    if (selectedResource) select({ type: "node", id: selectedResource.id });
+    else {
+      const current = selectionRef.current;
+      if (current?.type === "node" && changes.some((change) => change.type === "select" && !change.selected && change.id === flowElementId(current.id))) select(null);
+    }
+  }, [select, rememberNodes]);
   const onEdgesChange: OnEdgesChange<GraphEdge> = useCallback((changes) => {
     const selected = changes.find((change) => change.type === "select" && change.selected);
     const selectedRelationship = selected?.type === "select" ? document.edges.find((edge) => flowElementId(edge.id) === selected.id) : undefined;
-    if (selectedRelationship) onSelect({ type: "edge", id: selectedRelationship.id });
-    else if (selection?.type === "edge" && changes.some((change) => change.type === "select" && !change.selected && change.id === flowElementId(selection.id))) onSelect(null);
-  }, [document.edges, onSelect, selection]);
+    if (selectedRelationship) select({ type: "edge", id: selectedRelationship.id });
+    else {
+      const current = selectionRef.current;
+      if (current?.type === "edge" && changes.some((change) => change.type === "select" && !change.selected && change.id === flowElementId(current.id))) select(null);
+    }
+  }, [document.edges, select]);
 
-  return <div className="topology-graph" data-testid="topology-graph" aria-label="Infrastructure topology" aria-busy={busy}>
+  return <div ref={canvasRef} className="topology-graph" data-testid="topology-graph" aria-label="Infrastructure topology" aria-busy={busy}>
     <ReactFlow<GraphNode, GraphEdge>
       nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
       onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
       onNodeDragStop={() => rememberNodes(nodesRef.current)}
-      onNodeClick={(_event, node) => onSelect({ type: "node", id: node.data.resource.id })}
-      onEdgeClick={(_event, edge) => { if (edge.data) onSelect({ type: "edge", id: edge.data.relationship.id }); }}
-      onPaneClick={() => onSelect(null)}
+      onNodeClick={(_event, node) => select({ type: "node", id: node.data.resource.id })}
+      onEdgeClick={(_event, edge) => { if (edge.data) select({ type: "edge", id: edge.data.relationship.id }); }}
+      onPaneClick={() => select(null)}
       onMoveEnd={(event, viewport) => {
         // Startup can emit the untouched default transform before ELK finishes.
         // Only a real gesture or an established viewport should be restored.
@@ -341,7 +383,8 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
       {nodes.length > 16 ? <MiniMap pannable zoomable nodeColor="var(--color-surface-secondary)" maskColor="color-mix(in srgb, var(--color-background) 70%, transparent)" /> : null}
-      <FitAfterLayout revision={fitRevision} expectedLayout={geometry} enabled={!userViewport} onFitted={rememberAutomaticViewport} />
+      <FitAfterLayout revision={fitRevision} expectedLayout={geometry} enabled={fitRevision !== cancelledFitRevision && (!userViewport || fitInspector)}
+        fit={fitAvailableSpace} onFitted={rememberAutomaticViewport} />
     </ReactFlow>
     <div className="topology-graph__controls">
       <Button isIconOnly size="sm" variant="secondary" aria-label="Zoom out" onPress={() => {
@@ -354,7 +397,7 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
       }}><span aria-hidden="true">+</span></Button>
       <Button size="sm" variant="secondary" onPress={() => {
         rememberViewport();
-        void flow.fitView({ padding: 0.18, maxZoom: 1 }).then(() => rememberViewport());
+        void fitAvailableSpace().then(() => rememberViewport());
       }}>Fit view</Button>
       <Button size="sm" variant="ghost" isDisabled={busy} onPress={() => {
         setUserViewport(false);
@@ -369,14 +412,15 @@ function GraphCanvas({ document, selection, onSelect, decorateNode }: TopologyGr
   </div>;
 }
 
-function FitAfterLayout({ revision, expectedLayout, enabled, onFitted }: {
+function FitAfterLayout({ revision, expectedLayout, enabled, fit, onFitted }: {
   revision: number;
   expectedLayout: readonly LayoutNode[];
   enabled: boolean;
+  fit: () => Promise<boolean>;
   onFitted: () => void;
 }) {
   const initialized = useNodesInitialized();
-  const { fitView, viewportInitialized } = useReactFlow();
+  const { viewportInitialized } = useReactFlow();
   const geometryReady = useStore((state) => state.width > 0 && state.height > 0
     && expectedLayout.length > 0 && state.nodeLookup.size === expectedLayout.length
     && expectedLayout.every((expected) => {
@@ -399,18 +443,23 @@ function FitAfterLayout({ revision, expectedLayout, enabled, onFitted }: {
   useEffect(() => {
     if (!enabled || !initialized || !viewportInitialized || !geometryReady || !revision
       || fittedRevision.current === revision || pendingRevision.current === revision) return;
+    let resizeFrame = 0;
     const frame = requestAnimationFrame(() => {
-      pendingRevision.current = revision;
-      void fitView({ padding: 0.18, maxZoom: 1 }).then((fitted) => {
-        if (pendingRevision.current === revision) pendingRevision.current = 0;
-        if (!mounted.current || !enabledRef.current || latestRevision.current !== revision || !fitted) return;
-        fittedRevision.current = revision;
-        onFittedRef.current();
-      }, () => {
-        if (pendingRevision.current === revision) pendingRevision.current = 0;
+      // Allow ResizeObserver/React Flow to measure the sidebar's new canvas
+      // before queuing the fit, including when a user viewport was restored.
+      resizeFrame = requestAnimationFrame(() => {
+        pendingRevision.current = revision;
+        void fit().then((fitted) => {
+          if (pendingRevision.current === revision) pendingRevision.current = 0;
+          if (!mounted.current || !enabledRef.current || latestRevision.current !== revision || !fitted) return;
+          fittedRevision.current = revision;
+          onFittedRef.current();
+        }, () => {
+          if (pendingRevision.current === revision) pendingRevision.current = 0;
+        });
       });
     });
-    return () => cancelAnimationFrame(frame);
-  }, [enabled, fitView, geometryReady, initialized, revision, viewportInitialized]);
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(resizeFrame); };
+  }, [enabled, fit, geometryReady, initialized, revision, viewportInitialized]);
   return null;
 }
