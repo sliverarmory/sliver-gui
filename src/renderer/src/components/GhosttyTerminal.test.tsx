@@ -404,6 +404,67 @@ describe("GhosttyTerminal", () => {
     expect(decoder.decode(terminal.write.mock.calls[0]?.[0] as Uint8Array)).toBe("result\u001b[6n");
   });
 
+  it("accepts Windows PowerShell input in the terminal without leaking device replies", async () => {
+    installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const frames: Array<{ data: string; source: string }> = [];
+    transport.send.mockImplementation((bytes, source) => {
+      frames.push({ data: decoder.decode(bytes.slice()), source });
+    });
+    ghosttyMocks.responsesPerWrite.push(["\u001b[1;1R"]);
+
+    render(
+      <GhosttyTerminal
+        ariaLabel="Interactive Windows shell"
+        pipedWindowsInput
+        transport={transport.api}
+        wasmBytes={new Uint8Array([0x00])}
+      />,
+    );
+    const host = await screen.findByRole("textbox", { name: "Interactive Windows shell" });
+    const terminal = requireTerminal();
+    expect(terminal.options["disableStdin"]).toBe(false);
+    expect(host).not.toHaveAttribute("aria-readonly");
+
+    act(() => terminal.emitData("Write-OutpuX"));
+    act(() => terminal.emitData("\u007f"));
+    act(() => terminal.emitData("t 'ready'\r"));
+    act(() => terminal.emitData("\u001b[D"));
+    act(() => transport.emitOutput(encoder.encode("\u001b[6n")));
+
+    expect(frames).toEqual([
+      { data: "Write-OutpuX", source: "operator" },
+      { data: "\b \b", source: "operator" },
+      { data: "t 'ready'\r", source: "operator" },
+    ]);
+  });
+
+  it("sends a reviewed multiline Windows paste in bounded wire slices", async () => {
+    installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const slices: Uint8Array[] = [];
+    transport.send.mockImplementation((bytes, source) => {
+      expect(source).toBe("operator");
+      slices.push(bytes.slice());
+    });
+    const ref = createRef<GhosttyTerminalHandle>();
+    render(
+      <GhosttyTerminal
+        ref={ref}
+        pipedWindowsInput
+        transport={transport.api}
+        wasmBytes={new Uint8Array([0x00])}
+      />,
+    );
+    await waitFor(() => expect(ghosttyMocks.terminals).toHaveLength(1));
+
+    const line = "x".repeat(12_000);
+    act(() => ref.current?.paste(`${line}\n${line}\n${line}\n${line}\n${line}\n`));
+    expect(slices.length).toBeGreaterThan(1);
+    expect(slices.every((slice) => slice.byteLength <= 16 * 1_024)).toBe(true);
+    expect(decoder.decode(concat(slices))).toBe(`${line}\r${line}\r${line}\r${line}\r${line}\r`);
+  });
+
   it("preserves workspace focus and exposes only bounded explicit handle operations", async () => {
     installWebAssemblyMocks();
     const transport = fakeTransport();

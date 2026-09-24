@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import {
+  STREAM_CLOSING_GRACE_MILLISECONDS,
   STREAM_CONTROL_FRAME_BURST,
   STREAM_CONTROL_FRAMES_PER_SECOND,
   STREAM_CREDIT_TIMEOUT_MILLISECONDS,
@@ -234,6 +235,8 @@ interface StreamResourceRecord {
   creditTimer?: Timer;
   idleTimer?: Timer;
   detachedTimer?: Timer;
+  remoteCloseTimer?: Timer;
+  remoteClosePending?: "completed" | "remote-close";
   detachedExpiresAtMilliseconds?: number;
   closePromise?: Promise<void>;
 }
@@ -846,7 +849,10 @@ export class StreamManager {
       remoteClose: (reason: StreamEndpointCloseReason) => {
         const closeReason: StreamCloseReason = reason === "transport-error" ? "transport-error" : reason;
         const current = this.resources.get(resource.resourceId);
-        if (current) void this.closeResource(current, closeReason);
+        if (current) {
+          if (reason === "transport-error") void this.closeResource(current, closeReason);
+          else this.beginRemoteClose(current, reason);
+        }
       },
     });
 
@@ -907,6 +913,23 @@ export class StreamManager {
     this.schedulePump();
   }
 
+  private beginRemoteClose(resource: StreamResourceRecord, reason: "completed" | "remote-close"): void {
+    if (resource.state === "closing" || resource.remoteClosePending) return;
+    if (!resource.attachment) {
+      void this.closeResource(resource, reason);
+      return;
+    }
+
+    // The final output chunk can be queued before its scheduled pump runs.
+    // Keep this exact attachment alive until its output reaches the renderer,
+    // while bounding a peer that never returns the required output credit.
+    resource.remoteClosePending = reason;
+    resource.remoteCloseTimer = managedTimeout(() => {
+      void this.closeResource(resource, reason);
+    }, STREAM_CLOSING_GRACE_MILLISECONDS);
+    this.schedulePump();
+  }
+
   private sendOpened(resource: StreamResourceRecord, attachment: Attachment): void {
     this.sendFrame(resource, attachment, {
       v: STREAM_PROTOCOL_VERSION,
@@ -929,6 +952,10 @@ export class StreamManager {
   ): void {
     const byteLength = buffer.byteLength;
     const transferredBytes = new Uint8Array(buffer);
+    if (resource.remoteClosePending) {
+      transferredBytes.fill(0);
+      return;
+    }
     if (
       resource.state !== "attached" ||
       !resource.endpoint ||
@@ -986,6 +1013,7 @@ export class StreamManager {
     rows: number,
     columns: number,
   ): void {
+    if (resource.remoteClosePending) return;
     if (
       resource.state !== "attached" ||
       !attachment.started ||
@@ -1002,7 +1030,9 @@ export class StreamManager {
 
   private acceptEndpointOutput(resourceId: string, input: Uint8Array): boolean {
     const resource = this.resources.get(resourceId);
-    if (!resource || resource.state === "closing" || resource.lifetime.signal.aborted) return false;
+    if (!resource || resource.state === "closing" || resource.lifetime.signal.aborted || resource.remoteClosePending) {
+      return false;
+    }
     if (!(input instanceof Uint8Array)) {
       void this.closeResource(resource, "transport-error");
       return false;
@@ -1168,7 +1198,12 @@ export class StreamManager {
       this.updatePressure(resource);
     }
 
-    if (!resource.commandInFlight && resource.endpoint && this.hasWriteSlot(resource)) {
+    if (resource.remoteClosePending && resource.state === "attached" && resource.outputQueue.length === 0) {
+      void this.closeResource(resource, resource.remoteClosePending);
+      return { bytes: processedBytes, progress: true };
+    }
+
+    if (!resource.remoteClosePending && !resource.commandInFlight && resource.endpoint && this.hasWriteSlot(resource)) {
       const chunk = resource.inputQueue.shift();
       if (chunk) {
         resource.inputQueuedBytes -= chunk.data.byteLength;
@@ -1474,10 +1509,12 @@ export class StreamManager {
     clearManagedTimer(resource.creditTimer);
     clearManagedTimer(resource.idleTimer);
     clearManagedTimer(resource.detachedTimer);
+    clearManagedTimer(resource.remoteCloseTimer);
     delete resource.handshakeTimer;
     delete resource.creditTimer;
     delete resource.idleTimer;
     delete resource.detachedTimer;
+    delete resource.remoteCloseTimer;
   }
 
   private revokeResourceTicket(resource: StreamResourceRecord): void {

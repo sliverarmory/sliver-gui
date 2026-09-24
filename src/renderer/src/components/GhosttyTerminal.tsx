@@ -15,10 +15,11 @@ import {
   type ITheme,
 } from "ghostty-web";
 
-import { STREAM_MAX_TERMINAL_DIMENSION } from "../../../shared/stream-contracts";
+import { STREAM_MAX_FRAME_BYTES, STREAM_MAX_TERMINAL_DIMENSION } from "../../../shared/stream-contracts";
 
 import { TerminalOutputSanitizer } from "./terminal-output-sanitizer";
 import { GhosttyTerminalClipboard } from "./GhosttyTerminalClipboard";
+import { PipedWindowsShellInput } from "./piped-windows-shell-input";
 
 const MIN_TERMINAL_DIMENSION = 1;
 const RESIZE_DEBOUNCE_MS = 100;
@@ -69,6 +70,7 @@ export interface GhosttyTerminalProps {
   className?: string;
   disableInput?: boolean;
   enableClipboard?: boolean;
+  pipedWindowsInput?: boolean;
   terminalResponseBudgetBytes?: number;
   onClipboardPaste?: (text: string) => void | Promise<void>;
   onClose?: (reason?: string) => void;
@@ -91,6 +93,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       className,
       disableInput = false,
       enableClipboard = false,
+      pipedWindowsInput = false,
       onClipboardPaste,
       onClose,
       onError,
@@ -152,6 +155,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         const normalized = error instanceof Error ? error : new Error(String(error));
         onErrorRef.current?.(normalized);
       };
+      const windowsInput = pipedWindowsInput ? new PipedWindowsShellInput() : undefined;
 
       const denyModifiedLink = (event: MouseEvent): void => {
         if (!event.ctrlKey && !event.metaKey) return;
@@ -189,9 +193,12 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
 
       const sendTerminalData = (data: string): void => {
         if (disposed || streamClosed) return;
-        const bytes = textEncoder.encode(data);
 
         if (remoteWriteDepth > 0) {
+          // A piped PowerShell cannot consume terminal device replies. Ghostty
+          // may synchronously emit them while rendering remote output.
+          if (windowsInput) return;
+          const bytes = textEncoder.encode(data);
           const now = Date.now();
           if (now - responseWindowStartedAt >= RESPONSE_BUDGET_WINDOW_MS) {
             responseWindowStartedAt = now;
@@ -209,7 +216,18 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
           return;
         }
 
-        if (bytes.byteLength === 0 || bytes.byteLength > MAX_OPERATOR_FRAME_BYTES) return;
+        const bytes = textEncoder.encode(windowsInput?.accept(data) ?? data);
+        if (bytes.byteLength === 0) return;
+        if (windowsInput) {
+          // A reviewed paste can contain several bounded command lines. Send
+          // its adapted bytes as wire-sized slices instead of dropping it.
+          for (let offset = 0; offset < bytes.byteLength; offset += STREAM_MAX_FRAME_BYTES) {
+            transport.send(bytes.subarray(offset, offset + STREAM_MAX_FRAME_BYTES), "operator");
+          }
+          bytes.fill(0);
+          return;
+        }
+        if (bytes.byteLength > MAX_OPERATOR_FRAME_BYTES) return;
         transport.send(bytes, "operator");
       };
 
@@ -256,6 +274,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
           if (disposed || streamClosed) return;
           flushSanitizer();
           streamClosed = true;
+          windowsInput?.reset();
           setTerminalState("closed");
           onCloseRef.current?.(reason);
         },
@@ -367,6 +386,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
 
       return () => {
         disposed = true;
+        windowsInput?.reset();
         unsubscribeTransport();
         if (resizeTimer) clearTimeout(resizeTimer);
         inputSubscription?.dispose();
@@ -394,6 +414,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       ariaLabelRef,
       disableInput,
       enableClipboard,
+      pipedWindowsInput,
       onCloseRef,
       onErrorRef,
       onReadyRef,

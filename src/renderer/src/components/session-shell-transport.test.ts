@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   STREAM_INITIAL_CREDIT_BYTES,
+  STREAM_MAX_DETACHED_SCROLLBACK_BYTES,
   STREAM_MAX_FRAME_BYTES,
   STREAM_MAX_TERMINAL_DIMENSION,
   STREAM_PROTOCOL_VERSION,
@@ -57,6 +58,90 @@ describe("SessionShellTransport", () => {
       bytesFromRemote: String(output.byteLength),
     });
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("replays bounded early output before reporting a normal remote close", async () => {
+    const harness = openHarness();
+    const { port, transport } = await openAttached(harness);
+    const first = serverData(0, Uint8Array.from([1, 2]));
+    const second = serverData(1, Uint8Array.from([3, 4]));
+    port.emit(first);
+    port.emit(second);
+    port.emit(serverClosed("remote-close"));
+
+    expect(port.closed).toBe(true);
+    expect(transport.getSnapshot()).toMatchObject({
+      state: "closed",
+      queuedOutputBytes: 4,
+      bytesFromRemote: "4",
+      closeReason: "remote-close",
+    });
+    const events: string[] = [];
+    const onOutput = vi.fn((bytes: Uint8Array) => events.push(`data:${[...bytes].join(",")}`));
+    const onClose = vi.fn((reason?: string) => events.push(`closed:${reason}`));
+    transport.subscribe({ onOutput, onClose });
+
+    expect(events).toEqual(["data:1,2", "data:3,4", "closed:remote-close"]);
+    expect(onOutput.mock.calls.every(([bytes]) => bytes.every((byte) => byte === 0))).toBe(true);
+    expect(transport.getSnapshot()).toMatchObject({ state: "closed", queuedOutputBytes: 0 });
+    expect([...new Uint8Array(first.data)]).toEqual([0, 0]);
+    expect([...new Uint8Array(second.data)]).toEqual([0, 0]);
+  });
+
+  it("preserves at most the bounded early-output capacity across remote EOF", async () => {
+    const harness = openHarness();
+    const { port, transport } = await openAttached(harness);
+    const frameCount = STREAM_MAX_DETACHED_SCROLLBACK_BYTES / STREAM_MAX_FRAME_BYTES;
+    expect(Number.isInteger(frameCount)).toBe(true);
+    for (let sequence = 0; sequence < frameCount; sequence += 1) {
+      port.emit(serverData(sequence, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(sequence + 1)));
+    }
+    port.emit(serverClosed("completed"));
+    expect(transport.getSnapshot()).toMatchObject({
+      state: "closed",
+      queuedOutputBytes: STREAM_MAX_DETACHED_SCROLLBACK_BYTES,
+    });
+
+    const seen: number[] = [];
+    transport.subscribe({
+      onOutput: (bytes) => seen.push(bytes[0] ?? 0),
+      onClose: vi.fn(),
+    });
+    expect(seen).toEqual(Array.from({ length: frameCount }, (_, index) => index + 1));
+    expect(transport.getSnapshot().queuedOutputBytes).toBe(0);
+
+    const overflowHarness = openHarness();
+    const overflow = await openAttached(overflowHarness);
+    for (let sequence = 0; sequence <= frameCount; sequence += 1) {
+      overflow.port.emit(serverData(sequence, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(0x41)));
+    }
+    expect(overflow.transport.getSnapshot()).toMatchObject({
+      state: "failed",
+      queuedOutputBytes: 0,
+      closeReason: "transport-error",
+    });
+    const onOutput = vi.fn();
+    overflow.transport.subscribe({ onOutput, onClose: vi.fn() });
+    expect(onOutput).not.toHaveBeenCalled();
+  });
+
+  it("wipes early output on error, operator close, or explicit release after remote EOF", async () => {
+    for (const action of ["transport-error", "operator-close", "release-after-eof"] as const) {
+      const harness = openHarness();
+      const { port, transport } = await openAttached(harness);
+      port.emit(serverData(0, Uint8Array.from([7, 8, 9])));
+      if (action === "transport-error") port.emit(serverClosed("transport-error"));
+      else if (action === "operator-close") transport.close();
+      else {
+        port.emit(serverClosed("completed"));
+        expect(transport.getSnapshot().queuedOutputBytes).toBe(3);
+        transport.close();
+      }
+      expect(transport.getSnapshot().queuedOutputBytes).toBe(0);
+      const onOutput = vi.fn();
+      transport.subscribe({ onOutput, onClose: vi.fn() });
+      expect(onOutput).not.toHaveBeenCalled();
+    }
   });
 
   it("chunks renderer input by frame and credit while preserving sequence", async () => {
@@ -285,6 +370,32 @@ function serverCredit(bytes: number): StreamServerFrame {
     type: "credit",
     streamId,
     bytes,
+  };
+}
+
+function serverClosed(reason: "completed" | "remote-close" | "transport-error"): StreamServerFrame {
+  return {
+    v: STREAM_PROTOCOL_VERSION,
+    type: "closed",
+    streamId,
+    reason,
+    disposition: "closed",
+    metrics: {
+      bytesFromRenderer: "0",
+      bytesToRenderer: "0",
+      framesFromRenderer: "0",
+      framesToRenderer: "0",
+      queuedInputBytes: 0,
+      queuedOutputBytes: 0,
+      inFlightInputBytes: 0,
+      inputCreditBytes: 0,
+      outputCreditBytes: 0,
+      highWaterInputBytes: 0,
+      highWaterOutputBytes: 0,
+      pressure: "normal",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActivityAt: "2026-01-01T00:00:00.000Z",
+    },
   };
 }
 

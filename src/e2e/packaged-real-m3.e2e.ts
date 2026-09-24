@@ -34,6 +34,7 @@ import type {
 } from "../shared/stream-contracts.js";
 
 const ENABLED = process.env["SLIVER_GUI_M3_REAL_E2E"] === "1";
+const ALLOW_REMOTE = process.env["SLIVER_GUI_M3_REAL_E2E_ALLOW_REMOTE"] === "1";
 const CONFIG_PATH = process.env["SLIVER_GUI_E2E_CONFIG"]?.trim();
 const SESSION_ID = process.env["SLIVER_GUI_E2E_SESSION_ID"]?.trim();
 const SESSION_NAME = process.env["SLIVER_GUI_E2E_SESSION_NAME"]?.trim();
@@ -77,7 +78,8 @@ test("M3 shell ownership recognizes only reviewed and upstream fallback executab
  * session. Failure cleanup may invoke Kill only through an exact managed-shell
  * resource captured in this isolated window, so main uses the PID bound to the
  * actual Shell response. No baseline or inferred concurrent process is ever
- * passed to a destructive RPC.
+ * passed to a destructive RPC. Non-loopback mTLS requires a separate explicit
+ * opt-in; the exact session selector and ownership checks still apply.
  */
 test(
   "packaged M3 app drives one authorized real session shell with exact cleanup",
@@ -104,7 +106,7 @@ test(
     let config: SliverClientConfig;
     try {
       config = parseConfig(configBytes);
-      assertLoopbackMtlsConfig(config);
+      assertAuthorizedMtlsConfig(config);
       await Promise.all([
         mkdir(savedConfigDirectory, { recursive: true }),
         mkdir(userDataDirectory, { recursive: true }),
@@ -174,10 +176,8 @@ test(
       await terminal.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.locator('[data-terminal-state="ready"]').waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.getByText("Attached", { exact: true }).first().waitFor();
-      const commandInput = shellCommandInput(page, terminal, authorizedSession.OS);
-      await commandInput.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       if (isWindows(authorizedSession.OS)) {
-        assert.equal(await terminal.getAttribute("aria-readonly"), "true");
+        await assertWindowsTerminalWritable(page, terminal);
       }
 
       const openedInventory = await waitForManagedShellCount(page, 1);
@@ -189,15 +189,20 @@ test(
         baselineProcessIds,
       );
       await assertSessionShellSemantics(page, authorizedSession, resource);
+      if (isWindows(authorizedSession.OS)) {
+        assert.equal(ownedShellProcess.executable, "powershell.exe", "the Windows test requires a PowerShell child");
+      }
 
       const firstMarker = syntheticMarker("OPEN");
       await sendSyntheticCommandAndVerifyOutput(
         page,
-        commandInput,
+        terminal,
         ownedShellProcess.executable,
         firstMarker,
-        authorizedSession.OS,
       );
+      if (isWindows(authorizedSession.OS)) {
+        await verifyPowerShellState(page, terminal, "STATE", true);
+      }
       await waitForNonZeroTerminalMetric(page, "Bytes in");
       await waitForNonZeroTerminalMetric(page, "Bytes out");
 
@@ -209,10 +214,9 @@ test(
         const resizedMarker = syntheticMarker("RESIZED");
         await sendSyntheticCommandAndVerifyOutput(
           page,
-          commandInput,
+          terminal,
           ownedShellProcess.executable,
           resizedMarker,
-          authorizedSession.OS,
         );
       } else {
         assert.equal(await readResizeFrameCount(page), 0, "a non-PTY shell must not emit resize frames");
@@ -223,7 +227,7 @@ test(
       await page.getByText("Shell is not attached", { exact: true }).waitFor();
       assert.equal(await terminal.count(), 0, "detach must dispose the payload-bearing terminal surface");
       if (isWindows(authorizedSession.OS)) {
-        assert.equal(await commandInput.count(), 0, "detach must dispose the Windows command composer");
+        assert.equal(await page.locator('form:has(input[name="windows-shell-command"])').count(), 0);
       }
       const detached = await waitForManagedResourceState(page, resource.resourceId, "detached");
       assert.equal(detached.resourceId, resource.resourceId);
@@ -237,12 +241,9 @@ test(
       await reattachedTerminal.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.locator('[data-terminal-state="ready"]').waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
       await page.getByText("Attached", { exact: true }).first().waitFor();
-      const reattachedCommandInput = shellCommandInput(
-        page,
-        reattachedTerminal,
-        authorizedSession.OS,
-      );
-      await reattachedCommandInput.waitFor({ timeout: SHELL_WAIT_MILLISECONDS });
+      if (isWindows(authorizedSession.OS)) {
+        await assertWindowsTerminalWritable(page, reattachedTerminal);
+      }
       assert.equal(
         await page.getByRole("button", { name: "Attach", exact: true }).count(),
         0,
@@ -258,11 +259,13 @@ test(
       const reattachedMarker = syntheticMarker("REATTACHED");
       await sendSyntheticCommandAndVerifyOutput(
         page,
-        reattachedCommandInput,
+        reattachedTerminal,
         ownedShellProcess.executable,
         reattachedMarker,
-        authorizedSession.OS,
       );
+      if (isWindows(authorizedSession.OS)) {
+        await verifyPowerShellState(page, reattachedTerminal, "REATTACHED", false);
+      }
       await assertRemoteProcessPresent(client, authorizedSession, ownedShellProcess);
 
       await page.getByRole("toolbar", { name: "Terminal actions", exact: true })
@@ -384,14 +387,15 @@ interface OwnedShellProcess {
   readonly executable: string;
 }
 
-function assertLoopbackMtlsConfig(config: SliverClientConfig): void {
+function assertAuthorizedMtlsConfig(config: SliverClientConfig): void {
   if (config.wg !== undefined) {
     throw new Error("The M3 real harness accepts mTLS operator configurations only; WireGuard is not claimed");
   }
+  if (ALLOW_REMOTE) return;
   const configuredHost = config.lhost.toLowerCase();
   const literalHost = configuredHost === "[::1]" ? "::1" : configuredHost;
   if (literalHost !== "127.0.0.1" && literalHost !== "::1") {
-    throw new Error("The M3 real harness requires a literal loopback Sliver server address");
+    throw new Error("The M3 real harness requires a literal loopback Sliver server address unless SLIVER_GUI_M3_REAL_E2E_ALLOW_REMOTE=1");
   }
 }
 
@@ -613,26 +617,51 @@ function syntheticCommand(executable: string, marker: string): string {
 
 async function sendSyntheticCommandAndVerifyOutput(
   page: Page,
-  commandInput: ReturnType<Page["getByRole"]>,
+  terminal: ReturnType<Page["getByRole"]>,
   executable: string,
   marker: string,
-  os: string,
 ): Promise<void> {
   await clearRenderedGlyphs(page);
-  await commandInput.pressSequentially(syntheticCommand(executable, marker));
-  await commandInput.press("Enter");
-  if (isWindows(os)) assert.equal(await commandInput.inputValue(), "");
+  await sendTerminalLine(terminal, syntheticCommand(executable, marker));
   await waitForRenderedMarker(page, marker);
 }
 
-function shellCommandInput(
+async function assertWindowsTerminalWritable(
   page: Page,
   terminal: ReturnType<Page["getByRole"]>,
-  os: string,
-): ReturnType<Page["getByRole"]> {
-  return isWindows(os)
-    ? page.getByRole("textbox", { name: "Windows command", exact: true })
-    : terminal;
+): Promise<void> {
+  assert.equal(
+    await page.locator('form:has(input[name="windows-shell-command"])').count(),
+    0,
+    "the Windows command form must be absent",
+  );
+  assert.equal(
+    await page.getByRole("textbox", { name: "Windows command", exact: true }).count(),
+    0,
+    "the separate Windows command input must be absent",
+  );
+  assert.equal(await terminal.getAttribute("contenteditable"), "true");
+  assert.notEqual(await terminal.getAttribute("aria-readonly"), "true");
+}
+
+async function verifyPowerShellState(
+  page: Page,
+  terminal: ReturnType<Page["getByRole"]>,
+  stage: "STATE" | "REATTACHED",
+  assign: boolean,
+): Promise<void> {
+  await clearRenderedGlyphs(page);
+  if (assign) await sendTerminalLine(terminal, "$global:SliverGuiProbe = 20 + 22");
+  await sendTerminalLine(terminal, `Write-Output ('SLIVERGUI_${stage}_' + $global:SliverGuiProbe)`);
+  await waitForRenderedMarker(page, `SLIVERGUI_${stage}_42`);
+}
+
+async function sendTerminalLine(
+  terminal: ReturnType<Page["getByRole"]>,
+  command: string,
+): Promise<void> {
+  await terminal.pressSequentially(command);
+  await terminal.press("Enter");
 }
 
 interface RendererStreamProbe {
@@ -912,10 +941,21 @@ async function connectSavedConfig(page: Page): Promise<void> {
   await dialog.waitFor();
   const option = dialog.getByRole("option", { name: /m3-real-operator/iu });
   await option.waitFor();
-  if ((await option.getAttribute("aria-selected")) !== "true") await option.click();
-  await dialog.getByRole("button", { name: /^connect$/iu }).click();
+  const connectButton = dialog.getByRole("button", { name: /^connect$/iu });
+  const deadline = Date.now() + SHELL_WAIT_MILLISECONDS;
+  while (Date.now() < deadline) {
+    if (await option.isEnabled()) {
+      if ((await option.getAttribute("aria-selected")) !== "true") await option.click();
+      if (await connectButton.isEnabled()) break;
+    }
+    await delay(100);
+  }
+  if (!(await connectButton.isEnabled())) {
+    throw new Error("The saved mTLS operator configuration did not become selectable");
+  }
+  await connectButton.click();
   await dialog.waitFor({ state: "hidden" });
-  await page.getByRole("heading", { name: "Jobs & listeners" }).waitFor({ timeout: 30_000 });
+  await page.getByRole("button", { name: /^Current server:/iu }).waitFor({ timeout: 30_000 });
   const mismatch = page.getByRole("dialog", { name: "Server version mismatch" });
   let mismatchVisible = false;
   try {

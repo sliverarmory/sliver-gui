@@ -472,13 +472,16 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
   }
 
   #remoteClosed(reason: StreamCloseReason, disposition: StreamCloseDisposition): void {
+    const preserveEarlyOutput = disposition === "closed" &&
+      (reason === "completed" || reason === "remote-close") &&
+      !this.#terminalSubscription;
     this.#closeReason = reason;
     this.#closeDisposition = disposition;
     this.#state = disposition === "detached" ? "detached" : "closed";
     this.#settleOpen(new Error(`Session shell closed before attachment (${reason})`));
     if (this.#terminalSubscription) safeTerminalClose(this.#terminalSubscription, reason);
     this.#teardownPort();
-    this.#clearQueues();
+    this.#clearQueues(preserveEarlyOutput);
     this.#emitSnapshot();
   }
 
@@ -487,7 +490,15 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
     reason: StreamCloseReason,
     state: "closed" | "detached",
   ): void {
-    if (isTerminalState(this.#state)) return;
+    if (isTerminalState(this.#state)) {
+      // A normal remote EOF may retain bounded output until Ghostty subscribes.
+      // Releasing that terminal without subscribing must still wipe those bytes.
+      if (this.#earlyOutput.length > 0) {
+        this.#clearQueues();
+        this.#emitSnapshot();
+      }
+      return;
+    }
     if (this.#streamId && this.#port) {
       try {
         this.#port.postMessage({
@@ -555,13 +566,15 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
     this.#portMessageErrorListener = undefined;
   }
 
-  #clearQueues(): void {
+  #clearQueues(preserveEarlyOutput = false): void {
     for (const queued of this.#inputQueue) queued.bytes.fill(0);
-    for (const output of this.#earlyOutput) output.fill(0);
+    if (!preserveEarlyOutput) {
+      for (const output of this.#earlyOutput) output.fill(0);
+      this.#earlyOutput.length = 0;
+      this.#queuedOutputBytes = 0;
+    }
     this.#inputQueue.length = 0;
-    this.#earlyOutput.length = 0;
     this.#queuedInputBytes = 0;
-    this.#queuedOutputBytes = 0;
     this.#inputCreditBytes = 0;
   }
 
