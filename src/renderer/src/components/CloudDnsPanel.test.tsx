@@ -124,6 +124,11 @@ describe("Cloud DNS management", () => {
     await user.click(screen.getByRole("button", { name: "All records" }));
     await screen.findByRole("grid", { name: "DNS records" });
     expect(screen.getByText("Public · Z1")).toBeInTheDocument();
+    const search = screen.getByRole("textbox", { name: "Search records" });
+    await user.type(search, "Z2");
+    expect(search).toHaveValue("Z2");
+    expect(await screen.findByText("1 of 2 record sets across all zones in this account")).toBeInTheDocument();
+    expect(screen.queryByText("Public · Z1")).not.toBeInTheDocument();
     const privateRow = screen.getByText("Private · Z2").closest("tr")!;
     await user.click(within(privateRow).getByRole("button", { name: "Edit www.example.com. A" }));
     expect(within(screen.getByRole("dialog", { name: "Edit DNS Record" })).getByText("Private · Z2")).toBeInTheDocument();
@@ -132,11 +137,6 @@ describe("Cloud DNS management", () => {
     expect(within(screen.getByRole("dialog", { name: "Delete DNS Record" })).getByText("Private · Z2")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete DNS Record" })).not.toBeInTheDocument());
-    const search = screen.getByRole("textbox", { name: "Search records" });
-    await user.type(search, "Z2");
-    expect(search).toHaveValue("Z2");
-    expect(await screen.findByText("1 of 2 record sets across all zones in this account")).toBeInTheDocument();
-    expect(screen.queryByText("Public · Z1")).not.toBeInTheDocument();
   });
 
   it("discards late records after changing the zone view", async () => {
