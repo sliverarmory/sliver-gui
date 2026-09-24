@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   CloudDeploymentAPI,
   CloudDeploymentNavigationRequest,
+  AwsLoginProgress,
 } from "../shared/cloud-deployment-ipc.js";
 import type {
   ApplicationContextMenuActionRequest,
@@ -28,6 +29,7 @@ const CHANNELS = Object.freeze({
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
   chooseSshPrivateKey: "sliver:cloud-deployment:ssh-key:choose",
   createCredential: "sliver:cloud-deployment:credential:create",
+  openAwsConsole: "sliver:cloud-deployment:aws:console:open",
   loginAwsCredential: "sliver:cloud-deployment:aws:login",
   copyAwsLoginLink: "sliver:cloud-deployment:aws:login:copy-link",
   cancelAwsLogin: "sliver:cloud-deployment:aws:login:cancel",
@@ -59,6 +61,7 @@ const CHANNELS = Object.freeze({
   openSshWindow: "sliver:cloud-deployment:ssh-window:open",
   approveSshHostKey: "sliver:cloud-deployment:ssh-host-key:approve",
   changed: "sliver:cloud-deployment:changed",
+  awsLoginProgress: "sliver:cloud-deployment:aws:login:progress",
   navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
 });
@@ -130,6 +133,7 @@ const api: CloudDeploymentAPI = {
   detectCurrentEgressIpv4: () => ipcRenderer.invoke(CHANNELS.detectCurrentEgressIpv4),
   chooseSshPrivateKey: () => ipcRenderer.invoke(CHANNELS.chooseSshPrivateKey),
   createCredential: (input) => ipcRenderer.invoke(CHANNELS.createCredential, input),
+  openAwsConsole: (input) => ipcRenderer.invoke(CHANNELS.openAwsConsole, input),
   loginAwsCredential: (input) => ipcRenderer.invoke(CHANNELS.loginAwsCredential, input),
   copyAwsLoginLink: () => ipcRenderer.invoke(CHANNELS.copyAwsLoginLink),
   cancelAwsLogin: () => ipcRenderer.invoke(CHANNELS.cancelAwsLogin),
@@ -171,6 +175,20 @@ const api: CloudDeploymentAPI = {
     };
     ipcRenderer.on(CHANNELS.changed, handler);
     return () => ipcRenderer.removeListener(CHANNELS.changed, handler);
+  },
+  onAwsLoginProgress: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("login progress listener must be a function");
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length !== 1) return;
+      const progress = payload[0];
+      if (progress === null) { listener(null); return; }
+      if (typeof progress !== "object" || !progress || Array.isArray(progress) || Object.keys(progress).length !== 1) return;
+      const phase = (progress as Record<string, unknown>)["phase"];
+      if (phase !== "opening-browser" && phase !== "waiting-for-authorization" && phase !== "exchanging-authorization") return;
+      listener(Object.freeze({ phase }) satisfies AwsLoginProgress);
+    };
+    ipcRenderer.on(CHANNELS.awsLoginProgress, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.awsLoginProgress, handler);
   },
   onNavigationRequested: (listener) => {
     if (typeof listener !== "function") throw new TypeError("navigation listener must be a function");

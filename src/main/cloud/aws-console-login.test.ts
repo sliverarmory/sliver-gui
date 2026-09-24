@@ -5,7 +5,7 @@ import { request, type IncomingHttpHeaders } from "node:http";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { AwsConsoleLogin, type AwsConsoleLoginSession } from "./aws-console-login.js";
+import { AwsConsoleLogin, type AwsConsoleLoginProgressPhase, type AwsConsoleLoginSession } from "./aws-console-login.js";
 
 const NOW = Date.parse("2026-09-08T20:00:00.000Z");
 const ARN = "arn:aws:iam::123456789012:user/test-user";
@@ -85,6 +85,39 @@ function proofContents(options: RequestInit | undefined): {
 }
 
 describe("AWS console browser login", () => {
+  it("reports browser, callback-wait and token-exchange phases without authorization material", async () => {
+    let authorize!: ReturnType<typeof callbackInfo>;
+    let browserOpened!: () => void;
+    const opened = new Promise<void>((resolve) => { browserOpened = resolve; });
+    let releaseBrowser!: () => void;
+    const browserLauncher = new Promise<void>((resolve) => { releaseBrowser = resolve; });
+    let waitingForAuthorization!: () => void;
+    const waiting = new Promise<void>((resolve) => { waitingForAuthorization = resolve; });
+    const phases: AwsConsoleLoginProgressPhase[] = [];
+    const tokenFetch = vi.fn<typeof fetch>(async () => {
+      expect(phases).toEqual(["opening-browser", "waiting-for-authorization", "exchanging-authorization"]);
+      return Response.json(tokenOutput());
+    });
+    const login = new AwsConsoleLogin({ fetch: tokenFetch, openExternal: async (url) => {
+      expect(phases).toEqual(["opening-browser"]);
+      authorize = callbackInfo(url);
+      browserOpened();
+      await browserLauncher;
+    } });
+    const pending = login.login("us-west-2", undefined, undefined, (phase) => {
+      phases.push(phase);
+      if (phase === "waiting-for-authorization") waitingForAuthorization();
+    });
+    await opened;
+    expect(phases).toEqual(["opening-browser"]);
+    releaseBrowser();
+    await waiting;
+    expect(tokenFetch).not.toHaveBeenCalled();
+    await callbackRequest(authorize.redirectUri, { state: authorize.state, code: "single-use-code" });
+    await expect(pending).resolves.toMatchObject({ loginSessionArn: ARN });
+    expect(phases).toEqual(["opening-browser", "waiting-for-authorization", "exchanging-authorization"]);
+  });
+
   it("lets a second browser finish the original pending request and withdraws the link before token exchange", async () => {
     let browserOpened!: () => void;
     const opened = new Promise<void>((resolve) => { browserOpened = resolve; });
@@ -97,7 +130,8 @@ describe("AWS console browser login", () => {
       return Response.json(tokenOutput());
     });
     const login = new AwsConsoleLogin({ openExternal, fetch: tokenFetch });
-    const pending = login.login("us-west-2", undefined, onPendingAuthorization);
+    const onProgress = vi.fn<(phase: AwsConsoleLoginProgressPhase) => void>();
+    const pending = login.login("us-west-2", undefined, onPendingAuthorization, onProgress);
     await opened;
 
     const authorization = onPendingAuthorization.mock.calls[0]?.[0] ?? "";
@@ -113,6 +147,7 @@ describe("AWS console browser login", () => {
     expect(tokenFetch).not.toHaveBeenCalled();
     releaseBrowser();
     const session = await pending;
+    expect(onProgress.mock.calls).toEqual([["opening-browser"], ["exchanging-authorization"]]);
     expect(session.loginSessionArn).toBe(ARN);
     expect(onPendingAuthorization.mock.calls).toEqual([[authorization], [null]]);
     const input = JSON.parse(String(tokenFetch.mock.calls[0]?.[1]?.body)) as Record<string, string>;
@@ -144,6 +179,18 @@ describe("AWS console browser login", () => {
     expect(onPendingAuthorization).toHaveBeenLastCalledWith(null);
     expect(tokenFetch).not.toHaveBeenCalled();
     await expect(callbackRequest(redirectUri, { state: "late", code: "late" })).rejects.toThrow();
+  });
+
+  it("does not retry a one-use authorization code after a transient token failure", async () => {
+    const tokenFetch = vi.fn<typeof fetch>(async () => new Response("PRIVATE_SERVICE_ERROR", { status: 503 }));
+    const login = new AwsConsoleLogin({ fetch: tokenFetch, openExternal: async (url) => {
+      const { redirectUri, state } = callbackInfo(url);
+      await callbackRequest(redirectUri, { state, code: "single-use-code" });
+    } });
+    await expect(login.login("us-west-2")).rejects.toMatchObject({
+      code: "service-unavailable", category: "transient", diagnostics: { httpStatus: 503 },
+    });
+    expect(tokenFetch).toHaveBeenCalledOnce();
   });
 
   it("exchanges a single loopback authorization with PKCE and a verifiable DPoP proof", async () => {
@@ -305,8 +352,10 @@ describe("AWS console browser login", () => {
       controller.abort(new Error("PRIVATE_CANCEL_REASON"));
       return new Promise(() => undefined);
     } });
-    const error: unknown = await login.login("us-west-2", controller.signal).catch((failure: unknown) => failure);
-    expect(error).toMatchObject({ code: "cancelled" });
+    const onProgress = vi.fn<(phase: AwsConsoleLoginProgressPhase) => void>();
+    const error: unknown = await login.login("us-west-2", controller.signal, undefined, onProgress).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "cancelled", category: "cancelled" });
+    expect(onProgress.mock.calls).toEqual([["opening-browser"]]);
     expect(String(error)).not.toContain("PRIVATE_CANCEL_REASON");
     expect(tokenFetch).not.toHaveBeenCalled();
     await expect(callbackRequest(redirectUri, { state: "late", code: "late" })).rejects.toThrow();
@@ -365,16 +414,53 @@ describe("AWS console session refresh", () => {
   });
 
   it.each([
-    ["TOKEN_EXPIRED", "login-required"],
-    ["USER_CREDENTIALS_CHANGED", "login-required"],
-    ["INSUFFICIENT_PERMISSIONS", "insufficient-permissions"],
-    ["AUTHCODE_EXPIRED", "authorization-failed"],
-    ["INVALID_REQUEST", "token-request-failed"],
-  ])("maps %s to a stable error without remote details", async (serviceCode, expectedCode) => {
-    const tokenFetch = vi.fn<typeof fetch>(async () => Response.json({ error: serviceCode, message: "PRIVATE_TOKEN_AND_ACCOUNT_DETAILS" }, { status: 403 }));
+    ["TOKEN_EXPIRED", "login-required", "session-invalid"],
+    ["USER_CREDENTIALS_CHANGED", "login-required", "session-invalid"],
+    ["INSUFFICIENT_PERMISSIONS", "insufficient-permissions", "permission-denied"],
+    ["AUTHCODE_EXPIRED", "authorization-failed", "authorization-invalid"],
+    ["INVALID_REQUEST", "authorization-failed", "authorization-invalid"],
+  ])("maps %s to a stable error with bounded diagnostics", async (serviceCode, expectedCode, category) => {
+    const requestId = "ec057264-564c-4b4a-b886-4b441284644d";
+    const tokenFetch = vi.fn<typeof fetch>(async () => Response.json({ error: serviceCode, message: "PRIVATE_TOKEN_AND_ACCOUNT_DETAILS" }, { status: 403, headers: { "x-amzn-requestid": requestId } }));
     const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession()).catch((failure: unknown) => failure);
-    expect(error).toMatchObject({ code: expectedCode });
-    expect(String(error)).not.toContain("PRIVATE_TOKEN_AND_ACCOUNT_DETAILS");
+    expect(error).toMatchObject({ code: expectedCode, category, diagnostics: { httpStatus: 403, serviceCode, requestId } });
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_TOKEN_AND_ACCOUNT_DETAILS");
+  });
+
+  it("discards unrecognized service codes and malformed request IDs", async () => {
+    const tokenFetch = vi.fn<typeof fetch>(async () => Response.json({ error: "PRIVATE_UNKNOWN_ERROR", message: "PRIVATE_MESSAGE" }, {
+      status: 400, headers: { "x-amzn-requestid": "PRIVATE_REQUEST_ID" },
+    }));
+    const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession()).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "token-request-failed", category: "unexpected-response", diagnostics: { httpStatus: 400 } });
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_");
+  });
+
+  it.each([408, 429, 500, 503])("classifies HTTP %i as transient even when its body is not JSON", async (status) => {
+    const tokenFetch = vi.fn<typeof fetch>(async () => new Response("PRIVATE_PROXY_ERROR", { status, headers: { "content-type": "text/html" } }));
+    const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession()).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "service-unavailable", category: "transient", diagnostics: { httpStatus: status } });
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_");
+    expect(tokenFetch).toHaveBeenCalledOnce();
+  });
+
+  it("classifies a structured throttling response as transient", async () => {
+    const tokenFetch = vi.fn<typeof fetch>(async () => Response.json({ error: "PRIVATE_UNKNOWN_SERVICE_ERROR" }, { status: 429 }));
+    const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession()).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "service-unavailable", category: "transient", diagnostics: { httpStatus: 429 } });
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_");
+  });
+
+  it.each(["connect", "response-body"])("classifies a %s transport failure as transient without exposing its cause", async (stage) => {
+    const tokenFetch = vi.fn<typeof fetch>(async () => {
+      if (stage === "connect") throw new TypeError("PRIVATE_NETWORK_ERROR");
+      return new Response(new ReadableStream({ start(controller) { controller.error(new Error("PRIVATE_STREAM_ERROR")); } }));
+    });
+    const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession()).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "network-unavailable", category: "transient" });
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_");
+    expect(String(error)).not.toContain("PRIVATE_");
+    expect(tokenFetch).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -392,14 +478,14 @@ describe("AWS console session refresh", () => {
   ])("rejects invalid or oversized token output", async (response) => {
     const tokenFetch = vi.fn<typeof fetch>(async () => response());
     const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession()).catch((failure: unknown) => failure);
-    expect(error).toMatchObject({ code: "token-request-failed" });
+    expect(error).toMatchObject({ code: "token-request-failed", category: "unexpected-response" });
     expect(String(error)).not.toContain("PRIVATE_TOKEN");
   });
 
   it("times out a stalled token body and cancels the stream", async () => {
     const cancel = vi.fn();
     const tokenFetch = vi.fn<typeof fetch>(async () => new Response(new ReadableStream({ cancel })));
-    await expect(new AwsConsoleLogin({ timeoutMs: 75, openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession())).rejects.toMatchObject({ code: "timeout" });
+    await expect(new AwsConsoleLogin({ timeoutMs: 75, openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession())).rejects.toMatchObject({ code: "timeout", category: "transient" });
     expect(cancel).toHaveBeenCalledOnce();
   });
 
@@ -412,7 +498,7 @@ describe("AWS console session refresh", () => {
       return new Promise(() => undefined);
     });
     const error: unknown = await new AwsConsoleLogin({ openExternal: async () => undefined, fetch: tokenFetch }).refresh(storedSession(), controller.signal).catch((failure: unknown) => failure);
-    expect(error).toMatchObject({ code: "cancelled" });
+    expect(error).toMatchObject({ code: "cancelled", category: "cancelled" });
     expect(String(error)).not.toContain("PRIVATE_REASON");
     expect(fetchSignal?.aborted).toBe(true);
   });

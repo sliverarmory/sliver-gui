@@ -5,6 +5,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  shell,
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
@@ -26,6 +27,9 @@ import {
 
 import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
+  CLOUD_DEPLOYMENT_IPC_EVENTS,
+  type AwsLoginProgress,
+  type OpenAwsConsoleInput,
   type CloudCredentialIdInput,
   type CloudCredentialTestResult,
   type CloudOperatorPermission,
@@ -44,6 +48,7 @@ import {
   parseCreateCloudOperatorConfigInput,
 } from "../shared/cloud-deployment-ipc.js";
 import {
+  isAwsRegion,
   isUuidV4,
   parseCreateCloudFirewallRuleInput,
   parseCloudDeploymentActionInput,
@@ -90,6 +95,7 @@ import {
 import { isSameRendererDocument } from "./security.js";
 import { awsRequiredPermissionsTerraform } from "../shared/cloud-permission-terraform.js";
 import { writePrivateArtifactFileAtomic } from "./secure-file.js";
+import { awsConsoleEntryUrl } from "./cloud/aws-console-entry.js";
 import type { TrustedWindowIdentity } from "./ipc.js";
 
 type MaybePromise<T> = T | Promise<T>;
@@ -128,8 +134,8 @@ export interface CloudDeploymentController {
   getTerminalRuntime(): MaybePromise<OperationResult<TerminalRuntimeAsset>>;
   detectCurrentEgressIpv4(): MaybePromise<OperationResult<CurrentEgressIpv4>>;
   chooseSshPrivateKey(owner: BrowserWindow): MaybePromise<OperationResult<SshPrivateKeySelection>>;
-  createCredential(input: CreateCloudCredentialInput, signal?: AbortSignal, ownerId?: number, onPendingAuthorization?: (url: string | null) => void): MaybePromise<OperationResult<CloudCredentialSummary>>;
-  loginAwsCredential(input: CloudCredentialIdInput, signal?: AbortSignal, onPendingAuthorization?: (url: string | null) => void): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  createCredential(input: CreateCloudCredentialInput, signal?: AbortSignal, ownerId?: number, onPendingAuthorization?: (url: string | null) => void, onProgress?: (phase: AwsLoginProgress["phase"]) => void): MaybePromise<OperationResult<CloudCredentialSummary>>;
+  loginAwsCredential(input: CloudCredentialIdInput, signal?: AbortSignal, onPendingAuthorization?: (url: string | null) => void, onProgress?: (phase: AwsLoginProgress["phase"]) => void): MaybePromise<OperationResult<CloudCredentialSummary>>;
   beginAzureLogin(input: BeginAzureLoginInput, signal?: AbortSignal, ownerId?: number): MaybePromise<OperationResult<AzureLoginSelection>>;
   loginAzureCredential(input: CloudCredentialIdInput, signal?: AbortSignal): MaybePromise<OperationResult<CloudCredentialSummary>>;
   cancelAzureLogin(ownerId?: number): void;
@@ -272,8 +278,8 @@ export function registerCloudDeploymentIpcHandlers(
     (args) => singleArgument(parseCreateCloudCredentialInput(requireSingleArgument(args))),
     ({ sender }, input) => {
       if (!("authentication" in input) || input.authentication !== "login") return controller.createCredential(input);
-      return withCloudLogin(sender, input.provider, async (signal, onPendingAuthorization) => {
-        if (input.provider === "aws") return controller.createCredential(input, signal, undefined, onPendingAuthorization);
+      return withCloudLogin(sender, input.provider, async (signal, onPendingAuthorization, onProgress) => {
+        if (input.provider === "aws") return controller.createCredential(input, signal, undefined, onPendingAuthorization, onProgress);
         try {
           return await controller.createCredential(input, signal, sender.id);
         } finally {
@@ -284,11 +290,31 @@ export function registerCloudDeploymentIpcHandlers(
     scrubCredentialArguments,
   );
   handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseOpenAwsConsoleInput(requireSingleArgument(args))),
+    async ({ sender }, input): Promise<OperationResult> => {
+      // Cancellation alone is insufficient: the old operation must settle and
+      // release its ownership before browser-session preparation can restart.
+      if (pendingCloudLogins.get(sender)?.provider === "aws") {
+        return { ok: false, error: "Complete or cancel the current AWS sign-in and wait for it to finish before opening AWS Console." };
+      }
+      const url = awsConsoleEntryUrl(input.region);
+      try {
+        await shell.openExternal(url);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "Could not open AWS Console in your browser. Please try again." };
+      }
+    },
+  );
+  handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential,
     exactRendererUrl,
     authorizeWindow,
     (args) => singleArgument(parseCredentialIdInput(requireSingleArgument(args))),
-    ({ sender }, input) => withCloudLogin(sender, "aws", (signal, onPendingAuthorization) => controller.loginAwsCredential(input, signal, onPendingAuthorization)),
+    ({ sender }, input) => withCloudLogin(sender, "aws", (signal, onPendingAuthorization, onProgress) => controller.loginAwsCredential(input, signal, onPendingAuthorization, onProgress)),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink,
@@ -671,13 +697,23 @@ const stagedAzureLogins = new Map<WebContents, () => void>();
 async function withCloudLogin<T>(
   sender: WebContents,
   provider: "aws" | "azure",
-  operation: (signal: AbortSignal, onPendingAuthorization: (url: string | null) => void) => MaybePromise<OperationResult<T>>,
+  operation: (signal: AbortSignal, onPendingAuthorization: (url: string | null) => void, onProgress: (phase: AwsLoginProgress["phase"]) => void) => MaybePromise<OperationResult<T>>,
 ): Promise<OperationResult<T>> {
   if (pendingCloudLogins.has(sender) || pendingCloudLogins.size >= 4) {
     return { ok: false, error: "A cloud login is already in progress. Complete or cancel it first." };
   }
   const controller = new AbortController();
   const pending = { provider, controller, authorizationUrl: null as string | null };
+  const ownerFrame = sender.mainFrame;
+  const publishProgress = (progress: AwsLoginProgress | null): void => {
+    if (provider !== "aws" || pendingCloudLogins.get(sender) !== pending || sender.isDestroyed() || sender.mainFrame !== ownerFrame) return;
+    try { sender.send(CLOUD_DEPLOYMENT_IPC_EVENTS.awsLoginProgress, progress); } catch { /* The owner may close during notification. */ }
+  };
+  const onProgress = (phase: AwsLoginProgress["phase"]): void => {
+    if (controller.signal.aborted) return;
+    if (phase !== "opening-browser" && phase !== "waiting-for-authorization" && phase !== "exchanging-authorization") return;
+    publishProgress(Object.freeze({ phase }));
+  };
   let authorizationFinished = false;
   const clearAuthorization = (): void => {
     pending.authorizationUrl = null;
@@ -698,8 +734,9 @@ async function withCloudLogin<T>(
   sender.once("render-process-gone", abort);
   sender.on("did-start-navigation", navigation);
   try {
-    return await operation(controller.signal, onPendingAuthorization);
+    return await operation(controller.signal, onPendingAuthorization, onProgress);
   } finally {
+    publishProgress(null);
     clearAuthorization();
     controller.signal.removeEventListener("abort", clearAuthorization);
     sender.removeListener("destroyed", abort);
@@ -825,6 +862,13 @@ function parseCredentialIdInput(value: unknown): CloudCredentialIdInput {
     throw new TypeError("Invalid cloud credential ID");
   }
   return Object.freeze({ credentialId: value["credentialId"] });
+}
+
+function parseOpenAwsConsoleInput(value: unknown): OpenAwsConsoleInput {
+  if (!hasExactKeys(value, ["region"]) || !isAwsRegion(value["region"])) {
+    throw new TypeError("Invalid AWS Console request");
+  }
+  return Object.freeze({ region: value["region"] });
 }
 
 function parseCopyInstanceIdInput(value: unknown): CopyCloudInstanceIdInput {

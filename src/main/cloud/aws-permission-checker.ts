@@ -1,3 +1,6 @@
+import { AwsConsoleLoginError } from "./aws-console-login.js";
+import { AwsSharedProfileError } from "./aws-shared-profiles.js";
+
 import {
   AllocateAddressCommand,
   AssociateAddressCommand,
@@ -181,6 +184,7 @@ export class AwsEc2PermissionChecker {
       await this.client.send(probe.command);
       return "verified";
     } catch (error) {
+      if (error instanceof AwsConsoleLoginError || error instanceof AwsSharedProfileError) throw error;
       const code = awsErrorCode(error);
       if ((probe.mode === "dry-run" || probe.mode === "tag-on-create") && code === "DryRunOperation") {
         return "verified";

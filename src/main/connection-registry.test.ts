@@ -3906,6 +3906,37 @@ describe("connection registry with an injected Sliver client", () => {
     await expect(readFile(downloadDestination)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("adds dropped local loot with its file name and content-detected type through the bounded reader", async () => {
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const textPath = join(root, "operator-report.txt");
+    const binaryPath = join(root, "operator-data.bin");
+    await writeFile(textPath, "loot text\n");
+    await writeFile(binaryPath, Buffer.from([0, 255, 1]));
+
+    const text = await registry.addDroppedLoot(sender(1), textPath);
+    const binary = await registry.addDroppedLoot(sender(1), binaryPath);
+
+    expect(text).toMatchObject({
+      ok: true,
+      value: { name: "operator-report.txt", fileName: "operator-report.txt", fileType: "text" },
+    });
+    expect(binary).toMatchObject({
+      ok: true,
+      value: { name: "operator-data.bin", fileName: "operator-data.bin", fileType: "binary" },
+    });
+    expect(electronMocks.showOpenDialog).not.toHaveBeenCalled();
+    expect(client.lootState.map((item) => item.File?.Data)).toEqual([
+      Buffer.from("loot text\n"),
+      Buffer.from([0, 255, 1]),
+    ]);
+    for (const [request] of client.lootAdd.mock.calls) {
+      expect(request.File?.Data.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
   it("adds a bounded remote file to loot with host provenance and preserves uncertain mutation outcomes", async () => {
     const client = new FakeSliverClient();
     const activeSession = session("session_m2", "m2-interactive");

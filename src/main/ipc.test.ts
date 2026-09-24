@@ -23,7 +23,7 @@ import {
 } from "../shared/contracts.js";
 import type { PrepareExecutionActionInput } from "../shared/execution-contracts.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
-import type { AddCredentialInput } from "../shared/operator-data-contracts.js";
+import { LOOT_DROPPED_ADD_IPC_CHANNEL, type AddCredentialInput } from "../shared/operator-data-contracts.js";
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { APPLICATION_SETTINGS_VERSION, DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
@@ -168,9 +168,10 @@ describe("trusted Electron IPC boundary", () => {
 
     expect([...electronMocks.handlers.keys()].sort()).toEqual([
       ...Object.values(IPC_INVOKE),
+      LOOT_DROPPED_ADD_IPC_CHANNEL,
       SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
     ].sort());
-    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length + 1);
+    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length + 2);
   });
 
   it("registers and unregisters the isolated shell and console port listeners", () => {
@@ -1364,6 +1365,23 @@ describe("trusted Electron IPC boundary", () => {
       .toThrow(/invalid dropped session upload request/u);
   });
 
+  it("routes dropped loot only through the private exact request envelope", async () => {
+    const addDroppedLoot = vi.fn(async () => ({ ok: false as const, error: "loot probe" }));
+    registerIpcHandlers(registryMock({ addDroppedLoot }), vi.fn(), RENDERER_URL);
+    const { event, sender } = invokeEvent("sliver://app/index.html#/loot", 77);
+    const handler = electronMocks.handlers.get(LOOT_DROPPED_ADD_IPC_CHANNEL);
+
+    await handler?.(event, { sourcePath: "/private/operator/report.txt" });
+
+    expect(addDroppedLoot).toHaveBeenCalledExactlyOnceWith(sender, "/private/operator/report.txt");
+    expect(() => handler?.(event, { sourcePath: "" })).toThrow(/invalid dropped loot request/u);
+    expect(() => handler?.(event, { sourcePath: "/tmp/report", name: "override" }))
+      .toThrow(/invalid dropped loot request/u);
+    expect(() => handler?.(event, { sourcePath: "/tmp/report" }, true))
+      .toThrow(/invalid dropped loot request/u);
+    expect(addDroppedLoot).toHaveBeenCalledTimes(1);
+  });
+
   it("parses shell invokes and binds preparation to the exact renderer document", async () => {
     const prepareSessionShell = vi.fn(async () => ({ ok: false as const, error: "prepare probe" }));
     const listSessionShells = vi.fn(async () => ({ ok: false as const, error: "list probe" }));
@@ -1916,6 +1934,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     deleteProfile: vi.fn(unavailable),
     listLoot: vi.fn(unavailable),
     addLoot: vi.fn(unavailable),
+    addDroppedLoot: vi.fn(unavailable),
     getLootDetail: vi.fn(unavailable),
     downloadLoot: vi.fn(unavailable),
     renameLoot: vi.fn(unavailable),

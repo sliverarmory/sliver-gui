@@ -1599,6 +1599,72 @@ async function verifyOperatorDataStores(
   await localLootRow.waitFor();
   await waitForFakeMethodCount(electronApplication, "lootAdd", 1);
 
+  const dialogCallsBeforeDrop = (await readFakeState(electronApplication)).dialogCalls;
+  await electronApplication.evaluate(({ dialog }) => {
+    dialog.showOpenDialog = async () => {
+      globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+      return { canceled: true, filePaths: [] };
+    };
+  });
+  await page.evaluate(() => {
+    const documentObject = (globalThis as unknown as {
+      document: {
+        createElement(tagName: "input"): {
+          type: string;
+          hidden: boolean;
+          setAttribute(name: string, value: string): void;
+        };
+        body: { append(node: unknown): void };
+      };
+    }).document;
+    const input = documentObject.createElement("input");
+    input.type = "file";
+    input.hidden = true;
+    input.setAttribute("data-e2e-loot-drop-source", "");
+    documentObject.body.append(input);
+  });
+  const dropInput = page.locator("input[data-e2e-loot-drop-source]");
+  await dropInput.setInputFiles(lootInputPath);
+  const dataTransfer = await dropInput.evaluateHandle((element) => {
+    const file = (element as unknown as { files?: ArrayLike<unknown> }).files?.[0];
+    if (!file) throw new Error("Dropped loot fixture is unavailable");
+    const DataTransferConstructor = (globalThis as unknown as {
+      DataTransfer: new() => { items: { add(file: unknown): void } };
+    }).DataTransfer;
+    const transfer = new DataTransferConstructor();
+    transfer.items.add(file);
+    const item = (transfer as unknown as { items: ArrayLike<object> }).items[0];
+    if (item) {
+      // React Aria expects a native file entry; this input supplies the same OS-backed File.
+      Object.defineProperty(Object.getPrototypeOf(item) as object, "webkitGetAsEntry", {
+        configurable: true,
+        value: () => ({ isFile: true, isDirectory: false }),
+      });
+    }
+    return transfer;
+  });
+  try {
+    const dropArea = page.getByLabel("Drop a local file into loot", { exact: true });
+    await dropArea.dispatchEvent("dragenter", { dataTransfer });
+    await page.getByText("Drop to add loot", { exact: true }).waitFor();
+    await dropArea.dispatchEvent("dragover", { dataTransfer });
+    await dropArea.dispatchEvent("drop", { dataTransfer });
+
+    const droppedLootRow = page.getByRole("row").filter({
+      has: page.getByRole("button", { name: "Inspect m6-loot-input.txt", exact: true }),
+    });
+    await droppedLootRow.waitFor();
+    await droppedLootRow.getByText("Text", { exact: true }).waitFor();
+    await waitForFakeMethodCount(electronApplication, "lootAdd", 2);
+    assert.equal((await readFakeState(electronApplication)).dialogCalls, dialogCallsBeforeDrop,
+      "dropping loot must not open a native file picker");
+    assert.equal((await page.locator("body").innerText()).includes(lootInputPath), false,
+      "the native loot source path must not be rendered");
+  } finally {
+    await dataTransfer.dispose();
+    await dropInput.evaluate((element) => element.remove());
+  }
+
   await electronApplication.evaluate(({ dialog }, outputPath) => {
     dialog.showSaveDialog = async () => {
       globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;

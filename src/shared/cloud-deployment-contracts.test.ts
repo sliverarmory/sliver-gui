@@ -7,6 +7,7 @@ import {
   parseAzureCliCredentialSecret,
   parseBeginAzureLoginInput,
   parseAwsConsoleLoginSession,
+  parseAwsProfileAuthentication,
   parseAwsFirewallRuleSpec,
   parseCloudCredentialSummary,
   parseCloudDeploymentActionInput,
@@ -229,6 +230,23 @@ describe("cloud deployment contracts", () => {
 
     expect(parseCloudCredentialSummary({ ...summary, profileName: "generals-network" }))
       .toMatchObject({ provider: "aws", profileName: "generals-network" });
+    const authentication = { method: "sso", canConsoleLogin: false };
+    expect(parseCloudCredentialSummary({ ...summary, profileName: "team", authentication }))
+      .toMatchObject({ profileName: "team", authentication });
+    expect(() => parseCloudCredentialSummary({ ...summary, authentication })).toThrow(/Invalid/u);
+  });
+
+  it("restricts profile capabilities to safe metadata and compatible renewal methods", () => {
+    expect(parseAwsProfileAuthentication({ method: "console-login", canConsoleLogin: true }))
+      .toEqual({ method: "console-login", canConsoleLogin: true });
+    for (const input of [
+      { method: "sso", canConsoleLogin: true },
+      { method: "unknown", canConsoleLogin: true },
+      { method: "console-login", canConsoleLogin: "yes" },
+      { method: "console-login", canConsoleLogin: true, refreshToken: "secret" },
+      { method: "console-login", canConsoleLogin: true, loginSessionArn: "private-identity" },
+      { method: "anything", canConsoleLogin: false },
+    ]) expect(() => parseAwsProfileAuthentication(input)).toThrow(/Invalid/u);
   });
 
   it("parses exact AWS deployment specs with separate firewall scopes and Elastic IP policy", () => {

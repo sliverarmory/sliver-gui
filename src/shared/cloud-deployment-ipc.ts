@@ -52,6 +52,7 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   detectCurrentEgressIpv4: "sliver:cloud-deployment:egress-ipv4:detect",
   chooseSshPrivateKey: "sliver:cloud-deployment:ssh-key:choose",
   createCredential: "sliver:cloud-deployment:credential:create",
+  openAwsConsole: "sliver:cloud-deployment:aws:console:open",
   loginAwsCredential: "sliver:cloud-deployment:aws:login",
   copyAwsLoginLink: "sliver:cloud-deployment:aws:login:copy-link",
   cancelAwsLogin: "sliver:cloud-deployment:aws:login:cancel",
@@ -86,9 +87,19 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
 
 export const CLOUD_DEPLOYMENT_IPC_EVENTS = {
   changed: "sliver:cloud-deployment:changed",
+  awsLoginProgress: "sliver:cloud-deployment:aws:login:progress",
   navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
 } as const;
+
+/** Only observable phases, with no authorization URLs or credential material. */
+export interface AwsLoginProgress {
+  readonly phase: "opening-browser" | "waiting-for-authorization" | "exchanging-authorization";
+}
+
+export interface OpenAwsConsoleInput {
+  readonly region: string;
+}
 
 export type CloudDeploymentNavigationRequest =
   | {
@@ -280,6 +291,8 @@ export interface CloudDeploymentAPI {
   detectCurrentEgressIpv4(): Promise<OperationResult<CurrentEgressIpv4>>;
   chooseSshPrivateKey(): Promise<OperationResult<SshPrivateKeySelection>>;
   createCredential(input: CreateCloudCredentialInput): Promise<OperationResult<CloudCredentialSummary>>;
+  /** Opens a fixed AWS Console page; success does not establish authentication. */
+  openAwsConsole(input: OpenAwsConsoleInput): Promise<OperationResult>;
   loginAwsCredential(input: CloudCredentialIdInput): Promise<OperationResult<CloudCredentialSummary>>;
   copyAwsLoginLink(): Promise<OperationResult>;
   cancelAwsLogin(): Promise<OperationResult>;
@@ -318,6 +331,7 @@ export interface CloudDeploymentAPI {
   openSshWindow(input: SshDeploymentInput): Promise<OperationResult<SshOpenTabResult>>;
   approveSshHostKey(input: SshHostKeyReviewInput): Promise<OperationResult<SshOpenTabResult>>;
   onChanged(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
+  onAwsLoginProgress?(listener: (progress: AwsLoginProgress | null) => void): () => void;
   onNavigationRequested(listener: (request: CloudDeploymentNavigationRequest) => void): () => void;
   onThemeChanged(listener: (dark: boolean) => void): () => void;
 }

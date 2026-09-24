@@ -10,6 +10,14 @@ export const OPERATOR_DATA_LIMITS = Object.freeze({
   artifactBytes: 64 * 1024 * 1024,
 } as const);
 
+export const LOOT_DROPPED_ADD_IPC_CHANNEL = "sliver:loot:add-dropped" as const;
+const LOOT_DROPPED_MAX_LOCAL_PATH_LENGTH = 32_768;
+
+/** Private preload-to-main envelope; the source path never enters renderer code. */
+export interface DroppedLootIpcRequest {
+  sourcePath: string;
+}
+
 export type LootFileType = "text" | "binary";
 export type LootFileTypeFilter = LootFileType | "all";
 
@@ -172,6 +180,16 @@ export function parseAddLootInput(value: unknown): AddLootInput {
   return {
     name: boundedString(record["name"], "name", OPERATOR_DATA_LIMITS.nameCharacters),
     fileType,
+  };
+}
+
+export function parseDroppedLootIpcRequest(value: unknown): DroppedLootIpcRequest {
+  const record = plainRecord(value, "dropped loot request");
+  exactKeys(record, ["sourcePath"]);
+  const sourcePath = boundedString(record["sourcePath"], "sourcePath", LOOT_DROPPED_MAX_LOCAL_PATH_LENGTH);
+  if (!sourcePath.trim()) throw new TypeError("sourcePath is required");
+  return {
+    sourcePath,
   };
 }
 

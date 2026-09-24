@@ -174,6 +174,23 @@ export function App() {
   const settings = applicationSettings?.settings ?? standaloneSettings;
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const connected = isUsableConnection(snapshot.connection.status);
+  const lootIdentity = connected ? [
+    snapshot.connection.epoch,
+    snapshot.connection.incarnation,
+    snapshot.connection.server,
+    snapshot.connection.configName,
+  ].join("\0") : "";
+  const latestLootEventId = snapshot.recentEvents.find((event) =>
+    event.type === "loot-added" || event.type === "loot-removed")?.id ?? "";
+  const [lootCountState, setLootCountState] = useState<{ identity: string; total: number }>();
+  const [lootCountRefreshSequence, setLootCountRefreshSequence] = useState(0);
+  const lootCountRequestSequence = useRef(0);
+  const lootCount = lootCountState?.identity === lootIdentity ? lootCountState.total : undefined;
+  const acceptLootInventoryTotal = useCallback((total: number) => {
+    if (!lootIdentity) return;
+    lootCountRequestSequence.current += 1;
+    setLootCountState({ identity: lootIdentity, total });
+  }, [lootIdentity]);
   const isViewAvailable = useCallback((entry: ViewId) =>
     entry === "overview" || entry === "settings" || entry === "script-editor" || connected, [connected]);
   const { current: view, navigate: setView, goBack, goForward, canGoBack, canGoForward } =
@@ -267,6 +284,25 @@ export function App() {
     };
   }, [loadSavedConfigs]);
 
+  useEffect(() => {
+    const request = ++lootCountRequestSequence.current;
+    if (!lootIdentity) {
+      setLootCountState(undefined);
+      return;
+    }
+
+    let active = true;
+    void window.sliver.listLoot({ fileType: "all", limit: 1 }).then((result) => {
+      if (!active || request !== lootCountRequestSequence.current) return;
+      setLootCountState(result.ok && result.value
+        ? { identity: lootIdentity, total: result.value.page.total }
+        : undefined);
+    }).catch(() => {
+      if (active && request === lootCountRequestSequence.current) setLootCountState(undefined);
+    });
+    return () => { active = false; };
+  }, [lootIdentity, latestLootEventId, lootCountRefreshSequence, snapshot.eventStream.status]);
+
   const connect = useCallback(async (): Promise<void> => {
     const eventGeneration = snapshotEventGenerationRef.current;
     setIsConnecting(true);
@@ -348,6 +384,7 @@ export function App() {
       return;
     }
     if (snapshotEventGenerationRef.current === eventGeneration) setSnapshot(result.value);
+    setLootCountRefreshSequence((current) => current + 1);
   }, []);
 
   async function openWindow(inheritConnection: boolean) {
@@ -689,6 +726,7 @@ export function App() {
       <Sidebar className="app-sidebar">
         <NavigationContent
           snapshot={snapshot}
+          lootCount={lootCount}
           view={view}
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
@@ -704,6 +742,7 @@ export function App() {
       <Sidebar.Mobile backdrop="blur" className="app-sidebar">
         <NavigationContent
           snapshot={snapshot}
+          lootCount={lootCount}
           view={view}
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
@@ -872,7 +911,7 @@ export function App() {
               ) : null}
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
-              {view === "loot" ? <LootPage snapshot={snapshot} /> : null}
+              {view === "loot" ? <LootPage snapshot={snapshot} onInventoryTotal={acceptLootInventoryTotal} /> : null}
               {view === "credentials" ? <CredentialsPage snapshot={snapshot} /> : null}
             </>
           ) : null}
@@ -965,6 +1004,7 @@ function WindowNavigation({ canGoBack, canGoForward, onBack, onForward, settings
 
 export function NavigationContent({
   snapshot,
+  lootCount,
   view,
   onDisconnect,
   onExitApp,
@@ -973,6 +1013,7 @@ export function NavigationContent({
   onViewChange,
 }: {
   snapshot: SliverSnapshot;
+  lootCount?: number | undefined;
   view: ViewId;
   onDisconnect: () => void;
   onExitApp: () => void;
@@ -1061,6 +1102,7 @@ export function NavigationContent({
             {dataNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}
+                count={item.id === "loot" ? lootCount : undefined}
                 item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}

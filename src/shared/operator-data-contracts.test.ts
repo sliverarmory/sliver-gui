@@ -4,6 +4,7 @@ import {
   OPERATOR_DATA_LIMITS,
   parseAddCredentialInput,
   parseCopyCredentialSecretInput,
+  parseDroppedLootIpcRequest,
   parseListCredentialsInput,
   parseListLootInput,
   parseRenameLootInput,
@@ -12,6 +13,18 @@ import {
 const ID = "80ae1382-e6e2-44d6-a663-537cafb60e74";
 
 describe("operator-data contracts", () => {
+  it("accepts only one bounded private dropped-loot path", () => {
+    expect(parseDroppedLootIpcRequest({ sourcePath: "/private/operator/report.txt" })).toEqual({
+      sourcePath: "/private/operator/report.txt",
+    });
+    expect(parseDroppedLootIpcRequest({ sourcePath: "/private/operator/report.txt " })).toEqual({
+      sourcePath: "/private/operator/report.txt ",
+    });
+    expect(() => parseDroppedLootIpcRequest({ sourcePath: "" })).toThrow(/sourcePath/u);
+    expect(() => parseDroppedLootIpcRequest({ sourcePath: "x".repeat(32_769) })).toThrow(/sourcePath/u);
+    expect(() => parseDroppedLootIpcRequest({ sourcePath: "/tmp/report", name: "override" })).toThrow(/unexpected/u);
+  });
+
   it("accepts only bounded, exact paged inventory requests", () => {
     expect(parseListLootInput({ query: "report", fileType: "text", cursor: "100", limit: 25 })).toEqual({
       query: "report",

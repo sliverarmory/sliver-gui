@@ -19,6 +19,7 @@ import {
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
+import { DropZone } from "@heroui-pro/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
@@ -34,6 +35,7 @@ import {
   faRotate,
   faTrash,
   faTriangleExclamation,
+  faUpload,
 } from "@fortawesome/free-solid-svg-icons";
 
 import type { SliverSnapshot } from "../../../shared/contracts";
@@ -48,6 +50,7 @@ import {
 
 interface LootPageProps {
   snapshot: SliverSnapshot;
+  onInventoryTotal?: (total: number) => void;
 }
 
 interface LootInventoryState extends LootCatalogPage {
@@ -75,7 +78,12 @@ const ADD_FILE_TYPE_OPTIONS: ReadonlyArray<{ id: "auto" | LootFileType; label: s
   { id: "binary", label: "Binary" },
 ];
 
-export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
+interface NativeFileDropItem {
+  kind: "file";
+  getFile: () => Promise<File>;
+}
+
+export function LootPage({ snapshot, onInventoryTotal }: LootPageProps): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [fileType, setFileType] = useState<LootFileTypeFilter>("all");
   const [inventory, setInventory] = useState<LootInventoryState>(EMPTY_INVENTORY);
@@ -86,6 +94,8 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
   const [addName, setAddName] = useState("");
   const [addFileType, setAddFileType] = useState<"auto" | LootFileType>("auto");
   const [isAdding, setIsAdding] = useState(false);
+  const [isDropAdding, setIsDropAdding] = useState(false);
+  const dropPendingRef = useRef(false);
   const [detailTarget, setDetailTarget] = useState<LootSummary>();
   const [detail, setDetail] = useState<LootDetail>();
   const [detailError, setDetailError] = useState<string>();
@@ -167,6 +177,7 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
         return;
       }
       setInventory(result.value);
+      if (!normalizedQuery && fileType === "all") onInventoryTotal?.(result.value.page.total);
     } catch (error) {
       if (request !== listRequestSequence.current || expectedIdentity !== backendIdentityRef.current) return;
       setInventory((current) => ({ ...current, error: errorMessage(error) }));
@@ -175,7 +186,7 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
         setIsLoading(false);
       }
     }
-  }, [fileType, normalizedQuery]);
+  }, [fileType, normalizedQuery, onInventoryTotal]);
 
   useEffect(() => {
     const delay = normalizedQuery ? 180 : 0;
@@ -248,6 +259,43 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
       setIsAdding(false);
     }
   }, [addFileType, addName, refresh]);
+
+  const addDroppedLoot = useCallback(async (items: readonly unknown[]) => {
+    if (dropPendingRef.current || isAdding || isAddOpen) return;
+    if (items.length !== 1 || !isNativeFileDropItem(items[0])) {
+      toast.danger("Choose one file", { description: "Drop exactly one local file at a time." });
+      return;
+    }
+
+    dropPendingRef.current = true;
+    setIsDropAdding(true);
+    const expectedIdentity = backendIdentityRef.current;
+    try {
+      const file = await items[0].getFile();
+      if (expectedIdentity !== backendIdentityRef.current) return;
+      if (file.size > OPERATOR_DATA_LIMITS.artifactBytes) {
+        toast.danger("File is too large", {
+          description: `Drop a file no larger than ${formatBytes(String(OPERATOR_DATA_LIMITS.artifactBytes))}.`,
+        });
+        return;
+      }
+      const result = await window.sliver.addDroppedLoot(file);
+      if (expectedIdentity !== backendIdentityRef.current) return;
+      if (!result.ok || !result.value) {
+        toast.danger("Could not add loot", { description: result.error });
+        return;
+      }
+      toast.success("Loot added", { description: displayName(result.value) });
+      refresh();
+    } catch (error) {
+      if (expectedIdentity === backendIdentityRef.current) {
+        toast.danger("Could not add loot", { description: errorMessage(error) });
+      }
+    } finally {
+      dropPendingRef.current = false;
+      setIsDropAdding(false);
+    }
+  }, [isAdding, isAddOpen, refresh]);
 
   const openDetail = useCallback(async (item: LootSummary) => {
     wipeDetail();
@@ -434,82 +482,109 @@ export function LootPage({ snapshot }: LootPageProps): React.JSX.Element {
           <p>Inspect server-collected files, preview bounded text safely, and save deliberate local copies.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="primary" onPress={() => setIsAddOpen(true)}>
+          <Button isDisabled={isDropAdding} variant="primary" onPress={() => setIsAddOpen(true)}>
             <FontAwesomeIcon aria-hidden icon={faPlus} /> Add local file
           </Button>
         </div>
       </header>
 
-      <Card className="overflow-hidden" variant="secondary">
-        <Card.Header className="flex-row items-center gap-3">
-          <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxOpen} /></span>
-          <div className="min-w-0 flex-1">
-            <Card.Title>Server inventory</Card.Title>
-            <Card.Description>Metadata is paged; file contents are fetched only when you inspect or save an item.</Card.Description>
-          </div>
-        </Card.Header>
+      <DropZone className="w-full">
+        <DropZone.Area
+          aria-label="Drop a local file into loot"
+          className="relative w-full items-stretch justify-start gap-0 rounded-2xl border-0 p-0 text-start"
+          isDisabled={isAdding || isDropAdding || isAddOpen}
+          onDrop={(event) => void addDroppedLoot(event.items)}
+        >
+          {({ isDropTarget }) => (
+            <>
+              <Card className="w-full overflow-hidden" variant="secondary">
+                <Card.Header className="flex-row items-center gap-3">
+                  <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faBoxOpen} /></span>
+                  <div className="min-w-0 flex-1">
+                    <Card.Title>Server inventory</Card.Title>
+                    <Card.Description>
+                      {isDropAdding
+                        ? "Adding dropped file…"
+                        : "Metadata is paged; file contents are fetched only when you inspect or save an item. Drop one local file here to add it."}
+                    </Card.Description>
+                  </div>
+                </Card.Header>
 
-        <Card.Content className="p-0">
-          <div className="flex flex-col gap-3 border-b border-separator px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
-            <SearchField
-              aria-label="Search loot"
-              className="w-full lg:max-w-md"
-              value={query}
-              variant="secondary"
-              onChange={setQuery}
-            >
-              <SearchField.Group>
-                <SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon>
-                <SearchField.Input
-                  maxLength={OPERATOR_DATA_LIMITS.queryCharacters}
-                  placeholder="Search name, ID, or origin host"
-                />
-                <SearchField.ClearButton />
-              </SearchField.Group>
-            </SearchField>
-            <LootTypeSelect value={fileType} onChange={setFileType} />
-          </div>
+                <Card.Content className="p-0">
+                  <div className="flex flex-col gap-3 border-b border-separator px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
+                    <SearchField
+                      aria-label="Search loot"
+                      className="w-full lg:max-w-md"
+                      value={query}
+                      variant="secondary"
+                      onChange={setQuery}
+                    >
+                      <SearchField.Group>
+                        <SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon>
+                        <SearchField.Input
+                          maxLength={OPERATOR_DATA_LIMITS.queryCharacters}
+                          placeholder="Search name, ID, or origin host"
+                        />
+                        <SearchField.ClearButton />
+                      </SearchField.Group>
+                    </SearchField>
+                    <LootTypeSelect value={fileType} onChange={setFileType} />
+                  </div>
 
-          {inventory.error ? <InlineError message={inventory.error} /> : null}
+                  {inventory.error ? <InlineError message={inventory.error} /> : null}
 
-          <DataGrid
-            aria-label="Sliver loot"
-            columns={columns}
-            contentClassName="min-w-[860px]"
-            data={inventory.items}
-            getRowId={(item) => item.id}
-            scrollContainerClassName="max-h-[620px] overflow-auto"
-            variant="secondary"
-            onRowAction={(key) => {
-              const item = inventory.items.find((candidate) => candidate.id === String(key));
-              if (item) void openDetail(item);
-            }}
-            renderEmptyState={() => (
-              <LootEmptyState
-                error={inventory.error}
-                filtered={isFiltered}
-                loading={isLoading}
-              />
-            )}
-          />
-        </Card.Content>
+                  <DataGrid
+                    aria-label="Sliver loot"
+                    columns={columns}
+                    contentClassName="min-w-[860px]"
+                    data={inventory.items}
+                    getRowId={(item) => item.id}
+                    scrollContainerClassName="max-h-[620px] overflow-auto"
+                    variant="secondary"
+                    onRowAction={(key) => {
+                      const item = inventory.items.find((candidate) => candidate.id === String(key));
+                      if (item) void openDetail(item);
+                    }}
+                    renderEmptyState={() => (
+                      <LootEmptyState
+                        error={inventory.error}
+                        filtered={isFiltered}
+                        loading={isLoading}
+                      />
+                    )}
+                  />
+                </Card.Content>
 
-        {inventory.page.nextCursor ? (
-          <Card.Footer className="flex items-center justify-between border-t border-separator px-4 py-3">
-            <p className="text-xs text-muted">
-              Showing {inventory.items.length} of {inventory.page.total} {inventory.page.total === 1 ? "item" : "items"}
-            </p>
-            <Button
-              isPending={isLoadingMore}
-              size="sm"
-              variant="secondary"
-              onPress={() => void loadMore()}
-            >
-              Load more
-            </Button>
-          </Card.Footer>
-        ) : null}
-      </Card>
+                {inventory.page.nextCursor ? (
+                  <Card.Footer className="flex items-center justify-between border-t border-separator px-4 py-3">
+                    <p className="text-xs text-muted">
+                      Showing {inventory.items.length} of {inventory.page.total} {inventory.page.total === 1 ? "item" : "items"}
+                    </p>
+                    <Button
+                      isPending={isLoadingMore}
+                      size="sm"
+                      variant="secondary"
+                      onPress={() => void loadMore()}
+                    >
+                      Load more
+                    </Button>
+                  </Card.Footer>
+                ) : null}
+              </Card>
+              {isDropTarget ? (
+                <div
+                  className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-2 rounded-xl border border-accent bg-accent-soft px-6 py-4 text-center text-accent-soft-foreground"
+                  role="status"
+                >
+                  <FontAwesomeIcon aria-hidden className="text-xl" icon={faUpload} />
+                  <p className="text-sm font-semibold">Drop to add loot</p>
+                  <p className="text-xs">One local file, up to {formatBytes(String(OPERATOR_DATA_LIMITS.artifactBytes))}</p>
+                </div>
+              ) : null}
+            </>
+          )}
+        </DropZone.Area>
+      </DropZone>
 
       <AddLootDialog
         fileType={addFileType}
@@ -971,6 +1046,12 @@ function mergeLoot(current: readonly LootSummary[], incoming: readonly LootSumma
   const items = new Map(current.map((item) => [item.id, item]));
   for (const item of incoming) items.set(item.id, item);
   return [...items.values()];
+}
+
+function isNativeFileDropItem(value: unknown): value is NativeFileDropItem {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<NativeFileDropItem>;
+  return candidate.kind === "file" && typeof candidate.getFile === "function";
 }
 
 function compareByteStrings(left: string, right: string): number {

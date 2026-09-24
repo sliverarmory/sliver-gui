@@ -22,6 +22,10 @@ import {
   parseSessionDroppedUploadInput,
   parseSessionDroppedUploadIpcRequest,
 } from "../shared/session-contracts.js";
+import {
+  LOOT_DROPPED_ADD_IPC_CHANNEL,
+  parseDroppedLootIpcRequest,
+} from "../shared/operator-data-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
 import { isResolvedApplicationIcon, parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import { parseSliverReleaseDownloadEvent } from "../shared/release-contracts.js";
@@ -158,6 +162,16 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
+  addDroppedLoot: (file) => {
+    let sourcePath: string;
+    try {
+      sourcePath = webUtils.getPathForFile(file);
+    } catch {
+      throw new TypeError("Dropped loot must be backed by a local file");
+    }
+    if (!sourcePath) throw new TypeError("Dropped loot must be backed by a local file");
+    return ipcRenderer.invoke(LOOT_DROPPED_ADD_IPC_CHANNEL, parseDroppedLootIpcRequest({ sourcePath }));
+  },
   uploadDroppedSessionFile: (file, input) => {
     const parsedInput = parseSessionDroppedUploadInput(input);
     let sourcePath: string;

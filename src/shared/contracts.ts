@@ -1079,6 +1079,8 @@ export type SliverDesktopInvokeAPI = {
 };
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
+  /** Add one native-backed dropped file to loot without exposing its local path to the renderer. */
+  addDroppedLoot: (file: File) => Promise<OperationResult<LootSummary>>;
   /** Upload one native-backed dropped file without exposing its local path to the renderer. */
   uploadDroppedSessionFile: (
     file: File,
@@ -1129,6 +1131,7 @@ function defineSliverDesktopNonInvokeAPIKeys<
  * each manually adapted capability is deliberately reviewed and added here.
  */
 export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAPIKeys([
+  "addDroppedLoot",
   "uploadDroppedSessionFile",
   "onScriptsChanged",
   "onScriptEditorRequested",

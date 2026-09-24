@@ -269,6 +269,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     deleteScript: vi.fn(failed),
     getScriptRuntime: vi.fn(failed),
     setScriptEditorDirty: vi.fn(failed),
+    addDroppedLoot: vi.fn(failed),
     uploadDroppedSessionFile: vi.fn(failed),
     onScriptsChanged: vi.fn(() => vi.fn()),
     onScriptEditorRequested: vi.fn(() => vi.fn()),

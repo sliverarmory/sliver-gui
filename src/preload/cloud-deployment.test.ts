@@ -52,6 +52,23 @@ vi.stubGlobal("document", {
 await import("./cloud-deployment.js");
 
 describe("Cloud Deployment preload bridge", () => {
+  it("accepts only credential-free login progress and removes its listener", () => {
+    const api = exposedApi();
+    const listener = vi.fn();
+    const unsubscribe = api.onAwsLoginProgress!(listener);
+    const registration = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.awsLoginProgress);
+    const handler = registration[1] as (_event: unknown, ...payload: unknown[]) => void;
+    handler({}, { phase: "waiting-for-authorization" });
+    handler({}, null);
+    for (const payload of [
+      [], [undefined], [{ phase: "unknown" }], [{ phase: "opening-browser", url: "https://example.test/?code=secret" }],
+      [{ phase: "opening-browser", token: "secret" }], [{ phase: "exchanging-authorization" }, "extra"], [["opening-browser"]],
+    ]) handler({}, ...payload);
+    expect(listener.mock.calls).toEqual([[{ phase: "waiting-for-authorization" }], [null]]);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(CLOUD_DEPLOYMENT_IPC_EVENTS.awsLoginProgress, handler);
+  });
+
   it("exposes only the narrow frozen cloud API and maps every invoke to its fixed channel", async () => {
     const api = exposedApi();
     expect(Object.keys(api)).toEqual([
@@ -64,6 +81,7 @@ describe("Cloud Deployment preload bridge", () => {
       "detectCurrentEgressIpv4",
       "chooseSshPrivateKey",
       "createCredential",
+      "openAwsConsole",
       "loginAwsCredential",
       "copyAwsLoginLink",
       "cancelAwsLogin",
@@ -95,6 +113,7 @@ describe("Cloud Deployment preload bridge", () => {
       "openSshWindow",
       "approveSshHostKey",
       "onChanged",
+      "onAwsLoginProgress",
       "onNavigationRequested",
       "onThemeChanged",
     ]);
@@ -178,8 +197,11 @@ describe("Cloud Deployment preload bridge", () => {
     ]);
   });
 
-  it("keeps AWS sign-in, link copying, and cancellation on fixed channels", async () => {
+  it("keeps AWS Console opening, sign-in, link copying, and cancellation on fixed channels", async () => {
     const api = exposedApi();
+    const consoleInput = { region: "us-west-2" };
+    await api.openAwsConsole(consoleInput);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, consoleInput);
     const input = { credentialId: "11111111-1111-4111-8111-111111111111" };
     await api.loginAwsCredential(input);
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, input);

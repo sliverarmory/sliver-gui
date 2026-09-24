@@ -84,9 +84,11 @@ import {
   type TargetRef,
 } from "../shared/target-contracts.js";
 import {
+  LOOT_DROPPED_ADD_IPC_CHANNEL,
   parseAddCredentialInput,
   parseAddLootInput,
   parseCopyCredentialSecretInput,
+  parseDroppedLootIpcRequest,
   parseListCredentialsInput,
   parseListLootInput,
   parseOperatorDataId,
@@ -226,6 +228,7 @@ export type IpcConnectionRegistry = Pick<
   | "deleteProfile"
   | "listLoot"
   | "addLoot"
+  | "addDroppedLoot"
   | "getLootDetail"
   | "downloadLoot"
   | "renameLoot"
@@ -609,6 +612,11 @@ export function registerIpcHandlers(
   handleTrusted(IPC.addLoot, rendererUrl, parseAddLootArguments, ({ sender }, input) =>
     registry.addLoot(sender, input),
   );
+  ipcMain.handle(LOOT_DROPPED_ADD_IPC_CHANNEL, (event, ...rawArguments: unknown[]) => {
+    const { sender } = requireTrustedSender(event, rendererUrl);
+    const [request] = parseDroppedLootArguments(rawArguments);
+    return registry.addDroppedLoot(sender, request.sourcePath);
+  });
   handleTrusted(IPC.getLootDetail, rendererUrl, parseLootIdArguments, ({ contentsId }, id) =>
     registry.getLootDetail(contentsId, id),
   );
@@ -796,6 +804,7 @@ export function registerIpcHandlers(
 
 export function unregisterIpcHandlers(): void {
   for (const channel of Object.values(IPC_INVOKE)) ipcMain.removeHandler(channel);
+  ipcMain.removeHandler(LOOT_DROPPED_ADD_IPC_CHANNEL);
   ipcMain.removeHandler(SESSION_DROPPED_UPLOAD_IPC_CHANNEL);
   if (registeredStreamAttachListener) {
     ipcMain.removeListener(IPC.attach, registeredStreamAttachListener);
@@ -1103,6 +1112,15 @@ function parseAddLootArguments(args: readonly unknown[]): [input: ReturnType<typ
     return [parseAddLootInput(args[0])];
   } catch {
     throw invalidArguments("add loot input");
+  }
+}
+
+function parseDroppedLootArguments(args: readonly unknown[]): [request: ReturnType<typeof parseDroppedLootIpcRequest>] {
+  requireArgumentCount(args, 1, "dropped loot request");
+  try {
+    return [parseDroppedLootIpcRequest(args[0])];
+  } catch {
+    throw invalidArguments("dropped loot request");
   }
 }
 

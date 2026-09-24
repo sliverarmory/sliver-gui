@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { cloudRequiredPermissions } from "../../shared/cloud-provider-permissions.js";
 import type { AwsEc2ClientLike } from "./aws-ec2-provider.js";
 import { AwsEc2PermissionChecker } from "./aws-permission-checker.js";
+import { AwsConsoleLoginError } from "./aws-console-login.js";
 
 const connection = {
   region: "us-west-2",
@@ -15,6 +16,13 @@ const connection = {
 } as const;
 
 describe("AWS EC2 permission checker", () => {
+  it("preserves typed authentication failures instead of replacing them with a generic preflight error", async () => {
+    const failure = new AwsConsoleLoginError("network-unavailable", "AWS sign-in could not reach the service.");
+    const client: AwsEc2ClientLike = { send: async () => { throw failure; } };
+    const checker = new AwsEc2PermissionChecker(connection, { clientFactory: () => client });
+    await expect(checker.check()).rejects.toBe(failure);
+  });
+
   it("uses successful read calls and DryRunOperation to verify permissions without mutations", async () => {
     const client = new PermissionClient();
     const checker = new AwsEc2PermissionChecker(connection, { clientFactory: () => client });

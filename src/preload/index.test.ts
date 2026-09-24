@@ -16,6 +16,7 @@ import {
   type ApplicationContextMenuAPI,
 } from "../shared/application-context-menu-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
+import { LOOT_DROPPED_ADD_IPC_CHANNEL } from "../shared/operator-data-contracts.js";
 import { SCRIPT_TASK_IPC, type ScriptTaskManagerAPI } from "../shared/script-task-manager-contracts.js";
 import type { ApplicationZoomAPI } from "../shared/application-zoom-contracts.js";
 
@@ -289,6 +290,28 @@ describe("sandboxed preload bridge", () => {
     expect(() => exposed.uploadDroppedSessionFile(file, input)).toThrow(
       /must be backed by a local file/u,
     );
+    expect(electronMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("resolves a dropped loot File in preload without exposing its path to the renderer", async () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    if (!exposed) throw new Error("Expected the preload API to be exposed");
+    const file = {} as File;
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReset();
+    electronMocks.getPathForFile.mockReturnValue("/private/operator/report.txt");
+
+    await exposed.addDroppedLoot(file);
+
+    expect(electronMocks.getPathForFile).toHaveBeenCalledExactlyOnceWith(file);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
+      LOOT_DROPPED_ADD_IPC_CHANNEL,
+      { sourcePath: "/private/operator/report.txt" },
+    );
+
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReturnValue("");
+    expect(() => exposed.addDroppedLoot(file)).toThrow(/must be backed by a local file/u);
     expect(electronMocks.invoke).not.toHaveBeenCalled();
   });
 

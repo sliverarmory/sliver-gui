@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CloudDnsProvider, CloudDnsZone, CloudDnsRecord, CloudDnsRecordSpec } from "../shared/cloud-dns-contracts.js";
 import { CLOUD_DEPLOYMENT_STATUSES } from "../shared/cloud-deployment-contracts.js";
+import { AwsConsoleLoginError } from "./cloud/aws-console-login.js";
 import type {
   AwsConsoleLoginSession,
   AwsFirewallRule,
@@ -479,13 +480,13 @@ describe("CloudDeploymentService", () => {
     const onReloginAuthorization = vi.fn();
     const created = await service.createCredential(nativeAuthInput(), undefined, 0, onCreateAuthorization);
     expect(created).toMatchObject({ ok: true, value: { id: CREDENTIAL_ID, loginSessionArn: originalSession.loginSessionArn } });
-    expect(login).toHaveBeenCalledWith("us-west-2", expect.any(AbortSignal), onCreateAuthorization);
+    expect(login).toHaveBeenCalledWith("us-west-2", expect.any(AbortSignal), onCreateAuthorization, undefined);
     expect(JSON.stringify(await service.getSnapshot())).not.toMatch(/original-secret|original-refresh|BEGIN EC PRIVATE KEY/u);
     const sshKey = await vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret.sshPrivateKey);
     await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
     expect(seen[0]?.secretAccessKey).toBe(originalSession.secretAccessKey);
     const relogged = await service.loginAwsCredential({ credentialId: CREDENTIAL_ID }, undefined, onReloginAuthorization);
-    expect(login).toHaveBeenLastCalledWith("us-west-2", expect.any(AbortSignal), onReloginAuthorization);
+    expect(login).toHaveBeenLastCalledWith("us-west-2", expect.any(AbortSignal), onReloginAuthorization, undefined);
     expect(relogged).toEqual(created);
     await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => ({
       key: secret.sshPrivateKey, refresh: "loginSession" in secret ? secret.loginSession?.refreshToken : undefined,
@@ -548,6 +549,57 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
+  it("does not renew an old native fallback after its profile switches to another authentication method", async () => {
+    const login = vi.fn();
+    const refresh = vi.fn();
+    const { service, vault, seen } = await authService({ login, refresh }, {
+      list: async () => [{ name: "default", region: "us-west-2", authentication: { method: "sso", canConsoleLogin: false } }],
+      credentialProvider: async () => async () => { throw new Error("expired SSO"); },
+      loginSessionArn: async () => null,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", loginSession: authSession("old"), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const snapshot = await service.getSnapshot();
+    expect(snapshot).toMatchObject({ ok: true, value: { credentials: [{ authentication: { method: "sso", canConsoleLogin: false } }] } });
+    expect((await vault.list())[0]).not.toHaveProperty("authentication");
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("configured sign-in method") });
+    expect(login).not.toHaveBeenCalled();
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
+    service.dispose();
+  });
+
+  it.each([null, "arn:aws:iam::999999999999:root"])("blocks stale fallback after a profile changes during refresh (%s)", async (changedArn) => {
+    const original = authSession("old", NOW.getTime() - 1);
+    let configuredArn: string | null = original.loginSessionArn;
+    const refresh = vi.fn(async () => { configuredArn = changedArn; return authSession("refreshed"); });
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh }, {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => { throw new Error("profile expired"); },
+      loginSessionArn: async () => configuredArn,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", loginSession: original, sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("profile authentication changed") });
+    expect(seen).toEqual([]);
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(original.refreshToken);
+    service.dispose();
+  });
+
+  it("rejects a profile authentication change while browser authorization is pending", async () => {
+    const session = authSession("new");
+    let configuredArn: string | null = session.loginSessionArn;
+    const login = vi.fn(async () => { configuredArn = null; return session; });
+    const { service, vault } = await authService({ login, refresh: vi.fn() }, {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => { throw new Error("expired"); },
+      loginSessionArn: async () => configuredArn,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("changed during sign-in") });
+    expect((await vault.list())[0]).not.toHaveProperty("loginSessionArn");
+    service.dispose();
+  });
+
   it("does not save a cancelled native login or recreate a credential deleted during reauthentication", async () => {
     const pending = authDeferred<AwsConsoleLoginSession>();
     const login = vi.fn(() => pending.promise);
@@ -570,7 +622,7 @@ describe("CloudDeploymentService", () => {
     service.dispose();
   });
 
-  it("prevents a stale refresh from overwriting a newer browser login and hides refresh errors", async () => {
+  it("uses a newer browser login when an older refresh finishes afterwards", async () => {
     const refreshing = authDeferred<AwsConsoleLoginSession>();
     const latest = authSession("latest");
     const refresh = vi.fn(() => refreshing.promise);
@@ -580,8 +632,85 @@ describe("CloudDeploymentService", () => {
     await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
     await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
     refreshing.resolve(authSession("stale"));
-    await expect(testing).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/AWS Login/u) });
+    await expect(testing).resolves.toMatchObject({ ok: true });
     await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(latest.refreshToken);
+    service.dispose();
+  });
+
+  it("keeps a successful browser login when background refresh rotated the same session", async () => {
+    const signingIn = authDeferred<AwsConsoleLoginSession>();
+    const login = vi.fn(() => signingIn.promise);
+    const refresh = vi.fn(async () => authSession("background"));
+    const { service, vault } = await authService({ login, refresh });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", NOW.getTime() + 120_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const pending = service.loginAwsCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("already in progress") });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(refresh).toHaveBeenCalledOnce();
+    signingIn.resolve(authSession("interactive"));
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe("interactive-refresh");
+    service.dispose();
+  });
+
+  it("refreshes early, retains unexpired credentials through a transient outage, and bounds retries", async () => {
+    let now = NOW.getTime();
+    const refresh = vi.fn()
+      .mockRejectedValueOnce(new AwsConsoleLoginError("network-unavailable", "AWS could not be reached. Try again."))
+      .mockResolvedValueOnce(authSession("fresh"));
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh }, undefined, { now: () => now });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", now + 240_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const results = await Promise.all([service.testCredential({ credentialId: CREDENTIAL_ID }), service.testCredential({ credentialId: CREDENTIAL_ID })]);
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(seen.map(({ secretAccessKey }) => secretAccessKey)).toEqual(["old-secret", "old-secret"]);
+    now += 29_000;
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(refresh).toHaveBeenCalledOnce();
+    now += 1_000;
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(seen.at(-1)?.secretAccessKey).toBe("fresh-secret");
+    service.dispose();
+  });
+
+  it("never falls back past the expiration safety margin during refresh backoff", async () => {
+    let now = NOW.getTime();
+    const refresh = vi.fn(async () => { throw new AwsConsoleLoginError("network-unavailable", "AWS could not be reached. Try again."); });
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh }, undefined, { now: () => now });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", now + 35_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    now += 20_000;
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("could not be reached") });
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(seen).toHaveLength(1);
+    service.dispose();
+  });
+
+  it.each(["login-required", "insufficient-permissions", "token-request-failed"] as const)("never reuses cached credentials after %s", async (code) => {
+    const refresh = vi.fn(async () => { throw new AwsConsoleLoginError(code, "AWS authorization could not be renewed."); });
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", NOW.getTime() + 120_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false });
+    expect(seen).toHaveLength(0);
+    service.dispose();
+  });
+
+  it("preserves safe token diagnostics and forwards login progress without storing it", async () => {
+    const progress = vi.fn();
+    const login = vi.fn<CloudAwsConsoleLogin["login"]>(async (_region, _signal, _pending, report) => {
+      report?.("exchanging-authorization");
+      throw new AwsConsoleLoginError("insufficient-permissions", "Check AWS sign-in permissions.", {
+        httpStatus: 403, serviceCode: "INSUFFICIENT_PERMISSIONS", requestId: "12345678-1234-1234-1234-123456789012",
+      });
+    });
+    const { service, vault } = await authService({ login, refresh: vi.fn() });
+    await expect(service.createCredential(nativeAuthInput(), undefined, 0, undefined, progress)).resolves.toMatchObject({
+      ok: false, error: expect.stringContaining("HTTP 403; INSUFFICIENT_PERMISSIONS; request 12345678-1234-1234-1234-123456789012"),
+    });
+    expect(progress).toHaveBeenCalledWith("exchanging-authorization");
+    expect(await vault.list()).toEqual([]);
     service.dispose();
   });
 
@@ -4824,11 +4953,11 @@ function authSession(name: string, expires = NOW.getTime() + 900_000): AwsConsol
 
 async function authService(awsConsoleLogin: CloudAwsConsoleLogin, awsProfileSource: CloudAwsProfileSource = {
   list: async () => [], credentialProvider: async () => { throw new Error("CLI unavailable"); },
-}) {
+}, options: { now?: () => number } = {}) {
   const deps = await dependencies();
   const seen: AwsEc2Credentials[] = [];
   const service = await CloudDeploymentService.create({ ...deps, rootDirectory, operatorConfigDirectory,
-    awsConsoleLogin, awsProfileSource, now: () => NOW.getTime(),
+    awsConsoleLogin, awsProfileSource, now: options.now ?? (() => NOW.getTime()),
     awsPermissionCheckerFactory: (connection) => ({ check: async () => {
       seen.push(typeof connection.credentials === "function" ? await connection.credentials() : connection.credentials);
       return fakeAwsPermissionChecker().check();

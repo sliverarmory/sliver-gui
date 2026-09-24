@@ -45,6 +45,7 @@ const AZURE_SUBSCRIPTION_ID = "11111111-2222-3333-4444-555555555555";
 const AZURE_TENANT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const KEY_TOKEN = "2b1cbf1a-6861-4db8-a39d-ffbdad8087f8";
 const LOGIN_SESSION_ARN = "arn:aws:iam::123456789012:user/operator";
+const CONSOLE_PROFILE_AUTHENTICATION = { method: "console-login", canConsoleLogin: true } as const;
 const AZURE_LOGIN_TOKEN = "c9b06d16-8a57-427f-a9de-c762c3f45f8c";
 const SSH_REVIEW_TOKEN = "r".repeat(43);
 
@@ -437,6 +438,7 @@ const api: CloudDeploymentAPI = {
       },
     };
   }),
+  openAwsConsole: vi.fn(async () => ({ ok: true as const })),
   loginAwsCredential: vi.fn(async () => ({ ok: true as const, value: { ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN } })),
   cancelAwsLogin: vi.fn(async () => ({ ok: true as const })),
   copyAwsLoginLink: vi.fn(async () => ({ ok: true as const })),
@@ -565,6 +567,7 @@ beforeEach(() => {
   vi.mocked(api.chooseSshPrivateKey).mockClear();
   vi.mocked(api.createCredential).mockClear();
   vi.mocked(api.loginAwsCredential).mockClear();
+  vi.mocked(api.openAwsConsole).mockReset().mockResolvedValue({ ok: true });
   vi.mocked(api.cancelAwsLogin).mockClear();
   vi.mocked(api.copyAwsLoginLink).mockClear();
   vi.mocked(api.copyInstanceId).mockReset();
@@ -846,7 +849,7 @@ describe("CloudDeploymentWindowApp", () => {
   });
 
   it("uses the provider state refreshed during login without issuing a duplicate remote request", async () => {
-    currentSnapshot = { ...runningCloudSnapshot(), credentials: [{ ...awsCredential, profileName: "operators" }],
+    currentSnapshot = { ...runningCloudSnapshot(), credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
       refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS login expired." }],
     };
     vi.mocked(api.refreshDeployments).mockResolvedValueOnce({ ok: false, error: "Provider refresh connection failed." });
@@ -854,7 +857,7 @@ describe("CloudDeploymentWindowApp", () => {
       currentSnapshot = { ...currentSnapshot, refreshErrors: [], state: { v: 1, revision: 10, deployments: [{
         ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
       }] } };
-      return { ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } };
+      return { ok: true, value: { ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION, loginSessionArn: LOGIN_SESSION_ARN } };
     });
     const user = userEvent.setup();
     renderCloudDeploymentApp();
@@ -862,6 +865,7 @@ describe("CloudDeploymentWindowApp", () => {
     const refreshMessage = screen.getByText("The AWS login expired.").closest<HTMLElement>('[role="status"]');
     if (!refreshMessage) throw new Error("Expected the AWS refresh error status");
     await user.click(within(refreshMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     const serverActions = await openServerActions(user, "range-control");
     expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
     expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
@@ -874,7 +878,7 @@ describe("CloudDeploymentWindowApp", () => {
   it.each(["resolved failure", "rejection"] as const)("ignores an older provider %s after a successful login snapshot", async (failure) => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      credentials: [{ ...awsCredential, profileName: "operators" }],
+      credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
       refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS login expired." }],
     };
     const provider = deferred<Awaited<ReturnType<CloudDeploymentAPI["refreshDeployments"]>>>();
@@ -885,7 +889,7 @@ describe("CloudDeploymentWindowApp", () => {
     }));
     vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => {
       currentSnapshot = { ...currentSnapshot, refreshErrors: [] };
-      return { ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } };
+      return { ok: true, value: { ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION, loginSessionArn: LOGIN_SESSION_ARN } };
     });
     const user = userEvent.setup();
     renderCloudDeploymentApp();
@@ -893,6 +897,7 @@ describe("CloudDeploymentWindowApp", () => {
     const refreshMessage = screen.getByText("The AWS login expired.").closest<HTMLElement>('[role="status"]');
     if (!refreshMessage) throw new Error("Expected the AWS refresh error status");
     await user.click(within(refreshMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     await waitFor(() => expect(screen.queryByText("The AWS login expired.")).not.toBeInTheDocument());
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
 
@@ -1127,14 +1132,171 @@ describe("CloudDeploymentWindowApp", () => {
     act(() => changedListener?.("snapshot"));
 
     await waitFor(() => {
-      expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("login");
+      expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("");
       expect(screen.queryByRole("combobox", { name: "AWS CLI Profile" })).not.toBeInTheDocument();
       expect(screen.queryByLabelText("Access Key ID")).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Sign In and Save" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign In to AWS Console" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Save Credential" })).toBeDisabled();
     });
   });
 
-  it("defaults to AWS Login without profiles and saves after browser sign-in", async () => {
+  it("validates before console sign-in and requires a separate confirmation before creating an AWS credential", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    expect(screen.getByText("Enter a credential label.")).toBeInTheDocument();
+    expect(api.openAwsConsole).not.toHaveBeenCalled();
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Console First");
+    await user.dblClick(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+
+    expect(api.openAwsConsole).toHaveBeenCalledExactlyOnceWith({ region: "us-east-1" });
+    expect(api.createCredential).not.toHaveBeenCalled();
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Complete AWS Login in your browser/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign In to AWS Console" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Opening the page or returning here does not verify your session/u)).toBeInTheDocument();
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(api.createCredential).not.toHaveBeenCalled();
+    await user.dblClick(screen.getByRole("button", { name: "Continue to Authorization" }));
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    await act(async () => login.resolve({ ok: true, value: awsCredential }));
+  });
+
+  it.each(["resolved failure", "rejection"] as const)("allows retry after a new AWS console opening %s without beginning authorization", async (failure) => {
+    if (failure === "rejection") vi.mocked(api.openAwsConsole).mockRejectedValueOnce(new Error("The console could not be opened."));
+    else vi.mocked(api.openAwsConsole).mockResolvedValueOnce({ ok: false, error: "The console could not be opened." });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Console Retry");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    expect(await screen.findByText("The console could not be opened.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue to Authorization" })).not.toBeInTheDocument();
+    expect(api.createCredential).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    expect(await screen.findByRole("button", { name: "Continue to Authorization" })).toBeEnabled();
+    expect(api.openAwsConsole).toHaveBeenCalledTimes(2);
+    expect(api.createCredential).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "region", "method", "provider", "unmount"] as const)("invalidates a delayed new AWS console opener after %s", async (change) => {
+    const opener = deferred<OperationResult>();
+    vi.mocked(api.openAwsConsole).mockReturnValueOnce(opener.promise);
+    const user = userEvent.setup();
+    const view = renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Delayed Console");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    expect(screen.getByText("Opening the AWS Console in your browser…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue to Authorization" })).not.toBeInTheDocument();
+    if (change === "cancel") await user.click(screen.getByRole("button", { name: "Cancel AWS Login" }));
+    if (change === "region") {
+      await user.clear(screen.getByRole("textbox", { name: "Default Region" }));
+      await user.type(screen.getByRole("textbox", { name: "Default Region" }), "cn-north-1");
+    }
+    if (change === "method") await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "access-keys");
+    if (change === "provider") await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "azure");
+    if (change === "unmount") view.unmount();
+    await act(async () => opener.resolve({ ok: true }));
+    expect(screen.queryByRole("button", { name: "Continue to Authorization" })).not.toBeInTheDocument();
+    expect(api.createCredential).not.toHaveBeenCalled();
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    if (change === "region") {
+      await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+      expect(api.openAwsConsole).toHaveBeenLastCalledWith({ region: "cn-north-1" });
+      expect(await screen.findByRole("button", { name: "Continue to Authorization" })).toBeEnabled();
+      expect(api.createCredential).not.toHaveBeenCalled();
+    }
+  });
+
+  it("ignores a rejected console opener after cancellation and a new ready console step", async () => {
+    const stale = deferred<OperationResult>();
+    vi.mocked(api.openAwsConsole).mockReturnValueOnce(stale.promise.then(() => { throw new Error("Stale browser opening failure."); }));
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Fresh Console");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(screen.getByRole("button", { name: "Cancel AWS Login" }));
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await act(async () => stale.resolve({ ok: true }));
+    expect(screen.queryByText("Stale browser opening failure.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue to Authorization" })).toBeEnabled();
+    expect(api.createCredential).not.toHaveBeenCalled();
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+  });
+
+  it("holds saved AWS renewal for explicit Continue while allowing local preparation cancellation", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.loginAwsCredential).mockReturnValueOnce(login.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.dblClick(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    expect(api.openAwsConsole).toHaveBeenCalledExactlyOnceWith({ region: awsCredential.defaultRegion });
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Test connection for Production AWS" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete Production AWS" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Cancel AWS Login" }));
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Continue to Authorization" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test connection for Production AWS" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+    await user.dblClick(screen.getByRole("button", { name: "Continue to Authorization" }));
+    expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
+    await act(async () => login.resolve({ ok: true, value: currentSnapshot.credentials[0]! }));
+  });
+
+  it("allows a saved credential to retry opening AWS Console without starting OAuth", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    vi.mocked(api.openAwsConsole).mockResolvedValueOnce({ ok: false, error: "The console could not be opened." });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    expect(await screen.findByText("The console could not be opened.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Continue to Authorization" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    expect(await screen.findByRole("button", { name: "Continue to Authorization" })).toBeEnabled();
+    expect(api.openAwsConsole).toHaveBeenCalledTimes(2);
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "region", "unmount"] as const)("invalidates a delayed saved AWS console opener after %s", async (change) => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const opener = deferred<OperationResult>();
+    vi.mocked(api.openAwsConsole).mockReturnValueOnce(opener.promise);
+    const user = userEvent.setup();
+    const view = renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    if (change === "cancel") await user.click(screen.getByRole("button", { name: "Cancel AWS Login" }));
+    if (change === "region") {
+      currentSnapshot = { ...currentSnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN, defaultRegion: "us-west-2" }] };
+      act(() => changedListener?.("snapshot"));
+      await screen.findByText(/us-west-2/u);
+    }
+    if (change === "unmount") view.unmount();
+    await act(async () => opener.resolve({ ok: true }));
+    expect(screen.queryByRole("button", { name: "Continue to Authorization" })).not.toBeInTheDocument();
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+    expect(api.cancelAwsLogin).not.toHaveBeenCalled();
+    if (change !== "unmount") expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeEnabled();
+  });
+
+  it("requires an explicit AWS authentication choice and saves after browser sign-in", async () => {
     const login = deferred<OperationResult<CloudCredentialSummary>>();
     vi.mocked(api.createCredential).mockImplementationOnce(async (input) => {
       capturedCredential = structuredClone(input);
@@ -1144,18 +1306,25 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
 
-    expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("login");
+    expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Save Credential" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Sign In to AWS Console" })).not.toBeInTheDocument();
     expect(api.createCredential).not.toHaveBeenCalled();
     expect(api.loginAwsCredential).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("Access Key ID")).not.toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
-    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    expect(screen.getByText(/IAM users and roles need SignInLocalDevelopmentAccess/u)).toBeInTheDocument();
+    expect(screen.getByText(/IAM Identity Center \(SSO\) uses an AWS CLI profile/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
 
     expect(await screen.findByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Label" })).toBeDisabled();
     expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
-    expect(screen.getByText(/If AWS shows 400 Bad Request/u)).toHaveTextContent("private browser window on this computer");
+    expect(screen.getByText(/If AWS shows 400 Bad Request/u)).toHaveTextContent("your console browser session may have expired");
+    expect(screen.getByText(/Start Over cancels this authorization/u)).toHaveTextContent("private browser window on this computer");
     await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
     expect(await screen.findByText("Sign-in link copied.")).toBeInTheDocument();
     expect(api.copyAwsLoginLink).toHaveBeenCalledExactlyOnceWith();
@@ -1177,6 +1346,132 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it("shows AWS browser progress and withdraws recovery when authorization arrives", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    const listeners = new Set<Parameters<NonNullable<CloudDeploymentAPI["onAwsLoginProgress"]>>[0]>();
+    const unsubscribe = vi.fn();
+    Object.defineProperty(window, "cloudDeployment", { configurable: true, value: {
+      ...api,
+      onAwsLoginProgress: (listener: Parameters<NonNullable<CloudDeploymentAPI["onAwsLoginProgress"]>>[0]) => {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); unsubscribe(); };
+      },
+    } });
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    const user = userEvent.setup();
+    const view = renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
+
+    expect(screen.getByText("Opening your browser for AWS Login…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Sign-in Link" })).toBeDisabled();
+    act(() => { for (const listener of listeners) listener({ phase: "waiting-for-authorization" }); });
+    expect(screen.getByText(/the app cannot see errors on the AWS browser page/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+    expect(await screen.findByText("Sign-in link copied.")).toBeInTheDocument();
+    act(() => { for (const listener of listeners) listener({ phase: "exchanging-authorization" }); });
+    expect(screen.getByText("AWS approval received. Completing sign-in…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Sign-in Link" })).toBeDisabled();
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/If AWS shows 400 Bad Request/u)).not.toBeInTheDocument();
+    expect(api.copyAwsLoginLink).toHaveBeenCalledOnce();
+    await act(async () => login.resolve({ ok: true, value: awsCredential }));
+    expect(await screen.findByText("Credential saved")).toBeInTheDocument();
+    view.unmount();
+    expect(listeners.size).toBe(0);
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it.each(["cancel-first", "attempt-first"] as const)("starts a fresh AWS Login only after cancellation and the previous attempt settle (%s)", async (order) => {
+    const first = deferred<OperationResult<CloudCredentialSummary>>();
+    const second = deferred<OperationResult<CloudCredentialSummary>>();
+    const cancel = deferred<OperationResult>();
+    vi.mocked(api.createCredential)
+      .mockImplementationOnce(async () => first.promise)
+      .mockImplementationOnce(async () => second.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => cancel.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Restart AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
+    await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
+    expect(await screen.findByText("Sign-in link copied.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start Over" }));
+    expect(api.cancelAwsLogin).toHaveBeenCalledOnce();
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    if (order === "cancel-first") {
+      await act(async () => cancel.resolve({ ok: true }));
+      expect(api.createCredential).toHaveBeenCalledOnce();
+      await act(async () => first.resolve({ ok: false, error: "AWS Login was cancelled." }));
+    } else {
+      await act(async () => first.resolve({ ok: false, error: "AWS Login was cancelled." }));
+      expect(api.createCredential).toHaveBeenCalledOnce();
+      expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toBeDisabled();
+      await act(async () => cancel.resolve({ ok: true }));
+    }
+
+    await waitFor(() => expect(api.openAwsConsole).toHaveBeenCalledTimes(2));
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Continue to Authorization" }));
+    expect(api.createCredential).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Credential not saved")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Label" })).toHaveValue("Restart AWS");
+    await act(async () => second.resolve({ ok: true, value: awsCredential }));
+    expect(await screen.findByText("Credential saved")).toBeInTheDocument();
+  });
+
+  it("cancels AWS Login before allowing another authentication method", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => {
+      login.resolve({ ok: false, error: "AWS Login was cancelled." });
+      return { ok: true };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Choose AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
+    await user.click(screen.getByRole("button", { name: "Choose Another Method" }));
+
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toHaveValue(""));
+    expect(screen.getByRole("button", { name: "Save Credential" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Label" })).toHaveValue("Choose AWS");
+    expect(screen.queryByText("Credential not saved")).not.toBeInTheDocument();
+    expect(api.cancelAwsLogin).toHaveBeenCalledOnce();
+    expect(api.createCredential).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the AWS attempt active when Start Over cannot cancel it", async () => {
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.cancelAwsLogin).mockResolvedValueOnce({ ok: false, error: "Cancellation was unavailable." });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.type(screen.getByRole("textbox", { name: "Label" }), "Pending AWS");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
+    await user.click(screen.getByRole("button", { name: "Start Over" }));
+
+    expect(await screen.findByText("Cancellation was unavailable.")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "AWS Authentication" })).toBeDisabled();
+    expect(api.createCredential).toHaveBeenCalledOnce();
+    await act(async () => login.resolve({ ok: false, error: "The original attempt expired." }));
+    expect(await screen.findByText("The original attempt expired.")).toBeInTheDocument();
+    expect(api.createCredential).toHaveBeenCalledOnce();
+  });
+
   it("cancels pending AWS Login without saving a credential or reporting a failure", async () => {
     const login = deferred<OperationResult<CloudCredentialSummary>>();
     vi.mocked(api.createCredential).mockImplementationOnce(async () => login.promise);
@@ -1188,12 +1483,14 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Cancelled AWS");
-    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     await user.click(await screen.findByRole("button", { name: "Cancel AWS Login" }));
 
     expect(api.cancelAwsLogin).toHaveBeenCalledOnce();
     await waitFor(() => expect(screen.queryByText(/Complete AWS Login in your browser/u)).not.toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Sign In and Save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Sign In to AWS Console" })).toBeEnabled();
     expect(screen.queryByText("Credential saved")).not.toBeInTheDocument();
     expect(screen.queryByText("Credential not saved")).not.toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledOnce();
@@ -1211,7 +1508,9 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
-    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
 
     expect(await screen.findByText("Sign-in link is not ready.")).toBeInTheDocument();
@@ -1239,7 +1538,9 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Browser AWS");
-    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     await user.click(screen.getByRole("button", { name: "Copy Sign-in Link" }));
     await user.click(screen.getByRole("button", { name: "Close Form" }));
     await waitFor(() => expect(api.cancelAwsLogin).toHaveBeenCalledOnce());
@@ -1259,6 +1560,7 @@ describe("CloudDeploymentWindowApp", () => {
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     expect(api.loginAwsCredential).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
 
     expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
     expect(screen.getByRole("button", { name: "Test connection for Production AWS" })).toBeDisabled();
@@ -1289,7 +1591,9 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Closing AWS");
-    await user.click(screen.getByRole("button", { name: "Sign In and Save" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "AWS Authentication" }), "login");
+    await user.click(screen.getByRole("button", { name: "Sign In to AWS Console" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     await user.click(screen.getByRole("button", { name: "Close Form" }));
 
     await waitFor(() => expect(api.cancelAwsLogin).toHaveBeenCalledOnce());
@@ -1313,6 +1617,7 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     const copyButton = screen.getByRole("button", { name: "Copy Sign-in Link" });
     await user.click(copyButton);
     await user.click(copyButton);
@@ -1328,6 +1633,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     expect(screen.queryByRole("button", { name: "Copy Sign-in Link" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     await act(async () => copy.resolve({ ok: true }));
 
     expect(screen.queryByText("Sign-in link copied.")).not.toBeInTheDocument();
@@ -1341,7 +1647,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("offers one AWS Login inside failed deployment errors without retrying lifecycle actions", async () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      credentials: [{ ...awsCredential, profileName: "operators" }],
+      credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
       state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
       refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS status session has expired." }],
     };
@@ -1353,6 +1659,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(within(refreshMessage).queryByRole("button", { name: /AWS Login for Production AWS/u })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
     await act(async () => embeddedLogin.click());
+    await act(async () => (await screen.findByRole("button", { name: "Continue to Authorization" })).click());
 
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
     expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
@@ -1365,7 +1672,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("hides the standalone AWS Login when the status refresh warning has its own login action", async () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      credentials: [{ ...awsCredential, profileName: "operators" }],
+      credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
       refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS status session has expired." }],
     };
     renderCloudDeploymentApp();
@@ -1378,7 +1685,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("keeps one AWS reauthentication alive when a snapshot clears its error message", async () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      credentials: [{ ...awsCredential, profileName: "operators" }],
+      credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
       state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
     };
     const login = deferred<OperationResult<CloudCredentialSummary>>();
@@ -1388,6 +1695,7 @@ describe("CloudDeploymentWindowApp", () => {
     const operationMessage = (await screen.findByText("The AWS session has expired.")).closest<HTMLElement>('[role="alert"]');
     if (!operationMessage) throw new Error("Expected the AWS deployment error alert");
     await user.click(within(operationMessage).getByRole("button", { name: "AWS Login for Production AWS from error message" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     expect(await screen.findByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
     const copyButton = within(operationMessage).getByRole("button", { name: "Copy Sign-in Link" });
     expect(screen.getAllByRole("button", { name: "Copy Sign-in Link" })).toHaveLength(1);
@@ -1408,7 +1716,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getAllByRole("button", { name: "Copy Sign-in Link" })).toHaveLength(1);
     expect(screen.getByText("Sign-in link copied.")).toBeInTheDocument();
     expect(api.copyAwsLoginLink).toHaveBeenCalledOnce();
-    await act(async () => login.resolve({ ok: true, value: { ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN } }));
+    await act(async () => login.resolve({ ok: true, value: { ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION, loginSessionArn: LOGIN_SESSION_ARN } }));
 
     expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
     expect(api.loginAwsCredential).toHaveBeenCalledExactlyOnceWith({ credentialId: CREDENTIAL_ID });
@@ -1430,6 +1738,7 @@ describe("CloudDeploymentWindowApp", () => {
     const view = renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
     expect(screen.getByText(/Complete AWS Login in your browser/u)).toBeInTheDocument();
 
     view.unmount();
@@ -1437,16 +1746,122 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.getSnapshot).toHaveBeenCalledOnce();
   });
 
-  it("reports an AWS Login error on the credential card and allows retry", async () => {
-    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, profileName: "operators" }] };
-    vi.mocked(api.loginAwsCredential).mockResolvedValueOnce({ ok: false, error: "Refresh this IAM Identity Center profile with the AWS CLI." });
+  it.each([
+    ["sso", "IAM Identity Center (SSO): refresh this profile"],
+    ["static", "This profile uses access keys."],
+    ["process", "This profile uses an external credential process."],
+    ["role", "This profile assumes a role."],
+    ["unknown", "Existing profile credentials are reused."],
+  ] as const)("offers appropriate renewal guidance for an AWS %s profile without console login", async (method, guidance) => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{
+      ...awsCredential,
+      profileName: "operators",
+      authentication: { method, canConsoleLogin: false },
+    }] };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+
+    expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
+    expect(screen.getByText((content) => content.startsWith(guidance))).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test connection for Production AWS" })).toBeEnabled();
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+  });
+
+  it("does not infer AWS profile renewal from a profile name or an old browser session", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{
+      ...awsCredential, profileName: "operators", loginSessionArn: LOGIN_SESSION_ARN,
+    }] };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+
+    expect(screen.queryByRole("button", { name: "AWS Login for Production AWS" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Renew this profile with the AWS CLI or your identity provider/u)).toBeInTheDocument();
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+  });
+
+  it("shows SSO profile renewal guidance on a deployment error without opening console login", async () => {
+    currentSnapshot = {
+      ...runningCloudSnapshot(),
+      credentials: [{ ...awsCredential, profileName: "sso", authentication: { method: "sso", canConsoleLogin: false } }],
+      refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The SSO session has expired." }],
+    };
+    renderCloudDeploymentApp();
+    const message = (await screen.findByText("The SSO session has expired.")).closest<HTMLElement>('[role="status"]');
+    if (!message) throw new Error("Expected the SSO status refresh warning");
+    expect(within(message).queryByRole("button", { name: /AWS Login/u })).not.toBeInTheDocument();
+    expect(within(message).getByText(/Console login cannot renew an SSO session/u)).toBeInTheDocument();
+    expect(api.loginAwsCredential).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel-first", "attempt-first"] as const)("starts over a saved AWS credential login after cancelling its previous attempt (%s)", async (order) => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const first = deferred<OperationResult<CloudCredentialSummary>>();
+    const second = deferred<OperationResult<CloudCredentialSummary>>();
+    const cancel = deferred<OperationResult>();
+    vi.mocked(api.loginAwsCredential)
+      .mockImplementationOnce(async () => first.promise)
+      .mockImplementationOnce(async () => second.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => cancel.promise);
     const user = userEvent.setup();
     renderCloudDeploymentApp();
     await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
     await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
+    await user.click(screen.getByRole("button", { name: "Start Over" }));
+    if (order === "cancel-first") {
+      await act(async () => cancel.resolve({ ok: true }));
+      expect(api.loginAwsCredential).toHaveBeenCalledOnce();
+      await act(async () => first.resolve({ ok: false, error: "AWS Login was cancelled." }));
+    } else {
+      await act(async () => first.resolve({ ok: false, error: "AWS Login was cancelled." }));
+      expect(api.loginAwsCredential).toHaveBeenCalledOnce();
+      expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeDisabled();
+      await act(async () => cancel.resolve({ ok: true }));
+    }
+
+    await waitFor(() => expect(api.openAwsConsole).toHaveBeenCalledTimes(2));
+    expect(api.loginAwsCredential).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Continue to Authorization" }));
+    expect(api.loginAwsCredential).toHaveBeenCalledTimes(2);
+    expect(api.cancelAwsLogin).toHaveBeenCalledOnce();
+    expect(screen.queryByText("AWS Login failed")).not.toBeInTheDocument();
+    await act(async () => second.resolve({ ok: true, value: currentSnapshot.credentials[0]! }));
+    expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
+  });
+
+  it("does not restart a saved AWS credential when authorization wins the cancellation race", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, loginSessionArn: LOGIN_SESSION_ARN }] };
+    const login = deferred<OperationResult<CloudCredentialSummary>>();
+    const cancel = deferred<OperationResult>();
+    vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => login.promise);
+    vi.mocked(api.cancelAwsLogin).mockImplementationOnce(async () => cancel.promise);
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
+    await user.click(screen.getByRole("button", { name: "Start Over" }));
+    await act(async () => login.resolve({ ok: true, value: currentSnapshot.credentials[0]! }));
+    expect(await screen.findByText("AWS Login complete")).toBeInTheDocument();
+    await act(async () => cancel.resolve({ ok: true }));
+
+    expect(api.loginAwsCredential).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Start Over" })).not.toBeInTheDocument();
+  });
+
+  it("reports an AWS Login error on the credential card and allows retry", async () => {
+    currentSnapshot = { ...emptySnapshot, credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }] };
+    vi.mocked(api.loginAwsCredential).mockResolvedValueOnce({ ok: false, error: "AWS denied console sign-in." });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("tab", { name: /Credentials/i }));
+    await user.click(screen.getByRole("button", { name: "AWS Login for Production AWS" }));
+    await user.click(await screen.findByRole("button", { name: "Continue to Authorization" }));
 
     expect(await screen.findByText("AWS Login failed")).toBeInTheDocument();
-    expect(screen.getByText("Refresh this IAM Identity Center profile with the AWS CLI.")).toBeInTheDocument();
+    expect(screen.getByText("AWS denied console sign-in.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "AWS Login for Production AWS" })).toBeEnabled();
     expect(api.getSnapshot).toHaveBeenCalledOnce();
   });

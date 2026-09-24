@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ResolvedAwsCloudCredentialInput,
+  AwsCredentialSecret,
   AwsConsoleLoginSession,
   AzureBrowserLoginSession,
   ResolvedAzureCloudCredentialInput,
@@ -113,6 +114,78 @@ describe("CloudCredentialVault", () => {
     await vault.delete(CREDENTIAL_ID);
     await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, { ...profile.secret, loginSession: first }, loginSessionFixture("resurrect"))).rejects.toThrow();
     expect(await vault.list()).toEqual([]);
+  });
+
+  it.each([true, false])("lets explicit AWS login replace background token rotation while preserving the current credential metadata (secure=%s)", async (secure) => {
+    const storage = new XorSafeStorage(secure);
+    const vault = createVault(storage);
+    const originalSession = loginSessionFixture("original");
+    const originalSecret = { ...awsProfileCredential().secret, loginSession: originalSession };
+    const original = await vault.create({ ...awsProfileCredential(), secret: originalSecret });
+    const rotated = loginSessionFixture("background-refresh");
+    await vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, rotated);
+    const explicitSession = { ...loginSessionFixture("explicit-login"), secretAccessKey: "fresh-browser-secret", sessionToken: "fresh-browser-token" };
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, explicitSession)).rejects.toThrow(/changed/u);
+    const updated = await vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, explicitSession, undefined, { allowSessionRotation: true });
+    expect(updated).toEqual(original);
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret)).resolves.toEqual({ ...originalSecret, loginSession: explicitSession });
+    expect(JSON.stringify(await vault.list())).not.toMatch(/original|background-refresh|explicit-login|fresh-browser/u);
+    if (secure) {
+      const reopened = new CloudCredentialVault(vaultRoot, storage);
+      await expect(reopened.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(explicitSession.refreshToken);
+      reopened.dispose();
+    }
+    await vault.delete(CREDENTIAL_ID);
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, explicitSession, undefined, { allowSessionRotation: true })).rejects.toThrow();
+    expect(await vault.list()).toEqual([]);
+    vault.dispose();
+  });
+
+  it.each(["profile", "source", "ssh-key", "ssh-passphrase", "identity", "region", "missing-session"])(
+    "rejects changed AWS %s when explicit login permits background token rotation", async (change) => {
+      const vault = createVault(new XorSafeStorage());
+      const originalSession = loginSessionFixture("original");
+      const originalSecret = { profileName: "generals-network", sshPrivateKey: PRIVATE_KEY, sshPassphrase: null, loginSession: originalSession };
+      let currentSecret: AwsCredentialSecret = { ...originalSecret, loginSession: loginSessionFixture("rotated") };
+      if (change === "profile") currentSecret = { ...currentSecret, profileName: "different-profile" };
+      if (change === "source") currentSecret = { sshPrivateKey: PRIVATE_KEY, sshPassphrase: null, loginSession: loginSessionFixture("rotated") };
+      if (change === "ssh-key") currentSecret = { ...currentSecret, sshPrivateKey: PRIVATE_KEY.replace("private material", "different private material") };
+      if (change === "ssh-passphrase") currentSecret = { ...currentSecret, sshPassphrase: "changed-passphrase" };
+      if (change === "identity") currentSecret = { ...currentSecret, loginSession: { ...originalSession, loginSessionArn: "arn:aws:iam::999999999999:root" } };
+      if (change === "region") currentSecret = { ...currentSecret, loginSession: { ...originalSession, region: "us-east-1" } };
+      if (change === "missing-session") currentSecret = { profileName: originalSecret.profileName, sshPrivateKey: PRIVATE_KEY, sshPassphrase: null };
+      await vault.create({ ...awsProfileCredential(), secret: currentSecret });
+      await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, loginSessionFixture("explicit"), undefined, { allowSessionRotation: true })).rejects.toThrow(/changed/u);
+      await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret)).resolves.toEqual(currentSecret);
+      vault.dispose();
+    },
+  );
+
+  it("rejects a changed replacement identity when allowing background AWS session rotation", async () => {
+    const vault = createVault(new XorSafeStorage());
+    const originalSecret = { ...awsProfileCredential().secret, loginSession: loginSessionFixture("original") };
+    await vault.create({ ...awsProfileCredential(), secret: originalSecret });
+    const otherIdentity = { ...loginSessionFixture("explicit"), loginSessionArn: "arn:aws:iam::999999999999:root" };
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, otherIdentity, undefined, { allowSessionRotation: true })).rejects.toThrow(/changed/u);
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret)).resolves.toEqual(originalSecret);
+    vault.dispose();
+  });
+
+  it("still checks cancellation at the atomic write when explicit AWS login tolerates token rotation", async () => {
+    const storage = new XorSafeStorage();
+    const vault = createVault(storage);
+    const originalSecret = { ...awsProfileCredential().secret, loginSession: loginSessionFixture("original") };
+    await vault.create({ ...awsProfileCredential(), secret: originalSecret });
+    const rotated = loginSessionFixture("background-refresh");
+    await vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, rotated);
+    const controller = new AbortController();
+    storage.encryptString.mockImplementationOnce((plaintext) => {
+      queueMicrotask(() => controller.abort());
+      return xor(Buffer.from(plaintext, "utf8"));
+    });
+    await expect(vault.updateAwsLoginSession(CREDENTIAL_ID, originalSecret, loginSessionFixture("cancelled"), controller.signal, { allowSessionRotation: true })).rejects.toThrow();
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(rotated.refreshToken);
+    vault.dispose();
   });
 
   it("rejects cancelled session updates before modifying the encrypted credential", async () => {

@@ -5572,34 +5572,48 @@ export class ConnectionRegistry {
       assertBinding();
       const filePath = selection.filePaths[0];
       if (selection.canceled || !filePath) throw new Error("Loot selection canceled");
-      const selected = await readBoundedRegularFile(filePath, {
-        label: "Loot source",
-        maxBytes: OPERATOR_DATA_LIMITS.artifactBytes,
-      });
+      return this.addLootFromPath(pool, assertBinding, filePath, input);
+    });
+  }
+
+  async addDroppedLoot(sender: WebContents, sourcePath: string): Promise<OperationResult<LootSummary>> {
+    return this.withPool(sender.id, (pool, assertBinding) =>
+      this.addLootFromPath(pool, assertBinding, sourcePath, { name: "", fileType: "auto" }));
+  }
+
+  private async addLootFromPath(
+    pool: BackendPool,
+    assertBinding: () => void,
+    filePath: string,
+    input: AddLootInput,
+  ): Promise<LootSummary> {
+    const selected = await readBoundedRegularFile(filePath, {
+      label: "Loot source",
+      maxBytes: OPERATOR_DATA_LIMITS.artifactBytes,
+    });
+    try {
+      assertBinding();
+      const fileName = safeArtifactFileName(basename(filePath));
+      const name = input.name.trim() ? requireKnownName(input.name, "Loot name") : fileName;
+      const fileType = input.fileType === "text" || (
+        input.fileType === "auto" && isProbablyTextLoot(selected.data)
+      )
+        ? clientpb.FileType.TEXT
+        : clientpb.FileType.BINARY;
+      const response = await pool.client.lootAdd(clientpb.Loot.create({
+        Name: name,
+        FileType: fileType,
+        File: commonpb.File.create({ Name: fileName, Data: selected.data }),
+      }));
       try {
         assertBinding();
-        const fileName = safeArtifactFileName(basename(filePath));
-        const name = input.name.trim() ? requireKnownName(input.name, "Loot name") : fileName;
-        const fileType = input.fileType === "text" || (
-          input.fileType === "auto" && isProbablyTextLoot(selected.data)
-        )
-          ? clientpb.FileType.TEXT
-          : clientpb.FileType.BINARY;
-        const response = await pool.client.lootAdd(clientpb.Loot.create({
-          Name: name,
-          FileType: fileType,
-          File: commonpb.File.create({ Name: fileName, Data: selected.data }),
-        }));
-        try {
-          assertBinding();
-          return lootSummary(response);
-        } finally {
-          response.File?.Data.fill(0);
-        }
+        return lootSummary(response);
       } finally {
-        selected.data.fill(0);
+        response.File?.Data.fill(0);
       }
-    });
+    } finally {
+      selected.data.fill(0);
+    }
   }
 
   async getLootDetail(contentsId: number, lootId: string): Promise<OperationResult<LootDetail>> {

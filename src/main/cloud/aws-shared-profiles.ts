@@ -23,6 +23,13 @@ export interface AwsSharedProfilePaths {
 export interface AwsSharedProfileSummary {
   readonly name: string;
   readonly region: string | null;
+  readonly authentication?: Pick<AwsSharedProfileAuthentication, "method" | "canConsoleLogin">;
+}
+
+export interface AwsSharedProfileAuthentication {
+  readonly method: "console-login" | "sso" | "static" | "process" | "role" | "unknown";
+  readonly canConsoleLogin: boolean;
+  readonly loginSessionArn?: string;
 }
 
 export interface AwsSharedProfileCredentials {
@@ -112,66 +119,37 @@ export class AwsSharedProfileSource {
   }
 
   async list(): Promise<readonly AwsSharedProfileSummary[]> {
-    let credentialsData: Buffer | undefined;
-    let configData: Buffer | undefined;
-    try {
-      [credentialsData, configData] = await Promise.all([
-        readOptionalProfileFile(this.paths.credentialsFilePath, "AWS shared credentials file", this.#maxFileBytes),
-        readOptionalProfileFile(this.paths.configFilePath, "AWS shared config file", this.#maxFileBytes),
-      ]);
-      const profiles = new Map<string, { region: string | null }>();
-      if (credentialsData) collectCredentialsProfiles(credentialsData, profiles);
-      if (configData) collectConfigProfiles(configData, profiles);
-      if (profiles.size > AWS_SHARED_PROFILE_MAX_COUNT) {
-        throw new Error("profile count exceeds limit");
-      }
-      return Object.freeze([...profiles.entries()]
-        .map(([name, { region }]) => Object.freeze({ name, region }))
-        .sort((left, right) => left.name.localeCompare(right.name)));
-    } catch (error) {
-      if (error instanceof AwsSharedProfileError) throw error;
-      throw new AwsSharedProfileError(
-        "profile-files-unavailable",
-        "AWS shared profile files could not be read safely.",
-      );
-    } finally {
-      credentialsData?.fill(0);
-      configData?.fill(0);
-    }
+    const { profiles, authenticationProfiles } = await readProfileMetadata(this.paths, this.#maxFileBytes);
+    return Object.freeze([...profiles.entries()]
+      .map(([name, { region }]) => {
+        const { method, canConsoleLogin } = classifyAuthentication(name, authenticationProfiles);
+        return Object.freeze({ name, region, authentication: Object.freeze({ method, canConsoleLogin }) });
+      })
+      .sort((left, right) => left.name.localeCompare(right.name)));
   }
 
-  /** Reads only the console-login identity needed to bind native reauthentication. */
-  async loginSessionArn(profileName: string): Promise<string | null> {
+  /** Classifies configuration without resolving credentials, executing a process, or opening a browser. */
+  async authentication(profileName: string): Promise<AwsSharedProfileAuthentication> {
     const selectedName = validateProfileName(profileName);
-    let data: Buffer | undefined;
-    try {
-      data = await readOptionalProfileFile(this.paths.configFilePath, "AWS shared config file", this.#maxFileBytes);
-      if (!data) return null;
-      let currentProfile: string | null = null;
-      let loginSessionArn: string | null = null;
-      forEachBoundedLine(data, (line) => {
-        const header = parseIniHeader(line);
-        if (header) {
-          currentProfile = profileNameFromConfigHeader(header);
-          return;
-        }
-        if (currentProfile !== selectedName) return;
-        const [start, end] = iniContentBounds(line);
-        const equals = line.indexOf(0x3d, start);
-        if (equals < start || equals >= end) return;
-        if (line.subarray(start, equals).toString("ascii").trim().toLowerCase() !== "login_session") return;
-        const valueBytes = line.subarray(equals + 1, end);
-        if (!isUtf8(valueBytes)) throw new Error("invalid login identity");
-        const value = valueBytes.toString("utf8").trim();
-        if (!isAwsLoginSessionArn(value)) throw new Error("invalid login identity");
-        if (loginSessionArn !== null && loginSessionArn !== value) throw new Error("ambiguous login identity");
-        loginSessionArn = value;
-      });
-      return loginSessionArn;
-    } catch {
+    const { profiles, authenticationProfiles } = await readProfileMetadata(this.paths, this.#maxFileBytes);
+    if (!profiles.has(selectedName)) {
+      throw new AwsSharedProfileError("profile-not-found", "The selected AWS profile is unavailable.");
+    }
+    const authentication = classifyAuthentication(selectedName, authenticationProfiles);
+    if (authentication.method === "unknown" && authenticationProfiles.get(selectedName)?.get("login_session") === null) {
       throw new AwsSharedProfileError("profile-files-unavailable", "The selected AWS profile login identity could not be read safely.");
-    } finally {
-      data?.fill(0);
+    }
+    return authentication;
+  }
+
+  /** Only a direct console profile may be renewed with native console sign-in. */
+  async loginSessionArn(profileName: string): Promise<string | null> {
+    try {
+      const authentication = await this.authentication(profileName);
+      return authentication.canConsoleLogin ? authentication.loginSessionArn ?? null : null;
+    } catch (error) {
+      if (error instanceof AwsSharedProfileError && error.code === "profile-not-found") return null;
+      throw error;
     }
   }
 
@@ -218,7 +196,7 @@ export class AwsSharedProfileSource {
       } catch {
         throw new AwsSharedProfileError(
           "credential-resolution-failed",
-          "Could not resolve the selected AWS profile. Use AWS Login or refresh its AWS CLI sign-in and try again.",
+          "Could not resolve the selected AWS profile. Renew it using its configured authentication method and try again.",
         );
       }
 
@@ -286,6 +264,159 @@ async function readOptionalProfileFile(path: string, label: string, maxBytes: nu
     if (isNodeError(error) && error.code === "ENOENT") return undefined;
     throw error;
   }
+}
+
+// Store only presence for secret-bearing settings. Values retained here are
+// profile references, credential-source names, and the public login identity.
+type AuthenticationProfile = Map<string, true | string | null>;
+const AUTHENTICATION_KEYS = new Set([
+  "aws_access_key_id", "aws_secret_access_key", "role_arn", "source_profile", "credential_source",
+  "web_identity_token_file", "credential_process", "sso_start_url", "sso_account_id", "sso_session",
+  "sso_region", "sso_role_name", "login_session",
+]);
+const AUTHENTICATION_VALUE_KEYS = new Set(["source_profile", "credential_source", "login_session"]);
+const SSO_KEYS = ["sso_start_url", "sso_account_id", "sso_session", "sso_region", "sso_role_name"];
+const CREDENTIAL_SOURCES = new Set(["Environment", "EcsContainer", "Ec2InstanceMetadata"]);
+const UNKNOWN_AUTHENTICATION: AwsSharedProfileAuthentication = Object.freeze({ method: "unknown", canConsoleLogin: false });
+
+async function readProfileMetadata(paths: AwsSharedProfilePaths, maxBytes: number): Promise<{
+  profiles: Map<string, { region: string | null }>;
+  authenticationProfiles: Map<string, AuthenticationProfile>;
+}> {
+  let credentialsData: Buffer | undefined;
+  let configData: Buffer | undefined;
+  try {
+    // Settle both reads so every successful buffer can be wiped even when its
+    // sibling read fails.
+    const [credentialsRead, configRead] = await Promise.allSettled([
+      readOptionalProfileFile(paths.credentialsFilePath, "AWS shared credentials file", maxBytes),
+      readOptionalProfileFile(paths.configFilePath, "AWS shared config file", maxBytes),
+    ]);
+    if (credentialsRead.status === "fulfilled") credentialsData = credentialsRead.value;
+    if (configRead.status === "fulfilled") configData = configRead.value;
+    if (credentialsRead.status === "rejected") throw credentialsRead.reason;
+    if (configRead.status === "rejected") throw configRead.reason;
+    const profiles = new Map<string, { region: string | null }>();
+    const authenticationProfiles = new Map<string, AuthenticationProfile>();
+    if (credentialsData) collectCredentialsProfiles(credentialsData, profiles);
+    if (configData) collectConfigProfiles(configData, profiles);
+    // The SDK merges individual keys, with shared credentials overriding config.
+    if (configData) collectAuthenticationProfiles(configData, "config", authenticationProfiles);
+    if (credentialsData) collectAuthenticationProfiles(credentialsData, "credentials", authenticationProfiles);
+    assertProfileCount(profiles);
+    return { profiles, authenticationProfiles };
+  } catch {
+    throw new AwsSharedProfileError("profile-files-unavailable", "AWS shared profile files could not be read safely.");
+  } finally {
+    credentialsData?.fill(0);
+    configData?.fill(0);
+  }
+}
+
+function collectAuthenticationProfiles(
+  data: Buffer,
+  kind: "config" | "credentials",
+  profiles: Map<string, AuthenticationProfile>,
+): void {
+  const fileProfiles = new Map<string, AuthenticationProfile>();
+  let currentProfile: string | null = null;
+  let inSubsection = false;
+  forEachBoundedLine(data, (line) => {
+    const [start, end] = iniContentBounds(line);
+    if (end - start >= 2 && line[start] === 0x5b && line[end - 1] === 0x5d) {
+      const headerBytes = line.subarray(start + 1, end - 1);
+      if (!isUtf8(headerBytes)) throw new Error("invalid profile header");
+      const header = headerBytes.toString("utf8");
+      if (header === "__proto__" || header === "profile __proto__") throw new Error("invalid profile header");
+      currentProfile = kind === "config"
+        ? profileNameFromConfigHeader(header)
+        : authenticationCredentialsProfileName(header);
+      inSubsection = false;
+      return;
+    }
+    if (!currentProfile || start === end) return;
+    const equals = line.indexOf(0x3d, start);
+    if (equals <= start || equals >= end) return;
+    const key = line.subarray(start, equals).toString("utf8").trim();
+    const [valueStart, valueEnd] = trimAsciiBoundsWithin(line, equals + 1, end);
+    if (valueStart === valueEnd) {
+      inSubsection = true;
+      return;
+    }
+    if (!isAsciiWhitespace(line[0])) inSubsection = false;
+    if (inSubsection || !AUTHENTICATION_KEYS.has(key)) return;
+    let profile = fileProfiles.get(currentProfile);
+    if (!profile) {
+      profile = new Map();
+      fileProfiles.set(currentProfile, profile);
+      assertProfileCount(fileProfiles);
+    }
+    if (!AUTHENTICATION_VALUE_KEYS.has(key)) {
+      profile.set(key, true);
+      return;
+    }
+    const valueBytes = line.subarray(valueStart, valueEnd);
+    if (!isUtf8(valueBytes)) throw new Error("invalid authentication metadata");
+    const value = valueBytes.toString("utf8");
+    if (key === "login_session") {
+      const previous = profile.get(key);
+      profile.set(key, isAwsLoginSessionArn(value) && (previous === undefined || previous === value) ? value : null);
+    } else {
+      profile.set(key, value);
+    }
+  });
+  for (const [name, profile] of fileProfiles) {
+    const merged = profiles.get(name) ?? new Map<string, true | string | null>();
+    for (const [key, value] of profile) merged.set(key, value);
+    profiles.set(name, merged);
+    assertProfileCount(profiles);
+  }
+}
+
+function authenticationCredentialsProfileName(header: string): string | null {
+  // The SDK namespaces prefixed sections even in the credentials file. Do not
+  // mistake a literal discovery name such as "profile example" for "example".
+  const prefixed = /^([\w-]+)\s(?:(['"])([\w@+.%:/-]+)\2|([\w@+.%:/-]+))$/u.exec(header);
+  if (prefixed) {
+    return ["profile", "sso-session", "services"].includes(prefixed[1] ?? "")
+      ? `${prefixed[1]}.${prefixed[3] ?? prefixed[4]}` : null;
+  }
+  return profileNameFromCredentialsHeader(header);
+}
+
+/** Mirrors the SDK INI provider's dispatch order without resolving any secrets. */
+function classifyAuthentication(
+  name: string,
+  profiles: ReadonlyMap<string, AuthenticationProfile>,
+  visited: Set<string> = new Set(),
+): AwsSharedProfileAuthentication {
+  const profile = profiles.get(name);
+  if (!profile || visited.size >= AWS_SHARED_PROFILE_MAX_COUNT) return UNKNOWN_AUTHENTICATION;
+  const staticKeys = profile.has("aws_access_key_id") && profile.has("aws_secret_access_key");
+  // A source profile containing static credentials terminates role resolution,
+  // even when it contains its own role settings (including a self-reference).
+  if (visited.size > 0 && staticKeys) return Object.freeze({ method: "static", canConsoleLogin: false });
+  if (visited.has(name)) return UNKNOWN_AUTHENTICATION;
+  const source = profile.get("source_profile");
+  const credentialSource = profile.get("credential_source");
+  const assumedRole = profile.has("role_arn") && ((typeof source === "string") !== (typeof credentialSource === "string"));
+  // The SDK also follows credential_source-only sections reached recursively.
+  const recursiveSource = visited.size > 0 && !profile.has("role_arn") && typeof credentialSource === "string";
+  if (assumedRole || recursiveSource) {
+    visited.add(name);
+    const sourceSupported = typeof source === "string"
+      ? classifyAuthentication(source, profiles, visited).method !== "unknown"
+      : typeof credentialSource === "string" && CREDENTIAL_SOURCES.has(credentialSource);
+    visited.delete(name);
+    return sourceSupported ? Object.freeze({ method: "role", canConsoleLogin: false }) : UNKNOWN_AUTHENTICATION;
+  }
+  if (staticKeys) return Object.freeze({ method: "static", canConsoleLogin: false });
+  if (profile.has("web_identity_token_file") && profile.has("role_arn")) return Object.freeze({ method: "role", canConsoleLogin: false });
+  if (profile.has("credential_process")) return Object.freeze({ method: "process", canConsoleLogin: false });
+  if (SSO_KEYS.some((key) => profile.has(key))) return Object.freeze({ method: "sso", canConsoleLogin: false });
+  const loginSessionArn = profile.get("login_session");
+  if (typeof loginSessionArn === "string") return Object.freeze({ method: "console-login", canConsoleLogin: true, loginSessionArn });
+  return UNKNOWN_AUTHENTICATION;
 }
 
 function collectCredentialsProfiles(

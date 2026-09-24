@@ -86,6 +86,7 @@ import {
 import type { AwsDeploymentOptions, AzureDeploymentOptions } from "../../shared/cloud-provider-inventory";
 import type { SshHostKeyReview } from "../../shared/ssh-contracts";
 import type {
+  AwsLoginProgress,
   CloudCredentialTestResult,
   CloudDeploymentAPI,
   CloudDeploymentChangeScope,
@@ -2234,6 +2235,8 @@ function DeploymentCard({
       isEmbedded={embedded}
       showDetails={embedded || !hasEmbeddedCloudLogin}
     />
+  ) : embedded && showCloudLogin && credential?.provider === "aws" && "profileName" in credential ? (
+    <p className="text-sm leading-6">{awsProfileRenewalGuidance(credential.authentication)}</p>
   ) : null;
 
   return (
@@ -2868,6 +2871,8 @@ function InstanceStatusRefreshMessage({
       isDisabled={false}
       isEmbedded={Boolean(message)}
     />
+  ) : credential?.provider === "aws" && "profileName" in credential ? (
+    <p className="text-sm leading-6">{awsProfileRenewalGuidance(credential.authentication)}</p>
   ) : null;
 
   if (message) {
@@ -4917,8 +4922,8 @@ function CredentialForm({
 }): React.JSX.Element {
   const initialAwsProfile = preferredAwsProfile(awsProfiles);
   const [provider, setProvider] = useState<CloudProvider>("aws");
-  const [awsAuthentication, setAwsAuthentication] = useState<"login" | "profile" | "access-keys">(
-    initialAwsProfile ? "profile" : "login",
+  const [awsAuthentication, setAwsAuthentication] = useState<"" | "login" | "profile" | "access-keys">(
+    initialAwsProfile ? "profile" : "",
   );
   const [awsProfileName, setAwsProfileName] = useState(initialAwsProfile?.name ?? "");
   const [label, setLabel] = useState("");
@@ -4950,13 +4955,21 @@ function CredentialForm({
   const [isSaving, setIsSaving] = useState(false);
   const [isCancellingLogin, setIsCancellingLogin] = useState(false);
   const awsLoginLink = useAwsLoginLinkCopy(api);
+  const awsLoginProgress = useAwsLoginProgress(api);
+  const awsConsoleSession = useAwsConsoleSessionPreparation(api);
+  const saveInFlight = useRef(false);
   const loginPending = useRef(false);
   const loginCancelled = useRef(false);
+  const [awsRecoveryAction, setAwsRecoveryAction] = useState<"restart" | "choose" | null>(null);
   const azureDiscoverySequence = useRef(0);
   const azureLoginSequence = useRef(0);
   const azureFlowActive = useRef(false);
   const azureModeChosen = useRef(false);
   const selectedAzureAccounts = azureAuthentication === "login" ? azureLoginSession?.subscriptions ?? [] : azureAccounts;
+
+  useEffect(() => {
+    awsConsoleSession.reset();
+  }, [provider, awsAuthentication, defaultRegion, awsConsoleSession.reset]);
 
   useEffect(() => () => {
     if (loginPending.current) void api.cancelAwsLogin().catch(() => undefined);
@@ -4970,7 +4983,7 @@ function CredentialForm({
 
     const profile = preferredAwsProfile(awsProfiles);
     if (!profile) {
-      setAwsAuthentication("login");
+      setAwsAuthentication("");
       setAwsProfileName("");
       return;
     }
@@ -5086,13 +5099,7 @@ function CredentialForm({
     }
   };
 
-  const save = async (): Promise<void> => {
-    if (isSaving || isAzureLoginPending || isCancellingAzureLogin) return;
-    if (provider === "azure" && azureAuthentication === "login" && !azureLoginSession) {
-      setError("Complete Azure Login before saving the credential.");
-      return;
-    }
-    const validation = validateCredential({
+  const currentValidation = (): string | null => validateCredential({
       provider,
       label,
       sshUsername,
@@ -5107,10 +5114,31 @@ function CredentialForm({
       azureTenantId,
       defaultLocation,
     });
+
+  const beginConsoleSignIn = async (): Promise<void> => {
+    if (saveInFlight.current || isSaving || isCancellingLogin || provider !== "aws" || awsAuthentication !== "login") return;
+    const validation = currentValidation();
     if (validation) {
       setError(validation);
       return;
     }
+    setError(null);
+    await awsConsoleSession.open(defaultRegion.trim());
+  };
+
+  const save = async (): Promise<void> => {
+    if (saveInFlight.current || isSaving || isCancellingLogin || isAzureLoginPending || isCancellingAzureLogin) return;
+    if (provider === "azure" && azureAuthentication === "login" && !azureLoginSession) {
+      setError("Complete Azure Login before saving the credential.");
+      return;
+    }
+    const validation = currentValidation();
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    if (provider === "aws" && awsAuthentication === "login" && !awsConsoleSession.consume(defaultRegion.trim())) return;
+    saveInFlight.current = true;
     const sshPrivateKeyToken = keySelection?.token ?? null;
 
     const input: CreateCloudCredentialInput = provider === "aws"
@@ -5162,11 +5190,13 @@ function CredentialForm({
     setIsSaving(true);
     awsLoginLink.reset();
     loginPending.current = provider === "aws" && awsAuthentication === "login";
+    if (loginPending.current) awsLoginProgress.begin();
     loginCancelled.current = false;
     setError(null);
     try {
       const result = await api.createCredential(input);
       loginPending.current = false;
+      awsLoginProgress.reset();
       awsLoginLink.reset();
       if (input.provider === "azure" && "authentication" in input) {
         azureFlowActive.current = false;
@@ -5190,6 +5220,7 @@ function CredentialForm({
         if (azureFlowActive.current) void discardAzureLogin();
       }
       loginPending.current = false;
+      awsLoginProgress.reset();
       awsLoginLink.reset();
       scrubCredentialInput(input);
       setAccessKeyId("");
@@ -5198,10 +5229,11 @@ function CredentialForm({
       setSshPassphrase("");
       setKeySelection(null);
       setIsSaving(false);
+      saveInFlight.current = false;
     }
   };
 
-  const cancelLogin = async (): Promise<void> => {
+  const cancelLogin = async (recoveryAction?: "restart" | "choose"): Promise<void> => {
     if (!loginPending.current || isCancellingLogin) return;
     setIsCancellingLogin(true);
     loginCancelled.current = true;
@@ -5210,6 +5242,8 @@ function CredentialForm({
       if (!result.ok) {
         loginCancelled.current = false;
         setError(result.error ?? "AWS Login could not be cancelled.");
+      } else {
+        setAwsRecoveryAction(recoveryAction ?? null);
       }
     } catch (caught) {
       loginCancelled.current = false;
@@ -5219,6 +5253,15 @@ function CredentialForm({
     }
   };
 
+  useEffect(() => {
+    if (isSaving || isCancellingLogin || !awsRecoveryAction) return;
+    const action = awsRecoveryAction;
+    setAwsRecoveryAction(null);
+    setError(null);
+    if (action === "choose") setAwsAuthentication("");
+    else void beginConsoleSignIn();
+  }, [isSaving, isCancellingLogin, awsRecoveryAction]);
+
   return (
     <Card>
       <Card.Header>
@@ -5227,16 +5270,43 @@ function CredentialForm({
       </Card.Header>
       <Card.Content className="space-y-5">
         {error ? <InlineMessage tone="danger" title="Credential not saved" detail={error} /> : null}
+        {provider === "aws" && awsAuthentication === "login" && (awsConsoleSession.isOpening || awsConsoleSession.isReady || awsConsoleSession.error) ? (
+          <div className="space-y-3">
+            <AwsConsoleSessionInstructions controller={awsConsoleSession} />
+            <div className="flex flex-wrap gap-2">
+              {awsConsoleSession.isReady ? <Button variant="primary" onPress={() => void save()}>Continue to Authorization</Button> : null}
+              {awsConsoleSession.isOpening || awsConsoleSession.isReady ? (
+                <Button variant="tertiary" onPress={awsConsoleSession.reset}>Cancel AWS Login</Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {isSaving && loginPending.current ? (
           <div role="status" className="space-y-2 text-sm text-muted">
-            <p>Complete AWS Login in your browser, then return here. This window will save the credential when sign-in finishes.</p>
-            <AwsLoginRecoveryDetails controller={awsLoginLink} />
+            <AwsLoginStatus phase={awsLoginProgress.phase} />
+            <p>This window will save the credential when sign-in finishes.</p>
+            {awsLoginProgress.phase === "waiting-for-authorization" ? <AwsLoginRecoveryDetails controller={awsLoginLink} /> : null}
+            <div className="flex flex-wrap gap-2 pt-2 text-foreground">
+              <Button isPending={isCancellingLogin} variant="tertiary" onPress={() => void cancelLogin()}>Cancel AWS Login</Button>
+              <Button
+                isDisabled={isCancellingLogin || awsLoginProgress.phase !== "waiting-for-authorization"}
+                isPending={awsLoginLink.isCopying}
+                variant="outline"
+                onPress={() => {
+                  if (loginPending.current && !isCancellingLogin && awsLoginProgress.phase === "waiting-for-authorization") void awsLoginLink.copy();
+                }}
+              >
+                Copy Sign-in Link
+              </Button>
+              <Button isDisabled={isCancellingLogin} variant="outline" onPress={() => void cancelLogin("restart")}>Start Over</Button>
+              <Button isDisabled={isCancellingLogin} variant="tertiary" onPress={() => void cancelLogin("choose")}>Choose Another Method</Button>
+            </div>
           </div>
         ) : null}
         {isAzureLoginPending ? (
           <p role="status" className="text-sm text-muted">Complete Azure Login in your browser, then return here to choose a subscription.</p>
         ) : null}
-        <fieldset className="space-y-5" disabled={isSaving || isAzureLoginPending || isCancellingAzureLogin}>
+        <fieldset className="space-y-5" disabled={isSaving || isCancellingLogin || isAzureLoginPending || isCancellingAzureLogin}>
         <div className="grid gap-4 md:grid-cols-2">
           <CloudNativeSelect
             label="Provider"
@@ -5249,7 +5319,7 @@ function CredentialForm({
                 setSshUsername(value === "aws" ? "ubuntu" : "azureuser");
                 if (value === "aws") {
                   const profile = preferredAwsProfile(awsProfiles);
-                  setAwsAuthentication(profile ? "profile" : "login");
+                  setAwsAuthentication(profile ? "profile" : "");
                   setAwsProfileName(profile?.name ?? "");
                   setDefaultRegion(profile?.region ?? "us-east-1");
                 } else {
@@ -5297,16 +5367,19 @@ function CredentialForm({
                 ? "Resolve credentials from the selected local AWS CLI profile at use time."
                 : awsAuthentication === "login"
                   ? "Sign in with your AWS console account in your browser. No AWS CLI required."
-                  : "Store access keys in Cloud Deployment's encrypted credential vault."}
+                  : awsAuthentication === "access-keys"
+                    ? "Store access keys in Cloud Deployment's encrypted credential vault."
+                    : "Choose the sign-in method your AWS identity uses."}
               label="AWS Authentication"
               value={awsAuthentication}
+              placeholder="Choose an authentication method"
               options={[
                 { value: "login", label: "AWS Login" },
                 ...(awsProfiles.length > 0 ? [{ value: "profile", label: "AWS CLI Profile" }] : []),
                 { value: "access-keys", label: "Access Keys" },
               ]}
               onChange={(value) => {
-                if (value !== "login" && value !== "profile" && value !== "access-keys") return;
+                if (value !== "" && value !== "login" && value !== "profile" && value !== "access-keys") return;
                 setAwsAuthentication(value);
                 if (value !== "access-keys") {
                   setAccessKeyId("");
@@ -5347,19 +5420,22 @@ function CredentialForm({
                 <CloudTextField autoComplete="new-password" description="Optional for temporary STS credentials." label="Session Token" type="password" value={sessionToken} onChange={setSessionToken} />
               </>
             ) : awsAuthentication === "profile" ? (
-              <p className="self-end text-sm leading-6 text-muted">
-                Existing profile credentials are reused. Refresh IAM Identity Center (SSO) sessions with the AWS CLI. AWS Login uses your AWS console account; interactive MFA profile prompts are not supported.
+              <p className="text-sm leading-6 text-muted md:col-span-2">
+                {awsProfileRenewalGuidance(awsProfiles.find(({ name }) => name === awsProfileName)?.authentication)}
               </p>
-            ) : (
-              <p className="self-end text-sm leading-6 text-muted">AWS Login opens your browser when you choose Sign In and Save. Your AWS password stays with AWS. For IAM Identity Center (SSO), use an existing AWS CLI profile.</p>
-            )}
+            ) : awsAuthentication === "login" ? (
+              <div className="space-y-2 text-sm leading-6 text-muted md:col-span-2">
+                <p>For IAM users and supported federated console identities. IAM users and roles need SignInLocalDevelopmentAccess permission. Your AWS password stays with AWS.</p>
+                <p>Sign in to the intended AWS account in your browser first, then return here and continue to app authorization. IAM Identity Center (SSO) uses an AWS CLI profile.</p>
+              </div>
+            ) : null}
             {awsProfileDiscoveryError ? (
               <div className="md:col-span-2">
                 <InlineMessage tone="warning" title="AWS profiles unavailable" detail={awsProfileDiscoveryError} />
               </div>
             ) : awsProfiles.length === 0 ? (
               <div className="md:col-span-2">
-                <InlineMessage tone="info" title="No local AWS profiles found" detail="Continue with AWS Login or access keys." />
+                <InlineMessage tone="info" title="No local AWS profiles found" detail="For IAM Identity Center (SSO), configure and sign in to an AWS CLI profile, then reopen this form. For a console identity, choose AWS Login; otherwise use access keys." />
               </div>
             ) : null}
           </div>
@@ -5466,26 +5542,17 @@ function CredentialForm({
       <Card.Footer className="flex flex-wrap justify-end gap-2">
         {isAzureLoginPending || isCancellingAzureLogin ? (
           <Button isPending={isCancellingAzureLogin} variant="tertiary" onPress={() => void discardAzureLogin()}>Cancel Azure Login</Button>
-        ) : isSaving && loginPending.current ? (
-          <>
-            <Button isPending={isCancellingLogin} variant="tertiary" onPress={() => void cancelLogin()}>Cancel AWS Login</Button>
-            <Button
-              isDisabled={isCancellingLogin}
-              isPending={awsLoginLink.isCopying}
-              variant="outline"
-              onPress={() => {
-                if (loginPending.current && !isCancellingLogin) void awsLoginLink.copy();
-              }}
-            >
-              Copy Sign-in Link
-            </Button>
-          </>
-        ) : (
+        ) : !(isSaving && loginPending.current) ? (
           <Button isDisabled={isSaving} variant="tertiary" onPress={onCancel}>Cancel</Button>
-        )}
-        <Button isDisabled={isAzureLoginPending || isCancellingAzureLogin || (provider === "azure" && azureAuthentication === "login" && !azureLoginSession)} isPending={isSaving} variant="primary" onPress={() => void save()}>
-          {provider === "aws" && awsAuthentication === "login" ? "Sign In and Save" : "Save Credential"}
-        </Button>
+        ) : null}
+        {!(provider === "aws" && awsAuthentication === "login" && (awsConsoleSession.isOpening || awsConsoleSession.isReady || isSaving)) ? (
+          <Button isDisabled={isCancellingLogin || isAzureLoginPending || isCancellingAzureLogin || (provider === "aws" && !awsAuthentication) || (provider === "azure" && azureAuthentication === "login" && !azureLoginSession)} isPending={isSaving} variant="primary" onPress={() => {
+            if (provider === "aws" && awsAuthentication === "login") void beginConsoleSignIn();
+            else void save();
+          }}>
+            {provider === "aws" && awsAuthentication === "login" ? "Sign In to AWS Console" : "Save Credential"}
+          </Button>
+        ) : null}
       </Card.Footer>
     </Card>
   );
@@ -5586,6 +5653,9 @@ function CredentialCard({
           <DeploymentDetail label="Added" value={new Date(credential.createdAt).toLocaleDateString()} />
           <DeploymentDetail label="Credential ID" value={credential.id} mono />
         </dl>
+        {credential.provider === "aws" && "profileName" in credential && !loginCredential ? (
+          <p className="mt-4 text-sm leading-6 text-muted">{awsProfileRenewalGuidance(credential.authentication)}</p>
+        ) : null}
         {testResult ? <CredentialPermissionSummary api={api} result={testResult} onHide={() => setTestResult(null)} /> : null}
         {loginCredential && (cloudLogin.isPending || cloudLogin.error) ? (
           <div className="mt-4">
@@ -5603,8 +5673,8 @@ function CredentialCard({
           {loginCredential ? (
             <Button
               aria-label={`${credential.provider === "aws" ? "AWS Login" : "Azure Login"} for ${credential.label}`}
-              isDisabled={pending !== null && !cloudLogin.isPending}
-              isPending={cloudLogin.isPending}
+              isDisabled={pending !== null}
+              isPending={cloudLogin.isAuthorizing || cloudLogin.awsConsoleSession.isOpening}
               onPress={() => void cloudLogin.login()}
             >
               {credential.provider === "aws" ? "AWS Login" : "Azure Login"}
@@ -5642,7 +5712,23 @@ function CredentialCard({
 function canLoginCloudCredential(
   credential: CloudCredentialSummary | undefined,
 ): credential is CloudCredentialSummary {
-  return credential?.provider === "azure" || (credential?.provider === "aws" && ("profileName" in credential || "loginSessionArn" in credential));
+  if (credential?.provider === "azure") return true;
+  if (credential?.provider !== "aws") return false;
+  if ("profileName" in credential) return credential.authentication?.canConsoleLogin === true;
+  return "loginSessionArn" in credential;
+}
+
+function awsProfileRenewalGuidance(authentication: AwsCliProfileSummary["authentication"]): string {
+  switch (authentication?.method) {
+    case "sso": return "IAM Identity Center (SSO): refresh this profile with the AWS CLI, then test the connection. Console login cannot renew an SSO session.";
+    case "console-login": return authentication.canConsoleLogin
+      ? "This console-login profile supports AWS Login with its configured identity. Existing valid profile credentials are reused."
+      : "Refresh this console-login profile with the AWS CLI, then test the connection.";
+    case "static": return "This profile uses access keys. Update its AWS credentials when needed, then test the connection.";
+    case "process": return "This profile uses an external credential process. Renew access through that tool, then test the connection.";
+    case "role": return "This profile assumes a role. Renew its source credentials with the AWS CLI or your identity provider, then test the connection. Interactive MFA prompts are unavailable here.";
+    default: return "Existing profile credentials are reused. Renew this profile with the AWS CLI or your identity provider, then test the connection. Interactive MFA prompts are unavailable here.";
+  }
 }
 
 function awsCredentialAuthenticationLabel(credential: Extract<CloudCredentialSummary, { readonly provider: "aws" }>): string {
@@ -5663,6 +5749,133 @@ interface AwsLoginLinkCopyController {
   readonly error: string | null;
   readonly copy: () => Promise<void>;
   readonly reset: () => void;
+}
+
+type AwsLoginPhase = AwsLoginProgress["phase"];
+
+interface AwsConsoleSessionPreparationController {
+  readonly isOpening: boolean;
+  readonly isReady: boolean;
+  readonly error: string | null;
+  readonly open: (region: string) => Promise<boolean>;
+  readonly consume: (region: string) => boolean;
+  readonly reset: () => void;
+}
+
+function useAwsConsoleSessionPreparation(api: CloudDeploymentAPI): AwsConsoleSessionPreparationController {
+  const [phase, setPhase] = useState<"idle" | "opening" | "ready">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const currentPhase = useRef(phase);
+  const region = useRef<string | null>(null);
+  const sequence = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      sequence.current += 1;
+      currentPhase.current = "idle";
+      region.current = null;
+    };
+  }, [api]);
+
+  const reset = useCallback(() => {
+    sequence.current += 1;
+    currentPhase.current = "idle";
+    region.current = null;
+    if (mounted.current) {
+      setPhase("idle");
+      setError(null);
+    }
+  }, []);
+
+  const open = useCallback(async (selectedRegion: string): Promise<boolean> => {
+    if (!mounted.current || currentPhase.current === "opening") return false;
+    const generation = ++sequence.current;
+    currentPhase.current = "opening";
+    region.current = selectedRegion;
+    setPhase("opening");
+    setError(null);
+    try {
+      const result = await api.openAwsConsole({ region: selectedRegion });
+      if (!mounted.current || sequence.current !== generation) return false;
+      if (!result.ok) {
+        currentPhase.current = "idle";
+        region.current = null;
+        setPhase("idle");
+        setError(result.error ?? "The AWS Console could not be opened. Try again.");
+        return false;
+      }
+      currentPhase.current = "ready";
+      setPhase("ready");
+      return true;
+    } catch (caught) {
+      if (mounted.current && sequence.current === generation) {
+        currentPhase.current = "idle";
+        region.current = null;
+        setPhase("idle");
+        setError(errorMessage(caught));
+      }
+      return false;
+    }
+  }, [api]);
+
+  const consume = useCallback((selectedRegion: string): boolean => {
+    if (!mounted.current || currentPhase.current !== "ready" || region.current !== selectedRegion) return false;
+    reset();
+    return true;
+  }, [reset]);
+
+  return { isOpening: phase === "opening", isReady: phase === "ready", error, open, consume, reset };
+}
+
+function AwsConsoleSessionInstructions({ controller }: { readonly controller: AwsConsoleSessionPreparationController }): React.JSX.Element {
+  return (
+    <div role="status" className="space-y-2 text-sm leading-6 text-muted">
+      <p className="font-medium text-foreground">Sign in to AWS Console</p>
+      {controller.isOpening ? <p>Opening the AWS Console in your browser…</p> : null}
+      <ol className="list-decimal space-y-1 pl-5">
+        <li>Sign in to the intended AWS account and reach the console. Federated users should use their usual organization sign-in in the same browser and profile.</li>
+        <li>Return here and choose Continue to Authorization. Keep using the same browser and profile for app authorization.</li>
+      </ol>
+      <p>Opening the page or returning here does not verify your session. Continue confirms that you have signed in.</p>
+      {controller.error ? <p className="text-danger">{controller.error}</p> : null}
+    </div>
+  );
+}
+
+function useAwsLoginProgress(api: CloudDeploymentAPI): {
+  readonly phase: AwsLoginPhase | null;
+  readonly begin: () => void;
+  readonly reset: () => void;
+} {
+  const [phase, setPhase] = useState<AwsLoginPhase | null>(null);
+  const active = useRef(false);
+  useEffect(() => {
+    const unsubscribe = api.onAwsLoginProgress?.((progress) => {
+      if (active.current) setPhase(progress?.phase ?? null);
+    });
+    return () => {
+      active.current = false;
+      unsubscribe?.();
+    };
+  }, [api]);
+  const begin = useCallback(() => {
+    active.current = true;
+    setPhase(api.onAwsLoginProgress ? "opening-browser" : "waiting-for-authorization");
+  }, [api]);
+  const reset = useCallback(() => {
+    active.current = false;
+    setPhase(null);
+  }, []);
+  return { phase, begin, reset };
+}
+
+function AwsLoginStatus({ phase }: { readonly phase: AwsLoginPhase | null }): React.JSX.Element {
+  if (phase === "opening-browser") return <p>Opening your browser for AWS Login…</p>;
+  if (phase === "exchanging-authorization") return <p>AWS approval received. Completing sign-in…</p>;
+  if (phase === null) return <p>Finishing AWS Login…</p>;
+  return <p>Complete AWS Login in your browser, then return here. Waiting for AWS to return authorization; the app cannot see errors on the AWS browser page.</p>;
 }
 
 function useAwsLoginLinkCopy(api: CloudDeploymentAPI): AwsLoginLinkCopyController {
@@ -5721,7 +5934,8 @@ function useAwsLoginLinkCopy(api: CloudDeploymentAPI): AwsLoginLinkCopyControlle
 function AwsLoginRecoveryDetails({ controller }: { readonly controller: AwsLoginLinkCopyController }): React.JSX.Element {
   return (
     <>
-      <p>If AWS shows 400 Bad Request, copy the sign-in link and open it in a private browser window on this computer.</p>
+      <p>If AWS shows 400 Bad Request after account selection, your console browser session may have expired. Start Over, sign in to the intended account until the AWS Console opens, then return and Continue to Authorization.</p>
+      <p>Start Over cancels this authorization before opening the console. You can also copy this attempt's sign-in link into a private browser window on this computer while the attempt remains open. Private browsing does not resolve missing permissions.</p>
       {controller.isCopied ? <p>Sign-in link copied.</p> : null}
       {controller.error ? <p className="text-danger">{controller.error}</p> : null}
     </>
@@ -5730,12 +5944,17 @@ function AwsLoginRecoveryDetails({ controller }: { readonly controller: AwsLogin
 
 interface CloudLoginActionController {
   readonly awsLoginLink: AwsLoginLinkCopyController;
+  readonly awsLoginPhase: AwsLoginPhase | null;
+  readonly awsConsoleSession: AwsConsoleSessionPreparationController;
+  readonly isAuthorizing: boolean;
+  readonly continueAuthorization: () => Promise<void>;
   readonly error: string | null;
   readonly isCancelling: boolean;
   readonly isPending: boolean;
   readonly cancel: () => Promise<void>;
   readonly copyAwsLoginLink: () => Promise<void>;
   readonly login: () => Promise<void>;
+  readonly restart: () => Promise<void>;
 }
 
 function useCloudLoginActionController({
@@ -5757,37 +5976,54 @@ function useCloudLoginActionController({
   const [isCancelling, setIsCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const awsLoginLink = useAwsLoginLinkCopy(api);
+  const awsLoginProgress = useAwsLoginProgress(api);
+  const awsConsoleSession = useAwsConsoleSessionPreparation(api);
+  const preparing = useRef(false);
+  const credentialRegion = credential?.provider === "aws" ? credential.defaultRegion : null;
   const active = useRef(false);
   const cancelling = useRef(false);
   const cancelled = useRef(false);
   const mounted = useRef(true);
   const attempt = useRef(0);
+  const [restartRequested, setRestartRequested] = useState(false);
+  const succeededAttempt = useRef<number | null>(null);
   const onPendingChangeRef = useRef(onPendingChange);
   onPendingChangeRef.current = onPendingChange;
 
   useEffect(() => {
     mounted.current = true;
+    setIsPending(false);
+    setIsCancelling(false);
+    setRestartRequested(false);
+    setError(null);
+    awsLoginProgress.reset();
     return () => {
       mounted.current = false;
       attempt.current += 1;
       const wasActive = active.current;
+      const wasPreparing = preparing.current;
       active.current = false;
+      preparing.current = false;
+      awsConsoleSession.reset();
       cancelling.current = false;
       awsLoginLink.reset();
       if (wasActive && credential) {
         void (credential.provider === "aws" ? api.cancelAwsLogin() : api.cancelAzureLogin()).catch(() => undefined);
-        onPendingChangeRef.current(false);
       }
+      if (wasActive || wasPreparing) onPendingChangeRef.current(false);
     };
-  }, [api, awsLoginLink.reset, credential?.id, credential?.provider]);
+  }, [api, awsLoginLink.reset, awsLoginProgress.reset, awsConsoleSession.reset, credential?.id, credential?.provider, credentialRegion]);
 
-  const login = async (): Promise<void> => {
-    if (!credential || active.current || cancelling.current || isDisabled) return;
+  const continueAuthorization = async (): Promise<void> => {
+    if (!credential || active.current || cancelling.current || (isDisabled && !preparing.current)) return;
+    if (credential.provider === "aws" && (!preparing.current || !awsConsoleSession.consume(credential.defaultRegion))) return;
+    preparing.current = false;
     const currentAttempt = attempt.current + 1;
     attempt.current = currentAttempt;
     active.current = true;
     cancelled.current = false;
     awsLoginLink.reset();
+    if (credential.provider === "aws") awsLoginProgress.begin();
     setIsPending(true);
     setError(null);
     onPendingChange(true);
@@ -5798,11 +6034,14 @@ function useCloudLoginActionController({
         : api.loginAzureCredential({ credentialId: credential.id }));
       if (!mounted.current || attempt.current !== currentAttempt) return;
       active.current = false;
+      awsLoginProgress.reset();
       awsLoginLink.reset();
       if (!result.ok || !result.value) {
         if (!cancelled.current) setError(result.error ?? `${loginName} could not be completed.`);
         return;
       }
+      succeededAttempt.current = currentAttempt;
+      setRestartRequested(false);
       onFeedback({ tone: "success", title: `${loginName} complete`, detail: `${credential.label} is signed in.` });
       await onRefresh();
     } catch (caught) {
@@ -5810,19 +6049,48 @@ function useCloudLoginActionController({
     } finally {
       if (attempt.current === currentAttempt) {
         active.current = false;
-        cancelling.current = false;
+        awsLoginProgress.reset();
         awsLoginLink.reset();
         if (mounted.current) {
           setIsPending(false);
-          setIsCancelling(false);
-          onPendingChange(false);
+          if (!cancelling.current) {
+            setIsCancelling(false);
+            onPendingChange(false);
+          }
         }
       }
     }
   };
 
-  const cancel = async (): Promise<void> => {
-    if (!credential || !active.current || cancelling.current) return;
+  const login = async (): Promise<void> => {
+    if (!credential || active.current || preparing.current || cancelling.current || isDisabled) return;
+    if (credential.provider !== "aws") {
+      await continueAuthorization();
+      return;
+    }
+    const currentAttempt = ++attempt.current;
+    preparing.current = true;
+    setError(null);
+    onPendingChange(true);
+    const opened = await awsConsoleSession.open(credential.defaultRegion);
+    if (!mounted.current || attempt.current !== currentAttempt) return;
+    if (!opened) {
+      preparing.current = false;
+      onPendingChange(false);
+    }
+  };
+
+  const cancel = async (restart = false): Promise<void> => {
+    if (!credential || cancelling.current) return;
+    if (preparing.current) {
+      attempt.current += 1;
+      preparing.current = false;
+      awsConsoleSession.reset();
+      setError(null);
+      onPendingChange(false);
+      return;
+    }
+    if (!active.current) return;
     const currentAttempt = attempt.current;
     cancelling.current = true;
     cancelled.current = true;
@@ -5833,22 +6101,47 @@ function useCloudLoginActionController({
       if (!result.ok && mounted.current && attempt.current === currentAttempt) {
         cancelled.current = false;
         setError(result.error ?? `${loginName} could not be cancelled.`);
+      } else if (result.ok && mounted.current && attempt.current === currentAttempt && succeededAttempt.current !== currentAttempt) {
+        setRestartRequested(restart);
       }
     } catch (caught) {
       cancelled.current = false;
       if (mounted.current && attempt.current === currentAttempt) setError(errorMessage(caught));
     } finally {
-      if (mounted.current && attempt.current === currentAttempt) setIsCancelling(false);
-      cancelling.current = false;
+      if (mounted.current && attempt.current === currentAttempt) {
+        cancelling.current = false;
+        setIsCancelling(false);
+        if (!active.current) onPendingChange(false);
+      }
     }
   };
 
+  useEffect(() => {
+    if (!isPending && !isCancelling && !isDisabled && restartRequested) {
+      setRestartRequested(false);
+      void login();
+    }
+  }, [isPending, isCancelling, isDisabled, restartRequested]);
+
   const copyAwsLoginLink = async (): Promise<void> => {
-    if (credential?.provider !== "aws" || !active.current || cancelling.current) return;
+    if (credential?.provider !== "aws" || !active.current || cancelling.current || awsLoginProgress.phase !== "waiting-for-authorization") return;
     await awsLoginLink.copy();
   };
 
-  return { awsLoginLink, cancel, copyAwsLoginLink, error, isCancelling, isPending, login };
+  return {
+    awsLoginLink,
+    awsLoginPhase: awsLoginProgress.phase,
+    awsConsoleSession,
+    cancel,
+    continueAuthorization,
+    copyAwsLoginLink,
+    error: error ?? awsConsoleSession.error,
+    isAuthorizing: isPending,
+    isCancelling,
+    isPending: isPending || awsConsoleSession.isOpening || awsConsoleSession.isReady,
+    login,
+    restart: () => cancel(true),
+  };
 }
 
 function CloudLoginAction({
@@ -5870,15 +6163,18 @@ function CloudLoginAction({
 
   return (
     <div className="space-y-3">
-      {showDetails && controller.error ? isEmbedded ? (
+      {showDetails && (controller.awsConsoleSession.isOpening || controller.awsConsoleSession.isReady || controller.awsConsoleSession.error) ? (
+        <AwsConsoleSessionInstructions controller={controller.awsConsoleSession} />
+      ) : null}
+      {showDetails && controller.error && !controller.awsConsoleSession.error ? isEmbedded ? (
         <p className="text-sm leading-5 opacity-80">
           <span className="font-semibold">{loginName} failed.</span> {controller.error}
         </p>
       ) : <InlineMessage tone="danger" title={`${loginName} failed`} detail={controller.error} /> : null}
-      {showDetails && controller.isPending ? credential.provider === "aws" ? (
+      {showDetails && controller.isAuthorizing ? credential.provider === "aws" ? (
         <div {...(isEmbedded ? {} : { role: "status" })} className="space-y-2 text-sm text-muted">
-          <p>Complete {loginName} in your browser, then return here.</p>
-          <AwsLoginRecoveryDetails controller={controller.awsLoginLink} />
+          <AwsLoginStatus phase={controller.awsLoginPhase} />
+          {controller.awsLoginPhase === "waiting-for-authorization" ? <AwsLoginRecoveryDetails controller={controller.awsLoginLink} /> : null}
         </div>
       ) : (
         <p {...(isEmbedded ? {} : { role: "status" })} className="text-sm text-muted">
@@ -5886,10 +6182,10 @@ function CloudLoginAction({
         </p>
       ) : null}
       {showLoginButton || (showDetails && controller.isPending) ? <div className="flex flex-wrap gap-2">
-        {showLoginButton ? <Button
+        {showLoginButton && !controller.awsConsoleSession.isOpening && !controller.awsConsoleSession.isReady ? <Button
           aria-label={`${loginName} for ${credential.label}${isEmbedded ? " from error message" : ""}`}
           isDisabled={(isDisabled && !controller.isPending) || (controller.isPending && !showDetails)}
-          isPending={controller.isPending && showDetails}
+          isPending={controller.isAuthorizing && showDetails}
           size="sm"
           variant="outline"
           onPress={() => void controller.login()}
@@ -5898,13 +6194,17 @@ function CloudLoginAction({
         </Button> : null}
         {showDetails && controller.isPending ? (
           <>
+            {controller.awsConsoleSession.isReady ? <Button size="sm" variant="primary" onPress={() => void controller.continueAuthorization()}>Continue to Authorization</Button> : null}
             <Button isPending={controller.isCancelling} size="sm" variant="tertiary" onPress={() => void controller.cancel()}>
               Cancel {loginName}
             </Button>
-            {credential.provider === "aws" ? (
-              <Button isDisabled={controller.isCancelling} isPending={controller.awsLoginLink.isCopying} size="sm" variant="outline" onPress={() => void controller.copyAwsLoginLink()}>
-                Copy Sign-in Link
-              </Button>
+            {credential.provider === "aws" && controller.isAuthorizing ? (
+              <>
+                <Button isDisabled={controller.isCancelling || controller.awsLoginPhase !== "waiting-for-authorization"} isPending={controller.awsLoginLink.isCopying} size="sm" variant="outline" onPress={() => void controller.copyAwsLoginLink()}>
+                  Copy Sign-in Link
+                </Button>
+                <Button isDisabled={controller.isCancelling} size="sm" variant="outline" onPress={() => void controller.restart()}>Start Over</Button>
+              </>
             ) : null}
           </>
         ) : null}
@@ -6717,7 +7017,7 @@ function validateCredential(values: {
   readonly label: string;
   readonly sshUsername: string;
   readonly defaultRegion: string;
-  readonly awsAuthentication: "login" | "profile" | "access-keys";
+  readonly awsAuthentication: "" | "login" | "profile" | "access-keys";
   readonly awsProfileName: string;
   readonly awsProfiles: readonly AwsCliProfileSummary[];
   readonly accessKeyId: string;
@@ -6730,6 +7030,7 @@ function validateCredential(values: {
   if (!values.label.trim()) return "Enter a credential label.";
   if (!values.sshUsername.trim()) return "Enter the Linux SSH username.";
   if (values.provider === "aws") {
+    if (!values.awsAuthentication) return "Choose an AWS authentication method.";
     if (!isAwsRegion(values.defaultRegion.trim())) return "Enter a valid AWS region.";
     if (values.awsAuthentication === "profile") {
       if (!values.awsProfileName || !values.awsProfiles.some(({ name }) => name === values.awsProfileName)) {

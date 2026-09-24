@@ -20,15 +20,36 @@ const TOKEN_TIMEOUT_MS = 30_000;
 export type AwsConsoleLoginErrorCode =
   | "invalid-input" | "cancelled" | "timeout" | "browser-open-failed"
   | "callback-unavailable" | "authorization-failed" | "insufficient-permissions"
-  | "login-required" | "token-request-failed";
+  | "login-required" | "token-request-failed" | "network-unavailable" | "service-unavailable";
+
+export type AwsConsoleLoginProgressPhase = "opening-browser" | "waiting-for-authorization" | "exchanging-authorization";
+
+export type AwsConsoleLoginFailureCategory =
+  | "transient" | "session-invalid" | "permission-denied" | "authorization-invalid"
+  | "cancelled" | "configuration" | "unexpected-response";
+
+export type AwsConsoleLoginServiceErrorCode =
+  | "INSUFFICIENT_PERMISSIONS" | "TOKEN_EXPIRED" | "USER_CREDENTIALS_CHANGED"
+  | "AUTHCODE_EXPIRED" | "INVALID_REQUEST";
+
+/** Only fixed service codes, HTTP status and UUID request IDs are retained. */
+export interface AwsConsoleLoginDiagnostics {
+  readonly httpStatus?: number;
+  readonly serviceCode?: AwsConsoleLoginServiceErrorCode;
+  readonly requestId?: string;
+}
 
 export class AwsConsoleLoginError extends Error {
   readonly code: AwsConsoleLoginErrorCode;
+  readonly category: AwsConsoleLoginFailureCategory;
+  readonly diagnostics: AwsConsoleLoginDiagnostics;
 
-  constructor(code: AwsConsoleLoginErrorCode, message: string) {
+  constructor(code: AwsConsoleLoginErrorCode, message: string, diagnostics: AwsConsoleLoginDiagnostics = {}) {
     super(message);
     this.name = "AwsConsoleLoginError";
     this.code = code;
+    this.category = failureCategory(code);
+    this.diagnostics = Object.freeze({ ...diagnostics });
   }
 }
 
@@ -64,6 +85,7 @@ export class AwsConsoleLogin {
     region: string,
     signal?: AbortSignal,
     onPendingAuthorization?: (url: string | null) => void,
+    onProgress?: (phase: AwsConsoleLoginProgressPhase) => void,
   ): Promise<AwsConsoleLoginSession> {
     const endpoint = signInEndpoint(region);
     const scope = deadline(signal, this.#timeoutMs);
@@ -107,12 +129,15 @@ export class AwsConsoleLogin {
       // A browser callback can settle while its launcher is still pending.
       void codeReceived.catch(() => undefined);
       try {
+        onProgress?.("opening-browser");
         await abortable(this.#openExternal(authorizationUrl.toString()), scope.signal);
       } catch {
         throwIfAborted(scope.signal);
         throw new AwsConsoleLoginError("browser-open-failed", "Could not open the AWS sign-in page in your browser.");
       }
+      if (authorizationPending) onProgress?.("waiting-for-authorization");
       const code = await codeReceived;
+      onProgress?.("exchanging-authorization");
       const output = await this.#requestToken(endpoint, privateKeyPem, {
         clientId: CLIENT_ID,
         grantType: "authorization_code",
@@ -167,10 +192,11 @@ export class AwsConsoleLogin {
     signal: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const scope = deadline(signal, TOKEN_TIMEOUT_MS);
+    let diagnostics: AwsConsoleLoginDiagnostics = {};
     try {
       throwIfAborted(scope.signal);
       const url = `${endpoint}/v1/token`;
-      const response = await abortable(this.#fetch(url, {
+      const options: RequestInit = {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -182,19 +208,36 @@ export class AwsConsoleLogin {
         cache: "no-store",
         credentials: "omit",
         signal: scope.signal,
-      }), scope.signal);
+      };
+      let response: Response;
+      try {
+        response = await abortable(this.#fetch(url, options), scope.signal);
+      } catch {
+        throwIfAborted(scope.signal);
+        throw networkUnavailable();
+      }
+      diagnostics = responseDiagnostics(response);
       if (response.redirected || (response.url && response.url !== url)) {
         void response.body?.cancel().catch(() => undefined);
         throw tokenRequestFailed();
       }
-      const output = await readBoundedJson(response, scope.signal);
-      if (!response.ok) throw serviceError(output["error"]);
+      let output: Record<string, unknown>;
+      try {
+        output = await readBoundedJson(response, scope.signal);
+      } catch (error) {
+        throwIfAborted(scope.signal);
+        if (isTransientStatus(response.status)) throw serviceUnavailable(diagnostics);
+        throw error;
+      }
+      if (!response.ok) throw serviceError(output["error"], diagnostics);
       throwIfAborted(scope.signal);
       return output;
     } catch (error) {
       throwIfAborted(scope.signal);
-      if (error instanceof AwsConsoleLoginError) throw error;
-      throw tokenRequestFailed();
+      if (error instanceof AwsConsoleLoginError) {
+        throw new AwsConsoleLoginError(error.code, error.message, { ...diagnostics, ...error.diagnostics });
+      }
+      throw tokenRequestFailed(diagnostics);
     } finally {
       scope.dispose();
     }
@@ -357,7 +400,13 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
       throw tokenRequestFailed();
     }
     for (;;) {
-      const chunk = await abortable(reader.read(), signal);
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await abortable(reader.read(), signal);
+      } catch {
+        throwIfAborted(signal);
+        throw networkUnavailable();
+      }
       if (chunk.done) { complete = true; break; }
       total += chunk.value.byteLength;
       if (total > MAX_RESPONSE_BYTES) throw tokenRequestFailed();
@@ -483,13 +532,64 @@ function invalidInput(): AwsConsoleLoginError {
   return new AwsConsoleLoginError("invalid-input", "The AWS sign-in region or session is invalid or unsupported.");
 }
 
-function tokenRequestFailed(): AwsConsoleLoginError {
-  return new AwsConsoleLoginError("token-request-failed", "AWS could not complete the sign-in request. Please try again.");
+function failureCategory(code: AwsConsoleLoginErrorCode): AwsConsoleLoginFailureCategory {
+  switch (code) {
+    case "timeout":
+    case "network-unavailable":
+    case "service-unavailable": return "transient";
+    case "login-required": return "session-invalid";
+    case "insufficient-permissions": return "permission-denied";
+    case "authorization-failed": return "authorization-invalid";
+    case "cancelled": return "cancelled";
+    case "invalid-input":
+    case "browser-open-failed":
+    case "callback-unavailable": return "configuration";
+    case "token-request-failed": return "unexpected-response";
+  }
 }
 
-function serviceError(code: unknown): AwsConsoleLoginError {
-  if (code === "INSUFFICIENT_PERMISSIONS") return new AwsConsoleLoginError("insufficient-permissions", "This AWS identity needs the SignInLocalDevelopmentAccess policy to sign in.");
-  if (code === "TOKEN_EXPIRED" || code === "USER_CREDENTIALS_CHANGED") return new AwsConsoleLoginError("login-required", "Your AWS session has expired. Sign in to AWS again.");
-  if (code === "AUTHCODE_EXPIRED") return new AwsConsoleLoginError("authorization-failed", "The AWS authorization has expired. Sign in to AWS again.");
-  return tokenRequestFailed();
+function tokenRequestFailed(diagnostics: AwsConsoleLoginDiagnostics = {}): AwsConsoleLoginError {
+  return new AwsConsoleLoginError("token-request-failed", "AWS could not complete the sign-in request. Please try again.", diagnostics);
+}
+
+function networkUnavailable(): AwsConsoleLoginError {
+  return new AwsConsoleLoginError("network-unavailable", "AWS sign-in could not reach the service. Check your connection and try again.");
+}
+
+function serviceUnavailable(diagnostics: AwsConsoleLoginDiagnostics): AwsConsoleLoginError {
+  return new AwsConsoleLoginError("service-unavailable", "AWS sign-in is temporarily unavailable. Please try again shortly.", diagnostics);
+}
+
+function isTransientStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function responseDiagnostics(response: Response): AwsConsoleLoginDiagnostics {
+  const requestId = response.headers.get("x-amzn-requestid");
+  return {
+    httpStatus: response.status,
+    ...(requestId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requestId) ? { requestId } : {}),
+  };
+}
+
+function allowedServiceCode(code: unknown): AwsConsoleLoginServiceErrorCode | undefined {
+  switch (code) {
+    case "INSUFFICIENT_PERMISSIONS":
+    case "TOKEN_EXPIRED":
+    case "USER_CREDENTIALS_CHANGED":
+    case "AUTHCODE_EXPIRED":
+    case "INVALID_REQUEST": return code;
+    default: return undefined;
+  }
+}
+
+function serviceError(code: unknown, response: AwsConsoleLoginDiagnostics): AwsConsoleLoginError {
+  const serviceCode = allowedServiceCode(code);
+  const diagnostics = { ...response, ...(serviceCode ? { serviceCode } : {}) };
+  if (isTransientStatus(response.httpStatus ?? 0)) return serviceUnavailable(diagnostics);
+  if (code === "INSUFFICIENT_PERMISSIONS") return new AwsConsoleLoginError("insufficient-permissions", "This AWS identity needs the SignInLocalDevelopmentAccess policy to sign in.", diagnostics);
+  if (code === "TOKEN_EXPIRED" || code === "USER_CREDENTIALS_CHANGED") return new AwsConsoleLoginError("login-required", "Your AWS session has expired. Sign in to AWS again.", diagnostics);
+  if (code === "AUTHCODE_EXPIRED") return new AwsConsoleLoginError("authorization-failed", "The AWS authorization has expired. Sign in to AWS again.", diagnostics);
+  if (code === "INVALID_REQUEST") return new AwsConsoleLoginError("authorization-failed", "AWS rejected the sign-in request. Start a new sign-in and try again.", diagnostics);
+  return tokenRequestFailed(diagnostics);
 }

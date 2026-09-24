@@ -61,6 +61,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function lootCountResult(total: number) {
+  return {
+    ok: true as const,
+    value: { items: [], page: { limit: 1, total, truncated: total > 1 } },
+  };
+}
+
 function installSliverAPI(
   listSavedConfigs: SliverDesktopAPI["listSavedConfigs"],
   initialSnapshot = disconnectedSnapshot(),
@@ -78,6 +85,7 @@ function installSliverAPI(
     deleteScript: vi.fn(failedOperation),
     getScriptRuntime: vi.fn(failedOperation),
     setScriptEditorDirty: vi.fn(async () => ({ ok: true as const })),
+    addDroppedLoot: vi.fn(failedOperation),
     uploadDroppedSessionFile: vi.fn(failedOperation),
     onScriptsChanged: vi.fn(() => vi.fn()),
     onScriptEditorRequested: vi.fn(() => vi.fn()),
@@ -1280,11 +1288,116 @@ describe("Sidebar navigation", () => {
     const data = screen.getByRole("treegrid", { name: "Data navigation" });
     await user.click(within(data).getByRole("row", { name: "Loot" }));
     expect(await screen.findByRole("heading", { name: "Loot" })).toBeInTheDocument();
-    await waitFor(() => expect(api.listLoot).toHaveBeenCalledOnce());
+    await waitFor(() => {
+      expect(api.listLoot).toHaveBeenCalledWith({ fileType: "all", limit: 1 });
+      expect(api.listLoot).toHaveBeenCalledWith({ fileType: "all", limit: 100 });
+    });
 
     await user.click(within(data).getByRole("row", { name: "Credentials" }));
     expect(await screen.findByRole("heading", { name: "Credentials" })).toBeInTheDocument();
     await waitFor(() => expect(api.listCredentials).toHaveBeenCalledOnce());
+  });
+
+  it("shows the unfiltered loot total and refreshes it for loot events and stream recovery", async () => {
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      epoch: 7,
+      incarnation: 3,
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+    };
+    snapshot.eventStream = { status: "connected", attempt: 1 };
+    let publishSnapshot!: (next: SliverSnapshot) => void;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      snapshot,
+      (listener) => { publishSnapshot = listener; },
+    );
+    let total = 4;
+    vi.mocked(api.listLoot).mockImplementation(async () => lootCountResult(total));
+
+    render(<App />);
+    const lootRow = () => within(screen.getByRole("treegrid", { name: "Data navigation", hidden: true }))
+      .getByRole("row", { name: "Loot", hidden: true });
+    await waitFor(() => expect(within(lootRow()).getByText("4")).toBeInTheDocument());
+    expect(api.listLoot).toHaveBeenCalledWith({ fileType: "all", limit: 1 });
+
+    total = 5;
+    const added = {
+      ...snapshot,
+      recentEvents: [{ id: "loot-1", type: "loot-added", at: "2026-09-23T12:00:00.000Z", message: "Loot added", isError: false }],
+    };
+    act(() => publishSnapshot(added));
+    await waitFor(() => expect(within(lootRow()).getByText("5")).toBeInTheDocument());
+
+    total = 0;
+    const removed = {
+      ...added,
+      recentEvents: [{ id: "loot-2", type: "loot-removed", at: "2026-09-23T12:01:00.000Z", message: "Loot removed", isError: false }],
+    };
+    act(() => publishSnapshot(removed));
+    await waitFor(() => expect(within(lootRow()).queryByText("5")).not.toBeInTheDocument());
+    expect(lootRow().querySelector(".sidebar__menu-chip")).toBeNull();
+
+    act(() => publishSnapshot({ ...removed, eventStream: { status: "retrying", attempt: 2 } }));
+    total = 6;
+    act(() => publishSnapshot({ ...removed, eventStream: { status: "connected", attempt: 2 } }));
+    await waitFor(() => expect(within(lootRow()).getByText("6")).toBeInTheDocument());
+
+    act(() => publishSnapshot(disconnectedSnapshot()));
+    expect(lootRow().querySelector(".sidebar__menu-chip")).toBeNull();
+  });
+
+  it("clears the loot count on connection switch and ignores an old in-flight result", async () => {
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      epoch: 7,
+      incarnation: 3,
+      server: "first.example.test:31337",
+      operator: "alice",
+      configName: "First",
+    };
+    let publishSnapshot!: (next: SliverSnapshot) => void;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      snapshot,
+      (listener) => { publishSnapshot = listener; },
+    );
+    const oldRequest = deferred<ReturnType<typeof lootCountResult>>();
+    const newRequest = deferred<ReturnType<typeof lootCountResult>>();
+    vi.mocked(api.listLoot)
+      .mockResolvedValueOnce(lootCountResult(4))
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockReturnValueOnce(newRequest.promise);
+
+    render(<App />);
+    const lootRow = () => within(screen.getByRole("treegrid", { name: "Data navigation", hidden: true }))
+      .getByRole("row", { name: "Loot", hidden: true });
+    await waitFor(() => expect(within(lootRow()).getByText("4")).toBeInTheDocument());
+
+    act(() => publishSnapshot({
+      ...snapshot,
+      recentEvents: [{ id: "loot-1", type: "loot-added", at: "2026-09-23T12:00:00.000Z", message: "Loot added", isError: false }],
+    }));
+    await waitFor(() => expect(api.listLoot).toHaveBeenCalledTimes(2));
+
+    act(() => publishSnapshot({
+      ...snapshot,
+      connection: { ...snapshot.connection, epoch: 8, incarnation: 4, server: "second.example.test:31337", configName: "Second" },
+    }));
+    await waitFor(() => expect(api.listLoot).toHaveBeenCalledTimes(3));
+    expect(lootRow().querySelector(".sidebar__menu-chip")).toBeNull();
+
+    await act(async () => { newRequest.resolve(lootCountResult(7)); });
+    await waitFor(() => expect(within(lootRow()).getByText("7")).toBeInTheDocument());
+    await act(async () => { oldRequest.resolve(lootCountResult(99)); });
+    expect(within(lootRow()).getByText("7")).toBeInTheDocument();
+    expect(within(lootRow()).queryByText("99")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -1358,6 +1471,7 @@ describe("Sidebar navigation", () => {
         <Sidebar className="app-sidebar">
           <NavigationContent
             snapshot={snapshot}
+            lootCount={19}
             view="operations"
             onDisconnect={vi.fn()}
             onExitApp={vi.fn()}
@@ -1387,7 +1501,8 @@ describe("Sidebar navigation", () => {
     expect(within(sessionsItem).getByText("501")).toBeInTheDocument();
     expect(within(beaconsItem).getByText("702")).toBeInTheDocument();
     expect(screen.getByText("Interact")).toBeInTheDocument();
-    expect(within(data).getByRole("row", { name: "Loot" })).toBeInTheDocument();
+    const lootItem = within(data).getByRole("row", { name: "Loot" });
+    expect(within(lootItem).getByText("19")).toBeInTheDocument();
     expect(within(data).getByRole("row", { name: "Credentials" })).toBeInTheDocument();
     expect(within(data).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
     expect(screen.getByText("Data")).toBeInTheDocument();
@@ -1396,7 +1511,7 @@ describe("Sidebar navigation", () => {
     expect(onViewChange).toHaveBeenCalledWith("sessions");
     await user.click(beaconsItem);
     expect(onViewChange).toHaveBeenCalledWith("beacons");
-    await user.click(within(data).getByRole("row", { name: "Loot" }));
+    await user.click(lootItem);
     expect(onViewChange).toHaveBeenCalledWith("loot");
     await user.click(within(data).getByRole("row", { name: "Credentials" }));
     expect(onViewChange).toHaveBeenCalledWith("credentials");

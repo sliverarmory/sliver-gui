@@ -154,10 +154,23 @@ describe("AWS EC2 provider authentication and discovery", () => {
     const error = await provider.preflight().catch((failure: unknown) => failure);
 
     expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain("Use AWS Login to renew this credential");
+    expect(String(error)).toContain(name === "AwsConsoleLoginError" ? "Use AWS Login to renew this credential" : "configured authentication method");
     expect(String(error)).not.toContain(name);
     expect(String(error)).not.toContain(credentials.secretAccessKey);
     expect(String(error)).not.toContain("do not expose");
+  });
+
+  it.each(["transient", "permission-denied", "unexpected-response"])("does not turn %s authentication failures into forced browser login", async (category) => {
+    const client = new RecordingEc2Client({
+      DescribeAvailabilityZonesCommand: () => {
+        throw Object.assign(new Error(`do not expose ${credentials.secretAccessKey}`), { name: "AwsConsoleLoginError", category });
+      },
+    });
+    const error = await providerFor(client).preflight().catch((failure: unknown) => failure);
+    expect(String(error)).not.toContain("Use AWS Login");
+    expect(String(error)).not.toContain(credentials.secretAccessKey);
+    expect(String(error)).not.toContain("do not expose");
+    if (category === "transient") expect(String(error)).toContain("temporary connection or service problem");
   });
 
   it("discovers curated regional sizes, latest official AMIs, networking, and SSH key pairs", async () => {

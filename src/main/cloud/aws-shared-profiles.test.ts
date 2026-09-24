@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { fromIni } from "@aws-sdk/credential-providers";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -76,10 +77,10 @@ describe("AWS shared profile discovery", () => {
     const profiles = await source.list();
 
     expect(profiles).toEqual([
-      { name: "commented-region", region: "us-west-2" },
-      { name: "default", region: "us-west-2" },
-      { name: "production", region: "eu-central-1" },
-      { name: "sso-admin", region: "us-east-1" },
+      { name: "commented-region", region: "us-west-2", authentication: { method: "unknown", canConsoleLogin: false } },
+      { name: "default", region: "us-west-2", authentication: { method: "static", canConsoleLogin: false } },
+      { name: "production", region: "eu-central-1", authentication: { method: "static", canConsoleLogin: false } },
+      { name: "sso-admin", region: "us-east-1", authentication: { method: "sso", canConsoleLogin: false } },
     ]);
     const serialized = JSON.stringify(profiles);
     expect(serialized).not.toMatch(/DO_NOT_EXPOSE|PRIVATE|secret|credential_process|start_url|REGION_COMMENT/iu);
@@ -126,6 +127,134 @@ describe("AWS shared profile discovery", () => {
   });
 });
 
+describe("AWS shared profile authentication capabilities", () => {
+  const arn = "arn:aws:iam::123456789012:user/example";
+
+  it("exposes only safe summary metadata and retains the ARN only for direct console renewal", async () => {
+    const paths = await profileFiles("", `[profile console]\nlogin_session=${arn}\nprivate_setting=DO_NOT_EXPOSE`);
+    const credentialResolver = vi.fn();
+    const source = new AwsSharedProfileSource({ paths, credentialResolver });
+    const profiles = await source.list();
+    expect(profiles).toEqual([{ name: "console", region: null, authentication: { method: "console-login", canConsoleLogin: true } }]);
+    expect(JSON.stringify(profiles)).not.toContain(arn);
+    expect(Object.isFrozen(profiles[0]?.authentication)).toBe(true);
+    const authentication = await source.authentication("console");
+    expect(authentication).toEqual({ method: "console-login", canConsoleLogin: true, loginSessionArn: arn });
+    expect(Object.isFrozen(authentication)).toBe(true);
+    expect(credentialResolver).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["static", "aws_access_key_id=DO_NOT_EXPOSE\naws_secret_access_key=DO_NOT_EXPOSE"],
+    ["process", "credential_process=DO_NOT_EXECUTE private-command"],
+    ["sso", "sso_session=private-company"],
+    ["sso", "sso_start_url=https://private.example.test/start\nsso_region=us-west-2"],
+    ["role", "role_arn=arn:aws:iam::123456789012:role/Workload\nweb_identity_token_file=/DO_NOT_READ"],
+  ])("does not advertise console renewal when %s takes precedence", async (method, settings) => {
+    const paths = await profileFiles("", `[profile selected]\nlogin_session=${arn}\n${settings}`);
+    const credentialResolver = vi.fn();
+    const source = new AwsSharedProfileSource({ paths, credentialResolver });
+    expect(await source.authentication("selected")).toEqual({ method, canConsoleLogin: false });
+    expect(await source.loginSessionArn("selected")).toBeNull();
+    expect(JSON.stringify(await source.list())).not.toMatch(/DO_NOT|private-company|private\.example|arn:aws/u);
+    expect(credentialResolver).not.toHaveBeenCalled();
+  });
+
+  it("merges credentials keys over configuration before choosing the effective method", async () => {
+    const credentialsArn = "arn:aws:iam::999999999999:user/credential-file";
+    const paths = await profileFiles(
+      `[selected]\naws_access_key_id=AKIAIOSFODNN7EXAMPLE\naws_secret_access_key=synthetic-secret\n[console]\nlogin_session=${credentialsArn}`,
+      `[profile selected]\nlogin_session=${arn}\ncredential_process=DO_NOT_EXECUTE\n[profile console]\nlogin_session=${arn}`,
+    );
+    const source = new AwsSharedProfileSource({ paths });
+    expect(await source.authentication("selected")).toEqual({ method: "static", canConsoleLogin: false });
+    expect(await source.loginSessionArn("selected")).toBeNull();
+    expect(await source.loginSessionArn("console")).toBe(credentialsArn);
+    // This resolution uses the real SDK and a synthetic static profile only.
+    expect((await source.resolve("selected")).credentials.accessKeyId).toBe("AKIAIOSFODNN7EXAMPLE");
+  });
+
+  it("follows source-profile chains without offering direct renewal of the assumed role", async () => {
+    const paths = await profileFiles("", [
+      "[profile selected]", "role_arn=arn:aws:iam::123456789012:role/Outer", "source_profile=intermediate", `login_session=${arn}`,
+      "[profile intermediate]", "role_arn=arn:aws:iam::123456789012:role/Inner", "source_profile=console",
+      "[profile console]", `login_session=${arn}`,
+    ].join("\n"));
+    const source = new AwsSharedProfileSource({ paths, credentialResolver: vi.fn() });
+    expect(await source.authentication("selected")).toEqual({ method: "role", canConsoleLogin: false });
+    expect(await source.loginSessionArn("selected")).toBeNull();
+    expect(await source.authentication("console")).toEqual({ method: "console-login", canConsoleLogin: true, loginSessionArn: arn });
+  });
+
+  it.each(["Environment", "EcsContainer", "Ec2InstanceMetadata"])("recognizes %s role sources without requesting credentials", async (credentialSource) => {
+    const paths = await profileFiles("", `[profile selected]\nrole_arn=arn:aws:iam::123456789012:role/Workload\ncredential_source=${credentialSource}\nlogin_session=${arn}`);
+    const credentialResolver = vi.fn();
+    const source = new AwsSharedProfileSource({ paths, credentialResolver });
+    expect(await source.authentication("selected")).toEqual({ method: "role", canConsoleLogin: false });
+    expect(credentialResolver).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing or cyclic role sources instead of falling through to console login", async () => {
+    const paths = await profileFiles("", [
+      "[profile missing-source]", "role_arn=role", "source_profile=absent", `login_session=${arn}`,
+      "[profile cycle-a]", "role_arn=role", "source_profile=cycle-b", `login_session=${arn}`,
+      "[profile cycle-b]", "role_arn=role", "source_profile=cycle-a",
+    ].join("\n"));
+    const source = new AwsSharedProfileSource({ paths });
+    for (const name of ["missing-source", "cycle-a", "cycle-b"]) {
+      expect(await source.authentication(name)).toEqual({ method: "unknown", canConsoleLogin: false });
+      expect(await source.loginSessionArn(name)).toBeNull();
+    }
+  });
+
+  it("gives root role settings precedence but terminates a source chain at static credentials", async () => {
+    const paths = await profileFiles("", [
+      "[profile selected]", "role_arn=role", "source_profile=selected",
+      "aws_access_key_id=synthetic-key", "aws_secret_access_key=synthetic-secret", `login_session=${arn}`,
+    ].join("\n"));
+    expect(await new AwsSharedProfileSource({ paths }).authentication("selected")).toEqual({ method: "role", canConsoleLogin: false });
+    const roleAssumer = vi.fn(async (_credentials: { accessKeyId: string; secretAccessKey: string }) => ({ accessKeyId: "ASIAIOSFODNN7EXAMPLE", secretAccessKey: "synthetic-role-secret" }));
+    await fromIni({ profile: "selected", filepath: paths.credentialsFilePath, configFilepath: paths.configFilePath, ignoreCache: true, roleAssumer })();
+    expect(roleAssumer).toHaveBeenCalledOnce();
+    expect(roleAssumer.mock.calls[0]?.[0]).toMatchObject({ accessKeyId: "synthetic-key", secretAccessKey: "synthetic-secret" });
+  });
+
+  it("does not confuse nested or differently cased settings with SDK authentication keys", async () => {
+    const paths = await profileFiles("", [
+      "[profile nested]", "service =", `  login_session=${arn}`,
+      "[profile uppercase]", `LOGIN_SESSION=${arn}`,
+      "[profile selected]", "service =", `  login_session=${arn}`, `login_session=${arn}`,
+    ].join("\n"));
+    const source = new AwsSharedProfileSource({ paths });
+    for (const name of ["nested", "uppercase"]) {
+      expect(await source.authentication(name)).toEqual({ method: "unknown", canConsoleLogin: false });
+    }
+    expect(await source.loginSessionArn("selected")).toBe(arn);
+  });
+
+  it("does not treat prefixed credentials sections ignored by the SDK as direct console profiles", async () => {
+    const paths = await profileFiles(`[profile selected]\nlogin_session=${arn}\n[unsupported selected]\nlogin_session=${arn}`, "");
+    const source = new AwsSharedProfileSource({ paths });
+    for (const profile of await source.list()) {
+      expect(profile.authentication).toEqual({ method: "unknown", canConsoleLogin: false });
+      expect(await source.loginSessionArn(profile.name)).toBeNull();
+    }
+  });
+
+  it("returns safe failures for absent, malformed, ambiguous, or oversized input", async () => {
+    const paths = await profileFiles("", `[profile selected]\nlogin_session=${arn}\nlogin_session=DO_NOT_EXPOSE`);
+    const source = new AwsSharedProfileSource({ paths });
+    await expect(source.authentication("missing")).rejects.toMatchObject({ code: "profile-not-found" });
+    await expect(source.authentication("bad\nname")).rejects.toMatchObject({ code: "invalid-input" });
+    await expect(source.authentication("selected")).rejects.toMatchObject({ code: "profile-files-unavailable" });
+    expect(await source.list()).toEqual([{ name: "selected", region: null, authentication: { method: "unknown", canConsoleLogin: false } }]);
+    const failure = await new AwsSharedProfileSource({ paths, maxFileBytes: 8 }).authentication("selected").catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "profile-files-unavailable" });
+    expect(String(failure)).not.toMatch(/DO_NOT_EXPOSE|123456789012/u);
+    expect(String(failure)).not.toContain(paths.configFilePath);
+  });
+});
+
 describe("AWS shared profile resolution", () => {
   it("passes only an exact discovered profile and injected paths to the resolver", async () => {
     const paths = await profileFiles("[operator]\naws_access_key_id=ignored", "[profile operator]\nregion=us-gov-west-1");
@@ -146,7 +275,7 @@ describe("AWS shared profile resolution", () => {
       region: "us-gov-west-1",
     });
     expect(resolved).toEqual({
-      profile: { name: "operator", region: "us-gov-west-1" },
+      profile: { name: "operator", region: "us-gov-west-1", authentication: { method: "unknown", canConsoleLogin: false } },
       credentials: {
         accessKeyId: "AKIAIOSFODNN7EXAMPLE",
         secretAccessKey: "provider-secret",
@@ -191,7 +320,7 @@ describe("AWS shared profile resolution", () => {
     const source = new AwsSharedProfileSource({ paths });
 
     await expect(source.resolve("sdk-static")).resolves.toEqual({
-      profile: { name: "sdk-static", region: "ap-southeast-2" },
+      profile: { name: "sdk-static", region: "ap-southeast-2", authentication: { method: "static", canConsoleLogin: false } },
       credentials: {
         accessKeyId: "AKIAIOSFODNN7EXAMPLE",
         secretAccessKey: "official-provider-secret",
@@ -213,7 +342,7 @@ describe("AWS shared profile resolution", () => {
     const source = new AwsSharedProfileSource({ paths });
 
     await expect(source.list()).resolves.toEqual([
-      { name: "quoted-operator", region: "eu-west-1" },
+      { name: "quoted-operator", region: "eu-west-1", authentication: { method: "static", canConsoleLogin: false } },
     ]);
     await expect(source.resolve("quoted-operator")).resolves.toMatchObject({
       profile: { name: "quoted-operator", region: "eu-west-1" },

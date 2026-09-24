@@ -2741,7 +2741,19 @@ function sanitizeAwsError(operation: string, error: unknown): AwsEc2ProviderErro
   const record = typeof error === "object" && error !== null ? error as Record<string, unknown> : undefined;
   const rawCode = record?.["name"] ?? record?.["Code"] ?? record?.["code"];
   const code = typeof rawCode === "string" && /^[A-Za-z0-9_.-]{1,80}$/u.test(rawCode) ? rawCode : undefined;
-  if (code === "AwsSharedProfileError" || code === "AwsConsoleLoginError" || code === "ExpiredToken" || code === "ExpiredTokenException") {
+  if (code === "AwsConsoleLoginError" && record?.["category"] === "transient") {
+    return new AwsEc2ProviderError(`AWS EC2 could not ${operation}. AWS credentials could not be refreshed because of a temporary connection or service problem. Try again.`);
+  }
+  if (code === "AwsConsoleLoginError" && record?.["category"] === "permission-denied") {
+    return new AwsEc2ProviderError(`AWS EC2 could not ${operation}. AWS sign-in permission was denied. Check the identity's sign-in permissions.`);
+  }
+  if (code === "AwsConsoleLoginError" && record?.["category"] && record["category"] !== "session-invalid") {
+    return new AwsEc2ProviderError(`AWS EC2 could not ${operation}. AWS credential refresh could not be completed. Try again or review the saved credential's authentication method.`);
+  }
+  if (code === "AwsSharedProfileError" || code === "ExpiredToken" || code === "ExpiredTokenException") {
+    return new AwsEc2ProviderError(`AWS EC2 could not ${operation}. Refresh this credential using its configured authentication method and try again.`);
+  }
+  if (code === "AwsConsoleLoginError") {
     return new AwsEc2ProviderError(
       `AWS EC2 could not ${operation}. Use AWS Login to renew this credential, or refresh its AWS CLI sign-in, and try again.`,
     );

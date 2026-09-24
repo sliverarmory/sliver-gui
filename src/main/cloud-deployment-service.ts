@@ -27,6 +27,7 @@ import { AwsDnsProvider } from "./cloud/aws-dns-provider.js";
 import { AzureDnsProvider } from "./cloud/azure-dns-provider.js";
 
 import type {
+  AwsLoginProgress,
   CloudCredentialIdInput,
   CloudCredentialTestResult,
   CloudDeploymentChangeScope,
@@ -123,7 +124,7 @@ import {
 } from "./cloud/aws-ec2-provider.js";
 import { toAwsDeploymentOptions } from "./cloud/aws-inventory.js";
 import { detectCurrentEgressIpv4 } from "./cloud/current-egress-ipv4.js";
-import { AwsSharedProfileSource } from "./cloud/aws-shared-profiles.js";
+import { AwsSharedProfileError, AwsSharedProfileSource } from "./cloud/aws-shared-profiles.js";
 import { AwsConsoleLogin, AwsConsoleLoginError } from "./cloud/aws-console-login.js";
 import { AzureBrowserLogin, AzureBrowserLoginError } from "./cloud/azure-browser-login.js";
 import { AwsEc2PermissionChecker } from "./cloud/aws-permission-checker.js";
@@ -299,7 +300,7 @@ export interface CloudAwsProfileSource {
 }
 
 export interface CloudAwsConsoleLogin {
-  login(region: string, signal?: AbortSignal, onPendingAuthorization?: (url: string | null) => void): Promise<AwsConsoleLoginSession>;
+  login(region: string, signal?: AbortSignal, onPendingAuthorization?: (url: string | null) => void, onProgress?: (phase: AwsLoginProgress["phase"]) => void): Promise<AwsConsoleLoginSession>;
   refresh(session: AwsConsoleLoginSession, signal?: AbortSignal): Promise<AwsConsoleLoginSession>;
 }
 
@@ -434,6 +435,8 @@ export class CloudDeploymentService {
   readonly #awsProfiles: CloudAwsProfileSource;
   readonly #awsConsoleLogin: CloudAwsConsoleLogin;
   readonly #awsRefreshes = new Map<string, Promise<void>>();
+  readonly #awsLogins = new Set<string>();
+  readonly #awsRefreshRetryAfter = new Map<string, { readonly session: string; readonly at: number; readonly error: AwsConsoleLoginError }>();
   readonly #authLifetime = new AbortController();
   readonly #azureProviderFactory: CloudAzureProviderFactory;
   readonly #azureAccounts: CloudAzureAccountSource;
@@ -625,7 +628,13 @@ export class CloudDeploymentService {
         value: Object.freeze({
           state: this.#store.getState(),
           refreshErrors: this.#refreshErrorSnapshot(),
-          credentials: await this.#vault.list(),
+          credentials: (await this.#vault.list()).map((credential) => {
+            if (credential.provider !== "aws" || !("profileName" in credential)) return credential;
+            const authentication = awsProfiles.find(({ name }) => name === credential.profileName)?.authentication;
+            return authentication ? Object.freeze({ ...credential, authentication: {
+              method: authentication.method, canConsoleLogin: authentication.canConsoleLogin,
+            } }) : credential;
+          }),
           secureCredentialStorage: this.#canPersistCredentials(),
           awsProfiles,
           awsProfileDiscoveryError,
@@ -1119,6 +1128,7 @@ export class CloudDeploymentService {
     signal?: AbortSignal,
     ownerId = 0,
     onPendingAuthorization?: (url: string | null) => void,
+    onProgress?: (phase: AwsLoginProgress["phase"]) => void,
   ): Promise<OperationResult<CloudCredentialSummary>> {
     try {
       this.#assertActive();
@@ -1129,7 +1139,7 @@ export class CloudDeploymentService {
         ? this.#consumeAzureLogin(parsed.loginToken, ownerId, parsed.subscriptionId, parsed.tenantId)
         : undefined;
       const loginSession = parsed.provider === "aws" && "authentication" in parsed
-        ? parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(parsed.defaultRegion, authSignal, onPendingAuthorization))
+        ? parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(parsed.defaultRegion, authSignal, onPendingAuthorization, onProgress))
         : undefined;
       this.#assertActive();
       authSignal.throwIfAborted();
@@ -1206,10 +1216,15 @@ export class CloudDeploymentService {
     input: CloudCredentialIdInput,
     signal?: AbortSignal,
     onPendingAuthorization?: (url: string | null) => void,
+    onProgress?: (phase: AwsLoginProgress["phase"]) => void,
   ): Promise<OperationResult<CloudCredentialSummary>> {
+    let ownsLogin = false;
     try {
       this.#assertActive();
       if (!isUuidV4(input.credentialId)) throw new TypeError("Invalid cloud credential identity");
+      if (this.#awsLogins.has(input.credentialId)) return { ok: false, error: "AWS sign-in is already in progress for this credential." };
+      this.#awsLogins.add(input.credentialId);
+      ownsLogin = true;
       const authSignal = signal ? AbortSignal.any([signal, this.#authLifetime.signal]) : this.#authLifetime.signal;
       return await this.#vault.withCredential(input.credentialId, "aws", async (secret, summary) => {
         if ("accessKeyId" in secret) return { ok: false, error: "Access-key credentials cannot use AWS Login. Add a new AWS Login credential instead." };
@@ -1218,22 +1233,28 @@ export class CloudDeploymentService {
           ? await this.#awsProfiles.loginSessionArn?.(secret.profileName)
           : undefined;
         const expectedArn = secret.loginSession?.loginSessionArn ?? configuredArn;
-        if (!expectedArn) return { ok: false, error: "This profile does not contain an AWS console login identity. Add a new AWS Login credential, or refresh this profile with its existing sign-in method." };
+        if (!expectedArn || ("profileName" in secret && !configuredArn)) return { ok: false, error: "This profile does not contain an eligible AWS console login identity. Refresh this profile with its configured sign-in method." };
         if (configuredArn && configuredArn !== expectedArn) return { ok: false, error: "The AWS profile login identity changed. Restore the original profile or add a new credential." };
         this.#assertActive();
         authSignal.throwIfAborted();
-        const loginSession = parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(summary.defaultRegion, authSignal, onPendingAuthorization));
+        const loginSession = parseAwsConsoleLoginSession(await this.#awsConsoleLogin.login(summary.defaultRegion, authSignal, onPendingAuthorization, onProgress));
         this.#assertActive();
         authSignal.throwIfAborted();
         if (loginSession.region !== summary.defaultRegion) throw new Error("AWS Login returned a different region");
         if (loginSession.loginSessionArn !== expectedArn) return { ok: false, error: "AWS Login used a different identity. Sign in with the original AWS identity and try again." };
-        const updated = await this.#vault.updateAwsLoginSession(summary.id, secret, loginSession, authSignal);
+        if ("profileName" in secret && await this.#awsProfiles.loginSessionArn?.(secret.profileName) !== configuredArn) {
+          return { ok: false, error: "The AWS profile authentication changed during sign-in. Review the profile and try again." };
+        }
+        const updated = await this.#vault.updateAwsLoginSession(summary.id, secret, loginSession, authSignal, { allowSessionRotation: true });
+        this.#awsRefreshRetryAfter.delete(summary.id);
         this.#emitChanged();
         await this.#refreshAfterCredentialLogin(summary.id);
         return { ok: true, value: updated };
       });
     } catch (error) {
       return awsLoginFailure(error);
+    } finally {
+      if (ownsLogin) this.#awsLogins.delete(input.credentialId);
     }
   }
 
@@ -1341,6 +1362,7 @@ export class CloudDeploymentService {
       if (!(await this.#vault.delete(input.credentialId))) {
         return { ok: false, error: "The cloud credential no longer exists" };
       }
+      this.#awsRefreshRetryAfter.delete(input.credentialId);
       this.#emitChanged();
       return { ok: true };
     } catch (error) {
@@ -2106,6 +2128,8 @@ export class CloudDeploymentService {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#authLifetime.abort();
+    this.#awsRefreshRetryAfter.clear();
+    this.#awsLogins.clear();
     for (const read of this.#refreshReads.values()) read.controller.abort();
     this.#pendingRefreshCredentials.clear();
     this.#pendingRefreshAll = false;
@@ -3325,6 +3349,14 @@ export class CloudDeploymentService {
     };
   }
 
+  async #assertAwsProfileFallback(secret: AwsCredentialSecret): Promise<void> {
+    if (!("profileName" in secret)) return;
+    const configuredArn = await this.#awsProfiles.loginSessionArn?.(secret.profileName);
+    if (!configuredArn || configuredArn !== secret.loginSession?.loginSessionArn) {
+      throw new AwsSharedProfileError("credential-resolution-failed", "The AWS profile authentication changed or is unavailable. Renew it using its configured authentication method.");
+    }
+  }
+
   async #resolveAwsCredentials(credentialId: string, region: string): Promise<AwsEc2Credentials> {
     this.#assertActive();
     return this.#vault.withCredential(credentialId, "aws", async (secret) => {
@@ -3338,10 +3370,18 @@ export class CloudDeploymentService {
           return credentials;
         } catch (error) {
           if (!secret.loginSession) throw error;
+          try { await this.#assertAwsProfileFallback(secret); } catch { throw error; }
         }
       }
       if (!secret.loginSession) throw new Error("Use AWS Login to sign in again.");
-      if (Date.parse(secret.loginSession.expiresAt) > this.#now() + 60_000) return awsSessionCredentials(secret.loginSession);
+      const session = secret.loginSession;
+      if (Date.parse(session.expiresAt) > this.#now() + 5 * 60_000) return awsSessionCredentials(session);
+      const sessionKey = createHash("sha256").update(JSON.stringify(session)).digest("hex");
+      const retry = this.#awsRefreshRetryAfter.get(credentialId);
+      if (retry?.session === sessionKey && retry.at > this.#now()) {
+        if (Date.parse(session.expiresAt) > this.#now() + 15_000) return awsSessionCredentials(session);
+        throw retry.error;
+      }
       let refreshing = this.#awsRefreshes.get(credentialId);
       if (!refreshing) {
         refreshing = (async () => {
@@ -3352,9 +3392,33 @@ export class CloudDeploymentService {
             if (refreshed.loginSessionArn !== secret.loginSession!.loginSessionArn || refreshed.region !== secret.loginSession!.region) {
               throw new Error("AWS login refresh returned a different identity");
             }
+            await this.#assertAwsProfileFallback(secret);
             await this.#vault.updateAwsLoginSession(credentialId, secret, refreshed, this.#authLifetime.signal);
-          } catch {
-            throw new AwsConsoleLoginError("login-required", "AWS login could not be refreshed. Use AWS Login to sign in again.");
+            this.#awsRefreshRetryAfter.delete(credentialId);
+          } catch (error) {
+            this.#assertActive();
+            this.#authLifetime.signal.throwIfAborted();
+            await this.#assertAwsProfileFallback(secret);
+            // A newer explicit login must win over an older in-flight refresh.
+            const replaced = await this.#vault.withCredential(credentialId, "aws", (current) => {
+              if (!("loginSession" in current) || !current.loginSession) return false;
+              const currentKey = createHash("sha256").update(JSON.stringify(current.loginSession)).digest("hex");
+              const sameSource = ("profileName" in current ? current.profileName : null) === ("profileName" in secret ? secret.profileName : null) &&
+                current.sshPrivateKey === secret.sshPrivateKey && current.sshPassphrase === secret.sshPassphrase;
+              return sameSource && currentKey !== sessionKey && current.loginSession.loginSessionArn === session.loginSessionArn &&
+                current.loginSession.region === session.region && Date.parse(current.loginSession.expiresAt) > this.#now() + 15_000;
+            });
+            if (replaced) return;
+            if (error instanceof AwsConsoleLoginError) {
+              if (error.category === "transient") {
+                // Bound retries across callers without delaying cancellation or
+                // turning a temporary network problem into forced browser login.
+                this.#awsRefreshRetryAfter.set(credentialId, { session: sessionKey, at: this.#now() + 30_000, error });
+                if (Date.parse(session.expiresAt) > this.#now() + 15_000) return;
+              }
+              throw error;
+            }
+            throw new AwsConsoleLoginError("token-request-failed", "AWS credential refresh could not be completed. Try again.");
           }
         })();
         this.#awsRefreshes.set(credentialId, refreshing);
@@ -3363,8 +3427,12 @@ export class CloudDeploymentService {
         }).catch(() => undefined);
       }
       await refreshing;
-      return this.#vault.withCredential(credentialId, "aws", (current) => {
+      return this.#vault.withCredential(credentialId, "aws", async (current) => {
         if (!("loginSession" in current) || !current.loginSession) throw new Error("Use AWS Login to sign in again.");
+        await this.#assertAwsProfileFallback(current);
+        if (Date.parse(current.loginSession.expiresAt) <= this.#now() + 15_000) {
+          throw new AwsConsoleLoginError("token-request-failed", "AWS credentials could not be refreshed before expiry. Try again.");
+        }
         return awsSessionCredentials(current.loginSession);
       });
     });
@@ -4832,9 +4900,19 @@ function awsSessionCredentials(session: AwsConsoleLoginSession): AwsEc2Credentia
 }
 
 function awsLoginFailure(error: unknown): { readonly ok: false; readonly error: string } {
-  if (error instanceof AwsConsoleLoginError) return { ok: false, error: error.message };
+  if (error instanceof AwsConsoleLoginError) return { ok: false, error: awsLoginErrorMessage(error) };
   if (error instanceof Error && error.name === "AbortError") return { ok: false, error: "AWS Login was cancelled." };
   return { ok: false, error: "AWS Login could not be completed. Try again." };
+}
+
+function awsLoginErrorMessage(error: AwsConsoleLoginError): string {
+  const { httpStatus, serviceCode, requestId } = error.diagnostics;
+  const details = [
+    typeof httpStatus === "number" && Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? `HTTP ${httpStatus}` : null,
+    serviceCode && ["INSUFFICIENT_PERMISSIONS", "TOKEN_EXPIRED", "USER_CREDENTIALS_CHANGED", "AUTHCODE_EXPIRED", "INVALID_REQUEST"].includes(serviceCode) ? serviceCode : null,
+    requestId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requestId) ? `request ${requestId}` : null,
+  ].filter(Boolean);
+  return details.length ? `${error.message} (${details.join("; ")})` : error.message;
 }
 
 function azureLoginFailure(error: unknown): { readonly ok: false; readonly error: string } {
@@ -4908,7 +4986,7 @@ function cloudErrorMessage(
   fallback: string,
   secrets: readonly string[] = [],
 ): string {
-  let message = error instanceof Error && error.message.trim() ? error.message : fallback;
+  let message = error instanceof AwsConsoleLoginError ? awsLoginErrorMessage(error) : error instanceof Error && error.message.trim() ? error.message : fallback;
   for (const secret of secrets) {
     if (secret.length > 0) message = message.replaceAll(secret, "[redacted]");
   }

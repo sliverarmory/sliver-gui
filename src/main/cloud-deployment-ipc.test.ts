@@ -20,6 +20,7 @@ import {
 import { awsRequiredPermissionsTerraform } from "../shared/cloud-permission-terraform.js";
 import {
   CLOUD_DEPLOYMENT_IPC_INVOKE,
+  CLOUD_DEPLOYMENT_IPC_EVENTS,
   type CloudDeploymentSnapshot,
   type CreateCloudOperatorConfigInput,
 } from "../shared/cloud-deployment-ipc.js";
@@ -36,12 +37,14 @@ const electronMocks = vi.hoisted(() => ({
   fromWebContents: vi.fn(),
   showSaveDialog: vi.fn(),
   writeText: vi.fn(),
+  openExternal: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   BrowserWindow: { fromWebContents: electronMocks.fromWebContents },
   clipboard: { writeText: electronMocks.writeText },
   dialog: { showSaveDialog: electronMocks.showSaveDialog },
+  shell: { openExternal: electronMocks.openExternal },
   ipcMain: {
     handle: electronMocks.handle,
     removeHandler: electronMocks.removeHandler,
@@ -89,11 +92,144 @@ beforeEach(() => {
   electronMocks.showSaveDialog.mockReset();
   electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
   electronMocks.writeText.mockReset();
+  electronMocks.openExternal.mockReset();
+  electronMocks.openExternal.mockResolvedValue(undefined);
 });
 
 afterEach(() => unregisterCloudDeploymentIpcHandlers());
 
 describe("Cloud Deployment IPC boundary", () => {
+  it.each([
+    ["us-west-2", "https://console.aws.amazon.com/"],
+    ["cn-north-1", "https://console.amazonaws.cn/"],
+    ["us-gov-west-1", "https://console.amazonaws-us-gov.com/"],
+  ])("opens the fixed AWS Console for %s without starting authentication", async (region, expectedUrl) => {
+    const controller = controllerMock();
+    registerCloudDeploymentIpcHandlers(controller, CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, owner.event, { region })).resolves.toEqual({ ok: true });
+    expect(electronMocks.openExternal).toHaveBeenCalledExactlyOnceWith(expectedUrl);
+    expect(electronMocks.writeText).not.toHaveBeenCalled();
+    expect(owner.sender.send).not.toHaveBeenCalled();
+    for (const method of Object.values(controller)) expect(method).not.toHaveBeenCalled();
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink, owner.event)).resolves.toEqual({
+      ok: false, error: "No AWS sign-in link is available. Start AWS Login and try again.",
+    });
+  });
+
+  it.each([
+    [], [null], [{}], [{ region: 2 }], [{ region: "https://console.aws.amazon.com/" }],
+    [{ region: "us-west-2", url: "https://example.test/" }], [{ region: "us-west-2", state: "secret" }],
+    [{ region: "us-west-2" }, { url: "https://example.test/" }], [[{ region: "us-west-2" }]],
+    [{ region: "us-iso-east-1" }], [{ region: "eusc-de-east-1" }],
+  ])("rejects malformed or unsupported AWS Console arguments %j", async (...args: unknown[]) => {
+    registerCloudDeploymentIpcHandlers(controllerMock(), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event, ...args)).resolves.toEqual(REJECTED);
+    expect(electronMocks.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("requires the authorized current cloud window and its trusted main frame to open AWS Console", async () => {
+    registerCloudDeploymentIpcHandlers(controllerMock(), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const subframe = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const subframeEvent = { ...subframe.event, senderFrame: { ...subframe.mainFrame, frameToken: "child-frame" } } as IpcMainInvokeEvent;
+    for (const event of [
+      invokeEvent("sliver://app/index.html", 77).event,
+      invokeEvent("https://example.test/", 77).event,
+      invokeEvent(CLOUD_RENDERER_URL, 78).event,
+      subframeEvent,
+    ]) {
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, event, { region: "us-west-2" })).resolves.toEqual(REJECTED);
+    }
+    electronMocks.fromWebContents.mockReturnValueOnce(OTHER_WINDOW);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole,
+      invokeEvent(CLOUD_RENDERER_URL, 77).event, { region: "us-west-2" })).resolves.toEqual(REJECTED);
+    expect(electronMocks.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("waits for the owner's AWS login to settle after cancellation before opening AWS Console", async () => {
+    let finish!: () => void;
+    let signal!: AbortSignal;
+    const completed = new Promise<void>((resolve) => { finish = resolve; });
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, loginSignal) => {
+      signal = loginSignal!;
+      await completed;
+      return { ok: false, error: "Cancelled" };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, () => true);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const other = invokeEvent(CLOUD_RENDERER_URL, 78);
+    const pending = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    const blocked = {
+      ok: false,
+      error: "Complete or cancel the current AWS sign-in and wait for it to finish before opening AWS Console.",
+    };
+    try {
+      await vi.waitFor(() => expect(loginAwsCredential).toHaveBeenCalledOnce());
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, owner.event, { region: "us-west-2" })).resolves.toEqual(blocked);
+      expect(electronMocks.openExternal).not.toHaveBeenCalled();
+      expect(signal.aborted).toBe(false);
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, other.event, { region: "us-west-2" })).resolves.toEqual({ ok: true });
+      expect(signal.aborted).toBe(false);
+      await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, owner.event);
+      expect(signal.aborted).toBe(true);
+      await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, owner.event, { region: "us-west-2" })).resolves.toEqual(blocked);
+      expect(electronMocks.openExternal).toHaveBeenCalledOnce();
+    } finally {
+      finish();
+      await pending;
+    }
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, owner.event, { region: "us-west-2" })).resolves.toEqual({ ok: true });
+    expect(electronMocks.openExternal).toHaveBeenCalledTimes(2);
+    expect(loginAwsCredential).toHaveBeenCalledOnce();
+  });
+
+  it("sanitizes AWS Console launch errors and leaves authentication available", async () => {
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async () => ({ ok: false, error: "test auth result" }));
+    const controller = controllerMock({ loginAwsCredential });
+    registerCloudDeploymentIpcHandlers(controller, CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    electronMocks.openExternal.mockRejectedValueOnce(new Error("/private/user/path secret-token https://example.test/?code=secret"));
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, owner.event, { region: "us-west-2" })).resolves.toEqual({
+      ok: false, error: "Could not open AWS Console in your browser. Please try again.",
+    });
+    for (const method of Object.values(controller)) expect(method).not.toHaveBeenCalled();
+    expect(owner.sender.send).not.toHaveBeenCalled();
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID })).resolves.toEqual({
+      ok: false, error: "test auth result",
+    });
+    expect(loginAwsCredential).toHaveBeenCalledOnce();
+  });
+
+  it("sends login phases only to the owning window and ignores late cancelled progress", async () => {
+    let publish!: NonNullable<Parameters<CloudDeploymentController["loginAwsCredential"]>[3]>;
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => { finish = resolve; });
+    const loginAwsCredential = vi.fn<CloudDeploymentController["loginAwsCredential"]>(async (_input, _signal, _pending, onProgress) => {
+      publish = onProgress!;
+      await completed;
+      return { ok: false, error: "Cancelled" };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ loginAwsCredential }), CLOUD_RENDERER_URL, () => true);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const other = invokeEvent(CLOUD_RENDERER_URL, 78);
+    const pending = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, owner.event, { credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(loginAwsCredential).toHaveBeenCalledOnce());
+    publish("opening-browser");
+    publish("waiting-for-authorization");
+    expect(owner.sender.send).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_EVENTS.awsLoginProgress, { phase: "waiting-for-authorization" });
+    expect(other.sender.send).not.toHaveBeenCalled();
+    await invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin, owner.event);
+    publish("exchanging-authorization");
+    expect(owner.sender.send).toHaveBeenCalledTimes(2);
+    finish();
+    await pending;
+    expect(owner.sender.send).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_EVENTS.awsLoginProgress, null);
+    publish("opening-browser");
+    expect(owner.sender.send).toHaveBeenCalledTimes(3);
+  });
+
   it("forwards only a validated canonical deployment rename to the controller", async () => {
     const response = { ok: true as const, value: { ...E2E_AWS_DEPLOYMENT, name: "Production Control" } };
     const renameDeployment = vi.fn<CloudDeploymentController["renameDeployment"]>(async () => response);
@@ -1482,6 +1618,7 @@ function invokeEvent(url: string, contentsId: number): {
   } as WebFrameMain;
   const sender = Object.assign(new EventEmitter(), {
     id: contentsId,
+    send: vi.fn(),
     mainFrame,
     getURL: () => url,
     isDestroyed: () => false,

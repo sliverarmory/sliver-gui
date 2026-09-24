@@ -253,6 +253,8 @@ export interface AwsAccessKeyCloudCredentialSummary extends AwsCloudCredentialSu
 export interface AwsProfileCloudCredentialSummary extends AwsCloudCredentialSummaryBase {
   readonly profileName: string;
   readonly loginSessionArn?: string;
+  /** Discovered at runtime; never changes the saved credential source. */
+  readonly authentication?: AwsProfileAuthentication;
 }
 
 export interface AwsLoginCloudCredentialSummary extends AwsCloudCredentialSummaryBase {
@@ -284,6 +286,12 @@ export type CloudCredentialSummary = AwsCloudCredentialSummary | AzureCloudCrede
 export interface AwsCliProfileSummary {
   readonly name: string;
   readonly region: string | null;
+  readonly authentication?: AwsProfileAuthentication;
+}
+
+export interface AwsProfileAuthentication {
+  readonly method: "console-login" | "sso" | "static" | "process" | "role" | "unknown";
+  readonly canConsoleLogin: boolean;
 }
 
 /** Non-secret subscription metadata discovered from the local Azure CLI. */
@@ -791,8 +799,10 @@ export function parseResolvedCloudCredentialInput(value: unknown): ResolvedCloud
 export function parseCloudCredentialSummary(value: unknown): CloudCredentialSummary {
   if (!isRecord(value)) throw invalid("cloud credential summary");
   if (value["provider"] === "aws") {
-    if ((hasExactKeys(value, AWS_PROFILE_SUMMARY_KEYS) || hasExactKeys(value, AWS_PROFILE_LOGIN_SUMMARY_KEYS)) && (!("loginSessionArn" in value) || isAwsLoginSessionArn(value["loginSessionArn"])) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"]) && isAwsProfileName(value["profileName"])) {
-      return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], profileName: value["profileName"], ...("loginSessionArn" in value ? { loginSessionArn: value["loginSessionArn"] as string } : {}) });
+    const profileKeys = "authentication" in value ? [...AWS_PROFILE_SUMMARY_KEYS, "authentication"] : AWS_PROFILE_SUMMARY_KEYS;
+    const profileLoginKeys = "authentication" in value ? [...AWS_PROFILE_LOGIN_SUMMARY_KEYS, "authentication"] : AWS_PROFILE_LOGIN_SUMMARY_KEYS;
+    if ((hasExactKeys(value, profileKeys) || hasExactKeys(value, profileLoginKeys)) && (!("loginSessionArn" in value) || isAwsLoginSessionArn(value["loginSessionArn"])) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"]) && isAwsProfileName(value["profileName"])) {
+      return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], profileName: value["profileName"], ...("loginSessionArn" in value ? { loginSessionArn: value["loginSessionArn"] as string } : {}), ...("authentication" in value ? { authentication: parseAwsProfileAuthentication(value["authentication"]) } : {}) });
     }
     if ((hasExactKeys(value, AWS_ACCESS_KEY_SUMMARY_KEYS) || hasExactKeys(value, AWS_LOGIN_SUMMARY_KEYS)) && (!("loginSessionArn" in value) || isAwsLoginSessionArn(value["loginSessionArn"])) && isUuidV4(value["id"]) && boundedLabel(value["label"]) && isCredentialPersistence(value["persistence"]) && isIsoTimestamp(value["createdAt"]) && isAwsRegion(value["defaultRegion"]) && isSshUsername(value["sshUsername"])) {
       return Object.freeze({ id: value["id"], provider: "aws", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultRegion: value["defaultRegion"], sshUsername: value["sshUsername"], ...("loginSessionArn" in value ? { loginSessionArn: value["loginSessionArn"] as string } : {}) });
@@ -804,6 +814,15 @@ export function parseCloudCredentialSummary(value: unknown): CloudCredentialSumm
     return Object.freeze({ id: value["id"], provider: "azure", label: value["label"], persistence: value["persistence"], createdAt: value["createdAt"], defaultLocation: value["defaultLocation"], subscriptionId: value["subscriptionId"], tenantId: value["tenantId"], sshUsername: value["sshUsername"], ...("authentication" in value ? { authentication: "login" as const } : {}), ...("loginAccountId" in value ? { loginAccountId: value["loginAccountId"] as string } : {}) });
   }
   throw invalid("cloud credential summary");
+}
+
+export function parseAwsProfileAuthentication(value: unknown): AwsProfileAuthentication {
+  if (!hasExactKeys(value, ["method", "canConsoleLogin"]) ||
+    (value["method"] !== "console-login" && value["method"] !== "sso" && value["method"] !== "static" &&
+      value["method"] !== "process" && value["method"] !== "role" && value["method"] !== "unknown") ||
+    typeof value["canConsoleLogin"] !== "boolean" ||
+    (value["canConsoleLogin"] && value["method"] !== "console-login")) throw invalid("AWS profile authentication");
+  return Object.freeze({ method: value["method"], canConsoleLogin: value["canConsoleLogin"] });
 }
 
 export function parseAzureCliAccountSummary(value: unknown): AzureCliAccountSummary {

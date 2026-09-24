@@ -153,13 +153,19 @@ export class CloudCredentialVault {
     });
   }
 
-  /** Replaces session material only if the credential still matches the captured snapshot. */
+  /**
+   * Replaces session material only if the credential still matches the captured
+   * snapshot. Explicit login may tolerate background token rotation while the
+   * caller separately excludes overlapping explicit logins.
+   */
   updateAwsLoginSession(
     id: string,
     expected: AwsCredentialSecret,
     loginSession: AwsConsoleLoginSession,
     signal?: AbortSignal,
+    options: { readonly allowSessionRotation?: boolean } = {},
   ): Promise<AwsCloudCredentialSummary> {
+    const allowSessionRotation = options.allowSessionRotation === true;
     return this.#serializeMutation(async () => {
       this.#assertActive();
       assertCredentialId(id);
@@ -168,11 +174,19 @@ export class CloudCredentialVault {
       const current = session
         ? parseCredentialEnvelopeFromBuffer(Buffer.from(session.plaintext), id, "session")
         : await this.#readPersistentEnvelope(id);
-      if (current.summary.provider !== "aws" || JSON.stringify(current.secret) !== JSON.stringify(parseAwsCredentialSecret(expected))) {
+      if (current.summary.provider !== "aws") throw new Error("The cloud credential changed during AWS login. Try again.");
+      const currentSecret = parseAwsCredentialSecret(current.secret);
+      const checkedExpected = parseAwsCredentialSecret(expected);
+      if (JSON.stringify(currentSecret) !== JSON.stringify(checkedExpected) &&
+        !(allowSessionRotation && sameAwsLoginSource(currentSecret, checkedExpected))) {
         throw new Error("The cloud credential changed during AWS login. Try again.");
       }
-      if ("accessKeyId" in current.secret) throw new Error("AWS login is unavailable for an access-key credential");
-      const secret = parseAwsCredentialSecret({ ...current.secret, loginSession });
+      if ("accessKeyId" in currentSecret) throw new Error("AWS login is unavailable for an access-key credential");
+      if (allowSessionRotation && currentSecret.loginSession && (
+        currentSecret.loginSession.loginSessionArn !== loginSession.loginSessionArn ||
+        currentSecret.loginSession.region !== loginSession.region
+      )) throw new Error("The cloud credential changed during AWS login. Try again.");
+      const secret = parseAwsCredentialSecret({ ...currentSecret, loginSession });
       const envelope = createEnvelope(id, current.summary.createdAt, current.summary.persistence, {
         provider: "aws", label: current.summary.label, defaultRegion: current.summary.defaultRegion,
         sshUsername: current.summary.sshUsername, secret,
@@ -389,6 +403,15 @@ export class CloudCredentialVault {
     );
     return result;
   }
+}
+
+function sameAwsLoginSource(current: AwsCredentialSecret, expected: AwsCredentialSecret): boolean {
+  if ("accessKeyId" in current || "accessKeyId" in expected || !current.loginSession || !expected.loginSession) return false;
+  if (("profileName" in current) !== ("profileName" in expected)) return false;
+  if ("profileName" in current && "profileName" in expected && current.profileName !== expected.profileName) return false;
+  return current.sshPrivateKey === expected.sshPrivateKey && current.sshPassphrase === expected.sshPassphrase &&
+    current.loginSession.loginSessionArn === expected.loginSession.loginSessionArn &&
+    current.loginSession.region === expected.loginSession.region;
 }
 
 function createEnvelope(
