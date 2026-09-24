@@ -204,6 +204,7 @@ export const IPC_STREAM = {
 export const IPC_EVENTS = {
   scriptsChanged: "sliver:scripts:changed",
   scriptEditorRequested: "sliver:scripts:editor-requested",
+  savedConfigsChanged: "sliver:connection:saved-configs-changed",
   cloudDeploymentThemeChanged: "sliver:cloud-deployment:theme-changed",
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
@@ -332,7 +333,7 @@ export interface ConnectionSummary {
 }
 
 export type SavedConfigTransport = "mtls" | "wireguard";
-export type SavedConfigOrigin = "managed" | "preexisting";
+export type SavedConfigOrigin = "imported" | "preexisting";
 
 export interface SavedConfigSummary {
   id: string;
@@ -344,7 +345,7 @@ export interface SavedConfigSummary {
   transport: SavedConfigTransport;
   modifiedAt: string;
   origin: SavedConfigOrigin;
-  removal: "delete-managed-copy" | "detach";
+  removal: "detach";
   availability: "available" | "deferred";
   unavailableReason?: string;
 }
@@ -1098,6 +1099,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   ) => Promise<OperationResult<SessionWorkbenchInvocationResult>>;
   onScriptsChanged: (listener: () => void) => () => void;
   onScriptEditorRequested: (listener: () => void) => () => void;
+  onSavedConfigsChanged: (listener: () => void) => () => void;
   /**
    * Transfer one narrow MessagePort capability to the trusted main process.
    * The port is delivered back to this document through a fixed window-message
@@ -1145,6 +1147,7 @@ export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAP
   "uploadDroppedSessionFile",
   "onScriptsChanged",
   "onScriptEditorRequested",
+  "onSavedConfigsChanged",
   "openStream",
   "openConsoleStream",
   "onSnapshotChanged",

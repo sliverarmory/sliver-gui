@@ -62,6 +62,16 @@ The TypeScript client is installed from the pinned `sliver-script` npm package.
 An adjacent client checkout is not needed. Ordinary application development
 does not require a Sliver source checkout; building the native console does.
 
+### Local settings and configurations
+
+The default Sliver client root is `~/.sliver-client`; `SLIVER_CLIENT_ROOT_DIR`
+can select another root. Application and text editor preferences are saved in
+`gui/application-settings.json` and `gui/text-editor-settings.json` beneath that
+root. The GUI discovers existing operator configs in `configs/` and updates the
+open selector when a valid config is saved there. It saves configs selected
+through Import as private file references in `gui/operator-configs.json`.
+Import and Forget do not copy or delete the source configs.
+
 ### Commands
 
 | Command | Purpose |

@@ -89,6 +89,7 @@ function installSliverAPI(
     uploadDroppedSessionFile: vi.fn(failedOperation),
     onScriptsChanged: vi.fn(() => vi.fn()),
     onScriptEditorRequested: vi.fn(() => vi.fn()),
+    onSavedConfigsChanged: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),
     chooseReportScreenshotDirectory: vi.fn(failedOperation),
@@ -451,6 +452,59 @@ describe("App startup", () => {
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
   });
 
+  it("refreshes an open selector when the saved-config directory changes", async () => {
+    const config: SavedConfigSummary = {
+      id: "46a72a10-a9ad-43ac-9db4-d108a0065e1c",
+      fileName: "new-operator.cfg",
+      displayName: "New operator",
+      operator: "alice",
+      lhost: "sliver.example.test",
+      lport: 31337,
+      transport: "mtls",
+      modifiedAt: "2026-08-09T12:00:00.000Z",
+      origin: "preexisting",
+      removal: "detach",
+      availability: "available",
+    };
+    const initialCatalog = deferred<OperationResult<SavedConfigSummary[]>>();
+    const listSavedConfigs = vi.fn()
+      .mockReturnValueOnce(initialCatalog.promise)
+      .mockResolvedValue({ ok: true, value: [config] });
+    const api = installSliverAPI(listSavedConfigs);
+    let notifyChanged: (() => void) | undefined;
+    vi.mocked(api.onSavedConfigsChanged).mockImplementation((listener) => {
+      notifyChanged = listener;
+      return vi.fn();
+    });
+
+    render(<App />);
+    expect(listSavedConfigs).toHaveBeenCalledOnce();
+    act(() => { notifyChanged?.(); notifyChanged?.(); notifyChanged?.(); });
+    expect(listSavedConfigs).toHaveBeenCalledOnce();
+
+    initialCatalog.resolve({ ok: true, value: [] });
+    expect(await screen.findByRole("option", { name: /alice/i })).toBeInTheDocument();
+    expect(listSavedConfigs).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+  });
+
+  it("subscribes only while the selector is open and scans when it reopens", async () => {
+    const user = userEvent.setup();
+    const listSavedConfigs = vi.fn().mockResolvedValue({ ok: true, value: [] });
+    const api = installSliverAPI(listSavedConfigs);
+    const unsubscribe = vi.fn();
+    vi.mocked(api.onSavedConfigsChanged).mockReturnValue(unsubscribe);
+
+    render(<App />);
+    await screen.findByText("No saved configurations");
+    expect(api.onSavedConfigsChanged).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(unsubscribe).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));
+    expect(api.onSavedConfigsChanged).toHaveBeenCalledTimes(2);
+  });
+
   it("opens the app-wide command palette and immediately adopts its saved shortcut", async () => {
     const user = userEvent.setup();
     const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
@@ -605,11 +659,11 @@ describe("App startup", () => {
     const importedConfig: SavedConfigSummary = {
       ...initialConfig,
       id: "fe346126-d70e-42a7-91b8-53081903014f",
-      fileName: "managed.cfg",
+      fileName: "imported.cfg",
       displayName: "Imported lab",
       operator: "bob",
-      origin: "managed",
-      removal: "delete-managed-copy",
+      origin: "imported",
+      removal: "detach",
     };
     const freshImportedConfig = {
       ...importedConfig,
@@ -627,7 +681,7 @@ describe("App startup", () => {
     render(<App />);
 
     expect(await screen.findByRole("option", { name: /alice/i })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Import a copy" }));
+    await user.click(screen.getByRole("button", { name: "Import file" }));
     await user.type(screen.getByRole("textbox", { name: "Local configuration name" }), "Imported lab");
     window.dispatchEvent(new Event("focus"));
     await waitFor(() => expect(listSavedConfigs).toHaveBeenCalledTimes(2));

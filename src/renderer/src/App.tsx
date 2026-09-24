@@ -211,6 +211,7 @@ export function App() {
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
   const [savedConfigError, setSavedConfigError] = useState<string>();
   const savedConfigLoadRef = useRef<Promise<void> | null>(null);
+  const configSelectorHasMountedRef = useRef(false);
   const snapshotEventGenerationRef = useRef(0);
   const wasConnectedRef = useRef(false);
   const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
@@ -284,6 +285,42 @@ export function App() {
       window.removeEventListener("focus", reloadSavedConfigs);
     };
   }, [loadSavedConfigs]);
+
+  useEffect(() => {
+    if (!isConfigSelectorOpen) return;
+    // The mount effect loads the initial catalog. Reopening must pick up any
+    // directory changes that arrived while this selector was dismissed.
+    if (configSelectorHasMountedRef.current) void loadSavedConfigs(true);
+    else configSelectorHasMountedRef.current = true;
+
+    let active = true;
+    let scheduled: number | undefined;
+    let refreshing = false;
+    let refreshNeeded = false;
+    const scheduleRefresh = (): void => {
+      refreshNeeded = true;
+      if (refreshing || scheduled !== undefined) return;
+      scheduled = window.setTimeout(() => void refreshCatalog(), 50);
+    };
+    const refreshCatalog = async (): Promise<void> => {
+      scheduled = undefined;
+      if (!active || !refreshNeeded) return;
+      refreshNeeded = false;
+      refreshing = true;
+      try {
+        await loadSavedConfigs(true);
+      } finally {
+        refreshing = false;
+        if (active && refreshNeeded) scheduleRefresh();
+      }
+    };
+    const unsubscribe = window.sliver.onSavedConfigsChanged(scheduleRefresh);
+    return () => {
+      active = false;
+      unsubscribe();
+      if (scheduled !== undefined) window.clearTimeout(scheduled);
+    };
+  }, [isConfigSelectorOpen, loadSavedConfigs]);
 
   useEffect(() => {
     const request = ++lootCountRequestSequence.current;
@@ -362,7 +399,7 @@ export function App() {
     const result = await window.sliver.removeSavedConfig({ id: config.id });
     if (!result.ok) throw new Error(result.error ?? "Could not remove the configuration");
     await loadSavedConfigs(true);
-    toast.success(config.removal === "delete-managed-copy" ? "Imported copy deleted" : "Configuration forgotten", {
+    toast.success("Configuration forgotten", {
       description: config.displayName,
     });
   }, [loadSavedConfigs]);

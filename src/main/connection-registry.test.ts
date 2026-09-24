@@ -76,7 +76,7 @@ beforeEach(async () => {
   externalDirectory = join(root, "external");
   managedDirectory = join(root, "managed");
   await mkdir(externalDirectory);
-  await writeFile(join(externalDirectory, "operator.cfg"), validConfig());
+  await writeFile(join(externalDirectory, "operator.cfg"), validConfig(), { mode: 0o600 });
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue({ isDestroyed: () => false });
   electronMocks.fromId.mockReset();
@@ -639,9 +639,41 @@ describe("managed server connection metadata", () => {
     registry.registerWindow(1);
     electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [join(externalDirectory, "operator.cfg")] });
     const imported = await registry.importConfig(sender(1), "Imported");
-    expect(imported).toMatchObject({ ok: true, value: { origin: "managed" } });
+    expect(imported).toMatchObject({ ok: true, value: { origin: "imported", removal: "detach" } });
     await connectNamed(registry, 1, "Imported");
     expect(registry.snapshot(1).connection.managedServer).toBeNull();
+  });
+
+  it("rejects an imported source changed after selection and omits it on refresh", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    const sourcePath = join(root, "outside.cfg");
+    await writeFile(sourcePath, validConfig(), { mode: 0o600 });
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [sourcePath] });
+    const imported = await registry.importConfig(sender(1), "Outside");
+    expect(imported.ok).toBe(true);
+
+    await writeFile(sourcePath, validConfig({ operator: "changed" }));
+    expect(await registry.connectSavedConfig(1, imported.value!.id)).toMatchObject({
+      ok: false,
+      error: "Saved configuration changed or is no longer available; refresh the list",
+    });
+    const refreshed = await registry.listSavedConfigs(1);
+    expect(refreshed.ok).toBe(true);
+    expect(refreshed.value?.some((entry) => entry.origin === "imported")).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("explains private file permissions required for a no-copy import", async () => {
+    const registry = createRegistry(() => new FakeSliverClient().adapter);
+    registry.registerWindow(1);
+    const sourcePath = join(root, "public.cfg");
+    await writeFile(sourcePath, validConfig(), { mode: 0o644 });
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [sourcePath] });
+
+    expect(await registry.importConfig(sender(1), "Public")).toEqual({
+      ok: false,
+      error: "Selected configuration must have private file permissions (0600 or stricter) to import by reference",
+    });
   });
 });
 

@@ -348,7 +348,7 @@ async function verifyApplicationContextMenu(
   page: Page,
 ): Promise<void> {
   const dialog = page.getByRole("dialog", { name: "Saved configurations" });
-  await dialog.getByRole("button", { name: "Import a copy" }).click();
+  await dialog.getByRole("button", { name: "Import file" }).click();
   const input = dialog.getByRole("textbox", { name: "Local configuration name" });
   const value = "context menu selection";
   const menu = page.getByRole("menu", { name: "Application context menu" });

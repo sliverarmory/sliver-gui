@@ -1,25 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, unlink } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
-
-import { parseConfig } from "sliver-script";
+import { isAbsolute, join, resolve } from "node:path";
 
 import type { SavedConfigSummary } from "../shared/contracts.js";
 import {
   discoverSavedConfigs,
   MAX_SAVED_CONFIG_BYTES,
-  readCurrentSavedConfig,
+  readSavedConfigRecord,
   sanitizeSavedConfigMetadata,
   type SavedConfigRecord,
 } from "./saved-config-catalog.js";
 import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js";
 
-const MANIFEST_FILE = ".sliver-gui-configs.json";
+const MANIFEST_FILE = "operator-configs.json";
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 
 interface ConfigManifest {
-  version: 1;
-  managed: Record<string, { displayName: string; digest: string }>;
+  version: 2;
+  imported: Record<string, { path: string; displayName: string; digest: string }>;
   detachedExternal: string[];
 }
 
@@ -28,26 +25,32 @@ export class OperatorConfigStore {
 
   constructor(
     readonly externalDirectory: string,
-    readonly managedDirectory: string,
+    readonly metadataDirectory: string,
   ) {}
 
   async list(): Promise<SavedConfigRecord[]> {
     const manifest = await this.loadManifest();
-    const displayNames = new Map(
-      Object.entries(manifest.managed).map(([fileName, entry]) => [fileName, entry.displayName] as const),
-    );
-    const [managed, external] = await Promise.all([
-      discoverSavedConfigs(this.managedDirectory, "managed", displayNames),
-      discoverSavedConfigs(this.externalDirectory, "preexisting"),
+    const [imported, external] = await Promise.all([
+      Promise.all(Object.entries(manifest.imported).map(async ([importedId, entry]) => {
+        try {
+          const record = await readSavedConfigRecord(entry.path, "imported", entry.displayName);
+          return record.digest === entry.digest ? { ...record, importedId } : undefined;
+        } catch {
+          // An unavailable or changed source must not become a selectable imported config.
+          return undefined;
+        }
+      })),
+      discoverSavedConfigs(this.externalDirectory),
     ]);
-    const ownedManaged = managed.filter((record) => {
-      const manifestEntry = manifest.managed[basename(record.path)];
-      return manifestEntry?.digest === record.digest;
-    });
+    const availableImported = imported.filter((record) => record !== undefined);
+    const importedPaths = new Set(Object.values(manifest.imported).map((entry) => pathFingerprint(entry.path)));
     const detached = new Set(manifest.detachedExternal);
     return [
-      ...ownedManaged,
-      ...external.filter((record) => !detached.has(pathFingerprint(record.path))),
+      ...availableImported,
+      ...external.filter((record) => {
+        const fingerprint = pathFingerprint(record.path);
+        return !detached.has(fingerprint) && !importedPaths.has(fingerprint);
+      }),
     ].sort(
       (left, right) =>
         right.summary.modifiedAt.localeCompare(left.summary.modifiedAt) ||
@@ -55,52 +58,33 @@ export class OperatorConfigStore {
     );
   }
 
-  async import(data: Buffer, requestedDisplayName: string): Promise<SavedConfigRecord> {
+  async import(sourcePath: string, requestedDisplayName: string): Promise<SavedConfigRecord> {
     const displayName = sanitizeSavedConfigMetadata(requestedDisplayName);
     if (!displayName || displayName.length > 200) throw new Error("A valid local configuration name is required");
-    const config = parseConfig(data);
-    if (!Number.isSafeInteger(config.lport) || config.lport < 1 || config.lport > 65_535) {
-      throw new Error("Invalid Sliver configuration port");
-    }
-
     return this.serializeMutation(async () => {
-      const fileName = `${randomUUID()}.cfg`;
-      const path = join(this.managedDirectory, fileName);
-      await writePrivateFileAtomic(path, data);
-      const digest = createHash("sha256").update(data).digest("hex");
-      try {
-        const manifest = await this.loadManifest();
-        manifest.managed[fileName] = { displayName, digest };
-        await this.saveManifest(manifest);
-        const record = (await discoverSavedConfigs(this.managedDirectory, "managed", new Map([[fileName, displayName]])))
-          .find((candidate) => basename(candidate.path) === fileName);
-        if (!record) throw new Error("Imported configuration could not be verified");
-        return record;
-      } catch (error) {
-        await unlink(path).catch(() => undefined);
-        throw error;
-      }
+      const path = resolve(sourcePath);
+      const record = await readSavedConfigRecord(path, "imported", displayName);
+      const manifest = await this.loadManifest();
+      const existing = Object.entries(manifest.imported).find(([, entry]) => entry.path === path);
+      const importedId = existing?.[0] ?? randomUUID();
+      manifest.imported[importedId] = { path, displayName, digest: record.digest };
+      manifest.detachedExternal = manifest.detachedExternal.filter((fingerprint) => fingerprint !== pathFingerprint(path));
+      await this.saveManifest(manifest);
+      return { ...record, importedId };
     });
   }
 
   async remove(record: SavedConfigRecord): Promise<void> {
     return this.serializeMutation(async () => {
       const manifest = await this.loadManifest();
-      if (record.summary.origin === "managed") {
-        const fileName = basename(record.path);
-        const entry = manifest.managed[fileName];
-        if (!entry || dirname(resolve(record.path)) !== resolve(this.managedDirectory)) {
-          throw new Error("Managed configuration ownership could not be verified");
+      if (record.summary.origin === "imported") {
+        const entry = record.importedId ? manifest.imported[record.importedId] : undefined;
+        if (!entry || entry.path !== record.path || entry.digest !== record.digest) {
+          throw new Error("Imported configuration reference could not be verified");
         }
-        const data = await readCurrentSavedConfig(record);
-        try {
-          const digest = createHash("sha256").update(data).digest("hex");
-          if (digest !== entry.digest) throw new Error("Managed configuration changed since it was imported");
-        } finally {
-          data.fill(0);
-        }
-        await unlink(record.path);
-        delete manifest.managed[fileName];
+        delete manifest.imported[record.importedId!];
+        const fingerprint = pathFingerprint(record.path);
+        if (!manifest.detachedExternal.includes(fingerprint)) manifest.detachedExternal.push(fingerprint);
         await this.saveManifest(manifest);
         return;
       }
@@ -121,7 +105,7 @@ export class OperatorConfigStore {
   }
 
   private async loadManifest(): Promise<ConfigManifest> {
-    const path = join(this.managedDirectory, MANIFEST_FILE);
+    const path = join(this.metadataDirectory, MANIFEST_FILE);
     try {
       const loaded = await readBoundedRegularFile(path, {
         label: "Configuration manifest",
@@ -143,7 +127,7 @@ export class OperatorConfigStore {
     const data = Buffer.from(JSON.stringify(manifest), "utf8");
     try {
       if (data.length > MAX_MANIFEST_BYTES) throw new Error("Configuration manifest is too large");
-      await writePrivateFileAtomic(join(this.managedDirectory, MANIFEST_FILE), data);
+      await writePrivateFileAtomic(join(this.metadataDirectory, MANIFEST_FILE), data);
     } finally {
       data.fill(0);
     }
@@ -157,28 +141,34 @@ export function deferredWireGuardResult(summary: SavedConfigSummary): string | u
 }
 
 function emptyManifest(): ConfigManifest {
-  return { version: 1, managed: {}, detachedExternal: [] };
+  return { version: 2, imported: {}, detachedExternal: [] };
 }
 
 function parseManifest(value: unknown): ConfigManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid configuration manifest");
   const candidate = value as Partial<ConfigManifest>;
-  if (candidate.version !== 1 || !candidate.managed || typeof candidate.managed !== "object") {
+  if (candidate.version !== 2 || !candidate.imported || typeof candidate.imported !== "object" || Array.isArray(candidate.imported)) {
     throw new Error("Invalid configuration manifest");
   }
-  const managed: ConfigManifest["managed"] = {};
-  for (const [fileName, raw] of Object.entries(candidate.managed)) {
-    if (!/^[0-9a-f-]{36}\.cfg$/iu.test(fileName) || !raw || typeof raw !== "object") continue;
-    const entry = raw as { displayName?: unknown; digest?: unknown };
-    if (typeof entry.displayName !== "string" || typeof entry.digest !== "string" || !/^[0-9a-f]{64}$/u.test(entry.digest)) {
+  const imported: ConfigManifest["imported"] = {};
+  for (const [importedId, raw] of Object.entries(candidate.imported)) {
+    if (!/^[0-9a-f-]{36}$/iu.test(importedId) || !raw || typeof raw !== "object") continue;
+    const entry = raw as { path?: unknown; displayName?: unknown; digest?: unknown };
+    if (
+      typeof entry.path !== "string" || !isAbsolute(entry.path) || entry.path.includes("\0") ||
+      typeof entry.displayName !== "string" || typeof entry.digest !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(entry.digest)
+    ) {
       continue;
     }
-    managed[fileName] = { displayName: sanitizeSavedConfigMetadata(entry.displayName), digest: entry.digest };
+    const displayName = sanitizeSavedConfigMetadata(entry.displayName);
+    if (!displayName) continue;
+    imported[importedId] = { path: resolve(entry.path), displayName, digest: entry.digest };
   }
   const detachedExternal = Array.isArray(candidate.detachedExternal)
     ? candidate.detachedExternal.filter((item): item is string => typeof item === "string" && /^[0-9a-f]{64}$/u.test(item))
     : [];
-  return { version: 1, managed, detachedExternal: [...new Set(detachedExternal)] };
+  return { version: 2, imported, detachedExternal: [...new Set(detachedExternal)] };
 }
 
 function pathFingerprint(path: string): string {
@@ -196,12 +186,4 @@ export async function readConfigForImport(path: string): Promise<Buffer> {
     maxBytes: MAX_SAVED_CONFIG_BYTES,
   });
   return loaded.data;
-}
-
-export async function verifyManagedConfigMode(path: string): Promise<void> {
-  const stats = await lstat(path);
-  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Imported configuration is not a regular file");
-  if (process.platform !== "win32" && (stats.mode & 0o077) !== 0) {
-    throw new Error("Imported configuration permissions must be private (0600)");
-  }
 }
