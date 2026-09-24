@@ -4,7 +4,8 @@ import {
   type KeyboardShortcutOverrides,
 } from "./keyboard-shortcuts.js";
 
-export const APPLICATION_SETTINGS_VERSION = 5 as const;
+export const APPLICATION_SETTINGS_VERSION = 6 as const;
+const REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION = 5 as const;
 const KEYBOARD_SHORTCUTS_APPLICATION_SETTINGS_VERSION = 4 as const;
 const PREVIOUS_APPLICATION_SETTINGS_VERSION = 3 as const;
 const COMMAND_PALETTE_APPLICATION_SETTINGS_VERSION = 2 as const;
@@ -37,6 +38,17 @@ export interface ApplicationTerminalSettings {
   readonly smoothScrolling: boolean;
 }
 
+export type OverviewKindSelection = "default" | "all" | readonly string[];
+export type OverviewStatusSelection = "all" | readonly ("healthy" | "warning" | "inactive" | "unknown")[];
+
+export interface ApplicationOverviewSettings {
+  readonly kinds: OverviewKindSelection;
+  readonly statuses: OverviewStatusSelection;
+  readonly lightning: boolean;
+  readonly sidebarDisabled: boolean;
+  readonly presentation: "graph" | "list";
+}
+
 export interface ApplicationSettingsValues {
   readonly theme: ApplicationTheme;
   readonly appIcon: ApplicationIcon;
@@ -46,6 +58,7 @@ export interface ApplicationSettingsValues {
   readonly commandPaletteShortcut: string;
   readonly keyboardShortcuts: KeyboardShortcutOverrides;
   readonly terminal: ApplicationTerminalSettings;
+  readonly overview: ApplicationOverviewSettings;
 }
 
 export interface ApplicationSettingsState extends ApplicationSettingsValues {
@@ -66,6 +79,14 @@ export const DEFAULT_APPLICATION_TERMINAL_SETTINGS: ApplicationTerminalSettings 
   smoothScrolling: false,
 });
 
+export const DEFAULT_APPLICATION_OVERVIEW_SETTINGS: ApplicationOverviewSettings = Object.freeze({
+  kinds: "default",
+  statuses: "all",
+  lightning: false,
+  sidebarDisabled: false,
+  presentation: "graph",
+});
+
 export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Object.freeze({
   theme: "system",
   appIcon: "auto",
@@ -74,6 +95,7 @@ export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Ob
   commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
   keyboardShortcuts: Object.freeze({}),
   terminal: DEFAULT_APPLICATION_TERMINAL_SETTINGS,
+  overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
 });
 
 export const DEFAULT_APPLICATION_SETTINGS_STATE: ApplicationSettingsState = Object.freeze({
@@ -93,8 +115,11 @@ const TERMINAL_KEYS = [
   "cursorBlink",
   "smoothScrolling",
 ] as const;
-const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
+const OVERVIEW_KEYS = ["kinds", "statuses", "lightning", "sidebarDisabled", "presentation"] as const;
+const OVERVIEW_STATUSES = new Set(["healthy", "warning", "inactive", "unknown"]);
+const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
 const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
+const REPORT_SCREENSHOT_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
 const KEYBOARD_SHORTCUTS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
 const PREVIOUS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
 const COMMAND_PALETTE_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
@@ -181,6 +206,42 @@ export function parseApplicationTerminalSettings(value: unknown): ApplicationTer
   });
 }
 
+export function parseApplicationOverviewSettings(value: unknown): ApplicationOverviewSettings {
+  if (!hasExactKeys(value, OVERVIEW_KEYS)) throw new TypeError("Invalid overview settings");
+  const kinds = value["kinds"];
+  const statuses = value["statuses"];
+  if (
+    !isOverviewKindSelection(kinds) ||
+    !isOverviewStatusSelection(statuses) ||
+    typeof value["lightning"] !== "boolean" ||
+    typeof value["sidebarDisabled"] !== "boolean" ||
+    (value["presentation"] !== "graph" && value["presentation"] !== "list")
+  ) {
+    throw new TypeError("Invalid overview settings");
+  }
+  return Object.freeze({
+    kinds: Array.isArray(kinds) ? Object.freeze([...kinds].sort()) : kinds,
+    statuses: Array.isArray(statuses) ? Object.freeze([...statuses].sort()) : statuses,
+    lightning: value["lightning"],
+    sidebarDisabled: value["sidebarDisabled"],
+    presentation: value["presentation"],
+  }) as ApplicationOverviewSettings;
+}
+
+function isOverviewKindSelection(value: unknown): value is OverviewKindSelection {
+  if (value === "default" || value === "all") return true;
+  if (!Array.isArray(value) || value.length > 64) return false;
+  return value.every((kind) => typeof kind === "string" && kind.length > 0 && kind.length <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(kind)) && new Set(value).size === value.length;
+}
+
+function isOverviewStatusSelection(value: unknown): value is OverviewStatusSelection {
+  if (value === "all") return true;
+  if (!Array.isArray(value) || value.length > OVERVIEW_STATUSES.size) return false;
+  return value.every((status) => typeof status === "string" && OVERVIEW_STATUSES.has(status)) &&
+    new Set(value).size === value.length;
+}
+
 export function parseApplicationSettingsValues(value: unknown): ApplicationSettingsValues {
   if (!hasExactKeys(value, SETTINGS_VALUE_KEYS)) {
     throw new TypeError("Invalid application settings");
@@ -196,9 +257,11 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
   }
   let terminal: ApplicationTerminalSettings;
   let keyboardShortcuts: KeyboardShortcutOverrides;
+  let overview: ApplicationOverviewSettings;
   try {
     terminal = parseApplicationTerminalSettings(value["terminal"]);
     keyboardShortcuts = parseKeyboardShortcutOverrides(value["keyboardShortcuts"]);
+    overview = parseApplicationOverviewSettings(value["overview"]);
   } catch {
     throw new TypeError("Invalid application settings");
   }
@@ -210,6 +273,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     commandPaletteShortcut: value["commandPaletteShortcut"],
     keyboardShortcuts,
     terminal,
+    overview,
   });
 }
 
@@ -231,6 +295,7 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
       commandPaletteShortcut: value["commandPaletteShortcut"],
       keyboardShortcuts: value["keyboardShortcuts"],
       terminal: value["terminal"],
+      overview: value["overview"],
     });
   } catch {
     throw new TypeError("Invalid application settings state");
@@ -247,11 +312,19 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
     return parseApplicationSettingsState(value);
   } catch {
     try {
+      if (hasExactKeys(value, REPORT_SCREENSHOT_SETTINGS_STATE_KEYS) && value["v"] === REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION) {
+        return parseApplicationSettingsState({
+          ...value,
+          v: APPLICATION_SETTINGS_VERSION,
+          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+        });
+      }
       if (hasExactKeys(value, KEYBOARD_SHORTCUTS_SETTINGS_STATE_KEYS) && value["v"] === KEYBOARD_SHORTCUTS_APPLICATION_SETTINGS_VERSION) {
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
           reportScreenshotDirectory: null,
+          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
         });
       }
       if (hasExactKeys(value, PREVIOUS_SETTINGS_STATE_KEYS) && value["v"] === PREVIOUS_APPLICATION_SETTINGS_VERSION) {
@@ -261,6 +334,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
           v: APPLICATION_SETTINGS_VERSION,
           keyboardShortcuts: {},
           reportScreenshotDirectory: null,
+          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
         });
       }
       if (hasExactKeys(value, COMMAND_PALETTE_SETTINGS_STATE_KEYS) && value["v"] === COMMAND_PALETTE_APPLICATION_SETTINGS_VERSION) {
@@ -271,6 +345,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
           appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
           keyboardShortcuts: {},
           reportScreenshotDirectory: null,
+          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
         });
       }
       if (hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) && value["v"] === LEGACY_APPLICATION_SETTINGS_VERSION) {
@@ -281,6 +356,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
           commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
           keyboardShortcuts: {},
           reportScreenshotDirectory: null,
+          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
         });
       }
     } catch {

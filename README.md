@@ -65,9 +65,11 @@ does not require a Sliver source checkout; building the native console does.
 ### Local settings and configurations
 
 The default Sliver client root is `~/.sliver-client`; `SLIVER_CLIENT_ROOT_DIR`
-can select another root. Application and text editor preferences are saved in
-`gui/application-settings.json` and `gui/text-editor-settings.json` beneath that
-root. The GUI discovers existing operator configs in `configs/` and updates the
+can select another root. Application preferences, including Overview graph
+options, are saved in `gui/application-settings.json`; workspace zoom is saved in
+`gui/workspace-zoom.json`, and text editor preferences in
+`gui/text-editor-settings.json` beneath that root. The GUI discovers existing
+operator configs in `configs/` and updates the
 open selector when a valid config is saved there. It saves configs selected
 through Import as private file references in `gui/operator-configs.json`.
 Import and Forget do not copy or delete the source configs.

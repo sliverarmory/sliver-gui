@@ -92,13 +92,16 @@ describe("CredentialsPage", () => {
     const user = userEvent.setup();
     const addition = deferred<OperationResult>();
     const addCredential = vi.fn().mockReturnValue(addition.promise);
+    const onInventoryChanged = vi.fn();
+    const onInventoryTotal = vi.fn();
     installAPI({
       listCredentials: vi.fn().mockResolvedValue({ ok: true, value: credentialPage() }),
       addCredential,
     });
 
-    render(<CredentialsPage snapshot={connectedSnapshot()} />);
+    render(<CredentialsPage snapshot={connectedSnapshot()} onInventoryChanged={onInventoryChanged} onInventoryTotal={onInventoryTotal} />);
     expect(await screen.findByText("alice")).toBeInTheDocument();
+    expect(onInventoryTotal).toHaveBeenCalledExactlyOnceWith(1);
     await user.click(screen.getByRole("button", { name: "Add credential" }));
     const dialog = await screen.findByRole("dialog", { name: "Add credential" });
     const username = within(dialog).getByRole("textbox", { name: "Username" });
@@ -114,8 +117,51 @@ describe("CredentialsPage", () => {
 
     addition.resolve({ ok: true });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add credential" })).not.toBeInTheDocument());
+    expect(onInventoryChanged).toHaveBeenCalledOnce();
     expect([...input.plaintext]).toEqual(new Array(input.plaintext.byteLength).fill(0));
     expect([...input.hash]).toEqual([]);
+  });
+
+  it("keeps the unfiltered sidebar total when viewing filtered credentials and invalidates on refresh", async () => {
+    const user = userEvent.setup();
+    const onInventoryTotal = vi.fn();
+    const onInventoryChanged = vi.fn();
+    const listCredentials = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { ...credentialPage(), page: { limit: 100, total: 12, truncated: true } } })
+      .mockResolvedValue({ ok: true, value: { ...credentialPage(), page: { limit: 100, total: 1, truncated: false } } });
+    installAPI({ listCredentials });
+
+    render(<CredentialsPage snapshot={connectedSnapshot()} onInventoryTotal={onInventoryTotal} onInventoryChanged={onInventoryChanged} />);
+    expect(await screen.findByText("alice")).toBeInTheDocument();
+    expect(onInventoryTotal).toHaveBeenCalledExactlyOnceWith(12);
+
+    await user.type(screen.getByPlaceholderText("Search username, collection, host, type, or ID"), "alice");
+    await waitFor(() => expect(listCredentials).toHaveBeenCalledWith({ query: "alice", kind: "all", limit: 100 }));
+    expect(onInventoryTotal).toHaveBeenCalledExactlyOnceWith(12);
+
+    await user.click(screen.getByRole("button", { name: "Refresh credentials" }));
+    expect(onInventoryChanged).toHaveBeenCalledOnce();
+  });
+
+  it("invalidates the sidebar total after deleting a credential from filtered results", async () => {
+    const user = userEvent.setup();
+    const onInventoryChanged = vi.fn();
+    const deleteCredential = vi.fn().mockResolvedValue({ ok: true });
+    const listCredentials = vi.fn().mockResolvedValue({ ok: true, value: credentialPage() });
+    installAPI({
+      listCredentials,
+      deleteCredential,
+    });
+
+    render(<CredentialsPage snapshot={connectedSnapshot()} onInventoryChanged={onInventoryChanged} />);
+    expect(await screen.findByText("alice")).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("Search username, collection, host, type, or ID"), "alice");
+    await waitFor(() => expect(listCredentials).toHaveBeenCalledWith({ query: "alice", kind: "all", limit: 100 }));
+    await user.click(await screen.findByRole("button", { name: "Delete credential" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Delete alice?" });
+    await user.click(within(dialog).getByRole("button", { name: "Delete credential" }));
+    await waitFor(() => expect(deleteCredential).toHaveBeenCalledExactlyOnceWith(CREDENTIAL_ID));
+    expect(onInventoryChanged).toHaveBeenCalledOnce();
   });
 });
 

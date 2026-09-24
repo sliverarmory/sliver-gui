@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
 import { createApplicationZoomAPI, type ApplicationZoomResizeTarget } from "./application-zoom.js";
+import { WORKSPACE_ZOOM_CHANGED_CHANNEL } from "../shared/application-zoom-contracts.js";
 
 import {
   IPC,
@@ -283,6 +284,7 @@ contextBridge.exposeInMainWorld("sliver", Object.freeze(api));
 contextBridge.exposeInMainWorld("applicationZoom", createApplicationZoomAPI(
   webFrame,
   (globalThis as unknown as { window: ApplicationZoomResizeTarget }).window,
+  () => ipcRenderer.send(WORKSPACE_ZOOM_CHANGED_CHANNEL),
 ));
 contextBridge.exposeInMainWorld("applicationContextMenu", Object.freeze({
   onMenuRequested: (listener) => {

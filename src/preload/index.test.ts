@@ -66,6 +66,7 @@ const invokeArguments = {
       keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
       reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+      overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
     },
   }],
   getApplicationUpdateState: [],
@@ -209,7 +210,11 @@ class TestMutationObserver {
 }
 vi.stubGlobal("MessageChannel", TestMessageChannel);
 vi.stubGlobal("MutationObserver", TestMutationObserver);
-vi.stubGlobal("window", { postMessage: windowPostMessage });
+vi.stubGlobal("window", {
+  postMessage: windowPostMessage,
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+});
 vi.stubGlobal("document", {
   addEventListener: documentAddEventListener,
   querySelectorAll: documentQuerySelectorAll,

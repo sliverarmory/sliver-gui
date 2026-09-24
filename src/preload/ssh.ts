@@ -62,6 +62,7 @@ const TERMINAL_FONT_IDS = new Set(["fira-code", "jetbrains-mono", "cascadia-mono
 const TERMINAL_CURSOR_STYLES = new Set(["block", "underline", "bar"]);
 const APPLICATION_THEMES = new Set(["system", "light", "dark"]);
 const APPLICATION_ICONS = new Set(["auto", "light", "dark", "passion"]);
+const OVERVIEW_STATUSES = new Set(["healthy", "warning", "inactive", "unknown"]);
 const KEYBOARD_SHORTCUT_ACTIONS = new Set([
   "newWindow", "duplicateWindow", "navigateBack", "navigateForward", "refreshServer", "openConsole",
   "reportScreenshot",
@@ -586,10 +587,10 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
 function parseApplicationSettingsState(value: unknown): ApplicationSettingsState {
   const state = exactRecord(
     value,
-    ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal"],
+    ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"],
     "application settings",
   );
-  if (state["v"] !== 5 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 6 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
@@ -614,8 +615,28 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
   if (typeof terminal["cursorBlink"] !== "boolean" || typeof terminal["smoothScrolling"] !== "boolean") {
     throw new TypeError("Invalid terminal behavior");
   }
+  const overview = exactRecord(
+    state["overview"],
+    ["kinds", "statuses", "lightning", "sidebarDisabled", "presentation"],
+    "overview settings",
+  );
+  const kinds = overview["kinds"];
+  const statuses = overview["statuses"];
+  const validKinds = kinds === "default" || kinds === "all" ||
+    (Array.isArray(kinds) && kinds.length <= 64 && kinds.every((kind) => typeof kind === "string" &&
+      kind.length > 0 && kind.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(kind)) &&
+      new Set(kinds).size === kinds.length);
+  const validStatuses = statuses === "all" ||
+    (Array.isArray(statuses) && statuses.length <= OVERVIEW_STATUSES.size &&
+      statuses.every((status) => typeof status === "string" && OVERVIEW_STATUSES.has(status)) &&
+      new Set(statuses).size === statuses.length);
+  if (!validKinds || !validStatuses || typeof overview["lightning"] !== "boolean" ||
+    typeof overview["sidebarDisabled"] !== "boolean" ||
+    (overview["presentation"] !== "graph" && overview["presentation"] !== "list")) {
+    throw new TypeError("Invalid overview settings");
+  }
   return Object.freeze({
-    v: 5,
+    v: 6,
     revision: state["revision"] as number,
     theme: state["theme"] as ApplicationSettingsState["theme"],
     appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
@@ -629,6 +650,13 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
       cursorStyle: terminal["cursorStyle"] as ApplicationSettingsState["terminal"]["cursorStyle"],
       cursorBlink: terminal["cursorBlink"],
       smoothScrolling: terminal["smoothScrolling"],
+    }),
+    overview: Object.freeze({
+      kinds: Array.isArray(kinds) ? Object.freeze([...kinds].sort()) : kinds,
+      statuses: Array.isArray(statuses) ? Object.freeze([...statuses].sort()) : statuses,
+      lightning: overview["lightning"],
+      sidebarDisabled: overview["sidebarDisabled"],
+      presentation: overview["presentation"],
     }),
   });
 }

@@ -133,6 +133,11 @@ every type, including offline operators, and an empty selection shows no nodes.
 Clear filters restores the default selections and clears the search. Optional
 `filterKind` metadata separates type-filter categories without changing node kinds
 or identities.
+The selected types and states, Graph/List view, Lightning switch, and Disable
+sidebar switch are saved in `gui/application-settings.json` beneath the Sliver
+client root (normally `~/.sliver-client`) and restored on the next application
+run. Search text, selected resources, and expanded collections remain specific
+to the current view.
 Search preserves upstream communication paths and parent enclosures among
 selected types and states, with cycle-safe traversal. Other associations retain
 one hop of eligible context. Unselected categories stay hidden, and a visible

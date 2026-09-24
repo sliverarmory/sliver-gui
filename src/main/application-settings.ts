@@ -97,6 +97,10 @@ export class ApplicationSettingsStore {
     });
   }
 
+  flush(): Promise<void> {
+    return this.#mutationChain;
+  }
+
   #serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.#mutationChain.then(operation);
     this.#mutationChain = result.then(

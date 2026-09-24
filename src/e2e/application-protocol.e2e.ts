@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -49,6 +50,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
   const managedConfigDirectory = join(temporaryRoot, "managed-configs");
   const userDataDirectory = join(temporaryRoot, "user-data");
   const consoleClientRootDirectory = join(temporaryRoot, "client-root");
+  const workspaceZoomPath = join(consoleClientRootDirectory, "gui", "workspace-zoom.json");
   const outsideFile = join(temporaryRoot, "outside-renderer.txt");
   const rendererArchive = join(temporaryRoot, "renderer.asar");
   await Promise.all([
@@ -73,24 +75,25 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
   }, { once: true });
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
+  const launchOptions = {
+    args: [
+      "--enable-sandbox",
+      join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+      `--repository-root=${repositoryRoot}`,
+      `--saved-config-directory=${savedConfigDirectory}`,
+      `--managed-config-directory=${managedConfigDirectory}`,
+      `--user-data-directory=${userDataDirectory}`,
+      `--console-client-root-directory=${consoleClientRootDirectory}`,
+    ],
+    bypassCSP: false,
+    chromiumSandbox: true,
+    cwd: repositoryRoot,
+  } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true };
   try {
     mark("seed saved host zoom");
     await seedSavedHostZoom(temporaryRoot, userDataDirectory);
     mark("launch");
-    application = await electron.launch({
-      args: [
-        "--enable-sandbox",
-        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
-        `--repository-root=${repositoryRoot}`,
-        `--saved-config-directory=${savedConfigDirectory}`,
-        `--managed-config-directory=${managedConfigDirectory}`,
-        `--user-data-directory=${userDataDirectory}`,
-        `--console-client-root-directory=${consoleClientRootDirectory}`,
-      ],
-      bypassCSP: false,
-      chromiumSandbox: true,
-      cwd: repositoryRoot,
-    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    application = await electron.launch(launchOptions);
     applicationProcess = application.process();
     if (diagnostics) applicationProcess.stderr?.on("data", (data: Buffer) => process.stderr.write(data));
     mark("first window");
@@ -128,6 +131,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
 
     mark("manual zoom");
     await mainWindow.evaluate((window) => window.webContents.setZoomFactor(1.1));
+    await waitForWorkspaceZoom(workspaceZoomPath, 1.1);
     await page.reload();
     await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
     assert.equal(await mainWindow.evaluate((window) => window.webContents.getZoomFactor()), 1.1,
@@ -148,6 +152,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
           commandPaletteShortcut: settings.commandPaletteShortcut,
           keyboardShortcuts: settings.keyboardShortcuts,
           terminal: settings.terminal,
+          overview: settings.overview,
         },
       });
       const runtime = await sliver.getTerminalRuntime();
@@ -272,6 +277,21 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
       }, pathToFileURL(outsideFile).href), true, "direct file reads must be denied");
     }
     assert.deepEqual(pageErrors, []);
+
+    mark("save and relaunch workspace zoom");
+    await mainWindow.evaluate((window) => window.webContents.setZoomFactor(1.25));
+    await waitForWorkspaceZoom(workspaceZoomPath, 1.25);
+    await closeProtocolApplication(application);
+    application = undefined;
+    application = await electron.launch(launchOptions);
+    applicationProcess = application.process();
+    const relaunchedPage = await application.firstWindow();
+    await relaunchedPage.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    const relaunchedWindow = await application.browserWindow(relaunchedPage);
+    assert.equal(await relaunchedWindow.evaluate((window) => window.webContents.getZoomFactor()), 1.25,
+      "a new application run restores the GUI-owned workspace zoom");
+    await relaunchedPage.evaluate(() => (globalThis as unknown as ProtocolBrowser).applicationZoom.reset());
+    await waitForWorkspaceZoom(workspaceZoomPath, 1);
   } catch (error) {
     process.stderr.write(`[protocol] failed during ${stage}\n${consoleErrors.join("\n")}\n`);
     throw error;
@@ -284,6 +304,21 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     }
   }
 });
+
+async function waitForWorkspaceZoom(path: string, factor: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  do {
+    try {
+      const state = JSON.parse(await readFile(path, "utf8")) as { v?: unknown; zoomFactor?: unknown };
+      if (state.v === 1 && typeof state.zoomFactor === "number" &&
+          Math.abs(state.zoomFactor - factor) < 0.001) return;
+    } catch {
+      // The first atomic write may still be in flight.
+    }
+    await delay(50);
+  } while (Date.now() < deadline);
+  assert.fail(`workspace zoom preference did not persist ${factor}`);
+}
 
 async function closeProtocolApplication(application: ElectronApplication): Promise<void> {
   const applicationProcess = application.process();

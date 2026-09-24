@@ -5,7 +5,12 @@ import type { ManagedServerReference, SliverSnapshot } from "../../../shared/con
 import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyEdge, TopologyNode, TopologyProperty } from "../../../shared/topology-contracts";
+import {
+  DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+  type ApplicationOverviewSettings,
+} from "../../../shared/application-settings-contracts";
 import { ApplicationContextMenuScope, type ApplicationContextMenuAction } from "../components/ApplicationContextMenu";
+import { useApplicationSettings } from "../components/ApplicationSettingsProvider";
 import { useSessionContextActions } from "../components/useSessionContextActions";
 import { sessionContextMenuActions } from "../components/session-context-menu-actions";
 import { isUsableConnection } from "../connection-status";
@@ -187,11 +192,18 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   decorateNode?: (node: TopologyNode, content: ReactNode) => ReactNode;
 }) {
   const [query, setQuery] = useState("");
-  const [selectedKinds, setSelectedKinds] = useState<TopologyFilters["kinds"]>("default");
-  const [selectedStatuses, setSelectedStatuses] = useState<TopologyFilters["statuses"]>("all");
-  const [presentation, setPresentation] = useState<"graph" | "list">("graph");
-  const [animateSessions, setAnimateSessions] = useState(false);
-  const [sidebarDisabled, setSidebarDisabled] = useState(false);
+  const [overview, setOverview] = useOverviewSettings();
+  const selectedKinds = useMemo<TopologyFilters["kinds"]>(() =>
+    typeof overview.kinds === "string" ? overview.kinds : new Set(overview.kinds), [overview.kinds]);
+  const selectedStatuses = useMemo<TopologyFilters["statuses"]>(() =>
+    overview.statuses === "all" ? "all" : new Set(overview.statuses), [overview.statuses]);
+  const presentation = overview.presentation;
+  const animateSessions = overview.lightning;
+  const sidebarDisabled = overview.sidebarDisabled;
+  const setSelectedKinds = (value: TopologyFilters["kinds"]): void =>
+    setOverview("kinds", typeof value === "string" ? value : [...value]);
+  const setSelectedStatuses = (value: TopologyFilters["statuses"]): void =>
+    setOverview("statuses", value === "all" ? value : [...value] as ApplicationOverviewSettings["statuses"]);
   const [selection, setSelection] = useState<TopologySelection>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const projection = useMemo(() => projectTopology(document, { query, kinds: selectedKinds, statuses: selectedStatuses, expanded }),
@@ -232,14 +244,14 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
         options={kinds.map((value): [string, string] => [value, value === OFFLINE_OPERATOR_FILTER_KIND ? "Operator (Offline)" : titleCase(value)])} />
       <OverviewFilter label="Status" noun="states" value={selectedStatuses} onChange={setSelectedStatuses}
         options={[["healthy", "Healthy"], ["warning", "Needs attention"], ["inactive", "Inactive"], ["unknown", "Unknown"]]} />
-      <Switch size="sm" className="overview-animation-toggle" isSelected={animateSessions} onChange={setAnimateSessions}
+      <Switch size="sm" className="overview-animation-toggle" isSelected={animateSessions} onChange={(value) => setOverview("lightning", value)}
         isDisabled={presentation !== "graph"}>
         <Switch.Content>
           <Label>Lightning</Label>
           <Switch.Control><Switch.Thumb /></Switch.Control>
         </Switch.Content>
       </Switch>
-      <Switch size="sm" className="overview-animation-toggle" isSelected={sidebarDisabled} onChange={setSidebarDisabled}
+      <Switch size="sm" className="overview-animation-toggle" isSelected={sidebarDisabled} onChange={(value) => setOverview("sidebarDisabled", value)}
         isDisabled={presentation !== "graph"}>
         <Switch.Content>
           <Label>Disable sidebar</Label>
@@ -247,8 +259,8 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
         </Switch.Content>
       </Switch>
       <div className="overview-view-controls" role="group" aria-label="Overview presentation">
-        <Button size="sm" variant={presentation === "graph" ? "secondary" : "ghost"} aria-pressed={presentation === "graph"} onPress={() => setPresentation("graph")}>Graph</Button>
-        <Button size="sm" variant={presentation === "list" ? "secondary" : "ghost"} aria-pressed={presentation === "list"} onPress={() => setPresentation("list")}>List</Button>
+        <Button size="sm" variant={presentation === "graph" ? "secondary" : "ghost"} aria-pressed={presentation === "graph"} onPress={() => setOverview("presentation", "graph")}>Graph</Button>
+        <Button size="sm" variant={presentation === "list" ? "secondary" : "ghost"} aria-pressed={presentation === "list"} onPress={() => setOverview("presentation", "list")}>List</Button>
       </div>
     </div>
     {filtering ? <div className="overview-filter-summary" role="status">
@@ -299,6 +311,58 @@ export function OverviewDocument({ document, onNavigate, decorateNode }: {
   </section>;
 }
 
+type PendingOverviewSettings = Partial<{
+  [Key in keyof ApplicationOverviewSettings]: {
+    readonly id: number;
+    readonly value: ApplicationOverviewSettings[Key];
+  };
+}>;
+
+/** Keep controls responsive while settings load or an atomic save is pending. */
+function useOverviewSettings(): [
+  ApplicationOverviewSettings,
+  <Key extends keyof ApplicationOverviewSettings>(key: Key, value: ApplicationOverviewSettings[Key]) => void,
+] {
+  const applicationSettings = useApplicationSettings();
+  const [pending, setPending] = useState<PendingOverviewSettings>({});
+  const nextId = useRef(0);
+  const sent = useRef<Partial<Record<keyof ApplicationOverviewSettings, number>>>({});
+  const saved = applicationSettings?.isReady ? applicationSettings.settings.overview : DEFAULT_APPLICATION_OVERVIEW_SETTINGS;
+  const overview: ApplicationOverviewSettings = {
+    kinds: pending.kinds?.value ?? saved.kinds,
+    statuses: pending.statuses?.value ?? saved.statuses,
+    lightning: pending.lightning?.value ?? saved.lightning,
+    sidebarDisabled: pending.sidebarDisabled?.value ?? saved.sidebarDisabled,
+    presentation: pending.presentation?.value ?? saved.presentation,
+  };
+
+  useEffect(() => {
+    if (!applicationSettings?.isReady) return;
+    for (const key of Object.keys(pending) as (keyof ApplicationOverviewSettings)[]) {
+      const entry = pending[key];
+      if (!entry || sent.current[key] === entry.id) continue;
+      sent.current[key] = entry.id;
+      const clearPending = (): void => {
+        setPending((current) => {
+          if (current[key]?.id !== entry.id) return current;
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      };
+      void applicationSettings.updateSettings((current) => ({
+        ...current,
+        overview: { ...current.overview, [key]: entry.value },
+      })).then(clearPending, clearPending);
+    }
+  }, [applicationSettings, pending]);
+
+  const update = <Key extends keyof ApplicationOverviewSettings>(key: Key, value: ApplicationOverviewSettings[Key]): void => {
+    setPending((current) => ({ ...current, [key]: { id: ++nextId.current, value } }));
+  };
+  return [overview, update];
+}
+
 function OverviewFilter({ label, noun, value, onChange, options }: {
   label: string;
   noun: "types" | "states";
@@ -312,15 +376,17 @@ function OverviewFilter({ label, noun, value, onChange, options }: {
   const summary = value === "all" ? allLabel : selectedOptions.length === 0 ? `No ${noun}`
     : selectedOptions.length === 1 ? selectedOptions[0]![1] : `${selectedOptions.length} ${noun} selected`;
   return <Select aria-label={label} className="overview-filter" selectionMode="multiple" shouldCloseOnSelect={false}
-    value={value === "all" ? [allKey, ...options.map(([id]) => id)] : [...value]}
+    value={value === "all" ? [allKey, ...options.map(([id]) => id)] : options.filter(([id]) => value.has(id)).map(([id]) => id)}
     onChange={(keys) => {
       const next = new Set(keys.map(String));
       // The aggregate option toggles all choices; individual choices remain
       // independently checked, including when starting from "All".
       if (value === "all" && !next.has(allKey)) { onChange(new Set()); return; }
       if (value !== "all" && next.has(allKey)) { onChange("all"); return; }
-      const selected = new Set(options.filter(([id]) => next.has(id)).map(([id]) => id));
-      onChange(selected.size === options.length ? "all" : selected);
+      const visibleKinds = new Set(options.map(([id]) => id));
+      const unavailable = value === "all" ? [] : [...value].filter((id) => !visibleKinds.has(id));
+      const selected = new Set([...unavailable, ...options.filter(([id]) => next.has(id)).map(([id]) => id)]);
+      onChange(selected.size === options.length && unavailable.length === 0 ? "all" : selected);
     }} variant="secondary">
     <Select.Trigger><Select.Value>{summary}</Select.Value><Select.Indicator /></Select.Trigger>
     <Select.Popover className="overview-filter__popover"><ListBox selectionMode="multiple" selectionBehavior="toggle">

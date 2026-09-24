@@ -68,6 +68,18 @@ function lootCountResult(total: number) {
   };
 }
 
+function credentialCountResult(total: number) {
+  return {
+    ok: true as const,
+    value: {
+      items: [],
+      page: { limit: 1, total, truncated: total > 1 },
+      collections: [],
+      hashTypes: [],
+    },
+  };
+}
+
 function installSliverAPI(
   listSavedConfigs: SliverDesktopAPI["listSavedConfigs"],
   initialSnapshot = disconnectedSnapshot(),
@@ -1404,7 +1416,95 @@ describe("Sidebar navigation", () => {
 
     await user.click(within(data).getByRole("row", { name: "Credentials" }));
     expect(await screen.findByRole("heading", { name: "Credentials" })).toBeInTheDocument();
-    await waitFor(() => expect(api.listCredentials).toHaveBeenCalledOnce());
+    await waitFor(() => {
+      expect(api.listCredentials).toHaveBeenCalledWith({ kind: "all", limit: 1 });
+      expect(api.listCredentials).toHaveBeenCalledWith({ query: "", kind: "all", limit: 100 });
+    });
+  });
+
+  it("shows the unfiltered credential total and refreshes it after stream recovery", async () => {
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      epoch: 7,
+      incarnation: 3,
+      server: "sliver.example.test:31337",
+      operator: "alice",
+      configName: "Production",
+    };
+    snapshot.eventStream = { status: "connected", attempt: 1 };
+    let publishSnapshot!: (next: SliverSnapshot) => void;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      snapshot,
+      (listener) => { publishSnapshot = listener; },
+    );
+    let total = 4;
+    vi.mocked(api.listCredentials).mockImplementation(async () => credentialCountResult(total));
+
+    render(<App />);
+    const credentialRow = () => within(screen.getByRole("treegrid", { name: "Data navigation", hidden: true }))
+      .getByRole("row", { name: "Credentials", hidden: true });
+    await waitFor(() => expect(within(credentialRow()).getByText("4")).toBeInTheDocument());
+    expect(api.listCredentials).toHaveBeenCalledWith({ kind: "all", limit: 1 });
+
+    total = 0;
+    act(() => publishSnapshot({ ...snapshot, eventStream: { status: "retrying", attempt: 2 } }));
+    await waitFor(() => expect(credentialRow().querySelector(".sidebar__menu-chip")).toBeNull());
+
+    total = 6;
+    act(() => publishSnapshot({ ...snapshot, eventStream: { status: "connected", attempt: 2 } }));
+    await waitFor(() => expect(within(credentialRow()).getByText("6")).toBeInTheDocument());
+
+    act(() => publishSnapshot(disconnectedSnapshot()));
+    expect(credentialRow().querySelector(".sidebar__menu-chip")).toBeNull();
+  });
+
+  it("clears the credential count on connection switch and ignores an old in-flight result", async () => {
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null,
+      status: "connected",
+      epoch: 7,
+      incarnation: 3,
+      server: "first.example.test:31337",
+      operator: "alice",
+      configName: "First",
+    };
+    let publishSnapshot!: (next: SliverSnapshot) => void;
+    const api = installSliverAPI(
+      vi.fn().mockResolvedValue({ ok: true, value: [] }),
+      snapshot,
+      (listener) => { publishSnapshot = listener; },
+    );
+    const oldRequest = deferred<ReturnType<typeof credentialCountResult>>();
+    const newRequest = deferred<ReturnType<typeof credentialCountResult>>();
+    vi.mocked(api.listCredentials)
+      .mockResolvedValueOnce(credentialCountResult(4))
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockReturnValueOnce(newRequest.promise);
+
+    render(<App />);
+    const credentialRow = () => within(screen.getByRole("treegrid", { name: "Data navigation", hidden: true }))
+      .getByRole("row", { name: "Credentials", hidden: true });
+    await waitFor(() => expect(within(credentialRow()).getByText("4")).toBeInTheDocument());
+
+    act(() => publishSnapshot({ ...snapshot, eventStream: { status: "retrying", attempt: 2 } }));
+    await waitFor(() => expect(api.listCredentials).toHaveBeenCalledTimes(2));
+
+    act(() => publishSnapshot({
+      ...snapshot,
+      connection: { ...snapshot.connection, epoch: 8, incarnation: 4, server: "second.example.test:31337", configName: "Second" },
+    }));
+    await waitFor(() => expect(api.listCredentials).toHaveBeenCalledTimes(3));
+    expect(credentialRow().querySelector(".sidebar__menu-chip")).toBeNull();
+
+    await act(async () => { newRequest.resolve(credentialCountResult(7)); });
+    await waitFor(() => expect(within(credentialRow()).getByText("7")).toBeInTheDocument());
+    await act(async () => { oldRequest.resolve(credentialCountResult(99)); });
+    expect(within(credentialRow()).getByText("7")).toBeInTheDocument();
+    expect(within(credentialRow()).queryByText("99")).not.toBeInTheDocument();
   });
 
   it("shows the unfiltered loot total and refreshes it for loot events and stream recovery", async () => {
@@ -1581,6 +1681,7 @@ describe("Sidebar navigation", () => {
           <NavigationContent
             snapshot={snapshot}
             lootCount={19}
+            credentialCount={27}
             view="operations"
             onDisconnect={vi.fn()}
             onExitApp={vi.fn()}
@@ -1612,7 +1713,7 @@ describe("Sidebar navigation", () => {
     expect(screen.getByText("Interact")).toBeInTheDocument();
     const lootItem = within(data).getByRole("row", { name: "Loot" });
     expect(within(lootItem).getByText("19")).toBeInTheDocument();
-    expect(within(data).getByRole("row", { name: "Credentials" })).toBeInTheDocument();
+    expect(within(within(data).getByRole("row", { name: "Credentials" })).getByText("27")).toBeInTheDocument();
     expect(within(data).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
     expect(screen.getByText("Data")).toBeInTheDocument();
 

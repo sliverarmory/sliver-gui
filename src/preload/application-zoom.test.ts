@@ -4,14 +4,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createApplicationZoomAPI } from "./application-zoom.js";
 
-function fixture(initialFactor = 1) {
+function fixture(initialFactor = 1, notifyNativeZoomChanged?: () => void) {
   let factor = initialFactor;
   const frame = {
     getZoomFactor: vi.fn(() => factor),
     setZoomFactor: vi.fn((value: number) => { factor = value; }),
   };
   const target = new EventTarget();
-  const api = createApplicationZoomAPI(frame, target);
+  const api = createApplicationZoomAPI(frame, target, notifyNativeZoomChanged);
   return {
     api,
     frame,
@@ -63,5 +63,20 @@ describe("application zoom preload API", () => {
     expect(() => api.onChanged(null as unknown as (factor: number) => void)).toThrow(
       /zoom listener must be a function/u,
     );
+  });
+
+  it("signals native zoom changes even without a UI subscriber and signals reset immediately", () => {
+    const notify = vi.fn();
+    const { api, resize, changeFactor } = fixture(1, notify);
+    resize();
+    expect(notify).not.toHaveBeenCalled();
+    changeFactor(1.25);
+    resize();
+    resize();
+    expect(notify).toHaveBeenCalledTimes(1);
+    api.reset();
+    expect(notify).toHaveBeenCalledTimes(2);
+    resize();
+    expect(notify).toHaveBeenCalledTimes(2);
   });
 });

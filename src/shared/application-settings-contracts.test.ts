@@ -4,6 +4,7 @@ import {
   APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   DEFAULT_APPLICATION_SETTINGS_VALUES,
+  DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
   DEFAULT_APPLICATION_TERMINAL_SETTINGS,
   isApplicationIcon,
   isReportScreenshotDirectory,
@@ -12,6 +13,7 @@ import {
   parseApplicationSettingsUpdateInput,
   parseApplicationSettingsValues,
   parseApplicationTerminalSettings,
+  parseApplicationOverviewSettings,
 } from "./application-settings-contracts.js";
 
 const terminal = {
@@ -29,12 +31,13 @@ const settings = {
   keyboardShortcuts: {},
   reportScreenshotDirectory: null,
   terminal,
+  overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
 };
 
 describe("application settings contracts", () => {
-  it("provides deeply frozen version-five defaults with Desktop screenshots", () => {
+  it("provides deeply frozen version-six defaults with Desktop screenshots", () => {
     expect(DEFAULT_APPLICATION_SETTINGS_STATE).toEqual({
-      v: 5,
+      v: 6,
       revision: 0,
       theme: "system",
       appIcon: "auto",
@@ -49,10 +52,12 @@ describe("application settings contracts", () => {
         cursorBlink: true,
         smoothScrolling: false,
       },
+      overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
     });
     expect(Object.isFrozen(DEFAULT_APPLICATION_SETTINGS_STATE)).toBe(true);
     expect(Object.isFrozen(DEFAULT_APPLICATION_SETTINGS_VALUES)).toBe(true);
     expect(Object.isFrozen(DEFAULT_APPLICATION_TERMINAL_SETTINGS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_APPLICATION_OVERVIEW_SETTINGS)).toBe(true);
     expect(Object.isFrozen(DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts)).toBe(true);
   });
 
@@ -67,11 +72,12 @@ describe("application settings contracts", () => {
       settings,
     });
 
-    expect(state).toEqual({ v: 5, revision: 7, ...settings });
+    expect(state).toEqual({ v: 6, revision: 7, ...settings });
     expect(update).toEqual({ expectedRevision: 7, settings });
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.terminal)).toBe(true);
     expect(Object.isFrozen(state.keyboardShortcuts)).toBe(true);
+    expect(Object.isFrozen(state.overview)).toBe(true);
     expect(Object.isFrozen(update)).toBe(true);
     expect(Object.isFrozen(update.settings)).toBe(true);
     expect(Object.isFrozen(update.settings.terminal)).toBe(true);
@@ -97,7 +103,7 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 5, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null });
+    expect(migrated).toEqual({ ...previous, v: 6, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(Object.isFrozen(migrated)).toBe(true);
     expect(Object.isFrozen(migrated.terminal)).toBe(true);
   });
@@ -113,15 +119,45 @@ describe("application settings contracts", () => {
       terminal,
     };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 5, keyboardShortcuts: {}, reportScreenshotDirectory: null });
+    expect(migrated).toEqual({ ...previous, v: 6, keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(Object.isFrozen(migrated.keyboardShortcuts)).toBe(true);
   });
 
   it("migrates version-four settings to the Desktop screenshot location", () => {
-    const { reportScreenshotDirectory: _directory, ...previousSettings } = settings;
+    const { reportScreenshotDirectory: _directory, overview: _overview, ...previousSettings } = settings;
     const previous = { v: 4, revision: 14, ...previousSettings };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 5, reportScreenshotDirectory: null });
+    expect(migrated).toEqual({ ...previous, v: 6, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+  });
+
+  it("migrates version-five settings without discarding existing preferences", () => {
+    const { overview: _overview, ...previousSettings } = settings;
+    const previous = { v: 5, revision: 19, ...previousSettings };
+    expect(parsePersistedApplicationSettingsState(previous)).toEqual({
+      ...previous, v: 6, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+    });
+  });
+
+  it("preserves selected future types and empty selections in overview settings", () => {
+    const parsed = parseApplicationOverviewSettings({
+      kinds: ["future-kind", "operator"], statuses: [], lightning: true,
+      sidebarDisabled: true, presentation: "list",
+    });
+    expect(parsed).toEqual({ kinds: ["future-kind", "operator"], statuses: [], lightning: true,
+      sidebarDisabled: true, presentation: "list" });
+    expect(Object.isFrozen(parsed.kinds)).toBe(true);
+    expect(Object.isFrozen(parsed.statuses)).toBe(true);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    for (const invalid of [
+      { ...parsed, kinds: ["operator", "operator"] },
+      { ...parsed, kinds: ["future\nkind"] },
+      { ...parsed, kinds: Array.from({ length: 65 }, (_, index) => `kind-${index}`) },
+      { ...parsed, statuses: ["broken"] },
+      { ...parsed, statuses: ["healthy", "healthy"] },
+      { ...parsed, lightning: "yes" },
+      { ...parsed, presentation: "table" },
+      { ...parsed, extra: true },
+    ]) expect(() => parseApplicationOverviewSettings(invalid)).toThrow("Invalid overview settings");
   });
 
   it.each(["/Users/operator/Pictures", "C:\\Users\\operator\\Pictures", "\\\\server\\share\\reports"])(
@@ -153,7 +189,7 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(legacy)).toThrow("Invalid application settings state");
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
-      v: 5,
+      v: 6,
       revision: 4,
       theme: "dark",
       appIcon: "auto",
@@ -162,6 +198,7 @@ describe("application settings contracts", () => {
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
       terminal,
+      overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
     });
   });
 
@@ -224,7 +261,7 @@ describe("application settings contracts", () => {
   });
 
   it.each([
-    { v: 6, revision: 0, ...settings },
+    { v: 7, revision: 0, ...settings },
     { v: 5, revision: -1, ...settings },
     { v: 5, revision: 1.5, ...settings },
     { v: 5, revision: 0, ...settings, extra: true },

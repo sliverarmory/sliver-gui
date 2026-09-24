@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -343,6 +343,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       const allowedMethods = new Set([
         "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
         "getOperators", "getSessions", "getBeacons", "getPivotGraph", "getExternalBuilders", "getCrackstations",
+        "lootAll", "credentialsAll",
         ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
       ]);
       assert.deepEqual(state.methods.filter((method) => !allowedMethods.has(method)), [],
@@ -389,6 +390,88 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
     }
   });
 }
+
+test("Overview toolbar choices survive an application restart", { timeout: 90_000 }, async (context) => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-overview-preferences-e2e-"));
+  const clientRoot = join(temporaryRoot, "client");
+  const expected = {
+    kinds: ["beacon"], statuses: ["inactive"], lightning: true,
+    sidebarDisabled: true, presentation: "list",
+  } as const;
+  let application: ElectronApplication | undefined;
+  let testFailure: unknown;
+  const launch = async (): Promise<ElectronApplication> => {
+    const launched = await electron.launch({
+      args: [
+        "--enable-sandbox", join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${join(temporaryRoot, "saved")}`,
+        `--managed-config-directory=${join(temporaryRoot, "managed")}`,
+        `--user-data-directory=${join(temporaryRoot, "user-data")}`,
+        `--console-client-root-directory=${clientRoot}`,
+      ],
+      cwd: repositoryRoot, timeout: 20_000, bypassCSP: false, chromiumSandbox: true,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const electronProcess = launched.process();
+    context.signal.addEventListener("abort", () => electronProcess.kill("SIGKILL"), { once: true });
+    return launched;
+  };
+  try {
+    await Promise.all(["saved", "managed", "user-data", "client"].map((name) => mkdir(join(temporaryRoot, name))));
+    await writeFile(join(clientRoot, "armories.json"), "[]", { mode: 0o600 });
+    await writeFile(join(temporaryRoot, "saved", "overview-fixture.cfg"), JSON.stringify({
+      operator: "overview-fixture", lhost: "127.0.0.1", lport: 31337,
+      ca_certificate: "FAKE_OVERVIEW_CA", certificate: "FAKE_OVERVIEW_CERT",
+      private_key: "FAKE_OVERVIEW_KEY", token: "FAKE_TOKEN_M0_DO_NOT_RENDER",
+    }), { mode: 0o600 });
+
+    application = await launch();
+    let page = await application.firstWindow();
+    page.setDefaultTimeout(15_000);
+    await page.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await chooseFilter(page, "Infrastructure type", "Beacon");
+    await chooseFilter(page, "Status", "Inactive");
+    await page.getByText("Lightning", { exact: true }).click();
+    await page.getByText("Disable sidebar", { exact: true }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
+    await page.waitForFunction(async (target) => {
+      const state = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getApplicationSettings();
+      return JSON.stringify(state.overview) === JSON.stringify(target);
+    }, expected);
+    const settingsPath = join(clientRoot, "gui", "application-settings.json");
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")).overview, expected);
+    await cleanupOwnedApplication(application, "Overview preferences restart", APPLICATION_CLEANUP_TIMEOUT_MS);
+    application = undefined;
+
+    application = await launch();
+    page = await application.firstWindow();
+    page.setDefaultTimeout(15_000);
+    await page.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.getByRole("button", { name: "List", exact: true }).and(page.locator('[aria-pressed="true"]')).waitFor();
+    assert.match(await page.getByRole("button", { name: /Infrastructure type/u }).innerText(), /Beacon/u);
+    assert.match(await page.getByRole("button", { name: /Status/u }).innerText(), /Inactive/u);
+    assert.equal(await page.getByRole("switch", { name: "Lightning", exact: true }).isChecked(), true);
+    assert.equal(await page.getByRole("switch", { name: "Disable sidebar", exact: true }).isChecked(), true);
+    assert.deepEqual((await page.evaluate(async () =>
+      (await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getApplicationSettings()).overview)), expected);
+  } catch (error) {
+    testFailure = error;
+    throw error;
+  } finally {
+    const cleanupFailures: unknown[] = [];
+    if (application) await cleanupOwnedApplication(application, "Overview preferences", APPLICATION_CLEANUP_TIMEOUT_MS)
+      .catch((error) => cleanupFailures.push(error));
+    await rm(temporaryRoot, { recursive: true, force: true }).catch((error) => cleanupFailures.push(error));
+    if (cleanupFailures.length) {
+      const cleanupError = new AggregateError(cleanupFailures, "Overview preferences E2E cleanup failed");
+      if (testFailure) attachCleanupFailure(testFailure, cleanupError);
+      else throw cleanupError;
+    }
+  }
+});
 
 async function verifyServerContextMenuNavigation(
   application: ElectronApplication,
@@ -766,6 +849,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
+        overview: current.overview,
       },
     });
   }, theme);

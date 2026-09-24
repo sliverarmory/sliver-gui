@@ -13,10 +13,25 @@ export interface ApplicationZoomResizeTarget {
 export function createApplicationZoomAPI(
   frame: ApplicationZoomFrame,
   resizeTarget: ApplicationZoomResizeTarget,
+  notifyNativeZoomChanged?: () => void,
 ): ApplicationZoomAPI {
+  let previousNativeFactor = frame.getZoomFactor();
+  if (notifyNativeZoomChanged) {
+    resizeTarget.addEventListener("resize", () => {
+      const factor = frame.getZoomFactor();
+      if (factor === previousNativeFactor) return;
+      previousNativeFactor = factor;
+      notifyNativeZoomChanged();
+    });
+  }
   return Object.freeze({
     getFactor: () => frame.getZoomFactor(),
-    reset: () => frame.setZoomFactor(1),
+    reset: () => {
+      const previousFactor = frame.getZoomFactor();
+      frame.setZoomFactor(1);
+      previousNativeFactor = 1;
+      if (previousFactor !== 1) notifyNativeZoomChanged?.();
+    },
     onChanged: (listener: (factor: number) => void) => {
       if (typeof listener !== "function") throw new TypeError("zoom listener must be a function");
       let previousFactor = frame.getZoomFactor();

@@ -220,6 +220,7 @@ describe("SSH preload bridge", () => {
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+        overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
       },
     };
 
@@ -404,6 +405,9 @@ describe("SSH preload bridge", () => {
     handler({}, { ...valid, appIcon: "system" });
     handler({}, { ...valid, reportScreenshotDirectory: "relative/reports" });
     handler({}, { ...valid, reportScreenshotDirectory: "" });
+    handler({}, { ...valid, overview: { ...valid.overview, kinds: ["operator", "operator"] } });
+    handler({}, { ...valid, overview: { ...valid.overview, statuses: ["unexpected"] } });
+    handler({}, { ...valid, overview: { ...valid.overview, presentation: "table" } });
     handler({}, { ...valid, keyboardShortcuts: { arbitraryAction: "mod+p" } });
     handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "mod+c" } });
     handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "shift+mod+t" } });

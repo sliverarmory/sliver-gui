@@ -140,6 +140,7 @@ describe("SSH IPC boundary", () => {
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         reportScreenshotDirectory: null,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+        overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
       },
     });
 

@@ -123,6 +123,7 @@ export function ApplicationSettingsProvider({
               commandPaletteShortcut: current.commandPaletteShortcut,
               keyboardShortcuts: current.keyboardShortcuts,
               terminal: legacyTerminal,
+              overview: current.overview,
             },
           });
           if (!active) return;
@@ -258,6 +259,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
     commandPaletteShortcut: state.commandPaletteShortcut,
     keyboardShortcuts: state.keyboardShortcuts,
     terminal: state.terminal,
+    overview: state.overview,
   });
 }
 
@@ -272,7 +274,20 @@ function sameSettings(left: ApplicationSettingsValues, right: ApplicationSetting
     left.terminal.fontSize === right.terminal.fontSize &&
     left.terminal.cursorStyle === right.terminal.cursorStyle &&
     left.terminal.cursorBlink === right.terminal.cursorBlink &&
-    left.terminal.smoothScrolling === right.terminal.smoothScrolling;
+    left.terminal.smoothScrolling === right.terminal.smoothScrolling &&
+    sameOverviewSettings(left.overview, right.overview);
+}
+
+function sameOverviewSettings(left: ApplicationSettingsValues["overview"], right: ApplicationSettingsValues["overview"]): boolean {
+  const sameSelection = (a: string | readonly string[], b: string | readonly string[]): boolean =>
+    typeof a === "string" || typeof b === "string"
+      ? a === b
+      : a.length === b.length && a.every((item, index) => item === b[index]);
+  return sameSelection(left.kinds, right.kinds) &&
+    sameSelection(left.statuses, right.statuses) &&
+    left.lightning === right.lightning &&
+    left.sidebarDisabled === right.sidebarDisabled &&
+    left.presentation === right.presentation;
 }
 
 function loadLegacyTerminalSettings(): ConsoleTerminalSettings | undefined {

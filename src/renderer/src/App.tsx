@@ -175,7 +175,7 @@ export function App() {
   const settings = applicationSettings?.settings ?? standaloneSettings;
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const connected = isUsableConnection(snapshot.connection.status);
-  const lootIdentity = connected ? [
+  const inventoryIdentity = connected ? [
     snapshot.connection.epoch,
     snapshot.connection.incarnation,
     snapshot.connection.server,
@@ -186,12 +186,24 @@ export function App() {
   const [lootCountState, setLootCountState] = useState<{ identity: string; total: number }>();
   const [lootCountRefreshSequence, setLootCountRefreshSequence] = useState(0);
   const lootCountRequestSequence = useRef(0);
-  const lootCount = lootCountState?.identity === lootIdentity ? lootCountState.total : undefined;
+  const lootCount = lootCountState?.identity === inventoryIdentity ? lootCountState.total : undefined;
+  const [credentialCountState, setCredentialCountState] = useState<{ identity: string; total: number }>();
+  const [credentialCountRefreshSequence, setCredentialCountRefreshSequence] = useState(0);
+  const credentialCountRequestSequence = useRef(0);
+  const credentialCount = credentialCountState?.identity === inventoryIdentity ? credentialCountState.total : undefined;
   const acceptLootInventoryTotal = useCallback((total: number) => {
-    if (!lootIdentity) return;
+    if (!inventoryIdentity) return;
     lootCountRequestSequence.current += 1;
-    setLootCountState({ identity: lootIdentity, total });
-  }, [lootIdentity]);
+    setLootCountState({ identity: inventoryIdentity, total });
+  }, [inventoryIdentity]);
+  const acceptCredentialInventoryTotal = useCallback((total: number) => {
+    if (!inventoryIdentity) return;
+    credentialCountRequestSequence.current += 1;
+    setCredentialCountState({ identity: inventoryIdentity, total });
+  }, [inventoryIdentity]);
+  const invalidateCredentialCount = useCallback(() => {
+    setCredentialCountRefreshSequence((current) => current + 1);
+  }, []);
   const isViewAvailable = useCallback((entry: ViewId) =>
     entry === "overview" || entry === "settings" || entry === "script-editor" || connected, [connected]);
   const { current: view, navigate: setView, goBack, goForward, canGoBack, canGoForward } =
@@ -324,7 +336,7 @@ export function App() {
 
   useEffect(() => {
     const request = ++lootCountRequestSequence.current;
-    if (!lootIdentity) {
+    if (!inventoryIdentity) {
       setLootCountState(undefined);
       return;
     }
@@ -333,13 +345,32 @@ export function App() {
     void window.sliver.listLoot({ fileType: "all", limit: 1 }).then((result) => {
       if (!active || request !== lootCountRequestSequence.current) return;
       setLootCountState(result.ok && result.value
-        ? { identity: lootIdentity, total: result.value.page.total }
+        ? { identity: inventoryIdentity, total: result.value.page.total }
         : undefined);
     }).catch(() => {
       if (active && request === lootCountRequestSequence.current) setLootCountState(undefined);
     });
     return () => { active = false; };
-  }, [lootIdentity, latestLootEventId, lootCountRefreshSequence, snapshot.eventStream.status]);
+  }, [inventoryIdentity, latestLootEventId, lootCountRefreshSequence, snapshot.eventStream.status]);
+
+  useEffect(() => {
+    const request = ++credentialCountRequestSequence.current;
+    if (!inventoryIdentity) {
+      setCredentialCountState(undefined);
+      return;
+    }
+
+    let active = true;
+    void window.sliver.listCredentials({ kind: "all", limit: 1 }).then((result) => {
+      if (!active || request !== credentialCountRequestSequence.current) return;
+      setCredentialCountState(result.ok && result.value
+        ? { identity: inventoryIdentity, total: result.value.page.total }
+        : undefined);
+    }).catch(() => {
+      if (active && request === credentialCountRequestSequence.current) setCredentialCountState(undefined);
+    });
+    return () => { active = false; };
+  }, [inventoryIdentity, credentialCountRefreshSequence, snapshot.eventStream.status]);
 
   const connect = useCallback(async (): Promise<void> => {
     const eventGeneration = snapshotEventGenerationRef.current;
@@ -423,7 +454,8 @@ export function App() {
     }
     if (snapshotEventGenerationRef.current === eventGeneration) setSnapshot(result.value);
     setLootCountRefreshSequence((current) => current + 1);
-  }, []);
+    invalidateCredentialCount();
+  }, [invalidateCredentialCount]);
 
   async function openWindow(inheritConnection: boolean) {
     const result = await window.sliver.openWindow({ inheritConnection });
@@ -574,6 +606,7 @@ export function App() {
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
+        overview: current.overview,
       }),
     }));
   }, [applicationSettings]);
@@ -796,6 +829,7 @@ export function App() {
         <NavigationContent
           snapshot={snapshot}
           lootCount={lootCount}
+          credentialCount={credentialCount}
           view={view}
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
@@ -812,6 +846,7 @@ export function App() {
         <NavigationContent
           snapshot={snapshot}
           lootCount={lootCount}
+          credentialCount={credentialCount}
           view={view}
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
@@ -985,7 +1020,7 @@ export function App() {
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
               {view === "loot" ? <LootPage snapshot={snapshot} onInventoryTotal={acceptLootInventoryTotal} /> : null}
-              {view === "credentials" ? <CredentialsPage snapshot={snapshot} /> : null}
+              {view === "credentials" ? <CredentialsPage snapshot={snapshot} onInventoryTotal={acceptCredentialInventoryTotal} onInventoryChanged={invalidateCredentialCount} /> : null}
             </>
           ) : null}
         </div>
@@ -1078,6 +1113,7 @@ function WindowNavigation({ canGoBack, canGoForward, onBack, onForward, settings
 export function NavigationContent({
   snapshot,
   lootCount,
+  credentialCount,
   view,
   onDisconnect,
   onExitApp,
@@ -1087,6 +1123,7 @@ export function NavigationContent({
 }: {
   snapshot: SliverSnapshot;
   lootCount?: number | undefined;
+  credentialCount?: number | undefined;
   view: ViewId;
   onDisconnect: () => void;
   onExitApp: () => void;
@@ -1175,7 +1212,7 @@ export function NavigationContent({
             {dataNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}
-                count={item.id === "loot" ? lootCount : undefined}
+                count={item.id === "loot" ? lootCount : credentialCount}
                 item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}

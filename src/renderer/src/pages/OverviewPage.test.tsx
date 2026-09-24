@@ -6,7 +6,13 @@ import { toast } from "@heroui/react";
 import { disconnectedSnapshot, type OperationResult, type SliverSnapshot } from "../../../shared/contracts";
 import type { BeaconSummary, SessionSummary } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyNode } from "../../../shared/topology-contracts";
+import {
+  DEFAULT_APPLICATION_SETTINGS_STATE,
+  parseApplicationSettingsState,
+  type ApplicationSettingsState,
+} from "../../../shared/application-settings-contracts";
 import { renderWithApplicationContextMenu } from "../application-context-menu-test-utils";
+import { ApplicationSettingsProvider, type ApplicationSettingsAPI } from "../components/ApplicationSettingsProvider";
 import { OverviewDocument, OverviewPage } from "./OverviewPage";
 
 vi.mock("../topology/TopologyGraph", () => ({
@@ -369,6 +375,114 @@ function topology(): TopologyDocument {
 }
 
 describe("Overview document rendering", () => {
+  it("restores saved types, states, lightning, sidebar, and presentation after remount", async () => {
+    const user = userEvent.setup();
+    let persisted: ApplicationSettingsState = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const api: ApplicationSettingsAPI = {
+      getApplicationSettings: vi.fn(async () => persisted),
+      updateApplicationSettings: vi.fn(async ({ expectedRevision, settings }) => {
+        if (expectedRevision !== persisted.revision) return { ok: false as const, error: "Stale settings" };
+        persisted = parseApplicationSettingsState({ v: 6, revision: expectedRevision + 1, ...settings });
+        return { ok: true as const, value: persisted };
+      }),
+      onApplicationSettingsChanged: vi.fn(() => vi.fn()),
+    };
+    const base = topology();
+    const document = { ...base, nodes: [...base.nodes, {
+      ...base.nodes[0]!, id: "server", kind: "server", label: "Control server", status: "warning" as const,
+    }] };
+    const mount = () => render(<ApplicationSettingsProvider api={api}><OverviewDocument document={document} /></ApplicationSettingsProvider>);
+    const first = mount();
+    await waitFor(() => expect(api.getApplicationSettings).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
+    await user.click(screen.getByRole("option", { name: "All types" }));
+    await user.click(screen.getByRole("option", { name: "Server" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: /Status/ }));
+    await user.click(screen.getByRole("option", { name: "All states" }));
+    await user.click(screen.getByRole("option", { name: "Needs attention" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("switch", { name: "Lightning" }));
+    await user.click(screen.getByRole("switch", { name: "Disable sidebar" }));
+    await user.click(screen.getByRole("button", { name: "List" }));
+    await waitFor(() => expect(persisted.overview).toEqual({
+      kinds: ["server"], statuses: ["warning"], lightning: true, sidebarDisabled: true, presentation: "list",
+    }));
+    first.unmount();
+
+    mount();
+    await waitFor(() => expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.getByRole("button", { name: /Infrastructure type/ })).toHaveTextContent("Server");
+    expect(screen.getByRole("button", { name: /Status/ })).toHaveTextContent("Needs attention");
+    expect(screen.getByRole("switch", { name: "Lightning" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Disable sidebar" })).toBeChecked();
+    expect(within(screen.getByRole("table", { name: "Infrastructure resources" })).getByRole("button", { name: "Control server" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Regional queue" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Graph" }));
+    expect(screen.getByLabelText("Test graph")).toBeInTheDocument();
+  });
+
+  it("merges a pre-load click into loaded settings and keeps the newer rapid toggle", async () => {
+    const user = userEvent.setup();
+    const loaded = parseApplicationSettingsState({ ...DEFAULT_APPLICATION_SETTINGS_STATE, revision: 3,
+      overview: { ...DEFAULT_APPLICATION_SETTINGS_STATE.overview, kinds: ["future-kind"], statuses: ["inactive"] } });
+    let resolveLoad!: (state: ApplicationSettingsState) => void;
+    const initial = new Promise<ApplicationSettingsState>((resolve) => { resolveLoad = resolve; });
+    let persisted = loaded;
+    const api: ApplicationSettingsAPI = {
+      getApplicationSettings: vi.fn(() => initial),
+      updateApplicationSettings: vi.fn(async ({ expectedRevision, settings }) => {
+        persisted = parseApplicationSettingsState({ v: 6, revision: expectedRevision + 1, ...settings });
+        return { ok: true as const, value: persisted };
+      }),
+      onApplicationSettingsChanged: vi.fn(() => vi.fn()),
+    };
+    render(<ApplicationSettingsProvider api={api}><OverviewDocument document={topology()} /></ApplicationSettingsProvider>);
+    await user.click(screen.getByRole("switch", { name: "Lightning" }));
+    expect(api.updateApplicationSettings).not.toHaveBeenCalled();
+    await act(async () => { resolveLoad(loaded); });
+    await waitFor(() => expect(persisted.overview).toEqual({
+      kinds: ["future-kind"], statuses: ["inactive"], lightning: true,
+      sidebarDisabled: false, presentation: "graph",
+    }));
+    await user.click(screen.getByRole("switch", { name: "Lightning" }));
+    await user.click(screen.getByRole("switch", { name: "Lightning" }));
+    await waitFor(() => expect(persisted.revision).toBe(6));
+    expect(persisted.overview.lightning).toBe(true);
+    expect(screen.getByRole("switch", { name: "Lightning" })).toBeChecked();
+  });
+
+  it("keeps temporarily absent type selections when visible types change", async () => {
+    const user = userEvent.setup();
+    let persisted = parseApplicationSettingsState({ ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      overview: { ...DEFAULT_APPLICATION_SETTINGS_STATE.overview, kinds: ["server", "future-kind"] } });
+    const api: ApplicationSettingsAPI = {
+      getApplicationSettings: vi.fn(async () => persisted),
+      updateApplicationSettings: vi.fn(async ({ expectedRevision, settings }) => {
+        persisted = parseApplicationSettingsState({ v: 6, revision: expectedRevision + 1, ...settings });
+        return { ok: true as const, value: persisted };
+      }),
+      onApplicationSettingsChanged: vi.fn(() => vi.fn()),
+    };
+    const base = topology();
+    const initial = { ...base, nodes: [
+      { ...base.nodes[0]!, id: "server", kind: "server", label: "Control server" },
+      base.nodes[0]!,
+    ] };
+    const rendered = render(<ApplicationSettingsProvider api={api}><OverviewDocument document={initial} /></ApplicationSettingsProvider>);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Infrastructure type/ })).toHaveTextContent("Server"));
+    await user.click(screen.getByRole("button", { name: /Infrastructure type/ }));
+    await user.click(screen.getByRole("option", { name: "Queue Cluster" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(persisted.overview.kinds).toEqual(["future-kind", "queue-cluster", "server"]));
+
+    const expanded = { ...initial, nodes: [...initial.nodes,
+      { ...base.nodes[0]!, id: "future-service", kind: "future-kind", label: "Future service" },
+    ] };
+    rendered.rerender(<ApplicationSettingsProvider api={api}><OverviewDocument document={expanded} /></ApplicationSettingsProvider>);
+    expect(screen.getByRole("button", { name: "Future service" })).toBeInTheDocument();
+  });
+
   it.each(["node", "edge"] as const)("closes and suppresses the graph sidebar while preserving %s selection and re-enables current details", async (firstType) => {
     const user = userEvent.setup();
     const base = topology();

@@ -206,6 +206,7 @@ describe("ApplicationSettingsProvider", () => {
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+        overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
       },
     });
     expect(screen.getByTestId("app-icon")).toHaveTextContent("passion");
@@ -262,6 +263,7 @@ describe("ApplicationSettingsProvider", () => {
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+        overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
       },
     });
     expect(document.documentElement).toHaveClass("dark");
@@ -304,6 +306,7 @@ describe("ApplicationSettingsProvider", () => {
           cursorBlink: false,
           smoothScrolling: true,
         },
+        overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
       },
     });
     expect(screen.getByTestId("revision")).toHaveTextContent("1");

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
   DEFAULT_APPLICATION_SETTINGS_VALUES,
+  DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
   type ApplicationIcon,
   type ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
@@ -39,9 +40,9 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-five file", async () => {
+  it("loads an exact private version-six file", async () => {
     const persisted = {
-      v: 5,
+      v: 6,
       revision: 9,
       theme: "dark",
       appIcon: "passion",
@@ -56,6 +57,8 @@ describe("ApplicationSettingsStore", () => {
         cursorBlink: false,
         smoothScrolling: true,
       },
+      overview: { kinds: ["future-kind", "operator"], statuses: ["healthy"], lightning: true,
+        sidebarDisabled: true, presentation: "list" },
     };
     await writeFile(settingsPath, JSON.stringify(persisted), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
@@ -65,10 +68,31 @@ describe("ApplicationSettingsStore", () => {
     expect(store.getState()).toEqual(persisted);
     expect(Object.isFrozen(store.getState())).toBe(true);
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
+    expect(Object.isFrozen(store.getState().overview)).toBe(true);
+  });
+
+  it("migrates a version-five file and retains its existing settings", async () => {
+    const { overview: _overview, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const previous = { ...previousSettings, v: 5, revision: 12, theme: "dark", appIcon: "passion" };
+    await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(settingsPath, 0o600);
+
+    const store = await ApplicationSettingsStore.load(settingsPath);
+    expect(store.getState()).toEqual({ ...previous, v: 6, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
+    const { v: _version, revision, ...settings } = store.getState();
+    await expect(store.update({ expectedRevision: revision, settings: {
+      ...settings, overview: { kinds: ["future-kind"], statuses: ["inactive"], lightning: true,
+        sidebarDisabled: true, presentation: "list" },
+    } })).resolves.toMatchObject({ ok: true, value: { revision: 13, v: 6 } });
+    const reloaded = await ApplicationSettingsStore.load(settingsPath);
+    expect(reloaded.getState()).toMatchObject({ revision: 13, theme: "dark", appIcon: "passion",
+      overview: { kinds: ["future-kind"], statuses: ["inactive"], lightning: true,
+        sidebarDisabled: true, presentation: "list" } });
   });
 
   it("migrates version-four settings and persists a custom screenshot directory", async () => {
-    const { reportScreenshotDirectory: _directory, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const { reportScreenshotDirectory: _directory, overview: _overview, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
     await writeFile(settingsPath, JSON.stringify({ ...previousSettings, v: 4 }), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
@@ -81,7 +105,7 @@ describe("ApplicationSettingsStore", () => {
       expectedRevision: revision,
       settings: { ...settings, reportScreenshotDirectory },
     });
-    expect(result).toMatchObject({ ok: true, value: { v: 5, revision: 1, reportScreenshotDirectory } });
+    expect(result).toMatchObject({ ok: true, value: { v: 6, revision: 1, reportScreenshotDirectory } });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState().reportScreenshotDirectory).toBe(reportScreenshotDirectory);
   });
@@ -97,7 +121,7 @@ describe("ApplicationSettingsStore", () => {
     await expect(lstat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("migrates version-two preferences and saves version five on the next update", async () => {
+  it("migrates version-two preferences and saves version six on the next update", async () => {
     const previous = {
       v: 2,
       revision: 9,
@@ -116,14 +140,14 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: 5, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null });
+    expect(store.getState()).toEqual({ ...previous, v: 6, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     const { v: _version, revision, ...settings } = store.getState();
     const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
     expect(result).toEqual({
       ok: true,
-      value: { ...previous, v: 5, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null },
+      value: { ...previous, v: 6, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS },
     });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toEqual(result.value);
@@ -149,7 +173,7 @@ describe("ApplicationSettingsStore", () => {
     const store = await ApplicationSettingsStore.load(settingsPath);
 
     expect(store.getState()).toEqual({
-      v: 5,
+      v: 6,
       revision: 9,
       theme: "dark",
       appIcon: "auto",
@@ -157,6 +181,7 @@ describe("ApplicationSettingsStore", () => {
       reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
+      overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
       terminal: {
         fontId: "source-code-pro",
         fontSize: 18,
@@ -224,7 +249,7 @@ describe("ApplicationSettingsStore", () => {
 
     expect(result.ok).toBe(true);
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
-    expect(reloaded.getState()).toMatchObject({ v: 5, revision: 1, appIcon, theme: "system" });
+    expect(reloaded.getState()).toMatchObject({ v: 6, revision: 1, appIcon, theme: "system" });
   });
 
   it("rejects stale revisions without changing memory or disk", async () => {
@@ -253,6 +278,35 @@ describe("ApplicationSettingsStore", () => {
     expect(second).toEqual({ ok: false, error: STALE_APPLICATION_SETTINGS_ERROR });
     expect(store.getState()).toMatchObject({ revision: 1, theme: "light" });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(store.getState());
+  });
+
+  it("flushes a queued overview update before shutdown", async () => {
+    const store = await ApplicationSettingsStore.load(settingsPath);
+    const update = store.update({
+      expectedRevision: 0,
+      settings: {
+        ...DEFAULT_APPLICATION_SETTINGS_VALUES,
+        overview: {
+          kinds: ["beacon"],
+          statuses: ["inactive"],
+          lightning: true,
+          sidebarDisabled: true,
+          presentation: "list",
+        },
+      },
+    });
+
+    await store.flush();
+    expect((await update).ok).toBe(true);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toMatchObject({
+      overview: {
+        kinds: ["beacon"],
+        statuses: ["inactive"],
+        lightning: true,
+        sidebarDisabled: true,
+        presentation: "list",
+      },
+    });
   });
 
   it("rejects malformed updates without persisting them", async () => {
@@ -297,6 +351,7 @@ function updateInput(
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       keyboardShortcuts: {},
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+      overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
     },
   };
 }

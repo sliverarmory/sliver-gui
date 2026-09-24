@@ -339,6 +339,7 @@ test("Overview renders passive operators, services, and a nested relay hierarchy
     const allowedMethods = new Set([
       "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
       "getOperators", "getSessions", "getBeacons", "getPivotGraph", "getExternalBuilders", "getCrackstations",
+      "lootAll", "credentialsAll",
     ]);
     assert.deepEqual(audit.methods.filter((method) => !allowedMethods.has(method)), []);
     assert.ok(audit.methods.includes("getPivotGraph"));
@@ -474,6 +475,7 @@ async function useDarkTheme(page: Page): Promise<void> {
         reportScreenshotDirectory: settings.reportScreenshotDirectory,
         commandPaletteShortcut: settings.commandPaletteShortcut, keyboardShortcuts: settings.keyboardShortcuts,
         terminal: settings.terminal,
+        overview: settings.overview,
       },
     });
   });

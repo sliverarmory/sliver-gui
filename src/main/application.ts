@@ -13,6 +13,7 @@ import {
   BrowserWindow,
   clipboard,
   dialog,
+  ipcMain,
   Menu,
   net,
   nativeTheme,
@@ -22,6 +23,7 @@ import {
   shell,
   systemPreferences,
   type MessageEvent as ElectronMessageEvent,
+  type IpcMainEvent,
   type MessagePortMain,
 } from "electron";
 
@@ -41,6 +43,7 @@ import {
   type ConsoleWindowLaunchContext,
 } from "../shared/console-contracts.js";
 import type { ApplicationUpdateState } from "../shared/application-update-contracts.js";
+import { WORKSPACE_ZOOM_CHANGED_CHANNEL } from "../shared/application-zoom-contracts.js";
 import type {
   ApplicationSettingsState,
   ApplicationSettingsUpdateInput,
@@ -83,6 +86,7 @@ import {
 } from "./application-updater.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
+import { WorkspaceZoomSettings } from "./workspace-zoom-settings.js";
 import { captureReportScreenshots } from "./report-screenshot.js";
 import { TextEditorSettingsStore } from "./text-editor-settings.js";
 import { ApplicationIconController } from "./application-icon.js";
@@ -172,6 +176,7 @@ import { TEXT_EDITOR_SESSION_PARTITION } from "./window-options.js";
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
 const APPLICATION_SETTINGS_FILE_NAME = "application-settings.json";
 const TEXT_EDITOR_SETTINGS_FILE_NAME = "text-editor-settings.json";
+const WORKSPACE_ZOOM_FILE_NAME = "workspace-zoom.json";
 
 // Scheme privileges must be declared synchronously before Electron is ready,
 // including when a test entry imports this application module.
@@ -345,7 +350,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   // Every application build uses the bundled protocol entry. Environment
   // variables must never redirect renderer navigation or IPC trust.
   const rendererUrl = APP_RENDERER_URL;
-  let initializedWorkspaceZoom = false;
+  let workspaceZoomSettings: WorkspaceZoomSettings | undefined;
+  const zoomReadyWorkspaceContents = new Set<number>();
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
@@ -715,6 +721,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       windows.delete(window);
       nativeWindowSurfaces.delete(window);
       windowsByContentsId.delete(contentsId);
+      zoomReadyWorkspaceContents.delete(contentsId);
       if (sessionShellRecord) {
         sessionShellWindowsByContentsId.delete(contentsId);
         if (sessionShellWindowsByKey.get(sessionShellRecord.key) === sessionShellRecord) {
@@ -754,15 +761,18 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       nativeTheme.shouldUseDarkColors,
     ));
     trackWindow(window, inheritFromContentsId);
-    window.webContents.once("dom-ready", () => {
-      if (initializedWorkspaceZoom) return;
-      initializedWorkspaceZoom = true;
-      // Restore 100% after Chromium applies any saved per-origin zoom. Do this
-      // once per launch so reloads and additional windows preserve manual zoom.
-      window.webContents.setZoomFactor(1);
+    window.webContents.on("did-start-navigation", (details) => {
+      if (details.isMainFrame && !details.isSameDocument) zoomReadyWorkspaceContents.delete(window.webContents.id);
+    });
+    window.webContents.on("dom-ready", () => {
+      // Chromium may apply a remembered per-origin zoom during navigation.
+      // The GUI-owned preference is authoritative on reload and new windows.
+      window.webContents.setZoomFactor(workspaceZoomSettings?.getFactor() ?? 1);
+      zoomReadyWorkspaceContents.add(window.webContents.id);
     });
     window.on("close", (event) => {
       if (!scriptCloseGuard.allowClose(window.webContents.id)) event.preventDefault();
+      else if (BrowserWindow.getFocusedWindow() === window) captureWorkspaceZoom(window);
     });
     window.webContents.on("will-prevent-unload", (event) => {
       // Electron defaults to retaining the document. preventDefault here means
@@ -2797,7 +2807,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return false;
   }
   const onBeforeQuit = (event: Electron.Event): void => {
-    if (!allowEditorQuit()) event.preventDefault();
+    if (!allowEditorQuit()) {
+      event.preventDefault();
+      return;
+    }
+    captureWorkspaceZoom(BrowserWindow.getFocusedWindow());
   };
   const onWillQuit = (event: Electron.Event): void => {
     // Do not stop services until every document has accepted closing. This also
@@ -2805,7 +2819,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     beginShutdown();
     if (quitCleanupComplete) return;
     event.preventDefault();
-    quitCleanupBarrier ??= Promise.allSettled([...pendingWindowCleanup, scriptStore.flush()])
+    quitCleanupBarrier ??= Promise.allSettled([
+      ...pendingWindowCleanup,
+      scriptStore.flush(),
+      applicationSettingsStore?.flush(),
+      workspaceZoomSettings?.flush(),
+    ])
       .then(() => {
         quitCleanupComplete = true;
         // Resolved cleanup can finish in a microtask inside Electron's current
@@ -2814,6 +2833,33 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       });
   };
   const onNativeThemeUpdated = (): void => applyNativeWindowTheme();
+  function captureWorkspaceZoom(window: BrowserWindow | null): void {
+    if (!window || !workspaceZoomSettings || window.isDestroyed() || window.webContents.isDestroyed() ||
+        nativeWindowSurfaces.get(window) !== "workspace" ||
+        !zoomReadyWorkspaceContents.has(window.webContents.id)) return;
+    try {
+      workspaceZoomSettings.setFactor(window.webContents.getZoomFactor());
+    } catch {
+      // Closing windows can lose their native webContents before this runs.
+    }
+  }
+  const onWorkspaceZoomChanged = (event: IpcMainEvent, ...arguments_: unknown[]): void => {
+    if (arguments_.length !== 0 || shutdown.isStopping || !workspaceZoomSettings) return;
+    try {
+      const window = windowsByContentsId.get(event.sender.id);
+      const frame = event.senderFrame;
+      if (!window || window.isDestroyed() || !zoomReadyWorkspaceContents.has(event.sender.id) ||
+          nativeWindowSurfaces.get(window) !== "workspace" ||
+          window.webContents !== event.sender || event.sender.isDestroyed() || !frame || frame.isDestroyed() ||
+          frame.processId !== event.sender.mainFrame.processId ||
+          frame.frameToken !== event.sender.mainFrame.frameToken ||
+          !isSameRendererDocument(event.sender.getURL(), rendererUrl) ||
+          !isSameRendererDocument(frame.url, rendererUrl)) return;
+      workspaceZoomSettings.setFactor(event.sender.getZoomFactor());
+    } catch {
+      // A window can retire while a queued zoom notification is delivered.
+    }
+  };
 
   await app.whenReady();
   applicationContextMenus = new ApplicationContextMenuController();
@@ -2822,6 +2868,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   );
   const loadedTextEditorSettingsStore = await TextEditorSettingsStore.load(
     join(consoleClientRootDirectory, "gui", TEXT_EDITOR_SETTINGS_FILE_NAME),
+  );
+  workspaceZoomSettings = await WorkspaceZoomSettings.load(
+    join(consoleClientRootDirectory, "gui", WORKSPACE_ZOOM_FILE_NAME),
   );
   applicationSettingsStore = loadedApplicationSettingsStore;
   systemIconAppearance.start(applyApplicationIcon);
@@ -3141,12 +3190,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   app.on("window-all-closed", onWindowAllClosed);
   app.on("before-quit", onBeforeQuit);
   app.on("will-quit", onWillQuit);
+  ipcMain.on(WORKSPACE_ZOOM_CHANGED_CHANNEL, onWorkspaceZoomChanged);
   createWindow();
   applicationUpdater.start();
 
   return {
     createWindow,
     async stop(): Promise<void> {
+      captureWorkspaceZoom(BrowserWindow.getFocusedWindow());
       beginShutdown();
       // A real application quit keeps the updater subscription alive through
       // Electron's later `quit` event: electron-updater performs an
@@ -3158,6 +3209,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       app.removeListener("window-all-closed", onWindowAllClosed);
       app.removeListener("before-quit", onBeforeQuit);
       app.removeListener("will-quit", onWillQuit);
+      ipcMain.removeListener(WORKSPACE_ZOOM_CHANGED_CHANNEL, onWorkspaceZoomChanged);
       nativeTheme.removeListener("updated", onNativeThemeUpdated);
       systemIconAppearance.dispose();
       applicationContextMenus?.dispose();
@@ -3174,7 +3226,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         await registry.closeWindowStreams(window.webContents.id, "application-shutdown").catch(() => undefined);
         window.close();
       }
-      await Promise.allSettled([...pendingWindowCleanup, scriptStore.flush()]);
+      await Promise.allSettled([
+        ...pendingWindowCleanup,
+        scriptStore.flush(),
+        applicationSettingsStore?.flush(),
+        workspaceZoomSettings?.flush(),
+      ]);
       for (const rendererSession of appProtocolSessions) {
         rendererSession.protocol.unhandle(APP_SCHEME);
         appProtocolSessions.delete(rendererSession);

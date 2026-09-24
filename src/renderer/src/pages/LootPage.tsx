@@ -482,6 +482,7 @@ export function LootPage({ snapshot, onInventoryTotal }: LootPageProps): React.J
     <section className="page-stack loot-page" aria-labelledby="loot-page-heading">
       <header className="page-heading">
         <div className="min-w-0">
+          <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={faBoxOpen} /> Collected files</div>
           <h1 id="loot-page-heading">Loot</h1>
           <p>Inspect server-collected files, preview bounded text and supported media, and save deliberate local copies.</p>
         </div>

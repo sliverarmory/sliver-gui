@@ -51,6 +51,8 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 
 interface CredentialsPageProps {
   snapshot: SliverSnapshot;
+  onInventoryTotal?: (total: number) => void;
+  onInventoryChanged?: () => void;
 }
 
 interface CredentialInventory {
@@ -80,7 +82,7 @@ const KIND_OPTIONS: readonly { value: CredentialKindFilter; label: string }[] = 
 
 const SECRET_DECODER = new TextDecoder();
 
-export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.Element {
+export function CredentialsPage({ snapshot, onInventoryTotal, onInventoryChanged }: CredentialsPageProps): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<CredentialKindFilter>("all");
   const [refreshSequence, setRefreshSequence] = useState(0);
@@ -168,6 +170,7 @@ export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.E
           return;
         }
         setInventory(inventoryFromPage(requestIdentity, result.value));
+        if (query === "" && kind === "all") onInventoryTotal?.(result.value.page.total);
       }).catch((error: unknown) => {
         if (
           requestSequence === listRequestSequence.current &&
@@ -185,7 +188,7 @@ export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.E
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [catalogIdentity, isConnected, kind, query, refreshSequence]);
+  }, [catalogIdentity, isConnected, kind, onInventoryTotal, query, refreshSequence]);
 
   useEffect(() => {
     clearRevealedSecret();
@@ -392,6 +395,7 @@ export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.E
       clearAddInputs();
       setIsCreateOpen(false);
       setRefreshSequence((current) => current + 1);
+      onInventoryChanged?.();
       toast.success("Credential added", {
         description: username || collection || "The server credential store was updated.",
       });
@@ -423,6 +427,7 @@ export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.E
       if (selectedCredentialRef.current?.id === target.id) closeCredential();
       setDeleteTarget(undefined);
       setRefreshSequence((current) => current + 1);
+      onInventoryChanged?.();
       toast.success("Credential deleted", { description: credentialDisplayName(target) });
       return true;
     } catch (error) {
@@ -510,6 +515,7 @@ export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.E
     <div className="page-stack">
       <section className="page-heading">
         <div>
+          <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={faKey} /> Credential store</div>
           <h1>Credentials</h1>
           <p>Browse server-side credential metadata and reveal secret values only when they are needed.</p>
         </div>
@@ -520,7 +526,10 @@ export function CredentialsPage({ snapshot }: CredentialsPageProps): React.JSX.E
               isIconOnly
               isPending={isLoading}
               variant="secondary"
-              onPress={() => setRefreshSequence((current) => current + 1)}
+              onPress={() => {
+                setRefreshSequence((current) => current + 1);
+                onInventoryChanged?.();
+              }}
             >
               <FontAwesomeIcon aria-hidden icon={faRotate} />
             </Button>

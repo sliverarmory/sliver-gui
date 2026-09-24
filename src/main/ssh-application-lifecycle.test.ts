@@ -1,11 +1,13 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from "vitest";
+import { ipcMain } from "electron";
 
 import type { ApplicationCloudDeploymentController } from "./application.js";
 import { IPC, type ManagedServerReference } from "../shared/contracts.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { NETWORK_FORWARDING_IPC_EVENTS } from "../shared/network-forwarding-contracts.js";
+import { WORKSPACE_ZOOM_CHANGED_CHANNEL } from "../shared/application-zoom-contracts.js";
 
 const harness = vi.hoisted(() => ({
   windows: [] as any[],
@@ -30,7 +32,7 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn(() => ({
-      v: 5,
+      v: 6,
       revision: 0,
       theme: "dark",
       appIcon: "auto",
@@ -45,8 +47,16 @@ const harness = vi.hoisted(() => ({
         cursorBlink: true,
         smoothScrolling: false,
       },
+      overview: { kinds: "default", statuses: "all", lightning: false, sidebarDisabled: false, presentation: "graph" },
     })),
     update: vi.fn(async () => ({ ok: false, error: "not used by this test" })),
+    flush: vi.fn(async () => undefined),
+  },
+  zoomFactor: 1,
+  zoomSettingsStore: {
+    getFactor: vi.fn(() => harness.zoomFactor),
+    setFactor: vi.fn((factor: number) => { harness.zoomFactor = factor; }),
+    flush: vi.fn(async () => undefined),
   },
 }));
 
@@ -84,6 +94,7 @@ vi.mock("electron", () => {
     readonly mainFrame: {
       processId: number;
       frameToken: string;
+      url: string;
       isDestroyed: () => boolean;
     };
     readonly send = vi.fn();
@@ -91,15 +102,19 @@ vi.mock("electron", () => {
     readonly copyImageAt = vi.fn();
     readonly inspectElement = vi.fn();
     readonly replaceMisspelling = vi.fn();
-    readonly setZoomFactor = vi.fn();
+    factor = 1;
+    readonly setZoomFactor = vi.fn((factor: number) => { this.factor = factor; });
+    readonly getZoomFactor = vi.fn(() => this.factor);
     destroyed = false;
     url = "";
 
     constructor() {
       super();
+      const self = this;
       this.id = harness.nextContentsId;
       harness.nextContentsId += 1;
       this.mainFrame = {
+        get url() { return self.url; },
         processId: this.id + 1_000,
         frameToken: `frame-${this.id}`,
         isDestroyed: () => this.destroyed,
@@ -252,6 +267,12 @@ vi.mock("./application-settings.js", () => ({
   },
 }));
 
+vi.mock("./workspace-zoom-settings.js", () => ({
+  WorkspaceZoomSettings: {
+    load: vi.fn(async () => harness.zoomSettingsStore),
+  },
+}));
+
 vi.mock("./application-updater.js", () => ({
   createApplicationUpdater: vi.fn(() => harness.updater),
 }));
@@ -366,8 +387,9 @@ vi.mock("./script-store.js", () => ({
 }));
 
 describe("application protocol lifecycle", () => {
-  it("normalizes startup zoom once and preserves manual zoom across reloads and later windows", async () => {
+  it("restores workspace zoom after navigation and across application starts", async () => {
     const { startApplication } = await import("./application.js");
+    harness.zoomFactor = 1;
     const controller = {
       getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
       getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
@@ -379,16 +401,34 @@ describe("application protocol lifecycle", () => {
       expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledExactlyOnceWith(1);
 
       firstWindow.webContents.setZoomFactor(1.1);
+      ipcMain.emit(WORKSPACE_ZOOM_CHANGED_CHANNEL, {
+        sender: firstWindow.webContents,
+        senderFrame: firstWindow.webContents.mainFrame,
+      });
+      expect(harness.zoomSettingsStore.setFactor).toHaveBeenLastCalledWith(1.1);
+      firstWindow.webContents.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+      firstWindow.webContents.setZoomFactor(0.9);
+      ipcMain.emit(WORKSPACE_ZOOM_CHANGED_CHANNEL, {
+        sender: firstWindow.webContents,
+        senderFrame: firstWindow.webContents.mainFrame,
+      });
+      expect(harness.zoomFactor).toBe(1.1);
       firstWindow.webContents.emit("dom-ready");
       firstWindow.webContents.emit("did-finish-load");
-      expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledTimes(2);
+      expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledTimes(4);
       expect(firstWindow.webContents.setZoomFactor).toHaveBeenLastCalledWith(1.1);
 
       const laterWindow = application.createWindow();
-      expect(laterWindow.webContents.setZoomFactor).not.toHaveBeenCalled();
-      expect(firstWindow.webContents.setZoomFactor).toHaveBeenCalledTimes(2);
+      expect(laterWindow.webContents.setZoomFactor).toHaveBeenCalledExactlyOnceWith(1.1);
     } finally {
       await application.stop();
+    }
+    const relaunched = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+    try {
+      expect(harness.windows.at(-1)!.webContents.setZoomFactor).toHaveBeenCalledExactlyOnceWith(1.1);
+    } finally {
+      await relaunched.stop();
+      harness.zoomFactor = 1;
     }
   });
 

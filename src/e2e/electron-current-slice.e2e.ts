@@ -1244,6 +1244,7 @@ async function setApplicationTheme(
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
+        overview: current.overview,
       },
     });
   }, theme);

@@ -57,6 +57,7 @@ test("Report Screenshot captures every open app window into the configured direc
           commandPaletteShortcut: current.commandPaletteShortcut,
           keyboardShortcuts: current.keyboardShortcuts,
           terminal: current.terminal,
+          overview: current.overview,
         },
       });
     }, reportDirectory);

@@ -609,6 +609,7 @@ describe("trusted Electron IPC boundary", () => {
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
+        overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
       },
     };
 
