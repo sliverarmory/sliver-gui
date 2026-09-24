@@ -860,7 +860,6 @@ export function SessionTerminalPanel({
           ref={entry.terminalRef}
           {...(terminalAppearance ? { appearance: terminalAppearance } : {})}
           ariaLabel={`Interactive shell for ${session.name || session.hostname || session.id}`}
-          className="min-h-[360px]"
           disableInput={isWindows(session.os)}
           enableClipboard
           transport={entry.transport}
@@ -932,11 +931,11 @@ export function SessionTerminalPanel({
     <section
       aria-labelledby="session-shells-heading"
       className={isDedicated
-        ? "flex h-screen min-h-0 min-w-0 flex-col overflow-hidden bg-surface"
-        : "min-w-0 overflow-hidden rounded-2xl bg-surface"}
+        ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface"
+        : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl bg-surface"}
       data-presentation={presentation}
     >
-      <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <div className="flex shrink-0 flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faTerminal} /></span>
           <div className="min-w-0">
@@ -980,10 +979,7 @@ export function SessionTerminalPanel({
       ) : null}
 
       {isWide ? (
-        <div className={isDedicated
-          ? "min-h-0 flex-1 overflow-hidden bg-background"
-          : "h-[min(68vh,720px)] min-h-[520px] overflow-hidden bg-background"}
-        >
+        <div className="min-h-0 flex-1 overflow-hidden bg-background">
           <Resizable autoSaveId="sliver:session-shell-workspace" orientation="horizontal">
             <Resizable.Panel
               defaultSize="288px"
@@ -998,7 +994,7 @@ export function SessionTerminalPanel({
           </Resizable>
         </div>
       ) : (
-        <div className={isDedicated ? "min-h-0 flex-1 bg-background" : "min-h-[520px] bg-background"}>
+        <div className="min-h-0 flex-1 overflow-hidden bg-background">
           {terminalSurface}
         </div>
       )}
@@ -1177,8 +1173,8 @@ function TerminalSurface({
   }, []);
   useEffect(() => setIsStatisticsOpen(false), [selectedResource?.resourceId]);
   return (
-    <div className="flex h-full min-h-[520px] min-w-0 flex-col bg-background" data-terminal-surface>
-      <div className="flex flex-col gap-3 bg-surface px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="flex h-full min-h-0 min-w-0 flex-col bg-background" data-terminal-surface>
+      <div className="flex shrink-0 flex-col gap-3 bg-surface px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex min-w-0 items-center gap-2">
           {!isWide ? (
             <Button size="sm" variant="secondary" onPress={onOpenShellList}>Shells</Button>
@@ -1250,7 +1246,7 @@ function TerminalSurface({
         <div className="relative min-h-0 flex-1">
           {terminals}
           {!isAttached ? (
-            <EmptyState className="h-full min-h-[420px] px-6 py-12">
+            <EmptyState className="h-full min-h-0 px-6 py-12">
               <EmptyState.Header>
                 <EmptyState.Media variant="icon">
                   <FontAwesomeIcon aria-hidden icon={error || panelStatus === "error" ? faTriangleExclamation : faTerminal} />
