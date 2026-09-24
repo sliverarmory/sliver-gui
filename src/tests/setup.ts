@@ -1,4 +1,9 @@
 import "@testing-library/jest-dom/vitest";
+import { configure } from "@testing-library/react";
+
+if (process.env["CI"] === "true" && process.env["RUNNER_OS"] === "Windows") {
+  configure({ asyncUtilTimeout: 5_000 });
+}
 
 Object.defineProperty(globalThis, "matchMedia", {
   configurable: true,
