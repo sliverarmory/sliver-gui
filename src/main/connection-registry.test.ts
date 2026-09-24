@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
 import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedCloudOverview, type ManagedServerReference, type SliverSnapshot } from "../shared/contracts.js";
+import { OPERATOR_DATA_LIMITS } from "../shared/operator-data-contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -724,6 +725,105 @@ describe("connection registry with an injected Sliver client", () => {
     expect(revealed.value).not.toHaveProperty("hash");
     preview.value.preview.fill(0);
     revealed.value.value.fill(0);
+  });
+
+  it("previews binary images and videos by content signature, independent of filename", async () => {
+    const client = new FakeSliverClient();
+    const imageId = "591a16d2-e138-4a21-b38f-f166aa23e044";
+    const videoId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const video = Buffer.from([0, 0, 0, 16, ...Buffer.from("ftypmp42"), 0, 0, 0, 0]);
+    client.lootState = [
+      clientpb.Loot.create({
+        ID: imageId, Name: "image", FileType: clientpb.FileType.BINARY,
+        Size: String(image.byteLength), File: { Name: "misleading.txt", Data: image },
+      }),
+      clientpb.Loot.create({
+        ID: videoId, Name: "video", FileType: clientpb.FileType.BINARY,
+        Size: String(video.byteLength), File: { Name: "misleading.png", Data: video },
+      }),
+    ];
+    const returned: clientpb.Loot[] = [];
+    client.lootContent.mockImplementation(async (id) => {
+      const item = client.lootState.find((loot) => loot.ID === id);
+      if (!item) throw new Error("unknown fake loot");
+      const response = clientpb.Loot.create({
+        ...item,
+        File: item.File ? { ...item.File, Data: Buffer.from(item.File.Data) } : undefined,
+      });
+      returned.push(response);
+      return response;
+    });
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const imageDetail = await registry.getLootDetail(1, imageId);
+    const videoDetail = await registry.getLootDetail(1, videoId);
+    expect(imageDetail).toMatchObject({ ok: true, value: { previewState: "image", mediaMimeType: "image/png" } });
+    expect(videoDetail).toMatchObject({ ok: true, value: { previewState: "video", mediaMimeType: "video/mp4" } });
+    if (!imageDetail.ok || !videoDetail.ok) throw new Error("Media preview failed");
+    expect(imageDetail.value.preview).toEqual(new Uint8Array(image));
+    expect(videoDetail.value.preview).toEqual(new Uint8Array(video));
+    expect(returned).toHaveLength(2);
+    expect(returned.every((response) => response.File?.Data.every((byte) => byte === 0))).toBe(true);
+    imageDetail.value.preview.fill(0);
+    videoDetail.value.preview.fill(0);
+  });
+
+  it("keeps unknown binary content out of the detail response even with an image extension", async () => {
+    const client = new FakeSliverClient();
+    const lootId = "591a16d2-e138-4a21-b38f-f166aa23e044";
+    const response = clientpb.Loot.create({
+      ID: lootId, Name: "unknown", FileType: clientpb.FileType.BINARY,
+      Size: "11", File: { Name: "spoofed.png", Data: Buffer.from("not a photo") },
+    });
+    client.lootState = [response];
+    const returned = clientpb.Loot.create({
+      ...response, File: { Name: "spoofed.png", Data: Buffer.from("not a photo") },
+    });
+    client.lootContent.mockResolvedValueOnce(returned);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const detail = await registry.getLootDetail(1, lootId);
+    expect(detail).toMatchObject({ ok: true, value: { previewState: "binary" } });
+    if (!detail.ok) throw new Error(detail.error);
+    expect(detail.value.preview).toHaveLength(0);
+    expect(detail.value).not.toHaveProperty("mediaMimeType");
+    expect(client.lootContent).toHaveBeenCalledExactlyOnceWith(lootId);
+    expect(returned.File?.Data.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("does not fetch an oversized binary preview and rejects oversized returned content", async () => {
+    const client = new FakeSliverClient();
+    const lootId = "591a16d2-e138-4a21-b38f-f166aa23e044";
+    client.lootState = [clientpb.Loot.create({
+      ID: lootId, Name: "large", FileType: clientpb.FileType.BINARY,
+      Size: String(OPERATOR_DATA_LIMITS.mediaPreviewBytes + 1),
+      File: { Name: "large.mp4", Data: Buffer.alloc(0) },
+    })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const tooLarge = await registry.getLootDetail(1, lootId);
+    expect(tooLarge).toMatchObject({ ok: true, value: { previewState: "too-large" } });
+    expect(client.lootContent).not.toHaveBeenCalled();
+
+    client.lootState[0]!.Size = "1";
+    const oversizedData = Buffer.alloc(OPERATOR_DATA_LIMITS.mediaPreviewBytes + 1);
+    oversizedData[0] = 0x89;
+    client.lootContent.mockImplementationOnce(async () => ({
+      ID: lootId,
+      File: { Data: oversizedData },
+    }) as clientpb.Loot);
+    const rejected = await registry.getLootDetail(1, lootId);
+    expect(rejected).toMatchObject({ ok: false });
+    if (rejected.ok) throw new Error("Oversized preview was accepted");
+    expect(rejected.error).toMatch(/preview exceeds/u);
+    expect(oversizedData.every((byte) => byte === 0)).toBe(true);
   });
 
   it("opens the native loot save dialog before fetching content and writes a private bounded copy", async () => {

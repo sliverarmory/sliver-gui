@@ -197,6 +197,7 @@ test(`Script Editor works offline with real Monaco, QuickJS and Ghostty (${packa
         expectedRevision: settings.revision,
         settings: {
           theme: "dark", appIcon: settings.appIcon, reduceMotion: true,
+          reportScreenshotDirectory: settings.reportScreenshotDirectory,
           commandPaletteShortcut: settings.commandPaletteShortcut,
           keyboardShortcuts: settings.keyboardShortcuts, terminal: settings.terminal,
         },

@@ -52,6 +52,8 @@ const invokeArguments = {
   claimInteractionWindow: [],
   exitApp: [],
   getApplicationSettings: [],
+  chooseReportScreenshotDirectory: [],
+  reportScreenshot: [],
   getApplicationIcon: [],
   setKeyboardShortcutRecording: [true],
   updateApplicationSettings: [{
@@ -61,7 +63,8 @@ const invokeArguments = {
       appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
-        keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
+      keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
+      reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
     },
   }],

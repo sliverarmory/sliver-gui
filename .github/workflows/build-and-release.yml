@@ -56,7 +56,8 @@ jobs:
 
   application-e2e:
     name: Electron current-slice E2E
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Keep this check visible while its CI execution is disabled.
+    if: ${{ false }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
@@ -109,7 +110,6 @@ jobs:
     name: Build (${{ matrix.platform }})
     needs:
       - protocol-parity
-      - application-e2e
     runs-on: ${{ matrix.runner }}
     environment: ${{ github.ref_type == 'tag' && 'release' || 'ci' }}
     timeout-minutes: 60

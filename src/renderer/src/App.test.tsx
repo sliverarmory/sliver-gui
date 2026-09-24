@@ -23,7 +23,7 @@ import { ApplicationSettingsProvider } from "./components/ApplicationSettingsPro
 import * as connectionContext from "./components/ConnectionProvider";
 import { renderWithApplicationContextMenu as render } from "./application-context-menu-test-utils";
 import { navigationShortcuts, shortcutAriaKeyShortcuts } from "./navigation-shortcuts";
-import { isApplePlatform } from "./components/CommandPaletteShortcut";
+import { formatCommandPaletteShortcut, isApplePlatform } from "./components/CommandPaletteShortcut";
 import { OPEN_CONSOLE_SHORTCUT } from "./window-shortcuts";
 
 beforeAll(() => {
@@ -91,6 +91,7 @@ function installSliverAPI(
     onScriptEditorRequested: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),
+    chooseReportScreenshotDirectory: vi.fn(failedOperation),
     chooseCertificatePair: vi.fn(failedOperation),
     backgroundTarget: vi.fn(failedOperation),
     cancelBeaconTask: vi.fn(failedOperation),
@@ -171,6 +172,7 @@ function installSliverAPI(
     onConsoleSelectTabRequested: vi.fn(() => vi.fn()),
     onConsoleSettingsRequested: vi.fn(() => vi.fn()),
     openWindow: vi.fn(failedOperation),
+    reportScreenshot: vi.fn(failedOperation),
     prepareStopAllJobs: vi.fn(failedOperation),
     prepareStopJob: vi.fn(failedOperation),
     prepareExecutionAction: vi.fn(failedOperation),
@@ -502,6 +504,59 @@ describe("App startup", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
     });
+  });
+
+  it("captures all open windows from the command palette while disconnected", async () => {
+    const user = userEvent.setup();
+    const success = vi.spyOn(toast, "success");
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    vi.mocked(api.reportScreenshot).mockResolvedValue({
+      ok: true,
+      value: {
+        directory: "/Users/operator/Desktop",
+        files: ["/Users/operator/Desktop/report-1.png", "/Users/operator/Desktop/report-2.png"],
+      },
+    });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const command = await screen.findByRole("menuitem", { name: /^Report Screenshot/u });
+    expect(command).not.toHaveAttribute("aria-disabled", "true");
+    expect(within(command).getByLabelText(formatCommandPaletteShortcut("mod+alt+s"))).toBeInTheDocument();
+    await user.click(command);
+
+    await waitFor(() => expect(api.reportScreenshot).toHaveBeenCalledExactlyOnceWith());
+    await waitFor(() => expect(success).toHaveBeenCalledWith("Report screenshots saved", {
+      description: "Saved 2 windows to /Users/operator/Desktop.",
+    }));
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+    success.mockRestore();
+  });
+
+  it("reports screenshot failures from the command palette", async () => {
+    const user = userEvent.setup();
+    const danger = vi.spyOn(toast, "danger");
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    vi.mocked(api.reportScreenshot)
+      .mockResolvedValueOnce({ ok: false, error: "Screenshot folder is not writable." })
+      .mockRejectedValueOnce(new Error("Capture failed."));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.click(await screen.findByRole("menuitem", { name: /^Report Screenshot/u }));
+    await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not capture screenshots", {
+      description: "Screenshot folder is not writable.",
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.click(await screen.findByRole("menuitem", { name: /^Report Screenshot/u }));
+    await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not capture screenshots", {
+      description: "Capture failed.",
+    }));
+    expect(api.reportScreenshot).toHaveBeenCalledTimes(2);
+    danger.mockRestore();
   });
 
   it("removes stale opaque config IDs when a catalog refresh fails", async () => {

@@ -179,10 +179,14 @@ describe("ApplicationSettingsProvider", () => {
         theme: input.settings.theme,
         appIcon: input.settings.appIcon,
         reduceMotion: input.settings.reduceMotion,
+        reportScreenshotDirectory: input.settings.reportScreenshotDirectory,
       }),
     }));
     installSettingsAPI({
-      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ appIcon: "passion" })),
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({
+        appIcon: "passion",
+        reportScreenshotDirectory: "/tmp/report-screenshots",
+      })),
       updateApplicationSettings,
     });
     const user = userEvent.setup();
@@ -198,12 +202,38 @@ describe("ApplicationSettingsProvider", () => {
         theme: "light",
         appIcon: "passion",
         reduceMotion: false,
+        reportScreenshotDirectory: "/tmp/report-screenshots",
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     });
     expect(screen.getByTestId("app-icon")).toHaveTextContent("passion");
+  });
+
+  it("persists the screenshot directory and keeps it through later changes", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+    }));
+    installSettingsAPI({ updateApplicationSettings });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+
+    await user.click(screen.getByRole("button", { name: "Use report folder" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("1"));
+    expect(screen.getByTestId("report-directory")).toHaveTextContent("/tmp/report-screenshots");
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.reportScreenshotDirectory)
+      .toBe("/tmp/report-screenshots");
+
+    await user.click(screen.getByRole("button", { name: "Use report folder" }));
+    expect(updateApplicationSettings).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Use light theme" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("2"));
+    expect(updateApplicationSettings.mock.calls[1]?.[0].settings.reportScreenshotDirectory)
+      .toBe("/tmp/report-screenshots");
   });
 
   it("persists an icon-only update without changing the app theme", async () => {
@@ -228,6 +258,7 @@ describe("ApplicationSettingsProvider", () => {
         theme: "system",
         appIcon: "passion",
         reduceMotion: false,
+        reportScreenshotDirectory: null,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
@@ -263,6 +294,7 @@ describe("ApplicationSettingsProvider", () => {
         theme: "system",
         appIcon: "auto",
         reduceMotion: false,
+        reportScreenshotDirectory: null,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: {
@@ -316,6 +348,7 @@ function SettingsProbe(): React.JSX.Element {
       <span data-testid="revision">{context.settings.revision}</span>
       <span data-testid="theme">{context.settings.theme}</span>
       <span data-testid="app-icon">{context.settings.appIcon}</span>
+      <span data-testid="report-directory">{context.settings.reportScreenshotDirectory ?? "Desktop"}</span>
       <span data-testid="resolved-app-icon">{context.resolvedAppIcon}</span>
       <button
         type="button"
@@ -328,6 +361,14 @@ function SettingsProbe(): React.JSX.Element {
         onClick={() => void context.updateSettings((current) => ({ ...current, appIcon: "passion" }))}
       >
         Use Passion icon
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({
+          ...current, reportScreenshotDirectory: "/tmp/report-screenshots",
+        }))}
+      >
+        Use report folder
       </button>
       <button
         type="button"
@@ -367,7 +408,7 @@ function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
 }
 
 function applicationSettings(
-  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion">>,
+  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "reportScreenshotDirectory">>,
 ): ApplicationSettingsState {
   return {
     ...DEFAULT_APPLICATION_SETTINGS_STATE,

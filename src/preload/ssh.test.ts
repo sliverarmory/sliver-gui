@@ -216,6 +216,7 @@ describe("SSH preload bridge", () => {
         theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+        reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
@@ -388,17 +389,21 @@ describe("SSH preload bridge", () => {
       revision: 4,
       theme: "light" as const,
       appIcon: "passion" as const,
+      reportScreenshotDirectory: "/Users/operator/Pictures",
       keyboardShortcuts: {
         terminalNewTab: "mod+shift+t",
         terminalSettings: "alt+,",
         textEditorOpen: "mod+alt+o",
         textEditorUndo: "mod+z",
         textEditorRedo: "mod+shift+z",
+        reportScreenshot: "mod+alt+p",
       },
     };
     handler({}, { ...valid, rendererPath: "/tmp/private" });
     handler({}, { ...valid, terminal: { ...valid.terminal, fontSize: 100 } });
     handler({}, { ...valid, appIcon: "system" });
+    handler({}, { ...valid, reportScreenshotDirectory: "relative/reports" });
+    handler({}, { ...valid, reportScreenshotDirectory: "" });
     handler({}, { ...valid, keyboardShortcuts: { arbitraryAction: "mod+p" } });
     handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "mod+c" } });
     handler({}, { ...valid, keyboardShortcuts: { terminalNewTab: "shift+mod+t" } });

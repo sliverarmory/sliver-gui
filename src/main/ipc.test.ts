@@ -607,6 +607,7 @@ describe("trusted Electron IPC boundary", () => {
         reduceMotion: true,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
+        reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       },
     };
@@ -634,6 +635,39 @@ describe("trusted Electron IPC boundary", () => {
       destinationPath: "/tmp/private",
     })).toThrow(/invalid application settings update/);
     expect(update).toHaveBeenCalledOnce();
+  });
+
+  it("routes screenshot commands without accepting a renderer-supplied destination", async () => {
+    const chooseReportScreenshotDirectory = vi.fn(async () => ({
+      ok: true as const, value: { directory: "/chosen/screenshots" },
+    }));
+    const reportScreenshot = vi.fn(async () => ({
+      ok: true as const, value: { directory: "/chosen/screenshots", files: ["/chosen/screenshots/one.png"] },
+    }));
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined, {
+        getState: () => DEFAULT_APPLICATION_SETTINGS_STATE,
+        getIcon: () => "dark",
+        update: vi.fn(),
+        chooseReportScreenshotDirectory,
+        reportScreenshot,
+      });
+    const { event } = invokeEvent(RENDERER_URL, 42);
+    await expect(electronMocks.handlers.get(IPC.chooseReportScreenshotDirectory)?.(event))
+      .resolves.toMatchObject({ ok: true, value: { directory: "/chosen/screenshots" } });
+    await expect(electronMocks.handlers.get(IPC.reportScreenshot)?.(event))
+      .resolves.toMatchObject({ ok: true, value: { files: ["/chosen/screenshots/one.png"] } });
+    expect(chooseReportScreenshotDirectory).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 42, rendererProcessId: 100, rendererFrameToken: "main-frame",
+    });
+    expect(reportScreenshot).toHaveBeenCalledOnce();
+    for (const channel of [IPC.chooseReportScreenshotDirectory, IPC.reportScreenshot]) {
+      expect(() => electronMocks.handlers.get(channel)?.(event, "/untrusted/path"))
+        .toThrow(/invalid arguments/iu);
+      const { event: untrusted } = invokeEvent("https://example.invalid/index.html", 42);
+      expect(() => electronMocks.handlers.get(channel)?.(untrusted)).toThrow(/untrusted renderer/iu);
+    }
+    expect(reportScreenshot).toHaveBeenCalledOnce();
   });
 
   it("accepts shortcut recording only from a trusted sender with a single boolean", () => {

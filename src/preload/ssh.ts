@@ -64,6 +64,7 @@ const APPLICATION_THEMES = new Set(["system", "light", "dark"]);
 const APPLICATION_ICONS = new Set(["auto", "light", "dark", "passion"]);
 const KEYBOARD_SHORTCUT_ACTIONS = new Set([
   "newWindow", "duplicateWindow", "navigateBack", "navigateForward", "refreshServer", "openConsole",
+  "reportScreenshot",
   "terminalNewTab", "terminalCloseTab", "terminalSettings", "terminalCloseWindow",
   "textEditorOpen", "textEditorSaveAs", "textEditorSave", "textEditorUndo", "textEditorRedo",
   "textEditorFind", "textEditorReplace", "textEditorWordWrap", "textEditorCommandPalette",
@@ -585,15 +586,16 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
 function parseApplicationSettingsState(value: unknown): ApplicationSettingsState {
   const state = exactRecord(
     value,
-    ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "keyboardShortcuts", "terminal"],
+    ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal"],
     "application settings",
   );
-  if (state["v"] !== 4 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 5 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
   if (!APPLICATION_ICONS.has(stringValue(state["appIcon"]))) throw new TypeError("Invalid application icon");
   if (typeof state["reduceMotion"] !== "boolean") throw new TypeError("Invalid reduced-motion setting");
+  if (!isReportScreenshotDirectory(state["reportScreenshotDirectory"])) throw new TypeError("Invalid report screenshot directory");
   const shortcut = stringValue(state["commandPaletteShortcut"]);
   if (!isKeyboardShortcut(shortcut)) throw new TypeError("Invalid command-palette shortcut");
   const keyboardShortcuts = parseKeyboardShortcuts(state["keyboardShortcuts"]);
@@ -613,11 +615,12 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
     throw new TypeError("Invalid terminal behavior");
   }
   return Object.freeze({
-    v: 4,
+    v: 5,
     revision: state["revision"] as number,
     theme: state["theme"] as ApplicationSettingsState["theme"],
     appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
     reduceMotion: state["reduceMotion"],
+    reportScreenshotDirectory: state["reportScreenshotDirectory"],
     commandPaletteShortcut: shortcut,
     keyboardShortcuts,
     terminal: Object.freeze({
@@ -628,6 +631,14 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
       smoothScrolling: terminal["smoothScrolling"],
     }),
   });
+}
+
+function isReportScreenshotDirectory(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== "string" || value.length === 0 || value.length > 4096 || /[\u0000-\u001f\u007f]/u.test(value)) {
+    return false;
+  }
+  return value.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/][^\\/]+/u.test(value);
 }
 
 function isKeyboardShortcut(value: unknown): value is string {

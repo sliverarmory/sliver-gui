@@ -7,6 +7,7 @@ export const OPERATOR_DATA_LIMITS = Object.freeze({
   usernameCharacters: 256,
   secretBytes: 64 * 1024,
   previewBytes: 1024 * 1024,
+  mediaPreviewBytes: 32 * 1024 * 1024,
   artifactBytes: 64 * 1024 * 1024,
 } as const);
 
@@ -59,12 +60,20 @@ export interface RenameLootInput {
   name: string;
 }
 
-export type LootPreviewState = "text" | "binary" | "too-large" | "empty";
+export type LootPreviewState = "text" | "image" | "video" | "binary" | "too-large" | "empty";
+export type LootMediaMimeType =
+  | "image/png"
+  | "image/jpeg"
+  | "image/gif"
+  | "image/webp"
+  | "video/mp4"
+  | "video/webm";
 
 export interface LootDetail {
   item: LootSummary;
   previewState: LootPreviewState;
   preview: Uint8Array;
+  mediaMimeType?: LootMediaMimeType;
 }
 
 export interface LootDownloadResult {

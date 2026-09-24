@@ -9,6 +9,7 @@ import {
   faBolt,
   faBoxOpen,
   faBoxesStacked,
+  faCamera,
   faCloudArrowUp,
   faCode,
   faComputer,
@@ -392,6 +393,26 @@ export function App() {
     if (!result.ok) toast.danger("Could not open window", { description: result.error });
   }
 
+  async function reportScreenshot(): Promise<void> {
+    try {
+      const result = await window.sliver.reportScreenshot();
+      if (!result.ok || !result.value) {
+        toast.danger("Could not capture screenshots", {
+          description: result.error ?? "The screenshots could not be saved.",
+        });
+        return;
+      }
+      const count = result.value.files.length;
+      toast.success("Report screenshots saved", {
+        description: `Saved ${count} ${count === 1 ? "window" : "windows"} to ${result.value.directory}.`,
+      });
+    } catch (error) {
+      toast.danger("Could not capture screenshots", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async function openCloudDeployment() {
     try {
       const result = await window.sliver.openCloudDeploymentWindow();
@@ -512,6 +533,7 @@ export function App() {
         theme: current.theme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
+        reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
@@ -694,6 +716,16 @@ export function App() {
       onAction: () => void openCloudDeployment(),
     },
     {
+      id: "report-screenshot",
+      group: "Windows",
+      icon: faCamera,
+      label: "Report Screenshot",
+      shortcut: resolveKeyboardShortcut("reportScreenshot", settings, isApplePlatform()),
+      description: "Capture all open application windows to the configured screenshot folder.",
+      keywords: ["capture", "windows", "desktop"],
+      onAction: () => void reportScreenshot(),
+    },
+    {
       id: "window-same-server",
       group: "Windows",
       icon: faWindowRestore,
@@ -836,6 +868,10 @@ export function App() {
               onAppIconChange={(appIcon) => updateSettings((current) => ({
                 ...current,
                 appIcon,
+              }))}
+              onReportScreenshotDirectoryChange={(reportScreenshotDirectory) => updateSettings((current) => ({
+                ...current,
+                reportScreenshotDirectory,
               }))}
               onResetKeyboardShortcuts={() => updateSettings((current) => ({
                 ...current,
@@ -1058,7 +1094,7 @@ export function NavigationContent({
         </div>
       </Sidebar.Header>
       <Sidebar.Content>
-        <Sidebar.Group>
+        <Sidebar.Group className="mt-3">
           <Sidebar.Menu aria-label="Overview navigation" showGuideLines={false}>
             <SidebarNavigationItem item={overviewNavItem} isCurrent={view === "overview"}
               isDisabled={false} onAction={() => navigate("overview")} />

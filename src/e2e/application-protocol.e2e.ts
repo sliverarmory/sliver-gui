@@ -144,6 +144,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
           theme: "light",
           appIcon: settings.appIcon,
           reduceMotion: true,
+          reportScreenshotDirectory: settings.reportScreenshotDirectory,
           commandPaletteShortcut: settings.commandPaletteShortcut,
           keyboardShortcuts: settings.keyboardShortcuts,
           terminal: settings.terminal,

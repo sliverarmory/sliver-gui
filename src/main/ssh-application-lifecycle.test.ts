@@ -30,13 +30,14 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn(() => ({
-      v: 4,
+      v: 5,
       revision: 0,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: false,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
+      reportScreenshotDirectory: null,
       terminal: {
         fontId: "fira-code",
         fontSize: 13,

@@ -1,4 +1,4 @@
-import { dirname } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
 import {
   APPLICATION_SETTINGS_VERSION,
@@ -62,6 +62,9 @@ export class ApplicationSettingsStore {
       try {
         parsed = parseApplicationSettingsUpdateInput(input);
       } catch {
+        return { ok: false, error: INVALID_APPLICATION_SETTINGS_UPDATE_ERROR };
+      }
+      if (parsed.settings.reportScreenshotDirectory !== null && !isAbsolute(parsed.settings.reportScreenshotDirectory)) {
         return { ok: false, error: INVALID_APPLICATION_SETTINGS_UPDATE_ERROR };
       }
 

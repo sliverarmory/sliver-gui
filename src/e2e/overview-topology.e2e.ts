@@ -471,6 +471,7 @@ async function useDarkTheme(page: Page): Promise<void> {
       expectedRevision: settings.revision,
       settings: {
         theme: "dark", appIcon: settings.appIcon, reduceMotion: settings.reduceMotion,
+        reportScreenshotDirectory: settings.reportScreenshotDirectory,
         commandPaletteShortcut: settings.commandPaletteShortcut, keyboardShortcuts: settings.keyboardShortcuts,
         terminal: settings.terminal,
       },

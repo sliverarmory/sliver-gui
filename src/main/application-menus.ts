@@ -32,6 +32,7 @@ export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly openTextEditor?: () => void;
   readonly duplicateConnectedWindow: () => void;
+  readonly reportScreenshot?: () => void;
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
   readonly openArmory: (tab: ArmoryTabId) => void;
   readonly openNetwork: (tab: NetworkTabId, sourceWindow?: BaseWindow) => void;
@@ -245,6 +246,15 @@ export function buildApplicationMenuTemplate(
         { type: "separator" },
         { role: "togglefullscreen" },
         { role: "toggleDevTools" },
+        ...(actions.reportScreenshot ? [
+          { type: "separator" as const },
+          {
+            id: "view.report-screenshot",
+            label: "Report Screenshot",
+            accelerator: accelerator("reportScreenshot"),
+            click: actions.reportScreenshot,
+          },
+        ] : []),
       ],
     },
     {

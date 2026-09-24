@@ -41,6 +41,7 @@ describe("keyboard shortcut catalog", () => {
     expect(defaultKeyboardShortcut("textEditorWordWrap", apple)).toBe("alt+z");
     expect(defaultKeyboardShortcut("textEditorCommandPalette", apple)).toBe("f1");
     expect(defaultKeyboardShortcut("textEditorSettings", apple)).toBe("mod+,");
+    expect(defaultKeyboardShortcut("reportScreenshot", apple)).toBe("mod+alt+s");
     expect(defaultKeyboardShortcut("terminalTab10", apple)).toBe("mod+0");
   });
 
@@ -58,6 +59,7 @@ describe("keyboard shortcut catalog", () => {
     expect(keyboardShortcutConflict("openConsole", "mod+t", defaults, true)).toBeUndefined();
     expect(keyboardShortcutConflict("terminalNewTab", "mod+t", defaults, true)).toBeUndefined();
     expect(keyboardShortcutConflict("commandPalette", "mod+s", defaults, true)).toContain("Save file");
+    expect(keyboardShortcutConflict("commandPalette", "mod+alt+s", defaults, true)).toContain("Report Screenshot");
     expect(keyboardShortcutConflict("terminalNewTab", "mod+s", defaults, true)).toBeUndefined();
     expect(keyboardShortcutConflict("commandPalette", "mod+n", {
       ...defaults, keyboardShortcuts: { newWindow: "mod+alt+n" },

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -31,6 +31,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, "sliver");
 });
 
 describe("SettingsPage", () => {
@@ -42,6 +43,9 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("heading", { name: "Appearance" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Accessibility" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Report Screenshots" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Report screenshot save location")).toHaveTextContent("Desktop (default)");
+    expect(screen.getByRole("button", { name: "Use Desktop" })).toBeDisabled();
     expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
     expect(screen.getByRole("radiogroup", { name: "App icon" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Reduce motion" })).toBeInTheDocument();
@@ -64,6 +68,45 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("button", { name: "Reset defaults" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Discard" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("chooses a report screenshot folder and can restore the Desktop default", async () => {
+    const user = userEvent.setup();
+    const directory = "/Users/operator/Documents/reports";
+    const chooser = vi.fn().mockResolvedValue({ ok: true, value: { directory } });
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: { chooseReportScreenshotDirectory: chooser },
+    });
+    const onReportScreenshotDirectoryChange = vi.fn();
+    renderSettings({ onReportScreenshotDirectoryChange });
+
+    await user.click(screen.getByRole("button", { name: "Browse…" }));
+    await waitFor(() => expect(onReportScreenshotDirectoryChange).toHaveBeenCalledExactlyOnceWith(directory));
+    expect(chooser).toHaveBeenCalledOnce();
+
+    cleanup();
+    renderSettings({
+      settings: { ...DEFAULT_APPLICATION_SETTINGS_STATE, reportScreenshotDirectory: directory },
+      onReportScreenshotDirectoryChange,
+    });
+    expect(screen.getByLabelText("Report screenshot save location")).toHaveTextContent(directory);
+    await user.click(screen.getByRole("button", { name: "Use Desktop" }));
+    expect(onReportScreenshotDirectoryChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("leaves the setting alone when folder selection is canceled", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(window, "sliver", {
+      configurable: true,
+      value: { chooseReportScreenshotDirectory: vi.fn().mockResolvedValue({ ok: false, error: "cancelled" }) },
+    });
+    const onReportScreenshotDirectoryChange = vi.fn();
+    renderSettings({ onReportScreenshotDirectoryChange });
+
+    await user.click(screen.getByRole("button", { name: "Browse…" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Browse…" })).toBeEnabled());
+    expect(onReportScreenshotDirectoryChange).not.toHaveBeenCalled();
   });
 
   it("records the app-wide command palette shortcut from Keyboard Shortcuts settings", async () => {
@@ -218,6 +261,7 @@ function settingsProps(overrides: Partial<SettingsPageProps> = {}): SettingsPage
     onAppIconChange: vi.fn(),
     onThemeChange: vi.fn(),
     onReduceMotionChange: vi.fn(),
+    onReportScreenshotDirectoryChange: vi.fn(),
     onKeyboardShortcutChange: vi.fn(),
     onResetKeyboardShortcuts: vi.fn(),
     onTerminalChange: vi.fn(),

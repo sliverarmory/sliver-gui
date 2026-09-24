@@ -2,6 +2,7 @@ export const KEYBOARD_SHORTCUT_DEFINITIONS = [
   { id: "commandPalette", label: "Open command palette", description: "Find pages and common application actions.", group: "Application", scope: "global" },
   { id: "newWindow", label: "New window", description: "Open a new application window.", group: "Application", scope: "global" },
   { id: "duplicateWindow", label: "New window for this server", description: "Open another window connected to the current server.", group: "Application", scope: "global" },
+  { id: "reportScreenshot", label: "Report Screenshot", description: "Save images of all open application windows.", group: "Application", scope: "global" },
   { id: "openConsole", label: "Open console", description: "Open the console for the connected server.", group: "Application", scope: "application" },
   { id: "navigateBack", label: "Go back", description: "Return to the previous application page.", group: "Navigation", scope: "application" },
   { id: "navigateForward", label: "Go forward", description: "Return to the next application page.", group: "Navigation", scope: "application" },
@@ -68,6 +69,7 @@ export function defaultKeyboardShortcut(action: KeyboardShortcutAction, apple: b
     case "commandPalette": return "mod+k";
     case "newWindow": return "mod+n";
     case "duplicateWindow": return "mod+shift+n";
+    case "reportScreenshot": return "mod+alt+s";
     case "navigateBack": return apple ? "mod+[" : "alt+arrowleft";
     case "navigateForward": return apple ? "mod+]" : "alt+arrowright";
     case "refreshServer": return "f5";

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
+  DEFAULT_APPLICATION_SETTINGS_VALUES,
   type ApplicationIcon,
   type ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
@@ -38,13 +39,14 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-four file", async () => {
+  it("loads an exact private version-five file", async () => {
     const persisted = {
-      v: 4,
+      v: 5,
       revision: 9,
       theme: "dark",
       appIcon: "passion",
       reduceMotion: true,
+      reportScreenshotDirectory: join(temporaryDirectory, "reports"),
       commandPaletteShortcut: "mod+shift+p",
       keyboardShortcuts: { newWindow: "mod+alt+n", terminalCloseTab: "mod+shift+e" },
       terminal: {
@@ -65,7 +67,37 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("migrates version-two preferences and saves version four on the next update", async () => {
+  it("migrates version-four settings and persists a custom screenshot directory", async () => {
+    const { reportScreenshotDirectory: _directory, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    await writeFile(settingsPath, JSON.stringify({ ...previousSettings, v: 4 }), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(settingsPath, 0o600);
+
+    const store = await ApplicationSettingsStore.load(settingsPath);
+    expect(store.getState()).toEqual({ ...DEFAULT_APPLICATION_SETTINGS_STATE });
+
+    const reportScreenshotDirectory = join(temporaryDirectory, "screenshots");
+    const { v: _version, revision, ...settings } = store.getState();
+    const result = await store.update({
+      expectedRevision: revision,
+      settings: { ...settings, reportScreenshotDirectory },
+    });
+    expect(result).toMatchObject({ ok: true, value: { v: 5, revision: 1, reportScreenshotDirectory } });
+    const reloaded = await ApplicationSettingsStore.load(settingsPath);
+    expect(reloaded.getState().reportScreenshotDirectory).toBe(reportScreenshotDirectory);
+  });
+
+  it.runIf(process.platform !== "win32")("rejects a screenshot path that is only absolute on another platform", async () => {
+    const store = await ApplicationSettingsStore.load(settingsPath);
+    const result = await store.update({
+      expectedRevision: 0,
+      settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, reportScreenshotDirectory: "C:\\Reports" },
+    });
+    expect(result).toEqual({ ok: false, error: "The application settings update is invalid." });
+    expect(store.getState()).toBe(DEFAULT_APPLICATION_SETTINGS_STATE);
+    await expect(lstat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("migrates version-two preferences and saves version five on the next update", async () => {
     const previous = {
       v: 2,
       revision: 9,
@@ -84,14 +116,14 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: 4, appIcon: "auto", keyboardShortcuts: {} });
+    expect(store.getState()).toEqual({ ...previous, v: 5, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     const { v: _version, revision, ...settings } = store.getState();
     const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
     expect(result).toEqual({
       ok: true,
-      value: { ...previous, v: 4, revision: 10, appIcon: "passion", keyboardShortcuts: {} },
+      value: { ...previous, v: 5, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null },
     });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toEqual(result.value);
@@ -117,11 +149,12 @@ describe("ApplicationSettingsStore", () => {
     const store = await ApplicationSettingsStore.load(settingsPath);
 
     expect(store.getState()).toEqual({
-      v: 4,
+      v: 5,
       revision: 9,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
+      reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
       terminal: {
@@ -136,7 +169,7 @@ describe("ApplicationSettingsStore", () => {
 
   it.each([
     "not-json",
-    JSON.stringify({ v: 5 }),
+    JSON.stringify({ v: 6 }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, extra: true }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "sepia" }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, appIcon: "system" }),
@@ -191,7 +224,7 @@ describe("ApplicationSettingsStore", () => {
 
     expect(result.ok).toBe(true);
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
-    expect(reloaded.getState()).toMatchObject({ v: 4, revision: 1, appIcon, theme: "system" });
+    expect(reloaded.getState()).toMatchObject({ v: 5, revision: 1, appIcon, theme: "system" });
   });
 
   it("rejects stale revisions without changing memory or disk", async () => {
@@ -260,6 +293,7 @@ function updateInput(
       theme: overrides.theme ?? DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       appIcon: overrides.appIcon ?? DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: overrides.reduceMotion ?? DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+      reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       keyboardShortcuts: {},
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,

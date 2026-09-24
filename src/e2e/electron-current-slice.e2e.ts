@@ -48,6 +48,10 @@ const M2_INITIAL_FILE_TEXT = `${M2_FILE_CONTENT}\nsecond deterministic line\n`;
 const M2_EDITED_CONTENT = "FAKE_M2_EDITED_CONTENT_DO_NOT_JOURNAL";
 const M2_SEARCH_PATTERN = "FAKE_M2_SEARCH_PATTERN_DO_NOT_JOURNAL";
 const M6_LOOT_CONTENT = "FAKE_M6_LOOT_CONTENT_DO_NOT_PERSIST_IN_RENDERER";
+// A 16x16 PNG and a one-frame VP8 WebM. Keep media fixtures embedded so CI
+// does not need ffmpeg or another encoder at runtime.
+const M6_LOOT_IMAGE_PNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAABAAAAAQBPJcTWAAAAFElEQVR4nGNkIBGwjGoY1TB8NQAAYgAAPn161xsAAAAASUVORK5CYII=";
+const M6_LOOT_VIDEO_WEBM = "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAH0EU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHWTbuMU6uEElTDZ1OsggEyTbuMU6uEHFO7a1OsggHe7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsCrXsYMPQkBNgIxMYXZmNjMuMS4xMDJXQYxMYXZmNjMuMS4xMDJEiYhAj0AAAAAAABZUrmvXrgEAAAAAAABO14EBc8WIesghxzguD86cgQAitZyDdW5kiIEAhoVWX1ZQOIOBASPjg4Q7msoA4JCwgRC6gRCagQJVsIRVuYEBVe6BAOwBAAAAAAAAAgAAElTDZ/pzc59jwIBnyJlFo4dFTkNPREVSRIeMTGF2ZjYzLjEuMTAyc3PVY8CLY8WIesghxzguD85nyKBFo4dFTkNPREVSRIeTTGF2YzYzLjEuMTAyIGxpYnZweGfIoUWjiERVUkFUSU9ORIeTMDA6MDA6MDEuMDAwMDAwMDAwAB9DtnWo54EAo6OBAACAEAIAnQEqEAAQAABHCIWFiJmEiAICAAwNYAD+/6tQgBxTu2uRu4+zgQC3iveBAfGCAbHwgQM=";
 const M6_CREDENTIAL_SECRET = "FAKE_M6_CREDENTIAL_SECRET_DO_NOT_RENDER_BY_DEFAULT";
 const M4_PRIVATE_KEY_SECRET = "FAKE_M4_PRIVATE_KEY_SECRET_DO_NOT_RENDER";
 const M4_SSH_STDOUT_TEXT = "deterministic M4 SSH stdout";
@@ -66,6 +70,62 @@ const M4_PRIVATE_KEY_CONTENT = [
   "",
 ].join("\n");
 
+test("native loot media previews load under CSP", { timeout: 60_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-loot-media-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  const selectedConfigPath = join(temporaryRoot, "media-operator.cfg");
+  const lootImagePath = join(temporaryRoot, "m6-media-preview.png");
+  const lootVideoPath = join(temporaryRoot, "m6-media-preview.webm");
+  await Promise.all([
+    mkdir(savedConfigDirectory, { recursive: true }),
+    mkdir(managedConfigDirectory, { recursive: true }),
+    mkdir(userDataDirectory, { recursive: true }),
+    mkdir(consoleClientRootDirectory, { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 }),
+    writeFile(lootImagePath, Buffer.from(M6_LOOT_IMAGE_PNG, "base64"), { mode: 0o600 }),
+    writeFile(lootVideoPath, Buffer.from(M6_LOOT_VIDEO_WEBM, "base64"), { mode: 0o600 }),
+  ]);
+
+  let electronApplication: ElectronApplication | undefined;
+  try {
+    electronApplication = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const page = await electronApplication.firstWindow();
+    await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    await electronApplication.evaluate(({ dialog }, configPath) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [configPath] });
+    }, selectedConfigPath);
+    await page.getByRole("button", {
+      name: /choose.*file|open file|connect (?:from |external )file/i,
+    }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Loot"]:visible').click();
+    await page.getByRole("heading", { name: "Loot", exact: true }).waitFor();
+    await verifyLootMediaPreviews(electronApplication, page, lootImagePath, lootVideoPath, 0);
+  } finally {
+    await electronApplication?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("real renderer reaches an injected fake only through frozen preload and trusted IPC", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-electron-e2e-"));
@@ -81,6 +141,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   const m4SavedOutputPath = join(temporaryRoot, "m4-ssh-stdout.txt");
   const m6LootInputPath = join(temporaryRoot, "m6-loot-input.txt");
   const m6LootSavedPath = join(temporaryRoot, "m6-loot-saved.txt");
+  const m6LootImagePath = join(temporaryRoot, "m6-media-preview.png");
+  const m6LootVideoPath = join(temporaryRoot, "m6-media-preview.webm");
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   await Promise.all([
     mkdir(savedConfigDirectory, { recursive: true }),
@@ -96,6 +158,10 @@ test("real renderer reaches an injected fake only through frozen preload and tru
   ]);
   await writeFile(m4PrivateKeyPath, M4_PRIVATE_KEY_CONTENT, { mode: 0o600 });
   await writeFile(m6LootInputPath, M6_LOOT_CONTENT, { mode: 0o600 });
+  await Promise.all([
+    writeFile(m6LootImagePath, Buffer.from(M6_LOOT_IMAGE_PNG, "base64"), { mode: 0o600 }),
+    writeFile(m6LootVideoPath, Buffer.from(M6_LOOT_VIDEO_WEBM, "base64"), { mode: 0o600 }),
+  ]);
 
   let electronApplication: ElectronApplication | undefined;
   let page: Page | undefined;
@@ -211,6 +277,8 @@ test("real renderer reaches an injected fake only through frozen preload and tru
       artifactDirectory,
       m6LootInputPath,
       m6LootSavedPath,
+      m6LootImagePath,
+      m6LootVideoPath,
     );
 
     const snapshotText = await page.evaluate(async () => {
@@ -1172,6 +1240,7 @@ async function setApplicationTheme(
         theme: nextTheme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
+        reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
@@ -1570,6 +1639,8 @@ async function verifyOperatorDataStores(
   artifactDirectory: string,
   lootInputPath: string,
   lootSavedPath: string,
+  lootImagePath: string,
+  lootVideoPath: string,
 ): Promise<void> {
   await page.locator('[aria-label="Loot"]:visible').click();
   await page.getByRole("heading", { name: "Loot", exact: true }).waitFor();
@@ -1665,6 +1736,8 @@ async function verifyOperatorDataStores(
     await dropInput.evaluate((element) => element.remove());
   }
 
+  await verifyLootMediaPreviews(electronApplication, page, lootImagePath, lootVideoPath, 2);
+
   await electronApplication.evaluate(({ dialog }, outputPath) => {
     dialog.showSaveDialog = async () => {
       globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
@@ -1755,6 +1828,80 @@ async function verifyOperatorDataStores(
   }
   await page.locator('[aria-label="Jobs & listeners"]:visible').click();
   await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
+}
+
+async function verifyLootMediaPreviews(
+  electronApplication: ElectronApplication,
+  page: Page,
+  lootImagePath: string,
+  lootVideoPath: string,
+  priorLootAdds: number,
+): Promise<void> {
+  const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  assert.match(csp ?? "", /(?:^|;)\s*img-src [^;]*\bdata:(?:\s|;|$)/u);
+  assert.match(csp ?? "", /(?:^|;)\s*media-src data:(?:;|$)/u);
+  const mediaFiles = [
+    { path: lootImagePath, name: "m6-media-preview.png", kind: "image" },
+    { path: lootVideoPath, name: "m6-media-preview.webm", kind: "video" },
+  ] as const;
+  for (const [index, media] of mediaFiles.entries()) {
+    await electronApplication.evaluate(({ dialog }, inputPath) => {
+      dialog.showOpenDialog = async () => {
+        globalThis.__SLIVER_GUI_E2E_STATE__.dialogCalls += 1;
+        return { canceled: false, filePaths: [inputPath] };
+      };
+    }, media.path);
+    await page.getByRole("button", { name: "Add local file", exact: true }).click();
+    const mediaAddDialog = page.getByRole("dialog", { name: "Add local loot", exact: true });
+    await mediaAddDialog.getByRole("button", { name: "Choose file and add", exact: true }).click();
+    const mediaRow = page.getByRole("row").filter({
+      has: page.getByRole("button", { name: `Inspect ${media.name}`, exact: true }),
+    });
+    await mediaRow.waitFor();
+    await mediaRow.getByText("Binary", { exact: true }).waitFor();
+    await waitForFakeMethodCount(electronApplication, "lootAdd", priorLootAdds + index + 1);
+    await mediaRow.getByRole("button", { name: `Inspect ${media.name}`, exact: true }).click();
+    const mediaDialog = page.getByRole("dialog", { name: media.name, exact: true });
+    await mediaDialog.getByText(media.kind === "image" ? "Image preview" : "Video preview", { exact: true }).waitFor();
+    const preview = media.kind === "image"
+      ? mediaDialog.getByRole("img", { name: `Preview of ${media.name}` })
+      : mediaDialog.locator(`video[aria-label="Preview of ${media.name}"]`);
+    await preview.waitFor();
+    assert.match(
+      await preview.getAttribute("src") ?? "",
+      media.kind === "image" ? /^data:image\/png;base64,/u : /^data:video\/webm;base64,/u,
+    );
+    if (media.kind === "image") {
+      assert.deepEqual(await preview.evaluate(async (element) => {
+        const image = element as unknown as {
+          decode(): Promise<void>;
+          naturalWidth: number;
+          naturalHeight: number;
+        };
+        await image.decode();
+        return [image.naturalWidth, image.naturalHeight];
+      }), [16, 16], "the PNG preview must decode under the active CSP");
+    } else {
+      assert.equal(await preview.getAttribute("controls"), "");
+      assert.deepEqual(await preview.evaluate((element) => new Promise<[number, number]>((resolve, reject) => {
+        const video = element as unknown as {
+          readyState: number;
+          videoWidth: number;
+          videoHeight: number;
+          addEventListener(type: string, listener: () => void, options: { once: boolean }): void;
+        };
+        if (video.readyState >= 1) {
+          resolve([video.videoWidth, video.videoHeight]);
+          return;
+        }
+        video.addEventListener("loadedmetadata", () => resolve([video.videoWidth, video.videoHeight]), { once: true });
+        video.addEventListener("error", () => reject(new Error("The WebM preview failed to decode")), { once: true });
+        setTimeout(() => reject(new Error("The WebM preview did not load metadata")), 5_000);
+      })), [16, 16], "the WebM preview must load metadata under the active CSP");
+    }
+    await mediaDialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    await mediaDialog.waitFor({ state: "hidden" });
+  }
 }
 
 async function verifySliverConsoleWindow(

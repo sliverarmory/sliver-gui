@@ -219,6 +219,28 @@ describe("configured native shortcuts", () => {
 });
 
 describe("application menu templates", () => {
+  it("adds Report Screenshot to View with the configured native shortcut", () => {
+    const reportScreenshot = vi.fn();
+    const actions = {
+      newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), reportScreenshot,
+      openCloudDeployment: vi.fn(), openArmory: vi.fn(), openNetwork: vi.fn(),
+      openScriptTaskManager: vi.fn(), editScript: vi.fn(), openDocumentation: vi.fn(),
+      showAboutPanel: vi.fn(), downloadRelease: vi.fn(), checkForApplicationUpdates: vi.fn(),
+      restartToApplyApplicationUpdate: vi.fn(),
+    };
+    const template = buildApplicationMenuTemplate("darwin", "Sliver GUI", actions);
+    const item = menuItems(template, "View").find(({ id }) => id === "view.report-screenshot");
+    expect(item).toMatchObject({ label: "Report Screenshot", accelerator: "CmdOrCtrl+Alt+S" });
+    clickItem(item);
+    expect(reportScreenshot).toHaveBeenCalledOnce();
+
+    const customized = buildApplicationMenuTemplate("win32", "Sliver GUI", actions,
+      undefined, undefined, undefined, [], false, undefined,
+      { ...DEFAULT_APPLICATION_SETTINGS_VALUES, keyboardShortcuts: { reportScreenshot: "mod+shift+9" } });
+    expect(menuItems(customized, "View").find(({ id }) => id === "view.report-screenshot")?.accelerator)
+      .toBe("CmdOrCtrl+Shift+9");
+  });
+
   it("places Scripts after Network and routes task manager/edit actions with the source window", () => {
     const actions = { newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), openCloudDeployment: vi.fn(), openArmory: vi.fn(),
       openNetwork: vi.fn(), openScriptTaskManager: vi.fn(), editScript: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Card, Tabs } from "@heroui/react";
+import { Button, Card, Tabs, toast } from "@heroui/react";
 import { Segment } from "@heroui-pro/react/segment";
 
 import type {
@@ -25,6 +25,7 @@ export interface SettingsPageProps {
   readonly onAppIconChange: (appIcon: ApplicationIcon) => void;
   readonly onThemeChange: (theme: ApplicationTheme) => void;
   readonly onReduceMotionChange: (value: boolean) => void;
+  readonly onReportScreenshotDirectoryChange: (directory: string | null) => void;
   readonly onKeyboardShortcutChange: (action: KeyboardShortcutAction, shortcut: string | undefined) => void;
   readonly onResetKeyboardShortcuts: () => void;
   readonly onTerminalChange: (value: ConsoleTerminalSettings) => void;
@@ -36,6 +37,7 @@ export function SettingsPage({
   onAppIconChange,
   onThemeChange,
   onReduceMotionChange,
+  onReportScreenshotDirectoryChange,
   onKeyboardShortcutChange,
   onResetKeyboardShortcuts,
   onTerminalChange,
@@ -46,6 +48,7 @@ export function SettingsPage({
   const scrollMarker = useRef<HTMLDivElement>(null);
   const [shortcutToolbar, setShortcutToolbar] = useState<HTMLDivElement | null>(null);
   const [isScrolled, setIsScrolled] = useState(false);
+  const [isChoosingScreenshotDirectory, setIsChoosingScreenshotDirectory] = useState(false);
 
   useEffect(() => {
     const marker = scrollMarker.current;
@@ -68,6 +71,24 @@ export function SettingsPage({
 
   const terminalIsDirty = !terminalSettingsEqual(terminalDraft, settings.terminal);
   const terminalIsValid = isValidTerminalSettings(terminalDraft);
+
+  const chooseScreenshotDirectory = async (): Promise<void> => {
+    setIsChoosingScreenshotDirectory(true);
+    try {
+      const result = await window.sliver.chooseReportScreenshotDirectory();
+      if (result.ok) {
+        onReportScreenshotDirectoryChange(result.value.directory);
+      } else if (result.error !== "cancelled") {
+        toast.danger("Could not choose screenshot folder", { description: result.error });
+      }
+    } catch (error: unknown) {
+      toast.danger("Could not choose screenshot folder", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsChoosingScreenshotDirectory(false);
+    }
+  };
 
   return (
     <section className="settings-page page-stack max-w-4xl" aria-labelledby="settings-page-heading">
@@ -172,6 +193,45 @@ export function SettingsPage({
                 selected={settings.reduceMotion}
                 onChange={onReduceMotionChange}
               />
+            </Card.Content>
+          </Card>
+
+          <Card variant="secondary">
+            <Card.Header>
+              <div>
+                <Card.Title>Report Screenshots</Card.Title>
+                <Card.Description>Save a PNG for each open application window.</Card.Description>
+              </div>
+            </Card.Header>
+            <Card.Content className="space-y-4">
+              <div>
+                <p className="text-sm font-medium text-foreground">Save location</p>
+                <p className="mt-1 text-xs leading-5 text-muted">
+                  Report Screenshot saves to your Desktop by default.
+                </p>
+                <p aria-label="Report screenshot save location" className="mt-3 break-all rounded-lg bg-surface-secondary px-3 py-2 font-mono text-xs text-foreground">
+                  {settings.reportScreenshotDirectory ?? "Desktop (default)"}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  isDisabled={isSaving}
+                  isPending={isChoosingScreenshotDirectory}
+                  size="sm"
+                  variant="secondary"
+                  onPress={() => void chooseScreenshotDirectory()}
+                >
+                  Browse…
+                </Button>
+                <Button
+                  isDisabled={isSaving || isChoosingScreenshotDirectory || settings.reportScreenshotDirectory === null}
+                  size="sm"
+                  variant="tertiary"
+                  onPress={() => onReportScreenshotDirectoryChange(null)}
+                >
+                  Use Desktop
+                </Button>
+              </div>
             </Card.Content>
           </Card>
         </Tabs.Panel>

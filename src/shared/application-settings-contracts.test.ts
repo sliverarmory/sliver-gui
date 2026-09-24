@@ -6,6 +6,7 @@ import {
   DEFAULT_APPLICATION_SETTINGS_VALUES,
   DEFAULT_APPLICATION_TERMINAL_SETTINGS,
   isApplicationIcon,
+  isReportScreenshotDirectory,
   parseApplicationSettingsState,
   parsePersistedApplicationSettingsState,
   parseApplicationSettingsUpdateInput,
@@ -26,17 +27,19 @@ const settings = {
   reduceMotion: true,
   commandPaletteShortcut: "mod+shift+p",
   keyboardShortcuts: {},
+  reportScreenshotDirectory: null,
   terminal,
 };
 
 describe("application settings contracts", () => {
-  it("provides deeply frozen version-four defaults with automatic icons", () => {
+  it("provides deeply frozen version-five defaults with Desktop screenshots", () => {
     expect(DEFAULT_APPLICATION_SETTINGS_STATE).toEqual({
-      v: 4,
+      v: 5,
       revision: 0,
       theme: "system",
       appIcon: "auto",
       reduceMotion: false,
+      reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
       terminal: {
@@ -64,7 +67,7 @@ describe("application settings contracts", () => {
       settings,
     });
 
-    expect(state).toEqual({ v: 4, revision: 7, ...settings });
+    expect(state).toEqual({ v: 5, revision: 7, ...settings });
     expect(update).toEqual({ expectedRevision: 7, settings });
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.terminal)).toBe(true);
@@ -94,7 +97,7 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 4, appIcon: "auto", keyboardShortcuts: {} });
+    expect(migrated).toEqual({ ...previous, v: 5, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null });
     expect(Object.isFrozen(migrated)).toBe(true);
     expect(Object.isFrozen(migrated.terminal)).toBe(true);
   });
@@ -110,9 +113,24 @@ describe("application settings contracts", () => {
       terminal,
     };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 4, keyboardShortcuts: {} });
+    expect(migrated).toEqual({ ...previous, v: 5, keyboardShortcuts: {}, reportScreenshotDirectory: null });
     expect(Object.isFrozen(migrated.keyboardShortcuts)).toBe(true);
   });
+
+  it("migrates version-four settings to the Desktop screenshot location", () => {
+    const { reportScreenshotDirectory: _directory, ...previousSettings } = settings;
+    const previous = { v: 4, revision: 14, ...previousSettings };
+    const migrated = parsePersistedApplicationSettingsState(previous);
+    expect(migrated).toEqual({ ...previous, v: 5, reportScreenshotDirectory: null });
+  });
+
+  it.each(["/Users/operator/Pictures", "C:\\Users\\operator\\Pictures", "\\\\server\\share\\reports"])(
+    "accepts an absolute screenshot directory %s", (directory) => {
+      expect(isReportScreenshotDirectory(directory)).toBe(true);
+      expect(parseApplicationSettingsValues({ ...settings, reportScreenshotDirectory: directory }))
+        .toMatchObject({ reportScreenshotDirectory: directory });
+    },
+  );
 
   it("accepts the expanded shortcut syntax and freezes persisted overrides", () => {
     const parsed = parseApplicationSettingsValues({
@@ -135,11 +153,12 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(legacy)).toThrow("Invalid application settings state");
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
-      v: 4,
+      v: 5,
       revision: 4,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
+      reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
       terminal,
@@ -186,6 +205,12 @@ describe("application settings contracts", () => {
     { ...settings, appIcon: "../passion.png" },
     { ...settings, appIcon: undefined },
     { ...settings, reduceMotion: "yes" },
+    { ...settings, reportScreenshotDirectory: "" },
+    { ...settings, reportScreenshotDirectory: "Pictures" },
+    { ...settings, reportScreenshotDirectory: "../Pictures" },
+    { ...settings, reportScreenshotDirectory: "/tmp/new\nfolder" },
+    { ...settings, reportScreenshotDirectory: 42 },
+    { ...settings, reportScreenshotDirectory: "/" + "x".repeat(4096) },
     { ...settings, commandPaletteShortcut: "k" },
     { ...settings, commandPaletteShortcut: "shift+k" },
     { ...settings, commandPaletteShortcut: "mod+alt+alt+k" },
@@ -199,12 +224,12 @@ describe("application settings contracts", () => {
   });
 
   it.each([
-    { v: 5, revision: 0, ...settings },
-    { v: 4, revision: -1, ...settings },
-    { v: 4, revision: 1.5, ...settings },
-    { v: 4, revision: 0, ...settings, extra: true },
-    { v: 4, revision: 0, ...settings, theme: "sepia" },
-    { v: 4, revision: 0, ...settings, appIcon: "system" },
+    { v: 6, revision: 0, ...settings },
+    { v: 5, revision: -1, ...settings },
+    { v: 5, revision: 1.5, ...settings },
+    { v: 5, revision: 0, ...settings, extra: true },
+    { v: 5, revision: 0, ...settings, theme: "sepia" },
+    { v: 5, revision: 0, ...settings, appIcon: "system" },
     { v: 2, revision: 0, ...settings },
     { v: 1, revision: 0, ...settings },
   ])("rejects invalid persisted state %#", (value) => {

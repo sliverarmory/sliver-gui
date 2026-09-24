@@ -119,6 +119,7 @@ export function ApplicationSettingsProvider({
               theme: current.theme,
               appIcon: current.appIcon,
               reduceMotion: current.reduceMotion,
+              reportScreenshotDirectory: current.reportScreenshotDirectory,
               commandPaletteShortcut: current.commandPaletteShortcut,
               keyboardShortcuts: current.keyboardShortcuts,
               terminal: legacyTerminal,
@@ -253,6 +254,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
     theme: state.theme,
     appIcon: state.appIcon,
     reduceMotion: state.reduceMotion,
+    reportScreenshotDirectory: state.reportScreenshotDirectory,
     commandPaletteShortcut: state.commandPaletteShortcut,
     keyboardShortcuts: state.keyboardShortcuts,
     terminal: state.terminal,
@@ -263,6 +265,7 @@ function sameSettings(left: ApplicationSettingsValues, right: ApplicationSetting
   return left.theme === right.theme &&
     left.appIcon === right.appIcon &&
     left.reduceMotion === right.reduceMotion &&
+    left.reportScreenshotDirectory === right.reportScreenshotDirectory &&
     left.commandPaletteShortcut === right.commandPaletteShortcut &&
     keyboardShortcutsEqual(left.keyboardShortcuts, right.keyboardShortcuts) &&
     left.terminal.fontId === right.terminal.fontId &&

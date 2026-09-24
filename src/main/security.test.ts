@@ -77,6 +77,7 @@ describe("Electron content security policy", () => {
     expect(directives.get("script-src")).toEqual(["'self'", "'wasm-unsafe-eval'"]);
     expect(directives.get("script-src-elem")).toEqual(["'self'"]);
     expect(directives.get("connect-src")).toEqual(["'none'"]);
+    expect(directives.get("media-src")).toEqual(["data:"]);
     expect(directives.get("object-src")).toEqual(["'none'"]);
     expect(directives.get("frame-ancestors")).toEqual(["'none'"]);
   });
@@ -100,6 +101,7 @@ describe("Electron content security policy", () => {
       "http://127.0.0.1:5173",
       "ws://127.0.0.1:5173",
     ]);
+    expect(directives.get("media-src")).toEqual(["data:"]);
   });
 
   it("installs the strict policy as a response header and denies permissions", () => {

@@ -128,6 +128,8 @@ export const IPC_INVOKE = {
   claimInteractionWindow: "sliver:window:claim-interaction",
   exitApp: "sliver:application:exit",
   getApplicationSettings: "sliver:application-settings:get",
+  chooseReportScreenshotDirectory: "sliver:report-screenshot:choose-directory",
+  reportScreenshot: "sliver:report-screenshot:capture",
   getApplicationIcon: "sliver:application-icon:get",
   updateApplicationSettings: "sliver:application-settings:update",
   setKeyboardShortcutRecording: "sliver:keyboard-shortcuts:recording",
@@ -799,6 +801,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.getApplicationSettings]: {
     args: [];
     result: ApplicationSettingsState;
+  };
+  [IPC.chooseReportScreenshotDirectory]: {
+    args: [];
+    result: OperationResult<{ directory: string }>;
+  };
+  [IPC.reportScreenshot]: {
+    args: [];
+    result: OperationResult<{ directory: string; files: string[] }>;
   };
   [IPC.getApplicationIcon]: {
     args: [];

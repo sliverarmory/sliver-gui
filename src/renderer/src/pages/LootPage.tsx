@@ -308,7 +308,10 @@ export function LootPage({ snapshot, onInventoryTotal }: LootPageProps): React.J
       if (
         request !== detailRequestSequence.current ||
         expectedIdentity !== backendIdentityRef.current
-      ) return;
+      ) {
+        result.value?.preview.fill(0);
+        return;
+      }
       if (!result.ok || !result.value) {
         setDetailError(result.error ?? "The loot preview could not be loaded.");
         return;
@@ -472,6 +475,7 @@ export function LootPage({ snapshot, onInventoryTotal }: LootPageProps): React.J
     () => detail?.previewState === "text" ? new TextDecoder().decode(detail.preview) : "",
     [detail],
   );
+  const mediaDataUri = useLootMediaDataUri(detail);
   const isFiltered = Boolean(normalizedQuery) || fileType !== "all";
 
   return (
@@ -479,7 +483,7 @@ export function LootPage({ snapshot, onInventoryTotal }: LootPageProps): React.J
       <header className="page-heading">
         <div className="min-w-0">
           <h1 id="loot-page-heading">Loot</h1>
-          <p>Inspect server-collected files, preview bounded text safely, and save deliberate local copies.</p>
+          <p>Inspect server-collected files, preview bounded text and supported media, and save deliberate local copies.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button isDisabled={isDropAdding} variant="primary" onPress={() => setIsAddOpen(true)}>
@@ -610,6 +614,7 @@ export function LootPage({ snapshot, onInventoryTotal }: LootPageProps): React.J
         isDownloading={detailTarget ? downloadingIds.has(detailTarget.id) : false}
         isLoading={isLoadingDetail}
         item={detailTarget}
+        mediaDataUri={mediaDataUri}
         previewText={previewText}
         onDelete={(item) => {
           closeDetail();
@@ -733,6 +738,7 @@ function LootDetailDialog({
   isDownloading,
   isLoading,
   item,
+  mediaDataUri,
   previewText,
   onDelete,
   onDownload,
@@ -744,6 +750,7 @@ function LootDetailDialog({
   isDownloading: boolean;
   isLoading: boolean;
   item?: LootSummary | undefined;
+  mediaDataUri: string | null | undefined;
   previewText: string;
   onDelete: (item: LootSummary) => void;
   onDownload: (item: LootSummary) => void;
@@ -781,11 +788,28 @@ function LootDetailDialog({
                 <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-separator bg-default p-4 font-mono text-xs leading-5 text-foreground">{previewText}</pre>
               </div>
             ) : null}
+            {!isLoading && !error && (detail?.previewState === "image" || detail?.previewState === "video") ? (
+              typeof mediaDataUri === "string" ? (
+                <LootMediaPreview key={detail.item.id} item={detail.item} kind={detail.previewState} dataUri={mediaDataUri} />
+              ) : (
+                <PreviewMessage
+                  icon={faFile}
+                  title={mediaDataUri === null ? "Preview unavailable" : "Preparing preview"}
+                  description={mediaDataUri === null
+                    ? "This media file could not be displayed here. Save a copy to inspect it."
+                    : "Preparing the local media preview…"}
+                />
+              )
+            ) : null}
             {!isLoading && !error && detail?.previewState === "binary" ? (
-              <PreviewMessage icon={faFile} title="Binary content" description="Binary loot is metadata-only here. Save a copy to inspect it with a suitable local tool." />
+              <PreviewMessage icon={faFile} title="Binary content" description="No supported image or video format was detected. Save a copy to inspect this file with a suitable local tool." />
             ) : null}
             {!isLoading && !error && detail?.previewState === "too-large" ? (
-              <PreviewMessage icon={faFile} title="Preview limit reached" description={`This text file exceeds the ${formatBytes(String(OPERATOR_DATA_LIMITS.previewBytes))} preview limit. Save a copy to inspect it.`} />
+              <PreviewMessage
+                icon={faFile}
+                title="Preview limit reached"
+                description={`This file exceeds the ${formatBytes(String(item?.fileType === "binary" ? OPERATOR_DATA_LIMITS.mediaPreviewBytes : OPERATOR_DATA_LIMITS.previewBytes))} inline preview limit.`}
+              />
             ) : null}
             {!isLoading && !error && detail?.previewState === "empty" ? (
               <PreviewMessage icon={faFileLines} title="Empty file" description="This loot item has no content to preview." />
@@ -816,6 +840,96 @@ function LootDetailDialog({
         </Modal.Dialog>
       </Modal.Container>
     </Modal.Backdrop>
+  );
+}
+
+function useLootMediaDataUri(detail: LootDetail | undefined): string | null | undefined {
+  const [preview, setPreview] = useState<{ detail: LootDetail; dataUri: string | null }>();
+
+  useEffect(() => {
+    if (!detail || (detail.previewState !== "image" && detail.previewState !== "video")) {
+      setPreview(undefined);
+      return;
+    }
+    const mediaType = detail.mediaMimeType;
+    const matchesKind = detail.previewState === "image"
+      ? mediaType === "image/png" || mediaType === "image/jpeg" || mediaType === "image/gif" || mediaType === "image/webp"
+      : mediaType === "video/mp4" || mediaType === "video/webm";
+    if (!mediaType || !matchesKind || detail.preview.byteLength === 0) {
+      setPreview({ detail, dataUri: null });
+      return;
+    }
+
+    const bytes = new Uint8Array(detail.preview.byteLength);
+    bytes.set(detail.preview);
+    let blob: Blob;
+    try {
+      blob = new Blob([bytes.buffer], { type: mediaType });
+    } catch {
+      setPreview({ detail, dataUri: null });
+      return;
+    } finally {
+      bytes.fill(0);
+    }
+
+    const reader = new FileReader();
+    let active = true;
+    reader.onload = () => {
+      if (!active) return;
+      const value = reader.result;
+      setPreview({
+        detail,
+        dataUri: typeof value === "string" && value.startsWith(`data:${mediaType};base64,`) ? value : null,
+      });
+    };
+    reader.onerror = () => { if (active) setPreview({ detail, dataUri: null }); };
+    try {
+      reader.readAsDataURL(blob);
+    } catch {
+      setPreview({ detail, dataUri: null });
+    }
+    return () => {
+      active = false;
+      if (reader.readyState === FileReader.LOADING) reader.abort();
+    };
+  }, [detail]);
+
+  return preview && preview.detail === detail ? preview.dataUri : undefined;
+}
+
+function LootMediaPreview({
+  item,
+  kind,
+  dataUri,
+}: {
+  item: LootSummary;
+  kind: "image" | "video";
+  dataUri: string;
+}): React.JSX.Element {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return <PreviewMessage icon={faFile} title="Preview unavailable" description="This media file could not be displayed here. Save a copy to inspect it." />;
+  }
+  const label = `Preview of ${displayName(item)}`;
+  return (
+    <div>
+      <p className="mb-2 text-xs font-medium text-foreground">{kind === "image" ? "Image preview" : "Video preview"}</p>
+      {kind === "image" ? (
+        <div className="flex max-h-[440px] items-center justify-center overflow-auto rounded-xl border border-separator bg-default p-3">
+          <img alt={label} className="max-h-[410px] max-w-full object-contain" decoding="async" onError={() => setFailed(true)} src={dataUri} />
+        </div>
+      ) : (
+        <video
+          aria-label={label}
+          className="max-h-[440px] w-full rounded-xl border border-separator bg-black"
+          controls
+          playsInline
+          preload="metadata"
+          src={dataUri}
+          onError={() => setFailed(true)}
+        />
+      )}
+    </div>
   );
 }
 

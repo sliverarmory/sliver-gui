@@ -177,6 +177,7 @@ import {
   splitList,
   validateImplantName,
 } from "./implant-config.js";
+import { sniffLootMediaMimeType } from "./loot-media.js";
 import { buildStagePayload } from "./stage-payload.js";
 import {
   MAX_SAVED_CONFIG_BYTES,
@@ -5620,10 +5621,12 @@ export class ConnectionRegistry {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       const item = await loadLootSummary(pool.client, lootId);
       assertBinding();
-      if (item.fileType === "binary") return { item, previewState: "binary", preview: new Uint8Array() };
       const declaredSize = decimalByteSize(item.sizeBytes);
       if (declaredSize === 0n) return { item, previewState: "empty", preview: new Uint8Array() };
-      if (declaredSize > BigInt(OPERATOR_DATA_LIMITS.previewBytes)) {
+      const previewLimit = item.fileType === "text"
+        ? OPERATOR_DATA_LIMITS.previewBytes
+        : OPERATOR_DATA_LIMITS.mediaPreviewBytes;
+      if (declaredSize > BigInt(previewLimit)) {
         return { item, previewState: "too-large", preview: new Uint8Array() };
       }
       const response = await pool.client.lootContent(lootId);
@@ -5632,12 +5635,24 @@ export class ConnectionRegistry {
       try {
         assertBinding();
         if (response.ID && response.ID !== lootId) throw new Error("The loot changed while its preview was loading");
-        if (data.byteLength > OPERATOR_DATA_LIMITS.previewBytes) {
+        if (data.byteLength > previewLimit) {
           throw new Error("The loot preview exceeds the in-memory preview limit");
+        }
+        if (data.byteLength === 0) return { item, previewState: "empty", preview: new Uint8Array() };
+        if (item.fileType === "binary") {
+          const mediaMimeType = sniffLootMediaMimeType(data);
+          return mediaMimeType
+            ? {
+              item,
+              previewState: mediaMimeType.startsWith("image/") ? "image" : "video",
+              preview: new Uint8Array(data),
+              mediaMimeType,
+            }
+            : { item, previewState: "binary", preview: new Uint8Array() };
         }
         return {
           item,
-          previewState: data.byteLength === 0 ? "empty" : "text",
+          previewState: "text",
           preview: new Uint8Array(data),
         };
       } finally {

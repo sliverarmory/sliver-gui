@@ -3,9 +3,10 @@ import { ArmoryService } from "./armory-service.js";
 import { registerArmoryIpcHandlers, unregisterArmoryIpcHandlers } from "./armory-ipc.js";
 import { ARMORY_SESSION_PARTITION, armoryWindowOptions } from "./window-options.js";
 import { readFileSync } from "node:fs";
+import { lstat, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   app,
@@ -82,6 +83,7 @@ import {
 } from "./application-updater.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
+import { captureReportScreenshots } from "./report-screenshot.js";
 import { TextEditorSettingsStore } from "./text-editor-settings.js";
 import { ApplicationIconController } from "./application-icon.js";
 import { createSystemIconAppearance } from "./system-icon-appearance.js";
@@ -2293,6 +2295,21 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           });
         },
         duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
+        reportScreenshot: () => {
+          void reportScreenshot().then((result) => {
+            if (shutdown.isStopping) return;
+            if (!result.ok) {
+              dialog.showErrorBox("Report Screenshot failed", result.error);
+              return;
+            }
+            void dialog.showMessageBox({
+              type: "info",
+              title: "Report Screenshot",
+              message: `Saved ${result.value.files.length} screenshot${result.value.files.length === 1 ? "" : "s"}`,
+              detail: result.value.directory,
+            });
+          });
+        },
         openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
         openArmory: (tab) => void openArmoryWindow(tab),
         openNetwork: (tab, sourceWindow) => {
@@ -2519,6 +2536,55 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     installMenu();
     publishApplicationSettingsState(result.value);
     return result;
+  }
+
+  async function chooseReportScreenshotDirectory(
+    source: TrustedWindowIdentity,
+  ): Promise<OperationResult<{ directory: string }>> {
+    const owner = windowsByContentsId.get(source.contentsId);
+    if (
+      !owner || owner.isDestroyed() || owner.webContents.isDestroyed() ||
+      nativeWindowSurfaces.get(owner) !== "workspace" ||
+      !sameWindowIdentity(source, identityForWindow(owner))
+    ) return { ok: false, error: "This window cannot choose a screenshot directory" };
+
+    try {
+      const selected = await dialog.showOpenDialog(owner, {
+        title: "Choose screenshot directory",
+        defaultPath: applicationSettingsStore?.getState().reportScreenshotDirectory ?? app.getPath("desktop"),
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (selected.canceled || selected.filePaths.length === 0) return { ok: false, error: "cancelled" };
+      if (
+        owner.isDestroyed() || owner.webContents.isDestroyed() ||
+        !sameWindowIdentity(source, identityForWindow(owner))
+      ) return { ok: false, error: "The screenshot directory selection is no longer current" };
+      const chosen = selected.filePaths[0];
+      if (!chosen || !isAbsolute(chosen)) return { ok: false, error: "Choose an absolute screenshot directory" };
+      const directory = await realpath(chosen);
+      if (!(await lstat(directory)).isDirectory()) return { ok: false, error: "Choose a directory" };
+      return { ok: true, value: { directory } };
+    } catch {
+      return { ok: false, error: "The screenshot directory could not be selected" };
+    }
+  }
+
+  async function reportScreenshot(): Promise<OperationResult<{ directory: string; files: string[] }>> {
+    if (shutdown.isStopping) return { ok: false, error: "The application is closing" };
+    try {
+      const directory = applicationSettingsStore?.getState().reportScreenshotDirectory ?? app.getPath("desktop");
+      const result = await captureReportScreenshots(directory);
+      if (result.failures.length > 0) {
+        return {
+          ok: false,
+          error: `Saved ${result.savedPaths.length} of ${result.windowCount} screenshots to ${result.directory}. ` +
+            `${result.failures.length} windows could not be captured.`,
+        };
+      }
+      return { ok: true, value: { directory: result.directory, files: result.savedPaths } };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "Screenshots could not be saved" };
+    }
   }
 
   function stopKeyboardShortcutRecording(window: BrowserWindow): void {
@@ -2902,6 +2968,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       getIcon: () => applicationIcons.getResolvedIcon(),
       update: updateApplicationSettings,
       setKeyboardShortcutRecording,
+      chooseReportScreenshotDirectory,
+      reportScreenshot,
     },
     {
       open: openCloudDeploymentWindowFromRenderer,

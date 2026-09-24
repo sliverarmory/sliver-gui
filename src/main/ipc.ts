@@ -183,6 +183,8 @@ export interface ApplicationSettingsController {
   getIcon(): ResolvedApplicationIcon;
   update(input: ApplicationSettingsUpdateInput): MaybePromise<OperationResult<ApplicationSettingsState>>;
   setKeyboardShortcutRecording?(source: TrustedWindowIdentity, isRecording: boolean): void;
+  chooseReportScreenshotDirectory?(source: TrustedWindowIdentity): MaybePromise<OperationResult<{ directory: string }>>;
+  reportScreenshot?(): MaybePromise<OperationResult<{ directory: string; files: string[] }>>;
 }
 
 export interface ConsoleWindowController {
@@ -463,6 +465,17 @@ export function registerIpcHandlers(
   });
   handleTrusted(IPC.getApplicationSettings, rendererUrl, parseNoArguments, () =>
     applicationSettings?.getState() ?? DEFAULT_APPLICATION_SETTINGS_STATE,
+  );
+  handleTrusted(
+    IPC.chooseReportScreenshotDirectory,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) =>
+      applicationSettings?.chooseReportScreenshotDirectory?.({ contentsId, rendererProcessId, rendererFrameToken }) ??
+      { ok: false, error: "Screenshot location selection is unavailable" },
+  );
+  handleTrusted(IPC.reportScreenshot, rendererUrl, parseNoArguments, () =>
+    applicationSettings?.reportScreenshot?.() ?? { ok: false, error: "Screenshot capture is unavailable" },
   );
   handleTrusted(IPC.getApplicationIcon, rendererUrl, parseNoArguments, () =>
     applicationSettings?.getIcon() ?? "dark",

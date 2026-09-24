@@ -37,7 +37,8 @@ describe("KeyboardShortcutsSettings", () => {
     for (const group of ["Application", "Navigation", "Text Editor", "Terminal", "Terminal tabs"]) {
       expect(screen.getByRole("heading", { name: group })).toBeInTheDocument();
     }
-    expect(screen.getAllByRole("button", { name: /^Change shortcut for /u })).toHaveLength(31);
+    expect(screen.getAllByRole("button", { name: /^Change shortcut for /u })).toHaveLength(32);
+    expect(screen.getByRole("group", { name: "Report Screenshot" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reset all to defaults" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Reset shortcut for New window" })).toBeDisabled();
     expect(within(screen.getByRole("group", { name: "New window" })).getByLabelText("Command + N"))
