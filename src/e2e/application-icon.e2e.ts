@@ -71,7 +71,7 @@ test("app icon settings apply, follow system appearance and survive restart", { 
 
     await chooseIcon(page, "passion");
     await page.screenshot({ path: join(artifacts, "settings-dark.png"), animations: "disabled" });
-    const persisted = JSON.parse(await readFile(join(userData, "application-settings.json"), "utf8"));
+    const persisted = JSON.parse(await readFile(join(root, "client", "gui", "application-settings.json"), "utf8"));
     assert.equal(persisted.appIcon, "passion");
     await cleanupOwnedApplication(application, "application icon restart", APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS);
     application = undefined;

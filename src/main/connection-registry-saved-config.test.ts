@@ -1,10 +1,12 @@
 // @vitest-environment node
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
+import { webContents } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IPC } from "../shared/contracts.js";
 
 const sliverMocks = vi.hoisted(() => ({
   constructedConfigs: [] as Array<Record<string, unknown>>,
@@ -46,6 +48,7 @@ vi.mock("sliver-script", async (importOriginal) => {
 });
 
 import { ConnectionRegistry } from "./connection-registry.js";
+import type { OperatorConfigStore } from "./operator-config-store.js";
 
 let directory: string;
 let registry: ConnectionRegistry;
@@ -54,7 +57,10 @@ beforeEach(async () => {
   sliverMocks.constructedConfigs.length = 0;
   directory = await mkdtemp(join(tmpdir(), "sliver-gui-registry-"));
   await writeFile(join(directory, "operator.cfg"), validConfig());
-  registry = new ConnectionRegistry(directory);
+  registry = new ConnectionRegistry({
+    savedConfigDirectory: directory,
+    managedConfigDirectory: join(directory, "managed"),
+  });
   registry.registerWindow(101);
   registry.registerWindow(202);
 });
@@ -62,10 +68,108 @@ beforeEach(async () => {
 afterEach(async () => {
   await registry.unregisterWindow(101);
   await registry.unregisterWindow(202);
+  vi.unstubAllEnvs();
   await rm(directory, { recursive: true, force: true });
 });
 
 describe("per-window saved configuration catalogs", () => {
+  it("invalidates each open window only when a filesystem change yields a valid catalog entry", async () => {
+    const send = vi.fn();
+    vi.mocked(webContents.fromId).mockReturnValue({
+      isDestroyed: () => false,
+      send,
+    } as unknown as ReturnType<typeof webContents.fromId>);
+
+    // The first scan closes the window-registration/startup race.
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(IPC.savedConfigsChanged), { timeout: 5_000 });
+    send.mockClear();
+
+    await writeFile(join(directory, "broken.cfg"), "{invalid", { mode: 0o600 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(send).not.toHaveBeenCalled();
+
+    const staged = join(directory, "..", `${basename(directory)}-staged.cfg`);
+    await writeFile(staged, validConfig(), { mode: 0o600 });
+    await rename(staged, join(directory, "new-operator.cfg"));
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(IPC.savedConfigsChanged), { timeout: 5_000 });
+    expect(send).toHaveBeenCalledTimes(2);
+
+    const listed = await registry.listSavedConfigs(101);
+    expect(listed.value?.map((entry) => entry.fileName)).toEqual(["new-operator.cfg", "operator.cfg"]);
+
+    send.mockClear();
+    await registry.unregisterWindow(101);
+    await registry.unregisterWindow(202);
+    await writeFile(join(directory, "after-close.cfg"), validConfig(), { mode: 0o600 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(send).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it("reattaches to an atomically replaced config directory", async () => {
+    await registry.unregisterWindow(101);
+    await registry.unregisterWindow(202);
+    const root = await mkdtemp(join(tmpdir(), "sliver-gui-watch-replace-"));
+    const configs = join(root, "configs");
+    const replacementRegistry = new ConnectionRegistry({
+      savedConfigDirectory: configs,
+      managedConfigDirectory: join(root, "gui"),
+    });
+    const send = vi.fn();
+    vi.mocked(webContents.fromId).mockReturnValue({
+      isDestroyed: () => false,
+      send,
+    } as unknown as ReturnType<typeof webContents.fromId>);
+
+    try {
+      await mkdir(configs);
+      await writeFile(join(configs, "old.cfg"), validConfig(), { mode: 0o600 });
+      replacementRegistry.registerWindow(303);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(IPC.savedConfigsChanged), { timeout: 5_000 });
+      send.mockClear();
+
+      await rename(configs, join(root, "configs-old"));
+      await mkdir(configs);
+      await writeFile(join(configs, "replacement.cfg"), validConfig(), { mode: 0o600 });
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(IPC.savedConfigsChanged), { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      send.mockClear();
+
+      await writeFile(join(configs, "later.cfg"), validConfig(), { mode: 0o600 });
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(IPC.savedConfigsChanged), { timeout: 5_000 });
+      const listed = await replacementRegistry.listSavedConfigs(303);
+      expect(listed.value?.map((entry) => entry.fileName)).toContain("later.cfg");
+    } finally {
+      await replacementRegistry.unregisterWindow(303);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("uses the Sliver client root for discovered configs and GUI-owned imports", async () => {
+    const clientRoot = await mkdtemp(join(tmpdir(), "sliver-gui-client-root-"));
+    const discoveredDirectory = join(clientRoot, "configs");
+    await mkdir(discoveredDirectory);
+    const sourcePath = join(discoveredDirectory, "existing.cfg");
+    await writeFile(sourcePath, validConfig(), { mode: 0o600 });
+    vi.stubEnv("SLIVER_CLIENT_ROOT_DIR", clientRoot);
+    const defaultRegistry = new ConnectionRegistry();
+    defaultRegistry.registerWindow(303);
+
+    try {
+      const listed = await defaultRegistry.listSavedConfigs(303);
+      expect(listed.value).toEqual([
+        expect.objectContaining({ fileName: "existing.cfg", origin: "preexisting" }),
+      ]);
+
+      const store = (defaultRegistry as unknown as { configStore: OperatorConfigStore }).configStore;
+      const imported = await store.import(sourcePath, "Imported");
+      expect(imported.path).toBe(sourcePath);
+      expect(await readdir(join(clientRoot, "gui"))).toEqual(["operator-configs.json"]);
+    } finally {
+      await defaultRegistry.unregisterWindow(303);
+      await rm(clientRoot, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unknown IDs and IDs owned by a different window", async () => {
     const listed = await registry.listSavedConfigs(101);
     const id = listed.value?.[0]?.id;

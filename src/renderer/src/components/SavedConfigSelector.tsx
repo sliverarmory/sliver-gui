@@ -25,7 +25,6 @@ import {
   faRotate,
   faSatelliteDish,
   faServer,
-  faTrashCan,
   faUnlink,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -238,7 +237,7 @@ export function SavedConfigSelector({
                     >
                       <Label>Local configuration name</Label>
                       <Input autoComplete="off" placeholder="Production team" />
-                      <Description>The GUI stores a private managed copy under this local name.</Description>
+                      <Description>The GUI saves a reference to the selected private file under this local name.</Description>
                     </TextField>
                     {importError ? <p className="mt-1 text-xs text-danger" role="alert">{importError}</p> : null}
                     <div className="mt-3 flex justify-end gap-2">
@@ -287,7 +286,7 @@ export function SavedConfigSelector({
                   </EmptyState.Media>
                   <EmptyState.Title>No saved configurations</EmptyState.Title>
                   <EmptyState.Description className="max-w-sm">
-                    Add an operator configuration to ~/.sliver-client/configs, refresh this list, or choose one from another location.
+                    Save an operator configuration to ~/.sliver-client/configs to see it here automatically, or choose one from another location.
                   </EmptyState.Description>
                 </EmptyState.Header>
               </EmptyState>
@@ -325,7 +324,7 @@ export function SavedConfigSelector({
                           >
                             <Chip.Label>
                               {config.availability === "available"
-                                ? config.origin === "managed" ? "Imported" : "Existing"
+                                ? config.origin === "imported" ? "Imported" : "Existing"
                                 : "Deferred"}
                             </Chip.Label>
                           </Chip>
@@ -378,10 +377,10 @@ export function SavedConfigSelector({
                 >
                   <FontAwesomeIcon
                     aria-hidden
-                    icon={selectedConfig.removal === "delete-managed-copy" ? faTrashCan : faUnlink}
+                    icon={faUnlink}
                     className="size-3.5"
                   />
-                  {selectedConfig.removal === "delete-managed-copy" ? "Delete copy" : "Forget"}
+                  Forget
                 </Button>
               ) : null}
               <div className="ml-auto flex items-center gap-2">
@@ -392,7 +391,7 @@ export function SavedConfigSelector({
                   onPress={() => setIsImportFormOpen(true)}
                 >
                   <FontAwesomeIcon aria-hidden icon={faFileImport} className="size-3.5" />
-                  Import a copy
+                  Import file
                 </Button>
                 <Button
                   isDisabled={isBusy}
@@ -456,21 +455,17 @@ export function SavedConfigSelector({
               <AlertDialog.Icon status="danger">
                 <FontAwesomeIcon
                   aria-hidden
-                  icon={removalCandidate?.removal === "delete-managed-copy" ? faTrashCan : faUnlink}
+                  icon={faUnlink}
                   className="size-4"
                 />
               </AlertDialog.Icon>
               <AlertDialog.Heading>
-                {removalCandidate?.removal === "delete-managed-copy"
-                  ? "Delete this imported copy?"
-                  : "Forget this configuration?"}
+                Forget this configuration?
               </AlertDialog.Heading>
             </AlertDialog.Header>
             <AlertDialog.Body>
               <p className="text-sm leading-relaxed text-muted">
-                {removalCandidate?.removal === "delete-managed-copy"
-                  ? `Delete the GUI-managed private copy “${removalCandidate.displayName}”? This does not change the Sliver server.`
-                  : `Detach “${removalCandidate?.displayName ?? "this configuration"}” from the GUI catalog? Its existing source file remains on disk.`}
+                {`Forget “${removalCandidate?.displayName ?? "this configuration"}” in the GUI catalog? Its source file remains on disk.`}
               </p>
               {removeError ? <p className="mt-3 text-sm text-danger" role="alert">{removeError}</p> : null}
             </AlertDialog.Body>
@@ -490,7 +485,7 @@ export function SavedConfigSelector({
                 variant="danger"
                 onPress={() => void removeConfig()}
               >
-                {removalCandidate?.removal === "delete-managed-copy" ? "Delete managed copy" : "Forget only"}
+                Forget only
               </Button>
             </AlertDialog.Footer>
           </AlertDialog.Dialog>

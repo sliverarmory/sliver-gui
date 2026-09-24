@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, posix as posixPath, win32 as win32Path } from "node:path";
+import { basename, dirname, join, posix as posixPath, resolve, win32 as win32Path } from "node:path";
 import { createSecureContext } from "node:tls";
 import { isDeepStrictEqual } from "node:util";
 
@@ -185,6 +185,7 @@ import {
   sanitizeSavedConfigMetadata,
   type SavedConfigRecord,
 } from "./saved-config-catalog.js";
+import { SavedConfigDirectoryWatcher } from "./saved-config-watcher.js";
 import { RecentEventDeduplicator } from "./recent-event-deduplicator.js";
 import {
   deferredWireGuardResult,
@@ -458,6 +459,7 @@ function unavailableManagedListenerFirewallController(): ManagedListenerFirewall
 
 export interface ConnectionRegistryOptions {
   savedConfigDirectory?: string;
+  /** Directory for the GUI's reference manifest; retained for existing test harnesses. */
   managedConfigDirectory?: string;
   clientFactory?: SliverClientFactory;
   now?: () => number;
@@ -598,6 +600,7 @@ export class ConnectionRegistry {
   };
 
   private readonly configStore: OperatorConfigStore;
+  private readonly savedConfigWatcher: SavedConfigDirectoryWatcher;
   private readonly clientFactory: SliverClientFactory;
   private readonly now: () => number;
   private resolveManagedServer: (configDigest: string) => ManagedServerReference | null;
@@ -606,9 +609,31 @@ export class ConnectionRegistry {
 
   constructor(options: string | ConnectionRegistryOptions = {}) {
     const normalized = typeof options === "string" ? { savedConfigDirectory: options } : options;
-    const externalDirectory = normalized.savedConfigDirectory ?? join(homedir(), ".sliver-client", "configs");
-    const managedDirectory = normalized.managedConfigDirectory ?? join(homedir(), ".sliver-gui", "configs");
-    this.configStore = new OperatorConfigStore(externalDirectory, managedDirectory);
+    const clientRootDirectory = resolve(process.env["SLIVER_CLIENT_ROOT_DIR"] || join(homedir(), ".sliver-client"));
+    const externalDirectory = normalized.savedConfigDirectory ?? join(clientRootDirectory, "configs");
+    const metadataDirectory = normalized.managedConfigDirectory ?? join(clientRootDirectory, "gui");
+    this.configStore = new OperatorConfigStore(externalDirectory, metadataDirectory);
+    this.savedConfigWatcher = new SavedConfigDirectoryWatcher(
+      externalDirectory,
+      async () => {
+        const records = await this.configStore.list();
+        // Catalog IDs are intentionally regenerated on every read. The watcher
+        // compares stable metadata so it only invalidates windows on real changes.
+        return JSON.stringify(records.map(({ path, digest, summary: { id: _id, ...summary } }) =>
+          [path, digest, summary]));
+      },
+      () => {
+        for (const contentsId of this.windows.keys()) {
+          const contents = webContents.fromId(contentsId);
+          if (!contents || contents.isDestroyed()) continue;
+          try {
+            contents.send(IPC.savedConfigsChanged);
+          } catch {
+            // The event is advisory. A new or navigated renderer reads the catalog on load.
+          }
+        }
+      },
+    );
     this.clientFactory = normalized.clientFactory ?? createSliverClientAdapter;
     this.now = normalized.now ?? Date.now;
     this.resolveManagedServer = normalized.resolveManagedServer ?? (() => null);
@@ -663,6 +688,7 @@ export class ConnectionRegistry {
   }
 
   registerWindow(contentsId: number): void {
+    if (this.windows.size === 0) this.savedConfigWatcher.start();
     this.windows.set(contentsId, {
       contentsId,
       snapshot: disconnectedSnapshot(),
@@ -694,6 +720,7 @@ export class ConnectionRegistry {
   async unregisterWindow(contentsId: number): Promise<void> {
     const context = this.windows.get(contentsId);
     this.windows.delete(contentsId);
+    if (this.windows.size === 0) this.savedConfigWatcher.stop();
     if (context) {
       context.connectionAttempt += 1;
       delete context.manualRefresh;
@@ -939,15 +966,13 @@ export class ConnectionRegistry {
       });
       const filePath = result.filePaths[0];
       if (result.canceled || !filePath) return { ok: false, error: "Import canceled" };
-      const data = await readConfigForImport(filePath);
-      try {
-        const imported = await this.configStore.import(data, displayName);
-        this.requireWindow(sender.id).savedConfigs.set(imported.summary.id, imported);
-        return { ok: true, value: imported.summary };
-      } finally {
-        data.fill(0);
+      const imported = await this.configStore.import(filePath, displayName);
+      this.requireWindow(sender.id).savedConfigs.set(imported.summary.id, imported);
+      return { ok: true, value: imported.summary };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Saved configuration permissions must be private")) {
+        return { ok: false, error: "Selected configuration must have private file permissions (0600 or stricter) to import by reference" };
       }
-    } catch {
       return { ok: false, error: "Unable to import the selected Sliver configuration" };
     }
   }
@@ -1001,7 +1026,7 @@ export class ConnectionRegistry {
         Object.freeze({
           path: record.path,
           digest: record.digest,
-          requirePrivateMode: record.summary.origin === "managed",
+          requirePrivateMode: record.summary.origin === "imported",
         }),
       );
     } finally {

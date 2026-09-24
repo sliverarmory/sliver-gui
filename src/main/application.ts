@@ -301,7 +301,6 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   // Install synchronously before any windows, sessions, or asynchronous startup.
   const preloadPath = options.preloadPath ?? join(import.meta.dirname, "../preload/index.cjs");
   installApplicationNavigationSecurity(app, join(dirname(preloadPath), "navigation.cjs"));
-  const registry = options.registry ?? new ConnectionRegistry();
   const mainBundleDirectory = import.meta.dirname;
   const applicationAssetsDirectory = options.applicationAssetsDirectory ?? join(mainBundleDirectory, "../../build");
   const runtimeIconPath = app.isPackaged
@@ -338,6 +337,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     homedir(),
     ".sliver-client",
   ));
+  const registry = options.registry ?? new ConnectionRegistry({
+    savedConfigDirectory: join(consoleClientRootDirectory, "configs"),
+    managedConfigDirectory: join(consoleClientRootDirectory, "gui"),
+  });
   const startConsoleRuntime = options.startConsoleRuntime ?? SliverConsoleRuntime.start;
   // Every application build uses the bundled protocol entry. Environment
   // variables must never redirect renderer navigation or IPC trust.
@@ -2815,7 +2818,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   await app.whenReady();
   applicationContextMenus = new ApplicationContextMenuController();
   const loadedApplicationSettingsStore = await ApplicationSettingsStore.load(
-    join(app.getPath("userData"), APPLICATION_SETTINGS_FILE_NAME),
+    join(consoleClientRootDirectory, "gui", APPLICATION_SETTINGS_FILE_NAME),
   );
   const loadedTextEditorSettingsStore = await TextEditorSettingsStore.load(
     join(consoleClientRootDirectory, "gui", TEXT_EDITOR_SETTINGS_FILE_NAME),

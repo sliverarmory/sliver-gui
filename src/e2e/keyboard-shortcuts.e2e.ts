@@ -84,7 +84,7 @@ test("keyboard shortcuts can be searched, recorded, persisted and reset without 
     await page.getByRole("tab", { name: "Keyboard Shortcuts", exact: true }).click();
     await waitForNewWindowShortcut(page, "mod+shift+o");
     assert.equal(await newWindowAccelerator(application), "CmdOrCtrl+Shift+O");
-    const persisted = JSON.parse(await readFile(join(root, "user-data", "application-settings.json"), "utf8"));
+    const persisted = JSON.parse(await readFile(join(root, "client", "gui", "application-settings.json"), "utf8"));
     assert.equal(persisted.keyboardShortcuts.newWindow, "mod+shift+o");
     assert.equal(persisted.theme, "dark");
     await sendNativeChord(application, windowId, "N");

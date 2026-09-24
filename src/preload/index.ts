@@ -190,6 +190,7 @@ const api: SliverDesktopAPI = {
     return () => ipcRenderer.removeListener(IPC.scriptsChanged, handler);
   },
   onScriptEditorRequested: (listener) => onFixedEvent(IPC.scriptEditorRequested, listener),
+  onSavedConfigsChanged: (listener) => onFixedEvent(IPC.savedConfigsChanged, listener),
   openStream,
   openConsoleStream,
   onSnapshotChanged: (listener) => {

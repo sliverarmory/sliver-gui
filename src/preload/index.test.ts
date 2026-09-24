@@ -246,6 +246,20 @@ describe("sandboxed preload bridge", () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.scriptsChanged, handler);
   });
 
+  it("accepts only payload-free saved-config invalidations and unsubscribes cleanly", () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    const listener = vi.fn();
+    const unsubscribe = api.onSavedConfigsChanged(listener);
+    const registration = electronMocks.on.mock.calls.findLast(([channel]) => channel === IPC.savedConfigsChanged)!;
+    const handler = registration[1] as (...args: unknown[]) => void;
+    handler({ privateElectronEvent: true }, "unexpected payload");
+    expect(listener).not.toHaveBeenCalled();
+    handler({ privateElectronEvent: true });
+    expect(listener).toHaveBeenCalledExactlyOnceWith();
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.savedConfigsChanged, handler);
+  });
+
   it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
     expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(4);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];

@@ -1,52 +1,62 @@
 // @vitest-environment node
 
-import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OperatorConfigStore } from "./operator-config-store.js";
+import { readCurrentSavedConfig } from "./saved-config-catalog.js";
 
 let root: string;
 let externalDirectory: string;
-let managedDirectory: string;
+let metadataDirectory: string;
+let sourceDirectory: string;
 let store: OperatorConfigStore;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "sliver-gui-config-store-"));
-  externalDirectory = join(root, "external");
-  managedDirectory = join(root, "managed");
-  store = new OperatorConfigStore(externalDirectory, managedDirectory);
+  externalDirectory = join(root, "configs");
+  metadataDirectory = join(root, "gui");
+  sourceDirectory = join(root, "sources");
+  store = new OperatorConfigStore(externalDirectory, metadataDirectory);
 });
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe("managed operator configuration store", () => {
-  it("imports a private GUI-owned copy with a local display name", async () => {
-    const source = Buffer.from(validConfig(), "utf8");
-    const imported = await store.import(source, "  Local\nOperator  ");
+describe("operator configuration references", () => {
+  it("imports a private source by reference without copying credentials", async () => {
+    const sourcePath = await createSource("team.cfg");
+    const imported = await store.import(sourcePath, "  Local\nOperator  ");
 
     expect(imported.summary).toMatchObject({
+      fileName: "team.cfg",
       displayName: "Local Operator",
-      origin: "managed",
-      removal: "delete-managed-copy",
+      origin: "imported",
+      removal: "detach",
       availability: "available",
       transport: "mtls",
     });
+    expect(imported.path).toBe(sourcePath);
+    expect(JSON.stringify(imported.summary)).not.toContain(sourceDirectory);
     expect(JSON.stringify(imported.summary)).not.toContain("private-key");
-    const configPath = join(managedDirectory, imported.summary.fileName);
-    expect(await readFile(configPath, "utf8")).toBe(validConfig());
+    expect(await readFile(sourcePath, "utf8")).toBe(validConfig());
+    expect(await readdir(metadataDirectory)).toEqual(["operator-configs.json"]);
+    const manifest = await readFile(join(metadataDirectory, "operator-configs.json"), "utf8");
+    expect(manifest).toContain(sourcePath);
+    expect(manifest).not.toContain("private-key");
     if (process.platform !== "win32") {
-      expect((await stat(configPath)).mode & 0o777).toBe(0o600);
-      expect((await stat(join(managedDirectory, ".sliver-gui-configs.json"))).mode & 0o777).toBe(0o600);
+      expect((await stat(join(metadataDirectory, "operator-configs.json"))).mode & 0o777).toBe(0o600);
+      expect((await stat(metadataDirectory)).mode & 0o777).toBe(0o700);
     }
   });
 
   it("labels imported WireGuard configs deferred without attempting transport support", async () => {
-    const imported = await store.import(Buffer.from(validConfig({ wg: wireGuardConfig() })), "WG operator");
+    const sourcePath = await createSource("wireguard.cfg", validConfig({ wg: wireGuardConfig() }));
+    const imported = await store.import(sourcePath, "WG operator");
 
     expect(imported.summary).toMatchObject({
       transport: "wireguard",
@@ -55,38 +65,85 @@ describe("managed operator configuration store", () => {
     });
   });
 
-  it("serializes concurrent imports so every successful managed copy remains manifest-owned", async () => {
-    const imports = await Promise.all(
-      Array.from({ length: 20 }, (_, index) =>
-        store.import(Buffer.from(validConfig({ operator: `operator-${index}` })), `Local ${index}`),
-      ),
-    );
+  it("serializes concurrent imports without creating config copies", async () => {
+    const paths = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+      createSource(`${index}.cfg`, validConfig({ operator: `operator-${index}` })),
+    ));
+    const imports = await Promise.all(paths.map((path, index) => store.import(path, `Local ${index}`)));
 
-    expect(new Set(imports.map((record) => record.summary.id)).size).toBe(20);
+    expect(new Set(imports.map((record) => record.importedId)).size).toBe(20);
     const listed = await store.list();
     expect(listed).toHaveLength(20);
     expect(listed.map((record) => record.summary.displayName).sort()).toEqual(
       Array.from({ length: 20 }, (_, index) => `Local ${index}`).sort(),
     );
-    expect((await readdir(managedDirectory)).filter((name) => name.endsWith(".cfg"))).toHaveLength(20);
+    expect(await readdir(metadataDirectory)).toEqual(["operator-configs.json"]);
   });
 
-  it("lists only manifest-owned managed copies and deletes an exact owned copy", async () => {
-    const imported = await store.import(Buffer.from(validConfig()), "Owned");
-    await writeFile(join(managedDirectory, "orphan.cfg"), validConfig({ operator: "orphan" }), { mode: 0o600 });
+  it("omits imported sources that change after import and rejects their old digest", async () => {
+    const sourcePath = await createSource("mutable.cfg");
+    const imported = await store.import(sourcePath, "Mutable");
+    await writeFile(sourcePath, validConfig({ operator: "changed" }), { mode: 0o600 });
 
+    expect(await store.list()).toEqual([]);
+    await expect(readCurrentSavedConfig(imported)).rejects.toThrow(/changed after the catalog was refreshed/u);
+  });
+
+  it("does not reclassify a changed imported source as discovered until explicit re-import", async () => {
+    const sourcePath = await createSource("existing.cfg", validConfig(), externalDirectory);
+    await store.import(sourcePath, "Existing");
+    await writeFile(sourcePath, validConfig({ operator: "changed" }));
+
+    expect(await store.list()).toEqual([]);
+    await store.import(sourcePath, "Updated");
     const listed = await store.list();
-    expect(listed.map((record) => record.summary.displayName)).toEqual(["Owned"]);
-    await store.remove(listed[0]!);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.summary).toMatchObject({ origin: "imported", displayName: "Updated", operator: "changed" });
+  });
 
-    await expect(access(join(managedDirectory, imported.summary.fileName))).rejects.toThrow();
-    expect((await readdir(managedDirectory)).sort()).toEqual([".sliver-gui-configs.json", "orphan.cfg"]);
+  it("requires a private regular source for a persistent import", async () => {
+    const sourcePath = await createSource("private.cfg");
+    const linkedPath = join(sourceDirectory, "link.cfg");
+    await symlink(sourcePath, linkedPath);
+    await expect(store.import(linkedPath, "Linked")).rejects.toThrow(/bounded regular file/u);
+
+    if (process.platform !== "win32") {
+      await chmod(sourcePath, 0o644);
+      await expect(store.import(sourcePath, "Public")).rejects.toThrow(/private and non-executable/u);
+    }
+  });
+
+  it("deduplicates a source inside the discovered directory and forgets without unlinking it", async () => {
+    const sourcePath = await createSource("existing.cfg", validConfig(), externalDirectory);
+    const first = await store.import(sourcePath, "First name");
+    const second = await store.import(sourcePath, "Second name");
+    expect(second.importedId).toBe(first.importedId);
+
+    let listed = await store.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.summary).toMatchObject({ origin: "imported", displayName: "Second name" });
+    await store.remove(listed[0]!);
+    expect(await readFile(sourcePath, "utf8")).toBe(validConfig());
+    expect(await store.list()).toEqual([]);
+
+    const importedAgain = await store.import(sourcePath, "Third name");
+    expect(importedAgain.summary.displayName).toBe("Third name");
+    listed = await store.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.summary.origin).toBe("imported");
+  });
+
+  it("forgets an imported source outside the discovered directory without deleting it", async () => {
+    const sourcePath = await createSource("outside.cfg");
+    const imported = await store.import(sourcePath, "Outside");
+    await store.remove(imported);
+
+    expect(await readFile(sourcePath, "utf8")).toBe(validConfig());
+    expect(await store.list()).toEqual([]);
   });
 
   it("detaches pre-existing configs without exposing filesystem deletion", async () => {
-    await mkdir(externalDirectory);
-    const detachedPath = join(externalDirectory, "detached.cfg");
-    await writeFile(detachedPath, validConfig({ operator: "detached" }));
+    const detachedPath = await createSource("detached.cfg", validConfig({ operator: "detached" }), externalDirectory);
 
     let listed = await store.list();
     const detached = listed.find((record) => record.summary.operator === "detached");
@@ -99,10 +156,9 @@ describe("managed operator configuration store", () => {
   });
 
   it("serializes concurrent external detach mutations without losing either manifest update", async () => {
-    await mkdir(externalDirectory);
     await Promise.all([
-      writeFile(join(externalDirectory, "first.cfg"), validConfig({ operator: "first" })),
-      writeFile(join(externalDirectory, "second.cfg"), validConfig({ operator: "second" })),
+      createSource("first.cfg", validConfig({ operator: "first" }), externalDirectory),
+      createSource("second.cfg", validConfig({ operator: "second" }), externalDirectory),
     ]);
     const listed = await store.list();
 
@@ -113,6 +169,13 @@ describe("managed operator configuration store", () => {
     expect(await readFile(join(externalDirectory, "second.cfg"), "utf8")).toContain("second");
   });
 });
+
+async function createSource(name: string, contents = validConfig(), directory = sourceDirectory): Promise<string> {
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, name);
+  await writeFile(path, contents, { mode: 0o600 });
+  return path;
+}
 
 function validConfig(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({

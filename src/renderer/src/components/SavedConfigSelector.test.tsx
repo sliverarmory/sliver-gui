@@ -50,15 +50,15 @@ const CONFIGS = [
   },
   {
     id: "config-three",
-    fileName: "89c18203-c7d1-46b9-a088-cb59b70ce7f6.cfg",
-    displayName: "Managed lab",
+    fileName: "lab.cfg",
+    displayName: "Imported lab",
     operator: "charlie",
     lhost: "lab.example.test",
     lport: 8888,
     transport: "mtls" as const,
     modifiedAt: "2026-08-06T12:00:00.000Z",
-    origin: "managed" as const,
-    removal: "delete-managed-copy" as const,
+    origin: "imported" as const,
+    removal: "detach" as const,
     availability: "available" as const,
   },
 ];
@@ -114,7 +114,7 @@ describe("SavedConfigSelector", () => {
     expect(onConnect).not.toHaveBeenCalled();
   });
 
-  it("keeps refresh, managed import, and one-off external selection distinct", async () => {
+  it("keeps refresh, referenced import, and one-off external selection distinct", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn();
     const onChooseFile = vi.fn();
@@ -123,7 +123,7 @@ describe("SavedConfigSelector", () => {
 
     await user.click(screen.getByRole("button", { name: "Refresh saved configurations" }));
     await user.click(screen.getByRole("button", { name: "Open file" }));
-    await user.click(screen.getByRole("button", { name: "Import a copy" }));
+    await user.click(screen.getByRole("button", { name: "Import file" }));
     await user.type(screen.getByRole("textbox", { name: "Local configuration name" }), "  Production west  ");
     await user.click(screen.getByRole("button", { name: "Choose file and import" }));
 
@@ -141,7 +141,7 @@ describe("SavedConfigSelector", () => {
     const configurationActions = screen.getByRole("group", { name: "Configuration actions" });
     const dialogActions = screen.getByRole("group", { name: "Dialog actions" });
     expect(within(configurationActions).getAllByRole("button").map((button) => button.textContent?.trim()))
-      .toEqual(["Forget", "Import a copy", "Open file"]);
+      .toEqual(["Forget", "Import file", "Open file"]);
     expect(within(dialogActions).getAllByRole("button").map((button) => button.textContent?.trim()))
       .toEqual(["Cloud Deployment", "Cancel", "Connect"]);
 
@@ -175,6 +175,21 @@ describe("SavedConfigSelector", () => {
     await user.click(screen.getByRole("button", { name: "Forget only" }));
 
     expect(onRemove).toHaveBeenCalledWith(CONFIGS[0]);
+  });
+
+  it("forgets an imported reference while keeping its source file", async () => {
+    const user = userEvent.setup();
+    const onRemove = vi.fn();
+    renderSelector({ onRemove });
+
+    await user.click(screen.getByRole("option", { name: /charlie/i }));
+    await user.click(screen.getByRole("button", { name: "Forget" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Forget this configuration?" });
+    expect(confirmation).toHaveTextContent("source file remains on disk");
+    expect(confirmation).not.toHaveTextContent("Delete");
+    await user.click(screen.getByRole("button", { name: "Forget only" }));
+
+    expect(onRemove).toHaveBeenCalledWith(CONFIGS[2]);
   });
 
   it("closes a removal confirmation when a catalog refresh invalidates its opaque ID", async () => {
