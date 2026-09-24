@@ -6108,6 +6108,59 @@ describe("M3 session shell registry boundary", () => {
     });
   });
 
+  it("streams shell output beyond the main queue reservation as the renderer returns credit", async () => {
+    const client = new FakeSliverClient();
+    const windowsSession = session("session_large_output", "windows-interactive");
+    windowsSession.OS = "windows";
+    windowsSession.Arch = "amd64";
+    client.sessionState.Sessions = [windowsSession];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0];
+    if (!target) throw new Error("Expected Windows session ref");
+    await registry.selectTarget(1, target);
+
+    const output = Uint8Array.from({ length: 384 * 1_024 }, (_, index) => index % 251);
+    const expectedDigest = createHash("sha256").update(output).digest("hex");
+    const shell = new FakeShellSession(output);
+    client.nextShellSession = shell;
+    const opened = await openRegistryShell(registry, 1, 303, "large-output-document", {
+      requestPty: false,
+    });
+    const openedFrame = opened.port.last("opened");
+    if (!openedFrame) throw new Error("Expected opened stream");
+
+    for (let segment = 1; segment <= 6; segment += 1) {
+      await vi.waitFor(() => {
+        const emitted = opened.port.frames
+          .filter((frame): frame is Extract<StreamServerFrame, { type: "data" }> => frame.type === "data")
+          .reduce((total, frame) => total + frame.data.byteLength, 0);
+        expect(emitted).toBe(segment * 64 * 1_024);
+      });
+      if (segment < 6) {
+        opened.port.send({
+          v: STREAM_PROTOCOL_VERSION,
+          type: "credit",
+          streamId: openedFrame.streamId,
+          bytes: 64 * 1_024,
+        });
+      }
+    }
+
+    const received = Buffer.concat(opened.port.frames
+      .filter((frame): frame is Extract<StreamServerFrame, { type: "data" }> => frame.type === "data")
+      .map((frame) => Buffer.from(frame.data)));
+    expect(createHash("sha256").update(received).digest("hex")).toBe(expectedDigest);
+    expect(opened.port.last("closed")).toBeUndefined();
+    expect(output.every((byte) => byte === 0)).toBe(true);
+    await registry.actOnSessionShell(1, 303, "large-output-document", {
+      resourceId: opened.plan.resourceId,
+      action: "close",
+    });
+    expect(shell.close).toHaveBeenCalledOnce();
+  });
+
   it("claims and returns one exact shell without restarting it or accepting stale renderer authority", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_popout", "popout-interactive")];

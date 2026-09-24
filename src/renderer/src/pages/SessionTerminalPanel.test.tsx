@@ -19,6 +19,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
         ariaLabel?: string;
         disableInput?: boolean;
         enableClipboard?: boolean;
+        pipedWindowsInput?: boolean;
         onClipboardPaste?: (text: string) => void | Promise<void>;
         onError?: (error: Error) => void;
         onReady?: () => void;
@@ -53,6 +54,7 @@ vi.mock("../components/GhosttyTerminal", async () => {
           aria-label={props.ariaLabel}
           data-terminal-clipboard-enabled={String(Boolean(props.enableClipboard))}
           data-terminal-input-disabled={String(Boolean(props.disableInput))}
+          data-terminal-piped-windows-input={String(Boolean(props.pipedWindowsInput))}
           data-terminal-output=""
           role="textbox"
         >
@@ -291,7 +293,7 @@ describe("SessionTerminalPanel", () => {
     expect(screen.queryByRole("textbox", { name: "Interactive shell for payments" })).not.toBeInTheDocument();
   });
 
-  it("forces Windows shells to non-PTY mode without terminal dimensions", async () => {
+  it("uses the interactive terminal for non-PTY Windows shells", async () => {
     const windowsSession = { ...session, os: "windows", arch: "amd64" };
     const transport = fakeTransport();
     shellMocks.open.mockResolvedValue(transport.api);
@@ -308,24 +310,13 @@ describe("SessionTerminalPanel", () => {
     await user.click(screen.getAllByRole("button", { name: "New shell" })[0]!);
     await waitFor(() => expect(api.prepareSessionShell).toHaveBeenCalledWith({ requestPty: false }));
     expect(screen.getByText(/Non-PTY · Windows resize unavailable/u)).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Interactive shell for payments" }))
-      .toHaveAttribute("data-terminal-input-disabled", "true");
-
-    const commandInput = screen.getByRole("textbox", { name: "Windows command" });
-    commandInput.focus();
-    await user.keyboard("Write-OutpuX{Backspace}t 'SLIVER_GUI_WINDOWS_OK'");
-    expect(commandInput).toHaveValue("Write-Output 'SLIVER_GUI_WINDOWS_OK'");
+    const terminal = screen.getByRole("textbox", { name: "Interactive shell for payments" });
+    expect(terminal).toHaveAttribute("data-terminal-input-disabled", "false");
+    expect(terminal).toHaveAttribute("data-terminal-piped-windows-input", "true");
+    expect(screen.queryByRole("textbox", { name: "Windows command" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Paste" })).toBeInTheDocument();
     expect(transport.send).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "Run" }));
-    expect(transport.send).toHaveBeenCalledOnce();
-    expect(transport.sentFrames[0]?.source).toBe("operator");
-    expect(new TextDecoder().decode(transport.sentFrames[0]?.bytes)).toBe(
-      "Write-Output 'SLIVER_GUI_WINDOWS_OK'\r",
-    );
-    expect(commandInput).toHaveValue("");
-    expect(commandInput).toHaveFocus();
-    expect(screen.queryByRole("button", { name: "Paste" })).not.toBeInTheDocument();
   });
 
   it("auto-attaches one detached shell activation, focuses it, and routes detach through the managed action API", async () => {

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import {
+  STREAM_CLOSING_GRACE_MILLISECONDS,
   STREAM_CONTROL_FRAME_BURST,
   STREAM_CONTROL_FRAMES_PER_SECOND,
   STREAM_CREDIT_TIMEOUT_MILLISECONDS,
@@ -93,6 +94,8 @@ export interface StartMainStreamEndpointContext {
   readonly signal: AbortSignal;
   /** Copies accepted output immediately; false means the resource is already terminal. */
   emitOutput(data: Uint8Array): boolean;
+  /** The endpoint's output reader waits for queue space; it must retain data until this settles. */
+  emitOutputWithBackpressure(data: Uint8Array): Promise<boolean>;
   /** Reports only a fixed disposition. Diagnostic errors stay inside the transport implementation. */
   remoteClose(reason: StreamEndpointCloseReason): void;
 }
@@ -217,6 +220,7 @@ interface StreamResourceRecord {
   attachment?: Attachment;
   inputQueue: QueuedChunk[];
   outputQueue: QueuedChunk[];
+  outputCapacityWaiters: Set<() => void>;
   inputQueuedBytes: number;
   outputQueuedBytes: number;
   inFlightInputBytes: number;
@@ -234,6 +238,8 @@ interface StreamResourceRecord {
   creditTimer?: Timer;
   idleTimer?: Timer;
   detachedTimer?: Timer;
+  remoteCloseTimer?: Timer;
+  remoteClosePending?: "completed" | "remote-close";
   detachedExpiresAtMilliseconds?: number;
   closePromise?: Promise<void>;
 }
@@ -364,6 +370,7 @@ export class StreamManager {
         openedCounted: false,
         inputQueue: [],
         outputQueue: [],
+        outputCapacityWaiters: new Set(),
         inputQueuedBytes: 0,
         outputQueuedBytes: 0,
         inFlightInputBytes: 0,
@@ -843,10 +850,15 @@ export class StreamManager {
     const context: StartMainStreamEndpointContext = Object.freeze({
       signal: resource.lifetime.signal,
       emitOutput: (data: Uint8Array) => this.acceptEndpointOutput(resource.resourceId, data),
+      emitOutputWithBackpressure: (data: Uint8Array) =>
+        this.acceptEndpointOutputWithBackpressure(resource.resourceId, data),
       remoteClose: (reason: StreamEndpointCloseReason) => {
         const closeReason: StreamCloseReason = reason === "transport-error" ? "transport-error" : reason;
         const current = this.resources.get(resource.resourceId);
-        if (current) void this.closeResource(current, closeReason);
+        if (current) {
+          if (reason === "transport-error") void this.closeResource(current, closeReason);
+          else this.beginRemoteClose(current, reason);
+        }
       },
     });
 
@@ -907,6 +919,23 @@ export class StreamManager {
     this.schedulePump();
   }
 
+  private beginRemoteClose(resource: StreamResourceRecord, reason: "completed" | "remote-close"): void {
+    if (resource.state === "closing" || resource.remoteClosePending) return;
+    if (!resource.attachment) {
+      void this.closeResource(resource, reason);
+      return;
+    }
+
+    // The final output chunk can be queued before its scheduled pump runs.
+    // Keep this exact attachment alive until its output reaches the renderer,
+    // while bounding a peer that never returns the required output credit.
+    resource.remoteClosePending = reason;
+    resource.remoteCloseTimer = managedTimeout(() => {
+      void this.closeResource(resource, reason);
+    }, STREAM_CLOSING_GRACE_MILLISECONDS);
+    this.schedulePump();
+  }
+
   private sendOpened(resource: StreamResourceRecord, attachment: Attachment): void {
     this.sendFrame(resource, attachment, {
       v: STREAM_PROTOCOL_VERSION,
@@ -929,6 +958,10 @@ export class StreamManager {
   ): void {
     const byteLength = buffer.byteLength;
     const transferredBytes = new Uint8Array(buffer);
+    if (resource.remoteClosePending) {
+      transferredBytes.fill(0);
+      return;
+    }
     if (
       resource.state !== "attached" ||
       !resource.endpoint ||
@@ -986,6 +1019,7 @@ export class StreamManager {
     rows: number,
     columns: number,
   ): void {
+    if (resource.remoteClosePending) return;
     if (
       resource.state !== "attached" ||
       !attachment.started ||
@@ -1002,7 +1036,9 @@ export class StreamManager {
 
   private acceptEndpointOutput(resourceId: string, input: Uint8Array): boolean {
     const resource = this.resources.get(resourceId);
-    if (!resource || resource.state === "closing" || resource.lifetime.signal.aborted) return false;
+    if (!resource || resource.state === "closing" || resource.lifetime.signal.aborted || resource.remoteClosePending) {
+      return false;
+    }
     if (!(input instanceof Uint8Array)) {
       void this.closeResource(resource, "transport-error");
       return false;
@@ -1035,6 +1071,42 @@ export class StreamManager {
     return true;
   }
 
+  private async acceptEndpointOutputWithBackpressure(resourceId: string, input: Uint8Array): Promise<boolean> {
+    if (!(input instanceof Uint8Array) || input.byteLength === 0) {
+      return this.acceptEndpointOutput(resourceId, input);
+    }
+
+    // A single upstream shell frame can exceed the queue reservation. Copy it
+    // into protocol-sized pieces, pausing the upstream iterator whenever the
+    // attached renderer has not returned enough output credit to make room.
+    for (let offset = 0; offset < input.byteLength;) {
+      const end = Math.min(input.byteLength, offset + this.limits.maxFrameBytes);
+      const part = input.subarray(offset, end);
+      for (;;) {
+        const resource = this.resources.get(resourceId);
+        if (!resource || resource.state === "closing" || resource.lifetime.signal.aborted || resource.remoteClosePending) {
+          return false;
+        }
+        if (
+          resource.state === "detached" ||
+          part.byteLength <= this.limits.maxQueueBytes - resource.outputQueuedBytes
+        ) {
+          if (!this.acceptEndpointOutput(resourceId, part)) return false;
+          break;
+        }
+        await new Promise<void>((resolve) => resource.outputCapacityWaiters.add(resolve));
+      }
+      offset = end;
+    }
+    return true;
+  }
+
+  private wakeOutputCapacityWaiters(resource: StreamResourceRecord): void {
+    const waiters = [...resource.outputCapacityWaiters];
+    resource.outputCapacityWaiters.clear();
+    for (const resolve of waiters) resolve();
+  }
+
   private detachResource(resource: StreamResourceRecord, reason: "operator-detach"): void {
     const attachment = resource.attachment;
     if (!attachment || resource.state === "closing") return;
@@ -1052,6 +1124,7 @@ export class StreamManager {
     }, false);
     this.disposeAttachment(resource, attachment);
     resource.state = "detached";
+    this.wakeOutputCapacityWaiters(resource);
     this.touch(resource);
     this.resetDetachedTimer(resource);
     this.resetIdleTimer(resource);
@@ -1070,6 +1143,7 @@ export class StreamManager {
     delete resource.handshakeTimer;
     delete resource.creditTimer;
     resource.state = "detached";
+    this.wakeOutputCapacityWaiters(resource);
     this.touch(resource);
     this.resetDetachedTimer(resource);
     this.resetIdleTimer(resource);
@@ -1141,6 +1215,7 @@ export class StreamManager {
       if (!chunk || chunk.data.byteLength > resource.attachment.outputCreditBytes) break;
       resource.outputQueue.shift();
       resource.outputQueuedBytes -= chunk.data.byteLength;
+      this.wakeOutputCapacityWaiters(resource);
       this.adjustQueued(resource, -chunk.data.byteLength);
       resource.attachment.outputCreditBytes -= chunk.data.byteLength;
       const data = exactArrayBuffer(chunk.data);
@@ -1168,7 +1243,12 @@ export class StreamManager {
       this.updatePressure(resource);
     }
 
-    if (!resource.commandInFlight && resource.endpoint && this.hasWriteSlot(resource)) {
+    if (resource.remoteClosePending && resource.state === "attached" && resource.outputQueue.length === 0) {
+      void this.closeResource(resource, resource.remoteClosePending);
+      return { bytes: processedBytes, progress: true };
+    }
+
+    if (!resource.remoteClosePending && !resource.commandInFlight && resource.endpoint && this.hasWriteSlot(resource)) {
       const chunk = resource.inputQueue.shift();
       if (chunk) {
         resource.inputQueuedBytes -= chunk.data.byteLength;
@@ -1402,6 +1482,7 @@ export class StreamManager {
     if (resource.closePromise) return resource.closePromise;
     resource.state = "closing";
     resource.lifetime.abort(new Error("Bounded stream closed"));
+    this.wakeOutputCapacityWaiters(resource);
     this.revokeResourceTicket(resource);
     this.clearResourceTimers(resource);
     const attachment = resource.attachment;
@@ -1474,10 +1555,12 @@ export class StreamManager {
     clearManagedTimer(resource.creditTimer);
     clearManagedTimer(resource.idleTimer);
     clearManagedTimer(resource.detachedTimer);
+    clearManagedTimer(resource.remoteCloseTimer);
     delete resource.handshakeTimer;
     delete resource.creditTimer;
     delete resource.idleTimer;
     delete resource.detachedTimer;
+    delete resource.remoteCloseTimer;
   }
 
   private revokeResourceTicket(resource: StreamResourceRecord): void {

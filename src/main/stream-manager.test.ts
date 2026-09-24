@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  STREAM_CLOSING_GRACE_MILLISECONDS,
   STREAM_MAX_FRAME_BYTES,
   STREAM_PROTOCOL_VERSION,
   type StreamClientFrame,
@@ -552,6 +553,131 @@ describe("StreamManager explicit window ownership transfer", () => {
 });
 
 describe("StreamManager protocol and data lifetime", () => {
+  it("delivers queued final output before closing a remote shell", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    const endpoint = endpointHarness();
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      starter: async (value) => {
+        context = value;
+        return endpoint.endpoint;
+      },
+    });
+
+    expect(context?.emitOutput(Uint8Array.from([1, 2, 3, 4]))).toBe(true);
+    context?.remoteClose("remote-close");
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    expect(manager.metricsForProcess().queuedBytes).toBe(4);
+    expect(context?.emitOutput(Uint8Array.from([9]))).toBe(false);
+    const lateInput = arrayBuffer([8]);
+    shell.port.send(dataFrame(shell.streamId, 0, lateInput));
+    expect([...new Uint8Array(lateInput)]).toEqual([0]);
+
+    await scheduler.flush();
+    expect(shell.port.frames.slice(-2).map((frame) => frame.type)).toEqual(["data", "closed"]);
+    expect([...new Uint8Array(lastFrame(shell.port, "data")!.data)]).toEqual([1, 2, 3, 4]);
+    expect(lastFrame(shell.port, "closed")).toMatchObject({ reason: "remote-close" });
+    expect(endpoint.write).not.toHaveBeenCalled();
+    expect(endpoint.close).toHaveBeenCalledOnce();
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
+    await manager.close();
+  });
+
+  it("drains a fast shell that reaches EOF before endpoint startup settles", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    const plan = manager.prepareSessionShell(preparation(binding(), (context) => {
+      expect(context.emitOutput(Uint8Array.from([5, 4, 3, 2]))).toBe(true);
+      context.remoteClose("completed");
+      return Promise.resolve(endpointHarness().endpoint);
+    }));
+    const port = new FakePort();
+    const streamId = manager.attach({
+      binding: binding(), attachmentToken: plan.attachment.attachmentToken, port,
+    });
+    port.send(startFrame(streamId, 4));
+
+    await scheduler.flush();
+    expect(port.frames.map((frame) => frame.type)).toEqual(["ready", "opened", "data", "closed"]);
+    expect([...new Uint8Array(lastFrame(port, "data")!.data)]).toEqual([5, 4, 3, 2]);
+    expect(lastFrame(port, "closed")).toMatchObject({ reason: "completed" });
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
+    await manager.close();
+  });
+
+  it("waits for output credit after remote EOF and bounds a stalled renderer", async () => {
+    vi.useFakeTimers();
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler, { creditTimeoutMilliseconds: 10_000 });
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 4,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+
+    expect(context?.emitOutput(Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]))).toBe(true);
+    context?.remoteClose("completed");
+    await scheduler.flush();
+    expect(shell.port.frames.filter((frame) => frame.type === "data")).toHaveLength(1);
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    expect(manager.metricsForProcess().queuedBytes).toBe(4);
+
+    shell.port.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "credit",
+      streamId: shell.streamId,
+      bytes: 4,
+    });
+    await scheduler.flush();
+    expect(shell.port.frames.slice(-2).map((frame) => frame.type)).toEqual(["data", "closed"]);
+    expect(shell.port.frames.filter((frame) => frame.type === "data")
+      .map((frame) => frame.type === "data" ? [...new Uint8Array(frame.data)] : []))
+      .toEqual([[1, 2, 3, 4], [5, 6, 7, 8]]);
+    expect(lastFrame(shell.port, "closed")).toMatchObject({ reason: "completed" });
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
+
+    const stalled = await openShell(manager, scheduler, {
+      binding: binding({ targetId: "stalled" }),
+      receiveCreditBytes: 4,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    expect(context?.emitOutput(Uint8Array.from([9, 8, 7, 6, 5, 4, 3, 2]))).toBe(true);
+    context?.remoteClose("remote-close");
+    await scheduler.flush();
+    expect(lastFrame(stalled.port, "closed")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(STREAM_CLOSING_GRACE_MILLISECONDS + 1);
+    expect(lastFrame(stalled.port, "closed")).toMatchObject({ reason: "remote-close" });
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
+    await manager.close();
+  });
+
+  it("closes transport errors immediately even when output is queued", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+
+    expect(context?.emitOutput(Uint8Array.from([1, 2, 3, 4]))).toBe(true);
+    context?.remoteClose("transport-error");
+    expect(lastFrame(shell.port, "closed")).toMatchObject({ reason: "transport-error" });
+    await scheduler.flush();
+    expect(lastFrame(shell.port, "data")).toBeUndefined();
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
+    await manager.close();
+  });
+
   it.each([
     ["extra key", (streamId: string, data: ArrayBuffer) => ({
       v: STREAM_PROTOCOL_VERSION, type: "data", streamId, sequence: 0, data, extra: true,
@@ -912,6 +1038,108 @@ describe("StreamManager protocol and data lifetime", () => {
       bytesFromRenderer: String(transferBytes),
       bytesToRenderer: String(transferBytes),
     });
+    await manager.close();
+  });
+
+  it("backpressures a megabyte output burst without exceeding the attached queue", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = new StreamManager({ schedule: scheduler.schedule, createOpaqueId: idGenerator() });
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 128 * 1_024,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    const output = patternedBytes(1 * 1_024 * 1_024, 37);
+    let settled = false;
+    const emitting = context!.emitOutputWithBackpressure(output).then((accepted) => {
+      settled = true;
+      return accepted;
+    });
+
+    await scheduler.flush();
+    expect(settled).toBe(false);
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    expect(manager.listSessionShells(binding()).resources[0]?.metrics).toMatchObject({
+      queuedOutputBytes: 128 * 1_024,
+      bytesToRenderer: String(128 * 1_024),
+    });
+
+    for (let credit = 0; credit < 14; credit += 1) {
+      shell.port.send({
+        v: STREAM_PROTOCOL_VERSION,
+        type: "credit",
+        streamId: shell.streamId,
+        bytes: 64 * 1_024,
+      });
+      await scheduler.flush();
+    }
+
+    expect(await emitting).toBe(true);
+    const frames = shell.port.frames.filter(
+      (frame): frame is Extract<StreamServerFrame, { type: "data" }> => frame.type === "data",
+    );
+    expect(sha256(Buffer.concat(frames.map((frame) => Buffer.from(frame.data))))).toBe(sha256(output));
+    expect(manager.listSessionShells(binding()).resources[0]?.metrics).toMatchObject({
+      queuedOutputBytes: 0,
+      highWaterOutputBytes: 128 * 1_024,
+      bytesToRenderer: String(output.byteLength),
+    });
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    await manager.close();
+  });
+
+  it("keeps a fragmented output stream open when its credit is returned in one bounded grant", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = new StreamManager({ schedule: scheduler.schedule, createOpaqueId: idGenerator() });
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 64 * 1_024,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    const output = patternedBytes(395 * 22, 43);
+    for (let offset = 0; offset < output.byteLength; offset += 22) {
+      expect(context!.emitOutput(output.subarray(offset, offset + 22))).toBe(true);
+      await scheduler.flush();
+    }
+    expect(shell.port.frames.filter((frame) => frame.type === "data")).toHaveLength(395);
+    shell.port.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "credit",
+      streamId: shell.streamId,
+      bytes: output.byteLength,
+    });
+    await scheduler.flush();
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    expect(manager.listSessionShells(binding()).resources[0]?.metrics).toMatchObject({
+      framesToRenderer: "395",
+      bytesToRenderer: String(output.byteLength),
+      outputCreditBytes: 64 * 1_024,
+    });
+    await manager.close();
+  });
+
+  it("releases an output producer waiting for queue space when the shell closes", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 4,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    const emitting = context!.emitOutputWithBackpressure(patternedBytes(64, 41));
+    await scheduler.flush();
+    await manager.actOnSessionShell(binding(), { resourceId: shell.resourceId, action: "close" });
+    expect(await emitting).toBe(false);
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
     await manager.close();
   });
 });

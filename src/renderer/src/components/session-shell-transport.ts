@@ -1,6 +1,7 @@
 import {
   STREAM_INITIAL_CREDIT_BYTES,
   STREAM_MAX_CREDIT_BYTES,
+  STREAM_MAX_CREDIT_GRANT_BYTES,
   STREAM_MAX_DETACHED_SCROLLBACK_BYTES,
   STREAM_MAX_FRAME_BYTES,
   STREAM_MAX_QUEUE_BYTES,
@@ -20,6 +21,9 @@ import type {
 
 const DEFAULT_ATTACH_TIMEOUT_MILLISECONDS = 5_000;
 const DEFAULT_OPEN_TIMEOUT_MILLISECONDS = 35_000;
+// Output often arrives as hundreds of tiny pipe reads. A credit frame for
+// every read would exhaust the main process's control-frame rate limit.
+const OUTPUT_CREDIT_COALESCE_MILLISECONDS = 25;
 const PRELOAD_ENVELOPE_SOURCE = "sliver-preload";
 const PRELOAD_ENVELOPE_TYPE = "stream-port";
 
@@ -98,6 +102,8 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
   #maxInputCreditBytes = STREAM_MAX_CREDIT_BYTES;
   #maxFrameBytes = STREAM_MAX_FRAME_BYTES;
   #receiveCreditBytes = STREAM_INITIAL_CREDIT_BYTES;
+  #pendingOutputCreditBytes = 0;
+  #outputCreditTimer: ReturnType<typeof setTimeout> | undefined;
   #nextInputSequence = 0;
   #nextOutputSequence = 0;
   #bytesFromRemote = 0n;
@@ -404,19 +410,37 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
       this.#earlyOutput.push(owned);
       this.#queuedOutputBytes += owned.byteLength;
     }
-    this.#receiveCreditBytes += frame.data.byteLength;
+    this.#pendingOutputCreditBytes += frame.data.byteLength;
+    this.#scheduleOutputCredit();
+    this.#emitSnapshot();
+  }
+
+  #scheduleOutputCredit(): void {
+    if (this.#outputCreditTimer || this.#pendingOutputCreditBytes === 0) return;
+    this.#outputCreditTimer = setTimeout(() => {
+      this.#outputCreditTimer = undefined;
+      this.#flushOutputCredit();
+    }, OUTPUT_CREDIT_COALESCE_MILLISECONDS);
+  }
+
+  #flushOutputCredit(): void {
+    if (this.#state !== "attached" || !this.#streamId || !this.#port) return;
+    const bytes = Math.min(this.#pendingOutputCreditBytes, STREAM_MAX_CREDIT_GRANT_BYTES);
+    if (bytes === 0) return;
     try {
-      this.#port?.postMessage({
+      this.#port.postMessage({
         v: STREAM_PROTOCOL_VERSION,
         type: "credit",
-        streamId: frame.streamId,
-        bytes: frame.data.byteLength,
+        streamId: this.#streamId,
+        bytes,
       });
     } catch (error) {
       this.#fail(normalizeError(error), "transport-error");
       return;
     }
-    this.#emitSnapshot();
+    this.#pendingOutputCreditBytes -= bytes;
+    this.#receiveCreditBytes += bytes;
+    this.#scheduleOutputCredit();
   }
 
   #receiveCredit(bytes: number): void {
@@ -472,13 +496,16 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
   }
 
   #remoteClosed(reason: StreamCloseReason, disposition: StreamCloseDisposition): void {
+    const preserveEarlyOutput = disposition === "closed" &&
+      (reason === "completed" || reason === "remote-close") &&
+      !this.#terminalSubscription;
     this.#closeReason = reason;
     this.#closeDisposition = disposition;
     this.#state = disposition === "detached" ? "detached" : "closed";
     this.#settleOpen(new Error(`Session shell closed before attachment (${reason})`));
     if (this.#terminalSubscription) safeTerminalClose(this.#terminalSubscription, reason);
     this.#teardownPort();
-    this.#clearQueues();
+    this.#clearQueues(preserveEarlyOutput);
     this.#emitSnapshot();
   }
 
@@ -487,7 +514,15 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
     reason: StreamCloseReason,
     state: "closed" | "detached",
   ): void {
-    if (isTerminalState(this.#state)) return;
+    if (isTerminalState(this.#state)) {
+      // A normal remote EOF may retain bounded output until Ghostty subscribes.
+      // Releasing that terminal without subscribing must still wipe those bytes.
+      if (this.#earlyOutput.length > 0) {
+        this.#clearQueues();
+        this.#emitSnapshot();
+      }
+      return;
+    }
     if (this.#streamId && this.#port) {
       try {
         this.#port.postMessage({
@@ -543,6 +578,9 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
   }
 
   #teardownPort(): void {
+    if (this.#outputCreditTimer) clearTimeout(this.#outputCreditTimer);
+    this.#outputCreditTimer = undefined;
+    this.#pendingOutputCreditBytes = 0;
     if (this.#port && this.#portMessageListener) {
       this.#port.removeEventListener("message", this.#portMessageListener);
     }
@@ -555,13 +593,15 @@ export class SessionShellTransport implements GhosttyTerminalTransport {
     this.#portMessageErrorListener = undefined;
   }
 
-  #clearQueues(): void {
+  #clearQueues(preserveEarlyOutput = false): void {
     for (const queued of this.#inputQueue) queued.bytes.fill(0);
-    for (const output of this.#earlyOutput) output.fill(0);
+    if (!preserveEarlyOutput) {
+      for (const output of this.#earlyOutput) output.fill(0);
+      this.#earlyOutput.length = 0;
+      this.#queuedOutputBytes = 0;
+    }
     this.#inputQueue.length = 0;
-    this.#earlyOutput.length = 0;
     this.#queuedInputBytes = 0;
-    this.#queuedOutputBytes = 0;
     this.#inputCreditBytes = 0;
   }
 

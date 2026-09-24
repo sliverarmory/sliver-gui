@@ -5,7 +5,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent,
   type RefObject,
 } from "react";
 import type { Selection } from "react-aria-components";
@@ -13,11 +12,8 @@ import {
   AlertDialog,
   Button,
   Chip,
-  Input,
-  Label,
   Modal,
   ScrollShadow,
-  TextField,
   Toolbar,
   Tooltip,
   toast,
@@ -39,7 +35,6 @@ import type {
   SessionShellResourceList,
   TerminalRuntimeAsset,
 } from "../../../shared/stream-contracts";
-import { STREAM_MAX_FRAME_BYTES } from "../../../shared/stream-contracts";
 import {
   GhosttyTerminal,
   type GhosttyTerminalHandle,
@@ -56,10 +51,6 @@ const DEFAULT_COLUMNS = 80;
 const MAX_PASTE_BYTES = 64 * 1_024;
 const METRICS_UPDATE_MILLISECONDS = 250;
 const WIDE_SHELL_WORKSPACE_QUERY = "(min-width: 768px)";
-const WINDOWS_COMMAND_TERMINATOR = "\r";
-const MAX_WINDOWS_COMMAND_BYTES = STREAM_MAX_FRAME_BYTES;
-
-const textEncoder = new TextEncoder();
 
 let cachedTerminalRuntime: TerminalRuntimeAsset | undefined;
 let pendingTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
@@ -148,7 +139,6 @@ export function SessionTerminalPanel({
   const preferredAttachmentKeyRef = useRef<string | undefined>(undefined);
   const pendingTerminalFocusResourceIdRef = useRef<string | undefined>(undefined);
   const pendingPasteRef = useRef<PendingPaste | undefined>(undefined);
-  const windowsCommandInputRef = useRef<HTMLInputElement>(null);
 
   const [panelStatus, setPanelStatus] = useState<PanelStatus>("loading");
   const [error, setError] = useState<string>();
@@ -171,17 +161,8 @@ export function SessionTerminalPanel({
   ), [routeIdentity]);
 
   const focusAttachedResource = useCallback((entry: AttachedTerminal): void => {
-    if (isWindows(session.os)) {
-      window.requestAnimationFrame(() => {
-        if (
-          selectedResourceIdRef.current === entry.resourceId &&
-          attachedTerminalsRef.current.get(entry.resourceId) === entry
-        ) windowsCommandInputRef.current?.focus();
-      });
-      return;
-    }
     entry.terminalRef.current?.focus();
-  }, [session.os]);
+  }, []);
 
   const releaseTransport = useCallback((
     resourceId: string,
@@ -796,34 +777,6 @@ export function SessionTerminalPanel({
     }
   }, [isCurrent]);
 
-  const submitWindowsCommand = useCallback((command: string): void => {
-    if (!isCurrent() || !isWindows(session.os)) {
-      throw new Error("Windows command input is no longer available");
-    }
-    if (command.includes("\0")) throw new Error("A command cannot contain NUL bytes");
-    if (/\r|\n/u.test(command)) throw new Error("Submit one command line at a time");
-
-    const resourceId = selectedResourceIdRef.current;
-    const entry = resourceId ? attachedTerminalsRef.current.get(resourceId) : undefined;
-    const resource = resourceId
-      ? inventoryRef.current?.resources.find((candidate) => candidate.resourceId === resourceId)
-      : undefined;
-    if (!entry || entry.latestSnapshot.state !== "attached" || resource?.pty !== "disabled") {
-      throw new Error("The selected Windows shell is not attached");
-    }
-
-    const bytes = textEncoder.encode(`${command}${WINDOWS_COMMAND_TERMINATOR}`);
-    if (bytes.byteLength > MAX_WINDOWS_COMMAND_BYTES) {
-      bytes.fill(0);
-      throw new Error(`A command cannot exceed ${MAX_WINDOWS_COMMAND_BYTES - 1} bytes`);
-    }
-    try {
-      entry.transport.send(bytes, "operator");
-    } finally {
-      bytes.fill(0);
-    }
-  }, [isCurrent, session.os]);
-
   const resources = useMemo(() => (
     [...(inventory?.resources ?? [])].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
   ), [inventory?.resources]);
@@ -860,9 +813,8 @@ export function SessionTerminalPanel({
           ref={entry.terminalRef}
           {...(terminalAppearance ? { appearance: terminalAppearance } : {})}
           ariaLabel={`Interactive shell for ${session.name || session.hostname || session.id}`}
-          className="min-h-[360px]"
-          disableInput={isWindows(session.os)}
           enableClipboard
+          pipedWindowsInput={isWindows(session.os)}
           transport={entry.transport}
           wasmBytes={runtime.bytes}
           onClipboardPaste={(text) => {
@@ -914,7 +866,6 @@ export function SessionTerminalPanel({
       session={session}
       terminals={terminals}
       transportSnapshot={transportSnapshot}
-      windowsCommandInputRef={windowsCommandInputRef}
       onCopy={() => void copySelection()}
       onDetach={() => {
         if (selectedResource) void runResourceAction(selectedResource.resourceId, "detach");
@@ -924,7 +875,6 @@ export function SessionTerminalPanel({
       onRequestClose={(resourceId) => setPendingResourceAction({ resourceId, action: "close" })}
       onRequestKill={(resourceId) => setPendingResourceAction({ resourceId, action: "kill" })}
       onStart={() => void startShell()}
-      onSubmitWindowsCommand={submitWindowsCommand}
     />
   );
 
@@ -932,11 +882,11 @@ export function SessionTerminalPanel({
     <section
       aria-labelledby="session-shells-heading"
       className={isDedicated
-        ? "flex h-screen min-h-0 min-w-0 flex-col overflow-hidden bg-surface"
-        : "min-w-0 overflow-hidden rounded-2xl bg-surface"}
+        ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface"
+        : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl bg-surface"}
       data-presentation={presentation}
     >
-      <div className="flex flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <div className="flex shrink-0 flex-col gap-4 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faTerminal} /></span>
           <div className="min-w-0">
@@ -980,10 +930,7 @@ export function SessionTerminalPanel({
       ) : null}
 
       {isWide ? (
-        <div className={isDedicated
-          ? "min-h-0 flex-1 overflow-hidden bg-background"
-          : "h-[min(68vh,720px)] min-h-[520px] overflow-hidden bg-background"}
-        >
+        <div className="min-h-0 flex-1 overflow-hidden bg-background">
           <Resizable autoSaveId="sliver:session-shell-workspace" orientation="horizontal">
             <Resizable.Panel
               defaultSize="288px"
@@ -998,7 +945,7 @@ export function SessionTerminalPanel({
           </Resizable>
         </div>
       ) : (
-        <div className={isDedicated ? "min-h-0 flex-1 bg-background" : "min-h-[520px] bg-background"}>
+        <div className="min-h-0 flex-1 overflow-hidden bg-background">
           {terminalSurface}
         </div>
       )}
@@ -1132,7 +1079,6 @@ function TerminalSurface({
   session,
   terminals,
   transportSnapshot,
-  windowsCommandInputRef,
   onCopy,
   onDetach,
   onOpenShellList,
@@ -1140,7 +1086,6 @@ function TerminalSurface({
   onRequestClose,
   onRequestKill,
   onStart,
-  onSubmitWindowsCommand,
 }: {
   activeResourceId: string | undefined;
   error: string | undefined;
@@ -1152,7 +1097,6 @@ function TerminalSurface({
   session: SessionSummary;
   terminals: React.ReactNode;
   transportSnapshot: SessionShellTransportSnapshot;
-  windowsCommandInputRef: RefObject<HTMLInputElement | null>;
   onCopy: () => void;
   onDetach: () => void;
   onOpenShellList: () => void;
@@ -1160,12 +1104,8 @@ function TerminalSurface({
   onRequestClose: (resourceId: string) => void;
   onRequestKill: (resourceId: string) => void;
   onStart: () => void;
-  onSubmitWindowsCommand: (command: string) => void;
 }): React.JSX.Element {
   const isAttached = Boolean(selectedResource && activeResourceId === selectedResource.resourceId);
-  const usesWindowsCommandComposer = Boolean(
-    isAttached && selectedResource?.pty === "disabled" && isWindows(session.os),
-  );
   const isBusy = isStarting || isAttaching;
   const [isStatisticsOpen, setIsStatisticsOpen] = useState(false);
   const statisticsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1177,8 +1117,8 @@ function TerminalSurface({
   }, []);
   useEffect(() => setIsStatisticsOpen(false), [selectedResource?.resourceId]);
   return (
-    <div className="flex h-full min-h-[520px] min-w-0 flex-col bg-background" data-terminal-surface>
-      <div className="flex flex-col gap-3 bg-surface px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="flex h-full min-h-0 min-w-0 flex-col bg-background" data-terminal-surface>
+      <div className="flex shrink-0 flex-col gap-3 bg-surface px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex min-w-0 items-center gap-2">
           {!isWide ? (
             <Button size="sm" variant="secondary" onPress={onOpenShellList}>Shells</Button>
@@ -1217,9 +1157,7 @@ function TerminalSurface({
           {isAttached ? (
             <>
               <Button size="sm" variant="ghost" onPress={onCopy}>Copy</Button>
-              {!usesWindowsCommandComposer ? (
-                <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
-              ) : null}
+              <Button size="sm" variant="ghost" onPress={onPaste}>Paste</Button>
               <Button isDisabled={isBusy} size="sm" variant="secondary" onPress={onDetach}>Detach</Button>
             </>
           ) : null}
@@ -1250,7 +1188,7 @@ function TerminalSurface({
         <div className="relative min-h-0 flex-1">
           {terminals}
           {!isAttached ? (
-            <EmptyState className="h-full min-h-[420px] px-6 py-12">
+            <EmptyState className="h-full min-h-0 px-6 py-12">
               <EmptyState.Header>
                 <EmptyState.Media variant="icon">
                   <FontAwesomeIcon aria-hidden icon={error || panelStatus === "error" ? faTriangleExclamation : faTerminal} />
@@ -1282,13 +1220,6 @@ function TerminalSurface({
             </EmptyState>
           ) : null}
         </div>
-        {usesWindowsCommandComposer ? (
-          <WindowsCommandComposer
-            key={selectedResource?.resourceId}
-            inputRef={windowsCommandInputRef}
-            onSubmit={onSubmitWindowsCommand}
-          />
-        ) : null}
       </div>
 
       <Modal.Backdrop isOpen={isStatisticsOpen && selectedResource !== undefined} variant="blur" onOpenChange={updateStatisticsOpen}>
@@ -1316,58 +1247,6 @@ function TerminalSurface({
         </Modal.Container>
       </Modal.Backdrop>
     </div>
-  );
-}
-
-function WindowsCommandComposer({
-  inputRef,
-  onSubmit,
-}: {
-  inputRef: RefObject<HTMLInputElement | null>;
-  onSubmit: (command: string) => void;
-}): React.JSX.Element {
-  const submit = (event: FormEvent<HTMLFormElement>): void => {
-    event.preventDefault();
-    const input = event.currentTarget.elements.namedItem("windows-shell-command");
-    if (!(input instanceof HTMLInputElement)) return;
-    try {
-      onSubmit(input.value);
-      event.currentTarget.reset();
-      input.focus();
-    } catch (caught) {
-      toast.danger("Could not send command", { description: errorMessage(caught) });
-    }
-  };
-
-  return (
-    <form
-      className="flex items-end gap-2 border-t border-divider bg-surface px-3 py-2.5"
-      onSubmit={submit}
-    >
-      <TextField
-        fullWidth
-        className="min-w-0 flex-1 gap-1"
-        name="windows-shell-command"
-        variant="secondary"
-      >
-        <Label className="text-xs font-medium text-muted">Windows command</Label>
-        <Input
-          ref={inputRef}
-          aria-describedby="windows-shell-command-description"
-          autoCapitalize="off"
-          autoComplete="off"
-          autoCorrect="off"
-          className="font-mono text-xs"
-          maxLength={MAX_WINDOWS_COMMAND_BYTES - WINDOWS_COMMAND_TERMINATOR.length}
-          placeholder="Enter a PowerShell or cmd.exe command"
-          spellCheck={false}
-        />
-      </TextField>
-      <Button size="sm" type="submit">Run</Button>
-      <p className="sr-only" id="windows-shell-command-description">
-        Edit locally, then submit the complete command as one line.
-      </p>
-    </form>
   );
 }
 

@@ -800,7 +800,7 @@ export function SessionWorkspacePage({
           ) : null}
           <Tabs.Panel
             shouldForceMount
-            className="pt-6 data-[inert=true]:hidden"
+            className="session-workspace__terminal-panel pt-6 data-[inert=true]:hidden"
             id="terminal"
           >
             {terminalVisitedRouteIdentity === routeIdentity
