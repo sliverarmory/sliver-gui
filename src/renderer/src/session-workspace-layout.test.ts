@@ -15,7 +15,10 @@ const registryPanel = workbenchPanels.slice(registryPanelStart, registryPanelEnd
 const filesPanelStart = workbenchPanels.indexOf("export function SessionFilesPanel");
 const filesPanelEnd = workbenchPanels.indexOf("type FileWorkbenchMode", filesPanelStart);
 const filesPanel = workbenchPanels.slice(filesPanelStart, filesPanelEnd);
-const pageFlowWorkbenchPanels = workbenchPanels.replace(registryPanel, "").replace(filesPanel, "");
+const processesPanelStart = workbenchPanels.indexOf("export function SessionProcessesPanel");
+const processesPanelEnd = workbenchPanels.indexOf("export function SessionEnvironmentPanel", processesPanelStart);
+const processesPanel = workbenchPanels.slice(processesPanelStart, processesPanelEnd);
+const pageFlowWorkbenchPanels = workbenchPanels.replace(registryPanel, "").replace(filesPanel, "").replace(processesPanel, "");
 const pageFlowSessionTableSources = [workspace, execution, pageFlowWorkbenchPanels].join("\n");
 
 describe("Session workspace sticky summary layout", () => {
@@ -33,10 +36,12 @@ describe("Session workspace sticky summary layout", () => {
     expect(workspace).not.toMatch(/className="[^"]*flow-root\s+pb-(?:12|20)(?:\s|")/u);
   });
 
-  it("renders the ten session tables outside the Registry and file browsers in page flow", () => {
+  it("renders eight session tables outside the Registry, Files, and Processes panels in page flow", () => {
     expect(sessionTableSources.match(/^\s*<DataGrid(?:\s|$)/gmu)).toHaveLength(12);
-    expect(pageFlowSessionTableSources.match(/^\s*<DataGrid(?:\s|$)/gmu)).toHaveLength(10);
+    expect(pageFlowSessionTableSources.match(/^\s*<DataGrid(?:\s|$)/gmu)).toHaveLength(8);
+    expect(processesPanel.match(/^\s*<DataGrid(?:\s|$)/gmu)).toHaveLength(2);
     expect(pageFlowSessionTableSources).not.toMatch(/scrollContainerClassName="[^"]*max-h-/u);
+    expect(processesPanel).toContain('scrollContainerClassName="h-full max-h-full overflow-auto overscroll-contain rounded-none"');
     expect(sessionTableSources).not.toMatch(/\svirtualized(?:\s|\n|\/?>)/u);
     expect(workbenchPanels).not.toContain('className="max-h-28 overflow-auto');
   });
@@ -53,14 +58,15 @@ describe("Session workspace sticky summary layout", () => {
     expect(registryPanel).toContain(">Load more values</Button>");
   });
 
-  it("constrains the selected Registry or Files panel to the remaining session viewport", () => {
-    expect(workspace).toContain("data-selected-panel={selectedPanel}");
+  it("constrains the selected Registry, Files, or Processes panel to the remaining session viewport", () => {
+    expect(workspace).toContain("data-selected-panel={visiblePanel}");
     expect(workspace).toContain('className="session-workspace__registry-panel pt-6"');
     expect(workspace).toContain('className="session-workspace__files-panel pt-6"');
+    expect(workspace).toContain('className="session-workspace__processes-panel pt-6"');
     expect(styles).toMatch(
-      /\.session-workspace:is\(\[data-selected-panel="registry"\],\s*\[data-selected-panel="files"\]\)\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
+      /\.session-workspace:is\(\[data-selected-panel="registry"\],\s*\[data-selected-panel="files"\],\s*\[data-selected-panel="processes"\]\)\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
     );
-    expect(styles).toContain(".session-workspace__viewport-content, .session-workspace__registry-panel, .session-workspace__files-panel");
+    expect(styles).toContain(".session-workspace__viewport-content, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel");
   });
 
   it("pins the session chrome above scrolling panel content", () => {
