@@ -1040,6 +1040,108 @@ describe("StreamManager protocol and data lifetime", () => {
     });
     await manager.close();
   });
+
+  it("backpressures a megabyte output burst without exceeding the attached queue", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = new StreamManager({ schedule: scheduler.schedule, createOpaqueId: idGenerator() });
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 128 * 1_024,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    const output = patternedBytes(1 * 1_024 * 1_024, 37);
+    let settled = false;
+    const emitting = context!.emitOutputWithBackpressure(output).then((accepted) => {
+      settled = true;
+      return accepted;
+    });
+
+    await scheduler.flush();
+    expect(settled).toBe(false);
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    expect(manager.listSessionShells(binding()).resources[0]?.metrics).toMatchObject({
+      queuedOutputBytes: 128 * 1_024,
+      bytesToRenderer: String(128 * 1_024),
+    });
+
+    for (let credit = 0; credit < 14; credit += 1) {
+      shell.port.send({
+        v: STREAM_PROTOCOL_VERSION,
+        type: "credit",
+        streamId: shell.streamId,
+        bytes: 64 * 1_024,
+      });
+      await scheduler.flush();
+    }
+
+    expect(await emitting).toBe(true);
+    const frames = shell.port.frames.filter(
+      (frame): frame is Extract<StreamServerFrame, { type: "data" }> => frame.type === "data",
+    );
+    expect(sha256(Buffer.concat(frames.map((frame) => Buffer.from(frame.data))))).toBe(sha256(output));
+    expect(manager.listSessionShells(binding()).resources[0]?.metrics).toMatchObject({
+      queuedOutputBytes: 0,
+      highWaterOutputBytes: 128 * 1_024,
+      bytesToRenderer: String(output.byteLength),
+    });
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    await manager.close();
+  });
+
+  it("keeps a fragmented output stream open when its credit is returned in one bounded grant", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = new StreamManager({ schedule: scheduler.schedule, createOpaqueId: idGenerator() });
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 64 * 1_024,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    const output = patternedBytes(395 * 22, 43);
+    for (let offset = 0; offset < output.byteLength; offset += 22) {
+      expect(context!.emitOutput(output.subarray(offset, offset + 22))).toBe(true);
+      await scheduler.flush();
+    }
+    expect(shell.port.frames.filter((frame) => frame.type === "data")).toHaveLength(395);
+    shell.port.send({
+      v: STREAM_PROTOCOL_VERSION,
+      type: "credit",
+      streamId: shell.streamId,
+      bytes: output.byteLength,
+    });
+    await scheduler.flush();
+    expect(lastFrame(shell.port, "closed")).toBeUndefined();
+    expect(manager.listSessionShells(binding()).resources[0]?.metrics).toMatchObject({
+      framesToRenderer: "395",
+      bytesToRenderer: String(output.byteLength),
+      outputCreditBytes: 64 * 1_024,
+    });
+    await manager.close();
+  });
+
+  it("releases an output producer waiting for queue space when the shell closes", async () => {
+    const scheduler = new ManualScheduler();
+    const manager = createManager(scheduler);
+    let context: StartMainStreamEndpointContext | undefined;
+    const shell = await openShell(manager, scheduler, {
+      receiveCreditBytes: 4,
+      starter: async (value) => {
+        context = value;
+        return endpointHarness().endpoint;
+      },
+    });
+    const emitting = context!.emitOutputWithBackpressure(patternedBytes(64, 41));
+    await scheduler.flush();
+    await manager.actOnSessionShell(binding(), { resourceId: shell.resourceId, action: "close" });
+    expect(await emitting).toBe(false);
+    expect(manager.metricsForProcess()).toMatchObject({ activeStreams: 0, queuedBytes: 0 });
+    await manager.close();
+  });
 });
 
 describe("StreamManager scheduler, timeouts, and teardown", () => {

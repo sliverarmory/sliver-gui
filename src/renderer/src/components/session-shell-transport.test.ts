@@ -47,11 +47,11 @@ describe("SessionShellTransport", () => {
     expect([...observedOutput ?? []]).toEqual([...output]);
     expect([...onOutput.mock.calls[0]![0] as Uint8Array]).toEqual(new Array(output.byteLength).fill(0));
     expect([...new Uint8Array(outputFrame.data)]).toEqual(new Array(output.byteLength).fill(0));
-    expect(port.sent.at(-1)?.message).toMatchObject({
+    await waitFor(() => expect(port.sent.at(-1)?.message).toMatchObject({
       type: "credit",
       streamId,
       bytes: output.byteLength,
-    });
+    }));
     expect(transport.getSnapshot()).toMatchObject({
       state: "attached",
       queuedOutputBytes: 0,
@@ -93,8 +93,12 @@ describe("SessionShellTransport", () => {
     const { port, transport } = await openAttached(harness);
     const frameCount = STREAM_MAX_DETACHED_SCROLLBACK_BYTES / STREAM_MAX_FRAME_BYTES;
     expect(Number.isInteger(frameCount)).toBe(true);
-    for (let sequence = 0; sequence < frameCount; sequence += 1) {
-      port.emit(serverData(sequence, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(sequence + 1)));
+    for (let sequence = 0; sequence < frameCount; sequence += 4) {
+      for (let offset = 0; offset < 4; offset += 1) {
+        port.emit(serverData(sequence + offset, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(sequence + offset + 1)));
+      }
+      await waitFor(() => expect(port.sent.filter(({ message }) => frameType(message) === "credit"))
+        .toHaveLength(sequence / 4 + 1));
     }
     port.emit(serverClosed("completed"));
     expect(transport.getSnapshot()).toMatchObject({
@@ -112,9 +116,14 @@ describe("SessionShellTransport", () => {
 
     const overflowHarness = openHarness();
     const overflow = await openAttached(overflowHarness);
-    for (let sequence = 0; sequence <= frameCount; sequence += 1) {
-      overflow.port.emit(serverData(sequence, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(0x41)));
+    for (let sequence = 0; sequence < frameCount; sequence += 4) {
+      for (let offset = 0; offset < 4; offset += 1) {
+        overflow.port.emit(serverData(sequence + offset, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(0x41)));
+      }
+      await waitFor(() => expect(overflow.port.sent.filter(({ message }) => frameType(message) === "credit"))
+        .toHaveLength(sequence / 4 + 1));
     }
+    overflow.port.emit(serverData(frameCount, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(0x41)));
     expect(overflow.transport.getSnapshot()).toMatchObject({
       state: "failed",
       queuedOutputBytes: 0,
@@ -185,6 +194,79 @@ describe("SessionShellTransport", () => {
     expect(observed).toEqual([new Uint8Array([0x73, 0x65, 0x63, 0x72, 0x65, 0x74])]);
     expect([...onOutput.mock.calls[0]![0] as Uint8Array]).toEqual([0, 0, 0, 0, 0, 0]);
     expect([...new Uint8Array(frame.data)]).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it("streams output much larger than the queue limit while replenishing receive credit", async () => {
+    const harness = openHarness();
+    const { port, transport } = await openAttached(harness);
+    const frameCount = 64;
+    const observed: number[] = [];
+    transport.subscribe({
+      onOutput: (bytes) => {
+        expect(bytes.byteLength).toBe(STREAM_MAX_FRAME_BYTES);
+        observed.push(bytes[0] ?? 0);
+      },
+      onClose: vi.fn(),
+    });
+
+    for (let sequence = 0; sequence < frameCount; sequence += 4) {
+      for (let offset = 0; offset < 4; offset += 1) {
+        port.emit(serverData(sequence + offset, new Uint8Array(STREAM_MAX_FRAME_BYTES).fill(sequence + offset)));
+      }
+      await waitFor(() => expect(port.sent.filter(({ message }) => frameType(message) === "credit"))
+        .toHaveLength(sequence / 4 + 1));
+    }
+
+    expect(observed).toEqual(Array.from({ length: frameCount }, (_, index) => index));
+    expect(port.sent.filter(({ message }) => frameType(message) === "credit")).toHaveLength(frameCount / 4);
+    expect(transport.getSnapshot()).toMatchObject({
+      state: "attached",
+      bytesFromRemote: String(frameCount * STREAM_MAX_FRAME_BYTES),
+      queuedOutputBytes: 0,
+    });
+  });
+
+  it("coalesces hundreds of small output frames into one credit grant", async () => {
+    const harness = openHarness();
+    const { port, transport } = await openAttached(harness);
+    const frameCount = 395;
+    const bytesPerFrame = 22;
+    let bytesSeen = 0;
+    transport.subscribe({
+      onOutput: (bytes) => {
+        bytesSeen += bytes.byteLength;
+      },
+      onClose: vi.fn(),
+    });
+
+    for (let sequence = 0; sequence < frameCount; sequence += 1) {
+      port.emit(serverData(sequence, new Uint8Array(bytesPerFrame).fill(0x61)));
+    }
+
+    expect(bytesSeen).toBe(frameCount * bytesPerFrame);
+    expect(port.sent.filter(({ message }) => frameType(message) === "credit")).toHaveLength(0);
+    await waitFor(() => expect(port.sent.filter(({ message }) => frameType(message) === "credit"))
+      .toHaveLength(1));
+    expect(port.sent.at(-1)?.message).toMatchObject({
+      type: "credit",
+      bytes: frameCount * bytesPerFrame,
+    });
+    expect(transport.getSnapshot()).toMatchObject({
+      state: "attached",
+      bytesFromRemote: String(frameCount * bytesPerFrame),
+    });
+  });
+
+  it("cancels a pending output credit grant when the shell closes", async () => {
+    const harness = openHarness();
+    const { port, transport } = await openAttached(harness);
+    transport.subscribe({ onOutput: vi.fn(), onClose: vi.fn() });
+    port.emit(serverData(0, Uint8Array.from([0x61])));
+    transport.close();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(port.sent.filter(({ message }) => frameType(message) === "credit")).toHaveLength(0);
+    expect(transport.getSnapshot().state).toBe("closed");
   });
 
   it("fails closed on an invalid sequence and quarantines a stale route", async () => {

@@ -2889,7 +2889,7 @@ export class ConnectionRegistry {
           }
           return current;
         };
-        const start: StartMainStreamEndpoint = async ({ signal, emitOutput, remoteClose }) => {
+        const start: StartMainStreamEndpoint = async ({ signal, emitOutputWithBackpressure, remoteClose }) => {
           const current = assertExactSession();
           if (signal.aborted) throw new Error("The shell request was canceled before dispatch");
           const handle = await pool.client.startShellSession(
@@ -2911,7 +2911,7 @@ export class ConnectionRegistry {
             try {
               for await (const chunk of handle.output) {
                 try {
-                  if (!emitOutput(chunk)) break;
+                  if (!await emitOutputWithBackpressure(chunk)) break;
                 } finally {
                   chunk.fill(0);
                 }
