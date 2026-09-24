@@ -76,7 +76,7 @@
     "@fortawesome/react-fontawesome": "3.5.0",
     "@grpc/grpc-js": "1.14.4",
     "@heroui-pro/react": "1.0.0-beta.8",
-    "@heroui/react": "3.2.4",
+    "@heroui/react": "3.2.6",
     "@heroui/styles": "3.2.4",
     "@internationalized/date": "^3.12.3",
     "@react-aria/i18n": "^3.13.1",
