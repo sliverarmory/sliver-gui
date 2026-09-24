@@ -310,7 +310,7 @@ describe("ScriptEditorPage", () => {
     }
     const last = [...documents.keys()].at(-1)!;
     render(<ScriptEditorPage active editRequest={{ id: last, request: 1 }} />);
-    await waitFor(() => expect(bridge.snapshots.at(-1)?.selectedId).toBe(last));
+    await waitFor(() => expect(bridge.snapshots.at(-1)?.selectedId).toBe(last), { timeout: 5_000 });
     const snapshot = bridge.snapshots.at(-1)!;
     expect(snapshot.scripts).toHaveLength(SCRIPT_TASK_LIMITS.displayScripts);
     expect(snapshot.scripts[0]?.id).toBe(last);

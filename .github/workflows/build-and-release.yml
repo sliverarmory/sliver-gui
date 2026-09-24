@@ -261,6 +261,8 @@ jobs:
         run: npm test
 
       - name: Prepare native packages
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
         run: npm run predist
 
       - name: Build unsigned CI packages
