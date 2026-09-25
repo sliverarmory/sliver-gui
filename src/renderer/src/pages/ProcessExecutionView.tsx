@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Chip, Switch, toast } from "@heroui/react";
+import { Button, Chip, Switch, Tooltip, toast } from "@heroui/react";
 import { ChatListView, Segment } from "@heroui-pro/react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -221,19 +221,20 @@ export function ProcessExecutionView({
           </section>
         ) : selected ? (
           <div className="min-w-0">
-            <h3 className="mb-3 text-base font-semibold text-foreground">Output</h3>
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h4 className="break-all font-mono text-sm font-medium text-foreground">{commandLabel(selected)}</h4>
+                  <h3 className="break-all font-mono text-sm font-medium text-foreground">{commandLabel(selected)}</h3>
                   <Chip color={stateColor(selected)} size="sm" variant="soft">{stateLabel(selected)}</Chip>
                 </div>
                 <p className="mt-0.5 text-xs text-muted">{new Date(selected.startedAt).toLocaleString()}</p>
               </div>
-              <Button size="sm" variant="danger-soft" onPress={() => onClear(selected.id)}>
-                <FontAwesomeIcon aria-hidden className="size-3" icon={faTrashCan} />
-                Clear selected
-              </Button>
+              <Tooltip delay={250}>
+                <Button aria-label="Clear selected" isIconOnly size="sm" variant="danger-soft" onPress={() => onClear(selected.id)}>
+                  <FontAwesomeIcon aria-hidden className="size-3" icon={faTrashCan} />
+                </Button>
+                <Tooltip.Content>Clear selected</Tooltip.Content>
+              </Tooltip>
             </div>
 
             <dl aria-label="Execution details" className="mt-3 grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-[minmax(0,7rem)_minmax(0,8rem)_minmax(0,1fr)]">
@@ -251,16 +252,47 @@ export function ProcessExecutionView({
             ) : null}
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <Segment
-                aria-label="Captured output stream"
-                selectedKey={stream}
-                size="sm"
-                variant="ghost"
-                onSelectionChange={(key) => setStream(String(key) as OutputStream)}
-              >
-                <Segment.Item id="stdout">Stdout</Segment.Item>
-                {!ignoreStderr ? <Segment.Item id="stderr">Stderr</Segment.Item> : null}
-              </Segment>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <Segment
+                  aria-label="Captured output stream"
+                  selectedKey={stream}
+                  size="sm"
+                  variant="ghost"
+                  onSelectionChange={(key) => setStream(String(key) as OutputStream)}
+                >
+                  <Segment.Item id="stdout">Stdout</Segment.Item>
+                  {!ignoreStderr ? <Segment.Item id="stderr">Stderr</Segment.Item> : null}
+                </Segment>
+                <div aria-label="Output actions" className="flex flex-wrap items-center gap-2" role="group">
+                  <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} size="sm" variant="tertiary" onPress={() => void copyOutput()}>
+                    <FontAwesomeIcon aria-hidden className="size-3.5" icon={faCopy} />
+                    Copy output
+                  </Button>
+                  <Button className="h-7 px-2.5 text-xs" isDisabled={!canSave} isPending={savingStream === stream} size="sm" variant="tertiary" onPress={() => selected.result && onSave(selected.result, stream)}>
+                    <FontAwesomeIcon aria-hidden className="size-3.5" icon={faDownload} />
+                    Save {stream}
+                  </Button>
+                  {output?.data.byteLength ? (
+                    <Button
+                      className="h-7 px-2.5 text-xs"
+                      isDisabled={!canSave}
+                      isPending={addingToLoot}
+                      size="sm"
+                      variant="outline"
+                      onPress={() => selected.result && onAddToLoot(selected.result, stream, "")}
+                    >
+                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faBoxOpen} />
+                      Add {stream} to Loot
+                    </Button>
+                  ) : null}
+                  {selected.result && (selected.state === "outcome-unknown" || selected.state === "submitted") ? (
+                    <Button className="h-7 px-2.5 text-xs" size="sm" variant="outline" onPress={() => onRefresh(selected)}>
+                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faRotate} />
+                      Refresh result
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
               <Switch className="flex items-center gap-2" isSelected={ignoreStderr} style={{ flexDirection: "row" }} onChange={setIgnoreStderr}>
                 <Switch.Content className="text-xs text-muted">Ignore stderr</Switch.Content>
                 <Switch.Control><Switch.Thumb /></Switch.Control>
@@ -286,34 +318,6 @@ export function ProcessExecutionView({
               )}
             </div>
             {output?.truncated ? <p className="mt-2 text-xs text-warning">The captured {stream} was truncated at the output limit.</p> : null}
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button isDisabled={!output?.data.byteLength} size="sm" variant="tertiary" onPress={() => void copyOutput()}>
-                <FontAwesomeIcon aria-hidden className="size-3.5" icon={faCopy} />
-                Copy output
-              </Button>
-              <Button isDisabled={!canSave} isPending={savingStream === stream} size="sm" variant="tertiary" onPress={() => selected.result && onSave(selected.result, stream)}>
-                <FontAwesomeIcon aria-hidden className="size-3.5" icon={faDownload} />
-                Save {stream}
-              </Button>
-              {output?.data.byteLength ? (
-                <Button
-                  isDisabled={!canSave}
-                  isPending={addingToLoot}
-                  size="sm"
-                  variant="outline"
-                  onPress={() => selected.result && onAddToLoot(selected.result, stream, "")}
-                >
-                  <FontAwesomeIcon aria-hidden className="size-3.5" icon={faBoxOpen} />
-                  Add {stream} to Loot
-                </Button>
-              ) : null}
-              {selected.result && (selected.state === "outcome-unknown" || selected.state === "submitted") ? (
-                <Button size="sm" variant="outline" onPress={() => onRefresh(selected)}>
-                  <FontAwesomeIcon aria-hidden className="size-3.5" icon={faRotate} />
-                  Refresh result
-                </Button>
-              ) : null}
-            </div>
           </div>
         ) : null}
       </div>

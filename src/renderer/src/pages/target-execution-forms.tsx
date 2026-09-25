@@ -23,6 +23,7 @@ import {
   faSliders,
 } from "@fortawesome/free-solid-svg-icons";
 
+import { DEFAULT_APPLICATION_TERMINAL_SETTINGS } from "../../../shared/application-settings-contracts";
 import {
   EXECUTION_LIMITS,
   parseExecutionActionDraft,
@@ -31,6 +32,8 @@ import {
   type ExecutionOperationId,
 } from "../../../shared/execution-contracts";
 import type { TargetSummary } from "../../../shared/target-contracts";
+import { useApplicationSettings } from "../components/ApplicationSettingsProvider";
+import { consoleTerminalFontFamily } from "../components/console-terminal-settings";
 import {
   defaultExecutionTimeout,
   defaultHostProcess,
@@ -65,6 +68,8 @@ export function ExecutionActionForm({
   const [credentialConsumed, setCredentialConsumed] = useState(false);
   const [processOptions, setProcessOptions] = useState<ProcessOptions>(DEFAULT_PROCESS_OPTIONS);
   const useCompactProcess = compactProcess && operationId === "execution.process";
+  const terminalFontId = useApplicationSettings()?.settings.terminal.fontId ?? DEFAULT_APPLICATION_TERMINAL_SETTINGS.fontId;
+  const processFontFamily = consoleTerminalFontFamily(terminalFontId);
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -97,8 +102,8 @@ export function ExecutionActionForm({
           {useCompactProcess ? (
             <>
               <div className="grid items-start gap-3 md:grid-cols-2">
-                <TextInput defaultValue={defaultProcessExecutable(target.os)} label="Executable path" maxLength={EXECUTION_LIMITS.path} name="path" required />
-                <TextInput label="Arguments" name="args" placeholder="--flag 'value with spaces'" />
+                <TextInput defaultValue={defaultProcessExecutable(target.os)} fontFamily={processFontFamily} label="Executable path" maxLength={EXECUTION_LIMITS.path} name="path" required />
+                <TextInput fontFamily={processFontFamily} label="Arguments" name="args" placeholder="--flag 'value with spaces'" />
               </div>
               <ProcessOptionsFields options={processOptions} platform={target.os} setOptions={setProcessOptions} />
             </>
@@ -794,6 +799,7 @@ function AdvancedFields({
 
 function TextInput({
   defaultValue = "",
+  fontFamily,
   inputRef,
   label,
   max,
@@ -807,6 +813,7 @@ function TextInput({
   value,
 }: {
   defaultValue?: string;
+  fontFamily?: string;
   inputRef?: RefObject<HTMLInputElement | null>;
   label: string;
   max?: number;
@@ -832,6 +839,7 @@ function TextInput({
       <Input
         ref={inputRef}
         autoComplete={type === "password" ? "new-password" : "off"}
+        {...(fontFamily ? { style: { fontFamily } } : {})}
         {...(max === undefined ? {} : { max })}
         {...(maxLength === undefined ? {} : { maxLength })}
         {...(min === undefined ? {} : { min })}

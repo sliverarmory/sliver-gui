@@ -1,9 +1,14 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import {
+  DEFAULT_APPLICATION_SETTINGS_STATE,
+  type ApplicationSettingsState,
+} from "../../../shared/application-settings-contracts";
 import type { ExecutionActionDraft, ExecutionCapability } from "../../../shared/execution-contracts";
 import type { SessionSummary } from "../../../shared/target-contracts";
+import { ApplicationSettingsProvider, type ApplicationSettingsAPI } from "../components/ApplicationSettingsProvider";
 import { ExecutionActionForm } from "./target-execution-forms";
 
 const capability: ExecutionCapability = {
@@ -79,6 +84,50 @@ function renderCompact(target: SessionSummary = linuxTarget): {
 }
 
 describe("compact process execution form", () => {
+  it("uses the selected terminal font for the executable and argument inputs, including later changes", async () => {
+    const initialSettings: ApplicationSettingsState = {
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 1,
+      terminal: { ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal, fontId: "jetbrains-mono" },
+    };
+    let onSettingsChanged: ((state: ApplicationSettingsState) => void) | undefined;
+    const api: ApplicationSettingsAPI = {
+      getApplicationSettings: vi.fn(async () => initialSettings),
+      onApplicationSettingsChanged: vi.fn((listener) => {
+        onSettingsChanged = listener;
+        return () => undefined;
+      }),
+    };
+    render(
+      <ApplicationSettingsProvider api={api}>
+        <ExecutionActionForm
+          capability={capability}
+          compactProcess
+          formId="process-font-test-form"
+          isPreparing={false}
+          operationId="execution.process"
+          target={linuxTarget}
+          onPrepare={vi.fn(async (_draft: ExecutionActionDraft) => undefined)}
+        />
+      </ApplicationSettingsProvider>,
+    );
+
+    const executable = screen.getByRole("textbox", { name: "Executable path" });
+    const argumentsField = screen.getByRole("textbox", { name: "Arguments" });
+    await waitFor(() => {
+      expect(executable).toHaveStyle({ fontFamily: '"JetBrains Mono", monospace' });
+      expect(argumentsField).toHaveStyle({ fontFamily: '"JetBrains Mono", monospace' });
+    });
+
+    act(() => onSettingsChanged?.({
+      ...initialSettings,
+      revision: 2,
+      terminal: { ...initialSettings.terminal, fontId: "cascadia-mono" },
+    }));
+    expect(executable).toHaveStyle({ fontFamily: '"Cascadia Mono", monospace' });
+    expect(argumentsField).toHaveStyle({ fontFamily: '"Cascadia Mono", monospace' });
+  });
+
   it.each([
     { os: "windows", path: "C:\\Windows\\System32\\cmd.exe" },
     { os: "linux", path: "/bin/sh" },
