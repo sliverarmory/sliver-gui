@@ -35,8 +35,27 @@ The archive is decompressed and checked in memory before package files are stage
 
 Only declared files are staged, with private file and directory permissions. Replacements retain backups until the install plan succeeds and roll back on failure. Conflicting commands and removals that would break installed dependencies are rejected. A failed signature or malformed archive never replaces an installed package. Concurrent external edits detected during installation or source updates require a refresh and retry.
 
-Already-installed packages are inventoried from disk; their presence does not imply retrospective signature verification. Armory exposes no session, beacon, RPC, or package-execution API and never runs package hooks or binaries.
+Already-installed packages are inventoried from disk; their presence does not imply retrospective signature verification. The Armory management window never runs package hooks or binaries.
+
+## Execute installed BOFs
+
+Open a session's **Execution** workspace, or a beacon's **Advanced execution** section, and select **BOFs**, immediately to the right of **Process**. **New Execution** lists BOF commands from installed `extensions/*/extension.json` manifests under the same Sliver client root used by Armory. Select a command to fill in the manifest's ordered string, wide-string, integer, short, or local-file arguments. Optional values use their manifest defaults. The selected object must match the target OS and architecture. Built-in BOFs require a target that advertises BOF execution. A legacy BOF with a `coff-loader` dependency also requires the matching installed loader artifact for that target.
+
+The Electron main process reads the manifest and object, packs arguments in Sliver's BOF wire format, and calls the fixed `CallExtension` RPC for the selected target. Legacy BOFs first register their installed loader and pass the BOF object and packed arguments through that loader. The renderer receives neither a general RPC interface nor local artifact paths. Execution history stays in memory for the current window and target. Submitted beacon results are checked automatically while their execution is selected, with a manual refresh option. The output panel shows captured stdout and stderr in the same terminal used for Process results, with copy, save, and Add to Loot actions.
 
 ## Validation
 
 Run `npm test` for the signature, archive, service, IPC, preload, and renderer checks. `npm run test:e2e:electron` includes a native Armory window test using an inert, independently signed package and a temporary console-compatible root. It verifies the restricted bridge, menu navigation, signed installation, console-format inventory changes, and removal without executing package artifacts.
+
+Run `npm run test:e2e:bofs` for the isolated Electron BOF workflow. It installs two inert direct BOF fixtures and a legacy loader fixture into a temporary Sliver client root and verifies the selected BOF, packed arguments, session and beacon RPC dispatch, history, terminal output, and copy controls through the fake client.
+
+The opt-in live check needs a Darwin/arm64 Sliver server binary built from the pinned source and locally installed `sa-dir` and `sa-nslookup` Armory packages:
+
+```sh
+SLIVER_GUI_BOF_LIVE_E2E=1 \
+SLIVER_GUI_BOF_E2E_SERVER_BINARY=/absolute/path/to/sliver-server \
+SLIVER_GUI_BOF_E2E_ARMORY_ROOT=/absolute/path/to/.sliver-client/extensions \
+npm run test:e2e:bof-live
+```
+
+That test creates an isolated loopback server and one disposable local session, runs both installed BOFs through the production GUI, checks argument-dependent terminal output and Copy output, and removes its exact processes and temporary files.

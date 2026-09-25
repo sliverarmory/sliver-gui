@@ -17,6 +17,7 @@ import {
 import {
   clientpb,
   commonpb,
+  sliverpb,
   parseConfig,
   type SliverClientConfig,
   type SliverEventStreamState,
@@ -155,6 +156,18 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "../shared/execution-contracts.js";
+import type {
+  AddBofOutputToLootInput,
+  BofArgumentFileSelection,
+  BofCatalog,
+  BofExecutionHistorySnapshot,
+  BofExecutionRecord,
+  BofExecutionRecordInput,
+  BofOutputInput,
+  ChooseBofArgumentFileInput,
+  ClearBofExecutionHistoryInput,
+  RunBofInput,
+} from "../shared/bof-contracts.js";
 import {
   OPERATOR_DATA_LIMITS,
   type AddCredentialInput,
@@ -253,6 +266,15 @@ import {
 } from "./stream-manager.js";
 import { loadTerminalRuntime } from "./terminal-runtime.js";
 import {
+  decodeBofOutput,
+  decodeBofTask,
+  installedBofCommands,
+  MAX_BOF_ARGUMENT_FILE_BYTES,
+  packBofArguments,
+  readInstalledBofObject,
+} from "./bof-workbench.js";
+import { packLegacyBofArguments, readInstalledBofLoader } from "./bof-legacy-dispatch.js";
+import {
   ExecutionArtifactStore,
   type ExecutionArtifactScope,
 } from "./execution-artifact-store.js";
@@ -327,6 +349,9 @@ interface WindowContext {
   executionAdmissions: Set<string>;
   executionResults: Map<string, InternalExecutionResult>;
   executionResultTimers: Map<string, NodeJS.Timeout>;
+  bofHistories: Map<string, { target: TargetRef; revision: number; records: BofExecutionRecord[] }>;
+  bofArgumentFiles: Map<string, { commandId: string; index: number; target: TargetRef; data: Buffer; fileName: string; expiresAt: number }>;
+  bofArgumentFileTimer?: NodeJS.Timeout;
   taskListAdmissions: Set<string>;
   taskDetailAdmissions: Set<string>;
   taskCancelAdmissions: Set<string>;
@@ -468,6 +493,8 @@ function unavailableManagedListenerFirewallController(): ManagedListenerFirewall
 
 export interface ConnectionRegistryOptions {
   savedConfigDirectory?: string;
+  /** Main-owned local Armory installation directory. */
+  clientRootDirectory?: string;
   /** Directory for the GUI's reference manifest; retained for existing test harnesses. */
   managedConfigDirectory?: string;
   clientFactory?: SliverClientFactory;
@@ -627,13 +654,15 @@ export class ConnectionRegistry {
   private readonly savedConfigWatcher: SavedConfigDirectoryWatcher;
   private readonly clientFactory: SliverClientFactory;
   private readonly now: () => number;
+  private readonly clientRootDirectory: string;
   private resolveManagedServer: (configDigest: string) => ManagedServerReference | null;
   private managedListenerFirewall: ManagedListenerFirewallController;
   private nextEpoch = 1;
 
   constructor(options: string | ConnectionRegistryOptions = {}) {
     const normalized = typeof options === "string" ? { savedConfigDirectory: options } : options;
-    const clientRootDirectory = resolve(process.env["SLIVER_CLIENT_ROOT_DIR"] || join(homedir(), ".sliver-client"));
+    const clientRootDirectory = resolve(normalized.clientRootDirectory ?? process.env["SLIVER_CLIENT_ROOT_DIR"] ?? join(homedir(), ".sliver-client"));
+    this.clientRootDirectory = clientRootDirectory;
     const externalDirectory = normalized.savedConfigDirectory ?? join(clientRootDirectory, "configs");
     const metadataDirectory = normalized.managedConfigDirectory ?? join(clientRootDirectory, "gui");
     this.configStore = new OperatorConfigStore(externalDirectory, metadataDirectory);
@@ -734,6 +763,8 @@ export class ConnectionRegistry {
       executionAdmissions: new Set(),
       executionResults: new Map(),
       executionResultTimers: new Map(),
+      bofHistories: new Map(),
+      bofArgumentFiles: new Map(),
       taskListAdmissions: new Set(),
       taskDetailAdmissions: new Set(),
       taskCancelAdmissions: new Set(),
@@ -2117,6 +2148,453 @@ export class ConnectionRegistry {
       });
     } catch (error) {
       return { ok: false, error: executionBoundaryError(error) };
+    }
+  }
+
+  async listInstalledBofs(contentsId: number): Promise<OperationResult<BofCatalog>> {
+    return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const { catalog } = await installedBofCommands(
+        this.clientRootDirectory, target.target, target.ref,
+        pool.supportsBuiltInBof(target.target.mode, target.target.id),
+      );
+      assertBinding();
+      return catalog;
+    });
+  }
+
+  async chooseBofArgumentFile(
+    sender: WebContents,
+    input: ChooseBofArgumentFileInput,
+  ): Promise<OperationResult<BofArgumentFileSelection | null>> {
+    return this.withExecutionPool(sender.id, async (pool, assertBinding) => {
+      const { context, target } = this.requireSelectedExecutionTarget(sender.id, pool);
+      const { entries } = await installedBofCommands(
+        this.clientRootDirectory, target.target, target.ref,
+        pool.supportsBuiltInBof(target.target.mode, target.target.id),
+      );
+      const command = entries.find((entry) => entry.dto.id === input.commandId && entry.dto.available);
+      if (!command || command.arguments[input.index]?.type !== "file") throw new Error("The selected BOF file argument is unavailable");
+      const owner = requireOwnerWindow(sender);
+      const selection = await dialog.showOpenDialog(owner, { title: `Choose ${command.arguments[input.index]!.name}`, properties: ["openFile"] });
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      assertBinding();
+      if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref)) throw new Error("The selected target changed");
+      const data = (await readBoundedRegularFile(selection.filePaths[0]!, {
+        label: "BOF argument file", maxBytes: MAX_BOF_ARGUMENT_FILE_BYTES,
+      })).data;
+      try {
+        assertBinding();
+        if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref) ||
+          !pool.targetStore.revalidateTargetRef(target.ref, pool.epoch)) throw new Error("The selected target changed");
+        for (const [existingToken, file] of context.bofArgumentFiles) {
+          if (file.expiresAt <= this.now() ||
+            (file.commandId === input.commandId && file.index === input.index && sameTargetRefIdentity(file.target, target.ref))) {
+            file.data.fill(0);
+            context.bofArgumentFiles.delete(existingToken);
+          }
+        }
+        const pendingBytes = [...context.bofArgumentFiles.values()].reduce((sum, file) => sum + file.data.length, 0);
+        if (context.bofArgumentFiles.size >= 8 || pendingBytes + data.length > 32 * 1_024 * 1_024) {
+          throw new Error("Too many BOF argument files are awaiting execution");
+        }
+        const token = randomUUID();
+        const fileName = safeArtifactFileName(basename(selection.filePaths[0]!));
+        context.bofArgumentFiles.set(token, {
+          commandId: input.commandId, index: input.index, target: { ...target.ref },
+          data, fileName, expiresAt: this.now() + 5 * 60_000,
+        });
+        this.scheduleBofArgumentFileExpiry(context);
+        return { token, fileName, size: data.length };
+      } catch (error) {
+        data.fill(0);
+        throw error;
+      }
+    });
+  }
+
+  /** Keep a single idle-window timer for the earliest native BOF file selection. */
+  private scheduleBofArgumentFileExpiry(context: WindowContext): void {
+    if (context.bofArgumentFileTimer) clearTimeout(context.bofArgumentFileTimer);
+    delete context.bofArgumentFileTimer;
+    const now = this.now();
+    let nextExpiry = Number.POSITIVE_INFINITY;
+    for (const [token, file] of context.bofArgumentFiles) {
+      if (file.expiresAt <= now) {
+        file.data.fill(0);
+        context.bofArgumentFiles.delete(token);
+      } else {
+        nextExpiry = Math.min(nextExpiry, file.expiresAt);
+      }
+    }
+    if (!Number.isFinite(nextExpiry)) return;
+    const timer = setTimeout(() => {
+      if (context.bofArgumentFileTimer !== timer || this.windows.get(context.contentsId) !== context) return;
+      this.scheduleBofArgumentFileExpiry(context);
+    }, Math.max(1, nextExpiry - now));
+    context.bofArgumentFileTimer = timer;
+    timer.unref();
+  }
+
+  async runBof(contentsId: number, input: RunBofInput): Promise<OperationResult<BofExecutionRecord>> {
+    let object: Buffer | undefined;
+    let packed: Buffer | undefined;
+    let loaderData: Buffer | undefined;
+    let legacyArguments: Buffer | undefined;
+    let admittedContext: WindowContext | undefined;
+    const admissionId = randomUUID();
+    try {
+      const context = this.requireWindow(contentsId);
+      this.admitExecutionRequest(context, admissionId);
+      admittedContext = context;
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+        const supportsBuiltInBof = pool.supportsBuiltInBof(target.target.mode, target.target.id);
+        const selectedRef = { ...target.ref };
+        const assertCurrent = (): void => {
+          assertBinding();
+          if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, selectedRef) ||
+            !pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch)) throw new Error("The selected target changed before BOF dispatch");
+        };
+        const { entries } = await installedBofCommands(this.clientRootDirectory, target.target, target.ref, supportsBuiltInBof);
+        const command = entries.find((entry) => entry.dto.id === input.commandId);
+        if (!command || !command.dto.available) throw new Error(command?.dto.reason ?? "The selected BOF is no longer installed");
+        this.scheduleBofArgumentFileExpiry(context);
+        const files = new Map<number, Buffer>();
+        for (let index = 0; index < command.arguments.length; index++) {
+          if (command.arguments[index]?.type !== "file" || input.arguments[index] === null || input.arguments[index] === "") continue;
+          const token = input.arguments[index];
+          if (typeof token !== "string") throw new Error("BOF file argument must use a native selection");
+          const file = context.bofArgumentFiles.get(token);
+          if (!file || file.commandId !== input.commandId || file.index !== index || file.expiresAt <= this.now() ||
+            !sameTargetRefIdentity(file.target, selectedRef)) throw new Error("The selected BOF file is unavailable or expired");
+          files.set(index, file.data);
+        }
+        packed = packBofArguments(command.arguments, input.arguments, files);
+        object = await readInstalledBofObject(command);
+        let loaderExport = "";
+        let loaderInit = "";
+        if (command.mode === "coff-loader") {
+          if (!command.dependencyName) throw new Error("The BOF loader dependency is missing");
+          const loader = await readInstalledBofLoader(this.clientRootDirectory, command.dependencyName, target.target);
+          loaderData = loader.data;
+          loaderExport = loader.exportName;
+          loaderInit = loader.init;
+          legacyArguments = packLegacyBofArguments(command.entrypoint, object, packed);
+        }
+        assertCurrent();
+        for (const [token, file] of context.bofArgumentFiles) {
+          if (file.commandId === input.commandId && sameTargetRefIdentity(file.target, selectedRef)) {
+            file.data.fill(0);
+            context.bofArgumentFiles.delete(token);
+          }
+        }
+        this.scheduleBofArgumentFileExpiry(context);
+        const record: BofExecutionRecord = {
+          id: randomUUID(), startedAt: new Date(this.now()).toISOString(),
+          commandId: command.dto.id, commandName: command.dto.commandName, state: "running",
+        };
+        this.addBofRecord(context, selectedRef, record);
+        let dispatched = false;
+        try {
+          assertCurrent();
+          if (command.mode === "coff-loader") {
+            const loader = loaderData!;
+            const registration = target.target.mode === "session"
+              ? await pool.client.registerBofLoaderSession(target.target.id, loader, loaderInit, target.target.os, input.timeoutSeconds)
+              : await pool.client.registerBofLoaderBeacon(target.target.id, loader, loaderInit, target.target.os, input.timeoutSeconds);
+            assertCurrent();
+            await this.awaitBofLoaderRegistration(pool, target, registration, input.timeoutSeconds, assertCurrent);
+            assertCurrent();
+          }
+          dispatched = true;
+          const response = command.mode === "coff-loader"
+            ? target.target.mode === "session"
+              ? await pool.client.callLegacyBofSession(target.target.id, loaderData!, legacyArguments!, loaderExport, input.timeoutSeconds)
+              : await pool.client.callLegacyBofBeacon(target.target.id, loaderData!, legacyArguments!, loaderExport, input.timeoutSeconds)
+            : target.target.mode === "session"
+              ? await pool.client.callBofSession(target.target.id, object, packed, command.entrypoint, input.timeoutSeconds)
+              : await pool.client.callBofBeacon(target.target.id, object, packed, command.entrypoint, input.timeoutSeconds);
+          assertCurrent();
+          const captured = decodeBofOutput(response);
+          if (response.Response?.Err?.trim()) {
+            return this.patchBofRecord(context, selectedRef, record.id, { state: "failed", error: "The selected target rejected the BOF execution.", ...captured });
+          }
+          if (response.Response?.Async) {
+            const taskId = response.Response.TaskID;
+            if (!taskId || response.Response.BeaconID !== target.target.id) {
+              return this.patchBofRecord(context, selectedRef, record.id, { state: "outcome-unknown", error: "The BOF was submitted, but its beacon task could not be identified." });
+            }
+            return this.patchBofRecord(context, selectedRef, record.id, { state: "submitted", taskId });
+          }
+          if (target.target.mode === "beacon") throw new Error("The beacon BOF response was missing task correlation");
+          return this.patchBofRecord(context, selectedRef, record.id, { state: "completed", ...captured });
+        } catch (error) {
+          const state = dispatched ? "outcome-unknown" : "request-failed";
+          return this.patchBofRecord(context, selectedRef, record.id, {
+            state,
+            error: dispatched
+              ? "The BOF was dispatched, but its final outcome could not be confirmed."
+              : executionBoundaryError(error),
+          });
+        }
+      });
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      object?.fill(0);
+      packed?.fill(0);
+      loaderData?.fill(0);
+      legacyArguments?.fill(0);
+      admittedContext?.executionAdmissions.delete(admissionId);
+      this.executionGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  private async awaitBofLoaderRegistration(
+    pool: BackendPool,
+    target: RevalidatedTarget,
+    registration: sliverpb.RegisterExtension,
+    timeoutSeconds: number,
+    assertCurrent: () => void,
+  ): Promise<void> {
+    const envelope = registration.Response;
+    if (!envelope || envelope.Err?.trim()) throw new Error("The target rejected the BOF loader registration");
+    if (!envelope.Async && target.target.mode === "session") return;
+    if (!envelope.Async || target.target.mode !== "beacon" || !envelope.TaskID || envelope.BeaconID !== target.target.id) {
+      throw new Error("The BOF loader registration task could not be identified");
+    }
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (Date.now() < deadline) {
+      assertCurrent();
+      const task = await pool.client.fetchBeaconTask(envelope.TaskID, Math.min(5, timeoutSeconds));
+      try {
+        assertCurrent();
+        if (task.ID !== envelope.TaskID || task.BeaconID !== target.target.id) {
+          throw new Error("The BOF loader registration task did not match the selected target");
+        }
+        const state = task.State.trim().toLowerCase();
+        if (state === "failed" || state === "canceled" || state === "cancelled") {
+          throw new Error("The BOF loader registration task failed");
+        }
+        if (state === "completed") {
+          if (!task.Response?.length) throw new Error("The BOF loader registration had no response");
+          let result: sliverpb.RegisterExtension;
+          try { result = sliverpb.RegisterExtension.decode(task.Response); }
+          catch { throw new Error("The BOF loader registration response was invalid"); }
+          if (!result.Response || result.Response.Err?.trim()) {
+            throw new Error("The target rejected the BOF loader registration");
+          }
+          return;
+        }
+      } finally {
+        task.Request?.fill(0);
+        task.Response?.fill(0);
+      }
+      await delayMilliseconds(Math.min(250, Math.max(0, deadline - Date.now())));
+    }
+    throw new Error("The BOF loader registration task did not complete before the timeout");
+  }
+
+  async listBofExecutionHistory(contentsId: number): Promise<OperationResult<BofExecutionHistorySnapshot>> {
+    return this.withExecutionPool(contentsId, async (pool) => {
+      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+      return { target: { ...target.ref }, revision: history?.revision ?? 0, records: history?.records.map(cloneBofRecord) ?? [] };
+    });
+  }
+
+  async clearBofExecutionHistory(contentsId: number, input: ClearBofExecutionHistoryInput): Promise<OperationResult> {
+    const result = await this.withExecutionPool(contentsId, async (pool) => {
+      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+      if (!history) return;
+      const index = input.id === undefined ? 0 : history.records.findIndex((record) => record.id === input.id);
+      if (index < 0) return;
+      const removed = input.id === undefined ? history.records.splice(0) : history.records.splice(index, 1);
+      for (const record of removed) clearBofRecord(record);
+      this.publishBofHistoryChanged(context, history);
+    });
+    return result.ok ? { ok: true } : result;
+  }
+
+  async getBofExecutionResult(contentsId: number, input: BofExecutionRecordInput): Promise<OperationResult<BofExecutionRecord>> {
+    return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+      const record = history?.records.find((item) => item.id === input.id);
+      if (!record) throw new Error("The BOF result is unavailable for the current target");
+      if ((record.state !== "submitted" && record.state !== "outcome-unknown") || !record.taskId) return cloneBofRecord(record);
+      const task = await pool.client.fetchBeaconTask(record.taskId);
+      try {
+        assertBinding();
+        if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref) ||
+          !history?.records.includes(record)) throw new Error("The selected target changed while refreshing the BOF result");
+        if (task.ID !== record.taskId || task.BeaconID !== target.target.id) {
+          return this.patchBofRecord(context, target.ref, record.id, { state: "outcome-unknown", error: "BOF task correlation failed." });
+        }
+        const state = task.State.trim().toLowerCase();
+        if (state === "failed" || state === "canceled" || state === "cancelled") {
+          return this.patchBofRecord(context, target.ref, record.id, { state: "failed", error: "The beacon BOF task failed." });
+        }
+        if (state !== "completed") return cloneBofRecord(record);
+        try {
+          const response = decodeBofTask(task.Response);
+          const captured = decodeBofOutput(response);
+          if (response.Response?.Err?.trim()) return this.patchBofRecord(context, target.ref, record.id, { state: "failed", error: "The selected target rejected the BOF execution.", ...captured });
+          return this.patchBofRecord(context, target.ref, record.id, { state: "completed", ...captured });
+        } catch {
+          return this.patchBofRecord(context, target.ref, record.id, { state: "outcome-unknown", error: "The beacon BOF task completed, but its exact result could not be confirmed." });
+        }
+      } finally {
+        task.Request?.fill(0);
+        task.Response?.fill(0);
+      }
+    });
+  }
+
+  private bofHistoryKey(ref: TargetRef): string {
+    return `${ref.mode}:${ref.id}:${ref.backendEpoch}:${ref.fingerprint}`;
+  }
+
+  private addBofRecord(context: WindowContext, target: TargetRef, record: BofExecutionRecord): void {
+    const key = this.bofHistoryKey(target);
+    let history = context.bofHistories.get(key);
+    if (!history) {
+      history = { target: { ...target }, revision: 0, records: [] };
+      context.bofHistories.set(key, history);
+    }
+    history.records.unshift(record);
+    this.trimBofHistory(history);
+    this.publishBofHistoryChanged(context, history);
+  }
+
+  private patchBofRecord(context: WindowContext, target: TargetRef, id: string, patch: Partial<BofExecutionRecord>): BofExecutionRecord {
+    const history = context.bofHistories.get(this.bofHistoryKey(target));
+    const index = history?.records.findIndex((record) => record.id === id) ?? -1;
+    if (!history || index < 0) throw new Error("The BOF result was cleared");
+    const previous = history.records[index]!;
+    const next = cloneBofRecord({ ...previous, ...patch });
+    history.records[index] = next;
+    patch.stdout?.data.fill(0);
+    patch.stderr?.data.fill(0);
+    clearBofRecord(previous);
+    const returned = cloneBofRecord(next);
+    this.trimBofHistory(history);
+    this.publishBofHistoryChanged(context, history);
+    return returned;
+  }
+
+  private trimBofHistory(history: { records: BofExecutionRecord[] }): void {
+    let bytes = history.records.reduce((sum, record) => sum +
+      (record.stdout?.data.byteLength ?? 0) + (record.stderr?.data.byteLength ?? 0), 0);
+    while (history.records.length > 50 || bytes > 16 * 1_024 * 1_024) {
+      const removed = history.records.pop();
+      if (!removed) break;
+      bytes -= (removed.stdout?.data.byteLength ?? 0) + (removed.stderr?.data.byteLength ?? 0);
+      clearBofRecord(removed);
+    }
+  }
+
+  private publishBofHistoryChanged(
+    context: WindowContext,
+    history: { target: TargetRef; revision: number; records: BofExecutionRecord[] },
+  ): void {
+    history.revision += 1;
+    const contents = webContents.fromId(context.contentsId);
+    if (contents && !contents.isDestroyed()) {
+      try { contents.send(IPC.bofExecutionHistoryChanged, { ...history.target }, history.revision); }
+      catch { /* Advisory invalidation; the next snapshot is authoritative. */ }
+    }
+  }
+
+  private bofOutputForActiveTarget(
+    contentsId: number,
+    pool: BackendPool,
+    input: BofOutputInput,
+  ): { context: WindowContext; target: RevalidatedTarget; record: BofExecutionRecord; data: Buffer } {
+    const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+    const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+    const record = history?.records.find((item) => item.id === input.id);
+    if (!record || (record.state !== "completed" && record.state !== "failed")) throw new Error("The BOF output is unavailable for the current target");
+    const stdout = record.stdout?.data;
+    const stderr = record.stderr?.data;
+    const data = input.stream === "combined"
+      ? stdout && stderr ? Buffer.concat([stdout, stderr]) : stdout ? Buffer.from(stdout) : stderr ? Buffer.from(stderr) : undefined
+      : input.stream === "stdout" && stdout ? Buffer.from(stdout)
+        : input.stream === "stderr" && stderr ? Buffer.from(stderr) : undefined;
+    if (!data || data.length > 2 * 1_024 * 1_024) throw new Error("The requested BOF output stream is unavailable");
+    return { context, target, record, data };
+  }
+
+  async saveBofOutput(sender: WebContents, input: BofOutputInput): Promise<OperationResult<SaveExecutionResultResult>> {
+    let data: Buffer | undefined;
+    try {
+      return await this.withExecutionPool(sender.id, async (pool, assertBinding) => {
+        const selected = this.bofOutputForActiveTarget(sender.id, pool, input);
+        data = selected.data;
+        const owner = requireOwnerWindow(sender);
+        const selection = await dialog.showSaveDialog(owner, {
+          title: "Save BOF output",
+          defaultPath: safeArtifactFileName(`${selected.record.commandName}-${input.stream}-${input.id}.txt`),
+        });
+        if (selection.canceled || !selection.filePath) return { saved: false };
+        const assertCurrent = (): void => {
+          assertBinding();
+          if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selected.target.ref) ||
+            selected.context.bofHistories.get(this.bofHistoryKey(selected.target.ref))?.records.find((record) => record.id === input.id) !== selected.record) {
+            throw new Error("The BOF output no longer belongs to the active target");
+          }
+        };
+        assertCurrent();
+        const intent = await this.reserveSessionSaveIntent(selection.filePath);
+        assertCurrent();
+        await this.commitSessionSaveIntent(intent, data!, assertCurrent);
+        return { saved: true, fileName: safeArtifactFileName(basename(intent.destinationPath)) };
+      });
+    } finally {
+      data?.fill(0);
+    }
+  }
+
+  async addBofOutputToLoot(contentsId: number, input: AddBofOutputToLootInput): Promise<OperationResult<LootSummary>> {
+    let data: Buffer | undefined;
+    let loot: clientpb.Loot | undefined;
+    let response: clientpb.Loot | undefined;
+    try {
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        const selected = this.bofOutputForActiveTarget(contentsId, pool, input);
+        data = selected.data;
+        const assertCurrent = (): void => {
+          assertBinding();
+          if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selected.target.ref) ||
+            selected.context.bofHistories.get(this.bofHistoryKey(selected.target.ref))?.records.find((record) => record.id === input.id) !== selected.record) {
+            throw new Error("The BOF output no longer belongs to the active target");
+          }
+        };
+        const requestedName = input.name.trim();
+        if (requestedName.length > OPERATOR_DATA_LIMITS.nameCharacters) throw new Error("Loot name is invalid");
+        const isText = isProbablyTextLoot(data);
+        const fileName = safeArtifactFileName(`bof-${input.stream}-${input.id}.${isText ? "txt" : "bin"}`);
+        loot = clientpb.Loot.create({
+          Name: requestedName || fileName,
+          OriginHostUUID: selected.target.target.hostId,
+          FileType: isText ? clientpb.FileType.TEXT : clientpb.FileType.BINARY,
+          File: commonpb.File.create({ Name: fileName, Data: data }),
+        });
+        assertCurrent();
+        try {
+          response = await pool.client.lootAdd(loot);
+          assertCurrent();
+          return lootSummary(response);
+        } catch {
+          throw new Error("The BOF output may have been added to loot; refresh loot before retrying");
+        }
+      });
+    } finally {
+      data?.fill(0);
+      loot?.File?.Data.fill(0);
+      response?.File?.Data.fill(0);
     }
   }
 
@@ -4033,6 +4511,14 @@ export class ConnectionRegistry {
     for (const timer of context.executionResultTimers.values()) clearTimeout(timer);
     context.executionResultTimers.clear();
     this.executionArtifacts.removeOwner(context.contentsId);
+    if (context.bofArgumentFileTimer) clearTimeout(context.bofArgumentFileTimer);
+    delete context.bofArgumentFileTimer;
+    for (const file of context.bofArgumentFiles.values()) file.data.fill(0);
+    context.bofArgumentFiles.clear();
+    for (const history of context.bofHistories.values()) {
+      for (const record of history.records) clearBofRecord(record);
+    }
+    context.bofHistories.clear();
   }
 
   private admitExecutionRequest(context: WindowContext, admissionId: string): void {
@@ -7032,6 +7518,7 @@ class BackendPool {
   private readonly subscriptions: Subscription[] = [];
   private readonly profilesByName = new Map<string, clientpb.ImplantProfile>();
   private readonly buildsByName = new Map<string, clientpb.ImplantConfig>();
+  private readonly bofCapabilities = new Map<string, boolean>();
   private readonly taskClaims = new Map<string, PoolTaskClaim>();
   private readonly taskClaimReservations = new Set<string>();
   private connectPromise: Promise<void> | undefined;
@@ -7085,6 +7572,10 @@ class BackendPool {
 
   get windowCount(): number {
     return this.windowIds.size;
+  }
+
+  supportsBuiltInBof(mode: TargetMode, id: string): boolean {
+    return this.bofCapabilities.get(`${mode}:${id}`) === true;
   }
 
   addWindow(contentsId: number): void {
@@ -7456,6 +7947,12 @@ class BackendPool {
         case "sessions": {
           const sessions = await abortable(this.client.getSessions(), this.lifetime.signal);
           this.assertCurrent();
+          for (const key of this.bofCapabilities.keys()) if (key.startsWith("session:")) this.bofCapabilities.delete(key);
+          for (const session of sessions.Sessions) {
+            let supported = false;
+            try { supported = (BigInt(session.Capabilities ?? "0") & 1n) !== 0n; } catch { /* invalid capability is unavailable */ }
+            this.bofCapabilities.set(`session:${session.ID}`, supported);
+          }
           const committed = this.targetStore.replaceSessions(sessions.Sessions);
           this.replaceTargetDomains();
           if (committed.status === "error") throw new Error(committed.error ?? "Unable to normalize sessions inventory");
@@ -7464,6 +7961,12 @@ class BackendPool {
         case "beacons": {
           const beacons = await abortable(this.client.getBeacons(), this.lifetime.signal);
           this.assertCurrent();
+          for (const key of this.bofCapabilities.keys()) if (key.startsWith("beacon:")) this.bofCapabilities.delete(key);
+          for (const beacon of beacons.Beacons) {
+            let supported = false;
+            try { supported = (BigInt(beacon.Capabilities ?? "0") & 1n) !== 0n; } catch { /* invalid capability is unavailable */ }
+            this.bofCapabilities.set(`beacon:${beacon.ID}`, supported);
+          }
           const committed = this.targetStore.replaceBeacons(beacons.Beacons);
           this.replaceTargetDomains();
           if (committed.status === "error") throw new Error(committed.error ?? "Unable to normalize beacons inventory");
@@ -7915,6 +8418,19 @@ function assertTargetDomainAuthoritative(pool: BackendPool, mode: TargetRef["mod
   if (!targetDomainAuthoritative(pool, mode)) {
     throw new Error(`The ${mode} inventory is not authoritative; refresh before acting`);
   }
+}
+
+function cloneBofRecord(record: BofExecutionRecord): BofExecutionRecord {
+  return {
+    ...record,
+    ...(record.stdout ? { stdout: { data: Uint8Array.from(record.stdout.data), truncated: record.stdout.truncated } } : {}),
+    ...(record.stderr ? { stderr: { data: Uint8Array.from(record.stderr.data), truncated: record.stderr.truncated } } : {}),
+  };
+}
+
+function clearBofRecord(record: BofExecutionRecord): void {
+  record.stdout?.data.fill(0);
+  record.stderr?.data.fill(0);
 }
 
 function operationBackendSummary(context: WindowContext, pool: BackendPool) {

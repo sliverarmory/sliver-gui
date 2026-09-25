@@ -106,6 +106,26 @@ interface FakeMainState {
     options: Parameters<SliverClientAdapter["executeSession"]>[1];
     timeoutSeconds: number | undefined;
   }>;
+  bofCalls: Array<{
+    targetMode: "session" | "beacon";
+    targetId: string;
+    objectSha256: string;
+    objectHex: string;
+    argumentsHex: string;
+    entrypoint: string;
+    timeoutSeconds: number;
+  }>;
+  legacyBofCalls: Array<{
+    phase: "register" | "call";
+    targetMode: "session" | "beacon";
+    targetId: string;
+    loaderHex: string;
+    init?: string;
+    os?: string;
+    argumentsHex?: string;
+    exportName?: string;
+    timeoutSeconds: number;
+  }>;
   processResponseHeld: boolean;
   m4Audit: {
     callCounts: Record<string, number>;
@@ -187,6 +207,8 @@ const state: FakeMainState = {
   openSessionRequests: [],
   tasks: [],
   processCalls: [],
+  bofCalls: [],
+  legacyBofCalls: [],
   processResponseHeld: false,
   m4Audit: {
     callCounts: {},
@@ -228,6 +250,7 @@ const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
 const overviewEgressFixture = process.argv.includes("--overview-egress-fixture");
 const overviewSoftwareFixture = process.argv.includes("--overview-software-fixture");
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
+const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
@@ -262,6 +285,7 @@ const softwareFixturePause = (): Promise<void> => new Promise((resolve) => setTi
 const registry = new ConnectionRegistry({
   savedConfigDirectory: requiredArgument("--saved-config-directory="),
   managedConfigDirectory: requiredArgument("--managed-config-directory="),
+  clientRootDirectory: consoleClientRootDirectory,
   clientFactory: (config) => {
     state.configFactoryCalls += 1;
     state.connectedConfig = {
@@ -1868,6 +1892,75 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         ),
       });
     },
+    async callBofSession(sessionId, object, argumentsBuffer, entrypoint, timeoutSeconds) {
+      if (!bofExecutionFixture) return unsupported("callBofSession");
+      recordM4("callBofSession");
+      requireSession(sessionId);
+      return fakeBofResponse("session", sessionId, object, argumentsBuffer, entrypoint, timeoutSeconds);
+    },
+    async callBofBeacon(beaconId, object, argumentsBuffer, entrypoint, timeoutSeconds) {
+      if (!bofExecutionFixture) return unsupported("callBofBeacon");
+      recordM4("callBofBeacon");
+      requireBeacon(beaconId);
+      const completed = fakeBofResponse("beacon", beaconId, object, argumentsBuffer, entrypoint, timeoutSeconds);
+      return sliverpb.CallExtension.create({
+        Response: queueTask(beaconId, "CallExtensionReq", Buffer.from(sliverpb.CallExtension.encode(completed).finish())),
+      });
+    },
+    async registerBofLoaderSession(sessionId, loader, init, os, timeoutSeconds) {
+      if (!bofExecutionFixture) return unsupported("registerBofLoaderSession");
+      recordM4("registerBofLoaderSession");
+      requireSession(sessionId);
+      state.legacyBofCalls.push({
+        phase: "register", targetMode: "session", targetId: sessionId,
+        loaderHex: loader.toString("hex"), init, os, timeoutSeconds,
+      });
+      return sliverpb.RegisterExtension.create({ Response: response(false) });
+    },
+    async registerBofLoaderBeacon(beaconId, loader, init, os, timeoutSeconds) {
+      if (!bofExecutionFixture) return unsupported("registerBofLoaderBeacon");
+      recordM4("registerBofLoaderBeacon");
+      requireBeacon(beaconId);
+      state.legacyBofCalls.push({
+        phase: "register", targetMode: "beacon", targetId: beaconId,
+        loaderHex: loader.toString("hex"), init, os, timeoutSeconds,
+      });
+      const completed = sliverpb.RegisterExtension.create({ Response: response(false) });
+      return sliverpb.RegisterExtension.create({
+        Response: queueTask(beaconId, "RegisterExtensionReq", Buffer.from(sliverpb.RegisterExtension.encode(completed).finish())),
+      });
+    },
+    async callLegacyBofSession(sessionId, loader, argumentsBuffer, exportName, timeoutSeconds) {
+      if (!bofExecutionFixture) return unsupported("callLegacyBofSession");
+      recordM4("callLegacyBofSession");
+      requireSession(sessionId);
+      state.legacyBofCalls.push({
+        phase: "call", targetMode: "session", targetId: sessionId,
+        loaderHex: loader.toString("hex"), argumentsHex: argumentsBuffer.toString("hex"),
+        exportName, timeoutSeconds,
+      });
+      return sliverpb.CallExtension.create({
+        Output: Buffer.from("deterministic legacy BOF stdout\n", "utf8"),
+        Response: response(false),
+      });
+    },
+    async callLegacyBofBeacon(beaconId, loader, argumentsBuffer, exportName, timeoutSeconds) {
+      if (!bofExecutionFixture) return unsupported("callLegacyBofBeacon");
+      recordM4("callLegacyBofBeacon");
+      requireBeacon(beaconId);
+      state.legacyBofCalls.push({
+        phase: "call", targetMode: "beacon", targetId: beaconId,
+        loaderHex: loader.toString("hex"), argumentsHex: argumentsBuffer.toString("hex"),
+        exportName, timeoutSeconds,
+      });
+      const completed = sliverpb.CallExtension.create({
+        Output: Buffer.from("deterministic legacy BOF stdout\n", "utf8"),
+        Response: response(false),
+      });
+      return sliverpb.CallExtension.create({
+        Response: queueTask(beaconId, "CallExtensionReq", Buffer.from(sliverpb.CallExtension.encode(completed).finish())),
+      });
+    },
     async executeChildrenSession(sessionId) {
       recordM4("executeChildrenSession");
       requireSession(sessionId);
@@ -2438,6 +2531,7 @@ function seedSession(name: string): clientpb.Session {
     Username: "e2e-user",
     OS: "darwin",
     Arch: "arm64",
+    Capabilities: bofExecutionFixture ? "1" : "0",
     Transport: "mtls",
     RemoteAddress: "127.0.0.1:41001",
     PID: 41001,
@@ -2483,6 +2577,7 @@ function seedBeacon(name: string): clientpb.Beacon {
     Username: "e2e-user",
     OS: "darwin",
     Arch: "arm64",
+    Capabilities: bofExecutionFixture ? "1" : "0",
     Transport: "https",
     RemoteAddress: "127.0.0.1:41002",
     PID: 41002,
@@ -2607,6 +2702,43 @@ function cloneTask(task: clientpb.BeaconTask): clientpb.BeaconTask {
 
 function response(isAsync: boolean, beaconId = "", taskId = "") {
   return { Err: "", Async: isAsync, BeaconID: beaconId, TaskID: taskId };
+}
+
+function fakeBofResponse(
+  targetMode: "session" | "beacon",
+  targetId: string,
+  object: Buffer,
+  argumentsBuffer: Buffer,
+  entrypoint: string,
+  timeoutSeconds: number,
+): sliverpb.CallExtension {
+  const marker = object.toString("utf8");
+  if (marker !== "inert-sa-dir-bof-object" && marker !== "inert-sa-nslookup-bof-object") {
+    throw new Error("The deterministic fake received an unexpected BOF object");
+  }
+  if (entrypoint !== "go" || argumentsBuffer.length < 4 ||
+      argumentsBuffer.readUInt32LE(0) !== argumentsBuffer.length - 4) {
+    throw new Error("The deterministic fake received an invalid BOF invocation");
+  }
+  state.bofCalls.push({
+    targetMode,
+    targetId,
+    objectSha256: createHash("sha256").update(object).digest("hex"),
+    objectHex: object.toString("hex"),
+    argumentsHex: argumentsBuffer.toString("hex"),
+    entrypoint,
+    timeoutSeconds,
+  });
+  const kind = marker === "inert-sa-dir-bof-object" ? "sa-dir" : "sa-nslookup";
+  return sliverpb.CallExtension.create({
+    BOFOutputs: [
+      { Type: 0, Data: Buffer.from(`deterministic ${kind} stdout\n`, "utf8") },
+      ...(kind === "sa-nslookup"
+        ? [{ Type: 0x0d, Data: Buffer.from("deterministic sa-nslookup stderr\n", "utf8") }]
+        : []),
+    ],
+    Response: response(false),
+  });
 }
 
 function epochSeconds(): string {

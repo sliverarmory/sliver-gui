@@ -6,6 +6,7 @@ import {
   type sliverpb,
   type clientpb,
 } from "sliver-script";
+import { createHash } from "node:crypto";
 
 /**
  * The complete, reviewed main-process Sliver surface.
@@ -164,6 +165,15 @@ export type SliverClientAdapter = Pick<
   lsBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
   psBeacon(beaconId: string, fullInfo: boolean, timeoutSeconds: number): Promise<sliverpb.Ps>;
   ifconfigBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Ifconfig>;
+  /** Executes one main-selected Armory object through the fixed BOF RPC. */
+  callBofSession(sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  callBofBeacon(beaconId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  /** Registers a main-selected installed COFF loader for a legacy BOF. */
+  registerBofLoaderSession(sessionId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number): Promise<sliverpb.RegisterExtension>;
+  registerBofLoaderBeacon(beaconId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number): Promise<sliverpb.RegisterExtension>;
+  /** Calls only that registered loader with a main-packed BOF envelope. */
+  callLegacyBofSession(sessionId: string, loader: Buffer, argumentsBuffer: Buffer, exportName: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  callLegacyBofBeacon(beaconId: string, loader: Buffer, argumentsBuffer: Buffer, exportName: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
 };
 
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
@@ -197,6 +207,66 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
       client.interactBeacon(beaconId).ps(fullInfo, timeoutSeconds),
     ifconfigBeacon: (beaconId: string, timeoutSeconds: number) =>
       client.interactBeacon(beaconId).ifconfig(timeoutSeconds),
+    callBofSession: (sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
+        Name: createHash("sha256").update(object).digest("hex"),
+        BOFData: object,
+        Args: argumentsBuffer,
+        Export: entrypoint,
+        IsBOF: true,
+        WantBOFOutputs: true,
+        ServerStore: false,
+        Request: { Async: false, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: sessionId, BeaconID: "" },
+      }, { signal })),
+    callBofBeacon: (beaconId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
+        Name: createHash("sha256").update(object).digest("hex"),
+        BOFData: object,
+        Args: argumentsBuffer,
+        Export: entrypoint,
+        IsBOF: true,
+        WantBOFOutputs: true,
+        ServerStore: false,
+        Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
+      }, { signal })),
+    registerBofLoaderSession: (sessionId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registerExtension({
+        Name: createHash("sha256").update(loader).digest("hex"),
+        Data: loader,
+        Init: init,
+        OS: os,
+        Request: { Async: false, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: sessionId, BeaconID: "" },
+      }, { signal })),
+    registerBofLoaderBeacon: (beaconId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registerExtension({
+        Name: createHash("sha256").update(loader).digest("hex"),
+        Data: loader,
+        Init: init,
+        OS: os,
+        Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
+      }, { signal })),
+    callLegacyBofSession: (sessionId: string, loader: Buffer, argumentsBuffer: Buffer, exportName: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
+        Name: createHash("sha256").update(loader).digest("hex"),
+        BOFData: Buffer.alloc(0),
+        Args: argumentsBuffer,
+        Export: exportName,
+        IsBOF: false,
+        WantBOFOutputs: false,
+        ServerStore: false,
+        Request: { Async: false, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: sessionId, BeaconID: "" },
+      }, { signal })),
+    callLegacyBofBeacon: (beaconId: string, loader: Buffer, argumentsBuffer: Buffer, exportName: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
+        Name: createHash("sha256").update(loader).digest("hex"),
+        BOFData: Buffer.alloc(0),
+        Args: argumentsBuffer,
+        Export: exportName,
+        IsBOF: false,
+        WantBOFOutputs: false,
+        ServerStore: false,
+        Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
+      }, { signal })),
   });
 }
 

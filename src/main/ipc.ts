@@ -71,6 +71,14 @@ import {
   parseSaveExecutionResultInput,
 } from "../shared/execution-contracts.js";
 import {
+  parseAddBofOutputToLootInput,
+  parseBofExecutionRecordInput,
+  parseBofOutputInput,
+  parseChooseBofArgumentFileInput,
+  parseClearBofExecutionHistoryInput,
+  parseRunBofInput,
+} from "../shared/bof-contracts.js";
+import {
   parseListSessionShellsInput,
   parsePrepareSessionShellInput,
   parseSessionShellResourceActionInput,
@@ -282,6 +290,14 @@ export type IpcConnectionRegistry = Pick<
   | "saveExecutionResult"
   | "listProcessExecutionHistory"
   | "clearProcessExecutionHistory"
+  | "listInstalledBofs"
+  | "chooseBofArgumentFile"
+  | "runBof"
+  | "listBofExecutionHistory"
+  | "clearBofExecutionHistory"
+  | "getBofExecutionResult"
+  | "saveBofOutput"
+  | "addBofOutputToLoot"
   | "attachStream"
 >;
 
@@ -846,6 +862,30 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.clearProcessExecutionHistory, rendererUrl, parseClearProcessExecutionHistoryArguments, ({ contentsId }, input) =>
     registry.clearProcessExecutionHistory(contentsId, input),
+  );
+  handleTrusted(IPC.listInstalledBofs, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.listInstalledBofs(contentsId),
+  );
+  handleTrusted(IPC.chooseBofArgumentFile, rendererUrl, (args) => parseBofArguments(args, parseChooseBofArgumentFileInput), ({ sender }, input) =>
+    registry.chooseBofArgumentFile(sender, input),
+  );
+  handleTrusted(IPC.runBof, rendererUrl, (args) => parseBofArguments(args, parseRunBofInput), ({ contentsId }, input) =>
+    registry.runBof(contentsId, input),
+  );
+  handleTrusted(IPC.listBofExecutionHistory, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.listBofExecutionHistory(contentsId),
+  );
+  handleTrusted(IPC.clearBofExecutionHistory, rendererUrl, (args) => parseBofArguments(args, parseClearBofExecutionHistoryInput), ({ contentsId }, input) =>
+    registry.clearBofExecutionHistory(contentsId, input),
+  );
+  handleTrusted(IPC.getBofExecutionResult, rendererUrl, (args) => parseBofArguments(args, parseBofExecutionRecordInput), ({ contentsId }, input) =>
+    registry.getBofExecutionResult(contentsId, input),
+  );
+  handleTrusted(IPC.saveBofOutput, rendererUrl, (args) => parseBofArguments(args, parseBofOutputInput), ({ sender }, input) =>
+    registry.saveBofOutput(sender, input),
+  );
+  handleTrusted(IPC.addBofOutputToLoot, rendererUrl, (args) => parseBofArguments(args, parseAddBofOutputToLootInput), ({ contentsId }, input) =>
+    registry.addBofOutputToLoot(contentsId, input),
   );
 
   if (registeredStreamAttachListener) {
@@ -1412,6 +1452,11 @@ function parseRunExecutionReadArguments(
 ): [input: ReturnType<typeof parseRunExecutionReadInput>] {
   requireArgumentCount(args, 1, "execution read input");
   return [parseRunExecutionReadInput(args[0])];
+}
+
+function parseBofArguments<T>(args: readonly unknown[], parser: (value: unknown) => T): [input: T] {
+  requireArgumentCount(args, 1, "BOF input");
+  return [parser(args[0])];
 }
 
 function parsePrepareExecutionActionArguments(

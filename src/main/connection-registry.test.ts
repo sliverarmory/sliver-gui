@@ -105,6 +105,171 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+describe("BOF execution records", () => {
+  it("zeroizes selected file bytes on idle expiry and cancels the timer on window close", async () => {
+    const directory = join(root, "extensions", "file-bof");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "file.o"), Buffer.from("COFF"));
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      name: "File BOF", command_name: "file-bof", entrypoint: "go", help: "fixture",
+      bof_executor: "reflektor", arguments: [{ name: "blob", type: "file", optional: false }],
+      files: [{ os: "windows", arch: "amd64", path: "file.o" }],
+    }));
+    const argumentPath = join(root, "argument.bin");
+    await writeFile(argumentPath, Buffer.from([1, 2, 3, 4]));
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({
+      ...session("session_bof_file", "file"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+      now: () => Date.now(),
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const targetRef = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_file");
+    if (!targetRef) throw new Error("Expected file BOF target");
+    expect(await registry.selectTarget(1, targetRef)).toMatchObject({ ok: true });
+    vi.useFakeTimers();
+    electronMocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [argumentPath] });
+    const context = (registry as unknown as { windows: Map<number, {
+      bofArgumentFiles: Map<string, { data: Buffer }>;
+      bofArgumentFileTimer?: NodeJS.Timeout;
+    }> }).windows.get(1)!;
+    const input = { commandId: "file-bof/file-bof", index: 0 };
+    expect(await registry.chooseBofArgumentFile(sender(1), input)).toMatchObject({ ok: true, value: { size: 4 } });
+    const retained = [...context.bofArgumentFiles.values()][0]!.data;
+    expect([...retained]).toEqual([1, 2, 3, 4]);
+    expect(context.bofArgumentFileTimer).toBeDefined();
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+    expect(context.bofArgumentFiles.size).toBe(0);
+    expect([...retained]).toEqual([0, 0, 0, 0]);
+    expect(context.bofArgumentFileTimer).toBeUndefined();
+    expect(await registry.chooseBofArgumentFile(sender(1), input)).toMatchObject({ ok: true, value: { size: 4 } });
+    const retainedUntilClose = [...context.bofArgumentFiles.values()][0]!.data;
+    await registry.unregisterWindow(1);
+    expect([...retainedUntilClose]).toEqual([0, 0, 0, 0]);
+    expect(context.bofArgumentFileTimer).toBeUndefined();
+  });
+
+  it("retains partial typed output after target rejection for save and loot", async () => {
+    const directory = join(root, "extensions", "partial-bof");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "partial.o"), Buffer.from("COFF"));
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      name: "Partial BOF", command_name: "partial-bof", entrypoint: "go", help: "fixture",
+      bof_executor: "reflektor", files: [{ os: "windows", arch: "amd64", path: "partial.o" }],
+    }));
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({
+      ...session("session_bof_partial", "partial"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    client.adapter.callBofSession = vi.fn(async () => sliverpb.CallExtension.create({
+      BOFOutputs: [
+        { Type: 0, Data: Buffer.from("partial stdout") },
+        { Type: 0x0d, Data: Buffer.from("partial stderr") },
+      ],
+      Response: { Err: "private target error", Async: false, BeaconID: "", TaskID: "" },
+    }));
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const targetRef = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_partial");
+    if (!targetRef) throw new Error("Expected BOF fixture target");
+    expect(await registry.selectTarget(1, targetRef)).toMatchObject({ ok: true });
+    const executed = await registry.runBof(1, { commandId: "partial-bof/partial-bof", arguments: [], timeoutSeconds: 60 });
+    expect(executed).toMatchObject({ ok: true, value: {
+      state: "failed", stdout: { data: Uint8Array.from(Buffer.from("partial stdout")) },
+      stderr: { data: Uint8Array.from(Buffer.from("partial stderr")) },
+    } });
+    if (!executed.ok) throw new Error(executed.error);
+    expect(executed.value.error).not.toContain("private target error");
+    const destination = join(externalDirectory, "partial-stderr.txt");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    expect(await registry.saveBofOutput(sender(1), { id: executed.value.id, stream: "stderr" }))
+      .toMatchObject({ ok: true, value: { saved: true } });
+    expect(await readFile(destination, "utf8")).toBe("partial stderr");
+    expect(await registry.addBofOutputToLoot(1, { id: executed.value.id, stream: "stdout", name: "Partial BOF" }))
+      .toMatchObject({ ok: true, value: { name: "Partial BOF" } });
+    expect(client.lootState[0]?.File?.Data.toString()).toBe("partial stdout");
+  });
+
+  it("waits for correlated beacon loader registration before dispatching a legacy BOF", async () => {
+    const bofDirectory = join(root, "extensions", "legacy-bof");
+    const loaderDirectory = join(root, "extensions", "coff-loader");
+    await mkdir(bofDirectory, { recursive: true });
+    await mkdir(loaderDirectory, { recursive: true });
+    await writeFile(join(bofDirectory, "legacy.o"), Buffer.from("BOF"));
+    await writeFile(join(bofDirectory, "extension.json"), JSON.stringify({
+      name: "Legacy BOF", command_name: "legacy-bof", entrypoint: "go", help: "fixture",
+      bof_executor: "coff-loader", depends_on: "coff-loader",
+      files: [{ os: "windows", arch: "amd64", path: "legacy.o" }],
+    }));
+    await writeFile(join(loaderDirectory, "loader.dll"), Buffer.from("DLL"));
+    await writeFile(join(loaderDirectory, "extension.json"), JSON.stringify({
+      name: "COFF Loader", command_name: "coff-loader", entrypoint: "LoadAndRun", help: "fixture",
+      files: [{ os: "windows", arch: "amd64", path: "loader.dll" }],
+    }));
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [clientpb.Beacon.create({
+      ...beacon("beacon_bof_loader", "loader"), OS: "windows", Arch: "amd64", Capabilities: "0",
+    })];
+    client.adapter.registerBofLoaderBeacon = vi.fn(async () => sliverpb.RegisterExtension.create({
+      Response: { Async: true, BeaconID: "beacon_bof_loader", TaskID: "register-task", Err: "" },
+    }));
+    const registrationResponse = sliverpb.RegisterExtension.encode(sliverpb.RegisterExtension.create({
+      Response: { Async: false, BeaconID: "", TaskID: "", Err: "" },
+    })).finish();
+    let registrationFetches = 0;
+    client.adapter.fetchBeaconTask = vi.fn(async () => {
+      registrationFetches += 1;
+      return clientpb.BeaconTask.create({
+        ID: "register-task", BeaconID: "beacon_bof_loader",
+        State: registrationFetches === 1 ? "pending" : "completed",
+        Response: registrationFetches === 1 ? Buffer.alloc(0) : Buffer.from(registrationResponse),
+      });
+    });
+    client.adapter.callLegacyBofBeacon = vi.fn(async () => {
+      expect(registrationFetches).toBe(2);
+      return sliverpb.CallExtension.create({
+        Response: { Async: true, BeaconID: "beacon_bof_loader", TaskID: "bof-task", Err: "" },
+      });
+    });
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const targetRef = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "beacon_bof_loader");
+    if (!targetRef) throw new Error("Expected legacy BOF beacon fixture");
+    expect(await registry.selectTarget(1, targetRef)).toMatchObject({ ok: true });
+    const input = { commandId: "legacy-bof/legacy-bof", arguments: [], timeoutSeconds: 5 } as const;
+    const executed = await registry.runBof(1, input);
+    expect(executed).toMatchObject({ ok: true, value: { state: "submitted", taskId: "bof-task" } });
+    expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledOnce();
+    client.adapter.registerBofLoaderBeacon = vi.fn(async () => sliverpb.RegisterExtension.create({
+      Response: { Async: false, BeaconID: "", TaskID: "", Err: "" },
+    }));
+    const rejected = await registry.runBof(1, input);
+    expect(rejected).toMatchObject({ ok: true, value: { state: "request-failed" } });
+    expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledOnce();
+  });
+});
+
 describe("passive infrastructure service inventory", () => {
   function services(client: FakeSliverClient) {
     const getExternalBuilders = vi.fn().mockResolvedValue(clientpb.Builders.create({ Builders: [

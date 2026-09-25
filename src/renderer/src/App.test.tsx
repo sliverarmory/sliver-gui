@@ -150,6 +150,14 @@ function installSliverAPI(
     addExecutionOutputToLoot: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
+    listInstalledBofs: vi.fn(failedOperation),
+    chooseBofArgumentFile: vi.fn(failedOperation),
+    runBof: vi.fn(failedOperation),
+    listBofExecutionHistory: vi.fn(failedOperation),
+    clearBofExecutionHistory: vi.fn(failedOperation),
+    getBofExecutionResult: vi.fn(failedOperation),
+    saveBofOutput: vi.fn(failedOperation),
+    addBofOutputToLoot: vi.fn(failedOperation),
     listProcessExecutionHistory: vi.fn(failedOperation),
     clearProcessExecutionHistory: vi.fn(failedOperation),
     listLoot: vi.fn(failedOperation),
@@ -170,6 +178,7 @@ function installSliverAPI(
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onProcessExecutionHistoryChanged: vi.fn(() => vi.fn()),
+    onBofExecutionHistoryChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
       captureSnapshotListener?.(listener);
       return vi.fn();

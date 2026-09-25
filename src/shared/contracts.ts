@@ -70,6 +70,18 @@ import type {
   SaveExecutionResultResult,
 } from "./execution-contracts.js";
 import type {
+  AddBofOutputToLootInput,
+  BofArgumentFileSelection,
+  BofCatalog,
+  BofExecutionHistorySnapshot,
+  BofExecutionRecord,
+  BofExecutionRecordInput,
+  BofOutputInput,
+  ChooseBofArgumentFileInput,
+  ClearBofExecutionHistoryInput,
+  RunBofInput,
+} from "./bof-contracts.js";
+import type {
   ConsoleTabCloseResult,
   ConsoleTabLaunchContext,
   ConsoleWindowLaunchContext,
@@ -205,6 +217,14 @@ export const IPC_INVOKE = {
   saveExecutionResult: "sliver:execution:save-result",
   listProcessExecutionHistory: "sliver:execution:process-history:list",
   clearProcessExecutionHistory: "sliver:execution:process-history:clear",
+  listInstalledBofs: "sliver:bof:catalog",
+  chooseBofArgumentFile: "sliver:bof:choose-file",
+  runBof: "sliver:bof:run",
+  listBofExecutionHistory: "sliver:bof:history:list",
+  clearBofExecutionHistory: "sliver:bof:history:clear",
+  getBofExecutionResult: "sliver:bof:result",
+  saveBofOutput: "sliver:bof:output:save",
+  addBofOutputToLoot: "sliver:bof:output:loot",
 } as const;
 
 export const IPC_STREAM = {
@@ -220,6 +240,7 @@ export const IPC_EVENTS = {
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
   processExecutionHistoryChanged: "sliver:execution:process-history:changed",
+  bofExecutionHistoryChanged: "sliver:bof:history:changed",
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
   sessionShellsChanged: "sliver:session-shell:changed",
   releaseDownloadChanged: "sliver:release-download:changed",
@@ -1127,6 +1148,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: ClearProcessExecutionHistoryInput];
     result: OperationResult;
   };
+  [IPC.listInstalledBofs]: { args: []; result: OperationResult<BofCatalog> };
+  [IPC.chooseBofArgumentFile]: { args: [input: ChooseBofArgumentFileInput]; result: OperationResult<BofArgumentFileSelection | null> };
+  [IPC.runBof]: { args: [input: RunBofInput]; result: OperationResult<BofExecutionRecord> };
+  [IPC.listBofExecutionHistory]: { args: []; result: OperationResult<BofExecutionHistorySnapshot> };
+  [IPC.clearBofExecutionHistory]: { args: [input: ClearBofExecutionHistoryInput]; result: OperationResult };
+  [IPC.getBofExecutionResult]: { args: [input: BofExecutionRecordInput]; result: OperationResult<BofExecutionRecord> };
+  [IPC.saveBofOutput]: { args: [input: BofOutputInput]; result: OperationResult<SaveExecutionResultResult> };
+  [IPC.addBofOutputToLoot]: { args: [input: AddBofOutputToLootInput]; result: OperationResult<LootSummary> };
 }>;
 
 export type IpcInvokeArgs<Channel extends IpcInvokeChannel> = IpcInvokeContract[Channel]["args"];
@@ -1161,6 +1190,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
   onProcessExecutionHistoryChanged: (listener: (target: TargetRef, revision: number) => void) => () => void;
+  onBofExecutionHistoryChanged: (listener: (target: TargetRef, revision: number) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
   onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
@@ -1204,6 +1234,7 @@ export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAP
   "onSnapshotChanged",
   "onOperationChanged",
   "onProcessExecutionHistoryChanged",
+  "onBofExecutionHistoryChanged",
   "onBeaconTasksInvalidated",
   "onSessionShellsChanged",
   "onReleaseDownloadChanged",

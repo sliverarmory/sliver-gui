@@ -23,7 +23,7 @@ import type {
 } from "../../../shared/execution-contracts";
 import type { TargetSummary } from "../../../shared/target-contracts";
 
-export type ExecutionCategoryId = "process" | "payloads" | "remote" | "identity";
+export type ExecutionCategoryId = "process" | "bofs" | "payloads" | "remote" | "identity";
 
 export interface ExecutionCategoryPresentation {
   id: ExecutionCategoryId;
@@ -45,6 +45,12 @@ export const EXECUTION_CATEGORIES: readonly ExecutionCategoryPresentation[] = Ob
     label: "Process",
     description: "Start programs, inspect tracked children, and move into another process.",
     icon: faMicrochip,
+  },
+  {
+    id: "bofs",
+    label: "BOFs",
+    description: "Run installed Armory BOFs with arguments from their manifests.",
+    icon: faFileCode,
   },
   {
     id: "payloads",

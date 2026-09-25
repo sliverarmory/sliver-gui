@@ -46,6 +46,7 @@ import type {
   ExecutionResultState,
 } from "../../../shared/execution-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
+import { BofExecutionView } from "./BofExecutionView";
 import { ProcessExecutionView } from "./ProcessExecutionView";
 import {
   useProcessExecutionHistory,
@@ -672,7 +673,14 @@ export function TargetExecutionWorkbench({
           </div>
         ) : categoryTabs}
 
-        {isSession && category === "process" ? (
+        {category === "bofs" ? (
+          <BofExecutionView
+            key={selectionIdentity}
+            isRefreshing={!catalogIsCurrent}
+            target={catalogState.value.target}
+            targetRef={catalogState.value.targetRef}
+          />
+        ) : isSession && category === "process" ? (
           <>
             {processHistoryError ? <p className="mt-4 text-xs text-danger" role="alert">{processHistoryError}</p> : null}
             <ProcessExecutionView

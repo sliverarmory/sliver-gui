@@ -159,6 +159,14 @@ const invokeArguments = {
   saveExecutionResult: [{ requestId: "execution_request_1", stream: "combined" }],
   listProcessExecutionHistory: [],
   clearProcessExecutionHistory: [{ id: "execution_request_1" }],
+  listInstalledBofs: [],
+  chooseBofArgumentFile: [{ commandId: "package/command", index: 0 }],
+  runBof: [{ commandId: "package/command", arguments: ["example", 1, null], timeoutSeconds: 30 }],
+  listBofExecutionHistory: [],
+  clearBofExecutionHistory: [{ id: "bof_request_1" }],
+  getBofExecutionResult: [{ id: "bof_request_1" }],
+  saveBofOutput: [{ id: "bof_request_1", stream: "stdout" }],
+  addBofOutputToLoot: [{ id: "bof_request_1", stream: "stdout", name: "BOF output" }],
 } satisfies InvokeArgumentsByMethod;
 
 const electronMocks = vi.hoisted(() => ({
