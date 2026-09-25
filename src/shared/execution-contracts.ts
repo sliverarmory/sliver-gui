@@ -324,6 +324,19 @@ export interface RunExecutionReadInput {
 
 export interface PrepareExecutionActionInput {
   draft: ExecutionActionDraft;
+  assemblySource?: AssemblySource;
+}
+
+/** Main-issued selection only. Renderer paths and bytes never cross IPC. */
+export type AssemblySource =
+  | { kind: "armory"; id: string }
+  | { kind: "file"; token: string };
+
+export interface DotNetFileSelection {
+  token: string;
+  fileName: string;
+  size: number;
+  isDll: boolean;
 }
 
 export interface ExecutionReviewField {
@@ -418,6 +431,31 @@ export interface ProcessExecutionHistorySnapshot {
 }
 
 export interface ClearProcessExecutionHistoryInput {
+  readonly id?: string;
+}
+
+/** Bounded, main-owned assembly history for one exact target. */
+export interface DotNetExecutionRecord {
+  readonly id: string;
+  readonly startedAt: string;
+  readonly assemblyName: string;
+  readonly args: readonly string[];
+  readonly sourceKind: "file" | "armory";
+  readonly state: "running" | "request-failed" | ExecutionResultState;
+  readonly result?: ExecutionActionResult;
+  readonly error?: string;
+  readonly stdout?: ProcessExecutionOutput;
+  readonly stderr?: ProcessExecutionOutput;
+  readonly outputError?: string;
+}
+
+export interface DotNetExecutionHistorySnapshot {
+  readonly target: TargetRef;
+  readonly revision: number;
+  readonly records: readonly DotNetExecutionRecord[];
+}
+
+export interface ClearDotNetExecutionHistoryInput {
   readonly id?: string;
 }
 
@@ -538,8 +576,23 @@ export function parseRunExecutionReadInput(value: unknown): RunExecutionReadInpu
 
 export function parsePrepareExecutionActionInput(value: unknown): PrepareExecutionActionInput {
   const record = plainRecord(value, "prepare execution action input");
-  exactKeys(record, ["draft"]);
-  return { draft: parseExecutionActionDraft(record["draft"]) };
+  exactKeys(record, ["draft"], ["assemblySource"]);
+  const draft = parseExecutionActionDraft(record["draft"]);
+  if (record["assemblySource"] === undefined) return { draft };
+  if (draft.operationId !== "execution.assembly") throw new TypeError("assemblySource requires execution.assembly");
+  const source = plainRecord(record["assemblySource"], "assembly source");
+  if (source["kind"] === "armory") {
+    exactKeys(source, ["kind", "id"]);
+    if (typeof source["id"] !== "string" || !/^aliases\/[^/\\\u0000-\u001f\u007f]{1,180}$/u.test(source["id"])) {
+      throw new TypeError("Invalid Armory assembly ID");
+    }
+    return { draft, assemblySource: { kind: "armory", id: source["id"] } };
+  }
+  if (source["kind"] === "file") {
+    exactKeys(source, ["kind", "token"]);
+    return { draft, assemblySource: { kind: "file", token: opaqueToken(source["token"], "token") } };
+  }
+  throw new TypeError("Invalid assembly source");
 }
 
 export function parseExecuteExecutionPlanInput(value: unknown): ExecuteExecutionPlanInput {
@@ -556,6 +609,12 @@ export function parseExecutionResultRequest(value: unknown): ExecutionResultRequ
 
 export function parseClearProcessExecutionHistoryInput(value: unknown): ClearProcessExecutionHistoryInput {
   const record = plainRecord(value, "clear process execution history input");
+  exactKeys(record, [], ["id"]);
+  return record["id"] === undefined ? {} : { id: opaqueToken(record["id"], "id") };
+}
+
+export function parseClearDotNetExecutionHistoryInput(value: unknown): ClearDotNetExecutionHistoryInput {
+  const record = plainRecord(value, "clear .NET execution history input");
   exactKeys(record, [], ["id"]);
   return record["id"] === undefined ? {} : { id: opaqueToken(record["id"], "id") };
 }

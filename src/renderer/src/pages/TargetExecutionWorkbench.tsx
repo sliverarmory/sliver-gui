@@ -9,6 +9,8 @@ import {
   AlertDialog,
   Button,
   Chip,
+  Dropdown,
+  Label,
   Spinner,
   Tooltip,
   toast,
@@ -25,6 +27,7 @@ import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faCheck,
+  faChevronDown,
   faChevronRight,
   faDownload,
   faTriangleExclamation,
@@ -32,6 +35,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 
 import type {
+  AssemblySource,
   ExecutionActionDraft,
   ExecutionActionPlan,
   ExecutionActionResult,
@@ -47,6 +51,7 @@ import type {
 } from "../../../shared/execution-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
 import { BofExecutionView } from "./BofExecutionView";
+import { DotNetExecutionView } from "./DotNetExecutionView";
 import { ProcessExecutionView } from "./ProcessExecutionView";
 import {
   useProcessExecutionHistory,
@@ -340,13 +345,14 @@ export function TargetExecutionWorkbench({
     setSelectedCapability(capability);
   }, [catalogIsCurrent, clearPreparedPlan, runRead]);
 
-  const execute = useCallback(async (directProcessPlan?: ExecutionActionPlan): Promise<void> => {
+  const execute = useCallback(async (directPlan?: ExecutionActionPlan): Promise<void> => {
     if (!catalogIsCurrent) return;
-    const current = directProcessPlan ?? planRef.current;
+    const current = directPlan ?? planRef.current;
     if (!current) return;
     const expectedIdentity = selectionIdentity;
     const sequence = ++executeRequestSequence.current;
     const isSessionProcess = current.operationId === "execution.process" && catalog?.target.mode === "session";
+    const shouldRestoreActionFocus = current.operationId !== "execution.assembly";
     if (isSessionProcess) setSelectedProcessId(undefined);
     setIsExecuting(true);
     try {
@@ -359,15 +365,15 @@ export function TargetExecutionWorkbench({
         setPlan(undefined);
         if (isSessionProcess) void refreshProcessHistory();
         toast.danger("Execution failed", { description: response.error });
-        restoreActionFocus();
+        if (shouldRestoreActionFocus) restoreActionFocus();
         return;
       }
       if (response.value.operationId !== current.operationId) {
         planRef.current = undefined;
         setPlan(undefined);
         if (isSessionProcess) void refreshProcessHistory();
-        toast.danger("Execution result rejected", { description: "The result did not match the reviewed operation." });
-        restoreActionFocus();
+        toast.danger("Execution result rejected", { description: "The result did not match the prepared operation." });
+        if (shouldRestoreActionFocus) restoreActionFocus();
         return;
       }
       planRef.current = undefined;
@@ -381,15 +387,17 @@ export function TargetExecutionWorkbench({
       }
       if (isSessionProcess && response.value.state === "completed" && response.value.exitCode !== undefined && response.value.exitCode !== 0) {
         toast.warning(`Process exited with code ${response.value.exitCode}`, { description: response.value.message });
+      } else if (current.operationId === "execution.assembly" && response.value.state === "completed") {
+        toast.success(executionResultTitle(response.value.state));
       } else {
         toast.success(executionResultTitle(response.value.state), { description: response.value.message });
       }
-      restoreActionFocus();
+      if (shouldRestoreActionFocus) restoreActionFocus();
     } catch (error) {
-      if (directProcessPlan) discardToken(current.token);
+      if (directPlan) discardToken(current.token);
       if (sequence === executeRequestSequence.current && expectedIdentity === selectionIdentityRef.current) {
         if (isSessionProcess) void refreshProcessHistory();
-        if (directProcessPlan) toast.warning("Execution status unknown", { description: errorMessage(error) });
+        if (directPlan) toast.warning("Execution status unknown", { description: errorMessage(error) });
         else toast.danger("Execution failed", { description: errorMessage(error) });
       }
     } finally {
@@ -397,14 +405,14 @@ export function TargetExecutionWorkbench({
     }
   }, [catalog?.target.mode, catalogIsCurrent, discardToken, refreshProcessHistory, restoreActionFocus, selectionIdentity]);
 
-  const prepare = useCallback(async (draft: ExecutionActionDraft): Promise<void> => {
+  const prepare = useCallback(async (draft: ExecutionActionDraft, assemblySource?: AssemblySource): Promise<void> => {
     if (!catalogIsCurrent) return;
     const expectedIdentity = exactIdentity;
     const sequence = ++prepareRequestSequence.current;
     if (planRef.current) clearPreparedPlan(false);
     setIsPreparing(true);
     try {
-      const response = await window.sliver.prepareExecutionAction({ draft });
+      const response = await window.sliver.prepareExecutionAction({ draft, ...(assemblySource ? { assemblySource } : {}) });
       if (sequence !== prepareRequestSequence.current || expectedIdentity !== identityRef.current) {
         if (response.ok && response.value) discardToken(response.value.token);
         return;
@@ -417,9 +425,10 @@ export function TargetExecutionWorkbench({
         discardToken(response.value.token);
         throw new Error("The prepared plan no longer matches this exact operation and target selection.");
       }
-      const isDirectSessionProcess = draft.operationId === "execution.process" && catalog?.target.mode === "session";
+      const isDirectAction = draft.operationId === "execution.assembly" ||
+        (draft.operationId === "execution.process" && catalog?.target.mode === "session");
       setSelectedCapability(undefined);
-      if (isDirectSessionProcess) {
+      if (isDirectAction) {
         await execute(response.value);
       } else {
         planRef.current = response.value;
@@ -599,19 +608,21 @@ export function TargetExecutionWorkbench({
     return <WorkbenchError error={catalogState.error} onRetry={() => void loadCatalog()} />;
   }
   const isSession = catalogState.value.target.mode === "session";
+  const selectCategory = (selected: ExecutionCategoryId): void => {
+    readRequestSequence.current += 1;
+    setCategory(selected);
+    setReadState({ status: "idle" });
+  };
   const categoryTabs = (
     <Segment
       aria-label="Execution categories"
       className={isSession ? "min-w-0 w-fit overflow-x-auto" : "mt-5 w-full overflow-x-auto sm:w-fit"}
       selectedKey={category}
       size="sm"
-      onSelectionChange={(key) => {
-        readRequestSequence.current += 1;
-        setCategory(String(key) as ExecutionCategoryId);
-        setReadState({ status: "idle" });
-      }}
+      onSelectionChange={(key) => selectCategory(String(key) as ExecutionCategoryId)}
     >
-      {EXECUTION_CATEGORIES.map((candidate) => (
+      {EXECUTION_CATEGORIES.filter((candidate) => !isSession ||
+        (candidate.id !== "payloads" && candidate.id !== "remote" && candidate.id !== "identity")).map((candidate) => (
         <Segment.Item id={candidate.id} key={candidate.id}>
           <span className="inline-flex items-center gap-2">
             <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={candidate.icon} />
@@ -653,8 +664,24 @@ export function TargetExecutionWorkbench({
         {isSession ? (
           <div className="flex shrink-0 items-center justify-between gap-4">
             {categoryTabs}
-            {onPopOut && presentation !== "dedicated" ? (
-              <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
+              <Dropdown>
+                <Button aria-label="Advanced actions" size="sm" variant="tertiary">
+                  {category === "payloads" || category === "remote" || category === "identity" ? categoryCopy.label : "Advanced actions"}
+                  <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
+                </Button>
+                <Dropdown.Popover className="min-w-44" placement="bottom end">
+                  <Dropdown.Menu aria-label="Advanced execution actions" onAction={(key) => selectCategory(String(key) as ExecutionCategoryId)}>
+                    {EXECUTION_CATEGORIES.filter((candidate) => candidate.id === "payloads" || candidate.id === "remote" || candidate.id === "identity").map((candidate) => (
+                      <Dropdown.Item id={candidate.id} key={candidate.id} textValue={candidate.label}>
+                        <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={candidate.icon} />
+                        <Label>{candidate.label}</Label>
+                      </Dropdown.Item>
+                    ))}
+                  </Dropdown.Menu>
+                </Dropdown.Popover>
+              </Dropdown>
+              {onPopOut && presentation !== "dedicated" ? (
                 <Tooltip delay={250}>
                   <Button
                     aria-label="Pop out execution"
@@ -668,8 +695,8 @@ export function TargetExecutionWorkbench({
                   </Button>
                   <Tooltip.Content>Pop out execution into a new window</Tooltip.Content>
                 </Tooltip>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         ) : categoryTabs}
 
@@ -679,6 +706,18 @@ export function TargetExecutionWorkbench({
             isRefreshing={!catalogIsCurrent}
             target={catalogState.value.target}
             targetRef={catalogState.value.targetRef}
+          />
+        ) : category === "dotnet" ? (
+          <DotNetExecutionView
+            key={selectionIdentity}
+            capability={capabilities.find((capability) => capability.operationId === "execution.assembly")}
+            isExecuting={isExecuting}
+            isPreparing={isPreparing}
+            isRefreshing={!catalogIsCurrent}
+            target={catalogState.value.target}
+            targetRef={catalogState.value.targetRef}
+            result={result?.operationId === "execution.assembly" ? result : undefined}
+            onPrepare={prepare}
           />
         ) : isSession && category === "process" ? (
           <>
@@ -729,7 +768,7 @@ export function TargetExecutionWorkbench({
               onLoadMore={(operationId, cursor, taskId) => void runRead(operationId, cursor, taskId)}
               onRetry={(operationId) => void runRead(operationId)}
             />
-            {result ? (
+            {result && result.operationId !== "execution.assembly" ? (
               <ExecutionResultPanel
                 result={result}
                 savingStream={savingStream}

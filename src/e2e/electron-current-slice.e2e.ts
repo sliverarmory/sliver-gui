@@ -1037,6 +1037,7 @@ async function assertCloudDeploymentSurface(
       "onAwsLoginProgress",
       "onChanged",
       "onNavigationRequested",
+      "onSoftwareInstallProgress",
       "onThemeChanged",
     ].sort(),
   });
@@ -3454,7 +3455,8 @@ async function verifyM4SessionExecution(
   await page.getByRole("region", { name: "Execute a subprocess", exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Open: Background children", exact: true }).count(), 0);
 
-  await page.getByRole("radio", { name: "Remote", exact: true }).click();
+  await page.getByRole("button", { name: "Advanced actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Remote", exact: true }).click();
   await page.getByRole("button", { name: "Open: SSH command", exact: true }).click();
   const configuration = page.getByRole("dialog", { name: "SSH command", exact: true });
   await configuration.waitFor();
@@ -3527,16 +3529,19 @@ async function verifyM4SessionExecution(
   assert.equal(m4Screenshot.includes(Buffer.from(M4_SSH_STDOUT_TEXT)), false);
   assert.equal(m4Screenshot.includes(Buffer.from(m4SavedOutputPath)), false);
 
-  // A reviewed plan is quarantined as soon as the main-owned exact target
+  // A reviewed SSH plan is quarantined as soon as the main-owned exact target
   // changes, without dispatching the stale operation.
-  await page.getByRole("radio", { name: "Process", exact: true }).click();
-  const staleConfiguration = page.getByRole("region", { name: "Execute a subprocess", exact: true });
-  await staleConfiguration.getByLabel("Executable path").fill("/usr/bin/printf");
-  await staleConfiguration.getByLabel("Arguments").fill("stale-m4-plan");
-  await staleConfiguration.getByRole("button", { name: "Review command", exact: true }).click();
+  await page.getByRole("button", { name: "Open: SSH command", exact: true }).click();
+  const staleConfiguration = page.getByRole("dialog", { name: "SSH command", exact: true });
+  await staleConfiguration.getByLabel("Remote hostname").fill("m4-hop.internal");
+  await staleConfiguration.getByLabel("Username").fill("m4-operator");
+  await staleConfiguration.getByLabel("Remote command").fill("stale-m4-plan");
+  await staleConfiguration.getByLabel("Authentication").click();
+  await page.getByRole("option", { name: "Private key chosen during Review", exact: true }).click();
+  await staleConfiguration.getByRole("button", { name: "Review", exact: true }).click();
   const staleReview = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
   await staleReview.waitFor();
-  const executeCalls = fakeMethodCount(await readFakeState(electronApplication), "executeSession");
+  const executeCalls = fakeMethodCount(await readFakeState(electronApplication), "runSshSession");
 
   const currentBeacon = requireTargetRef(await rendererSnapshot(page), "beacon");
   assert.equal(currentBeacon.id, beaconRef.id);
@@ -3544,7 +3549,7 @@ async function verifyM4SessionExecution(
   assert.equal(selectedBeacon.ok, true, selectedBeacon.error ?? "selecting the M4 beacon failed");
   await staleReview.waitFor({ state: "hidden" });
   await page.getByRole("heading", { name: "Session workspace unavailable", exact: true }).waitFor();
-  assert.equal(fakeMethodCount(await readFakeState(electronApplication), "executeSession"), executeCalls);
+  assert.equal(fakeMethodCount(await readFakeState(electronApplication), "runSshSession"), executeCalls);
 
   const currentSession = requireTargetRef(await rendererSnapshot(page), "session");
   assert.equal(currentSession.id, sessionRef.id);

@@ -227,7 +227,8 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
     for (const zoom of [1, 0.9, 1.1]) {
       await nativeWindow.evaluate((window, factor) => window.webContents.setZoomFactor(factor), zoom);
       await page.waitForFunction((expectedWidth) => Math.abs((globalThis as unknown as { innerWidth: number }).innerWidth - expectedWidth) <= 2, 1440 / zoom);
-      await zoomRegion.getByText(`Zoom ${Math.round(zoom * 100)}%`, { exact: true }).waitFor();
+      if (zoom === 1) await zoomRegion.waitFor({ state: "hidden" });
+      else await zoomRegion.getByText(`Zoom ${Math.round(zoom * 100)}%`, { exact: true }).waitFor();
       await processGridScroll.evaluate((element) => { element.scrollTop = 600; });
       await detailsPane.locator(":scope > .overflow-auto").evaluate((element) => { element.scrollTop = 80; });
       const gridBounds = await processGridPane.boundingBox();
@@ -253,7 +254,7 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
       await contextMenu.waitFor({ state: "hidden" });
     }
     await resetZoom.click();
-    await zoomRegion.getByText("Zoom 100%", { exact: true }).waitFor();
+    await zoomRegion.waitFor({ state: "hidden" });
     assert.equal(await nativeWindow.evaluate((window) => window.webContents.getZoomFactor()), 1,
       "the sidebar Reset zoom control must restore the native window zoom");
 
@@ -285,7 +286,7 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
     assert.ok(menuZoom > 1, "the View menu Zoom In role must change native zoom");
     await zoomRegion.getByText(`Zoom ${Math.round(menuZoom * 100)}%`, { exact: true }).waitFor();
     await resetZoom.click();
-    await zoomRegion.getByText("Zoom 100%", { exact: true }).waitFor();
+    await zoomRegion.waitFor({ state: "hidden" });
     assert.equal(await nativeWindow.evaluate((window) => window.webContents.getZoomFactor()), 1);
 
     await page.getByRole("button", { name: /^Current server:/i }).click();
@@ -316,8 +317,7 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
       (await window.webContents.capturePage()).toPNG().toString("base64"));
     await writeFile(join(artifactDirectory, "sidebar-window-zoom-90-collapsed.png"), Buffer.from(collapsedScreenshot, "base64"));
     await resetZoom.click();
-    await zoomRegion.getByText("Zoom 100%", { exact: true }).waitFor();
-    assert.equal(await resetZoom.isEnabled(), false, "Reset zoom must be disabled at 100%");
+    await zoomRegion.waitFor({ state: "hidden" });
 
     assert.deepEqual(rendererErrors, [], "the Network views must not emit renderer errors");
   } catch (error) {

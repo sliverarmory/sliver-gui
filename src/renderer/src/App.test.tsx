@@ -151,6 +151,10 @@ function installSliverAPI(
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
     listInstalledBofs: vi.fn(failedOperation),
+    listDotNetAssemblies: vi.fn(failedOperation),
+    listDotNetExecutionHistory: vi.fn(failedOperation),
+    clearDotNetExecutionHistory: vi.fn(failedOperation),
+    chooseDotNetAssemblyFile: vi.fn(failedOperation),
     chooseBofDirectory: vi.fn(failedOperation),
     chooseBofArgumentFile: vi.fn(failedOperation),
     runBof: vi.fn(failedOperation),
@@ -179,6 +183,7 @@ function installSliverAPI(
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
     onProcessExecutionHistoryChanged: vi.fn(() => vi.fn()),
+    onDotNetExecutionHistoryChanged: vi.fn(() => vi.fn()),
     onBofExecutionHistoryChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
       captureSnapshotListener?.(listener);

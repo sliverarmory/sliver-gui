@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
 import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedCloudOverview, type ManagedServerReference, type SliverSnapshot } from "../shared/contracts.js";
 import { OPERATOR_DATA_LIMITS } from "../shared/operator-data-contracts.js";
+import type { ExecuteAssemblyDraft } from "../shared/execution-contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -624,6 +625,333 @@ describe("BOF execution records", () => {
     const rejected = await registry.runBof(1, input);
     expect(rejected).toMatchObject({ ok: true, value: { state: "request-failed" } });
     expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledOnce();
+  });
+});
+
+describe(".NET assembly execution sources", () => {
+  function draft(args: string[] = ["first", "two words", "--count=3"]): ExecuteAssemblyDraft {
+    return {
+      operationId: "execution.assembly",
+      args,
+      process: "notepad.exe",
+      isDll: false,
+      architecture: "x64",
+      processArgs: [],
+      inProcess: false,
+      amsiBypass: false,
+      etwBypass: false,
+      timeoutSeconds: 60,
+    };
+  }
+
+  async function windowsRegistry(secondSession = false): Promise<{ registry: ConnectionRegistry; client: FakeSliverClient }> {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      clientpb.Session.create({ ...session("session_dotnet", "dotnet"), OS: "windows", Arch: "amd64" }),
+      ...(secondSession
+        ? [clientpb.Session.create({ ...session("session_dotnet_other", "dotnet-other"), OS: "windows", Arch: "amd64" })]
+        : []),
+    ];
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_dotnet");
+    if (!target) throw new Error("Expected a Windows .NET session");
+    expect(await registry.selectTarget(1, target)).toMatchObject({ ok: true });
+    return { registry, client };
+  }
+
+  async function installAssembly(bytes: Buffer): Promise<{ manifestPath: string; artifactPath: string }> {
+    const directory = join(root, "aliases", "arg-echo");
+    await mkdir(directory, { recursive: true });
+    const artifactPath = join(directory, "arg-echo.exe");
+    const manifestPath = join(directory, "alias.json");
+    await writeFile(artifactPath, bytes);
+    await writeFile(manifestPath, JSON.stringify({
+      name: "Argument Echo", command_name: "arg-echo", help: "Prints CLI arguments",
+      is_assembly: true, files: [{ os: "windows", arch: "amd64", path: "arg-echo.exe" }],
+    }));
+    return { manifestPath, artifactPath };
+  }
+
+  it("stages an installed Armory assembly and dispatches its exact CLI arguments", async () => {
+    const bytes = Buffer.from("managed-argument-echo");
+    await installAssembly(bytes);
+    const { registry, client } = await windowsRegistry();
+    const catalog = await registry.listDotNetAssemblies(1);
+    expect(catalog).toMatchObject({ ok: true, value: {
+      target: { id: "session_dotnet" },
+      assemblies: [{ id: "aliases/arg-echo", commandName: "arg-echo", available: true, isDll: false }],
+    } });
+
+    const args = ["first", "two words", "--count=3"];
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: draft(args), assemblySource: { kind: "armory", id: "aliases/arg-echo" },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    expect(prepared.value).toMatchObject({
+      operationId: "execution.assembly",
+      fields: expect.arrayContaining([{ label: "Arguments", value: "3", sensitive: false }]),
+      artifacts: [{
+        role: "assembly", fileName: "arg-echo.exe", size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      }],
+    });
+
+    const dispatches: Array<{ targetId: string; bytes: Buffer; args: string[]; processArgs: string[]; timeout: number }> = [];
+    client.adapter.executeAssemblySession = vi.fn(async (
+      ...[targetId, assembly, options, timeout]: Parameters<SliverClientAdapter["executeAssemblySession"]>
+    ) => {
+      if (!options?.arguments || !options.processArgs || timeout === undefined) {
+        throw new Error("Expected assembly CLI arguments and timeout");
+      }
+      dispatches.push({
+        targetId, bytes: Buffer.from(assembly), args: [...options.arguments],
+        processArgs: [...options.processArgs], timeout,
+      });
+      return sliverpb.ExecuteAssembly.create({ Output: Buffer.from("argv received"), Response: { Err: "" } });
+    });
+    const executed = await registry.executeExecutionPlan(1, { token: prepared.value.token });
+    expect(executed).toMatchObject({ ok: true, value: { state: "completed", operationId: "execution.assembly" } });
+    expect(dispatches).toEqual([{ targetId: "session_dotnet", bytes, args, processArgs: [], timeout: 60 }]);
+  });
+
+  it("shares bounded assembly history and prior output with an exact-target popout", async () => {
+    await installAssembly(Buffer.from("assembly-history-fixture"));
+    const { registry, client } = await windowsRegistry(true);
+    const target = registry.snapshot(1).targetContext.activeTarget;
+    if (!target) throw new Error("Expected selected .NET target");
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    expect(await registry.selectTarget(2, target)).toMatchObject({ ok: true });
+
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: draft(["alpha", "beta", "--count=7"]),
+      assemblySource: { kind: "armory", id: "aliases/arg-echo" },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    client.adapter.executeAssemblySession = vi.fn(async () => sliverpb.ExecuteAssembly.create({
+      Output: Buffer.from("COUNT=3\nARG[0]=alpha\nARG[1]=beta\nARG[2]=--count=7"),
+      Response: { Err: "" },
+    }));
+    const executed = await registry.executeExecutionPlan(1, { token: prepared.value.token });
+    if (!executed.ok) throw new Error(executed.error);
+
+    const listed = await registry.listDotNetExecutionHistory(2);
+    if (!listed.ok) throw new Error(listed.error);
+    expect(listed.value.target).toMatchObject({ id: target.id, fingerprint: target.fingerprint });
+    expect(listed.value.revision).toBeGreaterThan(0);
+    expect(listed.value.records).toMatchObject([{
+      id: executed.value.requestId,
+      assemblyName: "arg-echo.exe",
+      sourceKind: "armory",
+      args: ["alpha", "beta", "--count=7"],
+      state: "completed",
+    }]);
+    const copied = listed.value.records[0]!.stdout!.data;
+    expect(Buffer.from(copied).toString()).toContain("ARG[2]=--count=7");
+    copied.fill(0);
+    const fresh = await registry.listDotNetExecutionHistory(2);
+    if (!fresh.ok) throw new Error(fresh.error);
+    expect(Buffer.from(fresh.value.records[0]!.stdout!.data).toString()).toContain("ARG[0]=alpha");
+    await expect(registry.getExecutionResult(2, { requestId: executed.value.requestId }))
+      .resolves.toMatchObject({ ok: true, value: { operationId: "execution.assembly", state: "completed" } });
+    const output = await registry.readExecutionOutput(2, { requestId: executed.value.requestId, stream: "stdout" });
+    if (!output.ok) throw new Error(output.error);
+    expect(Buffer.from(output.value.data).toString()).toContain("COUNT=3");
+    output.value.data.fill(0);
+
+    const internal = (registry as unknown as { dotNetExecutionHistories: Map<string, {
+      entries: Array<{ record: { stdout?: { data: Uint8Array } } }>;
+    }> }).dotNetExecutionHistories;
+    const retained = [...internal.values()][0]?.entries[0]?.record.stdout?.data;
+    if (!retained) throw new Error("Expected retained assembly output");
+    await expect(registry.clearDotNetExecutionHistory(2, { id: executed.value.requestId }))
+      .resolves.toEqual({ ok: true });
+    expect(retained.every((byte) => byte === 0)).toBe(true);
+    await expect(registry.listDotNetExecutionHistory(1)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+    await expect(registry.readExecutionOutput(2, { requestId: executed.value.requestId, stream: "stdout" }))
+      .resolves.toMatchObject({ ok: false });
+  });
+
+  it("lets a beacon popout retry an uncertain assembly result and recover its output", async () => {
+    await installAssembly(Buffer.from("beacon-assembly-fixture"));
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [clientpb.Beacon.create({
+      ...beacon("beacon_dotnet", "dotnet"), OS: "windows", Arch: "amd64",
+    })];
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "beacon_dotnet");
+    if (!target) throw new Error("Expected a Windows .NET beacon");
+    expect(await registry.selectTarget(1, target)).toMatchObject({ ok: true });
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    expect(await registry.selectTarget(2, target)).toMatchObject({ ok: true });
+    client.adapter.executeAssemblyBeacon = vi.fn(async () => sliverpb.ExecuteAssembly.create({
+      Response: { Async: true, TaskID: "dotnet-task" },
+    }));
+
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: draft(["alpha", "--count=1"]),
+      assemblySource: { kind: "armory", id: "aliases/arg-echo" },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    const executed = await registry.executeExecutionPlan(1, { token: prepared.value.token });
+    if (!executed.ok) throw new Error(executed.error);
+    expect(executed.value).toMatchObject({ state: "submitted", taskId: "dotnet-task" });
+    await expect(registry.listDotNetExecutionHistory(2)).resolves.toMatchObject({
+      ok: true, value: { records: [{ id: executed.value.requestId, state: "submitted" }] },
+    });
+
+    let fetches = 0;
+    client.adapter.fetchBeaconTask = vi.fn(async () => clientpb.BeaconTask.create({
+      ID: "dotnet-task",
+      BeaconID: "beacon_dotnet",
+      State: "completed",
+      Description: fetches++ === 0 ? "TaskReq" : "InvokeExecuteAssemblyReq",
+      Response: Buffer.from(sliverpb.ExecuteAssembly.encode(sliverpb.ExecuteAssembly.create({
+        Output: Buffer.from("COUNT=2\nARG[0]=alpha\nARG[1]=--count=1"),
+        Response: { Err: "" },
+      })).finish()),
+    }));
+    await expect(registry.getExecutionResult(2, { requestId: executed.value.requestId })).resolves.toMatchObject({
+      ok: true, value: { operationId: "execution.assembly", state: "outcome-unknown" },
+    });
+    await expect(registry.listDotNetExecutionHistory(1)).resolves.toMatchObject({
+      ok: true, value: { records: [{ id: executed.value.requestId, state: "outcome-unknown" }] },
+    });
+    const peerContext = (registry as unknown as {
+      windows: Map<number, { executionResults: Map<string, unknown> }>;
+    }).windows.get(2);
+    expect(peerContext?.executionResults.has(executed.value.requestId)).toBe(false);
+    await expect(registry.getExecutionResult(2, { requestId: executed.value.requestId })).resolves.toMatchObject({
+      ok: true, value: { operationId: "execution.assembly", state: "completed" },
+    });
+    expect(client.adapter.fetchBeaconTask).toHaveBeenCalledTimes(2);
+    const history = await registry.listDotNetExecutionHistory(1);
+    if (!history.ok) throw new Error(history.error);
+    expect(history.value.records[0]?.state).toBe("completed");
+    expect(Buffer.from(history.value.records[0]!.stdout!.data).toString()).toContain("ARG[1]=--count=1");
+  });
+
+  it("does not resurrect an assembly invocation cleared while it runs", async () => {
+    await installAssembly(Buffer.from("clear-while-running"));
+    const { registry, client } = await windowsRegistry();
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: draft(["late"]), assemblySource: { kind: "armory", id: "aliases/arg-echo" },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    let finish: ((result: sliverpb.ExecuteAssembly) => void) | undefined;
+    client.adapter.executeAssemblySession = vi.fn(async () => new Promise<sliverpb.ExecuteAssembly>((resolve) => {
+      finish = resolve;
+    }));
+    const executing = registry.executeExecutionPlan(1, { token: prepared.value.token });
+    await vi.waitFor(async () => {
+      expect(await registry.listDotNetExecutionHistory(1)).toMatchObject({
+        ok: true, value: { records: [{ state: "running" }] },
+      });
+    });
+    await expect(registry.clearDotNetExecutionHistory(1, {})).resolves.toEqual({ ok: true });
+    finish?.(sliverpb.ExecuteAssembly.create({ Output: Buffer.from("late output"), Response: { Err: "" } }));
+    await expect(executing).resolves.toMatchObject({ ok: true, value: { state: "completed" } });
+    await expect(registry.listDotNetExecutionHistory(1)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+  });
+
+  it("rejects an Armory selection when its installed artifact or manifest changed", async () => {
+    const { manifestPath, artifactPath } = await installAssembly(Buffer.from("original-assembly"));
+    const { registry } = await windowsRegistry();
+    expect(await registry.listDotNetAssemblies(1)).toMatchObject({ ok: true, value: {
+      assemblies: [{ id: "aliases/arg-echo", available: true }],
+    } });
+
+    await rm(artifactPath);
+    await expect(registry.prepareExecutionAction(sender(1), {
+      draft: draft(), assemblySource: { kind: "armory", id: "aliases/arg-echo" },
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Armory assembly is unavailable/u) });
+
+    await writeFile(artifactPath, Buffer.from("replacement-assembly"));
+    await writeFile(manifestPath, JSON.stringify({
+      name: "Argument Echo", command_name: "arg-echo", help: "Changed to a DLL",
+      is_assembly: true, files: [{ os: "windows", arch: "amd64", path: "arg-echo.dll" }],
+    }));
+    await writeFile(join(root, "aliases", "arg-echo", "arg-echo.dll"), Buffer.from("dll-assembly"));
+    await expect(registry.prepareExecutionAction(sender(1), {
+      draft: draft(), assemblySource: { kind: "armory", id: "aliases/arg-echo" },
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/assembly type changed/u) });
+  });
+
+  it("opens a native assembly once and stages the bytes selected before the source file changed", async () => {
+    const sourcePath = join(externalDirectory, "local-arg-echo.exe");
+    const selectedBytes = Buffer.from("opened-assembly-bytes");
+    await writeFile(sourcePath, selectedBytes);
+    const { registry, client } = await windowsRegistry();
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [sourcePath] });
+    const selected = await registry.chooseDotNetAssemblyFile(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected native .NET file selection");
+    expect(selected.value).toMatchObject({ fileName: "local-arg-echo.exe", size: selectedBytes.length, isDll: false });
+    expect(electronMocks.showOpenDialog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      properties: ["openFile"], filters: [{ name: ".NET assemblies", extensions: ["exe", "dll"] }],
+    }));
+
+    await writeFile(sourcePath, Buffer.from("changed-after-open"));
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: draft(["alpha", "two words"]),
+      assemblySource: { kind: "file", token: selected.value.token },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    expect(prepared.value.artifacts).toEqual([expect.objectContaining({
+      role: "assembly", fileName: "local-arg-echo.exe", size: selectedBytes.length,
+      sha256: createHash("sha256").update(selectedBytes).digest("hex"),
+    })]);
+    await expect(registry.prepareExecutionAction(sender(1), {
+      draft: draft(), assemblySource: { kind: "file", token: selected.value.token },
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/file is unavailable or expired/u) });
+
+    const dispatched: Array<{ bytes: Buffer; args: string[] }> = [];
+    client.adapter.executeAssemblySession = vi.fn(async (
+      ...[_targetId, assembly, options]: Parameters<SliverClientAdapter["executeAssemblySession"]>
+    ) => {
+      if (!options?.arguments) throw new Error("Expected assembly CLI arguments");
+      dispatched.push({ bytes: Buffer.from(assembly), args: [...options.arguments] });
+      return sliverpb.ExecuteAssembly.create({ Output: Buffer.from("ok"), Response: { Err: "" } });
+    });
+    expect(await registry.executeExecutionPlan(1, { token: prepared.value.token }))
+      .toMatchObject({ ok: true, value: { state: "completed" } });
+    expect(dispatched).toEqual([{ bytes: selectedBytes, args: ["alpha", "two words"] }]);
+  });
+
+  it("revokes an opened file token when the selected target changes", async () => {
+    const sourcePath = join(externalDirectory, "local-arg-echo.exe");
+    await writeFile(sourcePath, Buffer.from("target-bound-assembly"));
+    const { registry } = await windowsRegistry(true);
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [sourcePath] });
+    const selected = await registry.chooseDotNetAssemblyFile(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected native .NET file selection");
+    const context = (registry as unknown as { windows: Map<number, { dotNetFile?: { data: Buffer } }> }).windows.get(1)!;
+    const retained = context.dotNetFile?.data;
+    if (!retained) throw new Error("Expected selected bytes in the window context");
+    const other = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_dotnet_other");
+    if (!other) throw new Error("Expected another Windows target");
+    expect(await registry.selectTarget(1, other)).toMatchObject({ ok: true });
+    expect(context.dotNetFile).toBeUndefined();
+    expect(retained.every((byte) => byte === 0)).toBe(true);
+    await expect(registry.prepareExecutionAction(sender(1), {
+      draft: draft(), assemblySource: { kind: "file", token: selected.value.token },
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/file is unavailable or expired/u) });
   });
 });
 

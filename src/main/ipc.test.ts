@@ -1616,6 +1616,24 @@ describe("trusted Electron IPC boundary", () => {
     expect(clearProcessExecutionHistory).toHaveBeenCalledExactlyOnceWith(77, { id: request.requestId });
   });
 
+  it("routes .NET history only through the trusted window and a bounded clear input", async () => {
+    const listDotNetExecutionHistory = vi.fn(async () => ({ ok: false as const, error: "history probe" }));
+    const clearDotNetExecutionHistory = vi.fn(async () => ({ ok: false as const, error: "clear probe" }));
+    registerIpcHandlers(registryMock({ listDotNetExecutionHistory, clearDotNetExecutionHistory }), vi.fn(), RENDERER_URL);
+    const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html#/sessions/session_1", 88);
+
+    await electronMocks.handlers.get(IPC.listDotNetExecutionHistory)?.(trusted.event);
+    await electronMocks.handlers.get(IPC.clearDotNetExecutionHistory)?.(trusted.event, { id: "dotnet_request_1" });
+    expect(listDotNetExecutionHistory).toHaveBeenCalledExactlyOnceWith(77);
+    expect(clearDotNetExecutionHistory).toHaveBeenCalledExactlyOnceWith(77, { id: "dotnet_request_1" });
+    expect(() => electronMocks.handlers.get(IPC.listDotNetExecutionHistory)?.(untrusted.event)).toThrow(/untrusted renderer/iu);
+    expect(() => electronMocks.handlers.get(IPC.clearDotNetExecutionHistory)?.(trusted.event, {
+      id: "dotnet_request_1", targetId: "other",
+    })).toThrow(/unexpected field: targetId/iu);
+    expect(clearDotNetExecutionHistory).toHaveBeenCalledOnce();
+  });
+
   it("scrubs every raw credential view after successful prepare while retaining the parsed copy", async () => {
     const parsedCredentials: Uint8Array[] = [];
     const prepareExecutionAction = vi.fn(async (_sender: WebContents, input: PrepareExecutionActionInput) => {
@@ -2145,6 +2163,10 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     saveExecutionResult: vi.fn(unavailable),
     listProcessExecutionHistory: vi.fn(unavailable),
     clearProcessExecutionHistory: vi.fn(unavailable),
+    listDotNetExecutionHistory: vi.fn(unavailable),
+    clearDotNetExecutionHistory: vi.fn(unavailable),
+    listDotNetAssemblies: vi.fn(unavailable),
+    chooseDotNetAssemblyFile: vi.fn(unavailable),
     listInstalledBofs: vi.fn(unavailable),
     chooseBofDirectory: vi.fn(unavailable),
     chooseBofArgumentFile: vi.fn(unavailable),

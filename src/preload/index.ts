@@ -211,6 +211,13 @@ const api: SliverDesktopAPI = {
     ipcRenderer.on(IPC.processExecutionHistoryChanged, handler);
     return () => ipcRenderer.removeListener(IPC.processExecutionHistoryChanged, handler);
   },
+  onDotNetExecutionHistoryChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, target: TargetRef, revision: number): void => {
+      if (Number.isSafeInteger(revision) && revision >= 0) listener(target, revision);
+    };
+    ipcRenderer.on(IPC.dotNetExecutionHistoryChanged, handler);
+    return () => ipcRenderer.removeListener(IPC.dotNetExecutionHistoryChanged, handler);
+  },
   onBofExecutionHistoryChanged: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, target: TargetRef, revision: number): void => {
       if (Number.isSafeInteger(revision) && revision >= 0) listener(target, revision);

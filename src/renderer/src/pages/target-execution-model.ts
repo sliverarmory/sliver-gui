@@ -23,7 +23,7 @@ import type {
 } from "../../../shared/execution-contracts";
 import type { TargetSummary } from "../../../shared/target-contracts";
 
-export type ExecutionCategoryId = "process" | "bofs" | "payloads" | "remote" | "identity";
+export type ExecutionCategoryId = "process" | "bofs" | "dotnet" | "payloads" | "remote" | "identity";
 
 export interface ExecutionCategoryPresentation {
   id: ExecutionCategoryId;
@@ -50,6 +50,12 @@ export const EXECUTION_CATEGORIES: readonly ExecutionCategoryPresentation[] = Ob
     id: "bofs",
     label: "BOFs",
     description: "Run installed Armory BOFs with arguments from their manifests.",
+    icon: faFileCode,
+  },
+  {
+    id: "dotnet",
+    label: ".NET",
+    description: "Run a .NET assembly from Armory or a local file with explicit command-line arguments.",
     icon: faFileCode,
   },
   {
@@ -86,7 +92,7 @@ const ACTION_PRESENTATION = Object.freeze({
     icon: faSitemap,
   },
   "execution.assembly": {
-    category: "payloads",
+    category: "dotnet",
     label: "Execute assembly",
     description: "Choose and run a .NET assembly with architecture-aware options.",
     icon: faFileCode,

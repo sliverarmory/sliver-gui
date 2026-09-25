@@ -62,6 +62,7 @@ import {
 } from "../shared/session-contracts.js";
 import {
   parseAddExecutionOutputToLootInput,
+  parseClearDotNetExecutionHistoryInput,
   parseClearProcessExecutionHistoryInput,
   parseExecuteExecutionPlanInput,
   parseExecutionResultRequest,
@@ -290,6 +291,10 @@ export type IpcConnectionRegistry = Pick<
   | "saveExecutionResult"
   | "listProcessExecutionHistory"
   | "clearProcessExecutionHistory"
+  | "listDotNetExecutionHistory"
+  | "clearDotNetExecutionHistory"
+  | "listDotNetAssemblies"
+  | "chooseDotNetAssemblyFile"
   | "listInstalledBofs"
   | "chooseBofDirectory"
   | "chooseBofArgumentFile"
@@ -863,6 +868,18 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.clearProcessExecutionHistory, rendererUrl, parseClearProcessExecutionHistoryArguments, ({ contentsId }, input) =>
     registry.clearProcessExecutionHistory(contentsId, input),
+  );
+  handleTrusted(IPC.listDotNetExecutionHistory, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.listDotNetExecutionHistory(contentsId),
+  );
+  handleTrusted(IPC.clearDotNetExecutionHistory, rendererUrl, parseClearDotNetExecutionHistoryArguments, ({ contentsId }, input) =>
+    registry.clearDotNetExecutionHistory(contentsId, input),
+  );
+  handleTrusted(IPC.listDotNetAssemblies, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.listDotNetAssemblies(contentsId),
+  );
+  handleTrusted(IPC.chooseDotNetAssemblyFile, rendererUrl, parseNoArguments, ({ sender }) =>
+    registry.chooseDotNetAssemblyFile(sender),
   );
   handleTrusted(IPC.listInstalledBofs, rendererUrl, parseNoArguments, ({ contentsId }) =>
     registry.listInstalledBofs(contentsId),
@@ -1537,6 +1554,13 @@ function parseClearProcessExecutionHistoryArguments(
 ): [input: ReturnType<typeof parseClearProcessExecutionHistoryInput>] {
   requireArgumentCount(args, 1, "clear process execution history input");
   return [parseClearProcessExecutionHistoryInput(args[0])];
+}
+
+function parseClearDotNetExecutionHistoryArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseClearDotNetExecutionHistoryInput>] {
+  requireArgumentCount(args, 1, "clear .NET execution history input");
+  return [parseClearDotNetExecutionHistoryInput(args[0])];
 }
 
 function parseSaveExecutionResultArguments(

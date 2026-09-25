@@ -54,7 +54,10 @@ import type {
 } from "./application-settings-contracts.js";
 import type {
   AddExecutionOutputToLootInput,
+  ClearDotNetExecutionHistoryInput,
   ClearProcessExecutionHistoryInput,
+  DotNetFileSelection,
+  DotNetExecutionHistorySnapshot,
   ExecuteExecutionPlanInput,
   ExecutionActionPlan,
   ExecutionActionResult,
@@ -69,6 +72,7 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "./execution-contracts.js";
+import type { DotNetCatalog } from "./dotnet-contracts.js";
 import type {
   AddBofOutputToLootInput,
   BofArgumentFileSelection,
@@ -218,6 +222,10 @@ export const IPC_INVOKE = {
   saveExecutionResult: "sliver:execution:save-result",
   listProcessExecutionHistory: "sliver:execution:process-history:list",
   clearProcessExecutionHistory: "sliver:execution:process-history:clear",
+  listDotNetExecutionHistory: "sliver:dotnet:history:list",
+  clearDotNetExecutionHistory: "sliver:dotnet:history:clear",
+  listDotNetAssemblies: "sliver:dotnet:catalog",
+  chooseDotNetAssemblyFile: "sliver:dotnet:choose-file",
   listInstalledBofs: "sliver:bof:catalog",
   chooseBofDirectory: "sliver:bof:choose-directory",
   chooseBofArgumentFile: "sliver:bof:choose-file",
@@ -242,6 +250,7 @@ export const IPC_EVENTS = {
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
   processExecutionHistoryChanged: "sliver:execution:process-history:changed",
+  dotNetExecutionHistoryChanged: "sliver:dotnet:history:changed",
   bofExecutionHistoryChanged: "sliver:bof:history:changed",
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
   sessionShellsChanged: "sliver:session-shell:changed",
@@ -1150,6 +1159,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: ClearProcessExecutionHistoryInput];
     result: OperationResult;
   };
+  [IPC.listDotNetExecutionHistory]: { args: []; result: OperationResult<DotNetExecutionHistorySnapshot> };
+  [IPC.clearDotNetExecutionHistory]: { args: [input: ClearDotNetExecutionHistoryInput]; result: OperationResult };
+  [IPC.listDotNetAssemblies]: { args: []; result: OperationResult<DotNetCatalog> };
+  [IPC.chooseDotNetAssemblyFile]: { args: []; result: OperationResult<DotNetFileSelection | null> };
   [IPC.listInstalledBofs]: { args: []; result: OperationResult<BofCatalog> };
   [IPC.chooseBofDirectory]: { args: []; result: OperationResult<BofDirectorySelection | null> };
   [IPC.chooseBofArgumentFile]: { args: [input: ChooseBofArgumentFileInput]; result: OperationResult<BofArgumentFileSelection | null> };
@@ -1193,6 +1206,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
   onProcessExecutionHistoryChanged: (listener: (target: TargetRef, revision: number) => void) => () => void;
+  onDotNetExecutionHistoryChanged: (listener: (target: TargetRef, revision: number) => void) => () => void;
   onBofExecutionHistoryChanged: (listener: (target: TargetRef, revision: number) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
@@ -1237,6 +1251,7 @@ export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAP
   "onSnapshotChanged",
   "onOperationChanged",
   "onProcessExecutionHistoryChanged",
+  "onDotNetExecutionHistoryChanged",
   "onBofExecutionHistoryChanged",
   "onBeaconTasksInvalidated",
   "onSessionShellsChanged",

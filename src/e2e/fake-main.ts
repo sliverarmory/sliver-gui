@@ -106,6 +106,13 @@ interface FakeMainState {
     options: Parameters<SliverClientAdapter["executeSession"]>[1];
     timeoutSeconds: number | undefined;
   }>;
+  assemblyCalls: Array<{
+    targetMode: "session" | "beacon";
+    targetId: string;
+    assemblySha256: string;
+    options: Parameters<SliverClientAdapter["executeAssemblySession"]>[2];
+    timeoutSeconds: number | undefined;
+  }>;
   bofCalls: Array<{
     targetMode: "session" | "beacon";
     targetId: string;
@@ -207,6 +214,7 @@ const state: FakeMainState = {
   openSessionRequests: [],
   tasks: [],
   processCalls: [],
+  assemblyCalls: [],
   bofCalls: [],
   legacyBofCalls: [],
   processResponseHeld: false,
@@ -1984,19 +1992,31 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         ),
       });
     },
-    async executeAssemblySession(sessionId, assembly) {
+    async executeAssemblySession(sessionId, assembly, options, timeoutSeconds) {
       recordM4("executeAssemblySession");
       requireSession(sessionId);
       inspectArtifact(assembly, "Assembly");
+      testState.assemblyCalls.push({
+        targetMode: "session", targetId: sessionId,
+        assemblySha256: createHash("sha256").update(assembly).digest("hex"),
+        options: { ...options, arguments: [...(options?.arguments ?? [])], processArgs: [...(options?.processArgs ?? [])] },
+        timeoutSeconds,
+      });
       return sliverpb.ExecuteAssembly.create({
         Output: Buffer.from("deterministic M4 assembly output\n", "utf8"),
         Response: response(false),
       });
     },
-    async executeAssemblyBeacon(beaconId, assembly, options) {
+    async executeAssemblyBeacon(beaconId, assembly, options, timeoutSeconds) {
       recordM4("executeAssemblyBeacon");
       requireBeacon(beaconId);
       inspectArtifact(assembly, "Assembly");
+      testState.assemblyCalls.push({
+        targetMode: "beacon", targetId: beaconId,
+        assemblySha256: createHash("sha256").update(assembly).digest("hex"),
+        options: { ...options, arguments: [...(options?.arguments ?? [])], processArgs: [...(options?.processArgs ?? [])] },
+        timeoutSeconds,
+      });
       const completed = sliverpb.ExecuteAssembly.create({
         Output: Buffer.from("deterministic M4 assembly output\n", "utf8"),
         Response: response(false),

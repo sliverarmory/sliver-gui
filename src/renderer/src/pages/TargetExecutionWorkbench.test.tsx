@@ -200,6 +200,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+async function selectAdvancedCategory(user: ReturnType<typeof userEvent.setup>, label: "Payloads" | "Remote" | "Identity"): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "Advanced actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: label }));
+}
+
 function installAPI(executionCatalog: ExecutionCatalog) {
   let beaconTasksInvalidatedListener: ((target: TargetRef) => void) | undefined;
   let processHistoryTarget = executionCatalog.targetRef;
@@ -208,6 +213,11 @@ function installAPI(executionCatalog: ExecutionCatalog) {
   const processHistoryListeners = new Set<(target: TargetRef, revision: number) => void>();
   const api = {
     listExecutionCatalog: vi.fn().mockResolvedValue({ ok: true, value: executionCatalog }),
+    listDotNetAssemblies: vi.fn().mockResolvedValue({ ok: true, value: { target: executionCatalog.targetRef, assemblies: [] } }),
+    listDotNetExecutionHistory: vi.fn().mockResolvedValue({ ok: true, value: { target: executionCatalog.targetRef, revision: 0, records: [] } }),
+    clearDotNetExecutionHistory: vi.fn().mockResolvedValue({ ok: true }),
+    onDotNetExecutionHistoryChanged: vi.fn(() => () => undefined),
+    chooseDotNetAssemblyFile: vi.fn().mockResolvedValue({ ok: true, value: { token: "assembly-file-token", fileName: "Seatbelt.exe", size: 524_288, isDll: false } }),
     runExecutionRead: vi.fn().mockResolvedValue({ ok: false, error: "No read configured" }),
     prepareExecutionAction: vi.fn().mockResolvedValue({ ok: false, error: "No plan configured" }),
     executeExecutionPlan: vi.fn().mockResolvedValue({ ok: false, error: "No execution configured" }),
@@ -332,7 +342,7 @@ describe("TargetExecutionWorkbench", () => {
 
     const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
     const operations = await screen.findByRole("region", { name: "Execution operations" });
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await selectAdvancedCategory(user, "Identity");
     expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Open: Revert identity" }));
     await user.click(screen.getByRole("button", { name: "Review" }));
@@ -343,20 +353,20 @@ describe("TargetExecutionWorkbench", () => {
     await waitFor(() => expect(api.discardExecutionPlan).toHaveBeenCalledWith({ token: "plan-privilege.revert" }));
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Execution operations" })).toBe(operations);
-    expect(screen.getByRole("radio", { name: "Identity" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Advanced actions" })).toHaveTextContent("Identity");
     expect(screen.queryByRole("region", { name: "Loading execution workbench" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeDisabled();
     expect(screen.getByRole("status")).toHaveTextContent("Refreshing execution capabilities");
     await user.click(screen.getByRole("radio", { name: "Process" }));
     expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled();
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await selectAdvancedCategory(user, "Identity");
 
     await act(async () => {
       refreshedCatalog.resolve({ ok: true, value: catalog([process, revert], target, revisedRef) });
       await refreshedCatalog.promise;
     });
     expect(screen.getByRole("region", { name: "Execution operations" })).toBe(operations);
-    expect(screen.getByRole("radio", { name: "Identity" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Advanced actions" })).toHaveTextContent("Identity");
     expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeEnabled();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
@@ -414,9 +424,11 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(executionOperations).queryByText("linux/amd64")).not.toBeInTheDocument();
     expect(api.listExecutionCatalog).toHaveBeenCalledOnce();
     expect(screen.getByRole("radio", { name: "Process" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Payloads" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Remote" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Identity" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "BOFs" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: ".NET" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Payloads" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Remote" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Identity" })).not.toBeInTheDocument();
     const processWorkspace = screen.getByRole("region", { name: "Process execution history and output" });
     const history = screen.getByRole("navigation", { name: "Process execution history" });
     expect(within(processWorkspace).getByRole("navigation", { name: "Process execution history" })).toBe(history);
@@ -439,13 +451,9 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.queryByText("Background tracking is disabled by this server.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Unavailable: Background children" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("radio", { name: "Remote" }));
-    expect(screen.getByText("SSH command")).toBeInTheDocument();
-    expect(screen.queryByText("Remote service")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
-    expect(screen.getByText("No identity actions support this target")).toBeInTheDocument();
-    expect(screen.queryByText("Inspect privileges")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: ".NET" }));
+    expect(screen.getByRole("region", { name: ".NET assembly execution" })).toBeInTheDocument();
+    expect(screen.getByText(".NET execution is unavailable for this target.")).toBeInTheDocument();
   });
 
   it("opens a typed configuration surface for every catalog action capability", async () => {
@@ -458,7 +466,6 @@ describe("TargetExecutionWorkbench", () => {
       {
         category: "Payloads",
         labels: [
-          "Execute assembly",
           "Execute shellcode",
           "Sideload library",
           "Spawn reflective DLL",
@@ -489,7 +496,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.queryByRole("dialog", { name: "Execution options" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open: Migrate process" })).not.toBeInTheDocument();
     for (const group of actionGroups) {
-      await user.click(screen.getByRole("radio", { name: group.category }));
+      await selectAdvancedCategory(user, group.category);
       for (const label of group.labels) {
         await user.click(screen.getByRole("button", { name: `Open: ${label}` }));
         const dialog = await screen.findByRole("dialog", { name: label });
@@ -1053,7 +1060,7 @@ describe("TargetExecutionWorkbench", () => {
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
     await screen.findByRole("region", { name: "Execution operations" });
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await selectAdvancedCategory(user, "Identity");
     const origin = screen.getByRole("button", { name: "Open: Revert identity" });
     await user.click(origin);
     await user.click(screen.getByRole("button", { name: "Review" }));
@@ -1073,7 +1080,7 @@ describe("TargetExecutionWorkbench", () => {
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
     await screen.findByRole("region", { name: "Execution operations" });
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await selectAdvancedCategory(user, "Identity");
     const origin = screen.getByRole("button", { name: "Open: Revert identity" });
     await user.click(origin);
     await user.click(screen.getByRole("button", { name: "Review" }));
@@ -1095,7 +1102,7 @@ describe("TargetExecutionWorkbench", () => {
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
     await screen.findByRole("region", { name: "Execution operations" });
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await selectAdvancedCategory(user, "Identity");
     await user.click(screen.getByRole("button", { name: "Open: Revert identity" }));
     await user.click(screen.getByRole("button", { name: "Review" }));
     const review = await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
@@ -1190,7 +1197,7 @@ describe("TargetExecutionWorkbench", () => {
 
     const { rerender } = render(<TargetExecutionWorkbench expectedTarget={windowsRef} targetIdentity="target-windows-a" />);
     await screen.findByRole("region", { name: "Execution operations" });
-    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await selectAdvancedCategory(user, "Identity");
     await user.click(screen.getByRole("button", { name: "Open: Run as user" }));
     await user.type(screen.getByRole("textbox", { name: "Username" }), "CORP\\alice");
     const password = screen.getByLabelText("Password") as HTMLInputElement;
@@ -1220,9 +1227,12 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
   });
 
-  it("keeps native paths in main and shows only sanitized file metadata during Review", async () => {
+  it("executes a local .NET assembly directly while keeping its native path in main", async () => {
     const user = userEvent.setup();
+    const windowsTarget: SessionSummary = { ...target, os: "windows", arch: "amd64" };
+    const windowsRef: TargetRef = { ...targetRef, fingerprint: "f".repeat(64) };
     const assembly = capability("execution.assembly", {
+      platforms: ["windows"],
       artifacts: [{
         role: "assembly",
         label: ".NET assembly",
@@ -1231,10 +1241,11 @@ describe("TargetExecutionWorkbench", () => {
         acceptedExtensions: [".exe", ".dll"],
       }],
     });
-    const api = installAPI(catalog([assembly]));
+    const api = installAPI(catalog([assembly], windowsTarget, windowsRef));
     api.prepareExecutionAction.mockResolvedValue({
       ok: true,
       value: plan("execution.assembly", {
+        target: { backend, target: windowsTarget, fingerprint: windowsRef.fingerprint },
         artifacts: [{
           role: "assembly",
           fileName: "Seatbelt.exe",
@@ -1244,18 +1255,57 @@ describe("TargetExecutionWorkbench", () => {
         }],
       }),
     });
+    api.executeExecutionPlan.mockResolvedValue({
+      ok: true,
+      value: {
+        requestId: "assembly-direct-request",
+        operationId: "execution.assembly",
+        state: "completed",
+        message: "Assembly execution completed.",
+      },
+    });
 
-    render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
+    render(<TargetExecutionWorkbench expectedTarget={windowsRef} targetIdentity="target-a" />);
     await screen.findByRole("region", { name: "Execution operations" });
-    await user.click(screen.getByRole("radio", { name: "Payloads" }));
-    await user.click(screen.getByRole("button", { name: "Open: Execute assembly" }));
-    expect(screen.getByRole("region", { name: "Native file selection" })).toHaveTextContent("Native files are chosen during Review");
+    await selectAdvancedCategory(user, "Payloads");
+    expect(screen.queryByRole("button", { name: "Open: Execute assembly" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: ".NET" }));
+    await user.click(screen.getByRole("button", { name: "Open assembly file" }));
+    await waitFor(() => expect(api.chooseDotNetAssemblyFile).toHaveBeenCalledOnce());
     expect(screen.queryByDisplayValue(/Users|Desktop|Seatbelt/u)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Review" }));
+    await user.click(screen.getByRole("button", { name: "Execute" }));
 
-    const dialog = await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
-    expect(dialog).toHaveTextContent("Seatbelt.exe");
-    expect(dialog).toHaveTextContent("512.0 KiB");
-    expect(dialog).toHaveTextContent(`SHA-256 ${"e".repeat(64)}`);
+    await waitFor(() => expect(api.prepareExecutionAction).toHaveBeenCalledWith({
+      draft: expect.objectContaining({ operationId: "execution.assembly" }),
+      assemblySource: { kind: "file", token: "assembly-file-token" },
+    }));
+    await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: "plan-execution.assembly" }));
+    expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Assembly execution completed.", { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(/Users|Desktop|Seatbelt/u)).not.toBeInTheDocument();
+  });
+
+  it("rejects a mismatched .NET plan before direct execution", async () => {
+    const user = userEvent.setup();
+    const windowsTarget: SessionSummary = { ...target, os: "windows", arch: "amd64" };
+    const windowsRef: TargetRef = { ...targetRef, fingerprint: "f".repeat(64) };
+    const assembly = capability("execution.assembly", { platforms: ["windows"] });
+    const api = installAPI(catalog([assembly], windowsTarget, windowsRef));
+    const mismatched = plan("execution.assembly", {
+      target: { backend, target: windowsTarget, fingerprint: "e".repeat(64) },
+    });
+    api.prepareExecutionAction.mockResolvedValue({ ok: true, value: mismatched });
+
+    render(<TargetExecutionWorkbench expectedTarget={windowsRef} targetIdentity="target-mismatched-assembly" />);
+    await screen.findByRole("region", { name: "Execution operations" });
+    await user.click(screen.getByRole("radio", { name: ".NET" }));
+    const form = screen.getByRole("region", { name: "Execute a .NET assembly" });
+    await user.click(within(form).getByRole("button", { name: "Open assembly file" }));
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent("no longer matches this exact operation and target selection");
+    await waitFor(() => expect(api.discardExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: mismatched.token }));
+    expect(api.executeExecutionPlan).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
   });
 });

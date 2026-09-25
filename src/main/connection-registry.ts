@@ -137,7 +137,11 @@ import {
 } from "../shared/stream-contracts.js";
 import type {
   AddExecutionOutputToLootInput,
+  ClearDotNetExecutionHistoryInput,
   ClearProcessExecutionHistoryInput,
+  DotNetFileSelection,
+  DotNetExecutionHistorySnapshot,
+  DotNetExecutionRecord,
   ExecuteExecutionPlanInput,
   ExecutionActionDraft,
   ExecutionActionPlan,
@@ -156,6 +160,7 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "../shared/execution-contracts.js";
+import type { DotNetCatalog } from "../shared/dotnet-contracts.js";
 import type {
   AddBofOutputToLootInput,
   BofArgumentFileSelection,
@@ -277,6 +282,7 @@ import {
   type InstalledBofCommand,
 } from "./bof-workbench.js";
 import { packLegacyBofArguments, readInstalledBofLoader } from "./bof-legacy-dispatch.js";
+import { installedDotNetAssemblies, MAX_DOTNET_ASSEMBLY_BYTES, readInstalledDotNetAssembly } from "./dotnet-armory.js";
 import {
   ExecutionArtifactStore,
   type ExecutionArtifactScope,
@@ -352,6 +358,9 @@ interface WindowContext {
   executionAdmissions: Set<string>;
   executionResults: Map<string, InternalExecutionResult>;
   executionResultTimers: Map<string, NodeJS.Timeout>;
+  dotNetFile?: { token: string; target: TargetRef; data: Buffer; fileName: string; isDll: boolean; expiresAt: number };
+  dotNetFileTimer?: NodeJS.Timeout;
+  dotNetFileRevision: number;
   bofArgumentFiles: Map<string, { commandId: string; index: number; target: TargetRef; data: Buffer; fileName: string; expiresAt: number }>;
   bofArgumentFileTimer?: NodeJS.Timeout;
   bofLocalPackage?: { directory: string; namespace: string; manifestDigest: string; target: TargetRef };
@@ -409,10 +418,13 @@ const MAX_WINDOW_SESSION_SHELL_PREPARES = 2;
 const MAX_GLOBAL_SESSION_SHELL_PREPARES = 16;
 const EXECUTION_PLAN_TTL_MS = 60_000;
 const EXECUTION_RESULT_TTL_MS = 5 * 60_000;
+const DOTNET_FILE_TTL_MS = 5 * 60_000;
 const MAX_WINDOW_EXECUTION_PLANS = 4;
 const MAX_WINDOW_EXECUTION_RESULTS = 128;
 const MAX_PROCESS_EXECUTION_HISTORY_ENTRIES = 50;
 const MAX_PROCESS_EXECUTION_HISTORY_OUTPUT_BYTES = 32 * 1_024 * 1_024;
+const MAX_DOTNET_EXECUTION_HISTORY_ENTRIES = 50;
+const MAX_DOTNET_EXECUTION_HISTORY_OUTPUT_BYTES = 32 * 1_024 * 1_024;
 const MAX_WINDOW_EXECUTION_REQUESTS = 4;
 const MAX_GLOBAL_EXECUTION_REQUESTS = 16;
 const MAX_RECENT_EVENTS = 50;
@@ -565,6 +577,7 @@ interface InternalExecutionPlan {
   draft: ExecutionActionDraft;
   artifacts: Array<InternalExecutionArtifact & { role: ExecutionArtifactRole }>;
   review: ExecutionActionPlan;
+  assemblySourceKind?: "file" | "armory";
 }
 
 interface InternalExecutionResult {
@@ -586,6 +599,23 @@ interface InternalProcessExecutionHistory {
   readonly target: TargetRef;
   revision: number;
   entries: Array<{ order: number; record: ProcessExecutionRecord }>;
+}
+
+interface InternalDotNetExecutionHistory {
+  readonly key: string;
+  readonly poolKey: string;
+  readonly epoch: number;
+  readonly target: TargetRef;
+  revision: number;
+  entries: Array<{ order: number; record: DotNetExecutionRecord }>;
+}
+
+interface SharedExecutionHistoryResult {
+  context: WindowContext;
+  pool: BackendPool;
+  target: RevalidatedTarget;
+  record: ProcessExecutionRecord | DotNetExecutionRecord;
+  assertCurrent: () => void;
 }
 
 interface InternalBofExecutionHistory {
@@ -643,6 +673,7 @@ export class ConnectionRegistry {
   private readonly sessionArtifacts: SessionArtifactStore;
   private readonly executionArtifacts: ExecutionArtifactStore;
   private readonly processExecutionHistories = new Map<string, InternalProcessExecutionHistory>();
+  private readonly dotNetExecutionHistories = new Map<string, InternalDotNetExecutionHistory>();
   private readonly bofExecutionHistories = new Map<string, InternalBofExecutionHistory>();
   private readonly streams: StreamManager;
   private readonly sessionWorkbenchGlobalAdmissions = new Map<string, "standard" | "artifact">();
@@ -656,6 +687,9 @@ export class ConnectionRegistry {
   private processExecutionHistoryEntryCount = 0;
   private processExecutionHistoryOutputBytes = 0;
   private nextProcessExecutionHistoryOrder = 0;
+  private nextDotNetExecutionHistoryOrder = 0;
+  private dotNetExecutionHistoryEntryCount = 0;
+  private dotNetExecutionHistoryOutputBytes = 0;
   private credentialClipboard?: {
     digest: string;
     expiresAt: number;
@@ -776,6 +810,7 @@ export class ConnectionRegistry {
       executionAdmissions: new Set(),
       executionResults: new Map(),
       executionResultTimers: new Map(),
+      dotNetFileRevision: 0,
       bofArgumentFiles: new Map(),
       bofDirectorySelectionRevision: 0,
       taskListAdmissions: new Set(),
@@ -2197,6 +2232,71 @@ export class ConnectionRegistry {
     });
   }
 
+  async listDotNetAssemblies(contentsId: number): Promise<OperationResult<DotNetCatalog>> {
+    return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const { catalog } = await installedDotNetAssemblies(this.clientRootDirectory, target.target, target.ref);
+      assertBinding();
+      if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref)) {
+        throw new Error("The selected target changed");
+      }
+      return catalog;
+    });
+  }
+
+  async chooseDotNetAssemblyFile(sender: WebContents): Promise<OperationResult<DotNetFileSelection | null>> {
+    return this.withExecutionPool(sender.id, async (pool, assertBinding) => {
+      const { context, target } = this.requireSelectedExecutionTarget(sender.id, pool);
+      assertExecutionOperationSupported("execution.assembly", target.target);
+      const selectedRef = { ...target.ref };
+      const revision = ++context.dotNetFileRevision;
+      const assertCurrent = (): void => {
+        assertBinding();
+        if (context.dotNetFileRevision !== revision ||
+          !context.activeTarget || !sameTargetRefIdentity(context.activeTarget, selectedRef) ||
+          !pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch)) {
+          throw new Error("The selected target changed while opening the .NET assembly");
+        }
+      };
+      const selection = await dialog.showOpenDialog(requireOwnerWindow(sender), {
+        title: "Open .NET assembly",
+        properties: ["openFile"],
+        filters: [{ name: ".NET assemblies", extensions: ["exe", "dll"] }],
+      });
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      assertCurrent();
+      const filePath = selection.filePaths[0]!;
+      const fileName = safeArtifactFileName(basename(filePath));
+      if (!/\.(?:exe|dll)$/iu.test(fileName)) throw new Error("The selected .NET assembly must be an .exe or .dll");
+      const selectedFile = await readBoundedRegularFile(filePath, {
+        label: ".NET assembly", maxBytes: MAX_DOTNET_ASSEMBLY_BYTES,
+      });
+      try {
+        assertCurrent();
+        if (context.dotNetFileTimer) clearTimeout(context.dotNetFileTimer);
+        context.dotNetFile?.data.fill(0);
+        const token = randomUUID();
+        const expiresAt = this.now() + DOTNET_FILE_TTL_MS;
+        context.dotNetFile = {
+          token, target: selectedRef, data: selectedFile.data,
+          fileName, isDll: /\.dll$/iu.test(fileName), expiresAt,
+        };
+        const timer = setTimeout(() => {
+          if (this.windows.get(context.contentsId) !== context || context.dotNetFile?.token !== token) return;
+          context.dotNetFile?.data.fill(0);
+          delete context.dotNetFile;
+          delete context.dotNetFileTimer;
+        }, DOTNET_FILE_TTL_MS);
+        timer.unref();
+        context.dotNetFileTimer = timer;
+        return { token, fileName, size: selectedFile.data.length, isDll: /\.dll$/iu.test(fileName) };
+      } catch (error) {
+        selectedFile.data.fill(0);
+        throw error;
+      }
+    });
+  }
+
   async chooseBofDirectory(sender: WebContents): Promise<OperationResult<BofDirectorySelection | null>> {
     return this.withExecutionPool(sender.id, async (pool, assertBinding) => {
       const { context, target } = this.requireSelectedExecutionTarget(sender.id, pool);
@@ -2707,6 +2807,133 @@ export class ConnectionRegistry {
     }
   }
 
+  async listDotNetExecutionHistory(
+    contentsId: number,
+  ): Promise<OperationResult<DotNetExecutionHistorySnapshot>> {
+    return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = this.dotNetExecutionHistories.get(processExecutionHistoryKey(pool.key, pool.epoch, target.ref));
+      assertBinding();
+      return {
+        target: { ...target.ref },
+        revision: history?.revision ?? 0,
+        records: history?.entries.map(({ record }) => cloneDotNetExecutionRecord(record)) ?? [],
+      };
+    });
+  }
+
+  async clearDotNetExecutionHistory(
+    contentsId: number,
+    input: ClearDotNetExecutionHistoryInput,
+  ): Promise<OperationResult> {
+    const result = await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = this.dotNetExecutionHistories.get(processExecutionHistoryKey(pool.key, pool.epoch, target.ref));
+      assertBinding();
+      if (!history) return;
+      if (input.id === undefined) {
+        if (history.entries.length === 0) return;
+        for (const entry of history.entries) this.releaseDotNetExecutionRecord(entry.record);
+        history.entries = [];
+      } else {
+        const index = history.entries.findIndex(({ record }) => record.id === input.id);
+        if (index < 0) return;
+        const [removed] = history.entries.splice(index, 1);
+        this.releaseDotNetExecutionRecord(removed!.record);
+      }
+      this.publishDotNetExecutionHistoryChanged(history);
+    });
+    return result.ok ? { ok: true } : result;
+  }
+
+  private beginDotNetExecutionHistory(
+    pool: BackendPool,
+    target: RevalidatedTarget,
+    journal: TargetOperationRecord,
+    plan: InternalExecutionPlan,
+  ): string {
+    const key = processExecutionHistoryKey(pool.key, pool.epoch, target.ref);
+    let history = this.dotNetExecutionHistories.get(key);
+    if (!history) {
+      history = { key, poolKey: pool.key, epoch: pool.epoch, target: { ...target.ref }, revision: 0, entries: [] };
+      this.dotNetExecutionHistories.set(key, history);
+    }
+    if (plan.draft.operationId !== "execution.assembly") throw new Error("Expected a reviewed .NET assembly");
+    const record: DotNetExecutionRecord = {
+      id: journal.requestId,
+      startedAt: journal.createdAt,
+      assemblyName: plan.review.artifacts.find((artifact) => artifact.role === "assembly")?.fileName ?? ".NET assembly",
+      args: [...plan.draft.args],
+      sourceKind: plan.assemblySourceKind ?? "file",
+      state: "running",
+    };
+    history.entries.unshift({ order: ++this.nextDotNetExecutionHistoryOrder, record });
+    this.dotNetExecutionHistoryEntryCount += 1;
+    this.publishDotNetExecutionHistoryChanged(history);
+    this.evictDotNetExecutionHistory();
+    return key;
+  }
+
+  private updateDotNetExecutionHistory(key: string, id: string, patch: Partial<DotNetExecutionRecord>): void {
+    const history = this.dotNetExecutionHistories.get(key);
+    const entry = history?.entries.find(({ record }) => record.id === id);
+    if (!history || !entry) return; // A cleared or evicted invocation stays cleared.
+    const previous = entry.record;
+    const next = cloneDotNetExecutionRecord({ ...previous, ...patch });
+    entry.record = next;
+    this.dotNetExecutionHistoryOutputBytes += dotNetExecutionOutputBytes(next) - dotNetExecutionOutputBytes(previous);
+    clearDotNetExecutionOutput(previous);
+    this.publishDotNetExecutionHistoryChanged(history);
+    this.evictDotNetExecutionHistory();
+  }
+
+  private evictDotNetExecutionHistory(): void {
+    while (
+      this.dotNetExecutionHistoryEntryCount > MAX_DOTNET_EXECUTION_HISTORY_ENTRIES ||
+      this.dotNetExecutionHistoryOutputBytes > MAX_DOTNET_EXECUTION_HISTORY_OUTPUT_BYTES
+    ) {
+      let oldestHistory: InternalDotNetExecutionHistory | undefined;
+      let oldestOrder = Number.POSITIVE_INFINITY;
+      for (const history of this.dotNetExecutionHistories.values()) {
+        const last = history.entries.at(-1);
+        if (last && last.order < oldestOrder) {
+          oldestHistory = history;
+          oldestOrder = last.order;
+        }
+      }
+      if (!oldestHistory) break;
+      const removed = oldestHistory.entries.pop()!;
+      this.releaseDotNetExecutionRecord(removed.record);
+      this.publishDotNetExecutionHistoryChanged(oldestHistory);
+    }
+  }
+
+  private releaseDotNetExecutionRecord(record: DotNetExecutionRecord): void {
+    this.dotNetExecutionHistoryEntryCount -= 1;
+    this.dotNetExecutionHistoryOutputBytes -= dotNetExecutionOutputBytes(record);
+    clearDotNetExecutionOutput(record);
+  }
+
+  private publishDotNetExecutionHistoryChanged(history: InternalDotNetExecutionHistory): void {
+    history.revision += 1;
+    for (const context of this.windows.values()) {
+      if (
+        context.poolKey !== history.poolKey ||
+        !context.activeTarget ||
+        !sameTargetRefIdentity(context.activeTarget, history.target)
+      ) continue;
+      const pool = this.pools.get(context.poolKey);
+      if (!pool || pool.epoch !== history.epoch) continue;
+      const contents = webContents.fromId(context.contentsId);
+      if (!contents || contents.isDestroyed()) continue;
+      try {
+        contents.send(IPC.dotNetExecutionHistoryChanged, { ...context.activeTarget }, history.revision);
+      } catch {
+        // The next snapshot is authoritative if an advisory invalidation is missed.
+      }
+    }
+  }
+
   async listProcessExecutionHistory(
     contentsId: number,
   ): Promise<OperationResult<ProcessExecutionHistorySnapshot>> {
@@ -2757,24 +2984,25 @@ export class ConnectionRegistry {
     return selected;
   }
 
-  /** A process result can be consumed by another window only while both select the same exact session. */
-  private sharedProcessExecutionResult(
+  /** A process or assembly result is shared only with windows on the same exact target. */
+  private sharedExecutionHistoryResult(
     contentsId: number,
     requestId: string,
-  ): {
-    pool: BackendPool;
-    target: RevalidatedTarget;
-    record: ProcessExecutionRecord;
-    assertCurrent: () => void;
-  } | undefined {
+  ): SharedExecutionHistoryResult | undefined {
     const context = this.requireWindow(contentsId);
     const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
     if (!pool || !["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status)) return undefined;
-    if (context.activeTarget?.mode !== "session" || context.activeTarget.backendEpoch !== pool.epoch) return undefined;
-    const selected = this.requireSelectedSessionProcessHistory(contentsId, pool);
-    const bucket = this.processExecutionHistories.get(processExecutionHistoryKey(pool.key, pool.epoch, selected.target.ref));
-    const record = bucket?.entries.find(({ record }) => record.id === requestId)?.record;
-    if (!record?.result || record.result.operationId !== "execution.process" || record.result.requestId !== requestId) {
+    if (!context.activeTarget || context.activeTarget.backendEpoch !== pool.epoch) return undefined;
+    const selected = this.requireSelectedExecutionTarget(contentsId, pool);
+    const historyKey = processExecutionHistoryKey(pool.key, pool.epoch, selected.target.ref);
+    const processHistory = selected.target.target.mode === "session"
+      ? this.processExecutionHistories.get(historyKey) : undefined;
+    const dotNetHistory = this.dotNetExecutionHistories.get(historyKey);
+    const processRecord = processHistory?.entries.find(({ record }) => record.id === requestId)?.record;
+    const dotNetRecord = dotNetHistory?.entries.find(({ record }) => record.id === requestId)?.record;
+    const record = processRecord?.result?.operationId === "execution.process"
+      ? processRecord : dotNetRecord?.result?.operationId === "execution.assembly" ? dotNetRecord : undefined;
+    if (!record?.result || record.result.requestId !== requestId) {
       return undefined;
     }
     const connectionAttempt = context.connectionAttempt;
@@ -2788,15 +3016,16 @@ export class ConnectionRegistry {
         !context.activeTarget ||
         !sameTargetRefIdentity(context.activeTarget, selected.target.ref) ||
         !pool.targetStore.revalidateTargetRef(selected.target.ref, pool.epoch) ||
-        !bucket?.entries.some((entry) => entry.record === record)
+        !(processHistory?.entries.some((entry) => entry.record === record) ||
+          dotNetHistory?.entries.some((entry) => entry.record === record))
       ) throw new Error("The execution result no longer belongs to the active target");
     };
     assertCurrent();
-    return { pool, target: selected.target, record, assertCurrent };
+    return { context, pool, target: selected.target, record, assertCurrent };
   }
 
-  private sharedProcessExecutionOutput(
-    record: ProcessExecutionRecord,
+  private sharedExecutionHistoryOutput(
+    record: ProcessExecutionRecord | DotNetExecutionRecord,
     stream: "stdout" | "stderr" | "combined",
   ): { data: Buffer; truncated: boolean } {
     const output = record.result?.output?.find((item) => item.stream === stream);
@@ -2818,6 +3047,98 @@ export class ConnectionRegistry {
       throw new Error("The requested execution output is unavailable");
     }
     return { data, truncated: output.truncated };
+  }
+
+  private async refreshSharedDotNetBeaconResult(shared: SharedExecutionHistoryResult): Promise<ExecutionActionResult> {
+    const previous = shared.record.result;
+    if (
+      !("assemblyName" in shared.record) ||
+      !previous ||
+      previous.operationId !== "execution.assembly" ||
+      !previous.taskId ||
+      shared.target.target.mode !== "beacon"
+    ) throw new Error("The .NET execution result is unavailable for the current target");
+    let task: clientpb.BeaconTask | undefined;
+    let decoded: DecodedExecutionBeaconTask | undefined;
+    let transferred = false;
+    try {
+      task = await shared.pool.client.fetchBeaconTask(previous.taskId);
+      shared.assertCurrent();
+      if (task.ID !== previous.taskId || task.BeaconID !== shared.target.target.id) {
+        throw new Error("The .NET execution task no longer matches the selected target");
+      }
+      const state = task.State.trim().toLowerCase();
+      if (state === "pending" || state === "sent") return cloneExecutionActionResult(previous);
+      const next = (state === "failed" || state === "canceled" || state === "cancelled")
+        ? {
+          requestId: previous.requestId,
+          operationId: "execution.assembly" as const,
+          state: state === "failed" ? "failed" as const : "canceled" as const,
+          message: state === "failed"
+            ? "The selected target rejected the .NET assembly execution."
+            : "The beacon .NET assembly task was canceled before completion.",
+          taskId: previous.taskId,
+        }
+        : undefined;
+      if (next) {
+        shared.assertCurrent();
+        return this.retainExecutionResult(shared.context, shared.pool, shared.target, next);
+      }
+      if (state !== "completed") return cloneExecutionActionResult(previous);
+      try {
+        decoded = decodeExecutionBeaconTask({
+          operationId: "execution.assembly",
+          description: task.Description,
+          response: task.Response,
+        });
+      } catch (error) {
+        shared.assertCurrent();
+        const uncertain: ExecutionActionResult = {
+          requestId: previous.requestId,
+          operationId: "execution.assembly",
+          state: error instanceof ExecutionRemoteRejectedError ? "failed" : "outcome-unknown",
+          message: error instanceof ExecutionRemoteRejectedError
+            ? "The selected target rejected the .NET assembly execution."
+            : "The beacon .NET task completed, but its exact result could not be confirmed safely.",
+          taskId: previous.taskId,
+        };
+        if (uncertain.state === "outcome-unknown") {
+          // Keep a peer's uncertain result in the shared history only. A peer
+          // has no originating operation journal, so retaining it locally
+          // would make the next refresh take the journal-only path.
+          this.updateDotNetExecutionHistory(
+            processExecutionHistoryKey(shared.pool.key, shared.pool.epoch, shared.target.ref),
+            previous.requestId,
+            { state: uncertain.state, result: uncertain },
+          );
+          return cloneExecutionActionResult(uncertain);
+        }
+        return this.retainExecutionResult(shared.context, shared.pool, shared.target, uncertain);
+      }
+      if (decoded.kind !== "action") throw new Error("The .NET execution task returned the wrong result type");
+      shared.assertCurrent();
+      const retained = this.retainExecutionResult(shared.context, shared.pool, shared.target, {
+        requestId: previous.requestId,
+        operationId: "execution.assembly",
+        state: "completed",
+        message: decoded.value.summary,
+        taskId: previous.taskId,
+        ...(decoded.value.pid === undefined ? {} : { pid: decoded.value.pid }),
+        ...(decoded.value.exitCode === undefined ? {} : { exitCode: decoded.value.exitCode }),
+      }, {
+        ...(decoded.value.stdout ? { stdout: { data: decoded.value.stdout, truncated: decoded.value.stdoutTruncated === true } } : {}),
+        ...(decoded.value.stderr ? { stderr: { data: decoded.value.stderr, truncated: decoded.value.stderrTruncated === true } } : {}),
+      });
+      transferred = true;
+      return retained;
+    } finally {
+      if (!transferred && decoded?.kind === "action") {
+        decoded.value.stdout?.fill(0);
+        decoded.value.stderr?.fill(0);
+      }
+      task?.Request.fill(0);
+      task?.Response.fill(0);
+    }
   }
 
   private beginProcessExecutionHistory(
@@ -2963,32 +3284,63 @@ export class ConnectionRegistry {
         const owner = requireOwnerWindow(sender);
         for (const requested of executionArtifactSelections(input.draft)) {
           if (owner.isDestroyed()) throw new Error("The application window is no longer available");
-          let selection;
-          try {
-            selection = await dialog.showOpenDialog(owner, {
-              title: requested.title,
-              properties: ["openFile"],
-              ...(requested.extensions.length > 0
-                ? { filters: [{ name: requested.title, extensions: requested.extensions }] }
-                : {}),
-            });
-          } catch {
-            throw new Error("Could not open the native execution file picker");
-          }
-          assertCurrent();
-          const filePath = selection.filePaths[0];
-          if (selection.canceled || !filePath) throw new Error("Execution file selection was canceled");
-          let selectedFile;
-          try {
-            selectedFile = await readBoundedRegularFile(filePath, {
-              label: requested.title,
-              maxBytes: requested.maximumBytes,
-            });
-          } catch {
-            throw new Error("Could not read the selected execution file");
+          let selectedFile: { data: Buffer };
+          let selectedFileName: string;
+          if (requested.role === "assembly" && input.assemblySource?.kind === "armory") {
+            const source = input.assemblySource;
+            const { entries } = await installedDotNetAssemblies(this.clientRootDirectory, target.target, selectedRef);
+            assertCurrent();
+            const entry = entries.find((candidate) => candidate.dto.id === source.id && candidate.dto.available);
+            if (!entry) throw new Error("The selected Armory assembly is unavailable; refresh the catalog");
+            selectedFileName = safeArtifactFileName(entry.dto.fileName);
+            selectedFile = { data: await readInstalledDotNetAssembly(entry) };
+          } else if (requested.role === "assembly" && input.assemblySource?.kind === "file") {
+            const file = context.dotNetFile;
+            if (!file || file.token !== input.assemblySource.token || file.expiresAt <= this.now() ||
+              !sameTargetRefIdentity(file.target, selectedRef)) {
+              throw new Error("The selected .NET file is unavailable or expired; open it again");
+            }
+            delete context.dotNetFile;
+            if (context.dotNetFileTimer) clearTimeout(context.dotNetFileTimer);
+            delete context.dotNetFileTimer;
+            selectedFile = { data: file.data };
+            selectedFileName = file.fileName;
+          } else {
+            let selection;
+            try {
+              selection = await dialog.showOpenDialog(owner, {
+                title: requested.title,
+                properties: ["openFile"],
+                ...(requested.extensions.length > 0
+                  ? { filters: [{ name: requested.title, extensions: requested.extensions }] }
+                  : {}),
+              });
+            } catch {
+              throw new Error("Could not open the native execution file picker");
+            }
+            assertCurrent();
+            const filePath = selection.filePaths[0];
+            if (selection.canceled || !filePath) throw new Error("Execution file selection was canceled");
+            selectedFileName = safeArtifactFileName(basename(filePath));
+            try {
+              selectedFile = await readBoundedRegularFile(filePath, {
+                label: requested.title,
+                maxBytes: requested.maximumBytes,
+              });
+            } catch {
+              throw new Error("Could not read the selected execution file");
+            }
           }
           try {
             assertCurrent();
+            if (requested.role === "assembly" && selectedFile.data.length === 0) {
+              throw new Error("The selected .NET assembly is empty");
+            }
+            if (requested.role === "assembly" && input.assemblySource &&
+              input.draft.operationId === "execution.assembly" &&
+              input.draft.isDll !== /\.dll$/iu.test(selectedFileName)) {
+              throw new Error("The assembly type changed; select the .NET assembly again");
+            }
             const scope = this.executionArtifactScope(
               context,
               pool,
@@ -3000,7 +3352,7 @@ export class ConnectionRegistry {
               scope,
               data: selectedFile.data,
               mediaType: "application/octet-stream",
-              suggestedBasename: safeArtifactFileName(basename(filePath)),
+              suggestedBasename: selectedFileName,
             });
             stagedArtifacts.push({ role: requested.role, scope, handle: metadata.handle });
           } finally {
@@ -3073,6 +3425,9 @@ export class ConnectionRegistry {
           draft: input.draft,
           artifacts: [...stagedArtifacts],
           review,
+          ...(input.draft.operationId === "execution.assembly"
+            ? { assemblySourceKind: input.assemblySource?.kind ?? "file" }
+            : {}),
         };
         context.executionPlans.set(token, plan);
         const timer = setTimeout(() => {
@@ -3238,6 +3593,7 @@ export class ConnectionRegistry {
     let engine: OperationEngine | undefined;
     let dispatched = false;
     let processHistoryKey: string | undefined;
+    let dotNetHistoryKey: string | undefined;
     let bindingCurrent: (() => boolean) | undefined;
     try {
       const context = this.requireWindow(contentsId);
@@ -3312,6 +3668,9 @@ export class ConnectionRegistry {
         );
         if (capturedPlan.draft.operationId === "execution.process" && current.target.mode === "session") {
           processHistoryKey = this.beginProcessExecutionHistory(pool, current, journal, capturedPlan.draft);
+        }
+        if (capturedPlan.draft.operationId === "execution.assembly") {
+          dotNetHistoryKey = this.beginDotNetExecutionHistory(pool, current, journal, capturedPlan);
         }
         const capturedEngine = engine;
         const capturedJournal = journal;
@@ -3476,6 +3835,14 @@ export class ConnectionRegistry {
             : executionBoundaryError(error),
         });
       }
+      if (journal && dotNetHistoryKey) {
+        this.updateDotNetExecutionHistory(dotNetHistoryKey, journal.requestId, {
+          state: dispatched ? "outcome-unknown" : "request-failed",
+          error: dispatched
+            ? "The execution was dispatched, but its final outcome could not be confirmed."
+            : executionBoundaryError(error),
+        });
+      }
       return { ok: false, error: executionBoundaryError(error) };
     } finally {
       for (const data of artifacts.values()) data.fill(0);
@@ -3502,9 +3869,18 @@ export class ConnectionRegistry {
       const context = this.requireWindow(contentsId);
       this.admitExecutionRequest(context, admissionId);
       admittedContext = context;
+      this.pruneExecutionResults(context);
       if (!context.executionResults.has(input.requestId)) {
-        const shared = this.sharedProcessExecutionResult(contentsId, input.requestId);
+        const shared = this.sharedExecutionHistoryResult(contentsId, input.requestId);
         if (!shared?.record.result) throw new Error("The execution result is unavailable or expired");
+        if (
+          "assemblyName" in shared.record &&
+          shared.target.target.mode === "beacon" &&
+          shared.record.result.taskId &&
+          (shared.record.result.state === "submitted" || shared.record.result.state === "outcome-unknown")
+        ) {
+          return { ok: true, value: await this.refreshSharedDotNetBeaconResult(shared) };
+        }
         return { ok: true, value: cloneExecutionActionResult(shared.record.result) };
       }
       const result = this.requireExecutionResult(context, input.requestId);
@@ -3626,11 +4002,12 @@ export class ConnectionRegistry {
     let data: Buffer | undefined;
     try {
       const context = this.requireWindow(contentsId);
+      this.pruneExecutionResults(context);
       if (!context.executionResults.has(input.requestId)) {
-        const shared = this.sharedProcessExecutionResult(contentsId, input.requestId);
+        const shared = this.sharedExecutionHistoryResult(contentsId, input.requestId);
         if (!shared) throw new Error("The execution result is unavailable or expired");
         shared.assertCurrent();
-        const output = this.sharedProcessExecutionOutput(shared.record, input.stream);
+        const output = this.sharedExecutionHistoryOutput(shared.record, input.stream);
         data = output.data;
         shared.assertCurrent();
         return { ok: true, value: { data: Uint8Array.from(data), truncated: output.truncated } };
@@ -3681,6 +4058,7 @@ export class ConnectionRegistry {
     try {
       return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
         const context = this.requireWindow(contentsId);
+        this.pruneExecutionResults(context);
         let assertCurrent: () => void;
         let target: RevalidatedTarget;
         if (context.executionResults.has(input.requestId)) {
@@ -3715,12 +4093,12 @@ export class ConnectionRegistry {
             throw new Error("The requested execution output is unavailable");
           }
         } else {
-          const shared = this.sharedProcessExecutionResult(contentsId, input.requestId);
+          const shared = this.sharedExecutionHistoryResult(contentsId, input.requestId);
           if (!shared || shared.pool !== pool) throw new Error("The execution result is unavailable or expired");
           assertCurrent = (): void => { assertBinding(); shared.assertCurrent(); };
           assertCurrent();
           target = shared.target;
-          data = this.sharedProcessExecutionOutput(shared.record, input.stream).data;
+          data = this.sharedExecutionHistoryOutput(shared.record, input.stream).data;
         }
         const isText = isProbablyTextLoot(data);
         const fileName = safeArtifactFileName(
@@ -3760,8 +4138,9 @@ export class ConnectionRegistry {
     let data: Buffer | undefined;
     try {
       const context = this.requireWindow(sender.id);
+      this.pruneExecutionResults(context);
       if (!context.executionResults.has(input.requestId)) {
-        return await this.saveSharedProcessExecutionResult(sender, input);
+        return await this.saveSharedExecutionHistoryResult(sender, input);
       }
       const result = this.requireExecutionResult(context, input.requestId);
       const artifact = result.output[input.stream];
@@ -3813,13 +4192,13 @@ export class ConnectionRegistry {
     }
   }
 
-  private async saveSharedProcessExecutionResult(
+  private async saveSharedExecutionHistoryResult(
     sender: WebContents,
     input: SaveExecutionResultInput,
   ): Promise<OperationResult<SaveExecutionResultResult>> {
     let data: Buffer | undefined;
     try {
-      const shared = this.sharedProcessExecutionResult(sender.id, input.requestId);
+      const shared = this.sharedExecutionHistoryResult(sender.id, input.requestId);
       if (!shared) throw new Error("The execution result is unavailable or expired");
       const owner = requireOwnerWindow(sender);
       if (owner.isDestroyed()) throw new Error("The application window is no longer available");
@@ -3838,7 +4217,7 @@ export class ConnectionRegistry {
       shared.assertCurrent();
       const intent = await this.reserveSessionSaveIntent(selection.filePath);
       shared.assertCurrent();
-      data = this.sharedProcessExecutionOutput(shared.record, input.stream).data;
+      data = this.sharedExecutionHistoryOutput(shared.record, input.stream).data;
       try {
         await this.commitSessionSaveIntent(intent, data, shared.assertCurrent);
       } catch {
@@ -4620,6 +4999,11 @@ export class ConnectionRegistry {
     for (const timer of context.executionResultTimers.values()) clearTimeout(timer);
     context.executionResultTimers.clear();
     this.executionArtifacts.removeOwner(context.contentsId);
+    if (context.dotNetFileTimer) clearTimeout(context.dotNetFileTimer);
+    delete context.dotNetFileTimer;
+    context.dotNetFile?.data.fill(0);
+    delete context.dotNetFile;
+    context.dotNetFileRevision += 1;
     if (context.bofArgumentFileTimer) clearTimeout(context.bofArgumentFileTimer);
     delete context.bofArgumentFileTimer;
     for (const file of context.bofArgumentFiles.values()) file.data.fill(0);
@@ -4685,8 +5069,13 @@ export class ConnectionRegistry {
     const historyKey = value.operationId === "execution.process" && target.target.mode === "session"
       ? processExecutionHistoryKey(pool.key, pool.epoch, target.ref)
       : undefined;
+    const dotNetHistoryKey = value.operationId === "execution.assembly"
+      ? processExecutionHistoryKey(pool.key, pool.epoch, target.ref)
+      : undefined;
     const historyStdout = historyKey && streams.stdout ? Uint8Array.from(streams.stdout.data) : undefined;
     const historyStderr = historyKey && streams.stderr ? Uint8Array.from(streams.stderr.data) : undefined;
+    const dotNetHistoryStdout = dotNetHistoryKey && streams.stdout ? Uint8Array.from(streams.stdout.data) : undefined;
+    const dotNetHistoryStderr = dotNetHistoryKey && streams.stderr ? Uint8Array.from(streams.stderr.data) : undefined;
     processWaited ??= context.executionResults.get(value.requestId)?.processWaited;
     if (context.executionResults.has(value.requestId)) {
       this.revokeExecutionResult(context, value.requestId);
@@ -4804,6 +5193,24 @@ export class ConnectionRegistry {
       } finally {
         historyStdout?.fill(0);
         historyStderr?.fill(0);
+      }
+    }
+    if (dotNetHistoryKey) {
+      try {
+        this.updateDotNetExecutionHistory(dotNetHistoryKey, value.requestId, {
+          state: retainedValue.state,
+          result: retainedValue,
+          ...(outputRetained && dotNetHistoryStdout
+            ? { stdout: { data: dotNetHistoryStdout, truncated: streams.stdout?.truncated === true } }
+            : {}),
+          ...(outputRetained && dotNetHistoryStderr
+            ? { stderr: { data: dotNetHistoryStderr, truncated: streams.stderr?.truncated === true } }
+            : {}),
+          ...(outputRetained ? {} : { outputError: "Captured output could not be retained." }),
+        });
+      } finally {
+        dotNetHistoryStdout?.fill(0);
+        dotNetHistoryStderr?.fill(0);
       }
     }
     return cloneExecutionActionResult(retainedValue);
@@ -7433,6 +7840,11 @@ export class ConnectionRegistry {
         for (const entry of bucket.entries) this.releaseProcessExecutionRecord(entry.record);
         this.processExecutionHistories.delete(key);
       }
+      for (const [key, history] of this.dotNetExecutionHistories) {
+        if (history.poolKey !== poolKey) continue;
+        for (const entry of history.entries) this.releaseDotNetExecutionRecord(entry.record);
+        this.dotNetExecutionHistories.delete(key);
+      }
       for (const [key, history] of this.bofExecutionHistories) {
         if (history.poolKey !== poolKey) continue;
         for (const record of history.records) clearBofRecord(record);
@@ -8451,6 +8863,29 @@ function cloneProcessExecutionRecord(record: ProcessExecutionRecord): ProcessExe
   };
 }
 
+function dotNetExecutionOutputBytes(record: DotNetExecutionRecord): number {
+  return (record.stdout?.data.byteLength ?? 0) + (record.stderr?.data.byteLength ?? 0);
+}
+
+function clearDotNetExecutionOutput(record: DotNetExecutionRecord): void {
+  record.stdout?.data.fill(0);
+  record.stderr?.data.fill(0);
+}
+
+function cloneDotNetExecutionRecord(record: DotNetExecutionRecord): DotNetExecutionRecord {
+  return {
+    ...record,
+    args: [...record.args],
+    ...(record.result ? { result: cloneExecutionActionResult(record.result) } : {}),
+    ...(record.stdout ? {
+      stdout: { data: Uint8Array.from(record.stdout.data), truncated: record.stdout.truncated },
+    } : {}),
+    ...(record.stderr ? {
+      stderr: { data: Uint8Array.from(record.stderr.data), truncated: record.stderr.truncated },
+    } : {}),
+  };
+}
+
 function streamOwnerBinding(
   context: WindowContext,
   pool: BackendPool,
@@ -9289,7 +9724,7 @@ function resolvedExecutionOperationTarget(
 function executionBoundaryError(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   if (
-    /^(Select a target|Select an active session|The selected target|The selected session|The execution read|The execution review|The execution result|The requested execution output|The loot submission|Loot name is invalid|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
+    /^(Select a target|Select an active session|The selected target|The selected session|The selected Armory assembly|The selected \.NET (?:file|assembly)|The assembly type changed|The execution read|The execution review|The execution result|The requested execution output|The loot submission|Loot name is invalid|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
   ) return boundedText(message, 512);
   return "The execution request failed at the protected main-process boundary";
 }

@@ -81,6 +81,31 @@ describe("execution contracts", () => {
     })).toThrow(/exactly one/u);
   });
 
+  it("accepts only main-resolved assembly sources for assembly reviews", () => {
+    const draft = {
+      operationId: "execution.assembly",
+      args: ["alpha", "two words"],
+      process: "notepad.exe",
+      isDll: false,
+      architecture: "x84",
+      processArgs: [],
+      inProcess: false,
+      amsiBypass: false,
+      etwBypass: false,
+      timeoutSeconds: 60,
+    };
+    expect(parsePrepareExecutionActionInput({ draft, assemblySource: { kind: "armory", id: "aliases/tool.name" } }))
+      .toMatchObject({ assemblySource: { kind: "armory", id: "aliases/tool.name" } });
+    expect(parsePrepareExecutionActionInput({ draft, assemblySource: { kind: "file", token: "opaque_123" } }))
+      .toMatchObject({ assemblySource: { kind: "file", token: "opaque_123" } });
+    expect(() => parsePrepareExecutionActionInput({ draft, assemblySource: { kind: "armory", id: "../tool" } }))
+      .toThrow(/Armory assembly ID/u);
+    expect(() => parsePrepareExecutionActionInput({ draft, assemblySource: { kind: "file", token: "opaque_123", path: "/tmp/a.exe" } }))
+      .toThrow(/unexpected/u);
+    expect(() => parsePrepareExecutionActionInput({ draft: { operationId: "privilege.revert", timeoutSeconds: 60 }, assemblySource: { kind: "file", token: "opaque_123" } }))
+      .toThrow(/requires execution.assembly/u);
+  });
+
   it("clones credential bytes and rejects unknown credential shapes", () => {
     const password = new Uint8Array([115, 101, 99, 114, 101, 116]);
     const prepared = parsePrepareExecutionActionInput({
