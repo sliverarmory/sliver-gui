@@ -46,7 +46,10 @@ describe("operator configuration references", () => {
     expect(await readFile(sourcePath, "utf8")).toBe(validConfig());
     expect(await readdir(metadataDirectory)).toEqual(["operator-configs.json"]);
     const manifest = await readFile(join(metadataDirectory, "operator-configs.json"), "utf8");
-    expect(manifest).toContain(sourcePath);
+    if (!imported.importedId) throw new Error("Expected an imported configuration ID");
+    expect(JSON.parse(manifest)).toMatchObject({
+      imported: { [imported.importedId]: { path: sourcePath } },
+    });
     expect(manifest).not.toContain("private-key");
     if (process.platform !== "win32") {
       expect((await stat(join(metadataDirectory, "operator-configs.json"))).mode & 0o777).toBe(0o600);

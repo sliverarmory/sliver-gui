@@ -281,6 +281,17 @@ const terminalFontEvidence = await verifyTerminalFontAssets(files);
 const licenseInventory = await readFile(join(distDir, "THIRD_PARTY_LICENSES.txt"), "utf8");
 const applicationPackage = JSON.parse(await readFile(join(rootDir, "package.json"), "utf8"));
 const sliverScriptVersion = applicationPackage.dependencies?.["sliver-script"];
+const exactDirectDependencyVersion = (packageName) => {
+  const version = applicationPackage.dependencies?.[packageName]
+    ?? applicationPackage.devDependencies?.[packageName];
+  if (
+    typeof version !== "string"
+    || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(version)
+  ) {
+    throw new Error(`${packageName} must be an exact semantic version`);
+  }
+  return version;
+};
 if (
   typeof sliverScriptVersion !== "string"
   || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(sliverScriptVersion)
@@ -288,18 +299,18 @@ if (
   throw new Error("Sliver client dependency must be an exact semantic version");
 }
 for (const requiredText of [
-  "@heroui-pro/react@1.0.0-beta.8",
+  `@heroui-pro/react@${exactDirectDependencyVersion("@heroui-pro/react")}`,
   "HeroUI Pro License Agreement",
-  "@heroui/react@3.2.4",
-  "@heroui/styles@3.2.4",
+  `@heroui/react@${exactDirectDependencyVersion("@heroui/react")}`,
+  `@heroui/styles@${exactDirectDependencyVersion("@heroui/styles")}`,
   "Copyright 2025 NextUI Inc.",
-  "react@19.2.8",
-  "ghostty-web@0.4.0",
-  "quickjs-emscripten@0.32.0",
+  `react@${exactDirectDependencyVersion("react")}`,
+  `ghostty-web@${exactDirectDependencyVersion("ghostty-web")}`,
+  `quickjs-emscripten@${exactDirectDependencyVersion("quickjs-emscripten")}`,
   "@jitl/quickjs-wasmfile-release-sync@0.32.0",
-  "monaco-editor@0.56.0",
-  "node-pty@1.1.0",
-  "electron-updater@6.8.9",
+  `monaco-editor@${exactDirectDependencyVersion("monaco-editor")}`,
+  `node-pty@${exactDirectDependencyVersion("node-pty")}`,
+  `electron-updater@${exactDirectDependencyVersion("electron-updater")}`,
   `sliver-script@${sliverScriptVersion}\nDeclared license: GPL-3.0-or-later`,
   "Fira Code@6.2 (embedded terminal font)",
   "JetBrains Mono@2.304 (embedded terminal font)",
