@@ -119,7 +119,7 @@ export function SessionPanelWindowApp(): React.JSX.Element {
     <ConnectionProvider connection={snapshot?.connection}>
       <AuxiliaryWindowFrame ariaLabel={panel ? `Standalone ${panelTitle(panel)} window` : "Standalone session panel window"}>
         <div
-          className={`h-full min-h-0 px-4 pb-4 pt-4 ${panel === "execution" ? "overflow-y-auto" : "overflow-hidden"}`}
+          className="h-full min-h-0 overflow-hidden px-4 pb-4 pt-4"
         >
           {content}
         </div>

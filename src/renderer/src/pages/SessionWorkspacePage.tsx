@@ -761,7 +761,7 @@ export function SessionWorkspacePage({
             </section>
           </Tabs.Panel>
 
-          <Tabs.Panel className="pt-6" id="execution">
+          <Tabs.Panel className="session-workspace__execution-panel pt-6" id="execution">
             {resolvedPanels.execution
               ? resolvedPanels.execution(context)
               : activeSessionRef

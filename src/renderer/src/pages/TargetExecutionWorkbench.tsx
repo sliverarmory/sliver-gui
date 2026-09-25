@@ -624,7 +624,9 @@ export function TargetExecutionWorkbench({
   return (
     <>
       <section
-        className="rounded-2xl bg-surface p-5 sm:p-6"
+        className={isSession
+          ? "flex h-full max-h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl bg-surface p-5 sm:p-6"
+          : "rounded-2xl bg-surface p-5 sm:p-6"}
         aria-label={isSession ? "Execution operations" : undefined}
         aria-labelledby={isSession ? undefined : "execution-workbench-heading"}
       >
@@ -648,7 +650,7 @@ export function TargetExecutionWorkbench({
         ) : null}
 
         {isSession ? (
-          <div className="flex items-center justify-between gap-4">
+          <div className="flex shrink-0 items-center justify-between gap-4">
             {categoryTabs}
             {onPopOut && presentation !== "dedicated" ? (
               <div className="flex shrink-0 items-center gap-2">
@@ -672,28 +674,28 @@ export function TargetExecutionWorkbench({
 
         {isSession && category === "process" ? (
           <>
-          {processHistoryError ? <p className="mt-4 text-xs text-danger" role="alert">{processHistoryError}</p> : null}
-          <ProcessExecutionView
-            capability={categoryCapabilities.find((capability) => capability.operationId === "execution.process")}
-            history={processHistory}
-            addingToLoot={addingToLoot}
-            isExecuting={isExecuting}
-            isPreparing={isPreparing}
-            isRefreshing={!catalogIsCurrent}
-            savingStream={savingStream === "combined" ? undefined : savingStream}
-            selectedId={selectedProcessId}
-            target={catalogState.value.target}
-            onClear={(id) => void clearProcessHistory(id)}
-            onClearAll={() => void clearProcessHistory()}
-            onAddToLoot={(source, stream, name) => void addProcessOutputToLoot(source, stream, name)}
-            onPrepare={prepare}
-            onRefresh={(record) => void refreshProcessResult(record)}
-            onSave={(source, stream) => void saveResult(source, stream)}
-            onSelect={setSelectedProcessId}
-          />
+            {processHistoryError ? <p className="mt-4 text-xs text-danger" role="alert">{processHistoryError}</p> : null}
+            <ProcessExecutionView
+              capability={categoryCapabilities.find((capability) => capability.operationId === "execution.process")}
+              history={processHistory}
+              addingToLoot={addingToLoot}
+              isExecuting={isExecuting}
+              isPreparing={isPreparing}
+              isRefreshing={!catalogIsCurrent}
+              savingStream={savingStream === "combined" ? undefined : savingStream}
+              selectedId={selectedProcessId}
+              target={catalogState.value.target}
+              onClear={(id) => void clearProcessHistory(id)}
+              onClearAll={() => void clearProcessHistory()}
+              onAddToLoot={(source, stream, name) => void addProcessOutputToLoot(source, stream, name)}
+              onPrepare={prepare}
+              onRefresh={(record) => void refreshProcessResult(record)}
+              onSave={(source, stream) => void saveResult(source, stream)}
+              onSelect={setSelectedProcessId}
+            />
           </>
         ) : (
-          <>
+          <div className={isSession ? "min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain" : undefined}>
             <ItemCardGroup className="mt-5" columns={2} layout="grid" variant="secondary">
               <ItemCardGroup.Header className="col-span-full">
                 <ItemCardGroup.Title>{categoryCopy.label}</ItemCardGroup.Title>
@@ -727,7 +729,7 @@ export function TargetExecutionWorkbench({
                 onSave={(stream) => void saveResult(result, stream)}
               />
             ) : null}
-          </>
+          </div>
         )}
       </section>
 

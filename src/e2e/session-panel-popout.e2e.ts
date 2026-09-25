@@ -131,6 +131,7 @@ test("Execution history and captured output sync between the session and its pop
     await popOutOutput.getByRole("heading", { name: "/usr/bin/printf first-run", exact: true }).waitFor();
     await assertProcessResult(popOut, popOutOutput);
     await assertReadableProcessOutput(popOut, popOutOutput);
+    await assertExecutionPopOutResizes(fixture.application, popOut, popOutOutput);
     assert.equal(await popOutHistory.getByRole("row").count(), 2,
       "the pop-out must include the execution that completed before it opened");
 
@@ -276,6 +277,57 @@ async function assertReadableProcessOutput(page: Page, output: ReturnType<Page["
   }, requestId);
   assert.equal(read.ok, true, read.error ?? "the peer window must be authorized to read captured output");
   assert.match(read.stdout ?? "", /deterministic M4 process stdout/u);
+}
+
+async function assertExecutionPopOutResizes(
+  application: ElectronApplication,
+  page: Page,
+  workspace: ReturnType<Page["getByRole"]>,
+): Promise<void> {
+  const nativeWindow = await application.browserWindow(page);
+  const main = page.getByRole("main", { name: "Standalone Execution window", exact: true });
+  const operations = page.getByRole("region", { name: "Execution operations", exact: true });
+  const historyRail = workspace.locator("aside").first();
+  const terminal = page.locator('[aria-label="Execution output terminal"]');
+  await terminal.locator("canvas").waitFor();
+
+  const terminalHeights: number[] = [];
+  for (const [width, height] of [[1440, 950], [1024, 768]]) {
+    await nativeWindow.evaluate((window, size) => window.setSize(size.width, size.height), { width, height });
+    await page.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, width);
+    const [mainBounds, operationsBounds, workspaceBounds, historyBounds, terminalBounds] = await Promise.all([
+      main.boundingBox(), operations.boundingBox(), workspace.boundingBox(), historyRail.boundingBox(), terminal.boundingBox(),
+    ]);
+    assert.ok(mainBounds && operationsBounds && workspaceBounds && historyBounds && terminalBounds,
+      `Execution layout must be measurable at ${width}×${height}`);
+    const mainBottom = mainBounds.y + mainBounds.height;
+    const operationsBottom = operationsBounds.y + operationsBounds.height;
+    const workspaceBottom = workspaceBounds.y + workspaceBounds.height;
+    assert.ok(mainBottom - operationsBottom >= -1 && mainBottom - operationsBottom <= 32,
+      `Execution must fill the standalone window at ${width}×${height}; bottom gap=${mainBottom - operationsBottom}`);
+    assert.ok(operationsBottom - workspaceBottom >= -1 && operationsBottom - workspaceBottom <= 40,
+      `Process workspace must fill Execution at ${width}×${height}; bottom gap=${operationsBottom - workspaceBottom}`);
+    assertContained(historyBounds, workspaceBounds, `Execution history at ${width}×${height}`);
+    assertContained(terminalBounds, workspaceBounds, `Execution terminal at ${width}×${height}`);
+    terminalHeights.push(terminalBounds.height);
+  }
+  assert.ok(terminalHeights[0]! - terminalHeights[1]! > 50,
+    `Execution terminal must resize with the window; heights=${terminalHeights.join(", ")}`);
+}
+
+function assertContained(
+  child: { x: number; y: number; width: number; height: number },
+  parent: { x: number; y: number; width: number; height: number },
+  label: string,
+): void {
+  assert.ok(child.width > 0 && child.height > 0, `${label} must have positive size`);
+  assert.ok(child.x >= parent.x - 1 && child.y >= parent.y - 1, `${label} must start inside its workspace`);
+  assert.ok(child.x + child.width <= parent.x + parent.width + 1,
+    `${label} must fit horizontally inside its workspace`);
+  assert.ok(child.y + child.height <= parent.y + parent.height + 1,
+    `${label} must fit vertically inside its workspace`);
 }
 
 async function assertSandboxedWindow(application: ElectronApplication, expectedUrl: string): Promise<void> {

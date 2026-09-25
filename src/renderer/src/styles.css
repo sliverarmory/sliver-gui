@@ -884,23 +884,23 @@
   border-radius: 0;
 }
 
-/* Registry, Files, Processes, and Shell use the remaining session viewport, with scrolling
+/* Execution, Registry, Files, Processes, and Shell use the remaining session viewport, with scrolling
    contained inside their navigation and content panes. */
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) {
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) {
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) > .session-workspace__trail-frame,
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"])
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) > .session-workspace__trail-frame,
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"])
   > .session-workspace__tabs
   > .session-workspace__sticky {
   flex: none;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) > .session-workspace__tabs,
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"])
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) > .session-workspace__tabs,
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"])
   > .session-workspace__tabs
   > :is(.session-workspace__panel-content, .session-workspace__viewport) {
   min-height: 0;
@@ -908,15 +908,15 @@
   overflow: hidden;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"])
-  :is(.session-workspace__viewport-content, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel, .session-workspace__terminal-panel) {
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"])
+  :is(.session-workspace__viewport-content, .session-workspace__execution-panel, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel, .session-workspace__terminal-panel) {
   height: 100%;
   max-height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.session-workspace:is([data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) :is(.session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel, .session-workspace__terminal-panel) {
+.session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) :is(.session-workspace__execution-panel, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel, .session-workspace__terminal-panel) {
   margin-top: 0;
 }
 

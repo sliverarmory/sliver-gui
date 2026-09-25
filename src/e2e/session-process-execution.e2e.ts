@@ -114,6 +114,7 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
     await assertGhosttyOutput(page, terminal);
     await assertProcessDetails(outputPanel);
     await assertProcessRailBesideContent(outputPanel, history, terminal);
+    await assertEmbeddedProcessViewport(page, outputPanel, terminal);
     assert.equal(await history.getByRole("row").count(), 2,
       "the completed execution must appear directly below New Execution");
     await page.screenshot({
@@ -364,6 +365,35 @@ async function assertVerticalHistoryBesideTerminal(
     "New Execution and history entries must share the same left edge");
   assert.ok(Math.abs(secondBounds.x - firstBounds.x) <= 4,
     "history entries must share the same left edge");
+}
+
+async function assertEmbeddedProcessViewport(
+  page: Page,
+  workspace: Locator,
+  terminal: Locator,
+): Promise<void> {
+  const viewport = page.locator(
+    '.session-workspace[data-presentation="embedded"][data-selected-panel="execution"] .session-workspace__panel-content',
+  );
+  const operations = page.getByRole("region", { name: "Execution operations", exact: true });
+  const [viewportBounds, operationsBounds, workspaceBounds, terminalBounds] = await Promise.all([
+    viewport.boundingBox(), operations.boundingBox(), workspace.boundingBox(), terminal.boundingBox(),
+  ]);
+  assert.ok(viewportBounds && operationsBounds && workspaceBounds && terminalBounds,
+    "embedded Execution viewport, workspace, and output terminal must be measurable");
+  const viewportBottom = viewportBounds.y + viewportBounds.height;
+  const operationsBottom = operationsBounds.y + operationsBounds.height;
+  const workspaceBottom = workspaceBounds.y + workspaceBounds.height;
+  assert.ok(viewportBottom - operationsBottom >= -1 && viewportBottom - operationsBottom <= 24,
+    `Execution must fill the session content viewport; bottom gap=${viewportBottom - operationsBottom}`);
+  assert.ok(operationsBottom - workspaceBottom >= -1 && operationsBottom - workspaceBottom <= 40,
+    `Process workspace must fill Execution with modest padding; bottom gap=${operationsBottom - workspaceBottom}`);
+  assert.ok(terminalBounds.x >= workspaceBounds.x - 1 && terminalBounds.y >= workspaceBounds.y - 1 &&
+    terminalBounds.x + terminalBounds.width <= workspaceBounds.x + workspaceBounds.width + 1 &&
+    terminalBounds.y + terminalBounds.height <= workspaceBottom + 1,
+  "The output terminal must stay inside the embedded Process workspace");
+  assert.ok(workspaceBottom - terminalBounds.y - terminalBounds.height <= 40,
+    `The output terminal must use the available Process workspace height; bottom gap=${workspaceBottom - terminalBounds.y - terminalBounds.height}`);
 }
 
 async function runProcess(form: Locator, page: Page, path: string, args: string): Promise<void> {

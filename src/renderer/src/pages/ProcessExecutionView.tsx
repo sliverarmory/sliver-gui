@@ -98,13 +98,13 @@ export function ProcessExecutionView({
   return (
     <section
       aria-label="Process execution history and output"
-      className="mt-4 grid min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]"
+      className="mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"
     >
-      <aside className="min-w-0 border-b border-separator bg-background p-3 sm:border-b-0 sm:border-r sm:p-4">
-        <nav aria-label="Process execution history">
+      <aside className="flex min-h-0 min-w-0 flex-col border-b border-separator bg-background p-3 sm:border-b-0 sm:border-r sm:p-4">
+        <nav aria-label="Process execution history" className="min-h-0 sm:flex-1 sm:overflow-hidden">
           <ChatListView
             aria-label="Process execution history"
-            className="max-h-80 space-y-1 overflow-y-auto pr-1 sm:max-h-[36rem]"
+            className="max-h-40 space-y-1 overflow-y-auto pr-1 sm:h-full sm:max-h-full"
             selectedKeys={new Set([selectedHistoryKey])}
             selectionBehavior="replace"
             selectionMode="single"
@@ -178,7 +178,7 @@ export function ProcessExecutionView({
         </div>
       </aside>
 
-      <div className="min-w-0 p-4 sm:p-5">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 sm:p-5">
         {showingNew ? (
           <section aria-label="Run a process" className="min-w-0">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -220,7 +220,7 @@ export function ProcessExecutionView({
             )}
           </section>
         ) : selected ? (
-          <div className="min-w-0">
+          <div className="flex min-h-full min-w-0 flex-1 flex-col">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
@@ -298,15 +298,15 @@ export function ProcessExecutionView({
                 <Switch.Control><Switch.Thumb /></Switch.Control>
               </Switch>
             </div>
-            <div className="mt-2 min-h-80 overflow-hidden rounded-xl bg-surface-secondary">
+            <div className="mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary">
               {output?.data.byteLength ? (
                 <ExecutionOutputTerminal
                   bytes={output.data}
-                  className="h-80"
+                  className="h-full min-h-0"
                   resetKey={`${selected.id}:${stream}`}
                 />
               ) : (
-                <div className="flex min-h-80 items-center justify-center px-5 text-center text-sm text-muted">
+                <div className="flex h-full min-h-40 items-center justify-center px-5 text-center text-sm text-muted">
                   {selected.state === "running" || selected.state === "submitted"
                     ? "Waiting for the process result."
                     : outputMetadata && !output && !selected.outputError

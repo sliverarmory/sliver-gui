@@ -58,16 +58,17 @@ describe("Session workspace sticky summary layout", () => {
     expect(registryPanel).toContain(">Load more values</Button>");
   });
 
-  it("constrains the selected Registry, Files, Processes, or Shell panel to the remaining session viewport", () => {
+  it("constrains the selected Execution, Registry, Files, Processes, or Shell panel to the remaining session viewport", () => {
     expect(workspace).toContain("data-selected-panel={visiblePanel}");
+    expect(workspace).toContain('className="session-workspace__execution-panel pt-6"');
     expect(workspace).toContain('className="session-workspace__registry-panel pt-6"');
     expect(workspace).toContain('className="session-workspace__files-panel pt-6"');
     expect(workspace).toContain('className="session-workspace__processes-panel pt-6"');
     expect(workspace).toContain('className="session-workspace__terminal-panel pt-6 data-[inert=true]:hidden"');
     expect(styles).toMatch(
-      /\.session-workspace:is\(\[data-selected-panel="registry"\],\s*\[data-selected-panel="files"\],\s*\[data-selected-panel="processes"\],\s*\[data-selected-panel="terminal"\]\)\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
+      /\.session-workspace:is\(\[data-selected-panel="execution"\],\s*\[data-selected-panel="registry"\],\s*\[data-selected-panel="files"\],\s*\[data-selected-panel="processes"\],\s*\[data-selected-panel="terminal"\]\)\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
     );
-    expect(styles).toContain(".session-workspace__viewport-content, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel, .session-workspace__terminal-panel");
+    expect(styles).toContain(".session-workspace__viewport-content, .session-workspace__execution-panel, .session-workspace__registry-panel, .session-workspace__files-panel, .session-workspace__processes-panel, .session-workspace__terminal-panel");
   });
 
   it("pins the session chrome above scrolling panel content", () => {
