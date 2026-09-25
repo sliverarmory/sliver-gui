@@ -4,6 +4,10 @@ import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faPlus, faTrashCan } from "@fortawesome/free-solid-svg-icons";
 
+import {
+  useApplicationContextMenuScope,
+  type ApplicationContextMenuAction,
+} from "./ApplicationContextMenu";
 import { ExecutionHistoryScrollShadow } from "./ExecutionHistoryScrollShadow";
 
 export interface ExecutionHistorySidebarItem {
@@ -13,6 +17,7 @@ export interface ExecutionHistorySidebarItem {
   readonly stateLabel: string;
   readonly statusIcon: IconDefinition;
   readonly statusColor: string;
+  readonly contextActions?: readonly ApplicationContextMenuAction[];
 }
 
 interface ExecutionHistorySidebarProps {
@@ -85,34 +90,14 @@ export function ExecutionHistorySidebar({
               }
             }}
           >
-            {items.map((item) => {
-              const isSelected = item.id === selectedId;
-              return (
-                <ChatListView.Item
-                  className="rounded-xl"
-                  id={`${executionKeyPrefix}${item.id}`}
-                  key={item.id}
-                  style={{
-                    backgroundColor: isSelected ? "var(--color-surface)" : undefined,
-                    borderBottomColor: "transparent",
-                    boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
-                  }}
-                  textValue={item.title}
-                >
-                  <ChatListView.ItemContent>
-                    <ChatListView.Icon>
-                      <FontAwesomeIcon aria-hidden className={`size-3.5 ${item.statusColor}`} icon={item.statusIcon} />
-                    </ChatListView.Icon>
-                    <ChatListView.Text>
-                      <ChatListView.Title className="font-mono text-xs" title={item.title}>{item.title}</ChatListView.Title>
-                      <ChatListView.Preview>
-                        {new Date(item.startedAt).toLocaleTimeString()} · {item.stateLabel}
-                      </ChatListView.Preview>
-                    </ChatListView.Text>
-                  </ChatListView.ItemContent>
-                </ChatListView.Item>
-              );
-            })}
+            {items.map((item) => (
+              <ExecutionHistoryItem
+                executionKeyPrefix={executionKeyPrefix}
+                isSelected={item.id === selectedId}
+                item={item}
+                key={item.id}
+              />
+            ))}
           </ChatListView>
         </ExecutionHistoryScrollShadow>
       </nav>
@@ -125,5 +110,45 @@ export function ExecutionHistorySidebar({
         </Button>
       </div>
     </aside>
+  );
+}
+
+function ExecutionHistoryItem({
+  executionKeyPrefix,
+  isSelected,
+  item,
+}: {
+  readonly executionKeyPrefix: string;
+  readonly isSelected: boolean;
+  readonly item: ExecutionHistorySidebarItem;
+}): React.JSX.Element {
+  const contextMenuScope = useApplicationContextMenuScope(
+    item.contextActions ? { actions: item.contextActions } : {},
+  );
+
+  return (
+    <ChatListView.Item
+      {...contextMenuScope}
+      className="rounded-xl"
+      id={`${executionKeyPrefix}${item.id}`}
+      style={{
+        backgroundColor: isSelected ? "var(--color-surface)" : undefined,
+        borderBottomColor: "transparent",
+        boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
+      }}
+      textValue={item.title}
+    >
+      <ChatListView.ItemContent>
+        <ChatListView.Icon>
+          <FontAwesomeIcon aria-hidden className={`size-3.5 ${item.statusColor}`} icon={item.statusIcon} />
+        </ChatListView.Icon>
+        <ChatListView.Text>
+          <ChatListView.Title className="font-mono text-xs" title={item.title}>{item.title}</ChatListView.Title>
+          <ChatListView.Preview>
+            {new Date(item.startedAt).toLocaleTimeString()} · {item.stateLabel}
+          </ChatListView.Preview>
+        </ChatListView.Text>
+      </ChatListView.ItemContent>
+    </ChatListView.Item>
   );
 }

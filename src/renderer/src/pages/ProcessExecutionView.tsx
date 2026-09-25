@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Chip, Switch, Tooltip, toast } from "@heroui/react";
 import { Segment } from "@heroui-pro/react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
@@ -70,6 +70,10 @@ export function ProcessExecutionView({
 }: ProcessExecutionViewProps): React.JSX.Element {
   const [stream, setStream] = useState<OutputStream>("stdout");
   const [ignoreStderr, setIgnoreStderr] = useState(false);
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const addingToLootRef = useRef(addingToLoot);
+  addingToLootRef.current = addingToLoot;
   const selectedIndex = history.findIndex((record) => record.id === selectedId);
   const selected = selectedId === null ? undefined : history[selectedIndex < 0 ? 0 : selectedIndex];
   const showingNew = selected === undefined;
@@ -82,13 +86,22 @@ export function ProcessExecutionView({
   }, [selected?.id]);
   useEffect(() => { if (ignoreStderr) setStream("stdout"); }, [ignoreStderr]);
 
-  const copyOutput = async (): Promise<void> => {
-    if (!output?.data.byteLength) return;
+  const copyBytes = async (bytes: Uint8Array | undefined): Promise<void> => {
+    if (!bytes?.byteLength) return;
     try {
-      await navigator.clipboard.writeText(new TextDecoder().decode(output.data));
+      await navigator.clipboard.writeText(new TextDecoder().decode(bytes));
       toast.success("Output copied");
     } catch {
       toast.danger("Could not copy output", { description: "Select text in the terminal and use Copy instead." });
+    }
+  };
+  const copyOutput = (): Promise<void> => copyBytes(output?.data);
+  const copyHistoryOutput = (id: string): Promise<void> =>
+    copyBytes(historyRef.current.find((record) => record.id === id)?.stdout?.data);
+  const addHistoryStdoutToLoot = (id: string): void => {
+    const record = historyRef.current.find((item) => item.id === id);
+    if (record?.result && !addingToLootRef.current && canAddStdoutToLoot(record)) {
+      onAddToLoot(record.result, "stdout", "");
     }
   };
 
@@ -110,6 +123,22 @@ export function ProcessExecutionView({
             stateLabel: stateLabel(record),
             statusIcon: status.icon,
             statusColor: status.color,
+            contextActions: [
+              {
+                id: "copy-output",
+                label: "Copy output",
+                icon: faCopy,
+                isDisabled: !record.stdout?.data.byteLength,
+                onAction: () => copyHistoryOutput(record.id),
+              },
+              {
+                id: "add-stdout-to-loot",
+                label: "Add stdout to Loot",
+                icon: faBoxOpen,
+                isDisabled: addingToLoot || !canAddStdoutToLoot(record),
+                onAction: () => addHistoryStdoutToLoot(record.id),
+              },
+            ],
           };
         })}
         selectedId={selected?.id}
@@ -262,6 +291,12 @@ export function ProcessExecutionView({
       </div>
     </section>
   );
+}
+
+function canAddStdoutToLoot(record: ProcessExecutionRecord): boolean {
+  if (!record.stdout?.data.byteLength || !record.result) return false;
+  const metadata = record.result.output?.find((item) => item.stream === "stdout");
+  return Boolean(metadata && Date.parse(metadata.expiresAt) > Date.now());
 }
 
 function Detail({ label, value }: { label: string; value: string }): React.JSX.Element {

@@ -1,10 +1,11 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { BofCatalog, BofDirectorySelection, BofExecutionRecord } from "../../../shared/bof-contracts";
 import type { OperationResult, SliverDesktopAPI } from "../../../shared/contracts";
 import type { SessionSummary, TargetRef } from "../../../shared/target-contracts";
+import { renderWithApplicationContextMenu as render, type ApplicationContextMenuTestRender } from "../application-context-menu-test-utils";
 import { BofExecutionView } from "./BofExecutionView";
 
 vi.mock("../components/ExecutionOutputTerminal", () => ({
@@ -168,6 +169,13 @@ async function chooseBof(
   await user.clear(search);
   await user.type(search, searchTerm);
   await user.click(await screen.findByRole("option", { name: optionName }));
+}
+
+async function historyContextMenu(view: ApplicationContextMenuTestRender, commandName: string): Promise<HTMLElement> {
+  const history = screen.getByRole("navigation", { name: "BOF execution history" });
+  fireEvent.contextMenu(within(history).getByRole("row", { name: commandName }));
+  view.contextMenu.emit();
+  return screen.findByRole("menu", { name: "Application context menu" });
 }
 
 describe("BOF execution view", () => {
@@ -436,6 +444,57 @@ describe("BOF execution view", () => {
     await user.click(screen.getByRole("switch", { name: "Ignore stderr" }));
     expect(screen.queryByRole("radio", { name: "Stderr" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("BOF stdout");
+  });
+
+  it("runs history context actions on the right-clicked BOF without changing the selected output", async () => {
+    const user = userEvent.setup();
+    const selected: BofExecutionRecord = {
+      id: "selected-run", startedAt: "2026-09-25T11:01:00.000Z",
+      commandId: "sa-dir/sa-dir", commandName: "sa-dir", state: "completed",
+      stdout: { data: new TextEncoder().encode("selected BOF output\n"), truncated: false },
+    };
+    const clicked: BofExecutionRecord = {
+      id: "clicked-run", startedAt: "2026-09-25T11:00:00.000Z",
+      commandId: "sa-nslookup/sa-nslookup", commandName: "sa-nslookup", state: "completed",
+      stdout: { data: new TextEncoder().encode("clicked BOF output\n"), truncated: false },
+    };
+    const { api, clipboard } = installApi([selected, clicked]);
+    const view = render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
+    expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("selected BOF output");
+
+    const menu = await historyContextMenu(view, "sa-nslookup");
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy output" }));
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith("clicked BOF output\n"));
+    expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("selected BOF output");
+
+    const nextMenu = await historyContextMenu(view, "sa-nslookup");
+    await user.click(within(nextMenu).getByRole("menuitem", { name: "Add stdout to Loot" }));
+    await waitFor(() => expect(api.addBofOutputToLoot).toHaveBeenCalledWith({ id: "clicked-run", stream: "stdout", name: "" }));
+    expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("selected BOF output");
+  });
+
+  it("disables BOF history output actions when the clicked record has no stdout", async () => {
+    const user = userEvent.setup();
+    const selected: BofExecutionRecord = {
+      id: "selected-run", startedAt: "2026-09-25T11:01:00.000Z",
+      commandId: "sa-dir/sa-dir", commandName: "sa-dir", state: "completed",
+      stdout: { data: new TextEncoder().encode("selected BOF output\n"), truncated: false },
+    };
+    const clicked: BofExecutionRecord = {
+      id: "empty-run", startedAt: "2026-09-25T11:00:00.000Z",
+      commandId: "sa-nslookup/sa-nslookup", commandName: "sa-nslookup", state: "completed",
+      stderr: { data: new TextEncoder().encode("stderr only\n"), truncated: false },
+    };
+    const { api, clipboard } = installApi([selected, clicked]);
+    const view = render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
+    expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("selected BOF output");
+
+    const menu = await historyContextMenu(view, "sa-nslookup");
+    expect(within(menu).getByRole("menuitem", { name: "Copy output" })).toHaveAttribute("aria-disabled", "true");
+    expect(within(menu).getByRole("menuitem", { name: "Add stdout to Loot" })).toHaveAttribute("aria-disabled", "true");
+    await user.click(within(menu).getByRole("menuitem", { name: "Copy output" }));
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(api.addBofOutputToLoot).not.toHaveBeenCalled();
   });
 
   it("automatically refreshes a selected submitted BOF and stops polling after completion", async () => {

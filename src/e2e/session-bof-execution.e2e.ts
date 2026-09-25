@@ -114,6 +114,29 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     assert.equal(await history.getByRole("row").count(), 3);
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-bof-nslookup-output.png") });
 
+    const olderExecution = history.getByRole("row").nth(2);
+    await olderExecution.scrollIntoViewIfNeeded();
+    const olderBounds = await olderExecution.boundingBox();
+    assert.ok(olderBounds, "the older BOF history item must be visible");
+    const openOlderMenu = async (): Promise<Locator> => {
+      await sendNativeContextMenu(application!, page, {
+        x: olderBounds.x + olderBounds.width / 2,
+        y: olderBounds.y + olderBounds.height / 2,
+      });
+      const menu = page.getByRole("menu", { name: "Application context menu" });
+      await menu.waitFor();
+      return menu;
+    };
+    const copyMenu = await openOlderMenu();
+    await copyMenu.getByRole("menuitem", { name: "Copy output", exact: true }).click();
+    await assertClipboard(application, "deterministic sa-dir stdout\n");
+    await assertOutput(workspace, "deterministic sa-nslookup stderr");
+    const lootMenu = await openOlderMenu();
+    await lootMenu.getByRole("menuitem", { name: "Add stdout to Loot", exact: true }).click();
+    await page.getByText("Output added to Loot", { exact: true }).waitFor();
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.methods.filter((name) => name === "lootAdd").length), 1);
+    await assertOutput(workspace, "deterministic sa-nslookup stderr");
+
     const calls = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.bofCalls);
     assert.deepEqual(calls, [
       {
@@ -438,6 +461,31 @@ async function assertOutput(workspace: Locator, text: string): Promise<void> {
   }
   assert.match(await transcript.textContent() ?? "", new RegExp(text, "u"));
   await workspace.locator('[aria-label="Execution output terminal"] canvas').waitFor();
+}
+
+async function sendNativeContextMenu(
+  application: ElectronApplication,
+  page: Page,
+  point: { readonly x: number; readonly y: number },
+): Promise<void> {
+  const sent = await application.evaluate(({ app, BrowserWindow }, input) => {
+    const window = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.getURL() === input.url);
+    if (!window) return false;
+    app.focus({ steal: true });
+    window.show();
+    window.focus();
+    window.webContents.focus();
+    const event = {
+      x: Math.max(0, Math.round(input.x)),
+      y: Math.max(0, Math.round(input.y)),
+      button: "right" as const,
+      clickCount: 1,
+    };
+    window.webContents.sendInputEvent({ type: "mouseDown", ...event });
+    window.webContents.sendInputEvent({ type: "mouseUp", ...event });
+    return true;
+  }, { ...point, url: page.url() });
+  assert.equal(sent, true, `expected a native Electron window for ${page.url()}`);
 }
 
 async function assertClipboard(application: ElectronApplication, expected: string): Promise<void> {

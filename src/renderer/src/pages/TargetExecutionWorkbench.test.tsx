@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +20,7 @@ import type {
   TargetSummary,
 } from "../../../shared/target-contracts";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
+import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 
 vi.mock("../components/ExecutionOutputTerminal", () => ({
   ExecutionOutputTerminal: ({ bytes }: { bytes: Uint8Array }) => (
@@ -867,6 +868,80 @@ describe("TargetExecutionWorkbench", () => {
       stream: "stdout",
       name: "",
     }));
+  });
+
+  it("uses the right-clicked Process history item for output actions without changing selection", async () => {
+    const user = userEvent.setup();
+    const api = installAPI(catalog([capability("execution.process")]));
+    const writeText = vi.fn(async (_text: string) => undefined);
+    const previousClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      const view = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-history-menu" />);
+      act(() => api.publishProcessHistory([
+        processRecord("first-run", "/usr/bin/first", completedProcessResult("first-run", 100, 0, "first stdout"), "first stdout"),
+        processRecord("second-run", "/usr/bin/second", completedProcessResult("second-run", 101, 0, "second stdout"), "second stdout"),
+      ]));
+      const history = await screen.findByRole("navigation", { name: "Process execution history" });
+      const first = await within(history).findByRole("row", { name: /\/usr\/bin\/first/u });
+      const second = within(history).getByRole("row", { name: /\/usr\/bin\/second/u });
+      await user.click(second);
+      expect(second).toHaveAttribute("aria-selected", "true");
+
+      fireEvent.contextMenu(first);
+      view.contextMenu.emit([]);
+      const copyMenu = await screen.findByRole("menu", { name: "Application context menu" });
+      await user.click(within(copyMenu).getByRole("menuitem", { name: "Copy output" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith("first stdout"));
+      expect(second).toHaveAttribute("aria-selected", "true");
+
+      fireEvent.contextMenu(first);
+      view.contextMenu.emit([]);
+      const lootMenu = await screen.findByRole("menu", { name: "Application context menu" });
+      await user.click(within(lootMenu).getByRole("menuitem", { name: "Add stdout to Loot" }));
+      await waitFor(() => expect(api.addExecutionOutputToLoot).toHaveBeenCalledExactlyOnceWith({
+        requestId: "first-run",
+        stream: "stdout",
+        name: "",
+      }));
+      expect(second).toHaveAttribute("aria-selected", "true");
+    } finally {
+      if (previousClipboard) Object.defineProperty(navigator, "clipboard", previousClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("disables Process history output actions when stdout is absent or its Loot handle expired", async () => {
+    const user = userEvent.setup();
+    const api = installAPI(catalog([capability("execution.process")]));
+    const expiredResult = completedProcessResult("expired-run", 102, 0, "expired stdout");
+    expiredResult.output = expiredResult.output!.map((item) => ({
+      ...item,
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    }));
+    const view = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-history-menu-disabled" />);
+    act(() => api.publishProcessHistory([
+      processRecord("empty-run", "/usr/bin/empty"),
+      processRecord("expired-run", "/usr/bin/expired", expiredResult, "expired stdout"),
+    ]));
+    const history = await screen.findByRole("navigation", { name: "Process execution history" });
+    const empty = await within(history).findByRole("row", { name: /\/usr\/bin\/empty/u });
+    const expired = within(history).getByRole("row", { name: /\/usr\/bin\/expired/u });
+    fireEvent.contextMenu(empty);
+    view.contextMenu.emit([]);
+    const emptyMenu = await screen.findByRole("menu", { name: "Application context menu" });
+    expect(within(emptyMenu).getByRole("menuitem", { name: "Copy output" })).toHaveAttribute("aria-disabled", "true");
+    expect(within(emptyMenu).getByRole("menuitem", { name: "Add stdout to Loot" })).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu", { name: "Application context menu" })).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(expired);
+    view.contextMenu.emit([]);
+    await waitFor(() => {
+      const expiredMenu = screen.getByRole("menu", { name: "Application context menu" });
+      expect(within(expiredMenu).getByRole("menuitem", { name: "Copy output" })).not.toHaveAttribute("aria-disabled", "true");
+      expect(within(expiredMenu).getByRole("menuitem", { name: "Add stdout to Loot" })).toHaveAttribute("aria-disabled", "true");
+    });
   });
 
   it("advances an exact submitted beacon execution from its task invalidation and saves output natively", async () => {

@@ -150,6 +150,28 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
       "the older execution must follow the most recent one");
     await outputPanel.getByRole("heading", { name: '/usr/bin/id "second run" "escaped space"', exact: true }).waitFor();
 
+    const olderBounds = await historyItems.nth(2).boundingBox();
+    assert.ok(olderBounds, "the older process history item must be visible");
+    const openOlderMenu = async (): Promise<Locator> => {
+      await sendNativeContextMenu(application!, page, {
+        x: olderBounds.x + olderBounds.width / 2,
+        y: olderBounds.y + olderBounds.height / 2,
+      });
+      const menu = page.getByRole("menu", { name: "Application context menu" });
+      await menu.waitFor();
+      return menu;
+    };
+    const copyMenu = await openOlderMenu();
+    await copyMenu.getByRole("menuitem", { name: "Copy output", exact: true }).click();
+    await copyMenu.waitFor({ state: "hidden" });
+    await waitForClipboard(application, "deterministic M4 process stdout\n");
+    await outputPanel.getByRole("heading", { name: '/usr/bin/id "second run" "escaped space"', exact: true }).waitFor();
+    const lootMenu = await openOlderMenu();
+    await lootMenu.getByRole("menuitem", { name: "Add stdout to Loot", exact: true }).click();
+    await page.getByText("Output added to Loot", { exact: true }).waitFor();
+    assert.equal(await fakeMethodCount(application, "lootAdd"), 1);
+    await outputPanel.getByRole("heading", { name: '/usr/bin/id "second run" "escaped space"', exact: true }).waitFor();
+
     await historyItems.nth(2).click();
     await outputPanel.getByRole("heading", { name: "/usr/bin/printf first-run", exact: true }).waitFor();
     await assertGhosttyOutput(page, terminal);
@@ -507,6 +529,17 @@ async function sendNativeContextMenu(
     return true;
   }, { ...point, url: page.url() });
   assert.equal(sent, true, `expected a native Electron window for ${page.url()}`);
+}
+
+async function waitForClipboard(application: ElectronApplication, expected: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let actual = "";
+  while (Date.now() < deadline) {
+    actual = await application.evaluate(({ clipboard }) => clipboard.readText());
+    if (actual === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(actual, expected);
 }
 
 async function fakeMethodCount(application: ElectronApplication, method: string): Promise<number> {

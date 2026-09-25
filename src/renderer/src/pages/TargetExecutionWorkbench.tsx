@@ -626,7 +626,7 @@ export function TargetExecutionWorkbench({
     <>
       <section
         className={isSession
-          ? "flex h-full max-h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl bg-surface p-5 sm:p-6"
+          ? "flex h-full max-h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl bg-surface p-5 pt-3 sm:p-6 sm:pt-3"
           : "rounded-2xl bg-surface p-5 sm:p-6"}
         aria-label={isSession ? "Execution operations" : undefined}
         aria-labelledby={isSession ? undefined : "execution-workbench-heading"}

@@ -196,6 +196,8 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   const command = catalog?.commands.find((item) => item.id === commandId);
   commandRef.current = command;
   const historyRecords = historyState.identityKey === identityKey ? historyState.records : EMPTY_HISTORY;
+  const historyRecordsRef = useRef(historyRecords);
+  historyRecordsRef.current = historyRecords;
   const historyError = historyState.identityKey === identityKey ? historyState.error : undefined;
   const selectedIndex = historyRecords.findIndex((record) => record.id === selectedId);
   const selected = selectedId === null ? undefined : historyRecords[selectedIndex < 0 ? 0 : selectedIndex];
@@ -393,15 +395,20 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
     };
   }, [pendingId, refreshResult]);
 
-  const copyOutput = async (): Promise<void> => {
-    if (!output?.data.byteLength) return;
+  const copyOutputBytes = async (bytes: Uint8Array | undefined): Promise<void> => {
+    if (!bytes?.byteLength) return;
     try {
-      await navigator.clipboard.writeText(new TextDecoder().decode(output.data));
+      await navigator.clipboard.writeText(new TextDecoder().decode(bytes));
       toast.success("Output copied");
     } catch {
       toast.danger("Could not copy output", { description: "Select text in the terminal and use Copy instead." });
     }
   };
+
+  const copyOutput = async (): Promise<void> => copyOutputBytes(output?.data);
+
+  const historyRecordForAction = (id: string, expectedIdentity: string): BofExecutionRecord | undefined =>
+    identityRef.current === expectedIdentity ? historyRecordsRef.current.find((record) => record.id === id) : undefined;
 
   const saveOutput = async (record: BofExecutionRecord, selectedStream: OutputStream): Promise<void> => {
     setSavingStream(selectedStream);
@@ -447,6 +454,23 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
             stateLabel: stateLabel(record),
             statusIcon: status.icon,
             statusColor: status.color,
+            contextActions: [{
+              id: "copy-output",
+              label: "Copy output",
+              icon: faCopy,
+              isDisabled: !record.stdout?.data.byteLength,
+              onAction: () => copyOutputBytes(historyRecordForAction(record.id, identityKey)?.stdout?.data),
+            }, {
+              id: "add-stdout-to-loot",
+              label: "Add stdout to Loot",
+              icon: faBoxOpen,
+              isDisabled: !record.stdout?.data.byteLength || addingToLoot,
+              onAction: () => {
+                const current = historyRecordForAction(record.id, identityKey);
+                if (current?.stdout?.data.byteLength) return addOutputToLoot(current, "stdout");
+                return undefined;
+              },
+            }],
           };
         })}
         selectedId={selected?.id}
