@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Locator } from "playwright-core";
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 test("session and beacon BOFs render Armory arguments, dispatch packed invocations, and capture output", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -81,8 +81,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     assert.equal(await history.getByRole("row").count(), 1);
     assert.equal(await workspace.getByRole("row", { name: "New Execution", exact: true }).count(), 1);
 
-    const selector = form.getByRole("combobox", { name: "Armory BOF" });
-    await selector.selectOption("sa-dir/sa-dir");
+    await selectInstalledBof(page, form, "sa-dir");
     assert.equal(await form.getByRole("textbox", { name: /targetdir/u }).inputValue(), ".");
     assert.equal(await form.getByRole("spinbutton", { name: /subdirs/u }).inputValue(), "0");
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-bof-new-execution.png") });
@@ -99,7 +98,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
 
     await history.getByRole("row", { name: "New Execution", exact: true }).click();
     await form.waitFor();
-    await selector.selectOption("sa-nslookup/sa-nslookup");
+    await selectInstalledBof(page, form, "sa-nslookup");
     assert.equal(await form.getByRole("textbox", { name: /hostname/u }).count(), 1);
     assert.equal(await form.getByRole("spinbutton", { name: /type/u }).inputValue(), "1");
     await form.getByRole("textbox", { name: /hostname/u }).fill("localhost");
@@ -140,7 +139,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     const beaconWorkspace = page.getByRole("region", { name: "BOF execution history and output" });
     const beaconForm = beaconWorkspace.getByRole("region", { name: "Execute an Armory BOF" });
     assert.equal(await beaconWorkspace.getByRole("navigation", { name: "BOF execution history" }).getByRole("row").count(), 1);
-    await beaconForm.getByRole("combobox", { name: "Armory BOF" }).selectOption("sa-dir/sa-dir");
+    await selectInstalledBof(page, beaconForm, "sa-dir");
     await beaconForm.getByRole("textbox", { name: /targetdir/u }).fill("/tmp/beacon-BOF");
     await beaconForm.getByRole("button", { name: "Execute", exact: true }).click();
     await beaconWorkspace.getByRole("button", { name: "Refresh result" }).waitFor();
@@ -212,7 +211,7 @@ test("Windows session BOFs dispatch a legacy installed COFF loader", { timeout: 
 
     const workspace = page.getByRole("region", { name: "BOF execution history and output" });
     const form = workspace.getByRole("region", { name: "Execute an Armory BOF" });
-    await form.getByRole("combobox", { name: "Armory BOF" }).selectOption("legacy-probe/legacy-probe");
+    await selectInstalledBof(page, form, "legacy-probe");
     await form.getByRole("textbox", { name: /marker/u }).fill("legacy-e2e");
     await form.getByRole("button", { name: "Execute", exact: true }).click();
     await assertOutput(workspace, "deterministic legacy BOF stdout");
@@ -237,6 +236,13 @@ test("Windows session BOFs dispatch a legacy installed COFF loader", { timeout: 
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function selectInstalledBof(page: Page, form: Locator, commandName: string): Promise<void> {
+  await form.locator('[data-slot="autocomplete-trigger"]').click();
+  const search = page.getByRole("searchbox", { name: "Search installed BOFs", exact: true });
+  await search.fill(commandName);
+  await page.getByRole("option", { name: new RegExp(commandName, "u") }).click();
+}
 
 async function assertOutput(workspace: Locator, text: string): Promise<void> {
   const transcript = workspace.getByLabel("Execution output transcript");

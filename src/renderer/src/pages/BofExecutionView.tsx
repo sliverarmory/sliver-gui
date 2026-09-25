@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Button, Chip, Description, Input, Label, SearchField, Switch, TextField, Tooltip, toast } from "@heroui/react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Autocomplete, Button, Chip, Description, Input, Label, ListBox, SearchField, Switch, TextField, Tooltip, toast, useFilter } from "@heroui/react";
 import { ChatListView, Segment } from "@heroui-pro/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
@@ -56,7 +56,6 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   const [historyState, setHistoryState] = useState<HistoryState>({ identityKey, revision: -1, records: EMPTY_HISTORY });
   const [selectedId, setSelectedId] = useState<string | null>();
   const [commandId, setCommandId] = useState("");
-  const [query, setQuery] = useState("");
   const [argumentValues, setArgumentValues] = useState<ArgumentValue[]>([]);
   const [timeoutSeconds, setTimeoutSeconds] = useState("60");
   const [formError, setFormError] = useState<string>();
@@ -77,6 +76,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   identityRef.current = identityKey;
   const targetKeyRef = useRef(targetKey);
   targetKeyRef.current = targetKey;
+  const { contains } = useFilter({ sensitivity: "base" });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -170,14 +170,6 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   const catalog = catalogState.status === "ready" && sameTargetIdentity(catalogState.value.target, targetRef)
     ? catalogState.value : undefined;
   const command = catalog?.commands.find((item) => item.id === commandId);
-  const matchingCommands = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    return catalog?.commands.filter((item) => !normalized ||
-      `${item.commandName} ${item.packageName} ${item.description}`.toLocaleLowerCase().includes(normalized)) ?? [];
-  }, [catalog, query]);
-  const commandsToShow = command && !matchingCommands.some((item) => item.id === command.id)
-    ? [command, ...matchingCommands]
-    : matchingCommands;
   const historyRecords = historyState.identityKey === identityKey ? historyState.records : EMPTY_HISTORY;
   const historyError = historyState.identityKey === identityKey ? historyState.error : undefined;
   const selectedIndex = historyRecords.findIndex((record) => record.id === selectedId);
@@ -476,22 +468,53 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
             {catalogState.status === "error" ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogState.message}</p> : null}
             {catalog ? (
               <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
-                <SearchField aria-label="Search installed BOFs" value={query} onChange={setQuery}>
-                  <SearchField.Group><SearchField.SearchIcon /><SearchField.Input placeholder="Search installed BOFs…" /></SearchField.Group>
-                </SearchField>
-                <div className="space-y-1">
-                  <label className="text-sm font-medium text-foreground" htmlFor="bof-command">Armory BOF</label>
-                  <NativeSelect className="w-full">
-                    <NativeSelect.Trigger id="bof-command" aria-label="Armory BOF" value={commandId} onChange={(event) => selectCommand(event.target.value)}>
-                      <NativeSelect.Option value="">Select an installed BOF</NativeSelect.Option>
-                      {commandsToShow.map((item) => (
-                        <NativeSelect.Option key={item.id} value={item.id}>{item.commandName} · {item.packageName}{item.available ? "" : " (unavailable)"}</NativeSelect.Option>
-                      ))}
-                      <NativeSelect.Indicator />
-                    </NativeSelect.Trigger>
-                  </NativeSelect>
-                  <p className="text-xs text-muted">{matchingCommands.length} matching installed BOFs for {target.os}/{target.arch}.</p>
-                </div>
+                <Autocomplete
+                  allowsEmptyCollection
+                  fullWidth
+                  placeholder="Select an installed BOF"
+                  selectionMode="single"
+                  value={commandId || null}
+                  variant="secondary"
+                  onChange={(key) => selectCommand(key === null || Array.isArray(key) ? "" : String(key))}
+                >
+                  <Label>Armory BOF</Label>
+                  <Autocomplete.Trigger>
+                    <Autocomplete.Value>
+                      {({ defaultChildren, isPlaceholder }) => isPlaceholder || !command
+                        ? defaultChildren
+                        : `${command.commandName} · ${command.packageName}`}
+                    </Autocomplete.Value>
+                    <Autocomplete.ClearButton />
+                    <Autocomplete.Indicator />
+                  </Autocomplete.Trigger>
+                  <Description>{catalog.commands.length} installed BOFs for {target.os}/{target.arch}. Type to search or browse.</Description>
+                  <Autocomplete.Popover>
+                    <Autocomplete.Filter filter={contains}>
+                      <SearchField autoFocus aria-label="Search installed BOFs" variant="secondary">
+                        <SearchField.Group>
+                          <SearchField.SearchIcon />
+                          <SearchField.Input placeholder="Search installed BOFs…" />
+                          <SearchField.ClearButton />
+                        </SearchField.Group>
+                      </SearchField>
+                      <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching installed BOFs.</p>}>
+                        {catalog.commands.map((item) => (
+                          <ListBox.Item
+                            id={item.id}
+                            key={item.id}
+                            textValue={`${item.commandName} ${item.packageName} ${item.description}`}
+                          >
+                            <span className="flex min-w-0 flex-1 flex-col">
+                              <span className="text-sm font-medium text-foreground">{item.commandName}</span>
+                              <span className="truncate text-xs text-muted">{item.packageName}{item.available ? "" : " · Unavailable"}</span>
+                            </span>
+                            <ListBox.ItemIndicator />
+                          </ListBox.Item>
+                        ))}
+                      </ListBox>
+                    </Autocomplete.Filter>
+                  </Autocomplete.Popover>
+                </Autocomplete>
                 {catalog.commands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs are installed in the local Armory directories.</p> : null}
                 {catalog.warnings.map((warning) => <p className="text-xs text-warning" key={warning}>{warning}</p>)}
                 {command ? (

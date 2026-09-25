@@ -148,14 +148,28 @@ function renderView(): void {
   render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
 }
 
+async function chooseBof(
+  user: ReturnType<typeof userEvent.setup>,
+  composer: HTMLElement,
+  searchTerm: string,
+  optionName: RegExp,
+): Promise<void> {
+  const trigger = composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]');
+  expect(trigger).not.toBeNull();
+  await user.click(trigger!);
+  const search = await screen.findByRole("searchbox", { name: "Search installed BOFs" });
+  await user.clear(search);
+  await user.type(search, searchTerm);
+  await user.click(await screen.findByRole("option", { name: optionName }));
+}
+
 describe("BOF execution view", () => {
   it("renders manifest arguments for two installed BOFs and passes ordered typed values", async () => {
     const user = userEvent.setup();
     const { api } = installApi();
     renderView();
     const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
-    const picker = within(composer).getByRole("combobox", { name: "Armory BOF" });
-    await user.selectOptions(picker, "sa-dir/sa-dir");
+    await chooseBof(user, composer, "directory contents", /sa-dir/iu);
     expect(within(composer).getByRole("textbox", { name: "targetdir (optional)" })).toHaveValue(".");
     expect(within(composer).getByRole("spinbutton", { name: "subdirs (optional)" })).toHaveValue(0);
     await user.clear(within(composer).getByRole("textbox", { name: "targetdir (optional)" }));
@@ -168,7 +182,7 @@ describe("BOF execution view", () => {
 
     await user.click(within(screen.getByRole("navigation", { name: "BOF execution history" })).getByRole("row", { name: "New Execution" }));
     const nextComposer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
-    await user.selectOptions(within(nextComposer).getByRole("combobox", { name: "Armory BOF" }), "sa-nslookup/sa-nslookup");
+    await chooseBof(user, nextComposer, "Resolve a hostname", /sa-nslookup/iu);
     await user.type(within(nextComposer).getByRole("textbox", { name: "hostname" }), "example.com");
     await user.selectOptions(within(nextComposer).getByRole("combobox", { name: "type" }), "28");
     await user.click(within(nextComposer).getByRole("button", { name: "Execute" }));
@@ -180,7 +194,7 @@ describe("BOF execution view", () => {
     const { api, clipboard } = installApi();
     renderView();
     const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
-    await user.selectOptions(within(composer).getByRole("combobox", { name: "Armory BOF" }), "inject/inject");
+    await chooseBof(user, composer, "inject", /inject/iu);
     await user.type(within(composer).getByRole("spinbutton", { name: "pid" }), "4242");
     await user.click(within(composer).getByRole("button", { name: "Choose file for bin" }));
     expect(api.chooseBofArgumentFile).toHaveBeenCalledWith({ commandId: "inject/inject", index: 1 });

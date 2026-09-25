@@ -160,8 +160,7 @@ test("production GUI executes two installed BOFs on a test-owned loopback Sliver
     const workspace = page.getByRole("region", { name: "BOF execution history and output" });
     const history = workspace.getByRole("navigation", { name: "BOF execution history" });
     const form = workspace.getByRole("region", { name: "Execute an Armory BOF" });
-    const selector = form.getByRole("combobox", { name: "Armory BOF" });
-    await selector.selectOption("sa-dir/sa-dir");
+    await selectInstalledBof(page, form, "sa-dir");
     await form.getByRole("textbox", { name: /targetdir/u }).fill(probeDirectory);
     await form.getByRole("spinbutton", { name: /subdirs/u }).fill("0");
     await form.getByRole("button", { name: "Execute", exact: true }).click();
@@ -171,7 +170,7 @@ test("production GUI executes two installed BOFs on a test-owned loopback Sliver
     assert.ok((await application.evaluate(({ clipboard }) => clipboard.readText())).includes(marker));
 
     await history.getByRole("row", { name: "New Execution", exact: true }).click();
-    await selector.selectOption("sa-nslookup/sa-nslookup");
+    await selectInstalledBof(page, form, "sa-nslookup");
     await form.getByRole("textbox", { name: /hostname/u }).fill("localhost");
     await form.getByRole("button", { name: "Execute", exact: true }).click();
     const dnsOutput = await waitForTranscript(workspace, "DNS results for localhost", 90_000);
@@ -209,6 +208,13 @@ test("production GUI executes two installed BOFs on a test-owned loopback Sliver
     );
   }
 });
+
+async function selectInstalledBof(page: Page, form: Locator, commandName: string): Promise<void> {
+  await form.locator('[data-slot="autocomplete-trigger"]').click();
+  const search = page.getByRole("searchbox", { name: "Search installed BOFs", exact: true });
+  await search.fill(commandName);
+  await page.getByRole("option", { name: new RegExp(commandName, "u") }).click();
+}
 
 function isolatedEnvironment(home: string, serverRoot: string): NodeJS.ProcessEnv {
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([name, value]) =>
