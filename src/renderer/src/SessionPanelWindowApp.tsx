@@ -115,12 +115,37 @@ export function SessionPanelWindowApp(): React.JSX.Element {
   }
 
   const panel = launchContext?.panel;
+  const sessionName = ready?.session.name || ready?.session.hostname || ready?.session.id;
+  const hostname = ready?.session.hostname || ready?.session.hostId || "Unknown host";
+  const hostLabel = ready?.session.username
+    ? `${ready.session.username} on ${hostname}`
+    : hostname;
   return (
     <ConnectionProvider connection={snapshot?.connection}>
-      <AuxiliaryWindowFrame ariaLabel={panel ? `Standalone ${panelTitle(panel)} window` : "Standalone session panel window"}>
-        <div
-          className="h-full min-h-0 overflow-hidden px-4 pb-4 pt-4"
+      <AuxiliaryWindowFrame
+        ariaLabel={panel ? `Standalone ${panelTitle(panel)} window` : "Standalone session panel window"}
+        className="session-panel-window flex min-h-0 flex-col overflow-hidden"
+      >
+        <header
+          aria-label="Session window header"
+          className="session-panel-window__header flex h-10 shrink-0 items-center gap-2 border-b border-separator bg-surface px-4 text-xs"
         >
+          <span className="shrink-0 font-semibold text-foreground">
+            {panel ? panelTitle(panel) : "Session panel"}
+          </span>
+          {ready ? (
+            <>
+              <span aria-hidden="true" className="shrink-0 text-muted">·</span>
+              <span className="min-w-0 truncate font-medium text-foreground" title={sessionName}>
+                {sessionName}
+              </span>
+              <span className="ml-auto min-w-0 truncate text-muted" title={hostLabel}>
+                {hostLabel}
+              </span>
+            </>
+          ) : null}
+        </header>
+        <div className="session-panel-window__body min-h-0 flex-1 overflow-hidden">
           {content}
         </div>
       </AuxiliaryWindowFrame>

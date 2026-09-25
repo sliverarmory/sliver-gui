@@ -782,6 +782,44 @@
   }
 }
 
+/* Standalone session panels use their own draggable header and fill the window below it. */
+.auxiliary-window-frame[data-titlebar-style="hiddenInset"]:has(> .session-panel-window) > .auxiliary-window-titlebar {
+  height: 0;
+}
+
+.session-panel-window__header {
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.auxiliary-window-frame[data-titlebar-style="hiddenInset"] .session-panel-window__header {
+  padding-inline-start: 5.5rem;
+}
+
+.session-panel-window__body > :is(.session-files-browser, .session-registry-editor, [aria-label="Execution operations"]) {
+  border: 0;
+  border-radius: 0;
+}
+
+.session-panel-window__body > [aria-label="Execution operations"] {
+  padding: 0;
+}
+
+.session-panel-window__body > [aria-label="Execution operations"] > div:first-of-type {
+  padding: 0.75rem 1rem 0;
+}
+
+.session-panel-window__body > [aria-label="Execution operations"] > div:nth-of-type(2) {
+  padding: 0 1rem 1rem;
+}
+
+.session-panel-window__body > [aria-label="Execution operations"] > [aria-label="Process execution history and output"] {
+  margin-top: 0.75rem;
+  border-inline: 0;
+  border-bottom: 0;
+  border-radius: 0;
+}
+
 /* The embedded session workspace owns the full scrollport so its chrome can
    become full-bleed without including the collapsible sidebar. */
 .app-content:has(> .session-workspace[data-presentation="embedded"]) {

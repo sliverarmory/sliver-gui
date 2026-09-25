@@ -34,6 +34,8 @@ test("Execution, Files, and Registry open exact-session standalone panels and re
     for (const { id, tab, button, region } of panels) {
       await source.bringToFront();
       await source.getByRole("tab", { name: tab, exact: true }).click();
+      assert.equal(await source.locator('header[aria-label="Session window header"]').count(), 0,
+        "the standalone drag header must not appear in the main session window");
       const popOut = source.getByRole("button", { name: button, exact: true });
       await popOut.waitFor();
       const [window] = await Promise.all([
@@ -44,6 +46,13 @@ test("Execution, Files, and Registry open exact-session standalone panels and re
       await window.waitForURL(/\?surface=session-panel$/u);
       await window.getByRole("main", { name: `Standalone ${tab} window`, exact: true }).waitFor();
       await window.getByRole("region", { name: region, exact: true }).waitFor();
+      await assertStandalonePanelChrome(
+        window,
+        tab,
+        region,
+        original.targetContext.activeTargetSummary?.name ?? "",
+        original.targetContext.activeTargetSummary?.hostname ?? "",
+      );
       if (id === "files" || id === "registry") {
         const bounds = await window.getByRole("region", { name: region, exact: true }).boundingBox();
         assert.ok(bounds && bounds.height > 300,
@@ -277,6 +286,54 @@ async function assertReadableProcessOutput(page: Page, output: ReturnType<Page["
   }, requestId);
   assert.equal(read.ok, true, read.error ?? "the peer window must be authorized to read captured output");
   assert.match(read.stdout ?? "", /deterministic M4 process stdout/u);
+}
+
+async function assertStandalonePanelChrome(
+  page: Page,
+  title: string,
+  regionName: string,
+  sessionName: string,
+  hostname: string,
+): Promise<void> {
+  assert.ok(sessionName && hostname, "the fixture must provide session and host names");
+  const main = page.getByRole("main", { name: `Standalone ${title} window`, exact: true });
+  const header = page.locator('header[aria-label="Session window header"]');
+  const region = page.getByRole("region", { name: regionName, exact: true });
+  await header.waitFor();
+
+  const headerText = await header.innerText();
+  assert.ok(headerText.includes(title), `${title} header must identify the panel`);
+  assert.ok(headerText.includes(sessionName), `${title} header must identify the session`);
+  assert.ok(headerText.includes(hostname), `${title} header must identify the host`);
+  const dragRegion = await header.evaluate((element) => (
+    globalThis as unknown as {
+      getComputedStyle: (target: unknown) => { getPropertyValue: (name: string) => string };
+    }
+  ).getComputedStyle(element).getPropertyValue("-webkit-app-region"));
+  assert.equal(dragRegion.trim(), "drag", `${title} header must be a native window drag target`);
+
+  const [viewport, mainBounds, headerBounds, regionBounds] = await Promise.all([
+    page.evaluate(() => ({
+      width: (globalThis as unknown as { innerWidth: number }).innerWidth,
+      height: (globalThis as unknown as { innerHeight: number }).innerHeight,
+    })),
+    main.boundingBox(),
+    header.boundingBox(),
+    region.boundingBox(),
+  ]);
+  assert.ok(mainBounds && headerBounds && regionBounds, `${title} standalone layout must be measurable`);
+  assert.ok(headerBounds.y <= 2,
+    `${title} header must begin at the top of the window without a titlebar spacer (y=${headerBounds.y})`);
+  assert.ok(headerBounds.height >= 28 && headerBounds.height <= 64,
+    `${title} header must stay slim (height=${headerBounds.height})`);
+  assert.ok(Math.abs(regionBounds.y - (headerBounds.y + headerBounds.height)) <= 2,
+    `${title} panel must begin immediately below its header`);
+  assert.ok(Math.abs(regionBounds.x - mainBounds.x) <= 2 && regionBounds.x <= 2,
+    `${title} panel must meet the left window edge (x=${regionBounds.x})`);
+  assert.ok(Math.abs((regionBounds.x + regionBounds.width) - viewport.width) <= 2,
+    `${title} panel must meet the right window edge`);
+  assert.ok(Math.abs((regionBounds.y + regionBounds.height) - viewport.height) <= 2,
+    `${title} panel must meet the bottom window edge`);
 }
 
 async function assertExecutionPopOutResizes(
