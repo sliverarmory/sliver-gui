@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { sliverpb } from "sliver-script";
 import type { BofArgumentDefinition } from "../shared/bof-contracts.js";
 import type { TargetRef, TargetSummary } from "../shared/target-contracts.js";
-import { decodeBofOutput, installedBofCommands, packBofArguments, readInstalledBofObject } from "./bof-workbench.js";
+import { decodeBofOutput, installedBofCommands, packBofArguments, readBofCommandsFromDirectory, readInstalledBofObject } from "./bof-workbench.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -82,6 +82,64 @@ describe("installed BOF selection", () => {
       .toMatchObject({ available: true, arguments: [{ name: "domain.fqdn", type: "wstring" }] });
     expect(available.entries.find((item) => item.dto.id === "legacy-probe/legacy-probe"))
       .toMatchObject({ mode: "coff-loader", dependencyName: "coff-loader" });
+  });
+});
+
+describe("operator-selected BOF directory", () => {
+  it("loads an Armory-style package outside the installed extensions directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sliver-local-bof-test-"));
+    roots.push(root);
+    const directory = join(root, "working copy with spaces");
+    await mkdir(join(directory, "dist"), { recursive: true });
+    await writeFile(join(directory, "dist", "probe.o"), Buffer.from("local-object"));
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      name: "Local Probe", package_name: "local-probe", version: "1",
+      commands: [{ command_name: "probe", help: "Local package", bof_executor: "reflektor", entrypoint: "go",
+        files: [{ os: "windows", arch: "amd64", path: "/dist/probe.o" }],
+        arguments: [{ name: "domain", type: "wstring", optional: false },
+          { name: "depth", type: "short", optional: true, default: 2 }] }],
+    }));
+
+    const selected = await readBofCommandsFromDirectory(root, directory, "local-fixture", target, ref, true);
+    expect(selected.entries).toHaveLength(1);
+    expect(selected.entries[0]?.dto).toMatchObject({
+      id: "local-fixture/probe", packageName: "Local Probe", commandName: "probe", available: true,
+      arguments: [{ name: "domain", type: "wstring" }, { name: "depth", type: "short", default: 2 }],
+    });
+    expect(await readInstalledBofObject(selected.entries[0]!)).toEqual(Buffer.from("local-object"));
+
+    const unsupported = await readBofCommandsFromDirectory(root, directory, "local-fixture", { ...target, arch: "arm64" }, ref, true);
+    expect(unsupported.entries[0]?.dto).toMatchObject({ available: false, reason: expect.stringContaining("No BOF object") });
+  });
+
+  it("rejects selected symlinks and unsafe manifest paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sliver-local-bof-test-"));
+    roots.push(root);
+    const directory = join(root, "local-probe");
+    await mkdir(directory);
+    await writeFile(join(directory, "probe.o"), Buffer.from("COFF"));
+    const manifest = {
+      name: "Local Probe", command_name: "local-probe", help: "fixture", entrypoint: "go",
+      bof_executor: "reflektor", files: [{ os: "windows", arch: "amd64", path: "probe.o" }],
+    };
+    await writeFile(join(directory, "extension.json"), JSON.stringify(manifest));
+    const linkedDirectory = join(root, "linked-package");
+    await symlink(directory, linkedDirectory, "dir");
+    await expect(readBofCommandsFromDirectory(root, linkedDirectory, "local-linked", target, ref, true))
+      .rejects.toThrow(/regular directory/u);
+
+    await rm(join(directory, "extension.json"));
+    await writeFile(join(root, "outside.json"), JSON.stringify(manifest));
+    await symlink(join(root, "outside.json"), join(directory, "extension.json"));
+    await expect(readBofCommandsFromDirectory(root, directory, "local-linked", target, ref, true))
+      .rejects.toThrow(/bounded regular file/u);
+
+    await rm(join(directory, "extension.json"));
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      ...manifest, files: [{ os: "windows", arch: "amd64", path: "../outside.o" }],
+    }));
+    await expect(readBofCommandsFromDirectory(root, directory, "local-linked", target, ref, true))
+      .rejects.toThrow(/Unsafe Armory file path/u);
   });
 });
 

@@ -291,6 +291,7 @@ export type IpcConnectionRegistry = Pick<
   | "listProcessExecutionHistory"
   | "clearProcessExecutionHistory"
   | "listInstalledBofs"
+  | "chooseBofDirectory"
   | "chooseBofArgumentFile"
   | "runBof"
   | "listBofExecutionHistory"
@@ -865,6 +866,9 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.listInstalledBofs, rendererUrl, parseNoArguments, ({ contentsId }) =>
     registry.listInstalledBofs(contentsId),
+  );
+  handleTrusted(IPC.chooseBofDirectory, rendererUrl, parseNoArguments, ({ sender }) =>
+    registry.chooseBofDirectory(sender),
   );
   handleTrusted(IPC.chooseBofArgumentFile, rendererUrl, (args) => parseBofArguments(args, parseChooseBofArgumentFileInput), ({ sender }, input) =>
     registry.chooseBofArgumentFile(sender, input),

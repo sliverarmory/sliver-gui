@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { sliverpb } from "sliver-script";
@@ -25,9 +26,18 @@ export interface InstalledBofCommand {
   readonly dependencyName?: string;
 }
 
+export interface BofDirectoryCommands {
+  readonly entries: InstalledBofCommand[];
+  readonly manifestDigest: string;
+}
+
 async function realDirectory(path: string): Promise<void> {
   const stat = await lstat(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Armory directory is not a regular directory");
+}
+
+function isFileSystemError(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && typeof error.code === "string";
 }
 
 function architecture(value: string): string {
@@ -71,6 +81,112 @@ function manifestArguments(value: unknown): BofArgumentDefinition[] {
   });
 }
 
+/** Read one Armory-style BOF package without exposing its path to the renderer. */
+async function readBofPackage(
+  root: string,
+  packageDirectory: string,
+  namespace: string,
+  target: TargetSummary,
+  supportsBuiltInBof: boolean,
+  installedDirectoryName?: string,
+  loaderAvailability = new Map<string, string | null>(),
+): Promise<BofDirectoryCommands | null> {
+  await realDirectory(packageDirectory);
+  const bytes = (await readBoundedRegularFile(join(packageDirectory, "extension.json"), {
+    label: "Armory manifest", maxBytes: MAX_ARMORY_MANIFEST_BYTES,
+  })).data;
+  try {
+    const manifest = parseArmoryManifest(bytes, false);
+    if (installedDirectoryName && manifest.directoryName !== installedDirectoryName) return null;
+    if (manifest.kind !== "bof") {
+      if (installedDirectoryName) return null;
+      throw new Error("The selected directory does not contain an Armory BOF package");
+    }
+    const manifestDigest = createHash("sha256").update(bytes).digest("hex");
+    const raw = armoryRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown);
+    const commands = Array.isArray(raw["commands"]) && raw["commands"].length
+      ? raw["commands"].map(armoryRecord) : [raw];
+    const entries: InstalledBofCommand[] = [];
+    for (const command of commands) {
+      const commandName = safeArmoryName(armoryText(command["command_name"], true));
+      const files = command["files"];
+      if (!Array.isArray(files)) throw new Error("BOF manifest has no files");
+      const selected = files.map(armoryRecord).find((file) =>
+        armoryText(file["os"]).toLowerCase() === target.os.trim().toLowerCase() &&
+        architecture(armoryText(file["arch"])) === architecture(target.arch));
+      const objectPath = selected ? safeArmoryPath(armoryText(selected["path"], true), true) : undefined;
+      const isObject = objectPath !== undefined && /\.(?:o|obj)$/iu.test(objectPath);
+      if (!isObject && !files.some((file) => /\.(?:o|obj)$/iu.test(armoryText(armoryRecord(file)["path"])))) continue;
+      const executor = armoryText(command["bof_executor"]);
+      const supportedExecutor = executor === "" || executor === "coff-loader" || executor === "reflektor";
+      const dependencyName = armoryText(command["depends_on"]);
+      const usesLegacyLoader = executor === "coff-loader" ||
+        (executor === "" && !!dependencyName) ||
+        (executor === "reflektor" && !supportsBuiltInBof && !!dependencyName);
+      let loaderError: string | undefined;
+      if (usesLegacyLoader && objectPath && isObject) {
+        const cached = loaderAvailability.get(dependencyName);
+        if (cached !== undefined) loaderError = cached ?? undefined;
+        else {
+          try {
+            const loader = await readInstalledBofLoader(root, dependencyName, target);
+            loader.data.fill(0);
+            loaderAvailability.set(dependencyName, null);
+          } catch (error) {
+            loaderError = isFileSystemError(error) ? "Loader files could not be read"
+              : error instanceof Error ? error.message : "The Armory loader is unavailable";
+            loaderAvailability.set(dependencyName, loaderError);
+          }
+        }
+      }
+      const available = !!objectPath && isObject && supportedExecutor && (usesLegacyLoader ? !loaderError : supportsBuiltInBof);
+      const reason = !objectPath ? "No BOF object matches this target's OS and architecture."
+        : !isObject ? "This target artifact is not a BOF object."
+          : !supportedExecutor ? "This BOF manifest declares an unsupported executor."
+            : usesLegacyLoader && loaderError ? `The required Armory loader is unavailable: ${loaderError}`
+            : !usesLegacyLoader && !supportsBuiltInBof ? "This target does not advertise built-in BOF execution." : undefined;
+      const args = manifestArguments(command["arguments"]);
+      const entrypoint = armoryText(command["entrypoint"], true);
+      if (entrypoint.length > 256 || /[\u0000-\u001f\u007f]/u.test(entrypoint)) throw new Error("Invalid BOF entrypoint");
+      const dto: BofCommand = {
+        id: `${namespace}/${commandName}`,
+        packageName: manifest.name,
+        commandName,
+        description: armoryText(command["help"]),
+        arguments: args,
+        available,
+        ...(reason ? { reason } : {}),
+      };
+      entries.push({ dto, packageDirectory, ...(objectPath ? { objectPath } : {}), entrypoint, arguments: args,
+        mode: usesLegacyLoader ? "coff-loader" : "reflektor",
+        ...(usesLegacyLoader ? { dependencyName } : {}),
+      });
+    }
+    return { entries, manifestDigest };
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+export async function readBofCommandsFromDirectory(
+  root: string,
+  directory: string,
+  namespace: string,
+  target: TargetSummary,
+  _targetRef: TargetRef,
+  supportsBuiltInBof: boolean,
+): Promise<BofDirectoryCommands> {
+  safeArmoryName(namespace);
+  let result: BofDirectoryCommands | null;
+  try { result = await readBofPackage(root, directory, namespace, target, supportsBuiltInBof); }
+  catch (error) {
+    if (isFileSystemError(error)) throw new Error("The selected BOF directory or manifest could not be read");
+    throw error;
+  }
+  if (!result || !result.entries.length) throw new Error("The selected directory contains no BOF commands");
+  return result;
+}
+
 /** Enumerates only main-owned, locally installed Armory extensions. */
 export async function installedBofCommands(
   root: string,
@@ -95,69 +211,8 @@ export async function installedBofCommands(
     try {
       safeArmoryName(directoryName);
       const packageDirectory = join(extensions, directoryName);
-      await realDirectory(packageDirectory);
-      const bytes = (await readBoundedRegularFile(join(packageDirectory, "extension.json"), {
-        label: "Armory manifest", maxBytes: MAX_ARMORY_MANIFEST_BYTES,
-      })).data;
-      const manifest = parseArmoryManifest(bytes, false);
-      if (manifest.directoryName !== directoryName || manifest.kind !== "bof") continue;
-      const raw = armoryRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown);
-      const commands = Array.isArray(raw["commands"]) && raw["commands"].length
-        ? raw["commands"].map(armoryRecord) : [raw];
-      for (const command of commands) {
-        const commandName = safeArmoryName(armoryText(command["command_name"], true));
-        const files = command["files"];
-        if (!Array.isArray(files)) throw new Error("BOF manifest has no files");
-        const selected = files.map(armoryRecord).find((file) =>
-          armoryText(file["os"]).toLowerCase() === target.os.trim().toLowerCase() &&
-          architecture(armoryText(file["arch"])) === architecture(target.arch));
-        const objectPath = selected ? safeArmoryPath(armoryText(selected["path"], true), true) : undefined;
-        const isObject = objectPath !== undefined && /\.(?:o|obj)$/iu.test(objectPath);
-        if (!isObject && !files.some((file) => /\.(?:o|obj)$/iu.test(armoryText(armoryRecord(file)["path"])))) continue;
-        const executor = armoryText(command["bof_executor"]);
-        const supportedExecutor = executor === "" || executor === "coff-loader" || executor === "reflektor";
-        const dependencyName = armoryText(command["depends_on"]);
-        const usesLegacyLoader = executor === "coff-loader" ||
-          (executor === "" && !!dependencyName) ||
-          (executor === "reflektor" && !supportsBuiltInBof && !!dependencyName);
-        let loaderError: string | undefined;
-        if (usesLegacyLoader && objectPath && isObject) {
-          const cached = loaderAvailability.get(dependencyName);
-          if (cached !== undefined) loaderError = cached ?? undefined;
-          else {
-            try {
-              const loader = await readInstalledBofLoader(root, dependencyName, target);
-              loader.data.fill(0);
-              loaderAvailability.set(dependencyName, null);
-            } catch (error) {
-              loaderError = error instanceof Error ? error.message : "The Armory loader is unavailable";
-              loaderAvailability.set(dependencyName, loaderError);
-            }
-          }
-        }
-        const available = !!objectPath && isObject && supportedExecutor && (usesLegacyLoader ? !loaderError : supportsBuiltInBof);
-        const reason = !objectPath ? "No BOF object matches this target's OS and architecture."
-          : !isObject ? "This target artifact is not a BOF object."
-            : !supportedExecutor ? "This BOF manifest declares an unsupported executor."
-              : usesLegacyLoader && loaderError ? `The required Armory loader is unavailable: ${loaderError}`
-              : !usesLegacyLoader && !supportsBuiltInBof ? "This target does not advertise built-in BOF execution." : undefined;
-        const args = manifestArguments(command["arguments"]);
-        const entrypoint = armoryText(command["entrypoint"], true);
-        if (entrypoint.length > 256 || /[\u0000-\u001f\u007f]/u.test(entrypoint)) throw new Error("Invalid BOF entrypoint");
-        const dto: BofCommand = {
-          id: `${directoryName}/${commandName}`,
-          packageName: manifest.name,
-          commandName,
-          description: armoryText(command["help"]),
-          arguments: args,
-          available,
-          ...(reason ? { reason } : {}),
-        };
-        entries.push({ dto, packageDirectory, ...(objectPath ? { objectPath } : {}), entrypoint, arguments: args,
-          mode: usesLegacyLoader ? "coff-loader" : "reflektor",
-          ...(usesLegacyLoader ? { dependencyName } : {}),
-        });
-      }
+      const result = await readBofPackage(root, packageDirectory, directoryName, target, supportsBuiltInBof, directoryName, loaderAvailability);
+      if (result) entries.push(...result.entries);
     } catch (error) {
       warnings.push(`Could not read extensions/${directoryName}: ${error instanceof Error ? error.message : "invalid package"}`);
     }
@@ -167,18 +222,23 @@ export async function installedBofCommands(
 
 export async function readInstalledBofObject(entry: InstalledBofCommand): Promise<Buffer> {
   if (!entry.dto.available || !entry.objectPath) throw new Error(entry.dto.reason ?? "The selected BOF is unavailable");
-  let current = entry.packageDirectory;
-  await realDirectory(current);
-  const parts = entry.objectPath.split("/");
-  for (const part of parts.slice(0, -1)) {
-    current = join(current, part);
+  try {
+    let current = entry.packageDirectory;
     await realDirectory(current);
+    const parts = entry.objectPath.split("/");
+    for (const part of parts.slice(0, -1)) {
+      current = join(current, part);
+      await realDirectory(current);
+    }
+    const bytes = (await readBoundedRegularFile(join(current, parts.at(-1)!), {
+      label: "BOF object", maxBytes: MAX_OBJECT_BYTES,
+    })).data;
+    if (!bytes.length) throw new Error("The selected BOF object is empty");
+    return bytes;
+  } catch (error) {
+    if (isFileSystemError(error)) throw new Error("The selected BOF object could not be read");
+    throw error;
   }
-  const bytes = (await readBoundedRegularFile(join(current, parts.at(-1)!), {
-    label: "BOF object", maxBytes: MAX_OBJECT_BYTES,
-  })).data;
-  if (!bytes.length) throw new Error("The selected BOF object is empty");
-  return bytes;
 }
 
 /** Matches Sliver's core.BOFArgsBuffer framing, including optional zero values. */

@@ -27,6 +27,12 @@ export interface BofCatalog {
   readonly warnings: readonly string[];
 }
 
+/** Native directory selection; the local path remains in Electron main. */
+export interface BofDirectorySelection {
+  readonly catalog: BofCatalog;
+  readonly selectedCommandId: string;
+}
+
 export interface BofArgumentFileSelection {
   readonly token: string;
   readonly fileName: string;

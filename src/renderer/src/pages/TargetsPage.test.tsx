@@ -320,6 +320,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     importConfig: vi.fn(failed),
     listExecutionCatalog: vi.fn(failed),
     listInstalledBofs: vi.fn(failed),
+    chooseBofDirectory: vi.fn(failed),
     chooseBofArgumentFile: vi.fn(failed),
     runBof: vi.fn(failed),
     listBofExecutionHistory: vi.fn(failed),

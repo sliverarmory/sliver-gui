@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Autocomplete, Button, Chip, Description, Input, Label, ListBox, SearchField, Switch, TextField, Tooltip, toast, useFilter } from "@heroui/react";
-import { ChatListView, Segment } from "@heroui-pro/react";
+import { Segment } from "@heroui-pro/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -13,8 +13,8 @@ import {
   faCopy,
   faDownload,
   faFileArrowUp,
+  faFolderOpen,
   faPlay,
-  faPlus,
   faRotate,
   faTrashCan,
 } from "@fortawesome/free-solid-svg-icons";
@@ -27,7 +27,7 @@ import type {
   BofExecutionRecord,
 } from "../../../shared/bof-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
-import { ExecutionHistoryScrollShadow } from "../components/ExecutionHistoryScrollShadow";
+import { ExecutionHistorySidebar } from "../components/ExecutionHistorySidebar";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
 
 type OutputStream = "stdout" | "stderr";
@@ -39,8 +39,6 @@ type HistoryState = { identityKey: string; revision: number; records: readonly B
 type ArgumentValue = string | BofArgumentFileSelection | undefined;
 
 const FORM_ID = "execution-bof-form";
-const NEW_EXECUTION_KEY = "new-bof-execution";
-const EXECUTION_KEY_PREFIX = "bof-execution:";
 const EMPTY_HISTORY: readonly BofExecutionRecord[] = Object.freeze([]);
 const AUTO_REFRESH_INITIAL_DELAY_MS = 3_000;
 const AUTO_REFRESH_MAX_DELAY_MS = 15_000;
@@ -64,6 +62,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   const [timeoutSeconds, setTimeoutSeconds] = useState("60");
   const [formError, setFormError] = useState<string>();
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isChoosingDirectory, setIsChoosingDirectory] = useState(false);
   const [choosingFileIndex, setChoosingFileIndex] = useState<number>();
   const [stream, setStream] = useState<OutputStream>("stdout");
   const [ignoreStderr, setIgnoreStderr] = useState(false);
@@ -74,6 +73,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   const historySequence = useRef(0);
   const executionSequence = useRef(0);
   const fileSequence = useRef(0);
+  const directorySequence = useRef(0);
   const resultRefreshInFlight = useRef<string | undefined>(undefined);
   const mountedRef = useRef(true);
   const identityRef = useRef(identityKey);
@@ -100,6 +100,8 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
     setArgumentValues([]);
     setFormError(undefined);
     fileSequence.current += 1;
+    directorySequence.current += 1;
+    setIsChoosingDirectory(false);
   }, [identityKey]);
 
   const loadCatalog = useCallback(async (preserveCurrent = false): Promise<void> => {
@@ -198,18 +200,44 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   const selectedIndex = historyRecords.findIndex((record) => record.id === selectedId);
   const selected = selectedId === null ? undefined : historyRecords[selectedIndex < 0 ? 0 : selectedIndex];
   const showingNew = selected === undefined;
-  const selectedHistoryKey = showingNew ? NEW_EXECUTION_KEY : `${EXECUTION_KEY_PREFIX}${selected.id}`;
   const output = stream === "stdout" ? selected?.stdout : selected?.stderr;
 
   useEffect(() => { setStream("stdout"); }, [selected?.id]);
   useEffect(() => { if (ignoreStderr) setStream("stdout"); }, [ignoreStderr]);
 
-  const selectCommand = (id: string): void => {
-    const next = catalog?.commands.find((item) => item.id === id);
+  const selectCommand = (id: string, source = catalog): void => {
+    const next = source?.commands.find((item) => item.id === id);
     setCommandId(next?.id ?? "");
     setArgumentValues(next?.arguments.map((argument) => argument.default === undefined ? undefined : String(argument.default)) ?? []);
     setFormError(undefined);
     fileSequence.current += 1;
+  };
+
+  const chooseDirectory = async (): Promise<void> => {
+    const sequence = ++directorySequence.current;
+    const expectedIdentity = identityKey;
+    setIsChoosingDirectory(true);
+    try {
+      const response = await window.sliver.chooseBofDirectory();
+      if (sequence !== directorySequence.current || expectedIdentity !== identityRef.current || !mountedRef.current) return;
+      if (!response.ok) throw new Error(response.error ?? "Could not open the BOF directory.");
+      if (!response.value) return;
+      const { catalog: selectedCatalog, selectedCommandId } = response.value;
+      if (!sameTargetIdentity(selectedCatalog.target, targetRef) ||
+          !selectedCatalog.commands.some((item) => item.id === selectedCommandId)) {
+        throw new Error("The selected BOF no longer matches this target. Reselect the target and try again.");
+      }
+      // A pending Armory refresh must not replace the newly opened directory.
+      catalogSequence.current += 1;
+      setCatalogState({ status: "ready", value: selectedCatalog });
+      selectCommand(selectedCommandId, selectedCatalog);
+    } catch (error) {
+      if (sequence === directorySequence.current && expectedIdentity === identityRef.current && mountedRef.current) {
+        toast.danger("Could not open BOF directory", { description: errorMessage(error) });
+      }
+    } finally {
+      if (sequence === directorySequence.current && mountedRef.current) setIsChoosingDirectory(false);
+    }
   };
 
   const chooseFile = async (index: number): Promise<void> => {
@@ -234,7 +262,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!command || !command.available || isRefreshing || isCatalogLoading || catalogError !== undefined || isExecuting) return;
+    if (!command || !command.available || isRefreshing || isCatalogLoading || isChoosingDirectory || catalogError !== undefined || isExecuting) return;
     let args: (string | number | null)[];
     let timeout: number;
     try {
@@ -406,83 +434,25 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       aria-label="BOF execution history and output"
       className="mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"
     >
-      <aside className="flex min-h-0 min-w-0 flex-col border-b border-separator bg-background p-3 sm:border-b-0 sm:border-r sm:p-4">
-        <nav aria-label="BOF execution history" className="flex min-h-0 flex-col sm:flex-1 sm:overflow-hidden">
-          <ChatListView
-            aria-label="BOF execution history"
-            className="shrink-0"
-            selectedKeys={showingNew ? new Set([NEW_EXECUTION_KEY]) : new Set()}
-            selectionBehavior="replace"
-            selectionMode="single"
-            onSelectionChange={(keys) => {
-              if (keys !== "all" && keys.has(NEW_EXECUTION_KEY)) setSelectedId(null);
-            }}
-          >
-            <ChatListView.Item
-              className="rounded-xl"
-              id={NEW_EXECUTION_KEY}
-              style={{
-                backgroundColor: showingNew ? "var(--color-surface)" : "var(--color-background)",
-                borderBottomColor: "transparent",
-                boxShadow: showingNew ? "var(--shadow-surface)" : undefined,
-              }}
-              textValue="New Execution"
-            >
-              <ChatListView.ItemContent>
-                <ChatListView.Icon><FontAwesomeIcon aria-hidden className="size-3.5 text-accent" icon={faPlus} /></ChatListView.Icon>
-                <ChatListView.Text><ChatListView.Title>New Execution</ChatListView.Title></ChatListView.Text>
-              </ChatListView.ItemContent>
-            </ChatListView.Item>
-          </ChatListView>
-          <ExecutionHistoryScrollShadow>
-            <ChatListView
-              aria-label="BOF execution history items"
-              className="space-y-1"
-              selectedKeys={showingNew ? new Set() : new Set([selectedHistoryKey])}
-              selectionBehavior="replace"
-              selectionMode="single"
-              onSelectionChange={(keys) => {
-                if (keys === "all") return;
-                const key = keys.values().next().value;
-                if (typeof key === "string" && key.startsWith(EXECUTION_KEY_PREFIX)) setSelectedId(key.slice(EXECUTION_KEY_PREFIX.length));
-              }}
-            >
-              {historyRecords.map((record) => {
-                const isSelected = record.id === selected?.id;
-                const statusIcon = historyStatusIcon(record);
-                return (
-                  <ChatListView.Item
-                    className="rounded-xl"
-                    id={`${EXECUTION_KEY_PREFIX}${record.id}`}
-                    key={record.id}
-                    style={{
-                      backgroundColor: isSelected ? "var(--color-surface)" : undefined,
-                      borderBottomColor: "transparent",
-                      boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
-                    }}
-                    textValue={record.commandName}
-                  >
-                    <ChatListView.ItemContent>
-                      <ChatListView.Icon><FontAwesomeIcon aria-hidden className={`size-3.5 ${statusIcon.color}`} icon={statusIcon.icon} /></ChatListView.Icon>
-                      <ChatListView.Text>
-                        <ChatListView.Title className="font-mono text-xs" title={record.commandName}>{record.commandName}</ChatListView.Title>
-                        <ChatListView.Preview>{new Date(record.startedAt).toLocaleTimeString()} · {stateLabel(record)}</ChatListView.Preview>
-                      </ChatListView.Text>
-                    </ChatListView.ItemContent>
-                  </ChatListView.Item>
-                );
-              })}
-            </ChatListView>
-          </ExecutionHistoryScrollShadow>
-        </nav>
-        {historyRecords.length === 0 ? <p className="px-4 pt-2 text-xs text-muted">No executions yet.</p> : null}
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1">
-          <span className="text-xs text-muted">History · {historyRecords.length}</span>
-          <Button isDisabled={historyRecords.length === 0} size="sm" variant="danger-soft" onPress={() => void clearHistory()}>
-            <FontAwesomeIcon aria-hidden className="size-3" icon={faTrashCan} />Clear history
-          </Button>
-        </div>
-      </aside>
+      <ExecutionHistorySidebar
+        label="BOF execution history"
+        newExecutionKey="new-bof-execution"
+        executionKeyPrefix="bof-execution:"
+        items={historyRecords.map((record) => {
+          const status = historyStatusIcon(record);
+          return {
+            id: record.id,
+            title: record.commandName,
+            startedAt: record.startedAt,
+            stateLabel: stateLabel(record),
+            statusIcon: status.icon,
+            statusColor: status.color,
+          };
+        })}
+        selectedId={selected?.id}
+        onClearAll={() => void clearHistory()}
+        onSelect={setSelectedId}
+      />
 
       <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 sm:p-5">
         {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
@@ -491,28 +461,37 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-base font-semibold text-foreground">Execute an Armory BOF</h3>
               <div className="flex items-center gap-2">
-                <Button isDisabled={isCatalogLoading || isExecuting} size="sm" variant="ghost" onPress={() => { selectCommand(""); void loadCatalog(); }}>
-                  <FontAwesomeIcon aria-hidden className="size-3" icon={faRotate} />Refresh BOFs
-                </Button>
-                <Button form={FORM_ID} isDisabled={!command?.available || isRefreshing || isCatalogLoading || catalogError !== undefined || isExecuting || choosingFileIndex !== undefined} isPending={isExecuting} type="submit" variant="primary">
+                <Tooltip delay={250}>
+                  <Button aria-label="Refresh BOFs" isDisabled={isCatalogLoading || isChoosingDirectory || isExecuting} isIconOnly size="sm" variant="ghost" onPress={() => { selectCommand(""); void loadCatalog(); }}>
+                    <FontAwesomeIcon aria-hidden className="size-3" icon={faRotate} />
+                  </Button>
+                  <Tooltip.Content>Refresh BOFs</Tooltip.Content>
+                </Tooltip>
+                <Tooltip delay={250}>
+                  <Button aria-label="Open BOF directory" isDisabled={isChoosingDirectory || isExecuting} isIconOnly isPending={isChoosingDirectory} size="sm" variant="ghost" onPress={() => void chooseDirectory()}>
+                    <FontAwesomeIcon aria-hidden className="size-3" icon={faFolderOpen} />
+                  </Button>
+                  <Tooltip.Content>Open BOF directory</Tooltip.Content>
+                </Tooltip>
+                <Button form={FORM_ID} isDisabled={!command?.available || isRefreshing || isCatalogLoading || isChoosingDirectory || catalogError !== undefined || isExecuting || choosingFileIndex !== undefined} isPending={isExecuting} type="submit" variant="primary">
                   <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />Execute
                 </Button>
               </div>
             </div>
-            {catalogState.status === "loading" ? <p className="text-sm text-muted" role="status">Loading installed Armory BOFs…</p> : null}
+            {catalogState.status === "loading" ? <p className="text-sm text-muted" role="status">Loading BOFs…</p> : null}
             {catalogError !== undefined ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
             {catalog ? (
               <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
                 <Autocomplete
                   allowsEmptyCollection
                   fullWidth
-                  placeholder="Select an installed BOF"
+                  placeholder="Select a BOF"
                   selectionMode="single"
                   value={commandId || null}
                   variant="secondary"
                   onChange={(key) => selectCommand(key === null || Array.isArray(key) ? "" : String(key))}
                 >
-                  <Label>Armory BOF</Label>
+                  <Label>BOF</Label>
                   <Autocomplete.Trigger>
                     <Autocomplete.Value>
                       {({ defaultChildren, isPlaceholder }) => isPlaceholder || !command
@@ -522,17 +501,17 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                     <Autocomplete.ClearButton />
                     <Autocomplete.Indicator />
                   </Autocomplete.Trigger>
-                  <Description>{catalog.commands.length} installed BOFs for {target.os}/{target.arch}. Type to search or browse.</Description>
+                  <Description>{catalog.commands.length} BOFs for {target.os}/{target.arch}. Type to search or browse.</Description>
                   <Autocomplete.Popover>
                     <Autocomplete.Filter filter={contains}>
-                      <SearchField autoFocus aria-label="Search installed BOFs" variant="secondary">
+                      <SearchField autoFocus aria-label="Search BOFs" variant="secondary">
                         <SearchField.Group>
                           <SearchField.SearchIcon />
-                          <SearchField.Input placeholder="Search installed BOFs…" />
+                          <SearchField.Input placeholder="Search BOFs…" />
                           <SearchField.ClearButton />
                         </SearchField.Group>
                       </SearchField>
-                      <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching installed BOFs.</p>}>
+                      <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching BOFs.</p>}>
                         {catalog.commands.map((item) => (
                           <ListBox.Item
                             id={item.id}
@@ -550,7 +529,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                     </Autocomplete.Filter>
                   </Autocomplete.Popover>
                 </Autocomplete>
-                {catalog.commands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs are installed in the local Armory directories.</p> : null}
+                {catalog.commands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs are available. Refresh the Armory catalog or open a BOF directory.</p> : null}
                 {catalog.warnings.map((warning) => <p className="text-xs text-warning" key={warning}>{warning}</p>)}
                 {command ? (
                   <>

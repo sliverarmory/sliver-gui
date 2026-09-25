@@ -151,6 +151,7 @@ function installSliverAPI(
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
     listInstalledBofs: vi.fn(failedOperation),
+    chooseBofDirectory: vi.fn(failedOperation),
     chooseBofArgumentFile: vi.fn(failedOperation),
     runBof: vi.fn(failedOperation),
     listBofExecutionHistory: vi.fn(failedOperation),

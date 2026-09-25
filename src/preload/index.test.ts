@@ -160,6 +160,7 @@ const invokeArguments = {
   listProcessExecutionHistory: [],
   clearProcessExecutionHistory: [{ id: "execution_request_1" }],
   listInstalledBofs: [],
+  chooseBofDirectory: [],
   chooseBofArgumentFile: [{ commandId: "package/command", index: 0 }],
   runBof: [{ commandId: "package/command", arguments: ["example", 1, null], timeoutSeconds: 30 }],
   listBofExecutionHistory: [],

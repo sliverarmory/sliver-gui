@@ -106,6 +106,224 @@ afterEach(async () => {
 });
 
 describe("BOF execution records", () => {
+  async function writeLocalBof(directory: string): Promise<{ manifestPath: string; objectPath: string; manifest: Record<string, unknown> }> {
+    await mkdir(join(directory, "dist"), { recursive: true });
+    const objectPath = join(directory, "dist", "probe.o");
+    const manifestPath = join(directory, "extension.json");
+    const manifest = {
+      name: "Local Probe", package_name: "local-probe", version: "1",
+      commands: [{ command_name: "probe", help: "Local BOF fixture", entrypoint: "go", bof_executor: "reflektor",
+        files: [{ os: "windows", arch: "amd64", path: "/dist/probe.o" }],
+        arguments: [{ name: "domain", type: "string", optional: false },
+          { name: "depth", type: "short", optional: true, default: 2 }] }],
+    };
+    await writeFile(objectPath, Buffer.from("LOCAL-COFF"));
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    return { manifestPath, objectPath, manifest };
+  }
+
+  it("opens a selected directory and executes its manifest arguments with captured output", async () => {
+    const directory = join(root, "operator working copy");
+    await writeLocalBof(directory);
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      clientpb.Session.create({ ...session("session_bof_local", "local"), OS: "windows", Arch: "amd64", Capabilities: "1" }),
+      clientpb.Session.create({ ...session("session_bof_other", "other"), OS: "windows", Arch: "amd64", Capabilities: "1" }),
+    ];
+    const dispatches: Array<{ targetId: string; object: Buffer; argumentsBuffer: Buffer; entrypoint: string; timeoutSeconds: number }> = [];
+    client.adapter.callBofSession = vi.fn(async (targetId, object, argumentsBuffer, entrypoint, timeoutSeconds) => {
+      // Production clears these dispatch buffers after the call returns.
+      dispatches.push({ targetId, object: Buffer.from(object), argumentsBuffer: Buffer.from(argumentsBuffer), entrypoint, timeoutSeconds });
+      return sliverpb.CallExtension.create({
+        BOFOutputs: [{ Type: 0, Data: Buffer.from("local stdout") }, { Type: 0x0d, Data: Buffer.from("local stderr") }],
+        Response: { Err: "", Async: false, BeaconID: "", TaskID: "" },
+      });
+    });
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_local");
+    const other = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_other");
+    if (!target || !other) throw new Error("Expected local BOF fixture targets");
+    await registry.selectTarget(1, target);
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await registry.selectTarget(2, target);
+
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [directory] });
+    const selected = await registry.chooseBofDirectory(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected selected local BOF directory");
+    expect(electronMocks.showOpenDialog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ properties: ["openDirectory"] }));
+    const commandId = selected.value.selectedCommandId;
+    expect(commandId).toMatch(/^local-[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/u);
+    expect(selected.value.catalog.commands).toMatchObject([{ id: commandId, packageName: "Local Probe", commandName: "probe",
+      available: true, arguments: [{ name: "domain", type: "string" }, { name: "depth", type: "short", default: 2 }] }]);
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true,
+      value: { commands: [expect.objectContaining({ id: commandId })] } });
+    await expect(registry.listInstalledBofs(2)).resolves.toMatchObject({ ok: true, value: { commands: [] } });
+    await expect(registry.runBof(2, { commandId, arguments: ["other", 1], timeoutSeconds: 60 }))
+      .resolves.toMatchObject({ ok: false });
+
+    const executed = await registry.runBof(1, { commandId, arguments: ["example.local", 3], timeoutSeconds: 60 });
+    if (!executed.ok) throw new Error(executed.error);
+    expect(executed).toMatchObject({ ok: true, value: { state: "completed",
+      stdout: { data: Uint8Array.from(Buffer.from("local stdout")) },
+      stderr: { data: Uint8Array.from(Buffer.from("local stderr")) } } });
+    const packed = Buffer.from([20, 0, 0, 0, 14, 0, 0, 0,
+      ...Buffer.from("example.local\0"), 3, 0]);
+    expect(dispatches).toEqual([{ targetId: "session_bof_local", object: Buffer.from("LOCAL-COFF"),
+      argumentsBuffer: packed, entrypoint: "go", timeoutSeconds: 60 }]);
+    await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({ ok: true,
+      value: { records: [expect.objectContaining({ commandId, state: "completed" })] } });
+
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: true, filePaths: [] });
+    await expect(registry.chooseBofDirectory(sender(1))).resolves.toEqual({ ok: true, value: null });
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true,
+      value: { commands: [expect.objectContaining({ id: commandId })] } });
+    await registry.selectTarget(1, other);
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true, value: { commands: [] } });
+    await registry.selectTarget(1, target);
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true, value: { commands: [] } });
+    await expect(registry.runBof(1, { commandId, arguments: ["example.local", 3], timeoutSeconds: 60 }))
+      .resolves.toMatchObject({ ok: false });
+    expect(client.adapter.callBofSession).toHaveBeenCalledOnce();
+  });
+
+  it("passes a selected file argument from a local BOF directory and consumes its token", async () => {
+    const directory = join(root, "local file BOF");
+    const argumentPath = join(root, "argument.bin");
+    await mkdir(directory);
+    await writeFile(join(directory, "file.o"), Buffer.from("FILE-COFF"));
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      name: "Local File BOF", package_name: "local-file-bof", version: "1",
+      commands: [{ command_name: "file-probe", help: "File argument fixture", entrypoint: "go", bof_executor: "reflektor",
+        files: [{ os: "windows", arch: "amd64", path: "file.o" }],
+        arguments: [{ name: "label", type: "string", optional: false }, { name: "blob", type: "file", optional: false }] }],
+    }));
+    await writeFile(argumentPath, Buffer.from([0, 1, 2, 255]));
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({
+      ...session("session_bof_local_file", "local-file"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    const dispatches: Array<{ object: Buffer; argumentsBuffer: Buffer }> = [];
+    client.adapter.callBofSession = vi.fn(async (_targetId, object, argumentsBuffer) => {
+      // The registry zeroizes its buffers after the adapter returns.
+      dispatches.push({ object: Buffer.from(object), argumentsBuffer: Buffer.from(argumentsBuffer) });
+      return sliverpb.CallExtension.create({
+        BOFOutputs: [{ Type: 0, Data: Buffer.from("file BOF output") }],
+        Response: { Err: "", Async: false, BeaconID: "", TaskID: "" },
+      });
+    });
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_local_file");
+    if (!target) throw new Error("Expected local file BOF target");
+    await registry.selectTarget(1, target);
+
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [directory] });
+    const selected = await registry.chooseBofDirectory(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected selected local file BOF directory");
+    const commandId = selected.value.selectedCommandId;
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [argumentPath] });
+    const file = await registry.chooseBofArgumentFile(sender(1), { commandId, index: 1 });
+    if (!file.ok || !file.value) throw new Error("Expected selected BOF file argument");
+    expect(file.value).toMatchObject({ fileName: "argument.bin", size: 4 });
+    const input = { commandId, arguments: ["file-run", file.value.token], timeoutSeconds: 60 };
+    const executed = await registry.runBof(1, input);
+    if (!executed.ok) throw new Error(executed.error);
+    expect(executed.value).toMatchObject({ state: "completed",
+      stdout: { data: Uint8Array.from(Buffer.from("file BOF output")) } });
+    const expected = Buffer.from([21, 0, 0, 0, 9, 0, 0, 0,
+      ...Buffer.from("file-run\0"), 4, 0, 0, 0, 0, 1, 2, 255]);
+    expect(dispatches).toEqual([{ object: Buffer.from("FILE-COFF"), argumentsBuffer: expected }]);
+    await expect(registry.runBof(1, input)).resolves.toMatchObject({ ok: false });
+    expect(client.adapter.callBofSession).toHaveBeenCalledOnce();
+  });
+
+  it("rejects invalid selected directories and manifest changes before BOF dispatch", async () => {
+    const directory = join(root, "local-probe");
+    const { manifestPath, objectPath, manifest } = await writeLocalBof(directory);
+    const linkedDirectory = join(root, "linked-probe");
+    await symlink(directory, linkedDirectory, "dir");
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({
+      ...session("session_bof_local_invalid", "local"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    client.adapter.callBofSession = vi.fn(async () => sliverpb.CallExtension.create({ Response: { Err: "" } }));
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_local_invalid");
+    if (!target) throw new Error("Expected local BOF fixture target");
+    await registry.selectTarget(1, target);
+
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [linkedDirectory] });
+    await expect(registry.chooseBofDirectory(sender(1))).resolves.toMatchObject({ ok: false });
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true, value: { commands: [] } });
+
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [directory] });
+    const selected = await registry.chooseBofDirectory(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected selected local BOF directory");
+    const commandId = selected.value.selectedCommandId;
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, version: "2" }));
+    await expect(registry.runBof(1, { commandId, arguments: ["example.local", 3], timeoutSeconds: 60 }))
+      .resolves.toMatchObject({ ok: false });
+    expect(client.adapter.callBofSession).not.toHaveBeenCalled();
+
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [directory] });
+    const reselected = await registry.chooseBofDirectory(sender(1));
+    if (!reselected.ok || !reselected.value) throw new Error("Expected reselected local BOF directory");
+    await rm(objectPath);
+    await expect(registry.runBof(1, { commandId: reselected.value.selectedCommandId,
+      arguments: ["example.local", 3], timeoutSeconds: 60 })).resolves.toMatchObject({ ok: false });
+    expect(client.adapter.callBofSession).not.toHaveBeenCalled();
+  });
+
+  it("does not retain a directory selected after the target changes while the picker is open", async () => {
+    const directory = join(root, "local-probe");
+    await writeLocalBof(directory);
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      clientpb.Session.create({ ...session("session_bof_picker_a", "picker-a"), OS: "windows", Arch: "amd64", Capabilities: "1" }),
+      clientpb.Session.create({ ...session("session_bof_picker_b", "picker-b"), OS: "windows", Arch: "amd64", Capabilities: "1" }),
+    ];
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const first = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_picker_a");
+    const second = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_picker_b");
+    if (!first || !second) throw new Error("Expected two picker fixture targets");
+    await registry.selectTarget(1, first);
+    let resolvePicker!: (value: { canceled: boolean; filePaths: string[] }) => void;
+    const picker = new Promise<{ canceled: boolean; filePaths: string[] }>((resolve) => { resolvePicker = resolve; });
+    electronMocks.showOpenDialog.mockImplementationOnce(() => picker);
+    const selecting = registry.chooseBofDirectory(sender(1));
+    await vi.waitFor(() => expect(electronMocks.showOpenDialog).toHaveBeenCalledOnce());
+    await registry.selectTarget(1, second);
+    resolvePicker({ canceled: false, filePaths: [directory] });
+    await expect(selecting).resolves.toMatchObject({ ok: false });
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true, value: { commands: [] } });
+    await registry.selectTarget(1, first);
+    await expect(registry.listInstalledBofs(1)).resolves.toMatchObject({ ok: true, value: { commands: [] } });
+  });
+
   async function installSharedBof(): Promise<void> {
     const directory = join(root, "extensions", "shared-bof");
     await mkdir(directory, { recursive: true });

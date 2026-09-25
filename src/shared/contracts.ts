@@ -73,6 +73,7 @@ import type {
   AddBofOutputToLootInput,
   BofArgumentFileSelection,
   BofCatalog,
+  BofDirectorySelection,
   BofExecutionHistorySnapshot,
   BofExecutionRecord,
   BofExecutionRecordInput,
@@ -218,6 +219,7 @@ export const IPC_INVOKE = {
   listProcessExecutionHistory: "sliver:execution:process-history:list",
   clearProcessExecutionHistory: "sliver:execution:process-history:clear",
   listInstalledBofs: "sliver:bof:catalog",
+  chooseBofDirectory: "sliver:bof:choose-directory",
   chooseBofArgumentFile: "sliver:bof:choose-file",
   runBof: "sliver:bof:run",
   listBofExecutionHistory: "sliver:bof:history:list",
@@ -1149,6 +1151,7 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     result: OperationResult;
   };
   [IPC.listInstalledBofs]: { args: []; result: OperationResult<BofCatalog> };
+  [IPC.chooseBofDirectory]: { args: []; result: OperationResult<BofDirectorySelection | null> };
   [IPC.chooseBofArgumentFile]: { args: [input: ChooseBofArgumentFileInput]; result: OperationResult<BofArgumentFileSelection | null> };
   [IPC.runBof]: { args: [input: RunBofInput]; result: OperationResult<BofExecutionRecord> };
   [IPC.listBofExecutionHistory]: { args: []; result: OperationResult<BofExecutionHistorySnapshot> };

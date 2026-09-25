@@ -96,7 +96,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     assert.equal(await workspace.getByRole("button", { name: "Save stdout" }).count(), 1);
     assert.equal(await workspace.getByRole("button", { name: "Add stdout to Loot" }).count(), 1);
     await workspace.getByRole("button", { name: "Copy output" }).click();
-    assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText()), "deterministic sa-dir stdout\n");
+    await assertClipboard(application, "deterministic sa-dir stdout\n");
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-bof-dir-output.png") });
 
     await history.getByRole("row", { name: "New Execution", exact: true }).click();
@@ -110,7 +110,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     await workspace.getByRole("radio", { name: "Stderr" }).click();
     await assertOutput(workspace, "deterministic sa-nslookup stderr");
     await workspace.getByRole("button", { name: "Copy output" }).click();
-    assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText()), "deterministic sa-nslookup stderr\n");
+    await assertClipboard(application, "deterministic sa-nslookup stderr\n");
     assert.equal(await history.getByRole("row").count(), 3);
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-bof-nslookup-output.png") });
 
@@ -196,7 +196,7 @@ test("BOF history and output sync between the session and its execution pop-out"
     await firstInPopOut.click();
     await assertOutput(popOutWorkspace, "deterministic sa-dir stdout");
     await popOutWorkspace.getByRole("button", { name: "Copy output", exact: true }).click();
-    assert.equal(await fixture.application.evaluate(({ clipboard }) => clipboard.readText()), "deterministic sa-dir stdout\n");
+    await assertClipboard(fixture.application, "deterministic sa-dir stdout\n");
     assert.equal(await popOutHistory.getByRole("row").count(), 2);
 
     await popOutHistory.getByRole("row", { name: "New Execution", exact: true }).click();
@@ -213,7 +213,7 @@ test("BOF history and output sync between the session and its execution pop-out"
     await secondInSource.click();
     await assertOutput(sourceWorkspace, "deterministic sa-nslookup stdout");
     await sourceWorkspace.getByRole("button", { name: "Copy output", exact: true }).click();
-    assert.equal(await fixture.application.evaluate(({ clipboard }) => clipboard.readText()), "deterministic sa-nslookup stdout\n");
+    await assertClipboard(fixture.application, "deterministic sa-nslookup stdout\n");
     assert.equal(await sourceHistory.getByRole("row").count(), 3);
     assert.equal(await popOutHistory.getByRole("row").count(), 3);
     const calls = await fixture.application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.bofCalls);
@@ -232,6 +232,54 @@ test("BOF history and output sync between the session and its execution pop-out"
     await sourceWorkspace.getByRole("region", { name: "Execute an Armory BOF", exact: true }).waitFor();
     assert.equal(await sourceHistory.getByRole("row").count(), 1);
     assert.equal(await popOutHistory.getByRole("row").count(), 1);
+    assert.deepEqual(rendererErrors, []);
+  } finally {
+    await fixture.application.close().catch(() => undefined);
+    await rm(fixture.temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("an operator-selected BOF directory renders its manifest and dispatches its object and arguments", { timeout: 120_000 }, async () => {
+  const fixture = await launchBofPopoutFixture();
+  const directory = join(fixture.temporaryRoot, "operator working copy");
+  const objectPath = join(directory, "dist", "local.o");
+  const marker = "inert-sa-dir-bof-object";
+  await mkdir(join(directory, "dist"), { recursive: true });
+  await writeFile(objectPath, marker);
+  await writeFile(join(directory, "extension.json"), JSON.stringify({
+    name: "Local Probe", package_name: "local-probe", version: "1.0.0",
+    commands: [{ command_name: "local-probe", help: "Local directory fixture", entrypoint: "go", bof_executor: "reflektor",
+      files: [{ os: "darwin", arch: "arm64", path: "/dist/local.o" }],
+      arguments: [{ name: "targetdir", type: "string", desc: "Directory to list", optional: false },
+        { name: "subdirs", type: "short", desc: "Include subdirectories", optional: true, default: 0 }] }],
+  }));
+  const rendererErrors: string[] = [];
+  try {
+    const page = await openSession(fixture.application);
+    page.on("pageerror", (error) => rendererErrors.push(error.message));
+    await page.getByRole("tab", { name: "Execution", exact: true }).click();
+    await page.getByRole("radio", { name: "BOFs", exact: true }).click();
+    const workspace = page.getByRole("region", { name: "BOF execution history and output", exact: true });
+    const form = workspace.getByRole("region", { name: "Execute an Armory BOF", exact: true });
+    await form.waitFor();
+    await fixture.application.evaluate(({ dialog }, selectedPath) => {
+      dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [selectedPath] })) as typeof dialog.showOpenDialog;
+    }, directory);
+    await form.getByRole("button", { name: "Open BOF directory", exact: true }).click();
+    await form.getByRole("textbox", { name: /targetdir/u }).waitFor();
+    assert.match(await form.innerText(), /local-probe/u);
+    await form.getByRole("textbox", { name: /targetdir/u }).fill("/tmp/local-e2e");
+    await form.getByRole("spinbutton", { name: /subdirs/u }).fill("7");
+    await form.getByRole("button", { name: "Execute", exact: true }).click();
+    await assertOutput(workspace, "deterministic sa-dir stdout");
+    await workspace.getByRole("button", { name: "Copy output", exact: true }).click();
+    await assertClipboard(fixture.application, "deterministic sa-dir stdout\n");
+    assert.deepEqual(await fixture.application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.bofCalls), [{
+      targetMode: "session", targetId: "m1_session",
+      objectSha256: sha256Of(marker), objectHex: Buffer.from(marker).toString("hex"),
+      argumentsHex: packedArguments([stringArgument("/tmp/local-e2e"), shortArgument(7)]).toString("hex"),
+      entrypoint: "go", timeoutSeconds: 60,
+    }]);
     assert.deepEqual(rendererErrors, []);
   } finally {
     await fixture.application.close().catch(() => undefined);
@@ -318,7 +366,7 @@ test("Windows session BOFs dispatch a legacy installed COFF loader", { timeout: 
 
 async function selectInstalledBof(page: Page, form: Locator, commandName: string): Promise<void> {
   await form.locator('[data-slot="autocomplete-trigger"]').click();
-  const search = page.getByRole("searchbox", { name: "Search installed BOFs", exact: true });
+  const search = page.getByRole("searchbox", { name: "Search BOFs", exact: true });
   await search.fill(commandName);
   await page.getByRole("option", { name: new RegExp(commandName, "u") }).click();
 }
@@ -390,6 +438,17 @@ async function assertOutput(workspace: Locator, text: string): Promise<void> {
   }
   assert.match(await transcript.textContent() ?? "", new RegExp(text, "u"));
   await workspace.locator('[aria-label="Execution output terminal"] canvas').waitFor();
+}
+
+async function assertClipboard(application: ElectronApplication, expected: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  let actual = "";
+  do {
+    actual = await application.evaluate(({ clipboard }) => clipboard.readText());
+    if (actual === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() < deadline);
+  assert.equal(actual, expected);
 }
 
 async function waitForFakeBofTaskCompletion(application: ElectronApplication): Promise<void> {

@@ -160,6 +160,7 @@ import type {
   AddBofOutputToLootInput,
   BofArgumentFileSelection,
   BofCatalog,
+  BofDirectorySelection,
   BofExecutionHistorySnapshot,
   BofExecutionRecord,
   BofExecutionRecordInput,
@@ -271,7 +272,9 @@ import {
   installedBofCommands,
   MAX_BOF_ARGUMENT_FILE_BYTES,
   packBofArguments,
+  readBofCommandsFromDirectory,
   readInstalledBofObject,
+  type InstalledBofCommand,
 } from "./bof-workbench.js";
 import { packLegacyBofArguments, readInstalledBofLoader } from "./bof-legacy-dispatch.js";
 import {
@@ -351,6 +354,8 @@ interface WindowContext {
   executionResultTimers: Map<string, NodeJS.Timeout>;
   bofArgumentFiles: Map<string, { commandId: string; index: number; target: TargetRef; data: Buffer; fileName: string; expiresAt: number }>;
   bofArgumentFileTimer?: NodeJS.Timeout;
+  bofLocalPackage?: { directory: string; namespace: string; manifestDigest: string; target: TargetRef };
+  bofDirectorySelectionRevision: number;
   taskListAdmissions: Set<string>;
   taskDetailAdmissions: Set<string>;
   taskCancelAdmissions: Set<string>;
@@ -772,6 +777,7 @@ export class ConnectionRegistry {
       executionResults: new Map(),
       executionResultTimers: new Map(),
       bofArgumentFiles: new Map(),
+      bofDirectorySelectionRevision: 0,
       taskListAdmissions: new Set(),
       taskDetailAdmissions: new Set(),
       taskCancelAdmissions: new Set(),
@@ -2158,15 +2164,90 @@ export class ConnectionRegistry {
     }
   }
 
+  private async bofCommandsForWindow(
+    context: WindowContext,
+    pool: BackendPool,
+    target: RevalidatedTarget,
+  ): Promise<{ catalog: BofCatalog; entries: InstalledBofCommand[] }> {
+    const supportsBuiltInBof = pool.supportsBuiltInBof(target.target.mode, target.target.id);
+    const installed = await installedBofCommands(this.clientRootDirectory, target.target, target.ref, supportsBuiltInBof);
+    const local = context.bofLocalPackage;
+    if (!local || !sameTargetRefIdentity(local.target, target.ref)) return installed;
+    const selected = await readBofCommandsFromDirectory(
+      this.clientRootDirectory, local.directory, local.namespace, target.target, target.ref, supportsBuiltInBof,
+    );
+    if (selected.manifestDigest !== local.manifestDigest) {
+      throw new Error("The selected BOF manifest changed; open its directory again");
+    }
+    return {
+      catalog: { ...installed.catalog, commands: [...installed.catalog.commands, ...selected.entries.map((entry) => entry.dto)] },
+      entries: [...installed.entries, ...selected.entries],
+    };
+  }
+
   async listInstalledBofs(contentsId: number): Promise<OperationResult<BofCatalog>> {
     return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
-      const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
-      const { catalog } = await installedBofCommands(
-        this.clientRootDirectory, target.target, target.ref,
+      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const { catalog } = await this.bofCommandsForWindow(context, pool, target);
+      assertBinding();
+      if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref)) {
+        throw new Error("The selected target changed");
+      }
+      return catalog;
+    });
+  }
+
+  async chooseBofDirectory(sender: WebContents): Promise<OperationResult<BofDirectorySelection | null>> {
+    return this.withExecutionPool(sender.id, async (pool, assertBinding) => {
+      const { context, target } = this.requireSelectedExecutionTarget(sender.id, pool);
+      const selectedRef = { ...target.ref };
+      const revision = ++context.bofDirectorySelectionRevision;
+      const assertCurrent = (): void => {
+        assertBinding();
+        if (context.bofDirectorySelectionRevision !== revision ||
+          !context.activeTarget || !sameTargetRefIdentity(context.activeTarget, selectedRef) ||
+          !pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch)) {
+          throw new Error("The selected target changed while opening the BOF directory");
+        }
+      };
+      const selection = await dialog.showOpenDialog(requireOwnerWindow(sender), {
+        title: "Open Armory BOF directory", properties: ["openDirectory"],
+      });
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      assertCurrent();
+      const namespace = `local-${randomUUID()}`;
+      const selected = await readBofCommandsFromDirectory(
+        this.clientRootDirectory, selection.filePaths[0]!, namespace, target.target, selectedRef,
         pool.supportsBuiltInBof(target.target.mode, target.target.id),
       );
-      assertBinding();
-      return catalog;
+      for (const entry of selected.entries) {
+        if (!entry.dto.available) continue;
+        const object = await readInstalledBofObject(entry);
+        object.fill(0);
+      }
+      const installed = await installedBofCommands(
+        this.clientRootDirectory, target.target, selectedRef,
+        pool.supportsBuiltInBof(target.target.mode, target.target.id),
+      );
+      assertCurrent();
+      const old = context.bofLocalPackage;
+      if (old) {
+        for (const [token, file] of context.bofArgumentFiles) {
+          if (file.commandId.startsWith(`${old.namespace}/`)) {
+            file.data.fill(0);
+            context.bofArgumentFiles.delete(token);
+          }
+        }
+        this.scheduleBofArgumentFileExpiry(context);
+      }
+      context.bofLocalPackage = {
+        directory: selection.filePaths[0]!, namespace, manifestDigest: selected.manifestDigest, target: selectedRef,
+      };
+      const commands = selected.entries.map((entry) => entry.dto);
+      return {
+        catalog: { ...installed.catalog, commands: [...installed.catalog.commands, ...commands] },
+        selectedCommandId: (commands.find((command) => command.available) ?? commands[0]!).id,
+      };
     });
   }
 
@@ -2176,10 +2257,12 @@ export class ConnectionRegistry {
   ): Promise<OperationResult<BofArgumentFileSelection | null>> {
     return this.withExecutionPool(sender.id, async (pool, assertBinding) => {
       const { context, target } = this.requireSelectedExecutionTarget(sender.id, pool);
-      const { entries } = await installedBofCommands(
-        this.clientRootDirectory, target.target, target.ref,
-        pool.supportsBuiltInBof(target.target.mode, target.target.id),
-      );
+      const directoryRevision = context.bofDirectorySelectionRevision;
+      const localCommand = Boolean(context.bofLocalPackage && input.commandId.startsWith(`${context.bofLocalPackage.namespace}/`));
+      const { entries } = await this.bofCommandsForWindow(context, pool, target);
+      if (localCommand && context.bofDirectorySelectionRevision !== directoryRevision) {
+        throw new Error("The selected BOF directory changed");
+      }
       const command = entries.find((entry) => entry.dto.id === input.commandId && entry.dto.available);
       if (!command || command.arguments[input.index]?.type !== "file") throw new Error("The selected BOF file argument is unavailable");
       const owner = requireOwnerWindow(sender);
@@ -2187,6 +2270,9 @@ export class ConnectionRegistry {
       if (selection.canceled || selection.filePaths.length !== 1) return null;
       assertBinding();
       if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref)) throw new Error("The selected target changed");
+      if (localCommand && context.bofDirectorySelectionRevision !== directoryRevision) {
+        throw new Error("The selected BOF directory changed");
+      }
       const data = (await readBoundedRegularFile(selection.filePaths[0]!, {
         label: "BOF argument file", maxBytes: MAX_BOF_ARGUMENT_FILE_BYTES,
       })).data;
@@ -2194,6 +2280,9 @@ export class ConnectionRegistry {
         assertBinding();
         if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref) ||
           !pool.targetStore.revalidateTargetRef(target.ref, pool.epoch)) throw new Error("The selected target changed");
+        if (localCommand && context.bofDirectorySelectionRevision !== directoryRevision) {
+          throw new Error("The selected BOF directory changed");
+        }
         for (const [existingToken, file] of context.bofArgumentFiles) {
           if (file.expiresAt <= this.now() ||
             (file.commandId === input.commandId && file.index === input.index && sameTargetRefIdentity(file.target, target.ref))) {
@@ -2256,14 +2345,18 @@ export class ConnectionRegistry {
       admittedContext = context;
       return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
         const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
-        const supportsBuiltInBof = pool.supportsBuiltInBof(target.target.mode, target.target.id);
         const selectedRef = { ...target.ref };
+        const directoryRevision = context.bofDirectorySelectionRevision;
+        const localCommand = Boolean(context.bofLocalPackage && input.commandId.startsWith(`${context.bofLocalPackage.namespace}/`));
         const assertCurrent = (): void => {
           assertBinding();
           if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, selectedRef) ||
             !pool.targetStore.revalidateTargetRef(selectedRef, pool.epoch)) throw new Error("The selected target changed before BOF dispatch");
+          if (localCommand && context.bofDirectorySelectionRevision !== directoryRevision) {
+            throw new Error("The selected BOF directory changed before dispatch");
+          }
         };
-        const { entries } = await installedBofCommands(this.clientRootDirectory, target.target, target.ref, supportsBuiltInBof);
+        const { entries } = await this.bofCommandsForWindow(context, pool, target);
         const command = entries.find((entry) => entry.dto.id === input.commandId);
         if (!command || !command.dto.available) throw new Error(command?.dto.reason ?? "The selected BOF is no longer installed");
         this.scheduleBofArgumentFileExpiry(context);
@@ -4531,6 +4624,8 @@ export class ConnectionRegistry {
     delete context.bofArgumentFileTimer;
     for (const file of context.bofArgumentFiles.values()) file.data.fill(0);
     context.bofArgumentFiles.clear();
+    delete context.bofLocalPackage;
+    context.bofDirectorySelectionRevision += 1;
   }
 
   private admitExecutionRequest(context: WindowContext, admissionId: string): void {

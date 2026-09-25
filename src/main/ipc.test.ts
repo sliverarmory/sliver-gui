@@ -1534,6 +1534,20 @@ describe("trusted Electron IPC boundary", () => {
     })).toThrow(/unsupported/i);
   });
 
+  it("opens a BOF directory only for a trusted main-frame sender without path arguments", async () => {
+    const chooseBofDirectory = vi.fn(async () => ({ ok: true as const, value: null }));
+    registerIpcHandlers(registryMock({ chooseBofDirectory }), vi.fn(), RENDERER_URL);
+    const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html#/sessions/session_1", 88);
+    const handler = electronMocks.handlers.get(IPC.chooseBofDirectory);
+
+    await expect(handler?.(trusted.event)).resolves.toEqual({ ok: true, value: null });
+    expect(chooseBofDirectory).toHaveBeenCalledExactlyOnceWith(trusted.sender);
+    expect(() => handler?.(trusted.event, "/tmp/operator-selected")).toThrow(/invalid arguments/iu);
+    expect(() => handler?.(untrusted.event)).toThrow(/untrusted renderer/iu);
+    expect(chooseBofDirectory).toHaveBeenCalledOnce();
+  });
+
   it("routes only strictly parsed execution operations through the trusted window boundary", async () => {
     const listExecutionCatalog = vi.fn(async () => ({ ok: false as const, error: "catalog probe" }));
     const runExecutionRead = vi.fn(async () => ({ ok: false as const, error: "read probe" }));
@@ -2132,6 +2146,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     listProcessExecutionHistory: vi.fn(unavailable),
     clearProcessExecutionHistory: vi.fn(unavailable),
     listInstalledBofs: vi.fn(unavailable),
+    chooseBofDirectory: vi.fn(unavailable),
     chooseBofArgumentFile: vi.fn(unavailable),
     runBof: vi.fn(unavailable),
     listBofExecutionHistory: vi.fn(unavailable),

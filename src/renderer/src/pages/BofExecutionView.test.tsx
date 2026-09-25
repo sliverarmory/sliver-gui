@@ -2,8 +2,8 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { BofCatalog, BofExecutionRecord } from "../../../shared/bof-contracts";
-import type { SliverDesktopAPI } from "../../../shared/contracts";
+import type { BofCatalog, BofDirectorySelection, BofExecutionRecord } from "../../../shared/bof-contracts";
+import type { OperationResult, SliverDesktopAPI } from "../../../shared/contracts";
 import type { SessionSummary, TargetRef } from "../../../shared/target-contracts";
 import { BofExecutionView } from "./BofExecutionView";
 
@@ -88,6 +88,7 @@ function installApi(initialRows: BofExecutionRecord[] = []) {
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
   const api = {
     listInstalledBofs: vi.fn(async () => ({ ok: true as const, value: { ...catalog, target: currentTargetRef } })),
+    chooseBofDirectory: vi.fn(async (): Promise<OperationResult<BofDirectorySelection | null>> => ({ ok: true, value: null })),
     chooseBofArgumentFile: vi.fn(async () => ({ ok: true as const, value: { token: "file-token-1", fileName: "payload.bin", size: 8 } })),
     runBof: vi.fn(async ({ commandId }: { commandId: string }) => {
       const record: BofExecutionRecord = {
@@ -163,7 +164,7 @@ async function chooseBof(
   const trigger = composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]');
   expect(trigger).not.toBeNull();
   await user.click(trigger!);
-  const search = await screen.findByRole("searchbox", { name: "Search installed BOFs" });
+  const search = await screen.findByRole("searchbox", { name: "Search BOFs" });
   await user.clear(search);
   await user.type(search, searchTerm);
   await user.click(await screen.findByRole("option", { name: optionName }));
@@ -178,7 +179,7 @@ describe("BOF execution view", () => {
     const trigger = composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]');
     expect(trigger).not.toBeNull();
     await user.click(trigger!);
-    const search = await screen.findByRole("searchbox", { name: "Search installed BOFs" });
+    const search = await screen.findByRole("searchbox", { name: "Search BOFs" });
     await user.type(search, "direc");
 
     const refreshedTargetRef = { ...targetRef, domainRevision: targetRef.domainRevision + 1 };
@@ -188,7 +189,7 @@ describe("BOF execution view", () => {
     view.rerender(<BofExecutionView isRefreshing={false} target={target} targetRef={refreshedTargetRef} />);
 
     await waitFor(() => expect(api.listInstalledBofs).toHaveBeenCalledTimes(2));
-    expect(screen.getByRole("searchbox", { name: "Search installed BOFs" })).toBe(search);
+    expect(screen.getByRole("searchbox", { name: "Search BOFs" })).toBe(search);
     expect(search).toHaveFocus();
     expect(search).toHaveValue("direc");
     await user.type(search, "tory");
@@ -196,7 +197,7 @@ describe("BOF execution view", () => {
     await act(async () => {
       refresh.resolve({ ok: true, value: { ...catalog, target: refreshedTargetRef } });
     });
-    expect(screen.getByRole("searchbox", { name: "Search installed BOFs" })).toBe(search);
+    expect(screen.getByRole("searchbox", { name: "Search BOFs" })).toBe(search);
     expect(search).toHaveFocus();
     expect(search).toHaveValue("directory");
     expect(screen.getByRole("option", { name: /sa-dir/iu })).toBeInTheDocument();
@@ -251,7 +252,7 @@ describe("BOF execution view", () => {
 
     const nextComposer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
     expect(within(nextComposer).queryByRole("textbox", { name: "hostname" })).not.toBeInTheDocument();
-    expect(nextComposer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select an installed BOF");
+    expect(nextComposer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select a BOF");
     await chooseBof(user, nextComposer, "hostname", /sa-nslookup/iu);
     expect(within(nextComposer).getByRole("textbox", { name: "hostname" })).toHaveValue("");
     expect(api.runBof).not.toHaveBeenCalled();
@@ -267,7 +268,7 @@ describe("BOF execution view", () => {
     const execute = within(composer).getByRole("button", { name: "Execute" });
     await user.type(hostname, "draft.example");
     await user.click(composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]')!);
-    const search = await screen.findByRole("searchbox", { name: "Search installed BOFs" });
+    const search = await screen.findByRole("searchbox", { name: "Search BOFs" });
     await user.clear(search);
     await user.type(search, "directory");
 
@@ -277,7 +278,7 @@ describe("BOF execution view", () => {
     view.rerender(<BofExecutionView isRefreshing={false} target={target} targetRef={refreshedTargetRef} />);
 
     expect(await screen.findByText("Catalog refresh interrupted.")).toBeInTheDocument();
-    expect(screen.getByRole("searchbox", { name: "Search installed BOFs" })).toBe(search);
+    expect(screen.getByRole("searchbox", { name: "Search BOFs" })).toBe(search);
     expect(search).toHaveFocus();
     expect(search).toHaveValue("directory");
     expect(hostname).toBeInTheDocument();
@@ -307,11 +308,82 @@ describe("BOF execution view", () => {
     setTarget(refreshedTargetRef, [], 1);
     view.rerender(<BofExecutionView isRefreshing={false} target={target} targetRef={refreshedTargetRef} />);
 
-    await waitFor(() => expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select an installed BOF"));
+    await waitFor(() => expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select a BOF"));
     expect(within(composer).queryByRole("textbox", { name: "hostname" })).not.toBeInTheDocument();
     expect(within(composer).queryByRole("textbox", { name: "domain" })).not.toBeInTheDocument();
     await chooseBof(user, composer, "hostname", /sa-nslookup/iu);
     expect(within(composer).getByRole("textbox", { name: "domain" })).toHaveValue("");
+    expect(api.runBof).not.toHaveBeenCalled();
+  });
+
+  it("opens a BOF directory and renders its manifest arguments for execution", async () => {
+    const user = userEvent.setup();
+    const { api } = installApi();
+    const localCommand = {
+      id: "local_1234/local-probe", packageName: "Local Probe", commandName: "local-probe",
+      description: "Probe a directory", available: true,
+      arguments: [{ name: "query", description: "Query text", type: "wstring" as const, optional: false }],
+    };
+    api.chooseBofDirectory.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        catalog: { ...catalog, commands: [...catalog.commands, localCommand] },
+        selectedCommandId: localCommand.id,
+      },
+    });
+    renderView();
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    await user.click(within(composer).getByRole("button", { name: "Open BOF directory" }));
+    await waitFor(() => expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("local-probe"));
+    expect(within(composer).getByRole("textbox", { name: "query" })).toHaveValue("");
+    await user.type(within(composer).getByRole("textbox", { name: "query" }), "example.local");
+    await user.click(within(composer).getByRole("button", { name: "Execute" }));
+    await waitFor(() => expect(api.runBof).toHaveBeenCalledWith({
+      commandId: localCommand.id, arguments: ["example.local"], timeoutSeconds: 60,
+    }));
+  });
+
+  it("keeps the current BOF and argument draft when directory selection is canceled", async () => {
+    const user = userEvent.setup();
+    const { api } = installApi();
+    renderView();
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    await chooseBof(user, composer, "directory contents", /sa-dir/iu);
+    const argument = within(composer).getByRole("textbox", { name: "targetdir (optional)" });
+    await user.clear(argument);
+    await user.type(argument, "C:\\draft");
+    await user.click(within(composer).getByRole("button", { name: "Open BOF directory" }));
+    await waitFor(() => expect(api.chooseBofDirectory).toHaveBeenCalledOnce());
+    expect(argument).toHaveValue("C:\\draft");
+    expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("sa-dir");
+  });
+
+  it("ignores a directory selection returned after the target changes", async () => {
+    const user = userEvent.setup();
+    const { api, setTarget } = installApi();
+    const picker = deferred<OperationResult<BofDirectorySelection | null>>();
+    api.chooseBofDirectory.mockReturnValueOnce(picker.promise);
+    const view = render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    await user.click(within(composer).getByRole("button", { name: "Open BOF directory" }));
+
+    const nextTarget = { ...target, id: "other-session", hostname: "other-target" };
+    const nextTargetRef: TargetRef = { ...targetRef, id: nextTarget.id, fingerprint: "b".repeat(64) };
+    setTarget(nextTargetRef, [], 1);
+    view.rerender(<BofExecutionView isRefreshing={false} target={nextTarget} targetRef={nextTargetRef} />);
+    await act(async () => picker.resolve({
+      ok: true,
+      value: {
+        catalog: { ...catalog, commands: [{
+          id: "local_1234/local-probe", packageName: "Local Probe", commandName: "local-probe",
+          description: "Probe", available: true, arguments: [],
+        }] },
+        selectedCommandId: "local_1234/local-probe",
+      },
+    }));
+
+    expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select a BOF");
+    expect(within(composer).getByRole("button", { name: "Open BOF directory" })).toBeEnabled();
     expect(api.runBof).not.toHaveBeenCalled();
   });
 
