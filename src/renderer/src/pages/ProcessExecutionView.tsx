@@ -23,6 +23,7 @@ import type {
   ExecutionCapability,
 } from "../../../shared/execution-contracts";
 import type { TargetSummary } from "../../../shared/target-contracts";
+import { ExecutionHistoryScrollShadow } from "../components/ExecutionHistoryScrollShadow";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
 import { ExecutionActionForm } from "./target-execution-forms";
 import type { ProcessExecutionRecord } from "./process-execution-history";
@@ -101,24 +102,19 @@ export function ProcessExecutionView({
       className="mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"
     >
       <aside className="flex min-h-0 min-w-0 flex-col border-b border-separator bg-background p-3 sm:border-b-0 sm:border-r sm:p-4">
-        <nav aria-label="Process execution history" className="min-h-0 sm:flex-1 sm:overflow-hidden">
+        <nav aria-label="Process execution history" className="flex min-h-0 flex-col sm:flex-1 sm:overflow-hidden">
           <ChatListView
             aria-label="Process execution history"
-            className="max-h-40 space-y-1 overflow-y-auto pr-1 sm:h-full sm:max-h-full"
-            selectedKeys={new Set([selectedHistoryKey])}
+            className="shrink-0"
+            selectedKeys={showingNew ? new Set([NEW_EXECUTION_KEY]) : new Set()}
             selectionBehavior="replace"
             selectionMode="single"
             onSelectionChange={(keys) => {
-              if (keys === "all") return;
-              const key = keys.values().next().value;
-              if (key === NEW_EXECUTION_KEY) onSelect(null);
-              else if (typeof key === "string" && key.startsWith(EXECUTION_KEY_PREFIX)) {
-                onSelect(key.slice(EXECUTION_KEY_PREFIX.length));
-              }
+              if (keys !== "all" && keys.has(NEW_EXECUTION_KEY)) onSelect(null);
             }}
           >
             <ChatListView.Item
-              className="sticky top-0 z-10 rounded-xl"
+              className="rounded-xl"
               id={NEW_EXECUTION_KEY}
               style={{
                 backgroundColor: showingNew ? "var(--color-surface)" : "var(--color-background)",
@@ -136,37 +132,54 @@ export function ProcessExecutionView({
                 </ChatListView.Text>
               </ChatListView.ItemContent>
             </ChatListView.Item>
-            {history.map((record) => {
-              const command = commandLabel(record);
-              const isSelected = record.id === selected?.id;
-              const statusIcon = historyStatusIcon(record);
-              return (
-                <ChatListView.Item
-                  className="rounded-xl"
-                  id={`${EXECUTION_KEY_PREFIX}${record.id}`}
-                  key={record.id}
-                  style={{
-                    backgroundColor: isSelected ? "var(--color-surface)" : undefined,
-                    borderBottomColor: "transparent",
-                    boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
-                  }}
-                  textValue={command}
-                >
-                  <ChatListView.ItemContent>
-                    <ChatListView.Icon>
-                      <FontAwesomeIcon aria-hidden className={`size-3.5 ${statusIcon.color}`} icon={statusIcon.icon} />
-                    </ChatListView.Icon>
-                    <ChatListView.Text>
-                      <ChatListView.Title className="font-mono text-xs" title={command}>{command}</ChatListView.Title>
-                      <ChatListView.Preview>
-                        {new Date(record.startedAt).toLocaleTimeString()} · {stateLabel(record)}
-                      </ChatListView.Preview>
-                    </ChatListView.Text>
-                  </ChatListView.ItemContent>
-                </ChatListView.Item>
-              );
-            })}
           </ChatListView>
+          <ExecutionHistoryScrollShadow>
+            <ChatListView
+              aria-label="Process execution history items"
+              className="space-y-1"
+              selectedKeys={showingNew ? new Set() : new Set([selectedHistoryKey])}
+              selectionBehavior="replace"
+              selectionMode="single"
+              onSelectionChange={(keys) => {
+                if (keys === "all") return;
+                const key = keys.values().next().value;
+                if (typeof key === "string" && key.startsWith(EXECUTION_KEY_PREFIX)) {
+                  onSelect(key.slice(EXECUTION_KEY_PREFIX.length));
+                }
+              }}
+            >
+              {history.map((record) => {
+                const command = commandLabel(record);
+                const isSelected = record.id === selected?.id;
+                const statusIcon = historyStatusIcon(record);
+                return (
+                  <ChatListView.Item
+                    className="rounded-xl"
+                    id={`${EXECUTION_KEY_PREFIX}${record.id}`}
+                    key={record.id}
+                    style={{
+                      backgroundColor: isSelected ? "var(--color-surface)" : undefined,
+                      borderBottomColor: "transparent",
+                      boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
+                    }}
+                    textValue={command}
+                  >
+                    <ChatListView.ItemContent>
+                      <ChatListView.Icon>
+                        <FontAwesomeIcon aria-hidden className={`size-3.5 ${statusIcon.color}`} icon={statusIcon.icon} />
+                      </ChatListView.Icon>
+                      <ChatListView.Text>
+                        <ChatListView.Title className="font-mono text-xs" title={command}>{command}</ChatListView.Title>
+                        <ChatListView.Preview>
+                          {new Date(record.startedAt).toLocaleTimeString()} · {stateLabel(record)}
+                        </ChatListView.Preview>
+                      </ChatListView.Text>
+                    </ChatListView.ItemContent>
+                  </ChatListView.Item>
+                );
+              })}
+            </ChatListView>
+          </ExecutionHistoryScrollShadow>
         </nav>
         {history.length === 0 ? <p className="px-4 pt-2 text-xs text-muted">No executions yet.</p> : null}
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1">
@@ -298,7 +311,7 @@ export function ProcessExecutionView({
                 <Switch.Control><Switch.Thumb /></Switch.Control>
               </Switch>
             </div>
-            <div className="mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary">
+            <div className={["-mr-4 mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5", output?.truncated ? "" : "-mb-4 sm:-mb-5"].join(" ")}>
               {output?.data.byteLength ? (
                 <ExecutionOutputTerminal
                   bytes={output.data}

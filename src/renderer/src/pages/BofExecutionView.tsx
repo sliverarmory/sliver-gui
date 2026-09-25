@@ -27,10 +27,14 @@ import type {
   BofExecutionRecord,
 } from "../../../shared/bof-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
+import { ExecutionHistoryScrollShadow } from "../components/ExecutionHistoryScrollShadow";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
 
 type OutputStream = "stdout" | "stderr";
-type CatalogState = { status: "loading" } | { status: "error"; message: string } | { status: "ready"; value: BofCatalog };
+type CatalogState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; value: BofCatalog; refreshing?: boolean; error?: string };
 type HistoryState = { identityKey: string; revision: number; records: readonly BofExecutionRecord[]; error?: string };
 type ArgumentValue = string | BofArgumentFileSelection | undefined;
 
@@ -76,6 +80,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   identityRef.current = identityKey;
   const targetKeyRef = useRef(targetKey);
   targetKeyRef.current = targetKey;
+  const commandRef = useRef<BofCatalog["commands"][number] | undefined>(undefined);
   const { contains } = useFilter({ sensitivity: "base" });
 
   useEffect(() => {
@@ -95,11 +100,15 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
     setArgumentValues([]);
     setFormError(undefined);
     fileSequence.current += 1;
-  }, [targetKey]);
+  }, [identityKey]);
 
-  const loadCatalog = useCallback(async (): Promise<void> => {
+  const loadCatalog = useCallback(async (preserveCurrent = false): Promise<void> => {
     const sequence = ++catalogSequence.current;
-    setCatalogState({ status: "loading" });
+    // Inventory revisions can change for check-ins or another target. Keep the
+    // current form mounted so its open picker, focus, and draft survive.
+    setCatalogState((current) => preserveCurrent && current.status === "ready" && sameTargetIdentity(current.value.target, targetRef)
+      ? { status: "ready", value: current.value, refreshing: true }
+      : { status: "loading" });
     try {
       const response = await window.sliver.listInstalledBofs();
       if (sequence !== catalogSequence.current || identityKey !== identityRef.current) return;
@@ -107,10 +116,21 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       if (!sameTargetIdentity(response.value.target, targetRef)) {
         throw new Error("The Armory BOF catalog no longer matches this target. Reselect the target and try again.");
       }
+      const previousCommand = commandRef.current;
+      const nextCommand = response.value.commands.find((item) => item.id === previousCommand?.id);
+      if (previousCommand && JSON.stringify(previousCommand.arguments) !== JSON.stringify(nextCommand?.arguments)) {
+        setCommandId("");
+        setArgumentValues([]);
+        setFormError("The selected BOF's arguments changed or it is no longer installed. Select a BOF again.");
+        fileSequence.current += 1;
+      }
       setCatalogState({ status: "ready", value: response.value });
     } catch (error) {
       if (sequence === catalogSequence.current && identityKey === identityRef.current) {
-        setCatalogState({ status: "error", message: errorMessage(error) });
+        const message = errorMessage(error);
+        setCatalogState((current) => preserveCurrent && current.status === "ready" && sameTargetIdentity(current.value.target, targetRef)
+          ? { ...current, refreshing: false, error: message }
+          : { status: "error", message });
       }
     }
   }, [identityKey, targetKey]);
@@ -153,7 +173,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   }, [identityKey, targetKey]);
 
   useEffect(() => {
-    void loadCatalog();
+    void loadCatalog(true);
     void loadHistory();
     const unsubscribe = window.sliver.onBofExecutionHistoryChanged((changedTarget) => {
       if (sameTargetIdentity(changedTarget, targetRef)) void loadHistory();
@@ -169,7 +189,10 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
 
   const catalog = catalogState.status === "ready" && sameTargetIdentity(catalogState.value.target, targetRef)
     ? catalogState.value : undefined;
+  const isCatalogLoading = catalogState.status === "loading" || (catalogState.status === "ready" && catalogState.refreshing === true);
+  const catalogError = catalogState.status === "error" ? catalogState.message : catalogState.status === "ready" ? catalogState.error : undefined;
   const command = catalog?.commands.find((item) => item.id === commandId);
+  commandRef.current = command;
   const historyRecords = historyState.identityKey === identityKey ? historyState.records : EMPTY_HISTORY;
   const historyError = historyState.identityKey === identityKey ? historyState.error : undefined;
   const selectedIndex = historyRecords.findIndex((record) => record.id === selectedId);
@@ -211,7 +234,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!command || !command.available || isRefreshing || isExecuting) return;
+    if (!command || !command.available || isRefreshing || isCatalogLoading || catalogError !== undefined || isExecuting) return;
     let args: (string | number | null)[];
     let timeout: number;
     try {
@@ -384,22 +407,19 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       className="mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"
     >
       <aside className="flex min-h-0 min-w-0 flex-col border-b border-separator bg-background p-3 sm:border-b-0 sm:border-r sm:p-4">
-        <nav aria-label="BOF execution history" className="min-h-0 sm:flex-1 sm:overflow-hidden">
+        <nav aria-label="BOF execution history" className="flex min-h-0 flex-col sm:flex-1 sm:overflow-hidden">
           <ChatListView
             aria-label="BOF execution history"
-            className="max-h-40 space-y-1 overflow-y-auto pr-1 sm:h-full sm:max-h-full"
-            selectedKeys={new Set([selectedHistoryKey])}
+            className="shrink-0"
+            selectedKeys={showingNew ? new Set([NEW_EXECUTION_KEY]) : new Set()}
             selectionBehavior="replace"
             selectionMode="single"
             onSelectionChange={(keys) => {
-              if (keys === "all") return;
-              const key = keys.values().next().value;
-              if (key === NEW_EXECUTION_KEY) setSelectedId(null);
-              else if (typeof key === "string" && key.startsWith(EXECUTION_KEY_PREFIX)) setSelectedId(key.slice(EXECUTION_KEY_PREFIX.length));
+              if (keys !== "all" && keys.has(NEW_EXECUTION_KEY)) setSelectedId(null);
             }}
           >
             <ChatListView.Item
-              className="sticky top-0 z-10 rounded-xl"
+              className="rounded-xl"
               id={NEW_EXECUTION_KEY}
               style={{
                 backgroundColor: showingNew ? "var(--color-surface)" : "var(--color-background)",
@@ -413,32 +433,47 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                 <ChatListView.Text><ChatListView.Title>New Execution</ChatListView.Title></ChatListView.Text>
               </ChatListView.ItemContent>
             </ChatListView.Item>
-            {historyRecords.map((record) => {
-              const isSelected = record.id === selected?.id;
-              const statusIcon = historyStatusIcon(record);
-              return (
-                <ChatListView.Item
-                  className="rounded-xl"
-                  id={`${EXECUTION_KEY_PREFIX}${record.id}`}
-                  key={record.id}
-                  style={{
-                    backgroundColor: isSelected ? "var(--color-surface)" : undefined,
-                    borderBottomColor: "transparent",
-                    boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
-                  }}
-                  textValue={record.commandName}
-                >
-                  <ChatListView.ItemContent>
-                    <ChatListView.Icon><FontAwesomeIcon aria-hidden className={`size-3.5 ${statusIcon.color}`} icon={statusIcon.icon} /></ChatListView.Icon>
-                    <ChatListView.Text>
-                      <ChatListView.Title className="font-mono text-xs" title={record.commandName}>{record.commandName}</ChatListView.Title>
-                      <ChatListView.Preview>{new Date(record.startedAt).toLocaleTimeString()} · {stateLabel(record)}</ChatListView.Preview>
-                    </ChatListView.Text>
-                  </ChatListView.ItemContent>
-                </ChatListView.Item>
-              );
-            })}
           </ChatListView>
+          <ExecutionHistoryScrollShadow>
+            <ChatListView
+              aria-label="BOF execution history items"
+              className="space-y-1"
+              selectedKeys={showingNew ? new Set() : new Set([selectedHistoryKey])}
+              selectionBehavior="replace"
+              selectionMode="single"
+              onSelectionChange={(keys) => {
+                if (keys === "all") return;
+                const key = keys.values().next().value;
+                if (typeof key === "string" && key.startsWith(EXECUTION_KEY_PREFIX)) setSelectedId(key.slice(EXECUTION_KEY_PREFIX.length));
+              }}
+            >
+              {historyRecords.map((record) => {
+                const isSelected = record.id === selected?.id;
+                const statusIcon = historyStatusIcon(record);
+                return (
+                  <ChatListView.Item
+                    className="rounded-xl"
+                    id={`${EXECUTION_KEY_PREFIX}${record.id}`}
+                    key={record.id}
+                    style={{
+                      backgroundColor: isSelected ? "var(--color-surface)" : undefined,
+                      borderBottomColor: "transparent",
+                      boxShadow: isSelected ? "var(--shadow-surface)" : undefined,
+                    }}
+                    textValue={record.commandName}
+                  >
+                    <ChatListView.ItemContent>
+                      <ChatListView.Icon><FontAwesomeIcon aria-hidden className={`size-3.5 ${statusIcon.color}`} icon={statusIcon.icon} /></ChatListView.Icon>
+                      <ChatListView.Text>
+                        <ChatListView.Title className="font-mono text-xs" title={record.commandName}>{record.commandName}</ChatListView.Title>
+                        <ChatListView.Preview>{new Date(record.startedAt).toLocaleTimeString()} · {stateLabel(record)}</ChatListView.Preview>
+                      </ChatListView.Text>
+                    </ChatListView.ItemContent>
+                  </ChatListView.Item>
+                );
+              })}
+            </ChatListView>
+          </ExecutionHistoryScrollShadow>
         </nav>
         {historyRecords.length === 0 ? <p className="px-4 pt-2 text-xs text-muted">No executions yet.</p> : null}
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1">
@@ -456,16 +491,16 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <h3 className="text-base font-semibold text-foreground">Execute an Armory BOF</h3>
               <div className="flex items-center gap-2">
-                <Button isDisabled={catalogState.status === "loading" || isExecuting} size="sm" variant="ghost" onPress={() => { selectCommand(""); void loadCatalog(); }}>
+                <Button isDisabled={isCatalogLoading || isExecuting} size="sm" variant="ghost" onPress={() => { selectCommand(""); void loadCatalog(); }}>
                   <FontAwesomeIcon aria-hidden className="size-3" icon={faRotate} />Refresh BOFs
                 </Button>
-                <Button form={FORM_ID} isDisabled={!command?.available || isRefreshing || isExecuting || choosingFileIndex !== undefined} isPending={isExecuting} type="submit" variant="primary">
+                <Button form={FORM_ID} isDisabled={!command?.available || isRefreshing || isCatalogLoading || catalogError !== undefined || isExecuting || choosingFileIndex !== undefined} isPending={isExecuting} type="submit" variant="primary">
                   <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />Execute
                 </Button>
               </div>
             </div>
             {catalogState.status === "loading" ? <p className="text-sm text-muted" role="status">Loading installed Armory BOFs…</p> : null}
-            {catalogState.status === "error" ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogState.message}</p> : null}
+            {catalogError !== undefined ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
             {catalog ? (
               <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
                 <Autocomplete
@@ -605,7 +640,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                 <Switch.Control><Switch.Thumb /></Switch.Control>
               </Switch>
             </div>
-            <div className="mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary">
+            <div className={["-mr-4 mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5", output?.truncated ? "" : "-mb-4 sm:-mb-5"].join(" ")}>
               {output?.data.byteLength ? (
                 <ExecutionOutputTerminal bytes={output.data} className="h-full min-h-0" resetKey={`${selected.id}:${stream}`} />
               ) : (

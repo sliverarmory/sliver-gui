@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
+import { assertExecutionOutputLayout } from "./execution-layout-assertions.js";
 
 const PROCESS_STDOUT = "deterministic M4 process stdout";
 
@@ -115,6 +116,7 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
     await assertProcessDetails(outputPanel);
     await assertProcessRailBesideContent(outputPanel, history, terminal);
     await assertEmbeddedProcessViewport(page, outputPanel, terminal);
+    await assertExecutionOutputLayout(outputPanel, history, terminal, "Process");
     assert.equal(await history.getByRole("row").count(), 2,
       "the completed execution must appear directly below New Execution");
     await page.screenshot({

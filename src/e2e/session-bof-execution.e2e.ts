@@ -7,6 +7,8 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
+import { assertExecutionOutputLayout } from "./execution-layout-assertions.js";
+
 test("session and beacon BOFs render Armory arguments, dispatch packed invocations, and capture output", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-bof-execution-e2e-"));
@@ -89,6 +91,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     await form.getByRole("spinbutton", { name: /subdirs/u }).fill("2");
     await form.getByRole("button", { name: "Execute", exact: true }).click();
     await assertOutput(workspace, "deterministic sa-dir stdout");
+    await assertExecutionOutputLayout(workspace, history, workspace.locator('[aria-label="Execution output terminal"]'), "BOF");
     assert.equal(await history.getByRole("row").count(), 2);
     assert.equal(await workspace.getByRole("button", { name: "Save stdout" }).count(), 1);
     assert.equal(await workspace.getByRole("button", { name: "Add stdout to Loot" }).count(), 1);
