@@ -163,6 +163,82 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
   }
 });
 
+test("BOF history and output sync between the session and its execution pop-out", { timeout: 120_000 }, async () => {
+  const fixture = await launchBofPopoutFixture();
+  const rendererErrors: string[] = [];
+  fixture.application.on("window", (page) => page.on("pageerror", (error) => rendererErrors.push(error.message)));
+  try {
+    const source = await openSession(fixture.application);
+    source.on("pageerror", (error) => rendererErrors.push(error.message));
+    await source.getByRole("tab", { name: "Execution", exact: true }).click();
+    await source.getByRole("radio", { name: "BOFs", exact: true }).click();
+    const sourceWorkspace = source.getByRole("region", { name: "BOF execution history and output", exact: true });
+    const sourceHistory = sourceWorkspace.getByRole("navigation", { name: "BOF execution history", exact: true });
+    const sourceForm = sourceWorkspace.getByRole("region", { name: "Execute an Armory BOF", exact: true });
+    await selectInstalledBof(source, sourceForm, "sa-dir");
+    await sourceForm.getByRole("textbox", { name: /targetdir/u }).fill("/tmp/from-main");
+    await sourceForm.getByRole("button", { name: "Execute", exact: true }).click();
+    await assertOutput(sourceWorkspace, "deterministic sa-dir stdout");
+    assert.equal(await sourceHistory.getByRole("row").count(), 2);
+
+    // A new window must load a BOF that ran before the window was opened.
+    const [popOut] = await Promise.all([
+      fixture.application.waitForEvent("window", { timeout: 15_000 }),
+      source.getByRole("button", { name: "Pop out execution", exact: true }).click(),
+    ]);
+    popOut.setDefaultTimeout(20_000);
+    await popOut.getByRole("main", { name: "Standalone Execution window", exact: true }).waitFor();
+    await popOut.getByRole("radio", { name: "BOFs", exact: true }).click();
+    const popOutWorkspace = popOut.getByRole("region", { name: "BOF execution history and output", exact: true });
+    const popOutHistory = popOutWorkspace.getByRole("navigation", { name: "BOF execution history", exact: true });
+    const firstInPopOut = popOutHistory.getByRole("row", { name: /sa-dir/u });
+    await firstInPopOut.waitFor();
+    await firstInPopOut.click();
+    await assertOutput(popOutWorkspace, "deterministic sa-dir stdout");
+    await popOutWorkspace.getByRole("button", { name: "Copy output", exact: true }).click();
+    assert.equal(await fixture.application.evaluate(({ clipboard }) => clipboard.readText()), "deterministic sa-dir stdout\n");
+    assert.equal(await popOutHistory.getByRole("row").count(), 2);
+
+    await popOutHistory.getByRole("row", { name: "New Execution", exact: true }).click();
+    const popOutForm = popOutWorkspace.getByRole("region", { name: "Execute an Armory BOF", exact: true });
+    await selectInstalledBof(popOut, popOutForm, "sa-nslookup");
+    await popOutForm.getByRole("textbox", { name: /hostname/u }).fill("from-popout.example");
+    await popOutForm.getByRole("button", { name: "Execute", exact: true }).click();
+    await assertOutput(popOutWorkspace, "deterministic sa-nslookup stdout");
+
+    // The source keeps its selection until the operator selects the peer's run.
+    await assertOutput(sourceWorkspace, "deterministic sa-dir stdout");
+    const secondInSource = sourceHistory.getByRole("row", { name: /sa-nslookup/u });
+    await secondInSource.waitFor();
+    await secondInSource.click();
+    await assertOutput(sourceWorkspace, "deterministic sa-nslookup stdout");
+    await sourceWorkspace.getByRole("button", { name: "Copy output", exact: true }).click();
+    assert.equal(await fixture.application.evaluate(({ clipboard }) => clipboard.readText()), "deterministic sa-nslookup stdout\n");
+    assert.equal(await sourceHistory.getByRole("row").count(), 3);
+    assert.equal(await popOutHistory.getByRole("row").count(), 3);
+    const calls = await fixture.application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.bofCalls);
+    assert.deepEqual(calls.map((call) => call.argumentsHex), [
+      packedArguments([stringArgument("/tmp/from-main"), shortArgument(0)]).toString("hex"),
+      packedArguments([stringArgument("from-popout.example"), stringArgument(""), shortArgument(1)]).toString("hex"),
+    ], "cross-window synchronization must not dispatch either BOF again or alter its arguments");
+
+    await sourceWorkspace.getByRole("button", { name: "Clear selected", exact: true }).click();
+    await popOutHistory.getByRole("row", { name: /sa-nslookup/u }).waitFor({ state: "detached" });
+    await assertOutput(popOutWorkspace, "deterministic sa-dir stdout");
+    assert.equal(await popOutHistory.getByRole("row").count(), 2);
+
+    await popOutWorkspace.getByRole("button", { name: "Clear history", exact: true }).click();
+    await sourceHistory.getByRole("row", { name: /sa-dir/u }).waitFor({ state: "detached" });
+    await sourceWorkspace.getByRole("region", { name: "Execute an Armory BOF", exact: true }).waitFor();
+    assert.equal(await sourceHistory.getByRole("row").count(), 1);
+    assert.equal(await popOutHistory.getByRole("row").count(), 1);
+    assert.deepEqual(rendererErrors, []);
+  } finally {
+    await fixture.application.close().catch(() => undefined);
+    await rm(fixture.temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("Windows session BOFs dispatch a legacy installed COFF loader", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-legacy-bof-e2e-"));
@@ -245,6 +321,64 @@ async function selectInstalledBof(page: Page, form: Locator, commandName: string
   const search = page.getByRole("searchbox", { name: "Search installed BOFs", exact: true });
   await search.fill(commandName);
   await page.getByRole("option", { name: new RegExp(commandName, "u") }).click();
+}
+
+async function launchBofPopoutFixture(): Promise<{ application: ElectronApplication; temporaryRoot: string }> {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-bof-popout-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  await Promise.all([savedConfigDirectory, managedConfigDirectory, userDataDirectory, consoleClientRootDirectory]
+    .map((directory) => mkdir(directory, { recursive: true })));
+  await writeFile(join(savedConfigDirectory, "bof-popout-e2e-operator.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+  await Promise.all([
+    writeBofFixture(consoleClientRootDirectory, "sa-dir", "dir", "inert-sa-dir-bof-object", [
+      { name: "targetdir", type: "string", desc: "Directory to list", optional: true, default: "." },
+      { name: "subdirs", type: "short", desc: "Include subdirectories", optional: true, default: 0 },
+    ]),
+    writeBofFixture(consoleClientRootDirectory, "sa-nslookup", "nslookup", "inert-sa-nslookup-bof-object", [
+      { name: "hostname", type: "string", desc: "Hostname to query", optional: false },
+      { name: "server", type: "string", desc: "DNS server", optional: true },
+      { name: "type", type: "short", desc: "Record type", optional: true, default: 1 },
+    ]),
+  ]);
+  try {
+    const application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+        "--bof-execution-fixture",
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    return { application, temporaryRoot };
+  } catch (error) {
+    await rm(temporaryRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function openSession(application: ElectronApplication): Promise<Page> {
+  const page = await application.firstWindow();
+  page.setDefaultTimeout(20_000);
+  const savedConfigurations = page.getByRole("dialog", { name: "Saved configurations" });
+  await savedConfigurations.waitFor();
+  await savedConfigurations.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.locator('[aria-label="Sessions"]:visible').click();
+  await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Interact with m1-session", exact: true }).click();
+  await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+  return page;
 }
 
 async function assertOutput(workspace: Locator, text: string): Promise<void> {

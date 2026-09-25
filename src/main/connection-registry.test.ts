@@ -106,6 +106,16 @@ afterEach(async () => {
 });
 
 describe("BOF execution records", () => {
+  async function installSharedBof(): Promise<void> {
+    const directory = join(root, "extensions", "shared-bof");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "shared.o"), Buffer.from("COFF"));
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      name: "Shared BOF", command_name: "shared-bof", entrypoint: "go", help: "fixture",
+      bof_executor: "reflektor", files: [{ os: "windows", arch: "amd64", path: "shared.o" }],
+    }));
+  }
+
   it("zeroizes selected file bytes on idle expiry and cancels the timer on window close", async () => {
     const directory = join(root, "extensions", "file-bof");
     await mkdir(directory, { recursive: true });
@@ -202,6 +212,135 @@ describe("BOF execution records", () => {
     expect(await registry.addBofOutputToLoot(1, { id: executed.value.id, stream: "stdout", name: "Partial BOF" }))
       .toMatchObject({ ok: true, value: { name: "Partial BOF" } });
     expect(client.lootState[0]?.File?.Data.toString()).toBe("partial stdout");
+  });
+
+  it("shares exact-target BOF history and output actions across windows", async () => {
+    await installSharedBof();
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      clientpb.Session.create({ ...session("session_bof_shared", "shared"), OS: "windows", Arch: "amd64", Capabilities: "1" }),
+      clientpb.Session.create({ ...session("session_bof_other", "other"), OS: "windows", Arch: "amd64", Capabilities: "1" }),
+    ];
+    client.adapter.callBofSession = vi.fn(async () => sliverpb.CallExtension.create({
+      BOFOutputs: [
+        { Type: 0, Data: Buffer.from("shared stdout") },
+        { Type: 0x0d, Data: Buffer.from("shared stderr") },
+      ],
+      Response: { Err: "", Async: false, BeaconID: "", TaskID: "" },
+    }));
+    const mainEvents = vi.fn();
+    const popoutEvents = vi.fn();
+    electronMocks.fromId.mockImplementation((id: number) => ({
+      isDestroyed: () => false,
+      send: id === 1 ? mainEvents : popoutEvents,
+    }));
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const shared = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_shared");
+    const other = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_other");
+    if (!shared || !other) throw new Error("Expected distinct BOF session targets");
+    await registry.selectTarget(1, shared);
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await registry.selectTarget(2, shared);
+
+    const first = await registry.runBof(1, { commandId: "shared-bof/shared-bof", arguments: [], timeoutSeconds: 60 });
+    if (!first.ok) throw new Error(first.error);
+    expect(first.value.state).toBe("completed");
+    const listed = await registry.listBofExecutionHistory(2);
+    if (!listed.ok) throw new Error(listed.error);
+    expect(listed.value.target).toMatchObject({ id: shared.id, fingerprint: shared.fingerprint });
+    expect(listed.value.revision).toBeGreaterThan(0);
+    expect(listed.value.records).toMatchObject([{ id: first.value.id, state: "completed", commandName: "shared-bof" }]);
+    expect(Buffer.from(listed.value.records[0]!.stdout!.data).toString()).toBe("shared stdout");
+    listed.value.records[0]!.stdout!.data.fill(0);
+    const fresh = await registry.listBofExecutionHistory(2);
+    if (!fresh.ok) throw new Error(fresh.error);
+    expect(Buffer.from(fresh.value.records[0]!.stdout!.data).toString()).toBe("shared stdout");
+    await expect(registry.getBofExecutionResult(2, { id: first.value.id }))
+      .resolves.toMatchObject({ ok: true, value: { state: "completed" } });
+    expect(popoutEvents).toHaveBeenCalledWith(
+      IPC.bofExecutionHistoryChanged, expect.objectContaining({ id: shared.id }), expect.any(Number),
+    );
+
+    const destination = join(externalDirectory, "shared-bof-output.txt");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    await expect(registry.saveBofOutput(sender(2), { id: first.value.id, stream: "stdout" }))
+      .resolves.toMatchObject({ ok: true, value: { saved: true } });
+    await expect(readFile(destination, "utf8")).resolves.toBe("shared stdout");
+    await expect(registry.addBofOutputToLoot(2, { id: first.value.id, stream: "stderr", name: "Shared BOF stderr" }))
+      .resolves.toMatchObject({ ok: true, value: { name: "Shared BOF stderr" } });
+    expect(client.lootState[0]?.File?.Data.toString()).toBe("shared stderr");
+
+    await expect(registry.clearBofExecutionHistory(1, { id: first.value.id })).resolves.toEqual({ ok: true });
+    await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+    await expect(registry.getBofExecutionResult(2, { id: first.value.id })).resolves.toMatchObject({ ok: false });
+    const second = await registry.runBof(2, { commandId: "shared-bof/shared-bof", arguments: [], timeoutSeconds: 60 });
+    if (!second.ok) throw new Error(second.error);
+    await expect(registry.listBofExecutionHistory(1)).resolves.toMatchObject({
+      ok: true, value: { records: [{ id: second.value.id, state: "completed" }] },
+    });
+    expect(mainEvents).toHaveBeenCalledWith(
+      IPC.bofExecutionHistoryChanged, expect.objectContaining({ id: shared.id }), expect.any(Number),
+    );
+    await registry.unregisterWindow(1);
+    await expect(registry.getBofExecutionResult(2, { id: second.value.id }))
+      .resolves.toMatchObject({ ok: true, value: { state: "completed" } });
+    await registry.selectTarget(2, other);
+    await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+    await expect(registry.getBofExecutionResult(2, { id: second.value.id })).resolves.toMatchObject({ ok: false });
+    await expect(registry.saveBofOutput(sender(2), { id: second.value.id, stream: "stdout" }))
+      .resolves.toMatchObject({ ok: false });
+    await registry.selectTarget(2, shared);
+    await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({
+      ok: true, value: { records: [{ id: second.value.id }] },
+    });
+    await expect(registry.clearBofExecutionHistory(2, {})).resolves.toEqual({ ok: true });
+    await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+  });
+
+  it("does not restore a cleared BOF run when its result arrives later", async () => {
+    await installSharedBof();
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({
+      ...session("session_bof_clear", "clear"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    let complete: ((response: sliverpb.CallExtension) => void) | undefined;
+    client.adapter.callBofSession = vi.fn(() => new Promise<sliverpb.CallExtension>((resolve) => { complete = resolve; }));
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory,
+      managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root,
+      clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_bof_clear");
+    if (!target) throw new Error("Expected a BOF session target");
+    await registry.selectTarget(1, target);
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await registry.selectTarget(2, target);
+
+    const executing = registry.runBof(1, { commandId: "shared-bof/shared-bof", arguments: [], timeoutSeconds: 60 });
+    await vi.waitFor(async () => {
+      const listed = await registry.listBofExecutionHistory(2);
+      expect(listed).toMatchObject({ ok: true, value: { records: [{ state: "running" }] } });
+    });
+    await expect(registry.clearBofExecutionHistory(2, {})).resolves.toEqual({ ok: true });
+    expect(complete).toBeTypeOf("function");
+    complete?.(sliverpb.CallExtension.create({ BOFOutputs: [{ Type: 0, Data: Buffer.from("late") }], Response: { Err: "" } }));
+    await executing;
+    await expect(registry.listBofExecutionHistory(1)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+    await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({ ok: true, value: { records: [] } });
   });
 
   it("waits for correlated beacon loader registration before dispatching a legacy BOF", async () => {

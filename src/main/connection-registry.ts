@@ -349,7 +349,6 @@ interface WindowContext {
   executionAdmissions: Set<string>;
   executionResults: Map<string, InternalExecutionResult>;
   executionResultTimers: Map<string, NodeJS.Timeout>;
-  bofHistories: Map<string, { target: TargetRef; revision: number; records: BofExecutionRecord[] }>;
   bofArgumentFiles: Map<string, { commandId: string; index: number; target: TargetRef; data: Buffer; fileName: string; expiresAt: number }>;
   bofArgumentFileTimer?: NodeJS.Timeout;
   taskListAdmissions: Set<string>;
@@ -584,6 +583,14 @@ interface InternalProcessExecutionHistory {
   entries: Array<{ order: number; record: ProcessExecutionRecord }>;
 }
 
+interface InternalBofExecutionHistory {
+  readonly poolKey: string;
+  readonly epoch: number;
+  readonly target: TargetRef;
+  revision: number;
+  records: BofExecutionRecord[];
+}
+
 type RefreshedExecutionBeaconTask =
   | { state: "pending" }
   | { state: "canceled" }
@@ -631,6 +638,7 @@ export class ConnectionRegistry {
   private readonly sessionArtifacts: SessionArtifactStore;
   private readonly executionArtifacts: ExecutionArtifactStore;
   private readonly processExecutionHistories = new Map<string, InternalProcessExecutionHistory>();
+  private readonly bofExecutionHistories = new Map<string, InternalBofExecutionHistory>();
   private readonly streams: StreamManager;
   private readonly sessionWorkbenchGlobalAdmissions = new Map<string, "standard" | "artifact">();
   private readonly terminalRuntimeAdmissions = new Set<number>();
@@ -763,7 +771,6 @@ export class ConnectionRegistry {
       executionAdmissions: new Set(),
       executionResults: new Map(),
       executionResultTimers: new Map(),
-      bofHistories: new Map(),
       bofArgumentFiles: new Map(),
       taskListAdmissions: new Set(),
       taskDetailAdmissions: new Set(),
@@ -2294,7 +2301,7 @@ export class ConnectionRegistry {
           id: randomUUID(), startedAt: new Date(this.now()).toISOString(),
           commandId: command.dto.id, commandName: command.dto.commandName, state: "running",
         };
-        this.addBofRecord(context, selectedRef, record);
+        this.addBofRecord(pool, selectedRef, record);
         let dispatched = false;
         try {
           assertCurrent();
@@ -2318,20 +2325,20 @@ export class ConnectionRegistry {
           assertCurrent();
           const captured = decodeBofOutput(response);
           if (response.Response?.Err?.trim()) {
-            return this.patchBofRecord(context, selectedRef, record.id, { state: "failed", error: "The selected target rejected the BOF execution.", ...captured });
+            return this.patchBofRecord(pool, selectedRef, record, { state: "failed", error: "The selected target rejected the BOF execution.", ...captured });
           }
           if (response.Response?.Async) {
             const taskId = response.Response.TaskID;
             if (!taskId || response.Response.BeaconID !== target.target.id) {
-              return this.patchBofRecord(context, selectedRef, record.id, { state: "outcome-unknown", error: "The BOF was submitted, but its beacon task could not be identified." });
+              return this.patchBofRecord(pool, selectedRef, record, { state: "outcome-unknown", error: "The BOF was submitted, but its beacon task could not be identified." });
             }
-            return this.patchBofRecord(context, selectedRef, record.id, { state: "submitted", taskId });
+            return this.patchBofRecord(pool, selectedRef, record, { state: "submitted", taskId });
           }
           if (target.target.mode === "beacon") throw new Error("The beacon BOF response was missing task correlation");
-          return this.patchBofRecord(context, selectedRef, record.id, { state: "completed", ...captured });
+          return this.patchBofRecord(pool, selectedRef, record, { state: "completed", ...captured });
         } catch (error) {
           const state = dispatched ? "outcome-unknown" : "request-failed";
-          return this.patchBofRecord(context, selectedRef, record.id, {
+          return this.patchBofRecord(pool, selectedRef, record, {
             state,
             error: dispatched
               ? "The BOF was dispatched, but its final outcome could not be confirmed."
@@ -2398,22 +2405,22 @@ export class ConnectionRegistry {
 
   async listBofExecutionHistory(contentsId: number): Promise<OperationResult<BofExecutionHistorySnapshot>> {
     return this.withExecutionPool(contentsId, async (pool) => {
-      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
-      const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+      const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = this.bofExecutionHistories.get(this.bofHistoryKey(pool, target.ref));
       return { target: { ...target.ref }, revision: history?.revision ?? 0, records: history?.records.map(cloneBofRecord) ?? [] };
     });
   }
 
   async clearBofExecutionHistory(contentsId: number, input: ClearBofExecutionHistoryInput): Promise<OperationResult> {
     const result = await this.withExecutionPool(contentsId, async (pool) => {
-      const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
-      const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+      const { target } = this.requireSelectedExecutionTarget(contentsId, pool);
+      const history = this.bofExecutionHistories.get(this.bofHistoryKey(pool, target.ref));
       if (!history) return;
       const index = input.id === undefined ? 0 : history.records.findIndex((record) => record.id === input.id);
       if (index < 0) return;
       const removed = input.id === undefined ? history.records.splice(0) : history.records.splice(index, 1);
       for (const record of removed) clearBofRecord(record);
-      this.publishBofHistoryChanged(context, history);
+      this.publishBofHistoryChanged(history);
     });
     return result.ok ? { ok: true } : result;
   }
@@ -2421,7 +2428,7 @@ export class ConnectionRegistry {
   async getBofExecutionResult(contentsId: number, input: BofExecutionRecordInput): Promise<OperationResult<BofExecutionRecord>> {
     return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
       const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
-      const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+      const history = this.bofExecutionHistories.get(this.bofHistoryKey(pool, target.ref));
       const record = history?.records.find((item) => item.id === input.id);
       if (!record) throw new Error("The BOF result is unavailable for the current target");
       if ((record.state !== "submitted" && record.state !== "outcome-unknown") || !record.taskId) return cloneBofRecord(record);
@@ -2431,20 +2438,20 @@ export class ConnectionRegistry {
         if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref) ||
           !history?.records.includes(record)) throw new Error("The selected target changed while refreshing the BOF result");
         if (task.ID !== record.taskId || task.BeaconID !== target.target.id) {
-          return this.patchBofRecord(context, target.ref, record.id, { state: "outcome-unknown", error: "BOF task correlation failed." });
+          return this.patchBofRecord(pool, target.ref, record, { state: "outcome-unknown", error: "BOF task correlation failed." });
         }
         const state = task.State.trim().toLowerCase();
         if (state === "failed" || state === "canceled" || state === "cancelled") {
-          return this.patchBofRecord(context, target.ref, record.id, { state: "failed", error: "The beacon BOF task failed." });
+          return this.patchBofRecord(pool, target.ref, record, { state: "failed", error: "The beacon BOF task failed." });
         }
         if (state !== "completed") return cloneBofRecord(record);
         try {
           const response = decodeBofTask(task.Response);
           const captured = decodeBofOutput(response);
-          if (response.Response?.Err?.trim()) return this.patchBofRecord(context, target.ref, record.id, { state: "failed", error: "The selected target rejected the BOF execution.", ...captured });
-          return this.patchBofRecord(context, target.ref, record.id, { state: "completed", ...captured });
+          if (response.Response?.Err?.trim()) return this.patchBofRecord(pool, target.ref, record, { state: "failed", error: "The selected target rejected the BOF execution.", ...captured });
+          return this.patchBofRecord(pool, target.ref, record, { state: "completed", ...captured });
         } catch {
-          return this.patchBofRecord(context, target.ref, record.id, { state: "outcome-unknown", error: "The beacon BOF task completed, but its exact result could not be confirmed." });
+          return this.patchBofRecord(pool, target.ref, record, { state: "outcome-unknown", error: "The beacon BOF task completed, but its exact result could not be confirmed." });
         }
       } finally {
         task.Request?.fill(0);
@@ -2453,26 +2460,33 @@ export class ConnectionRegistry {
     });
   }
 
-  private bofHistoryKey(ref: TargetRef): string {
-    return `${ref.mode}:${ref.id}:${ref.backendEpoch}:${ref.fingerprint}`;
+  private bofHistoryKey(pool: BackendPool, ref: TargetRef): string {
+    return JSON.stringify([pool.key, pool.epoch, ref.mode, ref.id, ref.fingerprint]);
   }
 
-  private addBofRecord(context: WindowContext, target: TargetRef, record: BofExecutionRecord): void {
-    const key = this.bofHistoryKey(target);
-    let history = context.bofHistories.get(key);
+  private addBofRecord(pool: BackendPool, target: TargetRef, record: BofExecutionRecord): void {
+    const key = this.bofHistoryKey(pool, target);
+    let history = this.bofExecutionHistories.get(key);
     if (!history) {
-      history = { target: { ...target }, revision: 0, records: [] };
-      context.bofHistories.set(key, history);
+      history = { poolKey: pool.key, epoch: pool.epoch, target: { ...target }, revision: 0, records: [] };
+      this.bofExecutionHistories.set(key, history);
     }
     history.records.unshift(record);
     this.trimBofHistory(history);
-    this.publishBofHistoryChanged(context, history);
+    this.publishBofHistoryChanged(history);
   }
 
-  private patchBofRecord(context: WindowContext, target: TargetRef, id: string, patch: Partial<BofExecutionRecord>): BofExecutionRecord {
-    const history = context.bofHistories.get(this.bofHistoryKey(target));
-    const index = history?.records.findIndex((record) => record.id === id) ?? -1;
-    if (!history || index < 0) throw new Error("The BOF result was cleared");
+  private patchBofRecord(pool: BackendPool, target: TargetRef, original: BofExecutionRecord, patch: Partial<BofExecutionRecord>): BofExecutionRecord {
+    const history = this.bofExecutionHistories.get(this.bofHistoryKey(pool, target));
+    const index = history?.records.findIndex((record) => record.id === original.id) ?? -1;
+    if (!history || index < 0) {
+      // A peer may clear a running invocation before the result arrives. Return
+      // the result to the initiating call without restoring it to shared history.
+      const returned = cloneBofRecord({ ...original, ...patch });
+      patch.stdout?.data.fill(0);
+      patch.stderr?.data.fill(0);
+      return returned;
+    }
     const previous = history.records[index]!;
     const next = cloneBofRecord({ ...previous, ...patch });
     history.records[index] = next;
@@ -2481,7 +2495,7 @@ export class ConnectionRegistry {
     clearBofRecord(previous);
     const returned = cloneBofRecord(next);
     this.trimBofHistory(history);
-    this.publishBofHistoryChanged(context, history);
+    this.publishBofHistoryChanged(history);
     return returned;
   }
 
@@ -2496,14 +2510,16 @@ export class ConnectionRegistry {
     }
   }
 
-  private publishBofHistoryChanged(
-    context: WindowContext,
-    history: { target: TargetRef; revision: number; records: BofExecutionRecord[] },
-  ): void {
+  private publishBofHistoryChanged(history: InternalBofExecutionHistory): void {
     history.revision += 1;
-    const contents = webContents.fromId(context.contentsId);
-    if (contents && !contents.isDestroyed()) {
-      try { contents.send(IPC.bofExecutionHistoryChanged, { ...history.target }, history.revision); }
+    for (const context of this.windows.values()) {
+      if (context.poolKey !== history.poolKey || !context.activeTarget ||
+        !sameTargetRefIdentity(context.activeTarget, history.target)) continue;
+      const pool = this.pools.get(context.poolKey);
+      if (!pool || pool.epoch !== history.epoch) continue;
+      const contents = webContents.fromId(context.contentsId);
+      if (!contents || contents.isDestroyed()) continue;
+      try { contents.send(IPC.bofExecutionHistoryChanged, { ...context.activeTarget }, history.revision); }
       catch { /* Advisory invalidation; the next snapshot is authoritative. */ }
     }
   }
@@ -2514,7 +2530,7 @@ export class ConnectionRegistry {
     input: BofOutputInput,
   ): { context: WindowContext; target: RevalidatedTarget; record: BofExecutionRecord; data: Buffer } {
     const { context, target } = this.requireSelectedExecutionTarget(contentsId, pool);
-    const history = context.bofHistories.get(this.bofHistoryKey(target.ref));
+    const history = this.bofExecutionHistories.get(this.bofHistoryKey(pool, target.ref));
     const record = history?.records.find((item) => item.id === input.id);
     if (!record || (record.state !== "completed" && record.state !== "failed")) throw new Error("The BOF output is unavailable for the current target");
     const stdout = record.stdout?.data;
@@ -2542,7 +2558,7 @@ export class ConnectionRegistry {
         const assertCurrent = (): void => {
           assertBinding();
           if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selected.target.ref) ||
-            selected.context.bofHistories.get(this.bofHistoryKey(selected.target.ref))?.records.find((record) => record.id === input.id) !== selected.record) {
+            this.bofExecutionHistories.get(this.bofHistoryKey(pool, selected.target.ref))?.records.find((record) => record.id === input.id) !== selected.record) {
             throw new Error("The BOF output no longer belongs to the active target");
           }
         };
@@ -2568,7 +2584,7 @@ export class ConnectionRegistry {
         const assertCurrent = (): void => {
           assertBinding();
           if (!selected.context.activeTarget || !sameTargetRefIdentity(selected.context.activeTarget, selected.target.ref) ||
-            selected.context.bofHistories.get(this.bofHistoryKey(selected.target.ref))?.records.find((record) => record.id === input.id) !== selected.record) {
+            this.bofExecutionHistories.get(this.bofHistoryKey(pool, selected.target.ref))?.records.find((record) => record.id === input.id) !== selected.record) {
             throw new Error("The BOF output no longer belongs to the active target");
           }
         };
@@ -4515,10 +4531,6 @@ export class ConnectionRegistry {
     delete context.bofArgumentFileTimer;
     for (const file of context.bofArgumentFiles.values()) file.data.fill(0);
     context.bofArgumentFiles.clear();
-    for (const history of context.bofHistories.values()) {
-      for (const record of history.records) clearBofRecord(record);
-    }
-    context.bofHistories.clear();
   }
 
   private admitExecutionRequest(context: WindowContext, admissionId: string): void {
@@ -7325,6 +7337,11 @@ export class ConnectionRegistry {
         if (bucket.poolKey !== poolKey) continue;
         for (const entry of bucket.entries) this.releaseProcessExecutionRecord(entry.record);
         this.processExecutionHistories.delete(key);
+      }
+      for (const [key, history] of this.bofExecutionHistories) {
+        if (history.poolKey !== poolKey) continue;
+        for (const record of history.records) clearBofRecord(record);
+        this.bofExecutionHistories.delete(key);
       }
       await this.streams.closeBackend(
         { backendId: pool.key, backendEpoch: pool.epoch },
