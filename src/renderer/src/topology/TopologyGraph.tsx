@@ -8,6 +8,7 @@ import { Button } from "@heroui/react";
 import ELK, { type ELK as ElkEngine } from "elkjs/lib/elk-api.js";
 import type { TopologyDocument, TopologyEdge, TopologyNode } from "../../../shared/topology-contracts";
 import { createElkGraph, extractTopologyLayout, topologyLayoutInput, type LayoutNode, type TopologyLayoutInput } from "./topology-layout-input";
+import { spreadLocalRedirectors } from "./spread-local-redirectors";
 import { TopologyIcon } from "./TopologyIcon";
 
 type NodeDecorator = (node: TopologyNode, content: ReactNode) => ReactNode;
@@ -51,7 +52,7 @@ const ResourceNode = memo(function ResourceNode({ id, data, selected }: NodeProp
   const handlesKey = JSON.stringify(data.connectionHandles);
   useEffect(() => { updateNodeInternals(id); }, [id, handlesKey, updateNodeInternals]);
   const content = (
-    <div className="topology-node" data-testid="topology-node" data-selected={selected} data-status={node.status}
+    <div className="topology-node" data-testid="topology-node" data-kind={node.kind} data-selected={selected} data-status={node.status}
       data-freshness={node.freshness} data-compact={compact}>
       {node.kind === "session" ? <svg className="topology-node__lightning" aria-hidden="true" focusable="false"
         viewBox="-14 -14 264 140" preserveAspectRatio="none">
@@ -262,7 +263,7 @@ function GraphCanvas({ document, selection, onSelect, decorateNode, inspectorOpe
         window.clearTimeout(timeout);
         setBusy(false);
         terminate();
-        const next = extractTopologyLayout(result);
+        const next = spreadLocalRedirectors(extractTopologyLayout(result), document);
         setGeometry(next);
         const cache = cacheGeometry(scopeId, structureKey, next);
         if (cache.viewport && !force && (cache.viewport.source === "user" || cache.viewport.structureKey === structureKey)) {
@@ -310,7 +311,9 @@ function GraphCanvas({ document, selection, onSelect, decorateNode, inspectorOpe
         style: { width: position.width, height: position.height },
         ...(resource.parentId && positions.has(resource.parentId) && resources.has(resource.parentId) ? { parentId: flowElementId(resource.parentId), extent: "parent" as const } : {}),
         selected: selection?.type === "node" && selection.id === resource.id,
-        ariaLabel: `${resource.label}, ${resource.kind}, ${resource.statusLabel}, ${resource.freshness}`,
+        ariaLabel: [resource.label, resource.kind,
+          ...(resource.kind === "http-redirector" ? [resource.subtitle] : []),
+          resource.statusLabel, resource.freshness].filter(Boolean).join(", "),
       }];
     });
     nodesRef.current = next;

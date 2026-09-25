@@ -69,6 +69,58 @@ describe("Cloud Deployment preload bridge", () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(CLOUD_DEPLOYMENT_IPC_EVENTS.awsLoginProgress, handler);
   });
 
+  it("passes through only bounded typed software install progress from main", () => {
+    const api = exposedApi();
+    const listener = vi.fn();
+    const unsubscribe = api.onSoftwareInstallProgress(listener);
+    const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.softwareInstallProgress)[1] as
+      (_event: unknown, ...payload: unknown[]) => void;
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const chunk = new Uint8Array([65, 66]);
+    handler({}, { deploymentId, step: "ssh", status: "running", output: { stream: "stdout", chunk } });
+    chunk[0] = 90;
+    handler({}, { deploymentId, step: "dns", status: "complete", message: "A record ready" });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener.mock.calls[0]?.[0]).toEqual({
+      deploymentId, step: "ssh", status: "running", output: { stream: "stdout", chunk: new Uint8Array([65, 66]) },
+    });
+    expect(listener.mock.calls[1]?.[0]).toEqual({ deploymentId, step: "dns", status: "complete", message: "A record ready" });
+    for (const payload of [
+      [], [null], [{ deploymentId, step: "unknown", status: "running" }],
+      [{ deploymentId, step: "dns", status: "done" }],
+      [{ deploymentId, step: "dns", status: "running", token: "secret" }],
+      [{ deploymentId: "bad", step: "dns", status: "running" }],
+      [{ deploymentId, step: "dns", status: "running", message: "x".repeat(1025) }],
+      [{ deploymentId, step: "ssh", status: "running", output: { stream: "combined", chunk: new Uint8Array([65]) } }],
+      [{ deploymentId, step: "ssh", status: "running", output: { stream: "stdout", chunk: new Uint8Array(64 * 1024 + 1) } }],
+      [{ deploymentId, step: "dns", status: "running" }, "extra"],
+    ]) handler({}, ...payload);
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(CLOUD_DEPLOYMENT_IPC_EVENTS.softwareInstallProgress, handler);
+  });
+
+  it("routes managed software calls through fixed IPC channels", async () => {
+    const api = exposedApi();
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const installationId = "33333333-3333-4333-8333-333333333333";
+    await api.getSoftwareState();
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareState);
+    await api.getSoftwareInstallProgress({ deploymentId });
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareInstallProgress, { deploymentId });
+    const listInput = { deploymentId };
+    await api.listSoftwareListeners(listInput);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.listSoftwareListeners, listInput);
+    const installInput = { deploymentId, expectedRevision: 0, recipeId: "caddy" as const,
+      publicIp: "203.0.113.10", domains: [], listener: { mode: "create" as const, port: 8000 } };
+    await api.installLocalRedirector(installInput);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.installLocalRedirector, installInput);
+    const removeInput = { deploymentId, installationId, expectedRevision: 1 };
+    await api.removeLocalRedirector(removeInput);
+    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.removeLocalRedirector, removeInput);
+    electronMocks.invoke.mockClear();
+  });
+
   it("exposes only the narrow frozen cloud API and maps every invoke to its fixed channel", async () => {
     const api = exposedApi();
     expect(Object.keys(api)).toEqual([
@@ -100,6 +152,11 @@ describe("Cloud Deployment preload bridge", () => {
       "updateDnsRecord",
       "deleteDnsRecord",
       "createDeployment",
+      "getSoftwareState",
+      "getSoftwareInstallProgress",
+      "listSoftwareListeners",
+      "installLocalRedirector",
+      "removeLocalRedirector",
       "renameDeployment",
       "createOperatorConfig",
       "runLifecycleAction",
@@ -114,6 +171,7 @@ describe("Cloud Deployment preload bridge", () => {
       "approveSshHostKey",
       "onChanged",
       "onAwsLoginProgress",
+      "onSoftwareInstallProgress",
       "onNavigationRequested",
       "onThemeChanged",
     ]);
@@ -425,6 +483,7 @@ describe("Cloud Deployment preload bridge", () => {
     handler({}, { view: "deployments", deploymentId: "not-a-deployment", action: "stop" });
     handler({}, { view: "deployments", deploymentId, action: "delete" });
     handler({}, { view: "firewall", deploymentId, action: "stop" });
+    handler({}, { view: "software", deploymentId, action: "stop" });
 
     const api = exposedApi();
     const listener = vi.fn();
@@ -443,6 +502,9 @@ describe("Cloud Deployment preload bridge", () => {
 
     handler({}, { view: "firewall", deploymentId });
     expect(listener).toHaveBeenLastCalledWith({ view: "firewall", deploymentId });
+    handler({}, { view: "software", deploymentId });
+    expect(listener).toHaveBeenLastCalledWith({ view: "software", deploymentId });
+    expect(Object.isFrozen(listener.mock.calls.at(-1)?.[0])).toBe(true);
     unsubscribe();
   });
 

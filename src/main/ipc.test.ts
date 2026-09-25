@@ -250,6 +250,7 @@ describe("trusted Electron IPC boundary", () => {
     const { event } = invokeEvent(RENDERER_URL, 77);
     const requests: readonly CloudDeploymentNavigationRequest[] = [
       { view: "firewall", deploymentId },
+      { view: "software", deploymentId },
       ...(["start", "stop", "reboot", "terminate", "ssh", "operator", "rename"] as const).map((action) => ({
         view: "deployments" as const, deploymentId, action,
       })),
@@ -308,6 +309,8 @@ describe("trusted Electron IPC boundary", () => {
       [{ ...request, action: undefined }],
       [{ ...request, sourceContentsId: 88 }],
       [{ ...request, view: "firewall" }],
+      [{ ...request, view: "software" }],
+      [{ view: "software", deploymentId, action: "stop" }],
       [{ view: "deployments", deploymentId }],
       [request, "extra"],
     ];

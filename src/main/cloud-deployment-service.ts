@@ -1,7 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { unlink } from "node:fs/promises";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 
 import type { BrowserWindow } from "electron";
 import type { TokenCredential } from "@azure/identity";
@@ -14,6 +17,7 @@ import {
   parseCreateCloudDnsRecordInput,
   parseUpdateCloudDnsRecordInput,
   parseDeleteCloudDnsRecordInput,
+  cloudDnsRecordName,
   type CloudDnsProvider,
   type CloudDnsZone,
   type CloudDnsRecord,
@@ -25,6 +29,7 @@ import {
 } from "../shared/cloud-dns-contracts.js";
 import { AwsDnsProvider } from "./cloud/aws-dns-provider.js";
 import { AzureDnsProvider } from "./cloud/azure-dns-provider.js";
+import { publicDnsPointsToServer } from "./cloud/public-dns-resolver.js";
 
 import type {
   AwsLoginProgress,
@@ -97,6 +102,21 @@ import type {
   ManagedServerReference,
   OperationResult,
 } from "../shared/contracts.js";
+import {
+  parseInstallLocalRedirectorInput,
+  parseListLocalRedirectorListenersInput,
+  parseLocalRedirectorRecord,
+  parseRemoveLocalRedirectorInput,
+  resolveLocalRedirectorDnsNames,
+  type InstallLocalRedirectorInput,
+  type ListLocalRedirectorListenersInput,
+  type LocalRedirectorListenerOption,
+  type LocalRedirectorRecord,
+  type RemoveLocalRedirectorInput,
+  type SoftwareInstallProgress,
+  type SoftwareInstallProgressSnapshot,
+  type SoftwareDeploymentState,
+} from "../shared/software-deployment-contracts.js";
 import type { ManagedSshTarget, SshHostKeyReview } from "../shared/ssh-contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import type { CloudPermissionEvaluation } from "../shared/cloud-provider-permissions.js";
@@ -110,6 +130,15 @@ import {
 } from "../shared/cloud-provider-inventory.js";
 import { CloudCredentialVault, type CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { CloudDeploymentStore } from "./cloud-deployment-store.js";
+import { SoftwareDeploymentStore } from "./software-deployment-store.js";
+import {
+  LocalRedirectorDeployer,
+  type LocalRedirectorInstallInput,
+  type LocalRedirectorVerifyInput,
+  type LocalRedirectorRemoveInput,
+  type LocalRedirectorProbeInput,
+  type LocalRedirectorOutputHandler,
+} from "./cloud/local-redirector-deployer.js";
 import type { ManagedListenerFirewallInput } from "./connection-registry.js";
 import { resolveManagedServerFromDeployments } from "./managed-server-resolver.js";
 import {
@@ -185,6 +214,10 @@ const MAX_PROVISIONING_TRANSCRIPT_CHUNK_BYTES = 16 * 1024;
 const MAX_PROVISIONING_TRANSCRIPT_CHUNKS = 512;
 const MAX_PROVISIONING_TRANSCRIPTS = 8;
 const PROVISIONING_TRANSCRIPT_EMIT_DELAY_MS = 100;
+const MAX_SOFTWARE_PROGRESS_SESSIONS = 8;
+const MAX_SOFTWARE_PROGRESS_EVENTS = 512;
+const MAX_SOFTWARE_PROGRESS_OUTPUT_BYTES = 128 * 1024;
+const MAX_SOFTWARE_PROGRESS_CHUNK_BYTES = 16 * 1024;
 const SSH_HOST_KEY_REVIEW_TTL_MS = 5 * 60 * 1000;
 const DEPLOYMENT_REFRESH_TIMEOUT_MS = 30_000;
 const DEPLOYMENT_REFRESH_CONCURRENCY = 4;
@@ -292,6 +325,14 @@ export type CloudAwsPermissionCheckerFactory = (
   connection: AwsEc2ProviderConnection,
 ) => CloudAwsPermissionChecker;
 export type CloudAzureProviderFactory = (connection: AzureVmProviderConnection) => CloudAzureProvider;
+export type CloudSliverListenerClient = Pick<SliverClient, "connect" | "disconnect" | "getJobs" | "startHTTPListenerWithOptions" | "killJob">;
+export interface CloudLocalRedirectorDeployer {
+  install(input: LocalRedirectorInstallInput, onOutput?: LocalRedirectorOutputHandler): ReturnType<LocalRedirectorDeployer["install"]>;
+  verify(input: LocalRedirectorVerifyInput, onOutput?: LocalRedirectorOutputHandler): ReturnType<LocalRedirectorDeployer["verify"]>;
+  remove(input: LocalRedirectorRemoveInput): ReturnType<LocalRedirectorDeployer["remove"]>;
+  probeLoopbackListener(input: LocalRedirectorProbeInput): ReturnType<LocalRedirectorDeployer["probeLoopbackListener"]>;
+  checkFrontendPortsAvailable(input: { readonly ssh: LocalRedirectorInstallInput["ssh"]; readonly ports: readonly number[] }): Promise<boolean>;
+}
 
 export interface CloudAwsProfileSource {
   list(): Promise<readonly AwsCliProfileSummary[]>;
@@ -356,6 +397,14 @@ export interface CloudDeploymentServiceOptions {
   readonly operatorConfigDirectory: string;
   readonly safeStorage: CloudSafeStorageAdapter;
   readonly store?: CloudDeploymentStore;
+  readonly softwareStore?: SoftwareDeploymentStore;
+  readonly softwareDeployer?: CloudLocalRedirectorDeployer;
+  readonly sliverListenerClientFactory?: (config: SliverClientConfig) => CloudSliverListenerClient;
+  readonly resolveDomainAddresses?: (domain: string) => Promise<readonly string[]>;
+  readonly publicDnsPointsToServer?: (domain: string, publicIp: string) => Promise<boolean>;
+  /** Bounded test seams for managed redirector DNS propagation. */
+  readonly softwareDnsPropagationTimeoutMs?: number;
+  readonly softwareDnsPropagationPollIntervalMs?: number;
   readonly vault?: CloudCredentialVault;
   readonly privateKeyCapabilities?: CloudPrivateKeyCapabilities;
   readonly sshKeyGenerator?: CloudSshKeyGenerator;
@@ -415,6 +464,16 @@ interface MutableProvisioningTranscript {
   chunks: Array<{ readonly sequence: number; readonly bytes: Uint8Array }>;
 }
 
+interface MutableSoftwareInstallProgress {
+  readonly deploymentId: string;
+  readonly recipeId: SoftwareInstallProgressSnapshot["recipeId"];
+  status: SoftwareInstallProgressSnapshot["status"];
+  truncated: boolean;
+  outputSequenceStart: number;
+  outputBytes: number;
+  events: SoftwareInstallProgress[];
+}
+
 /**
  * Main-process orchestration for cloud credentials, provider-owned resources,
  * SSH provisioning, and local operator configuration import.
@@ -422,6 +481,13 @@ interface MutableProvisioningTranscript {
 export class CloudDeploymentService {
   readonly #operatorConfigDirectory: string;
   readonly #store: CloudDeploymentStore;
+  readonly #softwareStore: SoftwareDeploymentStore;
+  readonly #softwareDeployer: CloudLocalRedirectorDeployer;
+  readonly #sliverListenerClientFactory: (config: SliverClientConfig) => CloudSliverListenerClient;
+  readonly #resolveDomainAddresses: (domain: string) => Promise<readonly string[]>;
+  readonly #publicDnsPointsToServer: (domain: string, publicIp: string) => Promise<boolean>;
+  readonly #softwareDnsPropagationTimeoutMs: number;
+  readonly #softwareDnsPropagationPollIntervalMs: number;
   readonly #vault: CloudCredentialVault;
   readonly #privateKeys: CloudPrivateKeyCapabilities;
   readonly #sshKeyGenerator: CloudSshKeyGenerator;
@@ -457,6 +523,7 @@ export class CloudDeploymentService {
   readonly #sshHostKeyReviews = new Map<string, SshHostKeyReviewEntry>();
   readonly #issuedSshHostKeyReviewTokens = new Set<string>();
   readonly #provisioningTranscripts = new Map<string, MutableProvisioningTranscript>();
+  readonly #softwareInstallProgress = new Map<string, MutableSoftwareInstallProgress>();
   readonly #deploymentRefreshTimeoutMs: number;
   readonly #refreshErrors = new Map<string, string>();
   readonly #refreshReads = new Map<string, DeploymentRefreshRead>();
@@ -476,11 +543,20 @@ export class CloudDeploymentService {
     options: CloudDeploymentServiceOptions,
     store: CloudDeploymentStore,
     sshHostKeys: SshHostKeyStore,
+    softwareStore: SoftwareDeploymentStore,
   ) {
     assertBoundedAbsoluteDirectory(options.rootDirectory, "cloud deployment root");
     assertBoundedAbsoluteDirectory(options.operatorConfigDirectory, "operator configuration directory");
     this.#operatorConfigDirectory = options.operatorConfigDirectory;
     this.#store = store;
+    this.#softwareStore = softwareStore;
+    this.#softwareDeployer = options.softwareDeployer ?? new LocalRedirectorDeployer();
+    this.#sliverListenerClientFactory = options.sliverListenerClientFactory ?? ((config) => new SliverClient(config));
+    this.#resolveDomainAddresses = options.resolveDomainAddresses ?? (async (domain) =>
+      (await lookup(domain, { all: true })).map(({ address }) => address));
+    this.#publicDnsPointsToServer = options.publicDnsPointsToServer ?? publicDnsPointsToServer;
+    this.#softwareDnsPropagationTimeoutMs = Math.min(120_000, Math.max(1, Math.floor(options.softwareDnsPropagationTimeoutMs ?? 120_000)));
+    this.#softwareDnsPropagationPollIntervalMs = Math.min(5_000, Math.max(1, Math.floor(options.softwareDnsPropagationPollIntervalMs ?? 5_000)));
     this.#vault = options.vault ?? new CloudCredentialVault(options.rootDirectory, options.safeStorage);
     this.#privateKeys = options.privateKeyCapabilities ?? new PrivateKeyCapabilities();
     this.#sshKeyGenerator = options.sshKeyGenerator ?? generateEd25519SshKeyPair;
@@ -535,8 +611,10 @@ export class CloudDeploymentService {
     const sshHostKeys = options.sshHostKeyStore ?? await SshHostKeyStore.load(
       join(options.rootDirectory, SSH_HOST_KEY_STORE_FILE_NAME),
     );
+    const softwareStore = options.softwareStore ?? await SoftwareDeploymentStore.load(options.rootDirectory);
     await recoverInterruptedTransitions(store);
-    return new CloudDeploymentService(options, store, sshHostKeys);
+    await softwareStore.recoverInterruptedTransitions(options.now ?? Date.now);
+    return new CloudDeploymentService(options, store, sshHostKeys, softwareStore);
   }
 
   subscribe(listener: CloudDeploymentChangedListener): () => void {
@@ -551,7 +629,604 @@ export class CloudDeploymentService {
 
   resolveManagedServer(configDigest: string): ManagedServerReference | null {
     if (this.#disposed) return null;
-    return resolveManagedServerFromDeployments(configDigest, this.#store.getState().deployments);
+    const resolved = resolveManagedServerFromDeployments(configDigest, this.#store.getState().deployments);
+    if (!resolved?.overview) return resolved;
+    const redirectors = this.#softwareStore.getState().records
+      .filter((record) => record.deploymentId === resolved.deploymentId)
+      .map((record) => Object.freeze({
+        id: record.id,
+        recipeId: record.recipeId,
+        status: record.status,
+        publicUrl: record.publicUrl,
+        publicIp: record.publicIp,
+        domains: record.domains,
+        listener: record.listener,
+        lastCheckedAt: record.lastCheckedAt,
+      }));
+    return Object.freeze({ ...resolved, overview: Object.freeze({ ...resolved.overview, redirectors }) });
+  }
+
+  getSoftwareState(): OperationResult<SoftwareDeploymentState> {
+    try {
+      this.#assertActive();
+      return { ok: true, value: this.#softwareStore.getState() };
+    } catch (error) {
+      return failure(error, "Managed software state is unavailable");
+    }
+  }
+
+  getSoftwareInstallProgress(deploymentId: string): OperationResult<SoftwareInstallProgressSnapshot | null> {
+    try {
+      this.#assertActive();
+      parseListLocalRedirectorListenersInput({ deploymentId });
+      const progress = this.#softwareInstallProgress.get(deploymentId);
+      if (!progress) return { ok: true, value: null };
+      return { ok: true, value: {
+        deploymentId: progress.deploymentId,
+        recipeId: progress.recipeId,
+        status: progress.status,
+        truncated: progress.truncated,
+        outputSequenceStart: progress.outputSequenceStart,
+        events: progress.events.map((event) => ({
+          ...event,
+          ...(event.output ? { output: { stream: event.output.stream, chunk: Uint8Array.from(event.output.chunk) } } : {}),
+        })),
+      } };
+    } catch (error) {
+      return failure(error, "Managed software installation progress is unavailable");
+    }
+  }
+
+  async listSoftwareListeners(
+    input: ListLocalRedirectorListenersInput,
+  ): Promise<OperationResult<readonly LocalRedirectorListenerOption[]>> {
+    try {
+      this.#assertActive();
+      const { deploymentId } = parseListLocalRedirectorListenersInput(input);
+      const deployment = this.#requireSoftwareServer(deploymentId);
+      return { ok: true, value: await this.#withSoftwareSsh(deployment, async (ssh) =>
+        await this.#withSoftwareSliverClient(deployment, async (client) => {
+          const jobs = (await client.getJobs()).Active.filter((job) =>
+            job.Name === "http" || job.Name === "https");
+          if (jobs.length > 32) throw new Error("Too many HTTP listener jobs to inspect safely");
+          const options: LocalRedirectorListenerOption[] = [];
+          for (let offset = 0; offset < jobs.length; offset += 4) {
+            options.push(...await Promise.all(jobs.slice(offset, offset + 4).map(async (job) =>
+              await this.#softwareListenerOption(ssh, deploymentId, job))));
+          }
+          return options;
+        })) };
+    } catch (error) {
+      return failure(error, "The managed server listener inventory is unavailable");
+    }
+  }
+
+  async installLocalRedirector(
+    input: InstallLocalRedirectorInput,
+    onProgress?: (progress: SoftwareInstallProgress) => void,
+  ): Promise<OperationResult<LocalRedirectorRecord>> {
+    try {
+      this.#assertActive();
+      const parsed = parseInstallLocalRedirectorInput(input);
+      return await this.#serializeDeployment(parsed.deploymentId, async () => {
+        this.#beginSoftwareInstallProgress(parsed.deploymentId, parsed.recipeId);
+        let recorded: LocalRedirectorRecord | undefined;
+        let softwareDnsPrepared = false;
+        let currentStep: SoftwareInstallProgress["step"] = "dns";
+        const report = (status: SoftwareInstallProgress["status"], message: string): void =>
+          this.#reportSoftwareInstallProgress(parsed.deploymentId, { step: currentStep, status, message }, onProgress);
+        const start = (step: SoftwareInstallProgress["step"], message: string): void => {
+          currentStep = step;
+          report("running", message);
+        };
+        try {
+          start("dns", parsed.dnsRecords ? "Checking Cloud DNS records" : "Checking public DNS and server address");
+          this.#assertSoftwareRevision(parsed.expectedRevision);
+          const deployment = this.#requireSoftwareServer(parsed.deploymentId);
+          if (this.#softwareStore.getState().records.some((record) => record.deploymentId === deployment.id)) {
+            throw new Error("Remove this server's existing managed redirector before installing another");
+          }
+          if (parsed.listener.mode === "create" && (parsed.listener.port === 80 || parsed.listener.port === 443)) {
+            throw new Error("Choose a localhost listener port other than 80 or 443");
+          }
+          const publicIp = this.#requireSoftwarePublicIp(deployment, parsed.publicIp);
+          if (parsed.dnsRecords) {
+            const plannedDomains = await this.#ensureSoftwareDnsRecords(deployment, parsed.dnsRecords, parsed.domains, publicIp, (message) => report("running", message));
+            softwareDnsPrepared = true;
+            report("running", "Waiting for public DNS to resolve to this server");
+            await this.#waitForSoftwareDnsPropagation(plannedDomains, publicIp, (attempt) =>
+              report("running", `Waiting for public DNS propagation (check ${attempt})`));
+          } else {
+            await this.#assertDomainsPointToServer(parsed.domains, publicIp);
+          }
+          report("complete", parsed.domains.length > 0 ? "Public DNS points to this server" : "Server public IPv4 confirmed");
+          const frontendPorts = parsed.domains.length > 0 ? [80, 443] as const : [80] as const;
+          const publicUrl = parsed.domains.length > 0
+            ? `https://${parsed.domains[0]}`
+            : `http://${publicIp}`;
+          const installationId = randomUUID();
+          const serviceName = `sliver-gui-${parsed.recipeId}-${installationId}.service`;
+          const selectedListener = parsed.listener;
+
+          start("listener", selectedListener.mode === "create" ? "Preparing the localhost Sliver listener" : "Checking the selected localhost Sliver listener");
+          return await this.#withSoftwareSsh(deployment, async (ssh) => {
+            if (!await this.#softwareDeployer.checkFrontendPortsAvailable({ ssh, ports: frontendPorts })) {
+              throw new Error("Port 80 or 443 is already in use on this server");
+            }
+            const listener = await this.#withSoftwareSliverClient(deployment, async (client) => {
+              const jobs = (await client.getJobs()).Active;
+              if (selectedListener.mode === "existing") {
+                const job = jobs.find(({ ID }) => ID === selectedListener.jobId);
+                if (!job) throw new Error("The selected Sliver listener no longer exists");
+                const option = await this.#softwareListenerOption(ssh, deployment.id, job);
+                if (!option.eligible) throw new Error(option.reason ?? "The selected listener is ineligible");
+                return { ownership: "existing" as const, kind: "http" as const, host: "127.0.0.1" as const,
+                  port: option.port, jobId: option.jobId, domain: "" };
+              }
+              if (jobs.some(({ Port }) => Port === selectedListener.port)) {
+                throw new Error("The selected backend port is already used by a Sliver job");
+              }
+              // Save the intent before starting the remote job. Job ID zero means
+              // its identity has not been confirmed yet if the RPC response is lost.
+              return { ownership: "managed" as const, kind: "http" as const, host: "127.0.0.1" as const,
+                port: selectedListener.port, jobId: 0, domain: "" };
+            });
+            const now = new Date(this.#now()).toISOString();
+            const initialRecord = parseLocalRedirectorRecord({
+              id: installationId,
+              deploymentId: deployment.id,
+              recipeId: parsed.recipeId,
+              category: "HTTP Redirectors",
+              subcategory: "local",
+              status: "installing",
+              publicIp,
+              domains: parsed.domains,
+              publicUrl,
+              frontendPorts,
+              ingressPortsOwned: [],
+              listener,
+              serviceName,
+              createdAt: now,
+              updatedAt: now,
+              lastCheckedAt: null,
+              lastError: null,
+            });
+            await this.#softwareStore.put(initialRecord, parsed.expectedRevision);
+            recorded = initialRecord;
+            this.#emitChanged();
+
+            if (listener.ownership === "managed") {
+              const started = await this.#withSoftwareSliverClient(deployment, async (client) =>
+                await client.startHTTPListenerWithOptions({
+                  host: "127.0.0.1",
+                  port: listener.port,
+                  domain: "",
+                  website: "",
+                  enforceOTP: true,
+                }));
+              if (!Number.isSafeInteger(started.JobID) || started.JobID < 1) {
+                throw new Error("Sliver did not confirm the new localhost listener job");
+              }
+              recorded = parseLocalRedirectorRecord({
+                ...recorded,
+                listener: { ...listener, jobId: started.JobID },
+              });
+              recorded = await this.#persistSoftwareRecord(recorded);
+            }
+
+            if (!await this.#waitForSoftwareLoopbackListener(ssh, listener.port)) {
+              throw new Error("The selected Sliver listener is not bound exclusively to 127.0.0.1");
+            }
+            report("complete", `Sliver HTTP listener is ready on 127.0.0.1:${listener.port}`);
+            start("firewall", "Opening public redirector ports in the cloud firewall");
+            for (const port of frontendPorts) {
+              report("running", `Checking cloud ingress for TCP port ${port}`);
+              // Record the port before the cloud API call. If the response is
+              // uncertain, removal will look only for our exact managed rule.
+              recorded = await this.#persistSoftwareRecord({
+                ...recorded,
+                ingressPortsOwned: [...recorded.ingressPortsOwned, port],
+              });
+              const firewallInput: ManagedListenerFirewallInput = {
+                server: { deploymentId: deployment.id, provider: deployment.provider, name: deployment.name },
+                protocol: "tcp",
+                port,
+              };
+              const outcome = deployment.provider === "aws"
+                ? await this.#ensureAwsManagedListenerIngress(deployment, firewallInput)
+                : await this.#ensureAzureManagedListenerIngress(deployment, firewallInput);
+              if (!outcome.ok) throw new Error(outcome.error);
+              if (outcome.value.status === "outcome-unknown") {
+                throw new Error(outcome.value.error ?? `Cloud ingress on port ${port} has an uncertain outcome`);
+              }
+            }
+            report("complete", `Public ingress is ready on TCP ${frontendPorts.join(" and ")}`);
+
+            const recipeInput: LocalRedirectorInstallInput = {
+              ssh, installationId, recipeId: parsed.recipeId, domains: parsed.domains, publicIp,
+              backendKind: "http", backendPort: listener.port, serviceName,
+            };
+            start("ssh", `Installing ${parsed.recipeId === "caddy" ? "Caddy" : "Nginx"} over SSH`);
+            const installed = await this.#softwareDeployer.install(recipeInput, (output) =>
+              this.#reportSoftwareInstallOutput(parsed.deploymentId, "ssh", output, onProgress));
+            if (installed.publicUrl !== publicUrl ||
+                !sameNumberSequence(installed.frontendPorts, frontendPorts)) {
+              throw new Error("The redirector recipe returned an unexpected public endpoint");
+            }
+            report("complete", `${parsed.recipeId === "caddy" ? "Caddy" : "Nginx"} installation finished`);
+            start("verify", "Verifying the public redirector endpoint");
+            if (!await this.#softwareDeployer.verify(recipeInput, (output) =>
+              this.#reportSoftwareInstallOutput(parsed.deploymentId, "verify", output, onProgress))) {
+              throw new Error("The redirector did not pass its public endpoint verification");
+            }
+            recorded = await this.#persistSoftwareRecord({
+              ...recorded,
+              status: "active",
+              lastCheckedAt: new Date(this.#now()).toISOString(),
+              lastError: null,
+            });
+            report("complete", `Redirector is ready at ${publicUrl}`);
+            return { ok: true, value: recorded };
+          });
+        } catch (error) {
+          const cause = cloudErrorMessage(error, "The redirector deployment could not be completed");
+          const message = softwareDnsPrepared && !cause.includes("remain in Cloud DNS")
+            ? `${cause}. Requested A records remain in Cloud DNS`
+            : cause;
+          report("failed", message);
+          if (recorded) {
+            try {
+              await this.#persistSoftwareRecord({
+                ...recorded,
+                status: "outcome-unknown",
+                lastError: message,
+              });
+            } catch {
+              // A remote mutation may have completed even if local state could not be updated.
+            }
+          }
+          return { ok: false, error: message };
+        }
+      });
+    } catch (error) {
+      return failure(error, "The redirector installation request was rejected");
+    }
+  }
+
+  async removeLocalRedirector(
+    input: RemoveLocalRedirectorInput,
+  ): Promise<OperationResult<SoftwareDeploymentState>> {
+    try {
+      this.#assertActive();
+      const parsed = parseRemoveLocalRedirectorInput(input);
+      return await this.#serializeDeployment(parsed.deploymentId, async () => {
+        let record: LocalRedirectorRecord | undefined;
+        try {
+          this.#assertSoftwareRevision(parsed.expectedRevision);
+          record = this.#softwareStore.getState().records.find(({ id, deploymentId }) =>
+            id === parsed.installationId && deploymentId === parsed.deploymentId);
+          if (!record) throw new Error("The managed redirector no longer exists");
+          const deployment = this.#requireSoftwareServer(parsed.deploymentId);
+          record = await this.#persistSoftwareRecord({ ...record, status: "removing", lastError: null });
+          await this.#withSoftwareSsh(deployment, async (ssh) => {
+            if (record!.listener.ownership === "managed" && record!.listener.jobId === 0) {
+              await this.#withSoftwareSliverClient(deployment, async (client) => {
+                if ((await client.getJobs()).Active.some((job) => job.Port === record!.listener.port)) {
+                  throw new Error(
+                    `The Sliver listener on port ${record!.listener.port} has an unconfirmed job ID. Inspect and stop it before removing this recovery record`,
+                  );
+                }
+              });
+            }
+            await this.#softwareDeployer.remove({
+              ssh, recipeId: record!.recipeId, installationId: record!.id, serviceName: record!.serviceName,
+            });
+            if (record!.listener.ownership === "managed") {
+              await this.#withSoftwareSliverClient(deployment, async (client) => {
+                const jobs = (await client.getJobs()).Active;
+                if (record!.listener.jobId === 0) {
+                  return;
+                }
+                const job = jobs.find(({ ID }) => ID === record!.listener.jobId);
+                if (!job) return;
+                if (job.Name !== "http" || job.Port !== record!.listener.port ||
+                    job.Domains.some((domain) => domain !== "")) {
+                  throw new Error("The managed listener job changed; refusing to stop it");
+                }
+                if (!await this.#softwareDeployer.probeLoopbackListener({
+                  ssh, kind: "http", port: job.Port,
+                })) {
+                  throw new Error("The managed listener binding changed; refusing to stop it");
+                }
+                const killed = await client.killJob(job.ID);
+                if (!killed.Success) throw new Error("Sliver did not confirm the listener was stopped");
+              });
+            }
+          });
+          for (const port of record.ingressPortsOwned) {
+            const firewallInput: ManagedListenerFirewallInput = {
+              server: { deploymentId: deployment.id, provider: deployment.provider, name: deployment.name },
+              protocol: "tcp",
+              port,
+            };
+            const outcome = deployment.provider === "aws"
+              ? await this.#removeAwsManagedListenerIngress(deployment, firewallInput)
+              : await this.#removeAzureManagedListenerIngress(deployment, firewallInput);
+            if (!outcome.ok || outcome.value.status === "outcome-unknown") {
+              throw new Error(outcome.ok
+                ? outcome.value.error ?? `Cloud ingress removal on port ${port} has an uncertain outcome`
+                : outcome.error);
+            }
+          }
+          const state = await this.#softwareStore.remove(record.id);
+          this.#emitChanged();
+          return { ok: true, value: state };
+        } catch (error) {
+          const message = cloudErrorMessage(error, "The managed redirector could not be removed");
+          if (record) {
+            await this.#persistSoftwareRecord({ ...record, status: "outcome-unknown", lastError: message })
+              .catch(() => undefined);
+          }
+          return { ok: false, error: message };
+        }
+      });
+    } catch (error) {
+      return failure(error, "The redirector removal request was rejected");
+    }
+  }
+
+  #assertSoftwareRevision(expectedRevision: number): void {
+    if (this.#softwareStore.getState().revision !== expectedRevision) {
+      throw new Error("Managed software changed in another window. Refresh and try again.");
+    }
+  }
+
+  #requireSoftwareServer(deploymentId: string): CloudDeploymentRecord {
+    const deployment = this.#requireDeployment(deploymentId);
+    if (!hasStableRunningRuntime(deployment)) {
+      throw new Error("Start the managed server before changing its software");
+    }
+    if (deployment.operatorConfigFileName !== operatorConfigFileName(deploymentId) ||
+        deployment.operatorConfigDigest === null) {
+      throw new Error("The managed server operator connection is unavailable");
+    }
+    return deployment;
+  }
+
+  #requireSoftwarePublicIp(deployment: CloudDeploymentRecord, requested: string | null): string {
+    const publicIp = deployment.runtime.publicIpAddress;
+    if (!publicIp || isIP(publicIp) !== 4) {
+      throw new Error("This server needs a public IPv4 address for an HTTP redirector");
+    }
+    if (requested !== null && requested !== publicIp) {
+      throw new Error("The advertised public IP must match this server's current public IPv4 address");
+    }
+    return publicIp;
+  }
+
+  async #ensureSoftwareDnsRecords(
+    deployment: CloudDeploymentRecord,
+    selection: NonNullable<InstallLocalRedirectorInput["dnsRecords"]>,
+    domains: readonly string[],
+    publicIp: string,
+    onDetail?: (message: string) => void,
+  ): Promise<readonly string[]> {
+    let creationAttempted = false;
+    const result = await this.#withDnsProvider(deployment.credentialId, async (provider) => {
+      const zone = (await provider.listZones()).find(({ id }) => id === selection.zoneId);
+      if (!zone || zone.private || zone.provider !== deployment.provider) {
+        throw new Error("Choose a public DNS zone in this server's cloud account");
+      }
+      const plannedDomains = resolveLocalRedirectorDnsNames(zone.name, selection.names);
+      if (plannedDomains.some((domain) => !domains.includes(domain))) {
+        throw new Error("Every DNS record to create must appear in the redirector's public domains");
+      }
+      const existing = await provider.listRecords(zone.id);
+      const missing: string[] = [];
+      for (const domain of plannedDomains) {
+        const atName = existing.filter((record) => {
+          try { return cloudDnsRecordName(record.name, zone.name).replace(/\.$/u, "") === domain; }
+          catch { return false; }
+        });
+        const addresses = atName.filter(({ type }) => type === "A");
+        if (atName.some(({ type }) => type === "CNAME" || type === "AAAA") || addresses.length > 1 ||
+            addresses.some(({ values }) => values.length !== 1 || values[0] !== publicIp)) {
+          throw new Error(`${domain} has a conflicting DNS record. Update it in Cloud DNS before deploying`);
+        }
+        if (addresses.length === 0) missing.push(domain);
+        else onDetail?.(`Reusing matching A record for ${domain}`);
+      }
+      // Existing/manual domains must already resolve before creating any new records.
+      await this.#assertDomainsPointToServer(domains.filter((domain) => !plannedDomains.includes(domain)), publicIp);
+      for (const domain of missing) {
+        this.#assertActive();
+        onDetail?.(`Creating A record for ${domain}`);
+        creationAttempted = true;
+        await provider.createRecord(zone.id, { name: domain, type: "A", ttl: 300, values: [publicIp] });
+        onDetail?.(`Created A record for ${domain}`);
+      }
+      return { ok: true, value: plannedDomains };
+    });
+    if (!result.ok) {
+      throw new Error(creationAttempted
+        ? `${result.error}. Requested A records may remain in Cloud DNS; inspect them before retrying deployment`
+        : result.error);
+    }
+    return result.value;
+  }
+
+  async #waitForSoftwareDnsPropagation(domains: readonly string[], publicIp: string, onRetry?: (attempt: number) => void): Promise<void> {
+    const deadline = performance.now() + this.#softwareDnsPropagationTimeoutMs;
+    let lastError = "DNS has not propagated";
+    let attempt = 0;
+    while (performance.now() < deadline) {
+      this.#assertActive();
+      attempt += 1;
+      const remaining = Math.max(1, deadline - performance.now());
+      try {
+        await Promise.all(domains.map(async (domain) => {
+          const confirmed = await withSoftwareDeadline(
+            this.#publicDnsPointsToServer(domain, publicIp),
+            Math.min(15_000, remaining),
+            `Public DNS lookup timed out for ${domain}`,
+          );
+          if (!confirmed) throw new Error(`${domain} has not reached public DNS resolvers yet`);
+        }));
+      } catch (error) {
+        lastError = cloudErrorMessage(error, lastError);
+        onRetry?.(attempt);
+        const wait = Math.min(this.#softwareDnsPropagationPollIntervalMs, Math.max(0, deadline - performance.now()));
+        if (wait > 0) await delay(wait);
+        continue;
+      }
+      this.#assertActive();
+      return;
+    }
+    this.#assertActive();
+    throw new Error(`DNS did not resolve to this server within two minutes: ${lastError}. Requested A records remain in Cloud DNS; inspect them before retrying deployment`);
+  }
+
+  async #assertDomainsPointToServer(domains: readonly string[], publicIp: string, timeoutMs = 15_000): Promise<void> {
+    await Promise.all(domains.map(async (domain) => {
+      const addresses = await withSoftwareDeadline(
+        this.#resolveDomainAddresses(domain),
+        timeoutMs,
+        `DNS lookup timed out for ${domain}`,
+      );
+      if (addresses.length === 0 || addresses.some((address) => address !== publicIp)) {
+        throw new Error(`${domain} must resolve only to this server's public IPv4 address before HTTPS can be enabled`);
+      }
+    }));
+  }
+
+  async #persistSoftwareRecord(record: LocalRedirectorRecord): Promise<LocalRedirectorRecord> {
+    const updated = parseLocalRedirectorRecord({
+      ...record,
+      updatedAt: new Date(this.#now()).toISOString(),
+    });
+    await this.#softwareStore.put(updated);
+    this.#emitChanged();
+    return updated;
+  }
+
+  async #withSoftwareSsh<T>(
+    deployment: CloudDeploymentRecord,
+    operation: (ssh: LocalRedirectorInstallInput["ssh"]) => Promise<T>,
+  ): Promise<T> {
+    const credential = (await this.#vault.list()).find(({ id }) => id === deployment.credentialId);
+    if (!credential || credential.provider !== deployment.provider) {
+      throw new Error("The managed server SSH credential is unavailable");
+    }
+    const target = managedSshTarget(deployment, credential);
+    if (!target.connectable) throw new Error(target.unavailableReason ?? "The managed SSH server is unavailable");
+    const fingerprint = this.#sshHostKeys.get(deployment.id);
+    if (!fingerprint) throw new Error("The managed server SSH host key is unavailable");
+    const withSecret = async (secret: AwsCredentialSecret | AzureCliCredentialSecret): Promise<T> => {
+      try {
+        const current = this.#requireCurrentSshTarget(
+          deployment.id,
+          deployment.credentialId,
+          credential,
+          target,
+        );
+        return await operation({ ...sshTerminalTarget(current, secret, fingerprint), hostKeySha256: fingerprint });
+      } catch (error) {
+        throw new Error(cloudErrorMessage(error, "Managed software SSH operation failed", credentialValues(secret)));
+      }
+    };
+    if (deployment.provider === "aws") {
+      return await this.#vault.withCredential(deployment.credentialId, "aws", withSecret);
+    }
+    return await this.#vault.withCredential(deployment.credentialId, "azure", withSecret);
+  }
+
+  async #withSoftwareSliverClient<T>(
+    deployment: CloudDeploymentRecord,
+    operation: (client: CloudSliverListenerClient) => Promise<T>,
+  ): Promise<T> {
+    const expected = operatorConfigFileName(deployment.id);
+    if (deployment.operatorConfigFileName !== expected || deployment.operatorConfigDigest === null) {
+      throw new Error("The managed server operator profile is unavailable");
+    }
+    const loaded = await readBoundedRegularFile(join(this.#operatorConfigDirectory, expected), {
+      label: "Cloud operator configuration",
+      maxBytes: MAX_OPERATOR_CONFIG_BYTES,
+      requirePrivateMode: true,
+    });
+    let client: CloudSliverListenerClient | undefined;
+    try {
+      const digest = createHash("sha256").update(loaded.data).digest("hex");
+      if (digest !== deployment.operatorConfigDigest) {
+        throw new Error("The managed server operator profile changed after deployment");
+      }
+      const config = parseConfig(loaded.data);
+      if (config.operator !== deployment.spec.operatorName) {
+        throw new Error("The managed server operator identity changed after deployment");
+      }
+      client = this.#sliverListenerClientFactory({
+        ...config,
+        lhost: managedOperatorDirectoryHost(deployment),
+        lport: deployment.spec.multiplayerPort,
+      });
+      await client.connect();
+      return await operation(client);
+    } finally {
+      loaded.data.fill(0);
+      await client?.disconnect().catch(() => undefined);
+    }
+  }
+
+  async #softwareListenerOption(
+    ssh: LocalRedirectorInstallInput["ssh"],
+    deploymentId: string,
+    job: Awaited<ReturnType<CloudSliverListenerClient["getJobs"]>>["Active"][number],
+  ): Promise<LocalRedirectorListenerOption> {
+    const kind = job.Name === "https" ? "https" : "http";
+    const domain = job.Domains.find((value) => value !== "") ?? "";
+    let reason: string | null = null;
+    if (job.Name !== "http" && job.Name !== "https") {
+      reason = "This is not an HTTP listener";
+    } else if (job.Protocol !== "tcp") {
+      reason = "This HTTP listener does not use TCP";
+    } else if (!Number.isSafeInteger(job.ID) || job.ID < 1 || !Number.isSafeInteger(job.Port) || job.Port < 1 || job.Port > 65535) {
+      reason = "Sliver reported an invalid listener job";
+    } else if (kind === "https") {
+      reason = "HTTPS backend listeners need explicit certificate trust and SNI support";
+    } else if (job.Port === 80 || job.Port === 443) {
+      reason = "Choose a backend port other than 80 or 443";
+    } else if (domain || job.Domains.length > 1) {
+      reason = "This listener has a configured cookie domain";
+    } else if (this.#softwareStore.getState().records.some((record) =>
+      record.deploymentId === deploymentId && record.listener.jobId === job.ID)) {
+      reason = "This listener is already associated with a managed redirector";
+    } else {
+      try {
+        if (!await this.#softwareDeployer.probeLoopbackListener({ ssh, kind, port: job.Port })) {
+          reason = "The listener is not bound exclusively to 127.0.0.1 by sliver-server";
+        }
+      } catch {
+        reason = "The listener binding could not be verified over SSH";
+      }
+    }
+    return Object.freeze({
+      jobId: job.ID,
+      kind,
+      port: job.Port,
+      domain,
+      eligible: reason === null,
+      reason,
+    });
+  }
+
+  async #waitForSoftwareLoopbackListener(
+    ssh: LocalRedirectorInstallInput["ssh"],
+    port: number,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (await this.#softwareDeployer.probeLoopbackListener({ ssh, kind: "http", port })) return true;
+      if (attempt < 4) await delay(500);
+    }
+    return false;
   }
 
   async ensureIngress(
@@ -2051,6 +2726,9 @@ export class CloudDeploymentService {
     try {
       this.#assertActive();
       const deployment = this.#requireDeploymentAtRevision(input.deploymentId, input.expectedRevision);
+      if (this.#softwareStore.getState().records.some((record) => record.deploymentId === deployment.id)) {
+        throw new Error("Remove managed software from this server before terminating it");
+      }
       const token = this.#idFactory();
       if (!isUuidV4(token) || this.#destroyPlans.has(token)) {
         throw new Error("A deployment termination plan could not be created");
@@ -2096,6 +2774,9 @@ export class CloudDeploymentService {
         let operationStarted = false;
         try {
           let deployment = this.#requireDeploymentAtRevision(plan.deploymentId, plan.expectedRevision);
+          if (this.#softwareStore.getState().records.some((record) => record.deploymentId === deployment.id)) {
+            throw new Error("Remove managed software from this server before terminating it");
+          }
           deployment = await this.#persistPatch(deployment.id, (current) => ({
             ...current,
             status: "deleting",
@@ -2143,6 +2824,9 @@ export class CloudDeploymentService {
     this.#listeners.clear();
     for (const deploymentId of [...this.#provisioningTranscripts.keys()]) {
       this.#discardProvisioningTranscript(deploymentId);
+    }
+    for (const deploymentId of [...this.#softwareInstallProgress.keys()]) {
+      this.#discardSoftwareInstallProgress(deploymentId);
     }
     this.#privateKeys.dispose();
     this.#vault.dispose();
@@ -3236,6 +3920,90 @@ export class CloudDeploymentService {
       headIndex: 0,
       chunks: [],
     });
+  }
+
+  #beginSoftwareInstallProgress(deploymentId: string, recipeId: SoftwareInstallProgressSnapshot["recipeId"]): void {
+    this.#discardSoftwareInstallProgress(deploymentId);
+    for (const [id, progress] of this.#softwareInstallProgress) {
+      if (this.#softwareInstallProgress.size < MAX_SOFTWARE_PROGRESS_SESSIONS) break;
+      if (progress.status !== "running") this.#discardSoftwareInstallProgress(id);
+    }
+    while (this.#softwareInstallProgress.size >= MAX_SOFTWARE_PROGRESS_SESSIONS) {
+      const oldest = this.#softwareInstallProgress.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.#discardSoftwareInstallProgress(oldest);
+    }
+    this.#softwareInstallProgress.set(deploymentId, {
+      deploymentId, recipeId, status: "running", truncated: false, outputSequenceStart: 0, outputBytes: 0, events: [],
+    });
+  }
+
+  #reportSoftwareInstallProgress(
+    deploymentId: string,
+    event: Omit<SoftwareInstallProgress, "deploymentId">,
+    onProgress?: (progress: SoftwareInstallProgress) => void,
+  ): void {
+    const progress = this.#softwareInstallProgress.get(deploymentId);
+    if (!progress) return;
+    const snapshotEvent: SoftwareInstallProgress = {
+      deploymentId,
+      step: event.step,
+      status: event.status,
+      ...(event.message === undefined ? {} : { message: event.message.replace(/[\0\r\n\t]+/gu, " ").slice(0, 1_024) }),
+      ...(event.output === undefined ? {} : { output: {
+        stream: event.output.stream,
+        chunk: Uint8Array.from(event.output.chunk),
+      } }),
+    };
+    progress.events.push(snapshotEvent);
+    progress.outputBytes += snapshotEvent.output?.chunk.byteLength ?? 0;
+    if (snapshotEvent.status === "failed") progress.status = "failed";
+    else if (snapshotEvent.step === "verify" && snapshotEvent.status === "complete") progress.status = "complete";
+    while (progress.events.length > MAX_SOFTWARE_PROGRESS_EVENTS || progress.outputBytes > MAX_SOFTWARE_PROGRESS_OUTPUT_BYTES) {
+      const oldestOutput = progress.events.findIndex(({ output }) => output !== undefined);
+      const removed = progress.events.splice(oldestOutput >= 0 ? oldestOutput : 0, 1)[0];
+      if (!removed) break;
+      if (removed.output) {
+        progress.outputSequenceStart += 1;
+        progress.outputBytes -= removed.output.chunk.byteLength;
+        removed.output.chunk.fill(0);
+      }
+      progress.truncated = true;
+    }
+    try {
+      onProgress?.({
+        ...snapshotEvent,
+        ...(snapshotEvent.output ? { output: {
+          stream: snapshotEvent.output.stream,
+          chunk: Uint8Array.from(snapshotEvent.output.chunk),
+        } } : {}),
+      });
+    } catch {
+      // Closing a renderer must not affect an in-flight installation.
+    }
+  }
+
+  #reportSoftwareInstallOutput(
+    deploymentId: string,
+    step: SoftwareInstallProgress["step"],
+    output: Parameters<LocalRedirectorOutputHandler>[0],
+    onProgress?: (progress: SoftwareInstallProgress) => void,
+  ): void {
+    for (let offset = 0; offset < output.chunk.byteLength; offset += MAX_SOFTWARE_PROGRESS_CHUNK_BYTES) {
+      this.#reportSoftwareInstallProgress(deploymentId, {
+        step, status: "running",
+        output: { stream: output.stream, chunk: output.chunk.subarray(offset, offset + MAX_SOFTWARE_PROGRESS_CHUNK_BYTES) },
+      }, onProgress);
+    }
+  }
+
+  #discardSoftwareInstallProgress(deploymentId: string): void {
+    const progress = this.#softwareInstallProgress.get(deploymentId);
+    if (!progress) return;
+    this.#softwareInstallProgress.delete(deploymentId);
+    for (const event of progress.events) event.output?.chunk.fill(0);
+    progress.events = [];
+    progress.outputBytes = 0;
   }
 
   #captureProvisionerOutput(deploymentId: string, event: SliverProvisionOutputEvent): void {
@@ -5002,6 +5770,24 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => {
     setTimeout(resolveDelay, milliseconds);
   });
+}
+
+function sameNumberSequence(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+async function withSoftwareDeadline<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function assertBoundedAbsoluteDirectory(path: string, label: string): void {

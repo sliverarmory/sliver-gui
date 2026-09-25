@@ -37,6 +37,11 @@ import {
 import { loadTerminalRuntime } from "../main/terminal-runtime.js";
 import { resolveManagedServerFromDeployments } from "../main/managed-server-resolver.js";
 import type { ManagedSshTarget } from "../shared/ssh-contracts.js";
+import type {
+  LocalRedirectorOverview,
+  SoftwareInstallProgress,
+  SoftwareInstallProgressSnapshot,
+} from "../shared/software-deployment-contracts.js";
 import { SESSION_WORKBENCH_MAX_ARTIFACT_BYTES } from "../shared/session-contracts.js";
 import {
   E2E_AWS_CREDENTIAL_ID,
@@ -208,6 +213,7 @@ const sshIdentityStore = new SshIdentityStore(
 const overviewCloudArgument = process.argv.find((argument) => argument.startsWith("--overview-cloud-fixture="));
 const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
 const overviewEgressFixture = process.argv.includes("--overview-egress-fixture");
+const overviewSoftwareFixture = process.argv.includes("--overview-software-fixture");
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
@@ -226,6 +232,19 @@ const overviewCloudDeployment = overviewCloudRecord ? {
     join(requiredArgument("--saved-config-directory="), "overview-fixture.cfg"),
   )).digest("hex"),
 } : null;
+const overviewRedirector: LocalRedirectorOverview = {
+  id: "99999999-9999-4999-8999-999999999999",
+  recipeId: "caddy",
+  status: "active",
+  publicUrl: "https://c2.example.test",
+  publicIp: "198.51.100.24",
+  domains: ["c2.example.test"],
+  listener: { ownership: "managed", kind: "http", host: "127.0.0.1", port: 8000, jobId: 8, domain: "" },
+  lastCheckedAt: "2026-09-24T12:00:00.000Z",
+};
+let overviewSoftwareInstallProgress: SoftwareInstallProgressSnapshot | null = null;
+
+const softwareFixturePause = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 100));
 
 const registry = new ConnectionRegistry({
   savedConfigDirectory: requiredArgument("--saved-config-directory="),
@@ -244,7 +263,12 @@ const registry = new ConnectionRegistry({
 const cloudDeploymentController: ApplicationCloudDeploymentController = {
   ...createCloudDnsFixture(process.argv.includes("--dns-fixture")),
   ...(overviewCloudDeployment ? {
-    resolveManagedServer: (digest: string) => resolveManagedServerFromDeployments(digest, [overviewCloudDeployment]),
+    resolveManagedServer: (digest: string) => {
+      const server = resolveManagedServerFromDeployments(digest, [overviewCloudDeployment]);
+      return overviewSoftwareFixture && server?.overview
+        ? { ...server, overview: { ...server.overview, redirectors: [overviewRedirector] } }
+        : server;
+    },
   } : {}),
   listSshTargets: async () => ({
     ok: true,
@@ -364,6 +388,63 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
     },
   }),
   chooseSshPrivateKey: () => ({ ok: false, error: "The E2E key picker is unavailable" }),
+  getSoftwareState: () => ({ ok: true, value: { v: 1, revision: 0, records: [] } }),
+  getSoftwareInstallProgress: (deploymentId) => ({
+    ok: true,
+    value: overviewSoftwareFixture && deploymentId === E2E_AWS_DEPLOYMENT_ID
+      ? overviewSoftwareInstallProgress : null,
+  }),
+  listSoftwareListeners: () => ({ ok: true, value: [] }),
+  installLocalRedirector: async (input, onProgress) => {
+    if (!overviewSoftwareFixture || input.deploymentId !== E2E_AWS_DEPLOYMENT_ID ||
+        input.expectedRevision !== 0 || input.recipeId !== "caddy" ||
+        input.dnsRecords?.zoneId !== "ZEXAMPLE" || input.dnsRecords.names.length !== 1 ||
+        input.dnsRecords.names[0] !== "c2" || input.domains.length !== 1 ||
+        input.domains[0] !== "c2.example.test" ||
+        input.publicIp !== E2E_AWS_DEPLOYMENT.runtime.publicIpAddress ||
+        input.listener.mode !== "create" || input.listener.port !== 8000) {
+      return { ok: false, error: "Cloud mutations are disabled in this E2E fixture" };
+    }
+    const failure = "E2E fixture stopped at verification; no cloud or SSH changes were made";
+    overviewSoftwareInstallProgress = {
+      deploymentId: input.deploymentId,
+      recipeId: input.recipeId,
+      status: "running",
+      truncated: false,
+      outputSequenceStart: 0,
+      events: [],
+    };
+    const emit = (event: Omit<SoftwareInstallProgress, "deploymentId">): void => {
+      const progress: SoftwareInstallProgress = { deploymentId: input.deploymentId, ...event };
+      overviewSoftwareInstallProgress = {
+        ...overviewSoftwareInstallProgress!,
+        status: progress.status === "failed" ? "failed" : "running",
+        events: [...overviewSoftwareInstallProgress!.events, progress],
+      };
+      onProgress?.(progress);
+    };
+    emit({ step: "dns", status: "running", message: "Creating A record for c2.example.test" });
+    await softwareFixturePause();
+    emit({ step: "dns", status: "complete", message: "c2.example.test points to this server" });
+    emit({ step: "listener", status: "running", message: "Preparing localhost Sliver listener" });
+    await softwareFixturePause();
+    emit({ step: "listener", status: "complete", message: "Sliver HTTP listener is ready on 127.0.0.1:8000" });
+    emit({ step: "firewall", status: "running", message: "Opening public redirector ports" });
+    await softwareFixturePause();
+    emit({ step: "firewall", status: "complete", message: "Public ingress is ready on TCP 80 and 443" });
+    emit({ step: "ssh", status: "running", message: "Installing Caddy over SSH" });
+    emit({ step: "ssh", status: "running", output: {
+      stream: "stdout",
+      chunk: new TextEncoder().encode("E2E fixture: installing Caddy package\r\nE2E fixture: service configured\r\n"),
+    } });
+    await softwareFixturePause();
+    emit({ step: "ssh", status: "complete", message: "Caddy installation finished" });
+    emit({ step: "verify", status: "running", message: "Verifying the public redirector endpoint" });
+    await softwareFixturePause();
+    emit({ step: "verify", status: "failed", message: failure });
+    return { ok: false, error: failure };
+  },
+  removeLocalRedirector: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   createCredential: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   loginAwsCredential: () => ({ ok: false, error: "AWS login is disabled in this E2E fixture" }),
   beginAzureLogin: () => ({ ok: false, error: "Azure login is disabled in this E2E fixture" }),

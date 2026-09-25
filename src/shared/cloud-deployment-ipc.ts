@@ -28,6 +28,16 @@ import type {
   UpdateCloudFirewallInput,
 } from "./cloud-deployment-contracts.js";
 import type { OperationResult } from "./contracts.js";
+import type {
+  InstallLocalRedirectorInput,
+  ListLocalRedirectorListenersInput,
+  LocalRedirectorListenerOption,
+  LocalRedirectorRecord,
+  RemoveLocalRedirectorInput,
+  SoftwareDeploymentState,
+  SoftwareInstallProgress,
+  SoftwareInstallProgressSnapshot,
+} from "./software-deployment-contracts.js";
 import type { CloudPermissionEvaluation } from "./cloud-provider-permissions.js";
 import type {
   AwsDeploymentOptions,
@@ -71,6 +81,11 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   updateDnsRecord: "sliver:cloud-deployment:dns:record:update",
   deleteDnsRecord: "sliver:cloud-deployment:dns:record:delete",
   createDeployment: "sliver:cloud-deployment:create",
+  getSoftwareState: "sliver:cloud-deployment:software:state",
+  getSoftwareInstallProgress: "sliver:cloud-deployment:software:install:progress:get",
+  listSoftwareListeners: "sliver:cloud-deployment:software:listeners",
+  installLocalRedirector: "sliver:cloud-deployment:software:install",
+  removeLocalRedirector: "sliver:cloud-deployment:software:remove",
   renameDeployment: "sliver:cloud-deployment:rename",
   createOperatorConfig: "sliver:cloud-deployment:operator:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
@@ -88,6 +103,7 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
 export const CLOUD_DEPLOYMENT_IPC_EVENTS = {
   changed: "sliver:cloud-deployment:changed",
   awsLoginProgress: "sliver:cloud-deployment:aws:login:progress",
+  softwareInstallProgress: "sliver:cloud-deployment:software:install:progress",
   navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
 } as const;
@@ -109,6 +125,10 @@ export type CloudDeploymentNavigationRequest =
     }
   | {
       readonly view: "firewall";
+      readonly deploymentId: string;
+    }
+  | {
+      readonly view: "software";
       readonly deploymentId: string;
     };
 
@@ -312,6 +332,11 @@ export interface CloudDeploymentAPI {
   updateDnsRecord(input: UpdateCloudDnsRecordInput): Promise<OperationResult>;
   deleteDnsRecord(input: DeleteCloudDnsRecordInput): Promise<OperationResult>;
   createDeployment(input: CreateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
+  getSoftwareState(): Promise<OperationResult<SoftwareDeploymentState>>;
+  getSoftwareInstallProgress(input: ListLocalRedirectorListenersInput): Promise<OperationResult<SoftwareInstallProgressSnapshot | null>>;
+  listSoftwareListeners(input: ListLocalRedirectorListenersInput): Promise<OperationResult<readonly LocalRedirectorListenerOption[]>>;
+  installLocalRedirector(input: InstallLocalRedirectorInput): Promise<OperationResult<LocalRedirectorRecord>>;
+  removeLocalRedirector(input: RemoveLocalRedirectorInput): Promise<OperationResult<SoftwareDeploymentState>>;
   createOperatorConfig(
     input: CreateCloudOperatorConfigInput,
   ): Promise<OperationResult<SaveCloudOperatorConfigResult>>;
@@ -332,6 +357,7 @@ export interface CloudDeploymentAPI {
   approveSshHostKey(input: SshHostKeyReviewInput): Promise<OperationResult<SshOpenTabResult>>;
   onChanged(listener: (scope: CloudDeploymentChangeScope) => void): () => void;
   onAwsLoginProgress?(listener: (progress: AwsLoginProgress | null) => void): () => void;
+  onSoftwareInstallProgress(listener: (progress: SoftwareInstallProgress) => void): () => void;
   onNavigationRequested(listener: (request: CloudDeploymentNavigationRequest) => void): () => void;
   onThemeChanged(listener: (dark: boolean) => void): () => void;
 }

@@ -5,6 +5,7 @@ import {
   faCheck,
   faCloudArrowUp,
   faCopy,
+  faCubes,
   faEllipsisVertical,
   faKey,
   faPen,
@@ -110,6 +111,7 @@ import { CloudProvisioningTerminal } from "./components/CloudProvisioningTermina
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { RenameCloudDeploymentModal } from "./components/RenameCloudDeploymentModal";
 import { CloudDnsPanel } from "./components/CloudDnsPanel";
+import { ManagedSoftwarePanel } from "./components/ManagedSoftwarePanel";
 import { useCloudDnsZoneCount } from "./components/useCloudDnsZoneCount";
 
 type FeedbackTone = "danger" | "success" | "warning" | "info";
@@ -310,6 +312,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
   const [selectedTab, setSelectedTab] = useState("deployments");
   const contentRef = useRef<HTMLDivElement>(null);
   const [detailsDeploymentId, setDetailsDeploymentId] = useState<string | null>(null);
+  const [softwareDeploymentId, setSoftwareDeploymentId] = useState<string | null>(null);
   const [operatorDeploymentId, setOperatorDeploymentId] = useState<string | null>(null);
   const [operatorMutationLocks, setOperatorMutationLocks] = useState<Readonly<Record<string, OperatorMutationLock>>>({});
   const [actionRequest, setActionRequest] = useState<CloudDeploymentActionRequest | null>(null);
@@ -346,9 +349,15 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
     setOperatorDeploymentId(null);
     if (request.view === "firewall") {
       setActionRequest(null);
+      setSoftwareDeploymentId(null);
       setDetailsDeploymentId(request.deploymentId);
+    } else if (request.view === "software") {
+      setActionRequest(null);
+      setDetailsDeploymentId(null);
+      setSoftwareDeploymentId(request.deploymentId);
     } else {
       setDetailsDeploymentId(null);
+      setSoftwareDeploymentId(null);
       setActionRequest(request);
     }
   }, []);
@@ -578,6 +587,14 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
         detail: `The requested deployment (${detailsDeploymentId}) is no longer in the managed inventory.`,
       });
     }
+    if (softwareDeploymentId && !snapshot.state.deployments.some(({ id }) => id === softwareDeploymentId)) {
+      setSoftwareDeploymentId(null);
+      setFeedback({
+        tone: "danger",
+        title: "Deployment unavailable",
+        detail: `The requested deployment (${softwareDeploymentId}) is no longer in the managed inventory.`,
+      });
+    }
     if (operatorDeploymentId && !snapshot.state.deployments.some(({ id }) => id === operatorDeploymentId)) {
       setOperatorDeploymentId(null);
       setFeedback({
@@ -586,22 +603,25 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
         detail: `The requested deployment (${operatorDeploymentId}) is no longer in the managed inventory.`,
       });
     }
-  }, [actionRequest, detailsDeploymentId, operatorDeploymentId, snapshot]);
+  }, [actionRequest, detailsDeploymentId, operatorDeploymentId, softwareDeploymentId, snapshot]);
 
   const detailsDeployment = detailsDeploymentId
     ? snapshot?.state.deployments.find(({ id }) => id === detailsDeploymentId)
     : undefined;
+  const softwareDeployment = softwareDeploymentId
+    ? snapshot?.state.deployments.find(({ id }) => id === softwareDeploymentId)
+    : undefined;
   const operatorDeployment = operatorDeploymentId
     ? snapshot?.state.deployments.find(({ id }) => id === operatorDeploymentId)
     : undefined;
-  const showingDetails = detailsDeployment !== undefined || operatorDeployment !== undefined;
+  const showingDetails = detailsDeployment !== undefined || softwareDeployment !== undefined || operatorDeployment !== undefined;
   const refreshFailureMessage = loadError?.message ?? providerRefreshError;
   const detailsRefreshError = snapshot?.refreshErrors.find(({ deploymentId }) => deploymentId === detailsDeploymentId)?.message;
 
   useEffect(() => {
     const scroller = contentRef.current?.parentElement;
     if (scroller) scroller.scrollTop = 0;
-  }, [selectedTab, showingDetails]);
+  }, [selectedTab, showingDetails, detailsDeploymentId, softwareDeploymentId, operatorDeploymentId]);
 
   return (
     <AuxiliaryWindowFrame className={`bg-background text-foreground ${showingDetails ? "overflow-hidden" : "cloud-deployment-manager-scroll overflow-y-auto"}`}>
@@ -661,6 +681,13 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
             onMutationBlocked={(lock) => {
               setOperatorMutationLocks((current) => ({ ...current, [operatorDeployment.id]: lock }));
             }}
+          />
+        ) : snapshot && api && softwareDeployment ? (
+          <ManagedSoftwareView
+            api={api}
+            deployment={softwareDeployment}
+            key={softwareDeployment.id}
+            onBack={() => setSoftwareDeploymentId(null)}
           />
         ) : snapshot && api && detailsDeployment ? (
           detailsDeployment.provider === "aws" ? (
@@ -764,12 +791,21 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
                 onOpenDetails={(deploymentId) => {
                   setFeedback(null);
                   setOperatorDeploymentId(null);
+                  setSoftwareDeploymentId(null);
                   setDetailsDeploymentId(deploymentId);
+                }}
+                onOpenSoftware={(deploymentId) => {
+                  setActionRequest(null);
+                  setFeedback(null);
+                  setOperatorDeploymentId(null);
+                  setDetailsDeploymentId(null);
+                  setSoftwareDeploymentId(deploymentId);
                 }}
                 onOpenNewOperator={(deploymentId) => {
                   setActionRequest(null);
                   setFeedback(null);
                   setDetailsDeploymentId(null);
+                  setSoftwareDeploymentId(null);
                   setOperatorDeploymentId(deploymentId);
                 }}
                 onRefresh={refresh}
@@ -808,6 +844,7 @@ function DeploymentsPanel({
   onFinishCardAction,
   onFeedback,
   onOpenDetails,
+  onOpenSoftware,
   onOpenNewOperator,
   onRefresh,
   onShowCredentials,
@@ -820,6 +857,7 @@ function DeploymentsPanel({
   readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onOpenDetails: (deploymentId: string) => void;
+  readonly onOpenSoftware: (deploymentId: string) => void;
   readonly onOpenNewOperator: (deploymentId: string) => void;
   readonly onRefresh: () => Promise<void>;
   readonly onShowCredentials: () => void;
@@ -889,6 +927,7 @@ function DeploymentsPanel({
           onBeginCardAction={onBeginCardAction}
           onFinishCardAction={onFinishCardAction}
           onOpenDetails={() => onOpenDetails(resumedDeployment.id)}
+          onOpenSoftware={() => onOpenSoftware(resumedDeployment.id)}
           onOpenNewOperator={() => onOpenNewOperator(resumedDeployment.id)}
           onRefresh={onRefresh}
         />
@@ -946,6 +985,7 @@ function DeploymentsPanel({
               onBeginCardAction={onBeginCardAction}
               onFinishCardAction={onFinishCardAction}
               onOpenDetails={() => onOpenDetails(deployment.id)}
+              onOpenSoftware={() => onOpenSoftware(deployment.id)}
               onOpenNewOperator={() => onOpenNewOperator(deployment.id)}
               onRefresh={onRefresh}
             />
@@ -1960,6 +2000,7 @@ function DeploymentCard({
   onFinishCardAction,
   onFeedback,
   onOpenDetails,
+  onOpenSoftware,
   onOpenNewOperator,
   onRefresh,
   onTerminated,
@@ -1978,6 +2019,7 @@ function DeploymentCard({
   readonly onFinishCardAction: (deploymentId: string, action: CloudDeploymentCardAction) => void;
   readonly onFeedback: (feedback: Feedback) => void;
   readonly onOpenDetails?: () => void;
+  readonly onOpenSoftware?: () => void;
   readonly onOpenNewOperator?: () => void;
   readonly onRefresh: () => Promise<void>;
   readonly onTerminated?: () => void;
@@ -2325,6 +2367,15 @@ function DeploymentCard({
             onPress={() => onOpenDetails?.()}
           >
             <FontAwesomeIcon aria-hidden icon={faShieldHalved} /> Firewall
+          </Button>
+          <Button
+            aria-label={`Software for ${deployment.name}`}
+            isDisabled={!onOpenSoftware || deployment.status === "provisioning" || deployment.status === "deleting" || pendingAction !== null}
+            size="sm"
+            variant="outline"
+            onPress={() => onOpenSoftware?.()}
+          >
+            <FontAwesomeIcon aria-hidden icon={faCubes} /> Software
           </Button>
           <Tooltip delay={0}>
             <Button
@@ -2879,6 +2930,51 @@ function InstanceStatusRefreshMessage({
     return <InlineMessage action={loginAction} tone="warning" title="Status refresh failed" detail={message} />;
   }
   return cloudLogin.isPending || cloudLogin.error !== null ? loginAction : null;
+}
+
+function ManagedSoftwareView({
+  api,
+  deployment,
+  onBack,
+}: {
+  readonly api: CloudDeploymentAPI;
+  readonly deployment: CloudDeploymentRecord;
+  readonly onBack: () => void;
+}): React.JSX.Element {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header aria-label="Managed software header" className="sticky top-0 z-20 shrink-0 space-y-3 bg-background pb-4">
+        <Button aria-label="Back to managed servers" size="sm" variant="ghost" onPress={onBack}>
+          <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+          Managed Servers
+        </Button>
+        <section aria-labelledby="managed-software-heading" className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-surface-secondary text-muted">
+              <FontAwesomeIcon aria-hidden icon={faCubes} className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted">{deployment.name}</p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight" id="managed-software-heading">Managed software</h1>
+              <p className="mt-1 text-sm text-muted">{providerLabel(deployment.provider)} · {deployment.remoteHost ?? "Address pending"}</p>
+            </div>
+          </div>
+          <Chip color={statusColor(deployment.status)} variant="soft">
+            {deployment.status === "deleting" ? "Terminating" : titleCase(deployment.status)}
+          </Chip>
+        </section>
+      </header>
+      <ScrollShadow aria-label="Managed software content" className="min-h-0 flex-1 overflow-y-auto pb-12" orientation="vertical" role="region" size={48}>
+        <ManagedSoftwarePanel
+          api={api}
+          credentialId={deployment.credentialId}
+          deploymentId={deployment.id}
+          publicIp={deployment.runtime.publicIpAddress}
+          serverRunning={deployment.status === "running" && deployment.runtime.instanceState === "running"}
+        />
+      </ScrollShadow>
+    </div>
+  );
 }
 
 function AwsInstanceDetails({

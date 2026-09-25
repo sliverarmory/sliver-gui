@@ -63,6 +63,24 @@ relationships explicitly and document their source.
   Runtime network IDs take precedence over configured fallbacks. CIDRs are
   available for locally managed networks; missing values remain absent. Cache
   timestamps do not imply live provider health. Unmanaged hosting remains unknown.
+- Saved local Caddy and Nginx redirectors appear from the software records
+  attached to the currently associated managed deployment. Each installation
+  contributes one redirector node inside the managed cloud enclosure. The
+  graph places operators, server, and redirector from left to right. The node
+  shows its primary configured DNS name, or its public IP when no domain is
+  configured; the inspector retains the full domain list and public URL. The
+  server-to-redirector line shows the selected Sliver listener's protocol and
+  port, and its inspector shows the loopback upstream and job inventory. This
+  is a **configured relationship**, not measured traffic. No session or beacon
+  is attributed to that listener.
+- Redirector status comes from the saved installation record. The last
+  verification time is shown in the inspector, but the record is marked stale
+  or unknown because no periodic frontend health check is available. A
+  separately refreshed Sliver job inventory in the server-to-redirector edge
+  inspector can show whether the selected job ID and port are still reported;
+  it cannot prove that the listener is still bound only to loopback. The
+  redirector node does not claim DNS resolution or public reachability.
+  Removing a software record removes its graph path.
 - Every reported operator has a separate presence node, including offline
   operators. Offline nodes are hidden by default; enable **Operator (Offline)**
   in the type filter to display them. This also applies to last-known offline

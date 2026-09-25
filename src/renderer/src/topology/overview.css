@@ -52,6 +52,9 @@ html[data-reduce-motion="true"] .overview-page .topology-node__lightning path { 
 .topology-node__text strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 1.2; font-weight: 600; }
 .topology-node__subtitle { margin-top: 9px; color: var(--color-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topology-node__status { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-top: 7px; color: var(--color-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.topology-node[data-kind="http-redirector"] { padding-block: 10px; }
+.topology-node[data-kind="http-redirector"] .topology-node__subtitle { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; margin-top: 5px; line-height: 1.25; overflow-wrap: anywhere; white-space: normal; }
+.topology-node[data-kind="http-redirector"] .topology-node__status { margin-top: 5px; }
 .topology-status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--color-muted); flex: none; }
 .topology-node[data-status="healthy"][data-freshness="current"] .topology-status-dot { background: var(--color-success); }
 .topology-node[data-status="warning"][data-freshness="current"] .topology-status-dot { background: var(--color-warning); }
@@ -59,6 +62,8 @@ html[data-reduce-motion="true"] .overview-page .topology-node__lightning path { 
 .topology-node[data-compact="true"] .topology-node__subtitle, .topology-node[data-compact="true"] .topology-node__kind { display: none; }
 .topology-node[data-compact="true"] .topology-node__text strong { font-size: 18px; }
 .topology-node[data-compact="true"] .topology-node__identity { margin-top: 12px; }
+.topology-node[data-kind="http-redirector"][data-compact="true"] .topology-node__subtitle { display: -webkit-box; font-size: 12px; }
+.topology-node[data-kind="http-redirector"][data-compact="true"] .topology-node__identity { margin-top: 0; }
 .topology-graph .react-flow__handle { width: 5px; height: 5px; border: none; background: var(--color-muted); pointer-events: none; opacity: .5; }
 .topology-enclosure { position: relative; height: 100%; width: 100%; border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-separator)); border-radius: 22px; background: color-mix(in srgb, var(--color-accent) 3%, transparent); }
 .topology-enclosure[data-kind="egress"] { border-color: color-mix(in srgb, var(--color-muted) 30%, var(--color-separator)); background: color-mix(in srgb, var(--color-surface) 30%, transparent); }

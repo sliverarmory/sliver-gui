@@ -171,6 +171,7 @@ validation and review flows. Do not weaken these boundaries for development.
 - [Standalone Text Editor](docs/text-editor.md)
 - [AWS authentication](docs/aws-login.md) and [Azure authentication](docs/azure-login.md)
 - [Cloud DNS management](docs/cloud-dns.md)
+- [Managed software on cloud servers](docs/cloud-managed-software.md)
 - [Protocol baseline and provenance](protocol/README.md)
 - [Operator parity report](docs/operator-parity.md)
 - [Platform support and release policy](docs/adr/0001-platform-support.md)

@@ -1034,6 +1034,7 @@ async function assertCloudDeploymentSurface(
     frozen: true,
     keys: [
       ...Object.keys(CLOUD_DEPLOYMENT_IPC_INVOKE),
+      "onAwsLoginProgress",
       "onChanged",
       "onNavigationRequested",
       "onThemeChanged",
@@ -1565,7 +1566,7 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    19,
+    20,
     "the connected workspace should expose the bounded app command catalog",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();

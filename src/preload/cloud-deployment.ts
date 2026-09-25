@@ -5,6 +5,7 @@ import type {
   CloudDeploymentNavigationRequest,
   AwsLoginProgress,
 } from "../shared/cloud-deployment-ipc.js";
+import type { SoftwareInstallProgress } from "../shared/software-deployment-contracts.js";
 import type {
   ApplicationContextMenuActionRequest,
   ApplicationContextMenuAPI,
@@ -48,6 +49,11 @@ const CHANNELS = Object.freeze({
   updateDnsRecord: "sliver:cloud-deployment:dns:record:update",
   deleteDnsRecord: "sliver:cloud-deployment:dns:record:delete",
   createDeployment: "sliver:cloud-deployment:create",
+  getSoftwareState: "sliver:cloud-deployment:software:state",
+  getSoftwareInstallProgress: "sliver:cloud-deployment:software:install:progress:get",
+  listSoftwareListeners: "sliver:cloud-deployment:software:listeners",
+  installLocalRedirector: "sliver:cloud-deployment:software:install",
+  removeLocalRedirector: "sliver:cloud-deployment:software:remove",
   renameDeployment: "sliver:cloud-deployment:rename",
   createOperatorConfig: "sliver:cloud-deployment:operator:create",
   runLifecycleAction: "sliver:cloud-deployment:lifecycle",
@@ -62,6 +68,7 @@ const CHANNELS = Object.freeze({
   approveSshHostKey: "sliver:cloud-deployment:ssh-host-key:approve",
   changed: "sliver:cloud-deployment:changed",
   awsLoginProgress: "sliver:cloud-deployment:aws:login:progress",
+  softwareInstallProgress: "sliver:cloud-deployment:software:install:progress",
   navigationRequested: "sliver:cloud-deployment:navigation-requested",
   themeChanged: "sliver:cloud-deployment:theme-changed",
 });
@@ -152,6 +159,11 @@ const api: CloudDeploymentAPI = {
   updateDnsRecord: (input) => ipcRenderer.invoke(CHANNELS.updateDnsRecord, input),
   deleteDnsRecord: (input) => ipcRenderer.invoke(CHANNELS.deleteDnsRecord, input),
   createDeployment: (input) => ipcRenderer.invoke(CHANNELS.createDeployment, input),
+  getSoftwareState: () => ipcRenderer.invoke(CHANNELS.getSoftwareState),
+  getSoftwareInstallProgress: (input) => ipcRenderer.invoke(CHANNELS.getSoftwareInstallProgress, input),
+  listSoftwareListeners: (input) => ipcRenderer.invoke(CHANNELS.listSoftwareListeners, input),
+  installLocalRedirector: (input) => ipcRenderer.invoke(CHANNELS.installLocalRedirector, input),
+  removeLocalRedirector: (input) => ipcRenderer.invoke(CHANNELS.removeLocalRedirector, input),
   renameDeployment: (input) => ipcRenderer.invoke(CHANNELS.renameDeployment, input),
   createOperatorConfig: (input) => ipcRenderer.invoke(CHANNELS.createOperatorConfig, input),
   runLifecycleAction: (input) => ipcRenderer.invoke(CHANNELS.runLifecycleAction, input),
@@ -189,6 +201,16 @@ const api: CloudDeploymentAPI = {
     };
     ipcRenderer.on(CHANNELS.awsLoginProgress, handler);
     return () => ipcRenderer.removeListener(CHANNELS.awsLoginProgress, handler);
+  },
+  onSoftwareInstallProgress: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("software install progress listener must be a function");
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length !== 1) return;
+      const progress = parseSoftwareInstallProgress(payload[0]);
+      if (progress) listener(progress);
+    };
+    ipcRenderer.on(CHANNELS.softwareInstallProgress, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.softwareInstallProgress, handler);
   },
   onNavigationRequested: (listener) => {
     if (typeof listener !== "function") throw new TypeError("navigation listener must be a function");
@@ -478,15 +500,48 @@ function isContextMenuLabel(value: unknown): value is string {
     !CONTEXT_MENU_FORBIDDEN_LABEL_PATTERN.test(value);
 }
 
+function parseSoftwareInstallProgress(value: unknown): SoftwareInstallProgress | undefined {
+  if (!isRecord(value)) return undefined;
+  const hasMessage = Object.hasOwn(value, "message");
+  const hasOutput = Object.hasOwn(value, "output");
+  if (!hasExactKeys(value, ["deploymentId", "step", "status", ...(hasMessage ? ["message"] : []), ...(hasOutput ? ["output"] : [])])) {
+    return undefined;
+  }
+  const deploymentId = value["deploymentId"];
+  const step = value["step"];
+  const status = value["status"];
+  const message = value["message"];
+  if (!isUuidV4(deploymentId) ||
+      (step !== "dns" && step !== "listener" && step !== "firewall" && step !== "ssh" && step !== "verify") ||
+      (status !== "running" && status !== "complete" && status !== "failed") ||
+      (hasMessage && (typeof message !== "string" || message.length < 1 || message.length > 1024))) return undefined;
+  let output: SoftwareInstallProgress["output"];
+  if (hasOutput) {
+    const candidate = value["output"];
+    if (!isRecord(candidate) || !hasExactKeys(candidate, ["stream", "chunk"]) ||
+        (candidate["stream"] !== "stdout" && candidate["stream"] !== "stderr") ||
+        !(candidate["chunk"] instanceof Uint8Array) ||
+        candidate["chunk"].byteLength < 1 || candidate["chunk"].byteLength > 64 * 1024) return undefined;
+    output = Object.freeze({ stream: candidate["stream"], chunk: Uint8Array.from(candidate["chunk"]) });
+  }
+  return Object.freeze({
+    deploymentId,
+    step,
+    status,
+    ...(hasMessage ? { message: message as string } : {}),
+    ...(output ? { output } : {}),
+  });
+}
+
 function parseNavigationRequest(payload: readonly unknown[]): CloudDeploymentNavigationRequest | undefined {
   if (payload.length !== 1 || !isRecord(payload[0])) return undefined;
   const request = payload[0];
   if (!isUuidV4(request["deploymentId"])) return undefined;
   if (
-    request["view"] === "firewall" &&
+    (request["view"] === "firewall" || request["view"] === "software") &&
     hasExactKeys(request, ["view", "deploymentId"])
   ) {
-    return Object.freeze({ view: "firewall", deploymentId: request["deploymentId"] });
+    return Object.freeze({ view: request["view"], deploymentId: request["deploymentId"] });
   }
   if (
     request["view"] === "deployments" &&

@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
+import type { CloudDeploymentAPI } from "../shared/cloud-deployment-ipc.js";
 import {
   E2E_AWS_DEPLOYMENT,
   E2E_AZURE_DEPLOYMENT,
@@ -60,6 +61,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
           `--user-data-directory=${join(temporaryRoot, "user-data")}`,
           `--console-client-root-directory=${join(temporaryRoot, "client")}`,
           ...(hosting === "unmanaged" ? [] : [`--overview-cloud-fixture=${hosting}`]),
+          ...(hosting === "aws" ? ["--overview-software-fixture"] : []),
         ],
         cwd: repositoryRoot,
         timeout: 20_000,
@@ -96,6 +98,21 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
         const cloud = page.locator(`.topology-enclosure[data-provider="${hosting}"]`);
         await cloud.waitFor();
         assert.match(await cloud.innerText(), hosting === "aws" ? /AWS.*us-west-2/u : /Azure.*Resource group/u);
+      }
+      if (hosting === "aws") {
+        const redirector = page.getByTestId("topology-node").filter({
+          has: page.locator(".topology-node__kind", { hasText: "http redirector" }),
+        });
+        await redirector.waitFor();
+        assert.equal(await page.locator(".topology-node__kind")
+          .filter({ hasText: /^(?:public endpoint|local listener)$/u }).count(), 0);
+        assert.match(await redirector.innerText(), /Caddy/u);
+        const dnsLabel = redirector.locator(".topology-node__subtitle");
+        assert.equal(await dnsLabel.isVisible(), true);
+        assert.match(await dnsLabel.innerText(), /c2\.example\.test/u);
+        await redirector.click();
+        assert.match(await inspector.innerText(), /https:\/\/c2\.example\.test/u);
+        assert.match(await inspector.innerText(), /127\.0\.0\.1:8000/u);
       }
       await page.waitForFunction(() => {
         const browser = globalThis as unknown as {
@@ -485,7 +502,7 @@ async function verifyServerContextMenuNavigation(
   });
   const menu = page.getByRole("menu", { name: "Application context menu" });
   const powerLabel = hosting === "unmanaged" ? "Start" : "Stop";
-  const labels = ["View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", powerLabel, "Reboot", "Terminate"];
+  const labels = ["View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Deploy Redirector (Local)", "Add Operator", "Rename", "Copy Public IP", powerLabel, "Reboot", "Terminate"];
   const originalWindows = application.windows().length;
   await server.click({ button: "right" });
   await menu.waitFor();
@@ -494,8 +511,8 @@ async function verifyServerContextMenuNavigation(
   const orderedItems = await menu.locator('[role="menuitem"], [role="separator"], hr').evaluateAll((items) =>
     items.map((item) => item.getAttribute("role") === "separator" || item.tagName === "HR"
       ? "separator" : item.textContent?.trim()));
-  assert.deepEqual(orderedItems.slice(0, 12), [
-    "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", powerLabel, "Reboot", "Terminate",
+  assert.deepEqual(orderedItems.slice(0, 13), [
+    "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Deploy Redirector (Local)", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", powerLabel, "Reboot", "Terminate",
   ], "real separators must divide access, metadata, and lifecycle actions");
   assert.equal(await menu.getByRole("menuitem", { name: "View Jobs/Listeners", exact: true }).isEnabled(), true);
   for (const name of labels.slice(1)) {
@@ -565,7 +582,7 @@ async function verifyServerContextMenuNavigation(
   application.on("window", observeCloudWindow);
   let cloudPage: Page | undefined;
   try {
-    for (const destination of ["Add Operator", "Firewall", "Rename"] as const) {
+    for (const destination of ["Add Operator", "Firewall", "Deploy Redirector (Local)", "Rename"] as const) {
       await server.click({ button: "right" });
       await menu.waitFor();
       [cloudPage] = await Promise.all([
@@ -587,6 +604,98 @@ async function verifyServerContextMenuNavigation(
         await cloudPage.getByRole("heading", { level: 1, name: deployment.name, exact: true }).waitFor();
         await cloudPage.getByRole("heading", { name: "Firewall rules", exact: true }).waitFor();
         await cloudPage.getByRole("grid", { name: "Inbound firewall rules", exact: true }).waitFor();
+      } else if (destination === "Deploy Redirector (Local)") {
+        await cloudPage.getByRole("heading", { level: 1, name: "Managed software", exact: true }).waitFor();
+        await cloudPage.getByRole("region", { name: "Managed software content", exact: true }).waitFor();
+        if (hosting === "aws") {
+          await cloudPage.getByRole("button", { name: "Add software" }).click();
+          const domainTabs = cloudPage.locator('[data-slot="tabs-list-container"]').filter({
+            has: cloudPage.getByRole("tablist", { name: "Domain source" }),
+          });
+          const stripBounds = await domainTabs.boundingBox();
+          assert.ok(stripBounds, "DNS tab strip must be visible");
+          for (const label of ["Manual DNS", "Cloud DNS"]) {
+            const tab: Locator = cloudPage.getByRole("tab", { name: label, exact: true });
+            const bounds: { x: number; y: number; width: number; height: number } | null = await tab.boundingBox();
+            assert.ok(bounds, `${label} tab must be visible`);
+            assert.ok(bounds.x >= stripBounds.x - 1 && bounds.x + bounds.width <= stripBounds.x + stripBounds.width + 1,
+              `${label} must fit in the visible tab strip`);
+            const whiteSpace: string = await tab.evaluate((element: unknown) => (globalThis as unknown as {
+              getComputedStyle(element: unknown): { whiteSpace: string };
+            }).getComputedStyle(element).whiteSpace);
+            assert.equal(whiteSpace, "nowrap", `${label} must stay on one line`);
+          }
+          await domainTabs.screenshot({
+            path: join(artifactDirectory, "overview-aws-software-domain-tabs.png"),
+            animations: "disabled",
+          });
+          await cloudPage.getByRole("tab", { name: "Cloud DNS", exact: true }).click();
+          await cloudPage.getByRole("combobox", { name: "Public zone" }).selectOption("ZEXAMPLE");
+          await cloudPage.getByRole("combobox", { name: "DNS record setup" }).selectOption("create");
+          await cloudPage.getByRole("textbox", { name: "Subdomains to create" }).fill("c2");
+          const plannedDomain = "c2.example.test";
+          await cloudPage.getByText(`${plannedDomain} → ${deployment.runtime.publicIpAddress}`, { exact: true }).waitFor();
+          await cloudPage.getByText("Cloud DNS will create missing A records with TTL 300 seconds:", { exact: true }).waitFor();
+          await cloudPage.getByRole("region", { name: "Managed software content" }).screenshot({
+            path: join(artifactDirectory, "overview-aws-software-create-dns.png"),
+            animations: "disabled",
+          });
+          await cloudPage.getByRole("button", { name: "Review deployment" }).click();
+          await cloudPage.getByRole("heading", { name: "Review deployment" }).waitFor();
+          await cloudPage.getByText(`https://${plannedDomain}`, { exact: true }).waitFor();
+          await cloudPage.getByText(`Cloud DNS will create missing A records for ${plannedDomain} pointing to ${deployment.runtime.publicIpAddress} (TTL 300 seconds), then wait up to 2 minutes for DNS propagation.`, { exact: true }).waitFor();
+          await cloudPage.getByText("Records created during deployment stay in Cloud DNS if installation fails or this redirector is removed.", { exact: true }).waitFor();
+          await cloudPage.getByRole("button", { name: "Install Caddy", exact: true }).click();
+          await cloudPage.getByRole("heading", { name: "Installing Caddy", exact: true }).waitFor();
+          const installationSteps = cloudPage.getByRole("list", { name: "Installation steps" });
+          await installationSteps.waitFor();
+          for (const label of [
+            "Prepare public DNS",
+            "Prepare localhost listener",
+            "Configure public firewall",
+            "Install software over SSH",
+            "Verify public endpoint",
+          ]) await installationSteps.getByText(label, { exact: true }).waitFor();
+          await cloudPage.getByRole("region", { name: "SSH installation output" }).waitFor();
+          await cloudPage.getByText("c2.example.test points to this server", { exact: true }).waitFor();
+          await cloudPage.getByText("Caddy installation finished", { exact: true }).waitFor();
+          await cloudPage.getByRole("alert").filter({
+            hasText: "E2E fixture stopped at verification; no cloud or SSH changes were made",
+          }).waitFor();
+          const installSnapshot = await cloudPage.evaluate(async (deploymentId) => {
+            const api = (globalThis as unknown as {
+              cloudDeployment: Pick<CloudDeploymentAPI, "getSoftwareInstallProgress">;
+            }).cloudDeployment;
+            const result = await api.getSoftwareInstallProgress({ deploymentId });
+            if (!result.ok || !result.value) return null;
+            return {
+              status: result.value.status,
+              events: result.value.events.map(({ step, status, message }) => ({ step, status, message })),
+              stdout: result.value.events.flatMap(({ output }) => output?.stream === "stdout"
+                ? [new TextDecoder().decode(output.chunk)] : []).join(""),
+            };
+          }, deployment.id);
+          assert.equal(installSnapshot?.status, "failed");
+          assert.deepEqual(installSnapshot?.events.filter(({ status }) => status === "complete").map(({ step }) => step),
+            ["dns", "listener", "firewall", "ssh"]);
+          assert.match(installSnapshot?.stdout ?? "", /E2E fixture: installing Caddy package/u);
+          const softwareContent = cloudPage.getByRole("region", { name: "Managed software content" });
+          await softwareContent.evaluate((element) => { element.scrollTop = 0; });
+          await softwareContent.screenshot({
+            path: join(artifactDirectory, "overview-aws-software-install-progress.png"),
+            animations: "disabled",
+          });
+          await cloudPage.getByRole("region", { name: "SSH installation output" }).scrollIntoViewIfNeeded();
+          await softwareContent.screenshot({
+            path: join(artifactDirectory, "overview-aws-software-install-output.png"),
+            animations: "disabled",
+          });
+          await cloudPage.getByRole("button", { name: "Back to software" }).click();
+          await cloudPage.getByRole("heading", { level: 1, name: "Managed software", exact: true }).waitFor();
+          await cloudPage.getByRole("button", { name: "View last install log" }).click();
+          await cloudPage.getByRole("heading", { name: "Installing Caddy", exact: true }).waitFor();
+          await cloudPage.getByRole("button", { name: "Back to software" }).click();
+        }
       } else {
         const rename = cloudPage.getByRole("dialog", { name: "Rename Instance", exact: true });
         await rename.waitFor();
@@ -594,11 +703,12 @@ async function verifyServerContextMenuNavigation(
         assert.equal(await rename.getByRole("button", { name: "Save", exact: true }).isDisabled(), true);
       }
       await cloudPage.screenshot({
-        path: join(artifactDirectory, `overview-${hosting}-server-${destination === "Add Operator" ? "operator" : destination.toLowerCase()}.png`),
+        path: join(artifactDirectory, `overview-${hosting}-server-${destination === "Add Operator" ? "operator" : destination === "Deploy Redirector (Local)" ? "software" : destination.toLowerCase()}.png`),
         animations: "disabled",
       });
-      // Opening the existing form/details is the complete action under test.
-      // Never submit a rename, operator creation, lifecycle, firewall edits, or SSH.
+      // The software install above runs only against the in-process fake
+      // controller. Never submit a real rename, operator, lifecycle, firewall,
+      // cloud DNS, or SSH operation from this journey.
       if (destination === "Rename") {
         const rename = cloudPage.getByRole("dialog", { name: "Rename Instance", exact: true });
         await rename.getByRole("button", { name: "Cancel", exact: true }).click();

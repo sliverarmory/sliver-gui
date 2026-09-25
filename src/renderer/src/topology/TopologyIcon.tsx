@@ -8,6 +8,7 @@ const icons = new Map([
   ["windows", faWindows], ["linux", faLinux], ["apple", faApple], ["beacon", faSatellite],
   ["operator", faUser], ["relay", faNetworkWired], ["egress", faNetworkWired],
   ["external-builder", faHammer], ["crackstation", faMicrochip],
+  ["caddy", faNetworkWired], ["nginx", faNetworkWired],
 ]);
 
 export function TopologyIcon({ name, className = "" }: { name: string; className?: string }) {

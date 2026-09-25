@@ -985,9 +985,9 @@ function parseCloudDeploymentWindowArguments(
   const value = requireRecord(requireSingleArgument(args, description), description);
   const deploymentId = value["deploymentId"];
   if (typeof deploymentId !== "string" || !UUID_PATTERN.test(deploymentId)) throw invalidArguments(description);
-  if (value["view"] === "firewall") {
+  if (value["view"] === "firewall" || value["view"] === "software") {
     requireExactKeys(value, ["view", "deploymentId"], description);
-    return [Object.freeze({ view: "firewall", deploymentId })];
+    return [Object.freeze({ view: value["view"], deploymentId })];
   }
   if (value["view"] === "deployments") {
     requireExactKeys(value, ["view", "deploymentId", "action"], description);

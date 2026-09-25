@@ -194,12 +194,12 @@ describe("Overview server context menu", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-      "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Stop", "Reboot", "Terminate", "Inspect Element",
+      "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Deploy Redirector (Local)", "Add Operator", "Rename", "Copy Public IP", "Stop", "Reboot", "Terminate", "Inspect Element",
     ]);
     expect(Array.from(menu.querySelectorAll('[role="menuitem"], [role="separator"]')).map((item) =>
       item.getAttribute("role") === "separator" ? "separator" : item.textContent,
     )).toEqual([
-      "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", "Stop", "Reboot", "Terminate", "separator", "Inspect Element",
+      "View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Deploy Redirector (Local)", "Add Operator", "separator", "Rename", "Copy Public IP", "separator", "Stop", "Reboot", "Terminate", "separator", "Inspect Element",
     ]);
     await user.click(within(menu).getByRole("menuitem", { name: "View Jobs/Listeners" }));
     await waitFor(() => expect(onNavigate).toHaveBeenCalledExactlyOnceWith("operations"));
@@ -207,7 +207,7 @@ describe("Overview server context menu", () => {
   });
 
   it.each([
-    ["SSH", "ssh"], ["Firewall", "firewall"], ["Add Operator", "operator"], ["Rename", "rename"],
+    ["SSH", "ssh"], ["Firewall", "firewall"], ["Deploy Redirector (Local)", "software"], ["Add Operator", "operator"], ["Rename", "rename"],
     ["Stop", "stop"], ["Reboot", "reboot"], ["Terminate", "terminate"],
   ])("routes %s to the current managed deployment's existing cloud flow", async (label, action) => {
     const user = userEvent.setup();
@@ -217,8 +217,8 @@ describe("Overview server context menu", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
     await user.click(within(menu).getByRole("menuitem", { name: label }));
-    await waitFor(() => expect(openCloudDeploymentWindow).toHaveBeenCalledExactlyOnceWith(action === "firewall"
-      ? { view: "firewall", deploymentId: snapshot.connection.managedServer!.deploymentId }
+    await waitFor(() => expect(openCloudDeploymentWindow).toHaveBeenCalledExactlyOnceWith(action === "firewall" || action === "software"
+      ? { view: action, deploymentId: snapshot.connection.managedServer!.deploymentId }
       : { view: "deployments", deploymentId: snapshot.connection.managedServer!.deploymentId, action }));
   });
 
@@ -230,7 +230,7 @@ describe("Overview server context menu", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: "managed-control" }));
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
-    for (const name of ["SSH", "Copy SSH Command", "Add Operator", "Reboot"]) {
+    for (const name of ["SSH", "Copy SSH Command", "Deploy Redirector (Local)", "Add Operator", "Reboot"]) {
       expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
     }
     for (const name of ["Rename", "Copy Public IP"]) {
@@ -249,7 +249,7 @@ describe("Overview server context menu", () => {
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
     expect(within(menu).getByRole("menuitem", { name: "View Jobs/Listeners" })).not.toHaveAttribute("aria-disabled", "true");
-    for (const name of ["SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
+    for (const name of ["SSH", "Copy SSH Command", "Firewall", "Deploy Redirector (Local)", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
       expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
     }
     expect(openCloudDeploymentWindow).not.toHaveBeenCalled();
@@ -262,7 +262,7 @@ describe("Overview server context menu", () => {
     fireEvent.contextMenu(screen.getByRole("button", { name: "managed-control" }));
     rendered.contextMenu.emit();
     const menu = await screen.findByRole("menu");
-    for (const name of ["View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
+    for (const name of ["View Jobs/Listeners", "SSH", "Copy SSH Command", "Firewall", "Deploy Redirector (Local)", "Add Operator", "Rename", "Copy Public IP", "Start", "Reboot", "Terminate"]) {
       expect(within(menu).getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
     }
     expect(openCloudDeploymentWindow).not.toHaveBeenCalled();

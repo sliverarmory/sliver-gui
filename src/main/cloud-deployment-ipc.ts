@@ -78,6 +78,19 @@ import {
   type UpdateCloudFirewallInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { ManagedServerReference, OperationResult } from "../shared/contracts.js";
+import {
+  parseInstallLocalRedirectorInput,
+  parseListLocalRedirectorListenersInput,
+  parseRemoveLocalRedirectorInput,
+  type InstallLocalRedirectorInput,
+  type ListLocalRedirectorListenersInput,
+  type LocalRedirectorListenerOption,
+  type LocalRedirectorRecord,
+  type RemoveLocalRedirectorInput,
+  type SoftwareDeploymentState,
+  type SoftwareInstallProgress,
+  type SoftwareInstallProgressSnapshot,
+} from "../shared/software-deployment-contracts.js";
 import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import {
   parseSshDeploymentInput,
@@ -150,6 +163,11 @@ export interface CloudDeploymentController {
   updateDnsRecord(input: UpdateCloudDnsRecordInput): MaybePromise<OperationResult>;
   deleteDnsRecord(input: DeleteCloudDnsRecordInput): MaybePromise<OperationResult>;
   createDeployment(input: CreateCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
+  getSoftwareState(): MaybePromise<OperationResult<SoftwareDeploymentState>>;
+  getSoftwareInstallProgress(deploymentId: string): MaybePromise<OperationResult<SoftwareInstallProgressSnapshot | null>>;
+  listSoftwareListeners(input: ListLocalRedirectorListenersInput): MaybePromise<OperationResult<readonly LocalRedirectorListenerOption[]>>;
+  installLocalRedirector(input: InstallLocalRedirectorInput, onProgress?: (progress: SoftwareInstallProgress) => void): MaybePromise<OperationResult<LocalRedirectorRecord>>;
+  removeLocalRedirector(input: RemoveLocalRedirectorInput): MaybePromise<OperationResult<SoftwareDeploymentState>>;
   generateOperatorConfig(
     input: CreateCloudOperatorConfigInput,
   ): MaybePromise<GenerateCloudOperatorConfigResult>;
@@ -421,6 +439,65 @@ export function registerCloudDeploymentIpcHandlers(
     authorizeWindow,
     (args) => singleArgument(parseCreateCloudDeploymentInput(requireSingleArgument(args))),
     (_sender, input) => controller.createDeployment(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareState,
+    exactRendererUrl,
+    authorizeWindow,
+    parseNoArguments,
+    () => controller.getSoftwareState(),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareInstallProgress,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseListLocalRedirectorListenersInput(requireSingleArgument(args))),
+    (_sender, input) => controller.getSoftwareInstallProgress(input.deploymentId),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.listSoftwareListeners,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseListLocalRedirectorListenersInput(requireSingleArgument(args))),
+    (_sender, input) => controller.listSoftwareListeners(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.installLocalRedirector,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseInstallLocalRedirectorInput(requireSingleArgument(args))),
+    async (cloudSender, input) => {
+      let active = true;
+      const revoke = (): void => { active = false; };
+      const navigation = (event: { readonly isMainFrame: boolean }): void => {
+        if (event.isMainFrame) revoke();
+      };
+      cloudSender.sender.once("destroyed", revoke);
+      cloudSender.sender.once("render-process-gone", revoke);
+      cloudSender.sender.on("did-start-navigation", navigation);
+      const onProgress = (progress: SoftwareInstallProgress): void => {
+        if (!active || progress.deploymentId !== input.deploymentId) return;
+        try {
+          requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
+          cloudSender.sender.send(CLOUD_DEPLOYMENT_IPC_EVENTS.softwareInstallProgress, progress);
+        } catch { /* The initiating document may close or navigate during installation. */ }
+      };
+      try {
+        return await controller.installLocalRedirector(input, onProgress);
+      } finally {
+        active = false;
+        cloudSender.sender.removeListener("destroyed", revoke);
+        cloudSender.sender.removeListener("render-process-gone", revoke);
+        cloudSender.sender.removeListener("did-start-navigation", navigation);
+      }
+    },
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.removeLocalRedirector,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseRemoveLocalRedirectorInput(requireSingleArgument(args))),
+    (_sender, input) => controller.removeLocalRedirector(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,

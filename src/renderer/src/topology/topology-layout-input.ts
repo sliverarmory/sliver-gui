@@ -22,19 +22,24 @@ export function topologyLayoutInput(document: TopologyDocument): TopologyLayoutI
     nodes: document.nodes.map(({ id, role, parentId }) => ({ id, role, ...(parentId ? { parentId } : {}) })),
     edges: document.edges.filter((edge) => edge.role !== "containment")
       .map(({ id, source, target, kind, label }) => ({ id, source, target,
-        // Reserve room for IP/transport labels without sending display text to
-        // the worker. Seven pixels per glyph is conservative at our 10px font.
-        ...(kind === "egress-connection" ? { labelWidth: Array.from(label).length * 7 + 14 } : {}),
+        // Reserve room for labels placed between resource cards without
+        // sending display text to the worker. Seven pixels per glyph is
+        // conservative at our 10px font.
+        ...(["egress-connection", "server-redirector"].includes(kind) ? { labelWidth: Array.from(label).length * 7 + 14 } : {}),
       })),
   };
 }
 
 /** Construct hierarchy geometry without importing the ELK layout engine. */
 export function createElkGraph(input: TopologyLayoutInput): ElkNode {
+  const betweenLayers = String(Math.max(100, ...input.edges.map((edge) => (edge.labelWidth ?? 0) + 48)));
   const nodes = new Map<string, ElkNode>(input.nodes.map((node) => [node.id, {
     id: node.id,
     ...(node.role === "group"
-      ? { children: [], width: 292, height: 228, layoutOptions: { "elk.padding": "[top=88,left=28,bottom=28,right=28]" } }
+      ? { children: [], width: 292, height: 228, layoutOptions: {
+        "elk.padding": "[top=88,left=28,bottom=28,right=28]",
+        "elk.layered.spacing.nodeNodeBetweenLayers": betweenLayers,
+      } }
       : { width: 236, height: 112 }),
   }]));
   const children: ElkNode[] = [];
@@ -51,7 +56,7 @@ export function createElkGraph(input: TopologyLayoutInput): ElkNode {
       "elk.direction": "RIGHT",
       "elk.hierarchyHandling": "INCLUDE_CHILDREN",
       "elk.spacing.nodeNode": "32",
-      "elk.layered.spacing.nodeNodeBetweenLayers": String(Math.max(100, ...input.edges.map((edge) => (edge.labelWidth ?? 0) + 48))),
+      "elk.layered.spacing.nodeNodeBetweenLayers": betweenLayers,
       "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
       "elk.padding": "[top=32,left=32,bottom=32,right=32]",
     },

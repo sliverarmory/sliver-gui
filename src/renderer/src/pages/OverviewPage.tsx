@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Label, ListBox, SearchField, Select, Switch, toast } from "@heroui/react";
-import { faCloudArrowUp, faCopy, faList, faPen, faPlay, faRotate, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
+import { faCloudArrowUp, faCopy, faList, faPen, faPlay, faRotate, faServer, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
 import type { ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
 import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
@@ -106,7 +106,7 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
   const canCopyPublicIp = Boolean(managed?.overview?.publicIpAddress?.trim());
   const sshUnavailable = state !== undefined && !running;
   const lifecycleAction = running ? "stop" : "start";
-  type CloudAction = Extract<CloudDeploymentNavigationRequest, { view: "deployments" }>["action"] | "firewall";
+  type CloudAction = Extract<CloudDeploymentNavigationRequest, { view: "deployments" }>["action"] | "firewall" | "software";
   const cloudAction = (
     action: CloudAction,
     label: string,
@@ -119,8 +119,8 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
     isDisabled: !managed || disabled,
     onAction: async () => {
       if (!managed || disabled) return;
-      const request: CloudDeploymentNavigationRequest = action === "firewall"
-        ? { view: "firewall", deploymentId: managed.deploymentId }
+      const request: CloudDeploymentNavigationRequest = action === "firewall" || action === "software"
+        ? { view: action, deploymentId: managed.deploymentId }
         : { view: "deployments", deploymentId: managed.deploymentId, action };
       try {
         const result = await window.sliver.openCloudDeploymentWindow(request);
@@ -159,6 +159,7 @@ function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {
     },
   },
   cloudAction("firewall", "Firewall", faShieldHalved),
+  cloudAction("software", "Deploy Redirector (Local)", faServer, !running || !canCopyPublicIp),
   cloudAction("operator", "Add Operator", faUserPlus, state !== undefined && !running),
   { ...cloudAction("rename", "Rename", faPen), separatorBefore: true },
   {

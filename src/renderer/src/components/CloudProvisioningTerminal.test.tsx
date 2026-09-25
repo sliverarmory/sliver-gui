@@ -149,6 +149,44 @@ describe("CloudProvisioningTerminal", () => {
     expect(screen.getByText("Session failed")).toBeInTheDocument();
     expect(screen.queryByText("Waiting for SSH")).not.toBeInTheDocument();
   });
+
+  it("accepts software installation labels without changing the read-only terminal", async () => {
+    const api = {
+      getTerminalRuntime: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          version: "0.4.0" as const,
+          sha256: "d".repeat(64),
+          bytes: new Uint8Array([0, 97, 115, 109]),
+        },
+      })),
+    } as unknown as CloudDeploymentAPI;
+    const labels = {
+      sectionAriaLabel: "Software installation output",
+      title: "Installation output",
+      description: "Read-only output from the SSH installation session.",
+      terminalAriaLabel: "Read-only software installation output",
+      waiting: "Waiting for installer",
+      failed: "Installation failed",
+    };
+    const props = {
+      api,
+      deploymentId: "a48987b1-7b88-46dc-b72b-7f34dd5e0e92",
+      labels,
+    };
+    const { rerender } = render(<CloudProvisioningTerminal {...props} transcript={undefined} />);
+
+    expect(screen.getByLabelText("Software installation output")).toBeInTheDocument();
+    expect(screen.getByText("Installation output")).toBeInTheDocument();
+    expect(screen.getByText("Read-only output from the SSH installation session.")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for installer")).toBeInTheDocument();
+    const terminal = await screen.findByLabelText("Read-only software installation output");
+    expect(terminal).toHaveAttribute("data-disable-input", "true");
+
+    rerender(<CloudProvisioningTerminal {...props} transcript={{ ...provisioningTranscript([]), status: "failed" }} />);
+    expect(screen.getByText("Installation failed")).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for installer")).not.toBeInTheDocument();
+  });
 });
 
 function provisioningTranscript(

@@ -481,6 +481,11 @@ const api: CloudDeploymentAPI = {
   deleteFirewallRule: vi.fn(async () => ({ ok: true as const, value: currentFirewallSnapshot })),
   listDnsZones: vi.fn(async () => ({ ok: true as const, value: [] })),
   listDnsRecords: vi.fn(async () => ({ ok: true as const, value: [] })),
+  getSoftwareState: vi.fn(async () => ({ ok: true as const, value: { v: 1 as const, revision: 0, records: [] } })),
+  getSoftwareInstallProgress: vi.fn(async () => ({ ok: true as const, value: null })),
+  listSoftwareListeners: vi.fn(async () => ({ ok: true as const, value: [] })),
+  installLocalRedirector: vi.fn(async () => ({ ok: false as const, error: "No server is available for this test." })),
+  removeLocalRedirector: vi.fn(async () => ({ ok: false as const, error: "No redirector is available for this test." })),
   createDnsRecord: vi.fn(async () => ({ ok: true as const })),
   updateDnsRecord: vi.fn(async () => ({ ok: true as const })),
   deleteDnsRecord: vi.fn(async () => ({ ok: true as const })),
@@ -507,6 +512,7 @@ const api: CloudDeploymentAPI = {
     changedListener = listener;
     return unsubscribeChanged;
   }),
+  onSoftwareInstallProgress: vi.fn(() => () => undefined),
   onNavigationRequested: vi.fn((listener) => {
     navigationListener = listener;
     return unsubscribeNavigation;
@@ -2685,10 +2691,11 @@ describe("CloudDeploymentWindowApp", () => {
       .map((button) => button.getAttribute("aria-label"))
       .filter((label): label is string => label !== null);
 
-    expect(within(connectionActions).getAllByRole("button")).toHaveLength(3);
+    expect(within(connectionActions).getAllByRole("button")).toHaveLength(4);
     expect(connectionLabels).toEqual([
       "SSH to range-control",
       "Edit firewall for range-control",
+      "Software for range-control",
       "New Operator for range-control",
     ]);
     expect(lifecycleLabels).toEqual(["Server actions for range-control"]);
@@ -3682,6 +3689,51 @@ describe("CloudDeploymentWindowApp", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "range-control" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Firewall rules" })).toBeInTheDocument();
     expect(api.listFirewallRules).toHaveBeenCalledWith({ deploymentId: DEPLOYMENT_ID });
+  });
+
+  it.each([
+    { provider: "aws", name: "range-control" },
+    { provider: "azure", name: "azure-control" },
+  ] as const)("opens dedicated Managed software from the $provider server card", async ({ provider, name }) => {
+    currentSnapshot = provider === "aws" ? runningCloudSnapshot() : {
+      ...emptySnapshot,
+      state: { v: 1, revision: 9, deployments: [runningAzureDeployment] },
+      credentials: [azureCredential],
+    };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    const actions = await screen.findByRole("group", { name: `Access and operator actions for ${name}` });
+    expect(within(actions).getByRole("button", { name: `SSH to ${name}` })).toBeInTheDocument();
+    expect(within(actions).getByRole("button", { name: `Edit firewall for ${name}` })).toBeInTheDocument();
+    expect(within(actions).getByRole("button", { name: `New Operator for ${name}` })).toBeInTheDocument();
+    await user.click(within(actions).getByRole("button", { name: `Software for ${name}` }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Managed software" })).toBeInTheDocument();
+    expect(screen.getByText(name)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Managed software content" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add software" })).toBeInTheDocument();
+    expect(api.getSoftwareState).toHaveBeenCalled();
+    expect(api.listFirewallRules).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "Firewall rules" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
+    expect(screen.getByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Managed software content" })).not.toBeInTheDocument();
+    expect(within(await screen.findByRole("group", { name: `Access and operator actions for ${name}` }))
+      .getByRole("button", { name: `Software for ${name}` })).toBeInTheDocument();
+  });
+
+  it("opens the selected server's software view from native navigation", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    renderCloudDeploymentApp();
+    await screen.findByText("range-control");
+
+    act(() => navigationListener?.({ view: "software", deploymentId: DEPLOYMENT_ID }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Managed software" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Managed software content" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Firewall rules" })).not.toBeInTheDocument();
+    expect(api.listFirewallRules).not.toHaveBeenCalled();
   });
 
   it("opens the requested Azure firewall view and surfaces persistent errors for stale native targets", async () => {

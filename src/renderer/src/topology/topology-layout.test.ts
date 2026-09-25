@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { getSmoothStepPath, Position } from "@xyflow/react";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import { createOverviewTopology } from "./overview-topology";
+import { spreadLocalRedirectors } from "./spread-local-redirectors";
 import { layoutTopology } from "./topology-layout";
 import { topologyLayoutInput } from "./topology-layout-input";
 import type { LayoutNode, TopologyLayoutInput } from "./topology-layout-input";
@@ -10,6 +12,43 @@ function find(nodes: LayoutNode[], id: string): LayoutNode {
   const found = nodes.find((node) => node.id === id);
   expect(found).toBeDefined();
   return found!;
+}
+
+function pathCrossesRect(path: string, rect: { x: number; y: number; width: number; height: number }): boolean {
+  const tokens = path.match(/[MLQ]|-?\d+(?:\.\d+)?/gu) ?? [];
+  let index = 0;
+  let point = { x: 0, y: 0 };
+  const inside = (x: number, y: number) => x > rect.x && x < rect.x + rect.width
+    && y > rect.y && y < rect.y + rect.height;
+  const next = () => Number(tokens[index++]);
+  while (index < tokens.length) {
+    const command = tokens[index++];
+    if (command === "M") {
+      point = { x: next(), y: next() };
+    } else if (command === "L") {
+      const end = { x: next(), y: next() };
+      const steps = Math.max(1, Math.ceil(Math.hypot(end.x - point.x, end.y - point.y) / 2));
+      for (let step = 0; step <= steps; step += 1) {
+        const t = step / steps;
+        if (inside(point.x + (end.x - point.x) * t, point.y + (end.y - point.y) * t)) return true;
+      }
+      point = end;
+    } else if (command === "Q") {
+      const control = { x: next(), y: next() };
+      const end = { x: next(), y: next() };
+      for (let step = 0; step <= 16; step += 1) {
+        const t = step / 16;
+        const oneMinusT = 1 - t;
+        const x = oneMinusT ** 2 * point.x + 2 * oneMinusT * t * control.x + t ** 2 * end.x;
+        const y = oneMinusT ** 2 * point.y + 2 * oneMinusT * t * control.y + t ** 2 * end.y;
+        if (inside(x, y)) return true;
+      }
+      point = end;
+    } else {
+      throw new Error(`Unexpected SVG path command: ${command}`);
+    }
+  }
+  return false;
 }
 
 describe("topology worker input", () => {
@@ -42,6 +81,19 @@ describe("topology worker input", () => {
     expect(input.edges.every((edge) => Object.keys(edge).every((key) => ["id", "source", "target", "labelWidth"].includes(key)))).toBe(true);
     expect(JSON.stringify(input)).not.toContain(label);
     expect(JSON.stringify(input)).not.toContain("egress-connection");
+    expect(JSON.parse(JSON.stringify(input))).toEqual(input);
+  });
+
+  it("reserves numeric label geometry for a local redirector listener association", () => {
+    const document = createOverviewTopology(disconnectedSnapshot());
+    const label = "HTTP :8000";
+    const input = topologyLayoutInput({ ...document, edges: [
+      ...document.edges,
+      { ...document.edges[0]!, id: "redirector-upstream", kind: "server-redirector", label },
+    ] });
+    const redirector = input.edges.find((edge) => edge.id === "redirector-upstream")!;
+    expect(redirector.labelWidth).toBeGreaterThan(75);
+    expect(JSON.stringify(input)).not.toContain(label);
     expect(JSON.parse(JSON.stringify(input))).toEqual(input);
   });
 });
@@ -92,6 +144,85 @@ describe("real ELK topology layout", () => {
     expect(find(result, "empty-cloud").width).toBeGreaterThanOrEqual(236);
     expect(find(result, "empty-cloud").height).toBeGreaterThanOrEqual(112);
     expect(find(result, "standalone")).toMatchObject({ width: 236, height: 112 });
+  });
+
+  it("places local redirectors to the right of the server, with room for the listener label", async () => {
+    const labelWidth = 84;
+    const result = await layoutTopology({
+      nodes: [
+        { id: "client", role: "resource" },
+        { id: "operator", role: "resource" },
+        { id: "cloud", role: "group" },
+        { id: "server", role: "resource", parentId: "cloud" },
+        { id: "redirector", role: "resource", parentId: "cloud" },
+      ],
+      edges: [
+        { id: "client-server", source: "client", target: "server" },
+        { id: "operator-presence", source: "operator", target: "server" },
+        { id: "server-redirector", source: "server", target: "redirector", labelWidth },
+      ],
+    });
+    const cloud = find(result, "cloud");
+    const redirector = find(result, "redirector");
+    const server = find(result, "server");
+    expect(cloud.x + server.x).toBeGreaterThan(find(result, "client").x + find(result, "client").width);
+    expect(cloud.x + server.x).toBeGreaterThan(find(result, "operator").x + find(result, "operator").width);
+    expect(redirector.x - (server.x + server.width)).toBeGreaterThanOrEqual(labelWidth + 48);
+  });
+
+  it.each([1, 2])("keeps a server-to-session connection clear of %i local redirector cards", async (redirectorCount) => {
+    const redirectorIds = Array.from({ length: redirectorCount }, (_, index) => `redirector-${index}`);
+    const input: TopologyLayoutInput = {
+      nodes: [
+        { id: "operator", role: "resource" },
+        { id: "cloud", role: "group" },
+        { id: "server", role: "resource", parentId: "cloud" },
+        ...redirectorIds.map((id) => ({ id, role: "resource", parentId: "cloud" })),
+        { id: "egress", role: "group" },
+        ...Array.from({ length: 6 }, (_, index) => ({ id: `session-${index}`, role: "resource", parentId: "egress" })),
+      ],
+      edges: [
+        { id: "operator-server", source: "operator", target: "server" },
+        ...redirectorIds.map((id) => ({ id: `server-${id}`, source: "server", target: id, labelWidth: 84 })),
+        { id: "server-egress", source: "server", target: "egress", labelWidth: 160 },
+      ],
+    };
+    // GraphCanvas sorts structural input before invoking the ELK worker.
+    input.nodes.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    input.edges.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    const result = spreadLocalRedirectors(await layoutTopology(input), {
+      nodes: input.nodes,
+      edges: input.edges.map((edge) => ({ ...edge,
+        kind: redirectorIds.includes(edge.target) ? "server-redirector"
+          : edge.id === "server-egress" ? "egress-connection" : "operator-connection",
+      })),
+    });
+    const cloud = find(result, "cloud");
+    const server = find(result, "server");
+    const egress = find(result, "egress");
+    const [path] = getSmoothStepPath({
+      sourceX: cloud.x + server.x + server.width,
+      sourceY: cloud.y + server.y + server.height / 2,
+      targetX: egress.x,
+      targetY: egress.y + egress.height / 2,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      borderRadius: 18,
+    });
+    for (const id of redirectorIds) {
+      const redirector = find(result, id);
+      const redirectorCard = {
+        x: cloud.x + redirector.x - 8, y: cloud.y + redirector.y - 8,
+        width: redirector.width + 16, height: redirector.height + 16,
+      };
+      expect(pathCrossesRect(path, redirectorCard), `Session path ${path} intersects ${id} ${JSON.stringify(redirectorCard)}`).toBe(false);
+      expect(redirector.y + redirector.height + 28).toBeLessThanOrEqual(cloud.height);
+    }
+    if (redirectorCount === 2) {
+      const first = find(result, redirectorIds[0]!);
+      const second = find(result, redirectorIds[1]!);
+      expect(first.y + first.height + 16 <= second.y || second.y + second.height + 16 <= first.y).toBe(true);
+    }
   });
 
   it("lays out separate IP enclosures connected to a cloud-enclosed server", async () => {

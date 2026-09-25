@@ -230,6 +230,50 @@ describe("Cloud Deployment IPC boundary", () => {
     expect(owner.sender.send).toHaveBeenCalledTimes(3);
   });
 
+  it("routes software progress only to the installing document and validates snapshot requests", async () => {
+    const deploymentId = "22222222-2222-4222-8222-222222222222";
+    const input = {
+      deploymentId, expectedRevision: 0, recipeId: "caddy" as const,
+      publicIp: "203.0.113.10", domains: [], listener: { mode: "create" as const, port: 8000 },
+    };
+    const snapshot = { deploymentId, recipeId: "caddy" as const, status: "running" as const, truncated: false, outputSequenceStart: 0, events: [] };
+    const getSoftwareInstallProgress = vi.fn<CloudDeploymentController["getSoftwareInstallProgress"]>(() => ({ ok: true, value: snapshot }));
+    let publish!: NonNullable<Parameters<CloudDeploymentController["installLocalRedirector"]>[1]>;
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => { finish = resolve; });
+    const installLocalRedirector = vi.fn<CloudDeploymentController["installLocalRedirector"]>(async (_input, onProgress) => {
+      publish = onProgress!;
+      await completed;
+      return { ok: false, error: "Test install stopped" };
+    });
+    registerCloudDeploymentIpcHandlers(controllerMock({ getSoftwareInstallProgress, installLocalRedirector }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
+    const owner = invokeEvent(CLOUD_RENDERER_URL, 77);
+    const other = invokeEvent(CLOUD_RENDERER_URL, 78);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareInstallProgress, owner.event, { deploymentId })).resolves.toEqual({ ok: true, value: snapshot });
+    expect(getSoftwareInstallProgress).toHaveBeenCalledExactlyOnceWith(deploymentId);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareInstallProgress, owner.event, { deploymentId: "invalid" })).resolves.toEqual(REJECTED);
+    await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareInstallProgress, other.event, { deploymentId })).resolves.toEqual(REJECTED);
+    const pending = invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.installLocalRedirector, owner.event, input);
+    await vi.waitFor(() => expect(installLocalRedirector).toHaveBeenCalledOnce());
+    publish({ deploymentId, step: "dns", status: "running" });
+    publish({ deploymentId: CREDENTIAL_ID, step: "ssh", status: "running" });
+    expect(owner.sender.send).toHaveBeenCalledExactlyOnceWith(CLOUD_DEPLOYMENT_IPC_EVENTS.softwareInstallProgress, {
+      deploymentId, step: "dns", status: "running",
+    });
+    expect(other.sender.send).not.toHaveBeenCalled();
+    owner.sender.emit("did-start-navigation", { isMainFrame: false });
+    publish({ deploymentId, step: "ssh", status: "running", output: { stream: "stdout", chunk: new Uint8Array([65]) } });
+    expect(owner.sender.send).toHaveBeenCalledTimes(2);
+    owner.sender.emit("did-start-navigation", { isMainFrame: true });
+    publish({ deploymentId, step: "ssh", status: "running", output: { stream: "stderr", chunk: new Uint8Array([66]) } });
+    expect(owner.sender.send).toHaveBeenCalledTimes(2);
+    finish();
+    await pending;
+    publish({ deploymentId, step: "verify", status: "complete" });
+    expect(owner.sender.send).toHaveBeenCalledTimes(2);
+    expect(owner.sender.listenerCount("did-start-navigation")).toBe(0);
+  });
+
   it("forwards only a validated canonical deployment rename to the controller", async () => {
     const response = { ok: true as const, value: { ...E2E_AWS_DEPLOYMENT, name: "Production Control" } };
     const renameDeployment = vi.fn<CloudDeploymentController["renameDeployment"]>(async () => response);
@@ -1567,6 +1611,11 @@ function controllerMock(
     updateDnsRecord: vi.fn(unavailable),
     deleteDnsRecord: vi.fn(unavailable),
     createDeployment: vi.fn(unavailable),
+    getSoftwareState: vi.fn(unavailable),
+    getSoftwareInstallProgress: vi.fn(unavailable),
+    listSoftwareListeners: vi.fn(unavailable),
+    installLocalRedirector: vi.fn(unavailable),
+    removeLocalRedirector: vi.fn(unavailable),
     renameDeployment: vi.fn(unavailable),
     generateOperatorConfig: vi.fn(async () => ({
       ok: false as const,

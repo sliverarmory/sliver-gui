@@ -15,6 +15,7 @@ import {
 
 let cachedCloudTerminalRuntime: TerminalRuntimeAsset | undefined;
 let pendingCloudTerminalRuntime: Promise<TerminalRuntimeAsset> | undefined;
+type TerminalRuntimeAPI = Pick<CloudDeploymentAPI, "getTerminalRuntime">;
 const CLOUD_PROVISIONING_TERMINAL_APPEARANCE = Object.freeze({
   cursorBlink: false,
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
@@ -28,14 +29,27 @@ const CLOUD_PROVISIONING_TERMINAL_APPEARANCE = Object.freeze({
   }),
 }) satisfies GhosttyTerminalAppearance;
 
+export interface CloudProvisioningTerminalLabels {
+  readonly sectionAriaLabel?: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly terminalAriaLabel?: string;
+  readonly waiting?: string;
+  readonly live?: string;
+  readonly complete?: string;
+  readonly failed?: string;
+}
+
 export function CloudProvisioningTerminal({
   api,
   deploymentId,
   transcript,
+  labels,
 }: {
-  readonly api: CloudDeploymentAPI;
+  readonly api: TerminalRuntimeAPI;
   readonly deploymentId: string;
   readonly transcript: CloudProvisioningTranscript | undefined;
+  readonly labels?: CloudProvisioningTerminalLabels;
 }): React.JSX.Element {
   const transportRef = useRef<ReadonlyProvisioningTransport | undefined>(undefined);
   if (!transportRef.current) transportRef.current = new ReadonlyProvisioningTransport();
@@ -59,22 +73,22 @@ export function CloudProvisioningTerminal({
   }, [api, runtime]);
 
   return (
-    <section aria-label="SSH provisioning output" className="space-y-2">
+    <section aria-label={labels?.sectionAriaLabel ?? "SSH provisioning output"} className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-sm font-semibold">SSH Provisioning Output</h3>
+          <h3 className="text-sm font-semibold">{labels?.title ?? "SSH Provisioning Output"}</h3>
           <p className="mt-1 text-xs leading-5 text-muted">
-            Read-only stdout from the secure provisioning session.
+            {labels?.description ?? "Read-only stdout from the secure provisioning session."}
           </p>
         </div>
         <span className="text-xs text-muted">
           {transcript?.status === "failed"
-            ? "Session failed"
+            ? labels?.failed ?? "Session failed"
             : transcript?.status === "complete"
-              ? "Complete"
+              ? labels?.complete ?? "Complete"
               : transcript?.chunks.length
-                ? "Live"
-                : "Waiting for SSH"}
+                ? labels?.live ?? "Live"
+                : labels?.waiting ?? "Waiting for SSH"}
         </span>
       </div>
       {transcript?.truncated ? (
@@ -88,7 +102,7 @@ export function CloudProvisioningTerminal({
         <GhosttyTerminal
           key={deploymentId}
           appearance={CLOUD_PROVISIONING_TERMINAL_APPEARANCE}
-          ariaLabel={`Read-only SSH provisioning output for ${deploymentId}`}
+          ariaLabel={labels?.terminalAriaLabel ?? `Read-only SSH provisioning output for ${deploymentId}`}
           className="h-64 min-h-64 w-full overflow-hidden rounded-xl border border-default bg-black"
           disableInput
           transport={transport}
@@ -154,7 +168,7 @@ export class ReadonlyProvisioningTransport implements GhosttyTerminalTransport {
   }
 }
 
-async function loadCloudTerminalRuntime(api: CloudDeploymentAPI): Promise<TerminalRuntimeAsset> {
+async function loadCloudTerminalRuntime(api: TerminalRuntimeAPI): Promise<TerminalRuntimeAsset> {
   if (cachedCloudTerminalRuntime) return cachedCloudTerminalRuntime;
   if (pendingCloudTerminalRuntime) return pendingCloudTerminalRuntime;
   const request = api.getTerminalRuntime()

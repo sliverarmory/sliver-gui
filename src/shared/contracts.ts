@@ -286,6 +286,8 @@ export type ManagedCloudOverview = {
 /** Cached display metadata; reading it never refreshes a cloud provider. */
 export interface ManagedServerOverview {
   readonly cloud?: ManagedCloudOverview;
+  /** Persisted redirectors linked to this managed server, not live probes. */
+  readonly redirectors?: readonly import("./software-deployment-contracts.js").LocalRedirectorOverview[];
   readonly region: string;
   readonly size: string;
   readonly instanceId?: string;

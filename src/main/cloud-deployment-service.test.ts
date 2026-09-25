@@ -34,6 +34,13 @@ import {
 } from "../shared/cloud-provider-permissions.js";
 import { CloudCredentialVault, type CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { CloudDeploymentStore } from "./cloud-deployment-store.js";
+import { SoftwareDeploymentStore } from "./software-deployment-store.js";
+import type { LocalRedirectorRecord, SoftwareInstallProgress } from "../shared/software-deployment-contracts.js";
+import type {
+  LocalRedirectorInstallInput,
+  LocalRedirectorOutputHandler,
+  LocalRedirectorVerifyInput,
+} from "./cloud/local-redirector-deployer.js";
 import {
   CloudDeploymentService,
   type CloudAwsProvider,
@@ -47,6 +54,8 @@ import {
   type CloudSshTerminalStarter,
   type CloudSliverProvisioner,
   type CloudDeploymentServiceOptions,
+  type CloudLocalRedirectorDeployer,
+  type CloudSliverListenerClient,
 } from "./cloud-deployment-service.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
@@ -283,6 +292,7 @@ describe("CloudDeploymentService", () => {
           name: `Server ${status}`,
           overview: {
             cloud: { provider: "aws", vpcId: "vpc-0123456789abcdef0" },
+            redirectors: [],
             region: "us-west-2",
             size: "t3.small",
             instanceName: `Server ${status}`,
@@ -314,6 +324,36 @@ describe("CloudDeploymentService", () => {
       service.dispose();
     }
     expect(service.resolveManagedServer(configDigest)).toBeNull();
+  });
+
+  it("adds only the associated deployment's saved redirectors to the Overview summary", async () => {
+    const { store, safeStorage, vault } = await dependencies();
+    const softwareStore = await SoftwareDeploymentStore.load(rootDirectory);
+    const service = await CloudDeploymentService.create({
+      rootDirectory, operatorConfigDirectory, safeStorage, store, vault, softwareStore,
+      provisioner: fakeProvisioner(),
+    });
+    const digest = "a".repeat(64);
+    try {
+      const created = await store.create(awsDeployment());
+      if (!created.ok) throw new Error(created.error);
+      const updated = await store.update({ expectedRevision: store.getState().revision,
+        deployment: { ...created.value.deployment, operatorConfigFileName: "private-operator.cfg", operatorConfigDigest: digest },
+      });
+      if (!updated.ok) throw new Error(updated.error);
+      const own = softwareRecord("7bfdb74e-9267-4f14-a29c-c5fc858347ab", DEPLOYMENT_ID);
+      const unrelated = softwareRecord("fb94b349-b76a-435c-923e-2b185b2a1dd1", SECOND_DEPLOYMENT_ID);
+      await softwareStore.put(own, 0);
+      await softwareStore.put(unrelated, 1);
+
+      const resolved = service.resolveManagedServer(digest);
+      expect(resolved?.overview?.redirectors).toEqual([{
+        id: own.id, recipeId: "caddy", status: "active", publicUrl: own.publicUrl,
+        publicIp: own.publicIp, domains: own.domains, listener: own.listener, lastCheckedAt: own.lastCheckedAt,
+      }]);
+      expect(JSON.stringify(resolved)).not.toContain(unrelated.id);
+      expect(JSON.stringify(resolved)).not.toContain(own.serviceName);
+    } finally { service.dispose(); }
   });
 
   it("stages native Azure subscriptions and saves only an owner-bound selected credential", async () => {
@@ -5004,3 +5044,566 @@ async function azureAuthService(azureBrowserLogin: CloudAzureBrowserLogin, optio
   });
   return { ...deps, service, azureAccounts, cliGetToken, connections };
 }
+
+function softwareRecord(id: string, deploymentId: string): LocalRedirectorRecord {
+  const when = NOW.toISOString();
+  return {
+    id, deploymentId, recipeId: "caddy", category: "HTTP Redirectors", subcategory: "local",
+    status: "active", publicIp: "203.0.113.20", domains: ["c2.example.test"],
+    publicUrl: "https://c2.example.test", frontendPorts: [80, 443], ingressPortsOwned: [80, 443],
+    listener: { ownership: "managed", kind: "http", host: "127.0.0.1", port: 8000, jobId: 8, domain: "" },
+    serviceName: `sliver-gui-caddy-${id}.service`, createdAt: when, updatedAt: when,
+    lastCheckedAt: when, lastError: null,
+  };
+}
+
+async function softwareLifecycleFixture(providerKind: "aws" | "azure" = "aws") {
+  const deps = await dependencies();
+  await deps.vault.create(providerKind === "aws" ? awsCredential() : azureCredential());
+  const provider = new FakeAwsProvider();
+  const azureProvider = new FakeAzureProvider();
+  const publicIp = providerKind === "aws" ? "203.0.113.20" : "203.0.113.42";
+  const dnsZone: CloudDnsZone = {
+    id: providerKind === "aws" ? "ZEXAMPLE" : `/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Network/dnsZones/example.test`,
+    name: "example.test", provider: providerKind, private: false, recordCount: 0, resourceGroupName: providerKind === "aws" ? null : AZURE_RESOURCE_GROUP,
+  };
+  const dnsRecords: CloudDnsRecord[] = [];
+  const dns = {
+    listZones: vi.fn<CloudDnsProvider["listZones"]>(async () => [dnsZone]),
+    listRecords: vi.fn<CloudDnsProvider["listRecords"]>(async () => [...dnsRecords]),
+    createRecord: vi.fn<CloudDnsProvider["createRecord"]>(async (zoneId, spec) => {
+      const name = spec.name.toLowerCase();
+      dnsRecords.push({ id: `A:${name}`, zoneId, zoneName: dnsZone.name, name, type: "A", ttl: spec.ttl,
+        values: [...spec.values], editable: true, readOnlyReason: null, version: "v1" });
+    }),
+    updateRecord: vi.fn<CloudDnsProvider["updateRecord"]>(async () => undefined),
+    deleteRecord: vi.fn<CloudDnsProvider["deleteRecord"]>(async () => undefined),
+    dispose: vi.fn(),
+  } satisfies CloudDnsProvider;
+  const awsDnsProviderFactory = vi.fn(() => dns);
+  const azureDnsProviderFactory = vi.fn(() => dns);
+  const firewallRules: AwsFirewallRule[] = [awsFirewallRule()];
+  provider.listFirewallRules.mockImplementation(async () => ({ ...awsFirewallSnapshot(), rules: [...firewallRules] }));
+  provider.createFirewallRule.mockImplementation(async (_resource, spec) => {
+    const created = awsFirewallRule(spec, `sgr-managed-${spec.fromPort}`);
+    firewallRules.push(created);
+    return created;
+  });
+  provider.deleteFirewallRuleIfMatches.mockImplementation(async (_resource, ruleId) => {
+    const index = firewallRules.findIndex(({ id }) => id === ruleId);
+    if (index < 0) return false;
+    firewallRules.splice(index, 1);
+    return true;
+  });
+
+  const jobs: Array<{ ID: number; Name: string; Description: string; Protocol: string; Port: number; Domains: string[]; ProfileName: string }> = [];
+  const client = {
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+    getJobs: vi.fn(async () => ({ Active: jobs.map((job) => ({ ...job, Domains: [...job.Domains] })) })),
+    startHTTPListenerWithOptions: vi.fn(async (options: { host: string; port: number }) => {
+      jobs.push({ ID: 8, Name: "http", Description: options.host, Protocol: "tcp", Port: options.port, Domains: [], ProfileName: "" });
+      return { JobID: 8 };
+    }),
+    killJob: vi.fn(async (id: number) => {
+      const index = jobs.findIndex((job) => job.ID === id);
+      if (index < 0) return { ID: id, Success: false };
+      jobs.splice(index, 1);
+      return { ID: id, Success: true };
+    }),
+  };
+  const deployer = {
+    install: vi.fn(async (input: LocalRedirectorInstallInput, _onOutput?: LocalRedirectorOutputHandler) => ({
+      publicUrl: input.domains.length ? `https://${input.domains[0]}` : `http://${input.publicIp}`,
+      frontendPorts: input.domains.length ? [80, 443] : [80],
+    })),
+    verify: vi.fn(async (_input: LocalRedirectorVerifyInput, _onOutput?: LocalRedirectorOutputHandler) => true),
+    remove: vi.fn(async () => undefined),
+    probeLoopbackListener: vi.fn(async () => true),
+    checkFrontendPortsAvailable: vi.fn(async () => true),
+  } satisfies CloudLocalRedirectorDeployer;
+  const resolveDomainAddresses = vi.fn(async (_domain: string) => [publicIp]);
+  const publicDnsPointsToServer = vi.fn(async (_domain: string, _publicIp: string) => true);
+  const softwareStore = await SoftwareDeploymentStore.load(rootDirectory);
+  const service = await CloudDeploymentService.create({
+    ...deps, rootDirectory, operatorConfigDirectory, softwareStore,
+    privateKeyCapabilities: fakePrivateKeys(), provisioner: fakeProvisioner(),
+    awsProviderFactory: () => provider, azureProviderFactory: () => azureProvider,
+    awsDnsProviderFactory, azureDnsProviderFactory,
+    azureCliCredentialFactory: () => ({ getToken: async () => ({ token: "test-token", expiresOnTimestamp: NOW.getTime() + 60_000 }) }),
+    softwareDnsPropagationPollIntervalMs: 1, softwareDnsPropagationTimeoutMs: 30,
+    softwareDeployer: deployer,
+    sliverListenerClientFactory: () => client as unknown as CloudSliverListenerClient,
+    resolveDomainAddresses, publicDnsPointsToServer, now: () => NOW.getTime(),
+  });
+  const created = await service.createDeployment(providerKind === "aws" ? awsDeployment() : azureDeployment());
+  if (!created.ok) throw new Error(created.error);
+  return { ...deps, service, provider, azureProvider, firewallRules, softwareStore, jobs, client, deployer,
+    resolveDomainAddresses, publicDnsPointsToServer, dns, dnsRecords, dnsZone, publicIp,
+    awsDnsProviderFactory, azureDnsProviderFactory };
+}
+
+describe("CloudDeploymentService local redirectors", () => {
+  const ipInput = {
+    deploymentId: DEPLOYMENT_ID, expectedRevision: 0, recipeId: "caddy" as const,
+    publicIp: "203.0.113.20", domains: [], listener: { mode: "create" as const, port: 8000 },
+  };
+
+  it("creates a loopback Sliver listener by default and removes its owned frontend and listener", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      const installed = await f.service.installLocalRedirector(ipInput);
+      expect(installed).toMatchObject({ ok: true, value: {
+        status: "active", publicUrl: "http://203.0.113.20", frontendPorts: [80], ingressPortsOwned: [80],
+        listener: { ownership: "managed", kind: "http", host: "127.0.0.1", port: 8000, jobId: 8 },
+      } });
+      expect(f.client.startHTTPListenerWithOptions).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        host: "127.0.0.1", port: 8000, domain: "", enforceOTP: true,
+      }));
+      expect(f.deployer.install).toHaveBeenCalledWith(expect.objectContaining({
+        recipeId: "caddy", backendKind: "http", backendPort: 8000, domains: [],
+        ssh: expect.objectContaining({ host: "203.0.113.20", hostKeySha256: expect.stringMatching(/^SHA256:/u) }),
+      }), expect.any(Function));
+      expect(f.provider.createFirewallRule.mock.calls.map(([, rule]) => rule.fromPort)).toEqual([80]);
+      expect(f.service.getSoftwareState()).toMatchObject({ ok: true, value: { records: [{ status: "active" }] } });
+      const state = f.softwareStore.getState();
+      const record = state.records[0];
+      if (!record) throw new Error("Expected installed redirector");
+      const removed = await f.service.removeLocalRedirector({
+        deploymentId: DEPLOYMENT_ID, installationId: record.id, expectedRevision: state.revision,
+      });
+      expect(removed).toMatchObject({ ok: true, value: { records: [] } });
+      expect(f.deployer.remove).toHaveBeenCalledOnce();
+      expect(f.client.killJob).toHaveBeenCalledExactlyOnceWith(8);
+      expect(f.provider.deleteFirewallRuleIfMatches).toHaveBeenCalledOnce();
+      expect(f.firewallRules.map(({ fromPort }) => fromPort)).not.toContain(80);
+      expect(f.softwareStore.getState().records).toHaveLength(0);
+    } finally { f.service.dispose(); }
+  });
+
+  it.each(["caddy", "nginx"] as const)("preflights a %s domain and opens 80/443 for automatic HTTPS", async (recipeId) => {
+    const f = await softwareLifecycleFixture();
+    try {
+      const installed = await f.service.installLocalRedirector({
+        ...ipInput, recipeId, publicIp: null, domains: ["c2.example.test"],
+      });
+      expect(installed).toMatchObject({ ok: true, value: {
+        recipeId, publicUrl: "https://c2.example.test", frontendPorts: [80, 443], ingressPortsOwned: [80, 443],
+      } });
+      expect(f.resolveDomainAddresses).toHaveBeenCalledExactlyOnceWith("c2.example.test");
+      expect(f.provider.createFirewallRule.mock.calls.map(([, rule]) => rule.fromPort)).toEqual([80, 443]);
+      expect(f.deployer.install).toHaveBeenCalledWith(expect.objectContaining({ domains: ["c2.example.test"], backendPort: 8000 }), expect.any(Function));
+      expect(f.deployer.verify).toHaveBeenCalledOnce();
+    } finally { f.service.dispose(); }
+  });
+
+  it("creates a missing public A record before SSH and keeps it when the redirector is removed", async () => {
+    const f = await softwareLifecycleFixture();
+    f.publicDnsPointsToServer.mockResolvedValueOnce(false);
+    try {
+      const installed = await f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      });
+      expect(installed).toMatchObject({ ok: true, value: { publicUrl: "https://c2.example.test" } });
+      expect(f.dns.createRecord).toHaveBeenCalledExactlyOnceWith(f.dnsZone.id, {
+        name: "c2.example.test", type: "A", ttl: 300, values: ["203.0.113.20"],
+      });
+      expect(f.publicDnsPointsToServer).toHaveBeenCalledTimes(2);
+      expect(f.resolveDomainAddresses).not.toHaveBeenCalled();
+      expect(f.dnsRecords).toMatchObject([{ name: "c2.example.test", values: ["203.0.113.20"] }]);
+      expect(f.awsDnsProviderFactory).toHaveBeenCalledOnce();
+      expect(f.azureDnsProviderFactory).not.toHaveBeenCalled();
+      if (!installed.ok) throw new Error(installed.error);
+      await expect(f.service.removeLocalRedirector({
+        deploymentId: DEPLOYMENT_ID, installationId: installed.value.id,
+        expectedRevision: f.softwareStore.getState().revision,
+      })).resolves.toMatchObject({ ok: true });
+      expect(f.dns.deleteRecord).not.toHaveBeenCalled();
+      expect(f.dnsRecords).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reports DNS, listener, firewall, SSH output, and verification with a resumable session snapshot", async () => {
+    const f = await softwareLifecycleFixture();
+    f.publicDnsPointsToServer.mockResolvedValueOnce(false);
+    f.deployer.install.mockImplementationOnce(async (input, onOutput) => {
+      onOutput?.({ stream: "stdout", chunk: Buffer.from("Installing Caddy\n") });
+      onOutput?.({ stream: "stderr", chunk: Buffer.from("Certificate issuer retrying\n") });
+      return { publicUrl: `https://${input.domains[0]}`, frontendPorts: [80, 443] };
+    });
+    f.deployer.verify.mockImplementationOnce(async (_input, onOutput) => {
+      onOutput?.({ stream: "stdout", chunk: Buffer.from("Endpoint verified\n") });
+      return true;
+    });
+    const events: SoftwareInstallProgress[] = [];
+    let statusAtFinalCallback: string | undefined;
+    try {
+      const result = await f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      }, (event) => {
+        events.push(event);
+        if (event.step === "verify" && event.status === "complete") {
+          const snapshot = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+          statusAtFinalCallback = snapshot.ok ? snapshot.value?.status : undefined;
+        }
+      });
+      expect(result).toMatchObject({ ok: true });
+      expect(statusAtFinalCallback).toBe("complete");
+      expect(events.filter(({ status, output }) => status === "complete" && !output).map(({ step }) => step))
+        .toEqual(["dns", "listener", "firewall", "ssh", "verify"]);
+      expect(events.map(({ message }) => message).filter(Boolean)).toEqual(expect.arrayContaining([
+        "Creating A record for c2.example.test",
+        "Created A record for c2.example.test",
+        "Waiting for public DNS propagation (check 1)",
+      ]));
+      expect(events.filter(({ output }) => output).map(({ step, output }) => ({
+        step, stream: output?.stream, text: Buffer.from(output?.chunk ?? []).toString("utf8"),
+      }))).toEqual([
+        { step: "ssh", stream: "stdout", text: "Installing Caddy\n" },
+        { step: "ssh", stream: "stderr", text: "Certificate issuer retrying\n" },
+        { step: "verify", stream: "stdout", text: "Endpoint verified\n" },
+      ]);
+      const snapshot = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+      expect(snapshot).toMatchObject({ ok: true, value: { recipeId: "caddy", status: "complete", truncated: false, outputSequenceStart: 0 } });
+      if (!snapshot.ok || !snapshot.value) throw new Error("Expected software progress snapshot");
+      expect(snapshot.value.events).toHaveLength(events.length);
+      const firstOutput = snapshot.value.events.find(({ output }) => output)?.output?.chunk;
+      firstOutput?.fill(0);
+      const reread = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+      expect(reread.ok && reread.value?.events.find(({ output }) => output)?.output?.chunk[0]).toBe("I".charCodeAt(0));
+    } finally { f.service.dispose(); }
+  });
+
+  it("retains a failed installation's output and marks the snapshot failed before notifying the renderer", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockImplementationOnce(async (_input, onOutput) => {
+      onOutput?.({ stream: "stderr", chunk: Buffer.from("package manager failed\n") });
+      throw new Error("remote installation failed");
+    });
+    const events: SoftwareInstallProgress[] = [];
+    let statusAtFailureCallback: string | undefined;
+    try {
+      const result = await f.service.installLocalRedirector(ipInput, (event) => {
+        events.push(event);
+        if (event.status === "failed") {
+          const snapshot = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+          statusAtFailureCallback = snapshot.ok ? snapshot.value?.status : undefined;
+        }
+      });
+      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("remote installation failed") });
+      expect(statusAtFailureCallback).toBe("failed");
+      expect(events.filter(({ output }) => output).map(({ output }) => Buffer.from(output?.chunk ?? []).toString("utf8")))
+        .toEqual(["package manager failed\n"]);
+      expect(events.at(-1)).toMatchObject({ step: "ssh", status: "failed", message: expect.stringContaining("remote installation failed") });
+      expect(f.service.getSoftwareInstallProgress(DEPLOYMENT_ID)).toMatchObject({
+        ok: true, value: { status: "failed", truncated: false },
+      });
+    } finally { f.service.dispose(); }
+  });
+
+  it("bounds session output while retaining the installation's stage transitions", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockImplementationOnce(async (input, onOutput) => {
+      for (let index = 0; index < 600; index += 1) {
+        onOutput?.({ stream: "stdout", chunk: Buffer.alloc(256, 0x78) });
+      }
+      return { publicUrl: `http://${input.publicIp}`, frontendPorts: [80] };
+    });
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({ ok: true });
+      const result = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+      if (!result.ok || !result.value) throw new Error("Expected software progress snapshot");
+      expect(result.value).toMatchObject({ status: "complete", truncated: true });
+      expect(result.value.events.length).toBeLessThanOrEqual(512);
+      const retainedOutput = result.value.events.filter(({ output }) => output);
+      expect(result.value.outputSequenceStart).toBe(600 - retainedOutput.length);
+      expect(retainedOutput.reduce((bytes, { output }) =>
+        bytes + (output?.chunk.byteLength ?? 0), 0)).toBeLessThanOrEqual(128 * 1024);
+      expect(result.value.events.filter(({ status, output }) => status === "complete" && !output).map(({ step }) => step))
+        .toEqual(["dns", "listener", "firewall", "ssh", "verify"]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reuses an exact matching A record on retry after an uncertain DNS create", async () => {
+    const f = await softwareLifecycleFixture();
+    f.dns.createRecord.mockImplementationOnce(async (zoneId, spec) => {
+      f.dnsRecords.push({ id: "A:c2", zoneId, zoneName: f.dnsZone.name, name: "c2.example.test.", type: "A",
+        ttl: spec.ttl, values: [...spec.values], editable: true, readOnlyReason: null, version: "v1" });
+      throw new Error("DNS change outcome is unknown");
+    });
+    const input = { ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] } };
+    try {
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("may remain in Cloud DNS"),
+      });
+      expect(f.softwareStore.getState().records).toEqual([]);
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({ ok: true });
+      expect(f.dns.createRecord).toHaveBeenCalledTimes(1);
+      expect(f.dnsRecords).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reuses the first record and creates the second after a partial multi-record failure", async () => {
+    const f = await softwareLifecycleFixture();
+    f.dns.createRecord.mockImplementationOnce(async (zoneId, spec) => {
+      f.dnsRecords.push({ id: "A:c2", zoneId, zoneName: f.dnsZone.name, name: "c2.example.test.", type: "A",
+        ttl: spec.ttl, values: [...spec.values], editable: true, readOnlyReason: null, version: "v1" });
+    }).mockRejectedValueOnce(new Error("cloud DNS response lost"));
+    const input = { ...ipInput, domains: ["c2.example.test", "edge.example.test"],
+      dnsRecords: { zoneId: f.dnsZone.id, names: ["c2", "edge"] } };
+    try {
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("may remain in Cloud DNS"),
+      });
+      expect(f.dnsRecords).toMatchObject([{ name: "c2.example.test." }]);
+      expect(f.softwareStore.getState().records).toEqual([]);
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({ ok: true });
+      expect(f.dns.createRecord).toHaveBeenCalledTimes(3);
+      expect(f.dns.createRecord.mock.calls[2]).toEqual([f.dnsZone.id, {
+        name: "edge.example.test", type: "A", ttl: 300, values: ["203.0.113.20"],
+      }]);
+      expect(f.dnsRecords).toHaveLength(2);
+    } finally { f.service.dispose(); }
+  });
+
+  it("keeps requested DNS records and explains this after a downstream SSH install failure", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockRejectedValueOnce(new Error("remote installation failed"));
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("Requested A records remain in Cloud DNS"),
+      });
+      expect(f.dnsRecords).toHaveLength(1);
+      expect(f.softwareStore.getState().records).toMatchObject([{ status: "outcome-unknown" }]);
+    } finally { f.service.dispose(); }
+  });
+
+  it.each(["A", "CNAME", "AAAA"] as const)("rejects conflicting %s records without remote changes", async (type) => {
+    const f = await softwareLifecycleFixture();
+    f.dnsRecords.push({ id: `existing-${type}`, zoneId: f.dnsZone.id, zoneName: f.dnsZone.name,
+      name: "c2.example.test.", type, ttl: 300, values: [type === "A" ? "198.51.100.8" : "other.example.test."],
+      editable: true, readOnlyReason: null, version: "v1" });
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("conflicting DNS record") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.deployer.install).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("checks manual domains before creating planned records", async () => {
+    const f = await softwareLifecycleFixture();
+    f.resolveDomainAddresses.mockResolvedValueOnce(["198.51.100.8"]);
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["manual.example.test", "c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("manual.example.test must resolve only") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+    } finally { f.service.dispose(); }
+  });
+
+  it("requires every planned DNS name to be advertised by the redirector", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["other.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("must appear in the redirector's public domains") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+      expect(f.resolveDomainAddresses).not.toHaveBeenCalled();
+    } finally { f.service.dispose(); }
+  });
+
+  it("routes Azure DNS creation through Azure credentials and stops before SSH when propagation fails", async () => {
+    const f = await softwareLifecycleFixture("azure");
+    f.publicDnsPointsToServer.mockResolvedValue(false);
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, publicIp: f.publicIp, domains: ["c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("remain in Cloud DNS") });
+      expect(f.azureDnsProviderFactory).toHaveBeenCalledOnce();
+      expect(f.awsDnsProviderFactory).not.toHaveBeenCalled();
+      expect(f.dns.createRecord).toHaveBeenCalledExactlyOnceWith(f.dnsZone.id, {
+        name: "c2.example.test", type: "A", ttl: 300, values: ["203.0.113.42"],
+      });
+      expect(f.publicDnsPointsToServer.mock.calls.length).toBeGreaterThan(1);
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.dnsRecords).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it.each(["private", "other-provider"] as const)("rejects a %s DNS zone before any record mutation", async (problem) => {
+    const f = await softwareLifecycleFixture();
+    f.dns.listZones.mockResolvedValue([{ ...f.dnsZone,
+      ...(problem === "private" ? { private: true } : { provider: "azure" as const }),
+    }]);
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("public DNS zone") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+    } finally { f.service.dispose(); }
+  });
+
+  it("rejects DNS that does not exclusively resolve to the managed public IP before any listener or firewall mutation", async () => {
+    const f = await softwareLifecycleFixture();
+    f.resolveDomainAddresses.mockResolvedValue(["198.51.100.7"]);
+    try {
+      await expect(f.service.installLocalRedirector({ ...ipInput, domains: ["c2.example.test"] })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("must resolve only"),
+      });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.deployer.install).not.toHaveBeenCalled();
+      expect(f.provider.createFirewallRule).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("lists an existing listener only when SSH confirms loopback and rejects HTTPS backends", async () => {
+    const f = await softwareLifecycleFixture();
+    f.jobs.push({ ID: 12, Name: "http", Description: "", Protocol: "tcp", Port: 8012, Domains: [], ProfileName: "" });
+    f.jobs.push({ ID: 13, Name: "https", Description: "", Protocol: "tcp", Port: 8013, Domains: [], ProfileName: "" });
+    f.deployer.probeLoopbackListener.mockResolvedValue(false);
+    try {
+      const listed = await f.service.listSoftwareListeners({ deploymentId: DEPLOYMENT_ID });
+      expect(listed).toMatchObject({ ok: true, value: [
+        { jobId: 12, kind: "http", eligible: false, reason: expect.stringContaining("127.0.0.1") },
+        { jobId: 13, kind: "https", eligible: false, reason: expect.stringContaining("certificate trust") },
+      ] });
+      await expect(f.service.installLocalRedirector({ ...ipInput, listener: { mode: "existing", jobId: 12 } })).resolves.toMatchObject({ ok: false });
+      await expect(f.service.installLocalRedirector({ ...ipInput, listener: { mode: "existing", jobId: 13 } })).resolves.toMatchObject({ ok: false });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.deployer.install).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("keeps an adopted loopback listener running when its redirector is removed", async () => {
+    const f = await softwareLifecycleFixture();
+    f.jobs.push({ ID: 12, Name: "http", Description: "", Protocol: "tcp", Port: 8012, Domains: [], ProfileName: "" });
+    try {
+      const installed = await f.service.installLocalRedirector({ ...ipInput, listener: { mode: "existing", jobId: 12 } });
+      expect(installed).toMatchObject({ ok: true, value: { listener: { ownership: "existing", port: 8012, jobId: 12 } } });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      const state = f.softwareStore.getState();
+      const record = state.records[0];
+      if (!record) throw new Error("Expected installed redirector");
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id, expectedRevision: state.revision })).resolves.toMatchObject({ ok: true });
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      expect(f.jobs).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("keeps uncertain failed installs in state so removal can clean their listener and ingress", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockRejectedValue(new Error("remote installation failed"));
+    try {
+      const failed = await f.service.installLocalRedirector(ipInput);
+      expect(failed).toMatchObject({ ok: false, error: expect.stringContaining("remote installation failed") });
+      const state = f.softwareStore.getState();
+      expect(state.records).toMatchObject([{ status: "outcome-unknown", ingressPortsOwned: [80], listener: { ownership: "managed", jobId: 8 } }]);
+      expect(state.records[0]?.lastError).toContain("remote installation failed");
+      const record = state.records[0];
+      if (!record) throw new Error("Expected recovery record");
+      const removed = await f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id, expectedRevision: state.revision });
+      expect(removed).toMatchObject({ ok: true, value: { records: [] } });
+      expect(f.deployer.remove).toHaveBeenCalledOnce();
+      expect(f.client.killJob).toHaveBeenCalledExactlyOnceWith(8);
+      expect(f.firewallRules.map(({ fromPort }) => fromPort)).not.toContain(80);
+    } finally { f.service.dispose(); }
+  });
+
+  it("does not start a Sliver listener if the first durable software write fails", async () => {
+    const f = await softwareLifecycleFixture();
+    const put = vi.spyOn(f.softwareStore, "put").mockRejectedValueOnce(new Error("disk full"));
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("disk full"),
+      });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.provider.createFirewallRule).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { put.mockRestore(); f.service.dispose(); }
+  });
+
+  it("retains an unconfirmed listener intent when the Sliver start response is lost", async () => {
+    const f = await softwareLifecycleFixture();
+    f.client.startHTTPListenerWithOptions.mockImplementation(async (options) => {
+      f.jobs.push({ ID: 88, Name: "http", Description: options.host, Protocol: "tcp", Port: options.port,
+        Domains: [], ProfileName: "" });
+      throw new Error("start response lost");
+    });
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("start response lost"),
+      });
+      const state = f.softwareStore.getState();
+      expect(state.records).toMatchObject([{ status: "outcome-unknown", listener: { ownership: "managed", port: 8000, jobId: 0 } }]);
+      const record = state.records[0];
+      if (!record) throw new Error("Expected recovery record");
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id,
+        expectedRevision: state.revision })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("unconfirmed job ID"),
+      });
+      expect(f.deployer.remove).not.toHaveBeenCalled();
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      f.jobs.splice(0);
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id,
+        expectedRevision: f.softwareStore.getState().revision })).resolves.toMatchObject({ ok: true });
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("records a firewall port before an uncertain create so removal can reconcile it", async () => {
+    const f = await softwareLifecycleFixture();
+    f.provider.listFirewallRules
+      .mockImplementationOnce(async () => ({ ...awsFirewallSnapshot(), rules: [...f.firewallRules] }))
+      .mockRejectedValueOnce(new Error("reconciliation read failed"));
+    f.provider.createFirewallRule.mockImplementationOnce(async (_resource, spec) => {
+      f.firewallRules.push(awsFirewallRule(spec, `sgr-managed-${spec.fromPort}`));
+      throw new Error("firewall response lost");
+    });
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({
+        ok: false,
+      });
+      const state = f.softwareStore.getState();
+      expect(state.records).toMatchObject([{ status: "outcome-unknown", ingressPortsOwned: [80] }]);
+      const record = state.records[0];
+      if (!record) throw new Error("Expected recovery record");
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id,
+        expectedRevision: state.revision })).resolves.toMatchObject({ ok: true });
+      expect(f.firewallRules.map(({ fromPort }) => fromPort)).not.toContain(80);
+    } finally { f.service.dispose(); }
+  });
+
+  it("exposes the saved redirector in Overview and blocks server termination until it is removed", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      const installed = await f.service.installLocalRedirector(ipInput);
+      if (!installed.ok) throw new Error(installed.error);
+      const deployment = f.store.getState().deployments.find(({ id }) => id === DEPLOYMENT_ID);
+      if (!deployment?.operatorConfigDigest) throw new Error("Expected managed operator profile");
+      expect(f.service.resolveManagedServer(deployment.operatorConfigDigest)).toMatchObject({
+        deploymentId: DEPLOYMENT_ID,
+        overview: { redirectors: [{
+          id: installed.value.id, recipeId: "caddy", publicUrl: "http://203.0.113.20",
+          listener: { host: "127.0.0.1", jobId: 8 },
+        }] },
+      });
+      expect(f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      })).toMatchObject({ ok: false, error: expect.stringContaining("Remove managed software") });
+    } finally { f.service.dispose(); }
+  });
+});
