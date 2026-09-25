@@ -3499,6 +3499,8 @@ function sessionPanelWindowTitle(panel: SessionPanelWindowKind): string {
   switch (panel) {
     case "execution": return "Execution";
     case "files": return "Files";
+    case "processes": return "Processes";
+    case "network": return "Network";
     case "registry": return "Registry Editor";
   }
 }

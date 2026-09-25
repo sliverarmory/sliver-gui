@@ -367,6 +367,30 @@ describe("session workbench panels", () => {
     expect(screen.getByText("Loaded 2 of 2 interfaces")).toBeInTheDocument();
   });
 
+  it("pops out Network while retaining its embedded inventory and hides the action in a standalone panel", async () => {
+    const user = userEvent.setup();
+    const opening = deferred<void>();
+    const onPopOutPanel = vi.fn(() => opening.promise);
+    installAPI(networkInventory);
+    const context = panelContext();
+    const rendered = render(<SessionNetworkPanel {...context} onPopOutPanel={onPopOutPanel} />);
+    expect(await screen.findByText("eth0")).toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: "Pop out network" });
+    await user.click(button);
+    expect(onPopOutPanel).toHaveBeenCalledExactlyOnceWith("network");
+    expect(button).toHaveAttribute("data-pending", "true");
+    await act(async () => { opening.resolve(); await opening.promise; });
+    await waitFor(() => expect(button).not.toHaveAttribute("data-pending"));
+    expect(screen.getByText("eth0")).toBeInTheDocument();
+
+    rendered.rerender(<SessionNetworkPanel {...context} standalone />);
+    expect(screen.queryByRole("button", { name: "Pop out network" })).not.toBeInTheDocument();
+    const standaloneNetwork = screen.getByRole("region", { name: "Network" });
+    expect(standaloneNetwork).toHaveClass("h-full");
+    expect(standaloneNetwork.lastElementChild).toHaveClass("overflow-y-auto");
+  });
+
   it("keeps netstat auto-refresh off by default and uses the configured seconds only for connections", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const user = userEvent.setup();
@@ -2446,6 +2470,28 @@ describe("session workbench panels", () => {
     rerender(<SessionRegistryPanel {...panelContext()} />);
     expect(screen.getByText("Registry unavailable")).toBeInTheDocument();
     expect(api.runSessionWorkbench.mock.calls.some(([input]) => String(input.operationId).startsWith("session.registry."))).toBe(false);
+  });
+
+  it("pops out Processes from the embedded panel and reports opening failures", async () => {
+    const user = userEvent.setup();
+    const onPopOutPanel = vi.fn(async () => { throw new Error("Window could not open"); });
+    const danger = vi.spyOn(toast, "danger");
+    installAPI((input) => {
+      if (input.operationId !== "session.process.list") throw new Error(`Unexpected operation ${input.operationId}`);
+      return workbench(input.operationId, { items: [], page: { limit: 100, total: 0, truncated: false } });
+    });
+    const context = panelContext();
+    const rendered = render(<SessionProcessesPanel {...context} onPopOutPanel={onPopOutPanel} />);
+    const button = screen.getByRole("button", { name: "Pop out processes" });
+    await user.click(button);
+    expect(onPopOutPanel).toHaveBeenCalledExactlyOnceWith("processes");
+    await waitFor(() => expect(danger).toHaveBeenCalledWith(
+      "Could not pop out processes", { description: "Window could not open" },
+    ));
+    expect(button).toBeEnabled();
+
+    rendered.rerender(<SessionProcessesPanel {...context} />);
+    expect(screen.queryByRole("button", { name: "Pop out processes" })).not.toBeInTheDocument();
   });
 
   it("opens process details beside the process inventory and supports closing and reopening the selected row", async () => {

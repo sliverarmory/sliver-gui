@@ -796,7 +796,7 @@
   padding-inline-start: 5.5rem;
 }
 
-.session-panel-window__body > :is(.session-files-browser, .session-registry-editor, [aria-label="Execution operations"]) {
+.session-panel-window__body > :is(.session-files-browser, .session-registry-editor, [aria-label="Execution operations"], [aria-labelledby="session-panel-processes"], [aria-labelledby="session-panel-network"]) {
   border: 0;
   border-radius: 0;
 }

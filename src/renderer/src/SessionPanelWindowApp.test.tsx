@@ -36,6 +36,21 @@ vi.mock("./pages/session-workbench-panels", () => ({
       data-can-popout={Boolean(props.onPopOutPanel)}
     />
   ),
+  SessionProcessesPanel: (props: SessionWorkspacePanelContext) => (
+    <section
+      aria-label="Mock processes"
+      data-session-id={props.session.id}
+      data-can-popout={Boolean(props.onPopOutPanel)}
+    />
+  ),
+  SessionNetworkPanel: (props: SessionWorkspacePanelContext & { standalone?: boolean }) => (
+    <section
+      aria-label="Mock network"
+      data-session-id={props.session.id}
+      data-can-popout={Boolean(props.onPopOutPanel)}
+      data-standalone={Boolean(props.standalone)}
+    />
+  ),
   SessionRegistryPanel: (props: SessionWorkspacePanelContext) => (
     <section
       aria-label="Mock registry editor"
@@ -111,6 +126,8 @@ describe("SessionPanelWindowApp", () => {
 
   it.each([
     ["files", "Mock file browser"],
+    ["processes", "Mock processes"],
+    ["network", "Mock network"],
     ["registry", "Mock registry editor"],
   ] as const)("renders %s with exact session context and no recursive pop-out", async (panel, label) => {
     const snapshot = connectedSnapshot();
@@ -122,6 +139,9 @@ describe("SessionPanelWindowApp", () => {
     expect(editor).toHaveAttribute("data-session-id", session.id);
     expect(editor).toHaveAttribute("data-can-popout", "false");
     if (panel === "files") expect(editor).toHaveAttribute("data-route-incarnation", "4");
+    if (panel === "network") expect(editor).toHaveAttribute("data-standalone", "true");
+    expect(screen.getByRole("banner", { name: "Session window header" })).toHaveTextContent(panel === "processes" ? "Processes" : panel === "network" ? "Network" : panel === "files" ? "Files" : "Registry");
+    expect(document.title).toBe(`${panel === "processes" ? "Processes" : panel === "network" ? "Network" : panel === "files" ? "Files" : "Registry"} — Panel session`);
     expect(screen.queryByRole("region", { name: "Mock execution workbench" })).not.toBeInTheDocument();
   });
 
@@ -216,7 +236,7 @@ function connectedSnapshot(summary: SessionSummary = session): SliverSnapshot {
   return snapshot;
 }
 
-function panelContext(panel: "execution" | "files" | "registry", snapshot: SliverSnapshot): Extract<WindowLaunchContext, { kind: "session-panel" }> {
+function panelContext(panel: Extract<WindowLaunchContext, { kind: "session-panel" }>["panel"], snapshot: SliverSnapshot): Extract<WindowLaunchContext, { kind: "session-panel" }> {
   return { kind: "session-panel", panel, snapshot, target };
 }
 

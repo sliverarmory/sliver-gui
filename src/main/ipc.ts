@@ -1147,7 +1147,7 @@ function parseOpenSessionPanelWindowArguments(
   return [{ panel: requireStringLiteralProperty(
     value,
     "panel",
-    ["execution", "files", "registry"] as const,
+    ["execution", "files", "processes", "network", "registry"] as const,
     "open session-panel window input",
   ) }];
 }

@@ -13,7 +13,7 @@ import type { SessionSummary, TargetRef } from "../../shared/target-contracts";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { ConnectionProvider } from "./components/ConnectionProvider";
 import type { SessionWorkspacePanelContext, SessionWorkspaceRoute } from "./pages/SessionWorkspacePage";
-import { SessionFilesPanel, SessionRegistryPanel } from "./pages/session-workbench-panels";
+import { SessionFilesPanel, SessionNetworkPanel, SessionProcessesPanel, SessionRegistryPanel } from "./pages/session-workbench-panels";
 import { TargetExecutionWorkbench } from "./pages/TargetExecutionWorkbench";
 
 type SessionPanelLaunch = Extract<WindowLaunchContext, { kind: "session-panel" }>;
@@ -111,7 +111,11 @@ export function SessionPanelWindowApp(): React.JSX.Element {
       ? <TargetExecutionWorkbench expectedTarget={ready.target} presentation="dedicated" targetIdentity={sessionRouteIdentity(ready.route)} />
       : launchContext.panel === "files"
         ? <SessionFilesPanel {...panelContext} />
-        : <SessionRegistryPanel {...panelContext} />;
+        : launchContext.panel === "processes"
+          ? <SessionProcessesPanel {...panelContext} />
+          : launchContext.panel === "network"
+            ? <SessionNetworkPanel {...panelContext} standalone />
+            : <SessionRegistryPanel {...panelContext} />;
   }
 
   const panel = launchContext?.panel;
@@ -199,12 +203,14 @@ function panelTitle(panel: SessionPanelLaunch["panel"]): string {
   switch (panel) {
     case "execution": return "Execution";
     case "files": return "Files";
+    case "processes": return "Processes";
+    case "network": return "Network";
     case "registry": return "Registry";
   }
 }
 
 function isSessionPanelKind(value: unknown): value is SessionPanelLaunch["panel"] {
-  return value === "execution" || value === "files" || value === "registry";
+  return value === "execution" || value === "files" || value === "processes" || value === "network" || value === "registry";
 }
 
 function PanelWindowState({ title, description }: { readonly title: string; readonly description: string }): React.JSX.Element {

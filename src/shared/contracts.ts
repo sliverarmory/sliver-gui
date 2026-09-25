@@ -723,7 +723,7 @@ export interface OpenSessionShellWindowInput {
   readonly preferredResourceId?: string;
 }
 
-export type SessionPanelWindowKind = "execution" | "files" | "registry";
+export type SessionPanelWindowKind = "execution" | "files" | "processes" | "network" | "registry";
 
 export interface OpenSessionPanelWindowInput {
   readonly panel: SessionPanelWindowKind;

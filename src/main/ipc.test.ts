@@ -1033,7 +1033,7 @@ describe("trusted Electron IPC boundary", () => {
     const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
     const identity = { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" };
 
-    for (const panel of ["execution", "files", "registry"] as const) {
+    for (const panel of ["execution", "files", "processes", "network", "registry"] as const) {
       await expect(electronMocks.handlers.get(IPC.openSessionPanelWindow)?.(trusted.event, { panel }))
         .resolves.toEqual({ ok: true });
       expect(open).toHaveBeenLastCalledWith(identity, { panel });
@@ -1076,7 +1076,7 @@ describe("trusted Electron IPC boundary", () => {
     expect(() => electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(wrongProcess.event))
       .toThrow(/untrusted renderer/i);
 
-    expect(open).toHaveBeenCalledTimes(3);
+    expect(open).toHaveBeenCalledTimes(5);
     expect(claim).toHaveBeenCalledOnce();
   });
 

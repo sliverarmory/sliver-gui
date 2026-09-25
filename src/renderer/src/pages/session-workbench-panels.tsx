@@ -324,7 +324,13 @@ export function SessionOverviewPanel({ route, session }: SessionWorkspacePanelCo
   );
 }
 
-export function SessionNetworkPanel({ route, isTargetTransitionPending, onGoToProcess }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionNetworkPanel({
+  route,
+  isTargetTransitionPending,
+  onGoToProcess,
+  onPopOutPanel,
+  standalone = false,
+}: SessionWorkspacePanelContext & { standalone?: boolean }): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const [selectedTab, setSelectedTab] = useState("interfaces");
   const [connectionQuery, setConnectionQuery] = useState("");
@@ -335,10 +341,23 @@ export function SessionNetworkPanel({ route, isTargetTransitionPending, onGoToPr
   const [isLoadingMoreInterfaces, setIsLoadingMoreInterfaces] = useState(false);
   const [isLoadingMoreConnections, setIsLoadingMoreConnections] = useState(false);
   const [isRefreshingConnections, setIsRefreshingConnections] = useState(false);
+  const [isPoppingOut, setIsPoppingOut] = useState(false);
   const interfaceRequestSequence = useRef(0);
   const connectionRequestSequence = useRef(0);
   const connectionRequestPending = useRef(false);
   const isCurrent = useLatestIdentity(routeKey);
+  const popOut = useCallback(async () => {
+    if (!onPopOutPanel) return;
+    const expected = routeKey;
+    setIsPoppingOut(true);
+    try {
+      await onPopOutPanel("network");
+    } catch (error) {
+      if (isCurrent(expected)) toast.danger("Could not pop out network", { description: errorMessage(error) });
+    } finally {
+      if (isCurrent(expected)) setIsPoppingOut(false);
+    }
+  }, [isCurrent, onPopOutPanel, routeKey]);
   const isRefreshIntervalValid = Number.isInteger(refreshIntervalSeconds) &&
     refreshIntervalSeconds >= 1 && refreshIntervalSeconds <= 3_600;
 
@@ -476,15 +495,34 @@ export function SessionNetworkPanel({ route, isTargetTransitionPending, onGoToPr
 
   return (
     <PanelShell
+      fill={standalone}
+      scrollBody={standalone}
       icon={faNetworkWired}
       title="Network"
       description="Network interfaces and current connections."
-      action={<RefreshButton
-        label={selectedTab === "interfaces" ? "Refresh interfaces" : "Refresh netstat"}
-        pending={selectedTab === "interfaces" ? interfaces.status === "loading" : isRefreshingConnections}
-        disabled={isTargetTransitionPending || (selectedTab === "interfaces" ? isLoadingMoreInterfaces : isLoadingMoreConnections)}
-        onPress={() => { if (selectedTab === "interfaces") void loadInterfaces(); else void loadConnections(); }}
-      />}
+      action={<div className="flex items-center gap-2">
+        <RefreshButton
+          label={selectedTab === "interfaces" ? "Refresh interfaces" : "Refresh netstat"}
+          pending={selectedTab === "interfaces" ? interfaces.status === "loading" : isRefreshingConnections}
+          disabled={isTargetTransitionPending || (selectedTab === "interfaces" ? isLoadingMoreInterfaces : isLoadingMoreConnections)}
+          onPress={() => { if (selectedTab === "interfaces") void loadInterfaces(); else void loadConnections(); }}
+        />
+        {onPopOutPanel ? (
+          <Tooltip delay={250}>
+            <Button
+              aria-label="Pop out network"
+              isIconOnly
+              isPending={isPoppingOut}
+              size="sm"
+              variant="ghost"
+              onPress={() => void popOut()}
+            >
+              <FontAwesomeIcon aria-hidden icon={faArrowUpRightFromSquare} />
+            </Button>
+            <Tooltip.Content>Pop out network</Tooltip.Content>
+          </Tooltip>
+        ) : null}
+      </div>}
     >
       <Tabs className="min-w-0" selectedKey={selectedTab} onSelectionChange={(key) => setSelectedTab(String(key))}>
         <Tabs.ListContainer className="w-fit max-w-full">
@@ -2471,7 +2509,7 @@ function FileViewSummary({ value }: { value: FileViewResult }): React.JSX.Elemen
   );
 }
 
-export function SessionProcessesPanel({ route, session, processNavigation }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionProcessesPanel({ route, session, processNavigation, onPopOutPanel }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const platform = normalizedPlatform(session.os);
   const isWindows = platform === "windows";
@@ -2491,10 +2529,23 @@ export function SessionProcessesPanel({ route, session, processNavigation }: Ses
   const [busyProcess, setBusyProcess] = useState<number>();
   const [readingServiceName, setReadingServiceName] = useState<string>();
   const [startingServiceName, setStartingServiceName] = useState<string>();
+  const [isPoppingOut, setIsPoppingOut] = useState(false);
   const processRequestSequence = useRef(0);
   const serviceRequestSequence = useRef(0);
   const serviceDetailRequestSequence = useRef(0);
   const isCurrent = useLatestIdentity(routeKey);
+  const popOut = useCallback(async () => {
+    if (!onPopOutPanel) return;
+    const expected = routeKey;
+    setIsPoppingOut(true);
+    try {
+      await onPopOutPanel("processes");
+    } catch (error) {
+      if (isCurrent(expected)) toast.danger("Could not pop out processes", { description: errorMessage(error) });
+    } finally {
+      if (isCurrent(expected)) setIsPoppingOut(false);
+    }
+  }, [isCurrent, onPopOutPanel, routeKey]);
 
   const loadProcesses = useCallback(async (cursor?: string, requestedQuery = debouncedQuery) => {
     const expected = routeKey;
@@ -2766,7 +2817,24 @@ export function SessionProcessesPanel({ route, session, processNavigation }: Ses
         icon={faMicrochip}
         title="Processes"
         description="Inspect bounded process details and Windows service state."
-        action={<RefreshButton label={`Refresh ${section}`} pending={activeState.status === "loading"} onPress={() => void (section === "services" ? loadServices(undefined, debouncedQuery) : loadProcesses(undefined, debouncedQuery))} />}
+        action={<div className="flex items-center gap-2">
+          <RefreshButton label={`Refresh ${section}`} pending={activeState.status === "loading"} onPress={() => void (section === "services" ? loadServices(undefined, debouncedQuery) : loadProcesses(undefined, debouncedQuery))} />
+          {onPopOutPanel ? (
+            <Tooltip delay={250}>
+              <Button
+                aria-label="Pop out processes"
+                isIconOnly
+                isPending={isPoppingOut}
+                size="sm"
+                variant="ghost"
+                onPress={() => void popOut()}
+              >
+                <FontAwesomeIcon aria-hidden icon={faArrowUpRightFromSquare} />
+              </Button>
+              <Tooltip.Content>Pop out processes</Tooltip.Content>
+            </Tooltip>
+          ) : null}
+        </div>}
       >
         <div className="flex h-full min-h-0 min-w-0 flex-col gap-2">
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2">
@@ -4126,6 +4194,7 @@ function DestructiveActionDialog({ action }: { action: DestructiveActionState })
 
 function PanelShell({
   fill = false,
+  scrollBody = false,
   icon,
   title,
   description,
@@ -4133,6 +4202,7 @@ function PanelShell({
   children,
 }: {
   fill?: boolean;
+  scrollBody?: boolean;
   icon: Parameters<typeof FontAwesomeIcon>[0]["icon"];
   title: string;
   description: string;
@@ -4152,7 +4222,9 @@ function PanelShell({
         </div>
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
-      <div className={`border-t border-separator ${fill ? "min-h-0 flex-1 overflow-hidden px-5 py-3 sm:px-6" : "p-5 sm:p-6"}`}>{children}</div>
+      <div className={`border-t border-separator ${fill
+        ? `min-h-0 flex-1 px-5 py-3 sm:px-6 ${scrollBody ? "overflow-y-auto overscroll-contain" : "overflow-hidden"}`
+        : "p-5 sm:p-6"}`}>{children}</div>
     </section>
   );
 }

@@ -13,10 +13,12 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const panels = [
   { id: "execution", tab: "Execution", button: "Pop out execution", region: "Execution operations" },
   { id: "files", tab: "Files", button: "Pop out file browser", region: "File browser" },
+  { id: "processes", tab: "Processes", button: "Pop out processes", region: "Processes" },
+  { id: "network", tab: "Network", button: "Pop out network", region: "Network" },
   { id: "registry", tab: "Registry", button: "Pop out registry editor", region: "Registry editor" },
 ] as const;
 
-test("Execution, Files, and Registry open exact-session standalone panels and reuse their windows", {
+test("Execution, Files, Processes, Network, and Registry open exact-session standalone panels and reuse their windows", {
   timeout: 180_000,
 }, async () => {
   const fixture = await launchFixture(["--registry-layout-fixture", "--files-layout-fixture"]);
@@ -53,10 +55,18 @@ test("Execution, Files, and Registry open exact-session standalone panels and re
         original.targetContext.activeTargetSummary?.name ?? "",
         original.targetContext.activeTargetSummary?.hostname ?? "",
       );
-      if (id === "files" || id === "registry") {
+      if (id === "files" || id === "registry" || id === "processes" || id === "network") {
         const bounds = await window.getByRole("region", { name: region, exact: true }).boundingBox();
         assert.ok(bounds && bounds.height > 300,
           `${tab} standalone editor must fill useful vertical space (height=${bounds?.height})`);
+      }
+      if (id === "processes") {
+        await window.getByRole("grid", { name: "Session processes", exact: true }).waitFor();
+      }
+      if (id === "network") {
+        const networkViews = window.getByRole("tablist", { name: "Network views", exact: true });
+        await networkViews.getByRole("tab", { name: "Netstat", exact: true }).click();
+        await window.getByRole("grid", { name: "Session network connections", exact: true }).waitFor();
       }
 
       const url = new URL(window.url());
