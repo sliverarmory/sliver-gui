@@ -150,6 +150,8 @@ function installSliverAPI(
     addExecutionOutputToLoot: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
+    listProcessExecutionHistory: vi.fn(failedOperation),
+    clearProcessExecutionHistory: vi.fn(failedOperation),
     listLoot: vi.fn(failedOperation),
     listCredentials: vi.fn(failedOperation),
     listLocalNetworkInterfaces: vi.fn(failedOperation),
@@ -167,6 +169,7 @@ function installSliverAPI(
     openStream: vi.fn(),
     openConsoleStream: vi.fn(),
     onOperationChanged: vi.fn(() => vi.fn()),
+    onProcessExecutionHistoryChanged: vi.fn(() => vi.fn()),
     onSnapshotChanged: vi.fn((listener: (snapshot: SliverSnapshot) => void) => {
       captureSnapshotListener?.(listener);
       return vi.fn();
@@ -178,6 +181,8 @@ function installSliverAPI(
     claimInteractionWindow: vi.fn(failedOperation),
     openSessionShellWindow: vi.fn(failedOperation),
     claimSessionShellWindow: vi.fn(failedOperation),
+    openSessionPanelWindow: vi.fn(failedOperation),
+    claimSessionPanelWindow: vi.fn(failedOperation),
     openConsoleWindow: vi.fn(failedOperation),
     claimConsoleWindow: vi.fn(failedOperation),
     createConsoleTab: vi.fn(failedOperation),

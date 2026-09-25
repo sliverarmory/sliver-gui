@@ -8,6 +8,7 @@ import "./styles.css";
 import { App } from "./App";
 import { InteractionWindowApp } from "./InteractionWindowApp";
 import { SessionShellWindowApp } from "./SessionShellWindowApp";
+import { SessionPanelWindowApp } from "./SessionPanelWindowApp";
 import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
@@ -33,6 +34,7 @@ const surface = new URLSearchParams(window.location.search).get("surface");
 function RendererSurface(): React.JSX.Element {
   if (surface === "console") return <ConsoleWindowApp />;
   if (surface === "managed-shells") return <SessionShellWindowApp />;
+  if (surface === "session-panel") return <SessionPanelWindowApp />;
   if (surface === "interaction") return <InteractionWindowApp />;
   if (surface === "ssh") return <SshWindowApp />;
   return <App />;

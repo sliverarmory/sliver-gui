@@ -341,7 +341,7 @@ async function assertVerticalHistoryBesideTerminal(
   terminal: Locator,
 ): Promise<void> {
   const panelBounds = await outputPanel.boundingBox();
-  const headingBounds = await outputPanel.getByRole("heading", { name: "Output", exact: true }).boundingBox();
+  const headingBounds = await outputPanel.getByRole("heading").first().boundingBox();
   const historyBounds = await history.boundingBox();
   const terminalBounds = await terminal.boundingBox();
   const entries = history.getByRole("row");

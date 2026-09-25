@@ -392,6 +392,35 @@ export interface ExecutionActionResult {
   output?: ExecutionOutputMetadata[];
 }
 
+/** Bounded session process history shared by windows on the same exact target. */
+export interface ProcessExecutionOutput {
+  readonly data: Uint8Array;
+  readonly truncated: boolean;
+}
+
+export interface ProcessExecutionRecord {
+  readonly id: string;
+  readonly startedAt: string;
+  readonly path: string;
+  readonly args: readonly string[];
+  readonly state: "running" | "request-failed" | ExecutionResultState;
+  readonly result?: ExecutionActionResult;
+  readonly error?: string;
+  readonly stdout?: ProcessExecutionOutput;
+  readonly stderr?: ProcessExecutionOutput;
+  readonly outputError?: string;
+}
+
+export interface ProcessExecutionHistorySnapshot {
+  readonly target: TargetRef;
+  readonly revision: number;
+  readonly records: readonly ProcessExecutionRecord[];
+}
+
+export interface ClearProcessExecutionHistoryInput {
+  readonly id?: string;
+}
+
 export interface ExecutionChildSummary {
   pid: number;
   path: string;
@@ -523,6 +552,12 @@ export function parseExecutionResultRequest(value: unknown): ExecutionResultRequ
   const record = plainRecord(value, "execution result request");
   exactKeys(record, ["requestId"]);
   return { requestId: opaqueToken(record["requestId"], "requestId") };
+}
+
+export function parseClearProcessExecutionHistoryInput(value: unknown): ClearProcessExecutionHistoryInput {
+  const record = plainRecord(value, "clear process execution history input");
+  exactKeys(record, [], ["id"]);
+  return record["id"] === undefined ? {} : { id: opaqueToken(record["id"], "id") };
 }
 
 export function parseSaveExecutionResultInput(value: unknown): SaveExecutionResultInput {

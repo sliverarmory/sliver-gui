@@ -42,7 +42,7 @@ import {
   faTriangleExclamation,
 } from "@fortawesome/free-solid-svg-icons";
 
-import type { SliverSnapshot } from "../../../shared/contracts";
+import type { SessionPanelWindowKind, SliverSnapshot } from "../../../shared/contracts";
 import type {
   DestructiveTargetActionId,
   SessionSummary,
@@ -105,6 +105,7 @@ export interface SessionWorkspacePanelContext {
   snapshot: SliverSnapshot;
   onSnapshot: (snapshot: SliverSnapshot) => void;
   onOperationSubmitted: (operation: TargetOperationRecord) => boolean;
+  onPopOutPanel?: (panel: SessionPanelWindowKind) => Promise<void>;
   isTargetTransitionPending: boolean;
   onGoToProcess?: (pid: number) => void;
   processNavigation?: { pid: number; requestId: number };
@@ -535,6 +536,15 @@ export function SessionWorkspacePage({
     }
   }, [allowPopOut, routeIdentity]);
 
+  const popOutSessionPanel = useCallback(async (panel: SessionPanelWindowKind): Promise<void> => {
+    if (
+      !isCurrentRef.current || targetTransitionPendingRef.current ||
+      routeIdentity !== routeIdentityRef.current
+    ) throw new Error("The active session changed before the panel could be popped out");
+    const result = await window.sliver.openSessionPanelWindow({ panel });
+    if (!result.ok) throw new Error(result.error ?? "The session panel could not be opened");
+  }, [routeIdentity]);
+
   const goToProcess = useCallback((pid: number) => {
     if (
       !isCurrentRef.current ||
@@ -583,6 +593,7 @@ export function SessionWorkspacePage({
     snapshot,
     onSnapshot,
     onOperationSubmitted: acceptSubmittedOperation,
+    onPopOutPanel: popOutSessionPanel,
     isTargetTransitionPending,
     onGoToProcess: goToProcess,
     ...(processNavigation?.routeIdentity === routeIdentity ? {
@@ -754,7 +765,11 @@ export function SessionWorkspacePage({
             {resolvedPanels.execution
               ? resolvedPanels.execution(context)
               : activeSessionRef
-                ? <TargetExecutionWorkbench expectedTarget={activeSessionRef} targetIdentity={routeIdentity} />
+                ? <TargetExecutionWorkbench
+                    expectedTarget={activeSessionRef}
+                    targetIdentity={routeIdentity}
+                    onPopOut={() => popOutSessionPanel("execution")}
+                  />
                 : renderPanel(undefined, context, {
                     icon: faTriangleExclamation,
                     title: "Execution workbench unavailable",

@@ -136,6 +136,7 @@ import {
 } from "../shared/stream-contracts.js";
 import type {
   AddExecutionOutputToLootInput,
+  ClearProcessExecutionHistoryInput,
   ExecuteExecutionPlanInput,
   ExecutionActionDraft,
   ExecutionActionPlan,
@@ -147,6 +148,8 @@ import type {
   ExecutionReadResult,
   ExecutionResultRequest,
   PrepareExecutionActionInput,
+  ProcessExecutionHistorySnapshot,
+  ProcessExecutionRecord,
   ReadExecutionOutputInput,
   RunExecutionReadInput,
   SaveExecutionResultInput,
@@ -379,6 +382,8 @@ const EXECUTION_PLAN_TTL_MS = 60_000;
 const EXECUTION_RESULT_TTL_MS = 5 * 60_000;
 const MAX_WINDOW_EXECUTION_PLANS = 4;
 const MAX_WINDOW_EXECUTION_RESULTS = 128;
+const MAX_PROCESS_EXECUTION_HISTORY_ENTRIES = 50;
+const MAX_PROCESS_EXECUTION_HISTORY_OUTPUT_BYTES = 32 * 1_024 * 1_024;
 const MAX_WINDOW_EXECUTION_REQUESTS = 4;
 const MAX_GLOBAL_EXECUTION_REQUESTS = 16;
 const MAX_RECENT_EVENTS = 50;
@@ -543,6 +548,15 @@ interface InternalExecutionResult {
   target: TargetRef;
 }
 
+interface InternalProcessExecutionHistory {
+  readonly key: string;
+  readonly poolKey: string;
+  readonly epoch: number;
+  readonly target: TargetRef;
+  revision: number;
+  entries: Array<{ order: number; record: ProcessExecutionRecord }>;
+}
+
 type RefreshedExecutionBeaconTask =
   | { state: "pending" }
   | { state: "canceled" }
@@ -589,6 +603,7 @@ export class ConnectionRegistry {
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
   private readonly sessionArtifacts: SessionArtifactStore;
   private readonly executionArtifacts: ExecutionArtifactStore;
+  private readonly processExecutionHistories = new Map<string, InternalProcessExecutionHistory>();
   private readonly streams: StreamManager;
   private readonly sessionWorkbenchGlobalAdmissions = new Map<string, "standard" | "artifact">();
   private readonly terminalRuntimeAdmissions = new Set<number>();
@@ -598,6 +613,9 @@ export class ConnectionRegistry {
   private readonly sessionSaveLocks = new Map<string, Promise<void>>();
   private sessionSaveReservationTail: Promise<void> = Promise.resolve();
   private targetCatalogSnapshotBytes = 0;
+  private processExecutionHistoryEntryCount = 0;
+  private processExecutionHistoryOutputBytes = 0;
+  private nextProcessExecutionHistoryOrder = 0;
   private credentialClipboard?: {
     digest: string;
     expiresAt: number;
@@ -2102,6 +2120,210 @@ export class ConnectionRegistry {
     }
   }
 
+  async listProcessExecutionHistory(
+    contentsId: number,
+  ): Promise<OperationResult<ProcessExecutionHistorySnapshot>> {
+    return this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { target } = this.requireSelectedSessionProcessHistory(contentsId, pool);
+      const bucket = this.processExecutionHistories.get(processExecutionHistoryKey(pool.key, pool.epoch, target.ref));
+      assertBinding();
+      return {
+        target: { ...target.ref },
+        revision: bucket?.revision ?? 0,
+        records: bucket?.entries.map(({ record }) => cloneProcessExecutionRecord(record)) ?? [],
+      };
+    });
+  }
+
+  async clearProcessExecutionHistory(
+    contentsId: number,
+    input: ClearProcessExecutionHistoryInput,
+  ): Promise<OperationResult> {
+    const result = await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+      const { target } = this.requireSelectedSessionProcessHistory(contentsId, pool);
+      const bucket = this.processExecutionHistories.get(processExecutionHistoryKey(pool.key, pool.epoch, target.ref));
+      assertBinding();
+      if (!bucket) return;
+      if (input.id === undefined) {
+        if (bucket.entries.length === 0) return;
+        for (const entry of bucket.entries) this.releaseProcessExecutionRecord(entry.record);
+        bucket.entries = [];
+      } else {
+        const index = bucket.entries.findIndex(({ record }) => record.id === input.id);
+        if (index < 0) return;
+        const [removed] = bucket.entries.splice(index, 1);
+        this.releaseProcessExecutionRecord(removed!.record);
+      }
+      this.publishProcessExecutionHistoryChanged(bucket);
+    });
+    return result.ok ? { ok: true } : result;
+  }
+
+  private requireSelectedSessionProcessHistory(
+    contentsId: number,
+    pool: BackendPool,
+  ): { context: WindowContext; target: RevalidatedTarget } {
+    const selected = this.requireSelectedExecutionTarget(contentsId, pool);
+    if (selected.target.target.mode !== "session") {
+      throw new Error("Select an active session before using process execution history");
+    }
+    return selected;
+  }
+
+  /** A process result can be consumed by another window only while both select the same exact session. */
+  private sharedProcessExecutionResult(
+    contentsId: number,
+    requestId: string,
+  ): {
+    pool: BackendPool;
+    target: RevalidatedTarget;
+    record: ProcessExecutionRecord;
+    assertCurrent: () => void;
+  } | undefined {
+    const context = this.requireWindow(contentsId);
+    const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+    if (!pool || !["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status)) return undefined;
+    if (context.activeTarget?.mode !== "session" || context.activeTarget.backendEpoch !== pool.epoch) return undefined;
+    const selected = this.requireSelectedSessionProcessHistory(contentsId, pool);
+    const bucket = this.processExecutionHistories.get(processExecutionHistoryKey(pool.key, pool.epoch, selected.target.ref));
+    const record = bucket?.entries.find(({ record }) => record.id === requestId)?.record;
+    if (!record?.result || record.result.operationId !== "execution.process" || record.result.requestId !== requestId) {
+      return undefined;
+    }
+    const connectionAttempt = context.connectionAttempt;
+    const assertCurrent = (): void => {
+      if (
+        this.windows.get(contentsId) !== context ||
+        this.pools.get(pool.key) !== pool ||
+        pool.epoch !== selected.target.ref.backendEpoch ||
+        context.poolKey !== pool.key ||
+        context.connectionAttempt !== connectionAttempt ||
+        !context.activeTarget ||
+        !sameTargetRefIdentity(context.activeTarget, selected.target.ref) ||
+        !pool.targetStore.revalidateTargetRef(selected.target.ref, pool.epoch) ||
+        !bucket?.entries.some((entry) => entry.record === record)
+      ) throw new Error("The execution result no longer belongs to the active target");
+    };
+    assertCurrent();
+    return { pool, target: selected.target, record, assertCurrent };
+  }
+
+  private sharedProcessExecutionOutput(
+    record: ProcessExecutionRecord,
+    stream: "stdout" | "stderr" | "combined",
+  ): { data: Buffer; truncated: boolean } {
+    const output = record.result?.output?.find((item) => item.stream === stream);
+    const maximumBytes = stream === "combined"
+      ? 2 * EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES
+      : EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES;
+    if (!output || !Number.isFinite(Date.parse(output.expiresAt)) ||
+      Date.parse(output.expiresAt) <= this.now() || output.size > maximumBytes) {
+      throw new Error("The requested execution output is unavailable");
+    }
+    const stdout = record.stdout?.data;
+    const stderr = record.stderr?.data;
+    const data = stream === "combined"
+      ? stdout && stderr ? Buffer.concat([stdout, stderr]) : undefined
+      : stream === "stdout" && stdout ? Buffer.from(stdout)
+        : stream === "stderr" && stderr ? Buffer.from(stderr) : undefined;
+    if (!data || data.byteLength !== output.size) {
+      data?.fill(0);
+      throw new Error("The requested execution output is unavailable");
+    }
+    return { data, truncated: output.truncated };
+  }
+
+  private beginProcessExecutionHistory(
+    pool: BackendPool,
+    target: RevalidatedTarget,
+    journal: TargetOperationRecord,
+    draft: Extract<ExecutionActionDraft, { operationId: "execution.process" }>,
+  ): string {
+    const key = processExecutionHistoryKey(pool.key, pool.epoch, target.ref);
+    let bucket = this.processExecutionHistories.get(key);
+    if (!bucket) {
+      bucket = { key, poolKey: pool.key, epoch: pool.epoch, target: { ...target.ref }, revision: 0, entries: [] };
+      this.processExecutionHistories.set(key, bucket);
+    }
+    const record: ProcessExecutionRecord = {
+      id: journal.requestId,
+      startedAt: journal.createdAt,
+      path: draft.path,
+      args: [...draft.args],
+      state: "running",
+    };
+    bucket.entries.unshift({ order: ++this.nextProcessExecutionHistoryOrder, record });
+    this.processExecutionHistoryEntryCount += 1;
+    this.publishProcessExecutionHistoryChanged(bucket);
+    this.evictProcessExecutionHistory();
+    return key;
+  }
+
+  private updateProcessExecutionHistory(
+    key: string,
+    id: string,
+    patch: Partial<ProcessExecutionRecord>,
+  ): void {
+    const bucket = this.processExecutionHistories.get(key);
+    if (!bucket) return;
+    const entry = bucket.entries.find(({ record }) => record.id === id);
+    if (!entry) return; // A cleared or evicted invocation must never reappear.
+    const previous = entry.record;
+    const next = cloneProcessExecutionRecord({ ...previous, ...patch });
+    entry.record = next;
+    this.processExecutionHistoryOutputBytes += processExecutionOutputBytes(next) - processExecutionOutputBytes(previous);
+    clearProcessExecutionOutput(previous);
+    this.publishProcessExecutionHistoryChanged(bucket);
+    this.evictProcessExecutionHistory();
+  }
+
+  private evictProcessExecutionHistory(): void {
+    while (
+      this.processExecutionHistoryEntryCount > MAX_PROCESS_EXECUTION_HISTORY_ENTRIES ||
+      this.processExecutionHistoryOutputBytes > MAX_PROCESS_EXECUTION_HISTORY_OUTPUT_BYTES
+    ) {
+      let oldestBucket: InternalProcessExecutionHistory | undefined;
+      let oldestOrder = Number.POSITIVE_INFINITY;
+      for (const bucket of this.processExecutionHistories.values()) {
+        const last = bucket.entries.at(-1);
+        if (last && last.order < oldestOrder) {
+          oldestBucket = bucket;
+          oldestOrder = last.order;
+        }
+      }
+      if (!oldestBucket) break;
+      const removed = oldestBucket.entries.pop()!;
+      this.releaseProcessExecutionRecord(removed.record);
+      this.publishProcessExecutionHistoryChanged(oldestBucket);
+    }
+  }
+
+  private releaseProcessExecutionRecord(record: ProcessExecutionRecord): void {
+    this.processExecutionHistoryEntryCount -= 1;
+    this.processExecutionHistoryOutputBytes -= processExecutionOutputBytes(record);
+    clearProcessExecutionOutput(record);
+  }
+
+  private publishProcessExecutionHistoryChanged(bucket: InternalProcessExecutionHistory): void {
+    bucket.revision += 1;
+    for (const context of this.windows.values()) {
+      if (
+        context.poolKey !== bucket.poolKey ||
+        !context.activeTarget ||
+        !sameTargetRefIdentity(context.activeTarget, bucket.target)
+      ) continue;
+      const pool = this.pools.get(context.poolKey);
+      if (!pool || pool.epoch !== bucket.epoch) continue;
+      const contents = webContents.fromId(context.contentsId);
+      if (!contents || contents.isDestroyed()) continue;
+      try {
+        contents.send(IPC.processExecutionHistoryChanged, { ...context.activeTarget }, bucket.revision);
+      } catch {
+        // An invalidation is advisory; a newly loaded renderer reads the authoritative snapshot.
+      }
+    }
+  }
+
   async prepareExecutionAction(
     sender: WebContents,
     input: PrepareExecutionActionInput,
@@ -2428,6 +2650,7 @@ export class ConnectionRegistry {
     let journal: TargetOperationRecord | undefined;
     let engine: OperationEngine | undefined;
     let dispatched = false;
+    let processHistoryKey: string | undefined;
     let bindingCurrent: (() => boolean) | undefined;
     try {
       const context = this.requireWindow(contentsId);
@@ -2500,6 +2723,9 @@ export class ConnectionRegistry {
           capturedPlan.journalTarget,
           externalExecutionDescriptor(descriptor, true, current.target.mode),
         );
+        if (capturedPlan.draft.operationId === "execution.process" && current.target.mode === "session") {
+          processHistoryKey = this.beginProcessExecutionHistory(pool, current, journal, capturedPlan.draft);
+        }
         const capturedEngine = engine;
         const capturedJournal = journal;
         const markDispatched = (): void => {
@@ -2655,6 +2881,14 @@ export class ConnectionRegistry {
       if (journal && engine && !dispatched && !TERMINAL_OPERATION_STATES.has(engine.get(journal.requestId)?.state ?? "failed")) {
         engine.finishExternal(journal.requestId, "failed");
       }
+      if (journal && processHistoryKey) {
+        this.updateProcessExecutionHistory(processHistoryKey, journal.requestId, {
+          state: dispatched ? "outcome-unknown" : "request-failed",
+          error: dispatched
+            ? "The execution was dispatched, but its final outcome could not be confirmed."
+            : executionBoundaryError(error),
+        });
+      }
       return { ok: false, error: executionBoundaryError(error) };
     } finally {
       for (const data of artifacts.values()) data.fill(0);
@@ -2681,6 +2915,11 @@ export class ConnectionRegistry {
       const context = this.requireWindow(contentsId);
       this.admitExecutionRequest(context, admissionId);
       admittedContext = context;
+      if (!context.executionResults.has(input.requestId)) {
+        const shared = this.sharedProcessExecutionResult(contentsId, input.requestId);
+        if (!shared?.record.result) throw new Error("The execution result is unavailable or expired");
+        return { ok: true, value: cloneExecutionActionResult(shared.record.result) };
+      }
       const result = this.requireExecutionResult(context, input.requestId);
       return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
         if (
@@ -2800,6 +3039,15 @@ export class ConnectionRegistry {
     let data: Buffer | undefined;
     try {
       const context = this.requireWindow(contentsId);
+      if (!context.executionResults.has(input.requestId)) {
+        const shared = this.sharedProcessExecutionResult(contentsId, input.requestId);
+        if (!shared) throw new Error("The execution result is unavailable or expired");
+        shared.assertCurrent();
+        const output = this.sharedProcessExecutionOutput(shared.record, input.stream);
+        data = output.data;
+        shared.assertCurrent();
+        return { ok: true, value: { data: Uint8Array.from(data), truncated: output.truncated } };
+      }
       const result = this.requireExecutionResult(context, input.requestId);
       const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
       if (
@@ -2846,34 +3094,46 @@ export class ConnectionRegistry {
     try {
       return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
         const context = this.requireWindow(contentsId);
-        const result = this.requireExecutionResult(context, input.requestId);
-        const assertCurrent = (): void => {
-          assertBinding();
-          if (
-            this.windows.get(contentsId) !== context ||
-            this.pools.get(result.poolKey) !== pool ||
-            pool.epoch !== result.epoch ||
-            context.connectionAttempt !== result.connectionAttempt ||
-            !context.activeTarget ||
-            !sameTargetRefIdentity(context.activeTarget, result.target) ||
-            context.executionResults.get(input.requestId) !== result
-          ) throw new Error("The execution result no longer belongs to the active target");
-        };
-        assertCurrent();
-        const target = pool.targetStore.revalidateTargetRef(result.target, pool.epoch);
-        if (!target) throw new Error("The execution result is unavailable for the current target");
-        const artifact = result.output[input.stream];
-        const output = result.value.output?.find((item) => item.stream === input.stream);
-        if (!artifact || !output || output.handle !== artifact.handle) {
-          throw new Error("The requested execution output is unavailable");
-        }
-        const maximumBytes = input.stream === "combined"
-          ? 2 * EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES
-          : EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES;
-        if (output.size > maximumBytes) throw new Error("The requested execution output is unavailable");
-        data = this.executionArtifacts.getResult(artifact.scope, artifact.handle).data;
-        if (data.byteLength !== output.size || data.byteLength > maximumBytes) {
-          throw new Error("The requested execution output is unavailable");
+        let assertCurrent: () => void;
+        let target: RevalidatedTarget;
+        if (context.executionResults.has(input.requestId)) {
+          const result = this.requireExecutionResult(context, input.requestId);
+          assertCurrent = (): void => {
+            assertBinding();
+            if (
+              this.windows.get(contentsId) !== context ||
+              this.pools.get(result.poolKey) !== pool ||
+              pool.epoch !== result.epoch ||
+              context.connectionAttempt !== result.connectionAttempt ||
+              !context.activeTarget ||
+              !sameTargetRefIdentity(context.activeTarget, result.target) ||
+              context.executionResults.get(input.requestId) !== result
+            ) throw new Error("The execution result no longer belongs to the active target");
+          };
+          assertCurrent();
+          const current = pool.targetStore.revalidateTargetRef(result.target, pool.epoch);
+          if (!current) throw new Error("The execution result is unavailable for the current target");
+          target = current;
+          const artifact = result.output[input.stream];
+          const output = result.value.output?.find((item) => item.stream === input.stream);
+          if (!artifact || !output || output.handle !== artifact.handle) {
+            throw new Error("The requested execution output is unavailable");
+          }
+          const maximumBytes = input.stream === "combined"
+            ? 2 * EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES
+            : EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES;
+          if (output.size > maximumBytes) throw new Error("The requested execution output is unavailable");
+          data = this.executionArtifacts.getResult(artifact.scope, artifact.handle).data;
+          if (data.byteLength !== output.size || data.byteLength > maximumBytes) {
+            throw new Error("The requested execution output is unavailable");
+          }
+        } else {
+          const shared = this.sharedProcessExecutionResult(contentsId, input.requestId);
+          if (!shared || shared.pool !== pool) throw new Error("The execution result is unavailable or expired");
+          assertCurrent = (): void => { assertBinding(); shared.assertCurrent(); };
+          assertCurrent();
+          target = shared.target;
+          data = this.sharedProcessExecutionOutput(shared.record, input.stream).data;
         }
         const isText = isProbablyTextLoot(data);
         const fileName = safeArtifactFileName(
@@ -2913,6 +3173,9 @@ export class ConnectionRegistry {
     let data: Buffer | undefined;
     try {
       const context = this.requireWindow(sender.id);
+      if (!context.executionResults.has(input.requestId)) {
+        return await this.saveSharedProcessExecutionResult(sender, input);
+      }
       const result = this.requireExecutionResult(context, input.requestId);
       const artifact = result.output[input.stream];
       if (!artifact) throw new Error("The requested execution output is unavailable");
@@ -2956,6 +3219,45 @@ export class ConnectionRegistry {
         ok: true,
         value: { saved: true, fileName: safeArtifactFileName(basename(intent.destinationPath)) },
       };
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      data?.fill(0);
+    }
+  }
+
+  private async saveSharedProcessExecutionResult(
+    sender: WebContents,
+    input: SaveExecutionResultInput,
+  ): Promise<OperationResult<SaveExecutionResultResult>> {
+    let data: Buffer | undefined;
+    try {
+      const shared = this.sharedProcessExecutionResult(sender.id, input.requestId);
+      if (!shared) throw new Error("The execution result is unavailable or expired");
+      const owner = requireOwnerWindow(sender);
+      if (owner.isDestroyed()) throw new Error("The application window is no longer available");
+      const metadata = shared.record.result?.output?.find((item) => item.stream === input.stream);
+      if (!metadata) throw new Error("The requested execution output is unavailable");
+      let selection;
+      try {
+        selection = await dialog.showSaveDialog(owner, {
+          title: "Save execution output",
+          defaultPath: safeArtifactFileName(metadata.suggestedFileName),
+        });
+      } catch {
+        throw new Error("Could not open the native execution output save dialog");
+      }
+      if (selection.canceled || !selection.filePath) return { ok: true, value: { saved: false } };
+      shared.assertCurrent();
+      const intent = await this.reserveSessionSaveIntent(selection.filePath);
+      shared.assertCurrent();
+      data = this.sharedProcessExecutionOutput(shared.record, input.stream).data;
+      try {
+        await this.commitSessionSaveIntent(intent, data, shared.assertCurrent);
+      } catch {
+        throw new Error("Could not save the execution output");
+      }
+      return { ok: true, value: { saved: true, fileName: safeArtifactFileName(basename(intent.destinationPath)) } };
     } catch (error) {
       return { ok: false, error: executionBoundaryError(error) };
     } finally {
@@ -3787,6 +4089,11 @@ export class ConnectionRegistry {
     processWaited?: boolean,
   ): ExecutionActionResult {
     this.pruneExecutionResults(context);
+    const historyKey = value.operationId === "execution.process" && target.target.mode === "session"
+      ? processExecutionHistoryKey(pool.key, pool.epoch, target.ref)
+      : undefined;
+    const historyStdout = historyKey && streams.stdout ? Uint8Array.from(streams.stdout.data) : undefined;
+    const historyStderr = historyKey && streams.stderr ? Uint8Array.from(streams.stderr.data) : undefined;
     processWaited ??= context.executionResults.get(value.requestId)?.processWaited;
     if (context.executionResults.has(value.requestId)) {
       this.revokeExecutionResult(context, value.requestId);
@@ -3888,6 +4195,24 @@ export class ConnectionRegistry {
     }, EXECUTION_RESULT_TTL_MS);
     timer.unref?.();
     context.executionResultTimers.set(value.requestId, timer);
+    if (historyKey) {
+      try {
+        this.updateProcessExecutionHistory(historyKey, value.requestId, {
+          state: retainedValue.state,
+          result: retainedValue,
+          ...(outputRetained && historyStdout
+            ? { stdout: { data: historyStdout, truncated: streams.stdout?.truncated === true } }
+            : {}),
+          ...(outputRetained && historyStderr
+            ? { stderr: { data: historyStderr, truncated: streams.stderr?.truncated === true } }
+            : {}),
+          ...(outputRetained ? {} : { outputError: "Captured output could not be retained." }),
+        });
+      } finally {
+        historyStdout?.fill(0);
+        historyStderr?.fill(0);
+      }
+    }
     return cloneExecutionActionResult(retainedValue);
   }
 
@@ -6510,6 +6835,11 @@ export class ConnectionRegistry {
     pool.removeWindow(contentsId);
     if (pool.windowCount === 0) {
       this.pools.delete(poolKey);
+      for (const [key, bucket] of this.processExecutionHistories) {
+        if (bucket.poolKey !== poolKey) continue;
+        for (const entry of bucket.entries) this.releaseProcessExecutionRecord(entry.record);
+        this.processExecutionHistories.delete(key);
+      }
       await this.streams.closeBackend(
         { backendId: pool.key, backendEpoch: pool.epoch },
         "backend-disconnected",
@@ -7479,6 +7809,33 @@ function sameTargetRefIdentity(left: TargetRef, right: TargetRef): boolean {
     left.fingerprint === right.fingerprint;
 }
 
+function processExecutionHistoryKey(poolKey: string, epoch: number, target: TargetRef): string {
+  return JSON.stringify([poolKey, epoch, target.mode, target.id, target.fingerprint]);
+}
+
+function processExecutionOutputBytes(record: ProcessExecutionRecord): number {
+  return (record.stdout?.data.byteLength ?? 0) + (record.stderr?.data.byteLength ?? 0);
+}
+
+function clearProcessExecutionOutput(record: ProcessExecutionRecord): void {
+  record.stdout?.data.fill(0);
+  record.stderr?.data.fill(0);
+}
+
+function cloneProcessExecutionRecord(record: ProcessExecutionRecord): ProcessExecutionRecord {
+  return {
+    ...record,
+    args: [...record.args],
+    ...(record.result ? { result: cloneExecutionActionResult(record.result) } : {}),
+    ...(record.stdout ? {
+      stdout: { data: Uint8Array.from(record.stdout.data), truncated: record.stdout.truncated },
+    } : {}),
+    ...(record.stderr ? {
+      stderr: { data: Uint8Array.from(record.stderr.data), truncated: record.stderr.truncated },
+    } : {}),
+  };
+}
+
 function streamOwnerBinding(
   context: WindowContext,
   pool: BackendPool,
@@ -8304,7 +8661,7 @@ function resolvedExecutionOperationTarget(
 function executionBoundaryError(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   if (
-    /^(Select a target|The selected target|The selected session|The execution read|The execution review|The execution result|The requested execution output|The loot submission|Loot name is invalid|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
+    /^(Select a target|Select an active session|The selected target|The selected session|The execution read|The execution review|The execution result|The requested execution output|The loot submission|Loot name is invalid|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
   ) return boundedText(message, 512);
   return "The execution request failed at the protected main-process boundary";
 }

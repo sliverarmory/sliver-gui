@@ -1,201 +1,150 @@
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import type {
-  ExecutionActionResult,
-  ExecutionResultState,
-} from "../../../shared/execution-contracts";
+import type { ProcessExecutionRecord } from "../../../shared/execution-contracts";
+import type { TargetRef } from "../../../shared/target-contracts";
 
-export const PROCESS_EXECUTION_HISTORY_MAX_ENTRIES = 50;
-export const PROCESS_EXECUTION_HISTORY_MAX_OUTPUT_BYTES = 32 * 1_024 * 1_024;
-
-export interface ProcessExecutionOutput {
-  readonly data: Uint8Array;
-  readonly truncated: boolean;
-}
-
-export interface ProcessExecutionRecord {
-  readonly id: string;
-  readonly startedAt: string;
-  readonly path: string;
-  readonly args: readonly string[];
-  readonly state: "running" | "request-failed" | ExecutionResultState;
-  readonly result?: ExecutionActionResult;
-  readonly error?: string;
-  readonly stdout?: ProcessExecutionOutput;
-  readonly stderr?: ProcessExecutionOutput;
-  readonly outputError?: string;
-}
-
-export type ProcessExecutionPatch = Partial<Pick<ProcessExecutionRecord,
-  "state" | "result" | "error" | "stdout" | "stderr" | "outputError"
->>;
-
-interface HistoryEntry {
-  readonly order: number;
-  readonly record: ProcessExecutionRecord;
-}
-
-interface HistoryBucket {
-  entries: HistoryEntry[];
-  snapshot: readonly ProcessExecutionRecord[];
-  readonly listeners: Set<() => void>;
-}
+export type { ProcessExecutionRecord } from "../../../shared/execution-contracts";
 
 const EMPTY_HISTORY: readonly ProcessExecutionRecord[] = Object.freeze([]);
-const histories = new Map<string, HistoryBucket>();
-let entryCount = 0;
-let outputByteCount = 0;
-let nextOrder = 0;
 
-/** The newest invocation is first. History lives only as long as this renderer. */
-export function useProcessExecutionHistory(key: string | undefined): readonly ProcessExecutionRecord[] {
-  const subscribe = useCallback((listener: () => void) => subscribeToHistory(key, listener), [key]);
-  const getSnapshot = useCallback(() => historySnapshot(key), [key]);
-  return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_HISTORY);
+interface HistoryView {
+  readonly key: string;
+  readonly revision: number;
+  readonly records: readonly ProcessExecutionRecord[];
+  readonly error?: string;
 }
 
-export function addProcessExecution(key: string, record: ProcessExecutionRecord): void {
-  const bucket = historyBucket(key);
-  if (bucket.entries.some((entry) => entry.record.id === record.id)) return;
+/** Reads the main-owned history shared by windows showing this exact session. */
+export function useProcessExecutionHistory(
+  target: TargetRef | undefined,
+  contextIdentity: string,
+): { records: readonly ProcessExecutionRecord[]; error?: string; refresh: () => Promise<void> } {
+  const key = target?.mode === "session"
+    ? JSON.stringify([contextIdentity, target.mode, target.id, target.backendEpoch, target.fingerprint])
+    : undefined;
+  const [view, setView] = useState<HistoryView>();
+  const refreshRef = useRef<() => Promise<void>>(async () => undefined);
+  const refresh = useCallback(() => refreshRef.current(), []);
 
-  const owned = cloneRecord(record);
-  bucket.entries.unshift({ order: ++nextOrder, record: owned });
-  entryCount += 1;
-  outputByteCount += outputBytes(owned);
-  const changed = new Set<HistoryBucket>([bucket]);
-  evictOldestUntilBounded(changed);
-  publish(changed);
-}
+  // Each accepted IPC snapshot owns its bytes. Release the previous snapshot
+  // after React has committed its replacement, including on unmount.
+  useEffect(() => () => clearOutput(view?.records), [view?.records]);
 
-/** A late result for a cleared or evicted invocation is ignored. */
-export function updateProcessExecution(key: string, id: string, patch: ProcessExecutionPatch): void {
-  const bucket = histories.get(key);
-  if (!bucket) return;
-  const index = bucket.entries.findIndex((entry) => entry.record.id === id);
-  if (index < 0) return;
-
-  const previous = bucket.entries[index]!;
-  const owned = cloneRecord({ ...previous.record, ...patch });
-  bucket.entries[index] = { order: previous.order, record: owned };
-  outputByteCount += outputBytes(owned) - outputBytes(previous.record);
-  clearOutput(previous.record);
-  const changed = new Set<HistoryBucket>([bucket]);
-  evictOldestUntilBounded(changed);
-  publish(changed);
-}
-
-/** Pass an ID to remove one invocation, or omit it to clear this target's history. */
-export function clearProcessExecution(key: string, id?: string): void {
-  const bucket = histories.get(key);
-  if (!bucket) return;
-  if (id === undefined) {
-    if (bucket.entries.length === 0) return;
-    for (const entry of bucket.entries) release(entry.record);
-    bucket.entries = [];
-  } else {
-    const index = bucket.entries.findIndex((entry) => entry.record.id === id);
-    if (index < 0) return;
-    const [removed] = bucket.entries.splice(index, 1);
-    release(removed!.record);
-  }
-  publish(new Set([bucket]));
-}
-
-function subscribeToHistory(key: string | undefined, listener: () => void): () => void {
-  if (key === undefined) return () => undefined;
-  const bucket = historyBucket(key);
-  bucket.listeners.add(listener);
-  return () => {
-    bucket.listeners.delete(listener);
-    if (bucket.entries.length === 0 && bucket.listeners.size === 0) histories.delete(key);
-  };
-}
-
-function historySnapshot(key: string | undefined): readonly ProcessExecutionRecord[] {
-  return key === undefined ? EMPTY_HISTORY : histories.get(key)?.snapshot ?? EMPTY_HISTORY;
-}
-
-function historyBucket(key: string): HistoryBucket {
-  let bucket = histories.get(key);
-  if (!bucket) {
-    bucket = { entries: [], snapshot: EMPTY_HISTORY, listeners: new Set() };
-    histories.set(key, bucket);
-  }
-  return bucket;
-}
-
-function evictOldestUntilBounded(changed: Set<HistoryBucket>): void {
-  while (
-    entryCount > PROCESS_EXECUTION_HISTORY_MAX_ENTRIES ||
-    outputByteCount > PROCESS_EXECUTION_HISTORY_MAX_OUTPUT_BYTES
-  ) {
-    let oldestBucket: HistoryBucket | undefined;
-    let oldestOrder = Number.POSITIVE_INFINITY;
-    for (const bucket of histories.values()) {
-      const candidate = bucket.entries.at(-1);
-      if (candidate && candidate.order < oldestOrder) {
-        oldestOrder = candidate.order;
-        oldestBucket = bucket;
-      }
+  useEffect(() => {
+    setView((current) => current?.key === key ? current : undefined);
+    if (!key || !target) {
+      refreshRef.current = async () => undefined;
+      return;
     }
-    if (!oldestBucket) break;
-    const removed = oldestBucket.entries.pop()!;
-    release(removed.record);
-    changed.add(oldestBucket);
-  }
-}
 
-function publish(changed: Set<HistoryBucket>): void {
-  for (const bucket of changed) {
-    bucket.snapshot = bucket.entries.length > 0
-      ? Object.freeze(bucket.entries.map(({ record }) => record))
-      : EMPTY_HISTORY;
-    for (const listener of bucket.listeners) listener();
-    if (bucket.entries.length === 0 && bucket.listeners.size === 0) {
-      for (const [key, candidate] of histories) {
-        if (candidate === bucket) {
-          histories.delete(key);
-          break;
-        }
+    let active = true;
+    let loading = false;
+    let queued = false;
+    let notifiedRevision = 0;
+    let acceptedRevision = view?.key === key ? view.revision : -1;
+    const expected = target;
+    const load = async (): Promise<void> => {
+      if (loading) {
+        queued = true;
+        return;
       }
-    }
+      loading = true;
+      try {
+        do {
+          queued = false;
+          try {
+            const response = await window.sliver.listProcessExecutionHistory();
+            if (!active) {
+              if (response.ok && response.value) clearOutput(response.value.records);
+              return;
+            }
+            if (!response.ok || !response.value) {
+              setView((current) => ({
+                key,
+                revision: current?.key === key ? current.revision : 0,
+                records: current?.key === key ? current.records : EMPTY_HISTORY,
+                error: response.error ?? "Execution history is unavailable",
+              }));
+              continue;
+            }
+            const snapshot = response.value;
+            if (!sameTargetIdentity(snapshot.target, expected)) {
+              clearOutput(snapshot.records);
+              continue;
+            }
+            // A change event can overtake an older list response. The queued
+            // request below will fetch the revision announced by that event.
+            if (snapshot.revision < notifiedRevision || snapshot.revision < acceptedRevision) {
+              clearOutput(snapshot.records);
+              continue;
+            }
+            let ownedRecords: readonly ProcessExecutionRecord[];
+            try {
+              ownedRecords = cloneRecords(snapshot.records);
+            } finally {
+              // Electron already structured-cloned this response into the
+              // renderer. Keep only the copy owned by the mounted view.
+              clearOutput(snapshot.records);
+            }
+            acceptedRevision = snapshot.revision;
+            setView({ key, revision: snapshot.revision, records: ownedRecords });
+          } catch (error) {
+            if (!active) return;
+            setView((current) => ({
+              key,
+              revision: current?.key === key ? current.revision : 0,
+              records: current?.key === key ? current.records : EMPTY_HISTORY,
+              error: error instanceof Error ? error.message : "Execution history is unavailable",
+            }));
+          }
+        } while (active && queued);
+      } finally {
+        loading = false;
+      }
+    };
+    refreshRef.current = load;
+    const unsubscribe = window.sliver.onProcessExecutionHistoryChanged((changedTarget, revision) => {
+      if (!active || !sameTargetIdentity(changedTarget, expected)) return;
+      notifiedRevision = Math.max(notifiedRevision, revision);
+      void load();
+    });
+    void load();
+    return () => {
+      active = false;
+      refreshRef.current = async () => undefined;
+      unsubscribe();
+    };
+  }, [key]);
+
+  if (view && view.key === key) {
+    return { records: view.records, ...(view.error ? { error: view.error } : {}), refresh };
   }
+  return { records: EMPTY_HISTORY, refresh };
 }
 
-function release(record: ProcessExecutionRecord): void {
-  entryCount -= 1;
-  outputByteCount -= outputBytes(record);
-  clearOutput(record);
-}
-
-function outputBytes(record: ProcessExecutionRecord): number {
-  return (record.stdout?.data.byteLength ?? 0) + (record.stderr?.data.byteLength ?? 0);
-}
-
-function clearOutput(record: ProcessExecutionRecord): void {
-  record.stdout?.data.fill(0);
-  record.stderr?.data.fill(0);
-}
-
-function cloneRecord(record: ProcessExecutionRecord): ProcessExecutionRecord {
-  return Object.freeze({
+function cloneRecords(records: readonly ProcessExecutionRecord[]): readonly ProcessExecutionRecord[] {
+  return records.map((record) => ({
     ...record,
-    args: Object.freeze([...record.args]),
-    ...(record.result ? { result: cloneResult(record.result) } : {}),
-    ...(record.stdout ? { stdout: cloneOutput(record.stdout) } : {}),
-    ...(record.stderr ? { stderr: cloneOutput(record.stderr) } : {}),
-  });
+    args: [...record.args],
+    ...(record.result ? { result: {
+      ...record.result,
+      ...(record.result.output ? { output: record.result.output.map((item) => ({ ...item })) } : {}),
+    } } : {}),
+    ...(record.stdout ? { stdout: { ...record.stdout, data: Uint8Array.from(record.stdout.data) } } : {}),
+    ...(record.stderr ? { stderr: { ...record.stderr, data: Uint8Array.from(record.stderr.data) } } : {}),
+  }));
 }
 
-function cloneOutput(output: ProcessExecutionOutput): ProcessExecutionOutput {
-  return Object.freeze({ data: Uint8Array.from(output.data), truncated: output.truncated });
+function clearOutput(records: readonly ProcessExecutionRecord[] | undefined): void {
+  for (const record of records ?? EMPTY_HISTORY) {
+    record.stdout?.data.fill(0);
+    record.stderr?.data.fill(0);
+  }
 }
 
-function cloneResult(result: ExecutionActionResult): ExecutionActionResult {
-  return Object.freeze({
-    ...result,
-    ...(result.output ? {
-      output: result.output.map((stream) => Object.freeze({ ...stream })),
-    } : {}),
-  });
+function sameTargetIdentity(left: TargetRef, right: TargetRef): boolean {
+  return left.mode === right.mode &&
+    left.id === right.id &&
+    left.backendEpoch === right.backendEpoch &&
+    left.fingerprint === right.fingerprint;
 }

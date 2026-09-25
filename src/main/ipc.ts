@@ -24,6 +24,7 @@ import {
   type IpcInvokeResult,
   type ListenerInput,
   type OpenSessionShellWindowInput,
+  type OpenSessionPanelWindowInput,
   type OpenRemoteTextEditorInput,
   type OpenWindowInput,
   type OperationResult,
@@ -61,6 +62,7 @@ import {
 } from "../shared/session-contracts.js";
 import {
   parseAddExecutionOutputToLootInput,
+  parseClearProcessExecutionHistoryInput,
   parseExecuteExecutionPlanInput,
   parseExecutionResultRequest,
   parsePrepareExecutionActionInput,
@@ -154,6 +156,11 @@ export interface SessionShellWindowController {
     source: TrustedWindowIdentity,
     input: OpenSessionShellWindowInput,
   ): MaybePromise<OperationResult>;
+  claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<WindowLaunchContext>>;
+}
+
+export interface SessionPanelWindowController {
+  open(source: TrustedWindowIdentity, input: OpenSessionPanelWindowInput): MaybePromise<OperationResult>;
   claim(destination: TrustedWindowIdentity): MaybePromise<OperationResult<WindowLaunchContext>>;
 }
 
@@ -273,6 +280,8 @@ export type IpcConnectionRegistry = Pick<
   | "readExecutionOutput"
   | "addExecutionOutputToLoot"
   | "saveExecutionResult"
+  | "listProcessExecutionHistory"
+  | "clearProcessExecutionHistory"
   | "attachStream"
 >;
 
@@ -314,6 +323,7 @@ export function registerIpcHandlers(
   managedServerSshCommands?: ManagedServerSshCommandController,
   scripts?: ScriptLibraryController,
   remoteTextEditor?: RemoteTextEditorController,
+  sessionPanelWindows?: SessionPanelWindowController,
 ): void {
   const unavailableScripts = { ok: false as const, error: "The script library is unavailable" };
   handleTrusted(IPC.listScripts, rendererUrl, parseNoArguments, () =>
@@ -538,6 +548,25 @@ export function registerIpcHandlers(
       rendererProcessId,
       rendererFrameToken,
     }) ?? { ok: false, error: "This window is not authorized to host managed shells" },
+  );
+  handleTrusted(
+    IPC.openSessionPanelWindow,
+    rendererUrl,
+    parseOpenSessionPanelWindowArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }, input) => sessionPanelWindows?.open(
+      { contentsId, rendererProcessId, rendererFrameToken },
+      input,
+    ) ?? { ok: false, error: "Dedicated session panel windows are unavailable" },
+  );
+  handleTrusted(
+    IPC.claimSessionPanelWindow,
+    rendererUrl,
+    parseNoArguments,
+    ({ contentsId, rendererProcessId, rendererFrameToken }) => sessionPanelWindows?.claim({
+      contentsId,
+      rendererProcessId,
+      rendererFrameToken,
+    }) ?? { ok: false, error: "This window is not authorized to host a session panel" },
   );
   handleTrusted(
     IPC.openConsoleWindow,
@@ -811,6 +840,12 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.saveExecutionResult, rendererUrl, parseSaveExecutionResultArguments, ({ sender }, input) =>
     registry.saveExecutionResult(sender, input),
+  );
+  handleTrusted(IPC.listProcessExecutionHistory, rendererUrl, parseNoArguments, ({ contentsId }) =>
+    registry.listProcessExecutionHistory(contentsId),
+  );
+  handleTrusted(IPC.clearProcessExecutionHistory, rendererUrl, parseClearProcessExecutionHistoryArguments, ({ contentsId }, input) =>
+    registry.clearProcessExecutionHistory(contentsId, input),
   );
 
   if (registeredStreamAttachListener) {
@@ -1099,6 +1134,22 @@ function parseOpenSessionShellWindowArguments(
     throw invalidArguments("open managed-shell window input");
   }
   return [{ preferredResourceId }];
+}
+
+function parseOpenSessionPanelWindowArguments(
+  args: readonly unknown[],
+): [input: OpenSessionPanelWindowInput] {
+  const value = requireRecord(
+    requireSingleArgument(args, "open session-panel window input"),
+    "open session-panel window input",
+  );
+  requireExactKeys(value, ["panel"], "open session-panel window input");
+  return [{ panel: requireStringLiteralProperty(
+    value,
+    "panel",
+    ["execution", "files", "registry"] as const,
+    "open session-panel window input",
+  ) }];
 }
 
 function parseTargetRefArguments(args: readonly unknown[]): [target: TargetRef] {
@@ -1430,6 +1481,13 @@ function parseExecutionResultRequestArguments(
 ): [input: ReturnType<typeof parseExecutionResultRequest>] {
   requireArgumentCount(args, 1, "execution result request");
   return [parseExecutionResultRequest(args[0])];
+}
+
+function parseClearProcessExecutionHistoryArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseClearProcessExecutionHistoryInput>] {
+  requireArgumentCount(args, 1, "clear process execution history input");
+  return [parseClearProcessExecutionHistoryInput(args[0])];
 }
 
 function parseSaveExecutionResultArguments(

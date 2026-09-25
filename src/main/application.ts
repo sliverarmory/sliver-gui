@@ -30,7 +30,9 @@ import {
 import {
   IPC,
   type OpenSessionShellWindowInput,
+  type OpenSessionPanelWindowInput,
   type OperationResult,
+  type SessionPanelWindowKind,
   type SliverSnapshot,
   type WindowLaunchContext,
 } from "../shared/contracts.js";
@@ -134,6 +136,7 @@ import {
   nativeWindowBackgroundColor,
   networkWindowOptions,
   sessionShellWindowOptions,
+  sessionPanelWindowOptions,
   sshWindowOptions,
   titleBarSymbolColor,
 } from "./window-options.js";
@@ -188,6 +191,7 @@ type NativeWindowSurface =
   | "cloud-deployment"
   | "interaction"
   | "managed-shells"
+  | "session-panel"
   | "console"
   | "network"
   | "script-task-manager"
@@ -251,6 +255,17 @@ interface InteractionWindowRecord {
   claimedBy?: TrustedWindowIdentity;
   generation: number;
   transition: Promise<void>;
+}
+
+interface SessionPanelWindowRecord {
+  readonly key: string;
+  readonly window: BrowserWindow;
+  readonly source: TrustedWindowIdentity;
+  readonly panel: SessionPanelWindowKind;
+  target: TargetRef;
+  connectionIncarnation: number;
+  claimedBy?: TrustedWindowIdentity;
+  openPromise?: Promise<OperationResult>;
 }
 
 interface ConsoleWindowRecord {
@@ -405,6 +420,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
   const interactionWindowsByContentsId = new Map<number, InteractionWindowRecord>();
+  const sessionPanelWindowsByKey = new Map<string, SessionPanelWindowRecord>();
+  const sessionPanelWindowsByContentsId = new Map<number, SessionPanelWindowRecord>();
   const consoleWindowsByKey = new Map<string, ConsoleWindowRecord>();
   const consoleWindowsByContentsId = new Map<number, ConsoleWindowRecord>();
   const networkWindowsByKey = new Map<string, NetworkWindowRecord>();
@@ -491,7 +508,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "network" | "ssh" | "script-task-manager",
+    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "script-task-manager",
   ): Promise<void> {
     const url = new URL(rendererUrl);
     if (surface) url.searchParams.set("surface", surface);
@@ -506,6 +523,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     consoleWindowRecord?: ConsoleWindowRecord,
     explicitSurface?: NativeWindowSurface,
     registerWithConnectionRegistry = true,
+    sessionPanelRecord?: SessionPanelWindowRecord,
   ): void {
     const contentsId = window.webContents.id;
     const surface: NativeWindowSurface = explicitSurface ?? (
@@ -568,6 +586,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       if (commandPaletteDisposition !== "request") return;
       const sourceContentsId = sessionShellRecord?.source.contentsId ??
         interactionWindowRecord?.source.contentsId ??
+        sessionPanelRecord?.source.contentsId ??
         consoleWindowRecord?.source.contentsId;
       const paletteWindow = sourceContentsId === undefined
         ? window
@@ -642,6 +661,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         }
         if (surface === "workspace" && completedInitialLoad) retireScriptHost(contentsId);
         if (sessionShellRecord && completedInitialLoad) retireSessionShellWindow(sessionShellRecord);
+        if (sessionPanelRecord && completedInitialLoad) retireSessionPanelWindow(sessionPanelRecord);
         if (interactionWindowRecord && completedInitialLoad) resetInteractionWindowClaim(interactionWindowRecord);
         if (consoleWindowRecord && completedInitialLoad) retireConsoleWindow(consoleWindowRecord, "navigation");
       }
@@ -652,12 +672,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         void registry.closeWindowStreams(contentsId, "renderer-gone").catch(() => undefined);
       }
       if (sessionShellRecord) retireSessionShellWindow(sessionShellRecord);
+      if (sessionPanelRecord) retireSessionPanelWindow(sessionPanelRecord);
       if (interactionWindowRecord) resetInteractionWindowClaim(interactionWindowRecord);
       if (consoleWindowRecord) retireConsoleWindow(consoleWindowRecord, "renderer-gone");
       retireFailedCloudDeploymentWindow();
     });
     window.webContents.on("did-fail-load", (_event, _errorCode, _errorDescription, _url, isMainFrame) => {
       if (sessionShellRecord && isMainFrame) retireSessionShellWindow(sessionShellRecord);
+      if (sessionPanelRecord && isMainFrame) retireSessionPanelWindow(sessionPanelRecord);
       if (interactionWindowRecord && isMainFrame) resetInteractionWindowClaim(interactionWindowRecord);
       if (consoleWindowRecord && isMainFrame) retireConsoleWindow(consoleWindowRecord, "renderer-gone");
       if (isMainFrame) retireFailedCloudDeploymentWindow();
@@ -730,6 +752,12 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       }
       if (interactionWindowRecord && interactionWindowsByContentsId.get(contentsId) === interactionWindowRecord) {
         interactionWindowsByContentsId.delete(contentsId);
+      }
+      if (sessionPanelRecord) {
+        sessionPanelWindowsByContentsId.delete(contentsId);
+        if (sessionPanelWindowsByKey.get(sessionPanelRecord.key) === sessionPanelRecord) {
+          sessionPanelWindowsByKey.delete(sessionPanelRecord.key);
+        }
       }
       if (consoleWindowRecord) {
         consoleWindowsByContentsId.delete(contentsId);
@@ -1504,6 +1532,160 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       if (window && !window.isDestroyed()) window.destroy();
       return { ok: false, error: applicationErrorMessage(error, "The interaction could not be popped out") };
     }
+  }
+
+  async function openSessionPanelWindow(
+    source: TrustedWindowIdentity,
+    input: OpenSessionPanelWindowInput,
+  ): Promise<OperationResult> {
+    let created: SessionPanelWindowRecord | undefined;
+    try {
+      const sourceWindow = windowsByContentsId.get(source.contentsId);
+      if (!sourceWindow || sourceWindow.isDestroyed() || !sameWindowIdentity(source, identityForWindow(sourceWindow))) {
+        throw new Error("The source window changed before the panel could be popped out");
+      }
+      const sourceSurface = nativeWindowSurfaces.get(sourceWindow);
+      if (sourceSurface !== "workspace" && sourceSurface !== "interaction") {
+        throw new Error("This window cannot pop out another session panel");
+      }
+      const sourceSnapshot = registry.snapshot(source.contentsId);
+      const target = sourceSnapshot.targetContext.activeTarget;
+      const summary = sourceSnapshot.targetContext.activeTargetSummary;
+      if (
+        target?.mode !== "session" || summary?.mode !== "session" ||
+        summary.id !== target.id || summary.liveness !== "active" ||
+        sourceSnapshot.connection.epoch !== target.backendEpoch
+      ) throw new Error("Select an active session before popping out a panel");
+      if (input.panel === "registry" && !summary.os.toLocaleLowerCase().includes("windows")) {
+        throw new Error("Registry is available only for Windows sessions");
+      }
+
+      const incarnation = sourceSnapshot.connection.incarnation ?? 0;
+      const key = `${sessionShellWindowKey(source.contentsId, target)}:${incarnation}:${input.panel}`;
+      const existing = sessionPanelWindowsByKey.get(key);
+      if (existing && !existing.window.isDestroyed()) {
+        const result = await existing.openPromise;
+        if (!result?.ok) return result ?? { ok: false, error: "The session panel is still opening" };
+        if (sessionPanelWindowsByKey.get(key) !== existing || existing.window.isDestroyed()) {
+          return { ok: false, error: "The session panel closed while it was opening" };
+        }
+        if (existing.window.isMinimized()) existing.window.restore();
+        existing.window.show();
+        existing.window.focus();
+        return { ok: true };
+      }
+
+      const window = new BrowserWindow(sessionPanelWindowOptions(
+        preloadPath,
+        process.platform,
+        applicationIcons.getIconPath(),
+        nativeTheme.shouldUseDarkColors,
+      ));
+      const record: SessionPanelWindowRecord = {
+        key,
+        window,
+        source,
+        panel: input.panel,
+        target,
+        connectionIncarnation: incarnation,
+      };
+      created = record;
+      sessionPanelWindowsByKey.set(key, record);
+      sessionPanelWindowsByContentsId.set(window.webContents.id, record);
+      trackWindow(window, source.contentsId, undefined, undefined, undefined, "session-panel", true, record);
+      const opening = (async (): Promise<OperationResult> => {
+        try {
+          const selected = await registry.selectTarget(window.webContents.id, target);
+          if (sessionPanelWindowsByContentsId.get(window.webContents.id) !== record || window.isDestroyed()) {
+            throw new Error("The session panel closed while its target was being selected");
+          }
+          if (!selected.ok || !selected.value) {
+            throw new Error(selected.error ?? "The session could not be selected in the panel window");
+          }
+          const currentSource = registry.snapshot(source.contentsId);
+          const currentSourceTarget = currentSource.targetContext.activeTarget;
+          if (
+            !sameWindowIdentity(source, identityForWindow(sourceWindow)) ||
+            !currentSourceTarget || !sameTargetIdentity(currentSourceTarget, target) ||
+            (currentSource.connection.incarnation ?? 0) !== incarnation
+          ) throw new Error("The source session changed before the panel window was ready");
+          const selectedTarget = selected.value.targetContext.activeTarget;
+          const selectedSummary = selected.value.targetContext.activeTargetSummary;
+          if (
+            !selectedTarget || !sameTargetIdentity(selectedTarget, target) ||
+            selectedSummary?.mode !== "session" || selectedSummary.id !== target.id ||
+            selectedSummary.liveness !== "active" ||
+            (selected.value.connection.incarnation ?? 0) !== incarnation ||
+            (input.panel === "registry" && !selectedSummary.os.toLocaleLowerCase().includes("windows"))
+          ) throw new Error("The session changed before the panel window was ready");
+          record.target = selectedTarget;
+          window.setTitle(`${sessionPanelWindowTitle(input.panel)} — ${selectedSummary.name || selectedSummary.hostname || selectedSummary.id}`);
+          await loadRenderer(window, "session-panel");
+          if (sessionPanelWindowsByContentsId.get(window.webContents.id) !== record || window.isDestroyed()) {
+            throw new Error("The session panel closed while its renderer was loading");
+          }
+          return { ok: true };
+        } catch (error) {
+          retireSessionPanelWindow(record);
+          return { ok: false, error: applicationErrorMessage(error, "The session panel could not be opened") };
+        }
+      })();
+      record.openPromise = opening;
+      return await opening;
+    } catch (error) {
+      if (created) retireSessionPanelWindow(created);
+      return { ok: false, error: applicationErrorMessage(error, "The session panel could not be popped out") };
+    }
+  }
+
+  async function claimSessionPanelWindow(
+    destination: TrustedWindowIdentity,
+  ): Promise<OperationResult<WindowLaunchContext>> {
+    const record = sessionPanelWindowsByContentsId.get(destination.contentsId);
+    if (
+      !record || record.window.isDestroyed() ||
+      nativeWindowSurfaces.get(record.window) !== "session-panel" ||
+      !sameWindowIdentity(destination, identityForWindow(record.window)) ||
+      !isSessionPanelSurfaceUrl(record.window.webContents.getURL(), rendererUrl)
+    ) return { ok: false, error: "This window is not authorized to host a session panel" };
+    if (record.claimedBy && !sameWindowIdentity(record.claimedBy, destination)) {
+      return { ok: false, error: "The session panel authority belongs to another renderer frame" };
+    }
+    const currentSnapshot = registry.snapshot(destination.contentsId);
+    if ((currentSnapshot.connection.incarnation ?? 0) !== record.connectionIncarnation) {
+      return { ok: false, error: "The session panel connection changed before its authority could be claimed" };
+    }
+    const freshTarget = freshTargetIdentity(currentSnapshot, record.target);
+    if (!freshTarget) return { ok: false, error: "The session is no longer available on this backend" };
+    const selected = await registry.selectTarget(destination.contentsId, freshTarget);
+    if (
+      sessionPanelWindowsByContentsId.get(destination.contentsId) !== record ||
+      record.window.isDestroyed() ||
+      !sameWindowIdentity(destination, identityForWindow(record.window)) ||
+      !isSessionPanelSurfaceUrl(record.window.webContents.getURL(), rendererUrl)
+    ) return { ok: false, error: "The session panel changed while its authority was being claimed" };
+    if (!selected.ok || !selected.value) return selected;
+    const active = selected.value.targetContext.activeTarget;
+    const summary = selected.value.targetContext.activeTargetSummary;
+    if (
+      !active || !sameTargetIdentity(active, record.target) ||
+      summary?.mode !== "session" || summary.id !== record.target.id ||
+      summary.liveness !== "active" ||
+      (selected.value.connection.incarnation ?? 0) !== record.connectionIncarnation ||
+      (record.panel === "registry" && !summary.os.toLocaleLowerCase().includes("windows"))
+    ) return { ok: false, error: "The session changed while the panel was being claimed" };
+    record.target = active;
+    record.claimedBy = destination;
+    return {
+      ok: true,
+      value: Object.freeze({ kind: "session-panel" as const, panel: record.panel, snapshot: selected.value, target: active }),
+    };
+  }
+
+  function retireSessionPanelWindow(record: SessionPanelWindowRecord): void {
+    sessionPanelWindowsByContentsId.delete(record.window.webContents.id);
+    if (sessionPanelWindowsByKey.get(record.key) === record) sessionPanelWindowsByKey.delete(record.key);
+    if (!record.window.isDestroyed()) record.window.destroy();
   }
 
   async function claimInteractionWindow(
@@ -3077,12 +3259,20 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     {
       open: async (source, remotePath) => {
         const owner = windowsByContentsId.get(source.id);
+        const panel = sessionPanelWindowsByContentsId.get(source.id);
+        const claimedFilesPanel = owner && panel && panel.window === owner && panel.panel === "files" &&
+          panel.claimedBy && sameWindowIdentity(panel.claimedBy, identityForWindow(owner)) &&
+          isSessionPanelSurfaceUrl(owner.webContents.getURL(), rendererUrl);
         if (!owner || owner.webContents !== source || owner.isDestroyed() ||
-          nativeWindowSurfaces.get(owner) !== "workspace" || !textEditorWindows) {
+          (nativeWindowSurfaces.get(owner) !== "workspace" && !claimedFilesPanel) || !textEditorWindows) {
           throw new Error("This window cannot open a remote text editor");
         }
         await textEditorWindows.openRemote(source, remotePath);
       },
+    },
+    {
+      open: openSessionPanelWindow,
+      claim: claimSessionPanelWindow,
     },
   );
   registerScriptTaskManagerIpc({
@@ -3305,6 +3495,14 @@ function sessionShellWindowKey(sourceContentsId: number, target: TargetRef): str
   return `${sourceContentsId}:${target.backendEpoch}:${target.id.length}:${target.id}:${target.fingerprint}`;
 }
 
+function sessionPanelWindowTitle(panel: SessionPanelWindowKind): string {
+  switch (panel) {
+    case "execution": return "Execution";
+    case "files": return "Files";
+    case "registry": return "Registry Editor";
+  }
+}
+
 function sameTargetIdentity(left: TargetRef, right: TargetRef): boolean {
   return left.mode === right.mode &&
     left.id === right.id &&
@@ -3341,6 +3539,17 @@ function isInteractionSurfaceUrl(candidateUrl: string, rendererUrl: string): boo
     const candidate = new URL(candidateUrl);
     return isTrustedRendererUrl(candidate.href, rendererUrl) &&
       candidate.search === "?surface=interaction" &&
+      candidate.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+function isSessionPanelSurfaceUrl(candidateUrl: string, rendererUrl: string): boolean {
+  try {
+    const candidate = new URL(candidateUrl);
+    return isTrustedRendererUrl(candidate.href, rendererUrl) &&
+      candidate.search === "?surface=session-panel" &&
       candidate.hash === "";
   } catch {
     return false;
@@ -3484,7 +3693,11 @@ function applicationErrorMessage(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) return fallback;
   if (
     error.message === "The source window changed before managed shells could be popped out" ||
-    error.message === "Select an active session before popping out managed shells"
+    error.message === "Select an active session before popping out managed shells" ||
+    error.message === "The source window changed before the panel could be popped out" ||
+    error.message === "Select an active session before popping out a panel" ||
+    error.message === "This window cannot pop out another session panel" ||
+    error.message === "Registry is available only for Windows sessions"
   ) return error.message;
   return fallback;
 }

@@ -1,14 +1,16 @@
-import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { SliverDesktopAPI } from "../../../shared/contracts";
+import type { OperationResult, SliverDesktopAPI } from "../../../shared/contracts";
 import type {
   ExecutionActionPlan,
   ExecutionActionResult,
   ExecutionCapability,
   ExecutionCatalog,
   ExecutionOperationId,
+  ProcessExecutionHistorySnapshot,
+  ProcessExecutionRecord,
 } from "../../../shared/execution-contracts";
 import { EXECUTION_OPERATION_IDS } from "../../../shared/execution-contracts";
 import type {
@@ -17,7 +19,6 @@ import type {
   TargetRef,
   TargetSummary,
 } from "../../../shared/target-contracts";
-import { clearProcessExecution, useProcessExecutionHistory } from "./process-execution-history";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 vi.mock("../components/ExecutionOutputTerminal", () => ({
@@ -55,13 +56,6 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
-  clearProcessExecution(JSON.stringify([
-    backend.configId,
-    backend.epoch,
-    "session",
-    target.id,
-    targetRef.fingerprint,
-  ]));
 });
 
 const target: SessionSummary = {
@@ -207,6 +201,10 @@ function deferred<T>() {
 
 function installAPI(executionCatalog: ExecutionCatalog) {
   let beaconTasksInvalidatedListener: ((target: TargetRef) => void) | undefined;
+  let processHistoryTarget = executionCatalog.targetRef;
+  let processHistoryRevision = 0;
+  let processHistory: ProcessExecutionRecord[] = [];
+  const processHistoryListeners = new Set<(target: TargetRef, revision: number) => void>();
   const api = {
     listExecutionCatalog: vi.fn().mockResolvedValue({ ok: true, value: executionCatalog }),
     runExecutionRead: vi.fn().mockResolvedValue({ ok: false, error: "No read configured" }),
@@ -215,6 +213,20 @@ function installAPI(executionCatalog: ExecutionCatalog) {
     discardExecutionPlan: vi.fn().mockResolvedValue({ ok: true }),
     getExecutionResult: vi.fn().mockResolvedValue({ ok: false, error: "No result configured" }),
     readExecutionOutput: vi.fn().mockResolvedValue({ ok: false, error: "No output configured" }),
+    listProcessExecutionHistory: vi.fn<() => Promise<OperationResult<ProcessExecutionHistorySnapshot>>>(async () => ({
+      ok: true as const,
+      value: { target: processHistoryTarget, revision: processHistoryRevision, records: ipcProcessRecords(processHistory) },
+    })),
+    clearProcessExecutionHistory: vi.fn(async ({ id }: { id?: string }) => {
+      processHistory = id ? processHistory.filter((record) => record.id !== id) : [];
+      processHistoryRevision += 1;
+      for (const listener of processHistoryListeners) listener(processHistoryTarget, processHistoryRevision);
+      return { ok: true as const };
+    }),
+    onProcessExecutionHistoryChanged: vi.fn((listener: (target: TargetRef, revision: number) => void) => {
+      processHistoryListeners.add(listener);
+      return () => { processHistoryListeners.delete(listener); };
+    }),
     saveExecutionResult: vi.fn().mockResolvedValue({ ok: false, error: "No save configured" }),
     addExecutionOutputToLoot: vi.fn().mockResolvedValue({ ok: false, error: "No loot configured" }),
     onBeaconTasksInvalidated: vi.fn((listener: (target: TargetRef) => void) => {
@@ -226,6 +238,12 @@ function installAPI(executionCatalog: ExecutionCatalog) {
     emitBeaconTasksInvalidated: (invalidatedTarget: TargetRef) => {
       beaconTasksInvalidatedListener?.(invalidatedTarget);
     },
+    publishProcessHistory: (records: ProcessExecutionRecord[], changedTarget = processHistoryTarget) => {
+      processHistory = records;
+      processHistoryTarget = changedTarget;
+      processHistoryRevision += 1;
+      for (const listener of processHistoryListeners) listener(processHistoryTarget, processHistoryRevision);
+    },
   };
   Object.defineProperty(window, "sliver", {
     configurable: true,
@@ -234,7 +252,71 @@ function installAPI(executionCatalog: ExecutionCatalog) {
   return api;
 }
 
+function ipcProcessRecords(records: readonly ProcessExecutionRecord[]): ProcessExecutionRecord[] {
+  return records.map((record) => ({
+    ...record,
+    ...(record.stdout ? { stdout: { ...record.stdout, data: Uint8Array.from(record.stdout.data) } } : {}),
+    ...(record.stderr ? { stderr: { ...record.stderr, data: Uint8Array.from(record.stderr.data) } } : {}),
+  }));
+}
+
+function processRecord(
+  id: string,
+  path: string,
+  result?: ExecutionActionResult,
+  stdout?: string,
+  stderr?: string,
+): ProcessExecutionRecord {
+  return {
+    id,
+    startedAt: "2026-09-25T08:12:53.000Z",
+    path,
+    args: [],
+    state: result?.state ?? "running",
+    ...(result ? { result } : {}),
+    ...(stdout ? { stdout: { data: new TextEncoder().encode(stdout), truncated: false } } : {}),
+    ...(stderr ? { stderr: { data: new TextEncoder().encode(stderr), truncated: false } } : {}),
+  };
+}
+
 describe("TargetExecutionWorkbench", () => {
+  it("opens a separate Execution view once per request and hides its pop-out control in dedicated windows", async () => {
+    const user = userEvent.setup();
+    const opening = deferred<void>();
+    const onPopOut = vi.fn(() => opening.promise);
+    installAPI(catalog([capability("execution.process")]));
+
+    const { rerender } = render(
+      <TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" onPopOut={onPopOut} />,
+    );
+    const trigger = await screen.findByRole("button", { name: "Pop out execution" });
+    await user.click(trigger);
+    expect(onPopOut).toHaveBeenCalledOnce();
+    expect(trigger).toHaveAttribute("data-pending");
+    await user.click(trigger);
+    expect(onPopOut).toHaveBeenCalledOnce();
+
+    opening.resolve(undefined);
+    await waitFor(() => expect(trigger).not.toHaveAttribute("data-pending"));
+    rerender(
+      <TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" onPopOut={onPopOut} presentation="dedicated" />,
+    );
+    expect(screen.queryByRole("button", { name: "Pop out execution" })).not.toBeInTheDocument();
+  });
+
+  it("shows a failed Execution pop-out without replacing the workbench", async () => {
+    const user = userEvent.setup();
+    const onPopOut = vi.fn().mockRejectedValue(new Error("The session selection changed"));
+    installAPI(catalog([capability("execution.process")]));
+
+    render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" onPopOut={onPopOut} />);
+    await user.click(await screen.findByRole("button", { name: "Pop out execution" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The session selection changed");
+    expect(screen.getByRole("region", { name: "Execution operations" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Run a process" })).toBeInTheDocument();
+  });
+
   it("keeps the execution pane visible while a revised reference is validated", async () => {
     const user = userEvent.setup();
     const revisedRef = { ...targetRef, domainRevision: targetRef.domainRevision + 1 };
@@ -278,6 +360,35 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("retries a transient history failure when the target catalog recovers", async () => {
+    const revisedRef = { ...targetRef, domainRevision: targetRef.domainRevision + 1 };
+    const process = capability("execution.process");
+    const api = installAPI(catalog([process]));
+    let historyAvailable = false;
+    const retained = processRecord(
+      "recovered-run",
+      "/usr/bin/id",
+      completedProcessResult("recovered-run", 4242, 0, "recovered output"),
+      "recovered output",
+    );
+    api.listProcessExecutionHistory.mockImplementation(async () => historyAvailable
+      ? { ok: true, value: { target: revisedRef, revision: 1, records: ipcProcessRecords([retained]) } }
+      : { ok: false, error: "Target domain is refreshing" });
+    api.listExecutionCatalog
+      .mockResolvedValueOnce({ ok: true, value: catalog([process]) })
+      .mockResolvedValueOnce({ ok: true, value: catalog([process], target, revisedRef) });
+
+    const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="same-session" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Target domain is refreshing");
+    historyAvailable = true;
+    rerender(<TargetExecutionWorkbench expectedTarget={revisedRef} targetIdentity="same-session" />);
+
+    expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("recovered output");
+    expect(screen.queryByText("Target domain is refreshing")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("navigation", { name: "Process execution history" })).getByRole("row", { name: /\/usr\/bin\/id/u })).toBeInTheDocument();
+    expect(api.listProcessExecutionHistory).toHaveBeenCalledTimes(3);
+  });
+
   it("uses the main catalog as authority, preserves unavailable reasons, and omits structural mismatches", async () => {
     const user = userEvent.setup();
     const api = installAPI(catalog([
@@ -299,7 +410,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(executionOperations).queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
     expect(within(executionOperations).queryByText("Configure one typed operation, review the exact target and native files, then execute a short-lived main-owned plan.")).not.toBeInTheDocument();
     expect(within(executionOperations).queryByText("session", { exact: true })).not.toBeInTheDocument();
-    expect(within(executionOperations).getByText("linux/amd64")).toBeInTheDocument();
+    expect(within(executionOperations).queryByText("linux/amd64")).not.toBeInTheDocument();
     expect(api.listExecutionCatalog).toHaveBeenCalledOnce();
     expect(screen.getByRole("radio", { name: "Process" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Payloads" })).toBeInTheDocument();
@@ -483,10 +594,6 @@ describe("TargetExecutionWorkbench", () => {
       }),
     });
     api.executeExecutionPlan.mockReturnValue(pendingExecution.promise);
-    api.readExecutionOutput.mockResolvedValue({
-      ok: true,
-      value: { data: new TextEncoder().encode("tasklist completed\n"), truncated: false },
-    });
 
     const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="windows-process-revision" />);
     const form = await screen.findByRole("region", { name: "Run a process" });
@@ -496,8 +603,9 @@ describe("TargetExecutionWorkbench", () => {
     await user.click(within(form).getByRole("button", { name: "Run" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: "plan-execution.process" }));
     expect(api.prepareExecutionAction.mock.calls[0]?.[0].draft).toMatchObject({ path: "C:\\Windows\\System32\\tasklist.exe" });
+    act(() => api.publishProcessHistory([processRecord("windows-tasklist", "C:\\Windows\\System32\\tasklist.exe")]));
     const history = screen.getByRole("navigation", { name: "Process execution history" });
-    expect(within(history).getByRole("row", { name: /tasklist\.exe/u })).toHaveTextContent("Running");
+    await waitFor(() => expect(within(history).getByRole("row", { name: /tasklist\.exe/u })).toHaveTextContent("Running"));
 
     rerender(<TargetExecutionWorkbench expectedTarget={revisedRef} targetIdentity="windows-process-revision" />);
     await waitFor(() => expect(api.listExecutionCatalog).toHaveBeenCalledTimes(2));
@@ -511,9 +619,14 @@ describe("TargetExecutionWorkbench", () => {
       pendingExecution.resolve({ ok: true, value: completedProcessResult("windows-tasklist", 932, 0, "tasklist completed\n") });
       await pendingExecution.promise;
     });
+    act(() => api.publishProcessHistory([processRecord(
+      "windows-tasklist",
+      "C:\\Windows\\System32\\tasklist.exe",
+      completedProcessResult("windows-tasklist", 932, 0, "tasklist completed\n"),
+      "tasklist completed\n",
+    )]));
 
-    await waitFor(() => expect(api.readExecutionOutput).toHaveBeenCalledExactlyOnceWith({ requestId: "windows-tasklist", stream: "stdout" }));
-    expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("tasklist completed");
+    expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("tasklist completed");
     expect(within(history).getByRole("row", { name: /tasklist\.exe/u })).toHaveTextContent("Completed");
     const details = screen.getByLabelText("Execution details");
     expect(within(details).getByText("0")).toBeInTheDocument();
@@ -533,21 +646,15 @@ describe("TargetExecutionWorkbench", () => {
       .mockResolvedValueOnce({ ok: true, value: catalog([process], target, changedRef) });
     api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan("execution.process") });
     api.executeExecutionPlan.mockReturnValue(pendingExecution.promise);
-    const originalHistoryKey = JSON.stringify([
-      backend.configId,
-      backend.epoch,
-      "session",
-      target.id,
-      targetRef.fingerprint,
-    ]);
-    const originalHistory = renderHook(() => useProcessExecutionHistory(originalHistoryKey));
 
     const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-before-change" />);
     const form = await screen.findByRole("region", { name: "Run a process" });
     await user.click(within(form).getByRole("button", { name: "Run" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: "plan-execution.process" }));
-    expect(originalHistory.result.current[0]?.state).toBe("running");
+    act(() => api.publishProcessHistory([processRecord("late-original-target", "/bin/sh")]));
+    await waitFor(() => expect(screen.getByRole("navigation", { name: "Process execution history" })).toHaveTextContent("/bin/sh"));
 
+    act(() => api.publishProcessHistory([], changedRef));
     rerender(<TargetExecutionWorkbench expectedTarget={changedRef} targetIdentity="target-after-change" />);
     await waitFor(() => expect(api.listExecutionCatalog).toHaveBeenCalledTimes(2));
     await act(async () => {
@@ -555,8 +662,6 @@ describe("TargetExecutionWorkbench", () => {
       await pendingExecution.promise;
     });
 
-    await waitFor(() => expect(originalHistory.result.current[0]?.state).toBe("outcome-unknown"));
-    expect(originalHistory.result.current[0]?.error).toBe("The selected target changed before this result could be associated with it.");
     expect(api.readExecutionOutput).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("Execution output transcript")).not.toBeInTheDocument();
     expect(within(screen.getByRole("navigation", { name: "Process execution history" })).getAllByRole("row")).toHaveLength(1);
@@ -573,13 +678,6 @@ describe("TargetExecutionWorkbench", () => {
     api.executeExecutionPlan
       .mockResolvedValueOnce({ ok: true, value: completedProcessResult("process-first", 101, 7, firstOutput) })
       .mockResolvedValueOnce({ ok: true, value: completedProcessResult("process-second", 102, 0, secondOutput) });
-    api.readExecutionOutput.mockImplementation(async ({ requestId }: { requestId: string }) => ({
-      ok: true,
-      value: {
-        data: new TextEncoder().encode(requestId === "process-first" ? firstOutput : secondOutput),
-        truncated: false,
-      },
-    }));
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-history" />);
     let processForm = await screen.findByRole("region", { name: "Run a process" });
@@ -593,7 +691,10 @@ describe("TargetExecutionWorkbench", () => {
     await user.type(executable, "/usr/bin/first");
     await user.click(within(processForm).getByRole("button", { name: "Run" }));
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
-    await waitFor(() => expect(api.readExecutionOutput).toHaveBeenCalledWith({ requestId: "process-first", stream: "stdout" }));
+    await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledTimes(1));
+    act(() => api.publishProcessHistory([processRecord(
+      "process-first", "/usr/bin/first", completedProcessResult("process-first", 101, 7, firstOutput), firstOutput,
+    )]));
     expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("first process output");
     expect(screen.queryByRole("region", { name: "Run a process" })).not.toBeInTheDocument();
     expect(within(history).getAllByRole("row")).toHaveLength(2);
@@ -615,7 +716,11 @@ describe("TargetExecutionWorkbench", () => {
     await user.type(executable, "/usr/bin/second");
     await user.click(within(processForm).getByRole("button", { name: "Run" }));
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
-    await waitFor(() => expect(api.readExecutionOutput).toHaveBeenCalledWith({ requestId: "process-second", stream: "stdout" }));
+    await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledTimes(2));
+    act(() => api.publishProcessHistory([
+      processRecord("process-second", "/usr/bin/second", completedProcessResult("process-second", 102, 0, secondOutput), secondOutput),
+      processRecord("process-first", "/usr/bin/first", completedProcessResult("process-first", 101, 7, firstOutput), firstOutput),
+    ]));
     expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("second process output");
     expect(screen.queryByRole("region", { name: "Run a process" })).not.toBeInTheDocument();
     expect(within(history).getAllByRole("row")).toHaveLength(3);
@@ -634,11 +739,11 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("second process output");
 
     await user.click(screen.getByRole("button", { name: "Clear selected" }));
-    expect(within(history).getAllByRole("row")).toHaveLength(2);
+    await waitFor(() => expect(within(history).getAllByRole("row")).toHaveLength(2));
     expect(within(history).getAllByRole("row")[1]).toHaveTextContent("/usr/bin/first");
     expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("first process output");
     await user.click(screen.getByRole("button", { name: "Clear history" }));
-    expect(within(history).getAllByRole("row")).toHaveLength(1);
+    await waitFor(() => expect(within(history).getAllByRole("row")).toHaveLength(1));
     expect(within(history).getByRole("row", { name: "New Execution" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("region", { name: "Run a process" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Execution output transcript")).not.toBeInTheDocument();
@@ -659,20 +764,14 @@ describe("TargetExecutionWorkbench", () => {
     };
     api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan("execution.process") });
     api.executeExecutionPlan.mockResolvedValue({ ok: true, value: result });
-    api.readExecutionOutput.mockImplementation(async ({ stream }: { stream: "stdout" | "stderr" }) => ({
-      ok: true,
-      value: {
-        data: new TextEncoder().encode(stream === "stderr" ? stderr : stdout),
-        truncated: false,
-      },
-    }));
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-streams" />);
     const form = await screen.findByRole("region", { name: "Run a process" });
     await user.click(within(form).getByRole("button", { name: "Run" }));
-    await waitFor(() => expect(api.readExecutionOutput).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledOnce());
+    act(() => api.publishProcessHistory([processRecord("process-streams", "/bin/sh", result, stdout, stderr)]));
 
-    const streams = screen.getByRole("radiogroup", { name: "Captured output stream" });
+    const streams = await screen.findByRole("radiogroup", { name: "Captured output stream" });
     const stdoutChoice = within(streams).getByRole("radio", { name: "Stdout" });
     const stderrChoice = within(streams).getByRole("radio", { name: "Stderr" });
     expect(stdoutChoice).toBeChecked();
@@ -687,17 +786,13 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("captured stdout");
   });
 
-  it("keeps the session's in-memory process history after the workbench remounts", async () => {
+  it("hydrates the session's main-owned process history after the workbench remounts", async () => {
     const user = userEvent.setup();
     const api = installAPI(catalog([capability("execution.process")]));
     api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan("execution.process") });
     api.executeExecutionPlan.mockResolvedValue({
       ok: true,
       value: completedProcessResult("process-remount", 515, 3, "retained output"),
-    });
-    api.readExecutionOutput.mockResolvedValue({
-      ok: true,
-      value: { data: new TextEncoder().encode("retained output"), truncated: false },
     });
 
     const mounted = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-remount" />);
@@ -706,6 +801,10 @@ describe("TargetExecutionWorkbench", () => {
     await user.clear(executable);
     await user.type(executable, "/usr/bin/retained");
     await user.click(within(processForm).getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledOnce());
+    act(() => api.publishProcessHistory([processRecord(
+      "process-remount", "/usr/bin/retained", completedProcessResult("process-remount", 515, 3, "retained output"), "retained output",
+    )]));
     expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("retained output");
     mounted.unmount();
 
@@ -717,7 +816,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.queryByRole("region", { name: "Run a process" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("retained output");
     expect(within(screen.getByLabelText("Execution details")).getByText("3")).toBeInTheDocument();
-    expect(api.readExecutionOutput).toHaveBeenCalledExactlyOnceWith({ requestId: "process-remount", stream: "stdout" });
+    expect(api.readExecutionOutput).not.toHaveBeenCalled();
   });
 
   it("saves and adds the selected invocation's retained stdout to Loot", async () => {
@@ -727,10 +826,6 @@ describe("TargetExecutionWorkbench", () => {
     api.executeExecutionPlan.mockResolvedValue({
       ok: true,
       value: completedProcessResult("process-loot", 616, 0, "captured output"),
-    });
-    api.readExecutionOutput.mockResolvedValue({
-      ok: true,
-      value: { data: new TextEncoder().encode("captured output"), truncated: false },
     });
     api.saveExecutionResult.mockResolvedValue({ ok: true, value: { saved: true, fileName: "output.txt" } });
     api.addExecutionOutputToLoot.mockResolvedValue({
@@ -751,6 +846,10 @@ describe("TargetExecutionWorkbench", () => {
     await user.clear(executable);
     await user.type(executable, "/usr/bin/printf");
     await user.click(within(processForm).getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledOnce());
+    act(() => api.publishProcessHistory([processRecord(
+      "process-loot", "/usr/bin/printf", completedProcessResult("process-loot", 616, 0, "captured output"), "captured output",
+    )]));
     await screen.findByLabelText("Execution output transcript");
 
     await user.click(screen.getByRole("button", { name: "Save stdout" }));

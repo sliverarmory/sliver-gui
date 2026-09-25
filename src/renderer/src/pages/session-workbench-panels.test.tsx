@@ -784,6 +784,43 @@ describe("session workbench panels", () => {
     expect(screen.getByRole("switch", { name: "Auto-refresh" })).not.toBeChecked();
   });
 
+  it("pops the file browser into a dedicated window without offering another pop-out there", async () => {
+    const user = userEvent.setup();
+    const opening = deferred<void>();
+    const onPopOutPanel = vi.fn(() => opening.promise);
+    installAPI((input) => {
+      if (input.operationId === "session.filesystem.pwd") return workbench(input.operationId, { path: "/opt" });
+      if (input.operationId === "session.filesystem.ls") return workbench(input.operationId, {
+        path: "/opt", exists: true, items: [], page: { limit: 100, total: 0, truncated: false },
+      });
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const context = panelContext();
+    const rendered = render(<SessionFilesPanel {...context} onPopOutPanel={onPopOutPanel} />);
+    const button = screen.getByRole("button", { name: "Pop out file browser" });
+    const refresh = screen.getByRole("button", { name: "Refresh directory" });
+    const browserTab = screen.getByRole("radio", { name: "Browser" });
+    const mountsTab = screen.getByRole("radio", { name: "Mounts" });
+    expect(refresh.compareDocumentPosition(browserTab) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(mountsTab.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.click(button);
+    expect(onPopOutPanel).toHaveBeenCalledExactlyOnceWith("files");
+    expect(button).toHaveAttribute("data-pending", "true");
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    await user.click(button);
+    expect(onPopOutPanel).toHaveBeenCalledTimes(1);
+    await act(async () => { opening.resolve(); await opening.promise; });
+    await waitFor(() => expect(button).not.toHaveAttribute("data-pending"));
+
+    rendered.rerender(<SessionFilesPanel {...context} />);
+    expect(screen.queryByRole("button", { name: "Pop out file browser" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Refresh directory" }).compareDocumentPosition(
+        screen.getByRole("radio", { name: "Browser" }),
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("keeps file actions native and requires a reviewed plan before deletion", async () => {
     const user = userEvent.setup();
     const file = {
@@ -2718,6 +2755,30 @@ describe("session workbench panels", () => {
     expect(await screen.findByRole("row", { name: /Server Query Match/i })).toBeInTheDocument();
     expect(api.runSessionWorkbench).toHaveBeenCalledWith({ operationId: "session.service.list", limit: 100, query: "remote" });
     expect(screen.getByText("Loaded 1 of 1 services matching “remote”")).toBeInTheDocument();
+  });
+
+  it("pops the registry editor into a dedicated window and reports an opening failure", async () => {
+    const user = userEvent.setup();
+    const onPopOutPanel = vi.fn(async () => { throw new Error("Window could not open"); });
+    const danger = vi.spyOn(toast, "danger");
+    installAPI((input) => {
+      if (input.operationId === "session.registry.list-subkeys" || input.operationId === "session.registry.list-values") {
+        return workbench(input.operationId, { items: [], page: { limit: 100, total: 0, truncated: false } });
+      }
+      throw new Error(`Unexpected operation ${input.operationId}`);
+    });
+    const context = panelContext({ os: "windows", arch: "amd64" });
+    const rendered = render(<SessionRegistryPanel {...context} onPopOutPanel={onPopOutPanel} />);
+    const button = screen.getByRole("button", { name: "Pop out registry editor" });
+    await user.click(button);
+    expect(onPopOutPanel).toHaveBeenCalledExactlyOnceWith("registry");
+    await waitFor(() => expect(danger).toHaveBeenCalledWith(
+      "Could not pop out registry editor", { description: "Window could not open" },
+    ));
+    expect(button).toBeEnabled();
+
+    rendered.rerender(<SessionRegistryPanel {...context} />);
+    expect(screen.queryByRole("button", { name: "Pop out registry editor" })).not.toBeInTheDocument();
   });
 
   it("separates the Windows registry key tree from values and reads selected data", async () => {

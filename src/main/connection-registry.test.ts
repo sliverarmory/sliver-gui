@@ -6939,6 +6939,141 @@ describe("M3 session shell registry boundary", () => {
     expect(client.lootAdd).toHaveBeenCalledTimes(2);
   });
 
+  it("shares exact-session process history and output actions across windows", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [
+      session("session_m4_shared", "m4-shared"),
+      session("session_m4_other", "m4-other"),
+    ];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_m4_shared");
+    const other = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_m4_other");
+    if (!target || !other) throw new Error("Expected distinct session targets");
+    await registry.selectTarget(1, target);
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await registry.selectTarget(2, target);
+
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: {
+        operationId: "execution.process",
+        path: "/usr/bin/id",
+        args: ["-u"],
+        captureOutput: true,
+        background: false,
+        inheritEnvironment: true,
+        environment: [],
+        useToken: false,
+        hideWindow: false,
+        timeoutSeconds: 60,
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    const processResponse = {
+      Status: 0,
+      Stdout: Buffer.from("shared-stdout"),
+      Stderr: Buffer.from("shared-stderr"),
+      Pid: 42,
+      Response: { Err: "" },
+    };
+    client.executeSession.mockResolvedValueOnce(processResponse);
+    const executed = await registry.executeExecutionPlan(1, { token: prepared.value.token });
+    if (!executed.ok) throw new Error(executed.error);
+    const listed = await registry.listProcessExecutionHistory(2);
+    if (!listed.ok) throw new Error(listed.error);
+    expect(listed.value.target).toMatchObject({ id: target.id, fingerprint: target.fingerprint });
+    expect(listed.value.revision).toBeGreaterThan(0);
+    expect(listed.value.records).toMatchObject([{
+      id: executed.value.requestId,
+      path: "/usr/bin/id",
+      args: ["-u"],
+      state: "completed",
+      result: { requestId: executed.value.requestId, pid: 42 },
+    }]);
+    expect(Buffer.from(listed.value.records[0]!.stdout!.data).toString()).toBe("shared-stdout");
+    listed.value.records[0]!.stdout!.data.fill(0);
+    const fresh = await registry.listProcessExecutionHistory(2);
+    if (!fresh.ok) throw new Error(fresh.error);
+    expect(Buffer.from(fresh.value.records[0]!.stdout!.data).toString()).toBe("shared-stdout");
+
+    await expect(registry.getExecutionResult(2, { requestId: executed.value.requestId })).resolves.toMatchObject({
+      ok: true, value: { state: "completed", pid: 42 },
+    });
+    const peerRead = await registry.readExecutionOutput(2, { requestId: executed.value.requestId, stream: "stdout" });
+    if (!peerRead.ok) throw new Error(peerRead.error);
+    expect(Buffer.from(peerRead.value.data).toString()).toBe("shared-stdout");
+    peerRead.value.data.fill(0);
+    const looted = await registry.addExecutionOutputToLoot(2, {
+      requestId: executed.value.requestId,
+      stream: "stderr",
+      name: "Shared error output",
+    });
+    expect(looted).toMatchObject({ ok: true, value: { name: "Shared error output" } });
+    const destination = join(externalDirectory, "shared-output.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    await expect(registry.saveExecutionResult(sender(2), {
+      requestId: executed.value.requestId,
+      stream: "stdout",
+    })).resolves.toMatchObject({ ok: true, value: { saved: true } });
+    await expect(readFile(destination, "utf8")).resolves.toBe("shared-stdout");
+
+    await registry.unregisterWindow(1);
+    await expect(registry.readExecutionOutput(2, { requestId: executed.value.requestId, stream: "stdout" }))
+      .resolves.toMatchObject({ ok: true });
+    await registry.selectTarget(2, other);
+    await expect(registry.listProcessExecutionHistory(2)).resolves.toMatchObject({
+      ok: true, value: { records: [] },
+    });
+    await expect(registry.getExecutionResult(2, { requestId: executed.value.requestId }))
+      .resolves.toMatchObject({ ok: false });
+    await expect(registry.readExecutionOutput(2, { requestId: executed.value.requestId, stream: "stdout" }))
+      .resolves.toMatchObject({ ok: false });
+  });
+
+  it("does not restore a cleared process run when its result arrives later", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("session_m4_clear", "m4-clear")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ mode }) => mode === "session");
+    if (!target) throw new Error("Expected a session target");
+    await registry.selectTarget(1, target);
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await registry.selectTarget(2, target);
+    const prepared = await registry.prepareExecutionAction(sender(1), {
+      draft: {
+        operationId: "execution.process",
+        path: "/usr/bin/sleep",
+        args: ["1"],
+        captureOutput: true,
+        background: false,
+        inheritEnvironment: true,
+        environment: [],
+        useToken: false,
+        hideWindow: false,
+        timeoutSeconds: 60,
+      },
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    let complete: ((response: Awaited<ReturnType<typeof client.executeSession>>) => void) | undefined;
+    client.executeSession.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const executing = registry.executeExecutionPlan(1, { token: prepared.value.token });
+    await vi.waitFor(async () => {
+      const listed = await registry.listProcessExecutionHistory(2);
+      expect(listed).toMatchObject({ ok: true, value: { records: [{ state: "running" }] } });
+    });
+    await expect(registry.clearProcessExecutionHistory(2, {})).resolves.toEqual({ ok: true });
+    complete?.({ Stdout: Buffer.from("late"), Stderr: Buffer.alloc(0), Pid: 42, Response: { Err: "" } });
+    await executing;
+    await expect(registry.listProcessExecutionHistory(2)).resolves.toMatchObject({
+      ok: true, value: { records: [] },
+    });
+  });
+
   it("classifies exact target rejection separately from transport uncertainty without replay or backend text", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_m4_errors", "m4-errors")];

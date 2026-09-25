@@ -194,6 +194,27 @@ export function sessionShellWindowOptions(
   };
 }
 
+/** A focused, connection-bound session editor with native close controls. */
+export function sessionPanelWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1180,
+    height: 780,
+    minWidth: 720,
+    minHeight: 540,
+    show: false,
+    title: "Session Panel",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: secureWebPreferences(preload),
+  };
+}
+
 /**
  * A main-owned native-client console. It uses native chrome and an opaque
  * renderer URL; profile paths and credentials are supplied only to the PTY in

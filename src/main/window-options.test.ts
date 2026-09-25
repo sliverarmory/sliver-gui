@@ -14,6 +14,7 @@ import {
   interactionWindowOptions,
   mainWindowOptions,
   networkWindowOptions,
+  sessionPanelWindowOptions,
   sessionShellWindowOptions,
   sshWindowOptions,
   TEXT_EDITOR_SESSION_PARTITION,
@@ -239,6 +240,44 @@ describe("managed-shell window", () => {
 
   it("uses the resolved application theme for its native background", () => {
     expect(sessionShellWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
+      .toBe("#fafafa");
+  });
+});
+
+describe("session panel window", () => {
+  it.each(["darwin", "linux", "win32"] as const)(
+    "uses native controls and a sandboxed operator preload on %s",
+    (platform) => {
+      const options = sessionPanelWindowOptions("/absolute/preload.js", platform, "/brand.png");
+
+      expect(options).toMatchObject({
+        show: false,
+        backgroundColor: "#09090b",
+        webPreferences: {
+          preload: "/absolute/preload.js",
+          nodeIntegration: false,
+          nodeIntegrationInWorker: false,
+          nodeIntegrationInSubFrames: false,
+          contextIsolation: true,
+          sandbox: true,
+          webSecurity: true,
+          webviewTag: false,
+        },
+      });
+      expect(options.title).toEqual(expect.any(String));
+      expect(options.width).toBeGreaterThanOrEqual(720);
+      expect(options.height).toBeGreaterThanOrEqual(540);
+      expect(options).not.toHaveProperty("parent");
+      expect(options).not.toHaveProperty("frame");
+      expect(options).not.toHaveProperty("titleBarOverlay");
+      if (platform === "darwin") expect(options).not.toHaveProperty("icon");
+      else expect(options.icon).toBe("/brand.png");
+      expect(JSON.stringify(options)).not.toMatch(/sessionId|targetFingerprint|backendEpoch|remotePath/iu);
+    },
+  );
+
+  it("uses the resolved application theme for its native background", () => {
+    expect(sessionPanelWindowOptions("/preload.js", "linux", undefined, false).backgroundColor)
       .toBe("#fafafa");
   });
 });

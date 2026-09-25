@@ -269,7 +269,7 @@ function operation(overrides: Partial<TargetOperationRecord> = {}): TargetOperat
 
 function installAPI(operations: TargetOperationRecord[] = []): Pick<
   SliverDesktopAPI,
-  "listExecutionCatalog" | "listTargetOperations" | "listSessionShells" | "openInteractionWindow" | "selectTarget"
+  "listExecutionCatalog" | "listTargetOperations" | "listSessionShells" | "openInteractionWindow" | "openSessionPanelWindow" | "selectTarget"
 > & {
   emitOperationChanged: (operation: TargetOperationRecord) => void;
 } {
@@ -298,14 +298,22 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
     value: { resources: [], metrics: {} },
   });
   const openInteractionWindow = vi.fn().mockResolvedValue({ ok: true });
+  const openSessionPanelWindow = vi.fn().mockResolvedValue({ ok: true });
   const selectTarget = vi.fn().mockResolvedValue({ ok: false, error: "No selection configured" });
   const api = {
     listExecutionCatalog,
+    listProcessExecutionHistory: vi.fn().mockResolvedValue({
+      ok: true,
+      value: { target: sessionRef, revision: 0, records: [] },
+    }),
+    clearProcessExecutionHistory: vi.fn().mockResolvedValue({ ok: true }),
     listSessionShells,
     listTargetOperations,
     openInteractionWindow,
+    openSessionPanelWindow,
     selectTarget,
     onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
+    onProcessExecutionHistoryChanged: vi.fn(() => vi.fn()),
     onOperationChanged: vi.fn((listener: (operation: TargetOperationRecord) => void) => {
       operationChangedListener = listener;
       return vi.fn(() => {
@@ -322,6 +330,7 @@ function installAPI(operations: TargetOperationRecord[] = []): Pick<
     listSessionShells,
     listTargetOperations,
     openInteractionWindow,
+    openSessionPanelWindow,
     selectTarget,
     emitOperationChanged: (operation) => operationChangedListener?.(operation),
   };
@@ -1077,6 +1086,39 @@ describe("SessionWorkspacePage", () => {
     await user.click(screen.getByRole("button", { name: "Pop out interaction" }));
     await waitFor(() => expect(api.openInteractionWindow).toHaveBeenCalledOnce());
     expect(api.openInteractionWindow).toHaveBeenCalledWith();
+  });
+
+  it("opens a focused Execution window for the exact active session", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    render(<SessionWorkspacePage route={route} session={session} snapshot={workspaceSnapshot()} onSnapshot={vi.fn()} />);
+
+    await user.click(screen.getByRole("tab", { name: "Execution" }));
+    await user.click(await screen.findByRole("button", { name: "Pop out execution" }));
+
+    await waitFor(() => expect(api.openSessionPanelWindow).toHaveBeenCalledExactlyOnceWith({ panel: "execution" }));
+  });
+
+  it("allows the full interaction window to open a Files panel window", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    render(<SessionWorkspacePage
+      allowPopOut={false}
+      presentation="dedicated"
+      route={route}
+      session={session}
+      snapshot={workspaceSnapshot()}
+      onSnapshot={vi.fn()}
+      panels={{ files: ({ onPopOutPanel }) => (
+        <button onClick={() => void onPopOutPanel?.("files")}>Open Files Window</button>
+      ) }}
+    />);
+
+    await user.click(screen.getByRole("tab", { name: "Files" }));
+    await user.click(screen.getByRole("button", { name: "Open Files Window" }));
+
+    await waitFor(() => expect(api.openSessionPanelWindow).toHaveBeenCalledExactlyOnceWith({ panel: "files" }));
+    expect(screen.queryByRole("button", { name: "Pop out interaction" })).not.toBeInTheDocument();
   });
 
   it("shows Registry only for Windows sessions", () => {

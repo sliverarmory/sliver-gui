@@ -74,6 +74,8 @@ const invokeArguments = {
   restartToApplyApplicationUpdate: [],
   openSessionShellWindow: [{ preferredResourceId: "R".repeat(43) }],
   claimSessionShellWindow: [],
+  openSessionPanelWindow: [{ panel: "execution" }],
+  claimSessionPanelWindow: [],
   openConsoleWindow: [],
   claimConsoleWindow: [],
   createConsoleTab: [],
@@ -155,6 +157,8 @@ const invokeArguments = {
   readExecutionOutput: [{ requestId: "execution_request_1", stream: "stdout" }],
   addExecutionOutputToLoot: [{ requestId: "execution_request_1", stream: "stdout", name: "Saved output" }],
   saveExecutionResult: [{ requestId: "execution_request_1", stream: "combined" }],
+  listProcessExecutionHistory: [],
+  clearProcessExecutionHistory: [{ id: "execution_request_1" }],
 } satisfies InvokeArgumentsByMethod;
 
 const electronMocks = vi.hoisted(() => ({

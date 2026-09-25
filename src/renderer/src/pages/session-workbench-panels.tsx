@@ -38,6 +38,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowRight,
   faArrowUp,
+  faArrowUpRightFromSquare,
   faBoxArchive,
   faCamera,
   faChevronDown,
@@ -650,7 +651,7 @@ function NetworkConnectionContextMenu({
   );
 }
 
-export function SessionFilesPanel({ route, session }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionFilesPanel({ route, session, onPopOutPanel }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const platform = normalizedPlatform(session.os);
   const isWindows = platform === "windows";
@@ -668,6 +669,7 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const [isFolderDialogOpen, setIsFolderDialogOpen] = useState(false);
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isPoppingOut, setIsPoppingOut] = useState(false);
   const [droppedUpload, setDroppedUpload] = useState<PendingDroppedUpload>();
   const [droppedUploadRemotePath, setDroppedUploadRemotePath] = useState("");
   const [droppedUploadIsIOC, setDroppedUploadIsIOC] = useState(false);
@@ -679,6 +681,20 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
   const navigationRequestSequence = useRef(0);
   const fileActionsLocked = useRef(true);
   const isCurrent = useLatestIdentity(routeKey);
+  const popOut = useCallback(async () => {
+    if (!onPopOutPanel) return;
+    const expected = routeKey;
+    setIsPoppingOut(true);
+    try {
+      await onPopOutPanel("files");
+    } catch (error) {
+      if (isCurrent(expected)) {
+        toast.danger("Could not pop out file browser", { description: errorMessage(error) });
+      }
+    } finally {
+      if (isCurrent(expected)) setIsPoppingOut(false);
+    }
+  }, [isCurrent, onPopOutPanel, routeKey]);
   const destructive = useDestructiveAction(routeKey, () => {
     setInspector(undefined);
     setDestructiveRefreshToken((current) => current + 1);
@@ -1145,11 +1161,6 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
             </>
           ) : null}
           <div className="ml-auto flex items-center gap-2">
-            <Segment aria-label="Filesystem mode" selectedKey={mode} size="sm" onSelectionChange={(key) => setMode(String(key) as FileWorkbenchMode)}>
-              <Segment.Item id="browser">Browser</Segment.Item>
-              <Segment.Item id="search">Search</Segment.Item>
-              <Segment.Item id="storage">Mounts</Segment.Item>
-            </Segment>
             {mode === "browser" ? (
               <RefreshButton
                 disabled={!locationActionsAvailable}
@@ -1157,6 +1168,26 @@ export function SessionFilesPanel({ route, session }: SessionWorkspacePanelConte
                 pending={isNavigating}
                 onPress={refreshDirectory}
               />
+            ) : null}
+            <Segment aria-label="Filesystem mode" selectedKey={mode} size="sm" onSelectionChange={(key) => setMode(String(key) as FileWorkbenchMode)}>
+              <Segment.Item id="browser">Browser</Segment.Item>
+              <Segment.Item id="search">Search</Segment.Item>
+              <Segment.Item id="storage">Mounts</Segment.Item>
+            </Segment>
+            {onPopOutPanel ? (
+              <Tooltip delay={250}>
+                <Button
+                  aria-label="Pop out file browser"
+                  isIconOnly
+                  isPending={isPoppingOut}
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => void popOut()}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faArrowUpRightFromSquare} />
+                </Button>
+                <Tooltip.Content>Pop out file browser</Tooltip.Content>
+              </Tooltip>
             ) : null}
           </div>
         </div>
@@ -3158,7 +3189,7 @@ export function SessionEnvironmentPanel({
   );
 }
 
-export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelContext): React.JSX.Element {
+export function SessionRegistryPanel({ route, session, onPopOutPanel }: SessionWorkspacePanelContext): React.JSX.Element {
   const routeKey = workspaceRouteKey(route);
   const platform = normalizedPlatform(session.os);
   const [hive, setHive] = useState<SessionRegistryHive>("HKCU");
@@ -3173,6 +3204,7 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const [selectedValue, setSelectedValue] = useState<SessionRegistryReadResult>();
   const [readingValueKey, setReadingValueKey] = useState<string>();
   const [isSavingHive, setIsSavingHive] = useState(false);
+  const [isPoppingOut, setIsPoppingOut] = useState(false);
   const [isLoadingMoreSubkeys, setIsLoadingMoreSubkeys] = useState(false);
   const [isLoadingMoreValues, setIsLoadingMoreValues] = useState(false);
   const [editor, setEditor] = useState<{
@@ -3195,6 +3227,20 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
   const continuationRequests = useRef(new Set<string>());
   const mutationLocation = useRef({ hive: "HKCU" as SessionRegistryHive, path: "" });
   const isCurrent = useLatestIdentity(routeKey);
+  const popOut = useCallback(async () => {
+    if (!onPopOutPanel) return;
+    const expected = routeKey;
+    setIsPoppingOut(true);
+    try {
+      await onPopOutPanel("registry");
+    } catch (error) {
+      if (isCurrent(expected)) {
+        toast.danger("Could not pop out registry editor", { description: errorMessage(error) });
+      }
+    } finally {
+      if (isCurrent(expected)) setIsPoppingOut(false);
+    }
+  }, [isCurrent, onPopOutPanel, routeKey]);
 
   const load = useCallback(async (nextHive: SessionRegistryHive, nextPath: string) => {
     if (platform !== "windows") return;
@@ -3579,6 +3625,21 @@ export function SessionRegistryPanel({ route, session }: SessionWorkspacePanelCo
             <Tooltip.Content>{path ? "Save the selected registry subkey" : "Select a registry subkey before saving"}</Tooltip.Content>
           </Tooltip>
           <RefreshButton disabled={state.status === "loading"} label="Refresh registry" pending={state.status === "loading"} onPress={refreshRegistry} />
+          {onPopOutPanel ? (
+            <Tooltip delay={250}>
+              <Button
+                aria-label="Pop out registry editor"
+                isIconOnly
+                isPending={isPoppingOut}
+                size="sm"
+                variant="ghost"
+                onPress={() => void popOut()}
+              >
+                <FontAwesomeIcon aria-hidden icon={faArrowUpRightFromSquare} />
+              </Button>
+              <Tooltip.Content>Pop out registry editor</Tooltip.Content>
+            </Tooltip>
+          ) : null}
         </div>
       </div>
       <form

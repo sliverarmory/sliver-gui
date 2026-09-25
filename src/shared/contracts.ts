@@ -54,6 +54,7 @@ import type {
 } from "./application-settings-contracts.js";
 import type {
   AddExecutionOutputToLootInput,
+  ClearProcessExecutionHistoryInput,
   ExecuteExecutionPlanInput,
   ExecutionActionPlan,
   ExecutionActionResult,
@@ -62,6 +63,7 @@ import type {
   ExecutionReadResult,
   ExecutionResultRequest,
   PrepareExecutionActionInput,
+  ProcessExecutionHistorySnapshot,
   ReadExecutionOutputInput,
   RunExecutionReadInput,
   SaveExecutionResultInput,
@@ -141,6 +143,8 @@ export const IPC_INVOKE = {
   restartToApplyApplicationUpdate: "sliver:application-update:restart",
   openSessionShellWindow: "sliver:window:open-session-shells",
   claimSessionShellWindow: "sliver:window:claim-session-shells",
+  openSessionPanelWindow: "sliver:window:open-session-panel",
+  claimSessionPanelWindow: "sliver:window:claim-session-panel",
   openConsoleWindow: "sliver:window:open-console",
   claimConsoleWindow: "sliver:window:claim-console",
   createConsoleTab: "sliver:console-tab:create",
@@ -199,6 +203,8 @@ export const IPC_INVOKE = {
   readExecutionOutput: "sliver:execution:read-output",
   addExecutionOutputToLoot: "sliver:execution:loot-output",
   saveExecutionResult: "sliver:execution:save-result",
+  listProcessExecutionHistory: "sliver:execution:process-history:list",
+  clearProcessExecutionHistory: "sliver:execution:process-history:clear",
 } as const;
 
 export const IPC_STREAM = {
@@ -213,6 +219,7 @@ export const IPC_EVENTS = {
   cloudDeploymentThemeChanged: "sliver:cloud-deployment:theme-changed",
   snapshotChanged: "sliver:snapshot:changed",
   operationChanged: "sliver:operation:changed",
+  processExecutionHistoryChanged: "sliver:execution:process-history:changed",
   beaconTasksInvalidated: "sliver:beacon-task:invalidated",
   sessionShellsChanged: "sliver:session-shell:changed",
   releaseDownloadChanged: "sliver:release-download:changed",
@@ -716,6 +723,12 @@ export interface OpenSessionShellWindowInput {
   readonly preferredResourceId?: string;
 }
 
+export type SessionPanelWindowKind = "execution" | "files" | "registry";
+
+export interface OpenSessionPanelWindowInput {
+  readonly panel: SessionPanelWindowKind;
+}
+
 export interface OpenRemoteTextEditorInput {
   readonly remotePath: string;
 }
@@ -731,6 +744,12 @@ export type WindowLaunchContext =
       readonly kind: "session-shell";
       readonly snapshot: SliverSnapshot;
       readonly preferredResourceId?: string;
+    }
+  | {
+      readonly kind: "session-panel";
+      readonly panel: SessionPanelWindowKind;
+      readonly snapshot: SliverSnapshot;
+      readonly target: TargetRef;
     }
   | ConsoleWindowLaunchContext;
 
@@ -847,6 +866,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     result: OperationResult;
   };
   [IPC.claimSessionShellWindow]: {
+    args: [];
+    result: OperationResult<WindowLaunchContext>;
+  };
+  [IPC.openSessionPanelWindow]: {
+    args: [input: OpenSessionPanelWindowInput];
+    result: OperationResult;
+  };
+  [IPC.claimSessionPanelWindow]: {
     args: [];
     result: OperationResult<WindowLaunchContext>;
   };
@@ -1092,6 +1119,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: SaveExecutionResultInput];
     result: OperationResult<SaveExecutionResultResult>;
   };
+  [IPC.listProcessExecutionHistory]: {
+    args: [];
+    result: OperationResult<ProcessExecutionHistorySnapshot>;
+  };
+  [IPC.clearProcessExecutionHistory]: {
+    args: [input: ClearProcessExecutionHistoryInput];
+    result: OperationResult;
+  };
 }>;
 
 export type IpcInvokeArgs<Channel extends IpcInvokeChannel> = IpcInvokeContract[Channel]["args"];
@@ -1125,6 +1160,7 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
   openConsoleStream: (attachmentToken: string, correlationId: string) => void;
   onSnapshotChanged: (listener: (snapshot: SliverSnapshot) => void) => () => void;
   onOperationChanged: (listener: (operation: TargetOperationRecord) => void) => () => void;
+  onProcessExecutionHistoryChanged: (listener: (target: TargetRef, revision: number) => void) => () => void;
   onBeaconTasksInvalidated: (listener: (target: TargetRef) => void) => () => void;
   onSessionShellsChanged: (listener: (preferredResourceId?: string) => void) => () => void;
   onReleaseDownloadChanged: (listener: (event: SliverReleaseDownloadEvent) => void) => () => void;
@@ -1167,6 +1203,7 @@ export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAP
   "openConsoleStream",
   "onSnapshotChanged",
   "onOperationChanged",
+  "onProcessExecutionHistoryChanged",
   "onBeaconTasksInvalidated",
   "onSessionShellsChanged",
   "onReleaseDownloadChanged",

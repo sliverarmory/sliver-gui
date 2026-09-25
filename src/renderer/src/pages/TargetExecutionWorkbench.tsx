@@ -28,6 +28,7 @@ import {
   faChevronRight,
   faDownload,
   faTriangleExclamation,
+  faUpRightFromSquare,
 } from "@fortawesome/free-solid-svg-icons";
 
 import type {
@@ -43,14 +44,10 @@ import type {
   ExecutionReadOperationId,
   ExecutionReadResult,
   ExecutionResultState,
-  ExecuteProcessDraft,
 } from "../../../shared/execution-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
 import { ProcessExecutionView } from "./ProcessExecutionView";
 import {
-  addProcessExecution,
-  clearProcessExecution,
-  updateProcessExecution,
   useProcessExecutionHistory,
   type ProcessExecutionRecord,
 } from "./process-execution-history";
@@ -70,6 +67,8 @@ const ACTION_FORM_ID = "target-execution-action-form";
 export interface TargetExecutionWorkbenchProps {
   expectedTarget: TargetRef;
   targetIdentity: string;
+  onPopOut?: () => Promise<void>;
+  presentation?: "embedded" | "dedicated";
 }
 
 type CatalogState =
@@ -86,6 +85,8 @@ type ReadState =
 export function TargetExecutionWorkbench({
   expectedTarget,
   targetIdentity,
+  onPopOut,
+  presentation = "embedded",
 }: TargetExecutionWorkbenchProps): React.JSX.Element {
   const selectionIdentity = targetSelectionIdentity(targetIdentity, expectedTarget);
   const exactIdentity = targetExecutionIdentity(targetIdentity, expectedTarget);
@@ -100,6 +101,8 @@ export function TargetExecutionWorkbench({
   const [result, setResult] = useState<ExecutionActionResult>();
   const [savingStream, setSavingStream] = useState<"stdout" | "stderr" | "combined">();
   const [addingToLoot, setAddingToLoot] = useState(false);
+  const [isPoppingOut, setIsPoppingOut] = useState(false);
+  const [popOutError, setPopOutError] = useState<string>();
   // null explicitly opens the new-execution composer; undefined defaults to the newest retained run.
   const [selectedProcessId, setSelectedProcessId] = useState<string | null>();
   const [readState, setReadState] = useState<ReadState>({ status: "idle" });
@@ -123,9 +126,9 @@ export function TargetExecutionWorkbench({
   const resultRequestSequence = useRef(0);
   const saveRequestSequence = useRef(0);
   const lootRequestSequence = useRef(0);
+  const popOutRequestSequence = useRef(0);
   const actionButtons = useRef(new Map<ExecutionOperationId, HTMLButtonElement>());
   const lastAction = useRef<ExecutionOperationId | undefined>(undefined);
-  const preparedProcessDraft = useRef<Pick<ExecuteProcessDraft, "path" | "args"> | undefined>(undefined);
 
   const discardToken = useCallback((token: string): void => {
     void window.sliver.discardExecutionPlan({ token }).catch(() => undefined);
@@ -140,7 +143,6 @@ export function TargetExecutionWorkbench({
   const clearPreparedPlan = useCallback((restoreFocus: boolean): void => {
     const current = planRef.current;
     planRef.current = undefined;
-    preparedProcessDraft.current = undefined;
     setPlan(undefined);
     if (current) discardToken(current.token);
     if (restoreFocus) restoreActionFocus();
@@ -187,9 +189,11 @@ export function TargetExecutionWorkbench({
     resultRequestSequence.current += 1;
     saveRequestSequence.current += 1;
     lootRequestSequence.current += 1;
+    popOutRequestSequence.current += 1;
+    setIsPoppingOut(false);
+    setPopOutError(undefined);
     const stalePlan = planRef.current;
     planRef.current = undefined;
-    preparedProcessDraft.current = undefined;
     if (stalePlan) discardToken(stalePlan.token);
     setSelectedCapability(undefined);
     setIsPreparing(false);
@@ -226,14 +230,40 @@ export function TargetExecutionWorkbench({
   const categoryCapabilities = useMemo(() => capabilities.filter((capability) =>
     executionActionPresentation(capability.operationId).category === category), [capabilities, category]);
   const categoryCopy = executionCategoryPresentation(category);
-  const processHistoryKey = catalog ? JSON.stringify([
-    catalog.backend.configId,
-    catalog.backend.epoch,
-    catalog.target.mode,
-    catalog.target.id,
-    catalog.targetRef.fingerprint,
-  ]) : undefined;
-  const processHistory = useProcessExecutionHistory(processHistoryKey);
+  const processHistoryTarget = catalog?.target.mode === "session" &&
+    targetRefsSameIdentity(catalog.targetRef, expectedTarget)
+    ? catalog.targetRef
+    : undefined;
+  const {
+    records: processHistory,
+    error: processHistoryError,
+    refresh: refreshProcessHistory,
+  } = useProcessExecutionHistory(processHistoryTarget, selectionIdentity);
+
+  // A catalog refresh also confirms that the target domain recovered. Retry
+  // an earlier history read even if no execution changed while it was down.
+  useEffect(() => {
+    if (catalogIsCurrent && processHistoryTarget) void refreshProcessHistory();
+  }, [catalogState, catalogIsCurrent, processHistoryTarget?.fingerprint, refreshProcessHistory]);
+
+  const popOut = useCallback(async (): Promise<void> => {
+    if (!onPopOut || presentation === "dedicated" || expectedTarget.mode !== "session") return;
+    const expectedIdentity = exactIdentity;
+    const sequence = ++popOutRequestSequence.current;
+    setIsPoppingOut(true);
+    setPopOutError(undefined);
+    try {
+      await onPopOut();
+    } catch (error) {
+      if (sequence === popOutRequestSequence.current && expectedIdentity === identityRef.current) {
+        setPopOutError(errorMessage(error));
+      }
+    } finally {
+      if (sequence === popOutRequestSequence.current && expectedIdentity === identityRef.current) {
+        setIsPoppingOut(false);
+      }
+    }
+  }, [exactIdentity, expectedTarget.mode, onPopOut, presentation]);
 
   const runRead = useCallback(async (
     operationId: ExecutionReadOperationId,
@@ -309,93 +339,24 @@ export function TargetExecutionWorkbench({
     setSelectedCapability(capability);
   }, [catalogIsCurrent, clearPreparedPlan, runRead]);
 
-  const retainProcessResult = useCallback(async (
-    historyKey: string,
-    recordId: string,
-    value: ExecutionActionResult,
-  ): Promise<void> => {
-    updateProcessExecution(historyKey, recordId, { state: value.state, result: value });
-    const streams = (["stdout", "stderr"] as const).filter((stream) =>
-      value.output?.some((item) => item.stream === stream));
-    if (streams.length === 0) return;
-    const reads = await Promise.all(streams.map(async (stream) => {
-      try {
-        return {
-          stream,
-          response: await window.sliver.readExecutionOutput({ requestId: value.requestId, stream }),
-        };
-      } catch (error) {
-        return { stream, response: { ok: false as const, error: errorMessage(error) } };
-      }
-    }));
-    if (selectionIdentity !== selectionIdentityRef.current) {
-      for (const read of reads) if (read.response.ok) read.response.value.data.fill(0);
-      updateProcessExecution(historyKey, recordId, {
-        outputError: "Captured output could not be copied after the selected target changed.",
-      });
-      return;
-    }
-    const patch: { stdout?: { data: Uint8Array; truncated: boolean }; stderr?: { data: Uint8Array; truncated: boolean }; outputError?: string } = {};
-    const failures: string[] = [];
-    for (const read of reads) {
-      if (!read.response.ok) {
-        failures.push(read.response.error ?? "Captured output is unavailable.");
-      } else if (read.stream === "stdout") {
-        patch.stdout = read.response.value;
-      } else {
-        patch.stderr = read.response.value;
-      }
-    }
-    if (failures.length > 0) patch.outputError = failures.join(" ");
-    try {
-      updateProcessExecution(historyKey, recordId, patch);
-    } finally {
-      patch.stdout?.data.fill(0);
-      patch.stderr?.data.fill(0);
-    }
-  }, [selectionIdentity]);
-
   const execute = useCallback(async (directProcessPlan?: ExecutionActionPlan): Promise<void> => {
     if (!catalogIsCurrent) return;
     const current = directProcessPlan ?? planRef.current;
     if (!current) return;
     const expectedIdentity = selectionIdentity;
     const sequence = ++executeRequestSequence.current;
-    const historyKey = current.operationId === "execution.process" && catalog?.target.mode === "session"
-      ? processHistoryKey
-      : undefined;
-    const processDraft = preparedProcessDraft.current;
-    const recordId = historyKey && processDraft
-      ? (globalThis.crypto?.randomUUID?.() ?? `process-${Date.now()}-${sequence}`)
-      : undefined;
-    preparedProcessDraft.current = undefined;
-    if (historyKey && recordId && processDraft) {
-      addProcessExecution(historyKey, {
-        id: recordId,
-        startedAt: new Date().toISOString(),
-        path: processDraft.path,
-        args: processDraft.args,
-        state: "running",
-      });
-      setSelectedProcessId(recordId);
-    }
+    const isSessionProcess = current.operationId === "execution.process" && catalog?.target.mode === "session";
+    if (isSessionProcess) setSelectedProcessId(undefined);
     setIsExecuting(true);
     try {
       const response = await window.sliver.executeExecutionPlan({ token: current.token });
       if (sequence !== executeRequestSequence.current || expectedIdentity !== selectionIdentityRef.current) {
-        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
-          state: "outcome-unknown",
-          error: "The selected target changed before this result could be associated with it.",
-        });
         return;
       }
       if (!response.ok || !response.value) {
         planRef.current = undefined;
         setPlan(undefined);
-        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
-          state: "request-failed",
-          error: response.error ?? "The execution request failed.",
-        });
+        if (isSessionProcess) void refreshProcessHistory();
         toast.danger("Execution failed", { description: response.error });
         restoreActionFocus();
         return;
@@ -403,23 +364,21 @@ export function TargetExecutionWorkbench({
       if (response.value.operationId !== current.operationId) {
         planRef.current = undefined;
         setPlan(undefined);
-        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
-          state: "request-failed",
-          error: "The result did not match the reviewed operation.",
-        });
+        if (isSessionProcess) void refreshProcessHistory();
         toast.danger("Execution result rejected", { description: "The result did not match the reviewed operation." });
         restoreActionFocus();
         return;
       }
       planRef.current = undefined;
       setPlan(undefined);
-      if (historyKey && recordId) {
-        await retainProcessResult(historyKey, recordId, response.value);
+      if (isSessionProcess) {
+        setSelectedProcessId(response.value.requestId);
+        await refreshProcessHistory();
       } else {
         resultRef.current = response.value;
         setResult(response.value);
       }
-      if (historyKey && response.value.state === "completed" && response.value.exitCode !== undefined && response.value.exitCode !== 0) {
+      if (isSessionProcess && response.value.state === "completed" && response.value.exitCode !== undefined && response.value.exitCode !== 0) {
         toast.warning(`Process exited with code ${response.value.exitCode}`, { description: response.value.message });
       } else {
         toast.success(executionResultTitle(response.value.state), { description: response.value.message });
@@ -428,26 +387,20 @@ export function TargetExecutionWorkbench({
     } catch (error) {
       if (directProcessPlan) discardToken(current.token);
       if (sequence === executeRequestSequence.current && expectedIdentity === selectionIdentityRef.current) {
-        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
-          state: directProcessPlan ? "outcome-unknown" : "request-failed",
-          error: directProcessPlan
-            ? `Could not confirm whether execution started: ${errorMessage(error)}`
-            : errorMessage(error),
-        });
+        if (isSessionProcess) void refreshProcessHistory();
         if (directProcessPlan) toast.warning("Execution status unknown", { description: errorMessage(error) });
         else toast.danger("Execution failed", { description: errorMessage(error) });
       }
     } finally {
       if (sequence === executeRequestSequence.current && expectedIdentity === selectionIdentityRef.current) setIsExecuting(false);
     }
-  }, [catalog?.target.mode, catalogIsCurrent, discardToken, processHistoryKey, restoreActionFocus, retainProcessResult, selectionIdentity]);
+  }, [catalog?.target.mode, catalogIsCurrent, discardToken, refreshProcessHistory, restoreActionFocus, selectionIdentity]);
 
   const prepare = useCallback(async (draft: ExecutionActionDraft): Promise<void> => {
     if (!catalogIsCurrent) return;
     const expectedIdentity = exactIdentity;
     const sequence = ++prepareRequestSequence.current;
     if (planRef.current) clearPreparedPlan(false);
-    preparedProcessDraft.current = undefined;
     setIsPreparing(true);
     try {
       const response = await window.sliver.prepareExecutionAction({ draft });
@@ -464,9 +417,6 @@ export function TargetExecutionWorkbench({
         throw new Error("The prepared plan no longer matches this exact operation and target selection.");
       }
       const isDirectSessionProcess = draft.operationId === "execution.process" && catalog?.target.mode === "session";
-      if (isDirectSessionProcess) {
-        preparedProcessDraft.current = { path: draft.path, args: [...draft.args] };
-      }
       setSelectedCapability(undefined);
       if (isDirectSessionProcess) {
         await execute(response.value);
@@ -548,7 +498,7 @@ export function TargetExecutionWorkbench({
   }, [exactIdentity, runRead, syncResult]);
 
   const refreshProcessResult = useCallback(async (record: ProcessExecutionRecord): Promise<void> => {
-    if (!processHistoryKey || !record.result) return;
+    if (!processHistoryTarget || !record.result) return;
     const expectedIdentity = selectionIdentity;
     try {
       const response = await window.sliver.getExecutionResult({ requestId: record.result.requestId });
@@ -561,13 +511,29 @@ export function TargetExecutionWorkbench({
         toast.danger("Process result rejected", { description: "The returned result did not match this invocation." });
         return;
       }
-      await retainProcessResult(processHistoryKey, record.id, response.value);
+      await refreshProcessHistory();
     } catch (error) {
       if (expectedIdentity === selectionIdentityRef.current) {
         toast.danger("Could not refresh process result", { description: errorMessage(error) });
       }
     }
-  }, [processHistoryKey, retainProcessResult, selectionIdentity]);
+  }, [processHistoryTarget, refreshProcessHistory, selectionIdentity]);
+
+  const clearProcessHistory = useCallback(async (id?: string): Promise<void> => {
+    if (!processHistoryTarget) return;
+    const expectedIdentity = selectionIdentity;
+    try {
+      const response = await window.sliver.clearProcessExecutionHistory(id ? { id } : {});
+      if (expectedIdentity !== selectionIdentityRef.current) return;
+      if (!response.ok) throw new Error(response.error ?? "Could not clear execution history");
+      setSelectedProcessId(undefined);
+      await refreshProcessHistory();
+    } catch (error) {
+      if (expectedIdentity === selectionIdentityRef.current) {
+        toast.danger("Could not clear execution history", { description: errorMessage(error) });
+      }
+    }
+  }, [processHistoryTarget, refreshProcessHistory, selectionIdentity]);
 
   const saveResult = useCallback(async (
     source: ExecutionActionResult,
@@ -665,6 +631,7 @@ export function TargetExecutionWorkbench({
         {!catalogIsCurrent ? (
           <p className="mb-4 text-xs text-muted" role="status">Refreshing execution capabilities for the latest target inventory…</p>
         ) : null}
+        {popOutError ? <p className="mb-4 text-xs text-danger" role="alert">{popOutError}</p> : null}
         {!isSession ? (
           <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
@@ -683,13 +650,29 @@ export function TargetExecutionWorkbench({
         {isSession ? (
           <div className="flex items-center justify-between gap-4">
             {categoryTabs}
-            <Chip className="shrink-0" size="sm" variant="soft">
-              {catalogState.value.target.os}/{catalogState.value.target.arch}
-            </Chip>
+            {onPopOut && presentation !== "dedicated" ? (
+              <div className="flex shrink-0 items-center gap-2">
+                <Tooltip delay={250}>
+                  <Button
+                    aria-label="Pop out execution"
+                    isIconOnly
+                    isPending={isPoppingOut}
+                    size="sm"
+                    variant="ghost"
+                    onPress={() => void popOut()}
+                  >
+                    <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} />
+                  </Button>
+                  <Tooltip.Content>Pop out execution into a new window</Tooltip.Content>
+                </Tooltip>
+              </div>
+            ) : null}
           </div>
         ) : categoryTabs}
 
         {isSession && category === "process" ? (
+          <>
+          {processHistoryError ? <p className="mt-4 text-xs text-danger" role="alert">{processHistoryError}</p> : null}
           <ProcessExecutionView
             capability={categoryCapabilities.find((capability) => capability.operationId === "execution.process")}
             history={processHistory}
@@ -700,20 +683,15 @@ export function TargetExecutionWorkbench({
             savingStream={savingStream === "combined" ? undefined : savingStream}
             selectedId={selectedProcessId}
             target={catalogState.value.target}
-            onClear={(id) => {
-              if (processHistoryKey) clearProcessExecution(processHistoryKey, id);
-              setSelectedProcessId(undefined);
-            }}
-            onClearAll={() => {
-              if (processHistoryKey) clearProcessExecution(processHistoryKey);
-              setSelectedProcessId(undefined);
-            }}
+            onClear={(id) => void clearProcessHistory(id)}
+            onClearAll={() => void clearProcessHistory()}
             onAddToLoot={(source, stream, name) => void addProcessOutputToLoot(source, stream, name)}
             onPrepare={prepare}
             onRefresh={(record) => void refreshProcessResult(record)}
             onSave={(source, stream) => void saveResult(source, stream)}
             onSelect={setSelectedProcessId}
           />
+          </>
         ) : (
           <>
             <ItemCardGroup className="mt-5" columns={2} layout="grid" variant="secondary">

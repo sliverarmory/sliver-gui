@@ -1021,6 +1021,73 @@ describe("trusted Electron IPC boundary", () => {
     );
   });
 
+  it("opens and claims session panel windows through the trusted main-frame controller", async () => {
+    const open = vi.fn(async () => ({ ok: true as const }));
+    const claim = vi.fn(async () => ({ ok: false as const, error: "claim probe" }));
+    registerIpcHandlers(
+      registryMock(), vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
+      { open, claim },
+    );
+    const trusted = invokeEvent("sliver://app/index.html#/sessions/session_1", 77);
+    const identity = { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" };
+
+    for (const panel of ["execution", "files", "registry"] as const) {
+      await expect(electronMocks.handlers.get(IPC.openSessionPanelWindow)?.(trusted.event, { panel }))
+        .resolves.toEqual({ ok: true });
+      expect(open).toHaveBeenLastCalledWith(identity, { panel });
+    }
+    await expect(electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(trusted.event))
+      .resolves.toEqual({ ok: false, error: "claim probe" });
+    expect(claim).toHaveBeenCalledExactlyOnceWith(identity);
+
+    for (const input of [
+      {},
+      { panel: "terminal" },
+      { panel: "files", targetId: "attacker-selected-session" },
+      { panel: null },
+    ]) {
+      expect(() => electronMocks.handlers.get(IPC.openSessionPanelWindow)?.(trusted.event, input))
+        .toThrow(/invalid/i);
+    }
+    expect(() => electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(trusted.event, {}))
+      .toThrow(/invalid arguments/i);
+
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html", 88);
+    expect(() => electronMocks.handlers.get(IPC.openSessionPanelWindow)?.(untrusted.event, { panel: "files" }))
+      .toThrow(/untrusted renderer/i);
+    expect(() => electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(untrusted.event))
+      .toThrow(/untrusted renderer/i);
+
+    const child = invokeEvent("sliver://app/index.html?surface=session-panel", 99);
+    Object.defineProperty(child.event, "senderFrame", {
+      value: { ...child.mainFrame, frameToken: "child-frame" } as WebFrameMain,
+    });
+    expect(() => electronMocks.handlers.get(IPC.openSessionPanelWindow)?.(child.event, { panel: "registry" }))
+      .toThrow(/untrusted renderer/i);
+    expect(() => electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(child.event))
+      .toThrow(/untrusted renderer/i);
+
+    const wrongProcess = invokeEvent("sliver://app/index.html?surface=session-panel", 100);
+    Object.defineProperty(wrongProcess.event, "senderFrame", {
+      value: { ...wrongProcess.mainFrame, processId: 101 } as WebFrameMain,
+    });
+    expect(() => electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(wrongProcess.event))
+      .toThrow(/untrusted renderer/i);
+
+    expect(open).toHaveBeenCalledTimes(3);
+    expect(claim).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a session panel claim without a main-owned window controller", () => {
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent("sliver://app/index.html?surface=session-panel", 77);
+
+    expect(electronMocks.handlers.get(IPC.claimSessionPanelWindow)?.(event))
+      .toMatchObject({ ok: false });
+  });
+
   it("opens, claims, and attaches a console without renderer-authored profile material", async () => {
     const open = vi.fn(async () => ({ ok: true as const }));
     const context = {
@@ -1477,6 +1544,8 @@ describe("trusted Electron IPC boundary", () => {
     const readExecutionOutput = vi.fn(async () => ({ ok: false as const, error: "output probe" }));
     const addExecutionOutputToLoot = vi.fn(async () => ({ ok: false as const, error: "loot probe" }));
     const saveExecutionResult = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
+    const listProcessExecutionHistory = vi.fn(async () => ({ ok: false as const, error: "history probe" }));
+    const clearProcessExecutionHistory = vi.fn(async () => ({ ok: false as const, error: "clear probe" }));
     registerIpcHandlers(
       registryMock({
         listExecutionCatalog,
@@ -1488,6 +1557,8 @@ describe("trusted Electron IPC boundary", () => {
         readExecutionOutput,
         addExecutionOutputToLoot,
         saveExecutionResult,
+        listProcessExecutionHistory,
+        clearProcessExecutionHistory,
       }),
       vi.fn(),
       RENDERER_URL,
@@ -1511,6 +1582,8 @@ describe("trusted Electron IPC boundary", () => {
     await electronMocks.handlers.get(IPC.readExecutionOutput)?.(event, save);
     await electronMocks.handlers.get(IPC.addExecutionOutputToLoot)?.(event, { ...save, name: "Report" });
     await electronMocks.handlers.get(IPC.saveExecutionResult)?.(event, save);
+    await electronMocks.handlers.get(IPC.listProcessExecutionHistory)?.(event);
+    await electronMocks.handlers.get(IPC.clearProcessExecutionHistory)?.(event, { id: request.requestId });
 
     expect(listExecutionCatalog).toHaveBeenCalledExactlyOnceWith(77);
     expect(runExecutionRead).toHaveBeenCalledExactlyOnceWith(77, {
@@ -1525,6 +1598,8 @@ describe("trusted Electron IPC boundary", () => {
     expect(readExecutionOutput).toHaveBeenCalledExactlyOnceWith(77, save);
     expect(addExecutionOutputToLoot).toHaveBeenCalledExactlyOnceWith(77, { ...save, name: "Report" });
     expect(saveExecutionResult).toHaveBeenCalledExactlyOnceWith(sender, save);
+    expect(listProcessExecutionHistory).toHaveBeenCalledExactlyOnceWith(77);
+    expect(clearProcessExecutionHistory).toHaveBeenCalledExactlyOnceWith(77, { id: request.requestId });
   });
 
   it("scrubs every raw credential view after successful prepare while retaining the parsed copy", async () => {
@@ -1670,6 +1745,7 @@ describe("trusted Electron IPC boundary", () => {
     const readExecutionOutput = vi.fn(async () => ({ ok: false as const, error: "output probe" }));
     const addExecutionOutputToLoot = vi.fn(async () => ({ ok: false as const, error: "loot probe" }));
     const saveExecutionResult = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
+    const clearProcessExecutionHistory = vi.fn(async () => ({ ok: false as const, error: "clear probe" }));
     registerIpcHandlers(
       registryMock({
         runExecutionRead,
@@ -1680,6 +1756,7 @@ describe("trusted Electron IPC boundary", () => {
         readExecutionOutput,
         addExecutionOutputToLoot,
         saveExecutionResult,
+        clearProcessExecutionHistory,
       }),
       vi.fn(),
       RENDERER_URL,
@@ -1730,6 +1807,10 @@ describe("trusted Electron IPC boundary", () => {
       stream: "combined",
       destinationPath: "/tmp/secret",
     })).toThrow(/unexpected field: destinationPath/i);
+    expect(() => electronMocks.handlers.get(IPC.clearProcessExecutionHistory)?.(trusted.event, {
+      id: "execution_request_1",
+      targetId: "session_2",
+    })).toThrow(/unexpected field: targetId/i);
 
     expect(runExecutionRead).not.toHaveBeenCalled();
     expect(prepareExecutionAction).not.toHaveBeenCalled();
@@ -1739,6 +1820,7 @@ describe("trusted Electron IPC boundary", () => {
     expect(readExecutionOutput).not.toHaveBeenCalled();
     expect(addExecutionOutputToLoot).not.toHaveBeenCalled();
     expect(saveExecutionResult).not.toHaveBeenCalled();
+    expect(clearProcessExecutionHistory).not.toHaveBeenCalled();
   });
 
   it("routes only field-scoped operator-data requests and immediately scrubs raw credential bytes", async () => {
@@ -2047,6 +2129,8 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     readExecutionOutput: vi.fn(unavailable),
     addExecutionOutputToLoot: vi.fn(unavailable),
     saveExecutionResult: vi.fn(unavailable),
+    listProcessExecutionHistory: vi.fn(unavailable),
+    clearProcessExecutionHistory: vi.fn(unavailable),
     attachStream: vi.fn(),
     ...overrides,
   };
