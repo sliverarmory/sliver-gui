@@ -5,22 +5,20 @@ import {
   type RefObject,
 } from "react";
 import {
-  Button,
   Description,
   Disclosure,
   Input,
   Label,
   ListBox,
-  Modal,
   Select,
   Switch,
   TextArea,
   TextField,
 } from "@heroui/react";
+import { CellSwitch } from "@heroui-pro/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faChevronDown,
-  faClock,
   faFileArrowUp,
   faSliders,
 } from "@fortawesome/free-solid-svg-icons";
@@ -65,7 +63,6 @@ export function ExecutionActionForm({
   const passwordRef = useRef<HTMLInputElement>(null);
   const [validationError, setValidationError] = useState<string>();
   const [credentialConsumed, setCredentialConsumed] = useState(false);
-  const [isOptionsOpen, setIsOptionsOpen] = useState(false);
   const [processOptions, setProcessOptions] = useState<ProcessOptions>(DEFAULT_PROCESS_OPTIONS);
   const useCompactProcess = compactProcess && operationId === "execution.process";
 
@@ -75,7 +72,7 @@ export function ExecutionActionForm({
     if (nativeSecretInput) passwordRef.current = nativeSecretInput;
     let draft: ExecutionActionDraft;
     try {
-      draft = buildExecutionDraft(operationId, new FormData(event.currentTarget), passwordRef, useCompactProcess);
+      draft = buildExecutionDraft(operationId, new FormData(event.currentTarget), passwordRef, useCompactProcess, target.os);
       setValidationError(undefined);
     } catch (draftError) {
       setValidationError(errorMessage(draftError));
@@ -95,8 +92,7 @@ export function ExecutionActionForm({
   };
 
   return (
-    <>
-      <form className={`flex flex-col ${useCompactProcess ? "gap-3" : "gap-5"}`} id={formId} onSubmit={(event) => void submit(event)}>
+    <form className={`flex flex-col ${useCompactProcess ? "gap-3" : "gap-5"}`} id={formId} onSubmit={(event) => void submit(event)}>
         <fieldset className="contents" disabled={isPreparing}>
           {useCompactProcess ? (
             <>
@@ -104,20 +100,7 @@ export function ExecutionActionForm({
                 <TextInput defaultValue={defaultProcessExecutable(target.os)} label="Executable path" maxLength={EXECUTION_LIMITS.path} name="path" required />
                 <TextInput label="Arguments" name="args" placeholder="--flag 'value with spaces'" />
               </div>
-              <div className="flex justify-end">
-                <Button
-                  aria-label="Execution options"
-                  className="shrink-0"
-                  size="sm"
-                  type="button"
-                  variant="secondary"
-                  onPress={() => setIsOptionsOpen(true)}
-                >
-                  <FontAwesomeIcon aria-hidden className="size-3.5" icon={faSliders} />
-                  Options
-                </Button>
-              </div>
-              <ProcessOptionValues options={processOptions} platform={target.os} />
+              <ProcessOptionsFields options={processOptions} platform={target.os} setOptions={setProcessOptions} />
             </>
           ) : (
             <>
@@ -137,18 +120,7 @@ export function ExecutionActionForm({
             {validationError ?? error}
           </p>
         ) : null}
-      </form>
-      {useCompactProcess ? (
-        <ProcessOptionsModal
-          isOpen={isOptionsOpen}
-          isPreparing={isPreparing}
-          options={processOptions}
-          platform={target.os}
-          setOptions={setProcessOptions}
-          onClose={() => setIsOptionsOpen(false)}
-        />
-      ) : null}
-    </>
+    </form>
   );
 }
 
@@ -178,175 +150,163 @@ const DEFAULT_PROCESS_OPTIONS: ProcessOptions = {
   stderrPath: "",
 };
 
-function ProcessOptionValues({ options, platform }: { options: ProcessOptions; platform: string }): React.JSX.Element {
-  const isWindows = platform.trim().toLocaleLowerCase() === "windows";
-  return (
-    <>
-      <HiddenValue name="background" value={String(options.background)} />
-      <HiddenValue name="captureOutput" value={String(options.captureOutput)} />
-      <HiddenValue name="inheritEnvironment" value={String(options.inheritEnvironment)} />
-      <HiddenValue name="environment" value={options.environment} />
-      <HiddenValue name="useToken" value={String(isWindows && options.useToken)} />
-      <HiddenValue name="hideWindow" value={String(isWindows && options.hideWindow)} />
-      <HiddenValue name="timeoutSeconds" value={options.timeoutSeconds} />
-      <HiddenValue name="parentPid" value={isWindows ? options.parentPid : ""} />
-      <HiddenValue name="stdoutPath" value={options.stdoutPath} />
-      <HiddenValue name="stderrPath" value={options.stderrPath} />
-    </>
-  );
-}
-
-function ProcessOptionsModal({
-  isOpen,
-  isPreparing,
+function ProcessOptionsFields({
   options,
   platform,
   setOptions,
-  onClose,
 }: {
-  isOpen: boolean;
-  isPreparing: boolean;
   options: ProcessOptions;
   platform: string;
   setOptions: React.Dispatch<React.SetStateAction<ProcessOptions>>;
-  onClose: () => void;
 }): React.JSX.Element {
   const isWindows = platform.trim().toLocaleLowerCase() === "windows";
   return (
-    <Modal.Backdrop
-      isDismissable={!isPreparing}
-      isKeyboardDismissDisabled={isPreparing}
-      isOpen={isOpen}
-      variant="blur"
-      onOpenChange={(open) => { if (!open && !isPreparing) onClose(); }}
-    >
-      <Modal.Container placement="center" scroll="inside" size="lg">
-        <Modal.Dialog className="sm:max-w-[720px]">
-          <Modal.CloseTrigger isDisabled={isPreparing} />
-          <Modal.Header className="pr-10">
-            <Modal.Heading>Execution options</Modal.Heading>
-          </Modal.Header>
-          <Modal.Body className="flex flex-col gap-5">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <BooleanInput
-                description="Run without waiting for process output."
-                label="Run in background"
-                name="background"
-                selected={options.background}
-                stackContent
-                onChange={(background) => setOptions((current) => ({
-                  ...current,
-                  background,
-                  captureOutput: background ? false : current.captureOutput,
-                }))}
-              />
-              <BooleanInput
-                description="Return bounded stdout and stderr after execution."
-                label="Capture output"
-                name="captureOutput"
-                selected={options.captureOutput}
-                stackContent
-                onChange={(captureOutput) => setOptions((current) => ({
-                  ...current,
-                  captureOutput,
-                  background: captureOutput ? false : current.background,
-                }))}
-              />
-            </div>
+    <section aria-label="Execution options" className="mt-4 flex flex-col gap-6">
+      <h4 className="text-sm font-semibold text-foreground">Options</h4>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <ProcessBooleanInput
+          description="Run without waiting for process output."
+          label="Run in background"
+          name="background"
+          selected={options.background}
+          onChange={(background) => setOptions((current) => ({
+            ...current,
+            background,
+            captureOutput: background ? false : current.captureOutput,
+          }))}
+        />
+        <ProcessBooleanInput
+          description="Return bounded stdout and stderr after execution."
+          label="Capture output"
+          name="captureOutput"
+          selected={options.captureOutput}
+          onChange={(captureOutput) => setOptions((current) => ({
+            ...current,
+            captureOutput,
+            background: captureOutput ? false : current.background,
+          }))}
+        />
+      </div>
 
-            <section className="flex flex-col gap-3">
-              <h3 className="text-sm font-semibold text-foreground">Environment</h3>
-              <BooleanInput
-                description="Start with the implant process environment before applying overrides."
-                label="Inherit environment"
-                name="inheritEnvironment"
-                selected={options.inheritEnvironment}
-                stackContent
-                onChange={(inheritEnvironment) => setOptions((current) => ({ ...current, inheritEnvironment }))}
-              />
-              <LinesInput
-                description="One NAME=value pair per line. Duplicate names are rejected."
-                label="Environment overrides"
-                name="environment"
-                rows={3}
-                value={options.environment}
-                onChange={(environment) => setOptions((current) => ({ ...current, environment }))}
-              />
-            </section>
+      <section className="flex flex-col gap-3">
+        <h5 className="text-sm font-semibold text-foreground">Environment</h5>
+        <ProcessBooleanInput
+          description="Start with the implant process environment before applying overrides."
+          label="Inherit environment"
+          name="inheritEnvironment"
+          selected={options.inheritEnvironment}
+          onChange={(inheritEnvironment) => setOptions((current) => ({ ...current, inheritEnvironment }))}
+        />
+        <LinesInput
+          description="One NAME=value pair per line. Duplicate names are rejected."
+          label="Environment overrides"
+          name="environment"
+          rows={3}
+          value={options.environment}
+          onChange={(environment) => setOptions((current) => ({ ...current, environment }))}
+        />
+      </section>
 
-            {isWindows ? (
-              <section className="flex flex-col gap-3">
-                <h3 className="text-sm font-semibold text-foreground">Windows</h3>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <BooleanInput
-                    description="Execute using the implant's current token."
-                    label="Use current token"
-                    name="useToken"
-                    selected={options.useToken}
-                    stackContent
-                    onChange={(useToken) => setOptions((current) => ({ ...current, useToken }))}
-                  />
-                  <BooleanInput
-                    description="Request a hidden process window."
-                    label="Hide window"
-                    name="hideWindow"
-                    selected={options.hideWindow}
-                    stackContent
-                    onChange={(hideWindow) => setOptions((current) => ({ ...current, hideWindow }))}
-                  />
-                </div>
-              </section>
-            ) : null}
+      {isWindows ? (
+        <section className="flex flex-col gap-3">
+          <h5 className="text-sm font-semibold text-foreground">Windows</h5>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ProcessBooleanInput
+              description="Execute using the implant's current token."
+              label="Use current token"
+              name="useToken"
+              selected={options.useToken}
+              onChange={(useToken) => setOptions((current) => ({ ...current, useToken }))}
+            />
+            <ProcessBooleanInput
+              description="Request a hidden process window."
+              label="Hide window"
+              name="hideWindow"
+              selected={options.hideWindow}
+              onChange={(hideWindow) => setOptions((current) => ({ ...current, hideWindow }))}
+            />
+          </div>
+        </section>
+      ) : null}
 
-            <section className="flex flex-col gap-3">
-              <h3 className="text-sm font-semibold text-foreground">Advanced</h3>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <TextInput
-                  label="Timeout seconds"
-                  max={EXECUTION_LIMITS.timeoutSeconds}
-                  min={1}
-                  name="timeoutSeconds"
-                  required
-                  type="number"
-                  value={options.timeoutSeconds}
-                  onChange={(timeoutSeconds) => setOptions((current) => ({ ...current, timeoutSeconds }))}
-                />
-                {isWindows ? (
-                  <TextInput
-                    label="Parent process ID"
-                    max={EXECUTION_LIMITS.pid}
-                    min={0}
-                    name="parentPid"
-                    type="number"
-                    value={options.parentPid}
-                    onChange={(parentPid) => setOptions((current) => ({ ...current, parentPid }))}
-                  />
-                ) : null}
-                <TextInput
-                  label="Remote stdout path"
-                  maxLength={EXECUTION_LIMITS.path}
-                  name="stdoutPath"
-                  placeholder="Optional"
-                  value={options.stdoutPath}
-                  onChange={(stdoutPath) => setOptions((current) => ({ ...current, stdoutPath }))}
-                />
-                <TextInput
-                  label="Remote stderr path"
-                  maxLength={EXECUTION_LIMITS.path}
-                  name="stderrPath"
-                  placeholder="Optional"
-                  value={options.stderrPath}
-                  onChange={(stderrPath) => setOptions((current) => ({ ...current, stderrPath }))}
-                />
-              </div>
-            </section>
-          </Modal.Body>
-          <Modal.Footer>
-            <Button className="ml-auto" size="sm" type="button" variant="primary" onPress={onClose}>Done</Button>
-          </Modal.Footer>
-        </Modal.Dialog>
-      </Modal.Container>
-    </Modal.Backdrop>
+      <section className="flex flex-col gap-3">
+        <h5 className="text-sm font-semibold text-foreground">Advanced</h5>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <TextInput
+            label="Timeout seconds"
+            max={EXECUTION_LIMITS.timeoutSeconds}
+            min={1}
+            name="timeoutSeconds"
+            required
+            type="number"
+            value={options.timeoutSeconds}
+            onChange={(timeoutSeconds) => setOptions((current) => ({ ...current, timeoutSeconds }))}
+          />
+          {isWindows ? (
+            <TextInput
+              label="Parent process ID"
+              max={EXECUTION_LIMITS.pid}
+              min={0}
+              name="parentPid"
+              type="number"
+              value={options.parentPid}
+              onChange={(parentPid) => setOptions((current) => ({ ...current, parentPid }))}
+            />
+          ) : null}
+          <TextInput
+            label="Remote stdout path"
+            maxLength={EXECUTION_LIMITS.path}
+            name="stdoutPath"
+            placeholder="Optional"
+            value={options.stdoutPath}
+            onChange={(stdoutPath) => setOptions((current) => ({ ...current, stdoutPath }))}
+          />
+          <TextInput
+            label="Remote stderr path"
+            maxLength={EXECUTION_LIMITS.path}
+            name="stderrPath"
+            placeholder="Optional"
+            value={options.stderrPath}
+            onChange={(stderrPath) => setOptions((current) => ({ ...current, stderrPath }))}
+          />
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function ProcessBooleanInput({
+  description,
+  label,
+  name,
+  onChange,
+  selected,
+}: {
+  description: string;
+  label: string;
+  name: string;
+  onChange: (selected: boolean) => void;
+  selected: boolean;
+}): React.JSX.Element {
+  return (
+    <>
+      <input name={name} type="hidden" value={String(selected)} />
+      <CellSwitch
+        aria-label={label}
+        className="h-full w-full"
+        isSelected={selected}
+        variant="secondary"
+        onChange={onChange}
+      >
+        <CellSwitch.Trigger className="h-full min-h-16 items-center px-4 py-3">
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-start">
+            <span className="text-sm font-medium text-foreground">{label}</span>
+            <span className="text-xs leading-5 text-muted">{description}</span>
+          </span>
+          <CellSwitch.Control className="ml-auto" />
+        </CellSwitch.Trigger>
+      </CellSwitch>
+    </>
   );
 }
 
@@ -798,7 +758,7 @@ function AdvancedFields({
       <Disclosure.Heading>
         <Disclosure.Trigger className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-foreground">
           <span className="flex items-center gap-2">
-            <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faClock} />
+            <FontAwesomeIcon aria-hidden className="size-3.5 text-muted" icon={faSliders} />
             Advanced
           </span>
           <Disclosure.Indicator>
@@ -1028,6 +988,7 @@ function buildExecutionDraft(
   form: FormData,
   passwordRef: RefObject<HTMLInputElement | null>,
   compactProcess: boolean,
+  platform: string,
 ): ExecutionActionDraft {
   const timeoutSeconds = integerField(form, "timeoutSeconds", 1, EXECUTION_LIMITS.timeoutSeconds);
   let draft: ExecutionActionDraft;
@@ -1035,7 +996,7 @@ function buildExecutionDraft(
     case "execution.process":
       draft = {
         operationId,
-        path: requiredField(form, "path"),
+        path: executablePathField(form, platform),
         args: compactProcess ? parseProcessArgv(optionalField(form, "args")) : lineFields(form, "args"),
         captureOutput: booleanField(form, "captureOutput"),
         background: booleanField(form, "background"),
@@ -1243,6 +1204,19 @@ function requiredField(form: FormData, name: string): string {
   const value = optionalField(form, name).trim();
   if (!value) throw new TypeError(`${fieldLabel(name)} is required`);
   return value;
+}
+
+function executablePathField(form: FormData, platform: string): string {
+  const path = requiredField(form, "path");
+  if (platform.trim().toLocaleLowerCase() !== "windows") return path;
+  const startsQuoted = path.startsWith('"');
+  const endsQuoted = path.endsWith('"');
+  if (startsQuoted !== endsQuoted || (startsQuoted && path.length === 2)) {
+    throw new TypeError("Executable path has unmatched double quotes");
+  }
+  const unquoted = startsQuoted ? path.slice(1, -1) : path;
+  if (!unquoted.trim()) throw new TypeError("Executable path is required");
+  return unquoted;
 }
 
 function optionalField(form: FormData, name: string): string {

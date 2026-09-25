@@ -5,14 +5,13 @@ import {
   faComputer,
   faFileCode,
   faKey,
-  faList,
   faMicrochip,
   faNetworkWired,
   faPlay,
   faRotate,
   faShieldHalved,
+  faSitemap,
   faSkullCrossbones,
-  faTerminal,
   faUserGroup,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
@@ -30,6 +29,7 @@ export interface ExecutionCategoryPresentation {
   id: ExecutionCategoryId;
   label: string;
   description: string;
+  icon: IconDefinition;
 }
 
 export interface ExecutionActionPresentation {
@@ -44,21 +44,25 @@ export const EXECUTION_CATEGORIES: readonly ExecutionCategoryPresentation[] = Ob
     id: "process",
     label: "Process",
     description: "Start programs, inspect tracked children, and move into another process.",
+    icon: faMicrochip,
   },
   {
     id: "payloads",
     label: "Payloads",
     description: "Load, inject, or stage reviewed native payloads on the selected target.",
+    icon: faFileCode,
   },
   {
     id: "remote",
     label: "Remote",
     description: "Reach another host through reviewed service or SSH workflows.",
+    icon: faNetworkWired,
   },
   {
     id: "identity",
     label: "Identity",
     description: "Inspect privileges and make explicit, reviewed token or identity changes.",
+    icon: faKey,
   },
 ]);
 
@@ -67,13 +71,13 @@ const ACTION_PRESENTATION = Object.freeze({
     category: "process",
     label: "Execute process",
     description: "Start a program with explicit arguments, environment, and output handling.",
-    icon: faTerminal,
+    icon: faPlay,
   },
   "execution.children": {
     category: "process",
     label: "Background children",
     description: "Inspect the bounded inventory of tracked background processes.",
-    icon: faList,
+    icon: faSitemap,
   },
   "execution.assembly": {
     category: "payloads",

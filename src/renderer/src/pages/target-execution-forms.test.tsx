@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -88,13 +88,15 @@ describe("compact process execution form", () => {
     expect(screen.getByRole("textbox", { name: "Executable path" })).toHaveValue(path);
   });
 
-  it("keeps only path and arguments inline and defaults to captured foreground output", async () => {
+  it("keeps path, arguments, and options inline and defaults to captured foreground output", async () => {
     const user = userEvent.setup();
     const { onPrepare } = renderCompact();
     expect(screen.getByRole("textbox", { name: "Executable path" })).toBeInTheDocument();
     const argumentsField = screen.getByRole("textbox", { name: "Arguments" });
     expect(argumentsField.tagName).toBe("INPUT");
-    expect(screen.queryByRole("switch", { name: /Capture output/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /Capture output/u })).toBeChecked();
+    expect(screen.getByRole("switch", { name: /Run in background/u })).not.toBeChecked();
+    expect(screen.queryByRole("dialog", { name: "Execution options" })).not.toBeInTheDocument();
 
     const executable = screen.getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
@@ -132,28 +134,22 @@ describe("compact process execution form", () => {
     expect(onPrepare).toHaveBeenCalledWith(expect.objectContaining({ args: ["finished value"] }));
   });
 
-  it("retains modal options after closing and submits them through typed draft validation", async () => {
+  it("submits inline options through typed draft validation", async () => {
     const user = userEvent.setup();
     const { onPrepare } = renderCompact();
     const executable = screen.getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
     await user.type(executable, "/bin/echo");
-    await user.click(screen.getByRole("button", { name: "Execution options" }));
-    const modal = await screen.findByRole("dialog", { name: "Execution options" });
-    expect(within(modal).getByRole("switch", { name: /Capture output/u })).toBeChecked();
-    await user.click(within(modal).getByRole("switch", { name: /Run in background/u }));
-    expect(within(modal).getByRole("switch", { name: /Capture output/u })).not.toBeChecked();
-    await user.click(within(modal).getByRole("switch", { name: /Inherit environment/u }));
-    await user.type(within(modal).getByRole("textbox", { name: "Environment overrides" }), "LANG=C");
-    await user.clear(within(modal).getByRole("spinbutton", { name: "Timeout seconds" }));
-    await user.type(within(modal).getByRole("spinbutton", { name: "Timeout seconds" }), "27");
-    await user.type(within(modal).getByRole("textbox", { name: "Remote stdout path" }), "/tmp/out.txt");
-    await user.click(within(modal).getByRole("button", { name: "Done" }));
-    await user.click(screen.getByRole("button", { name: "Execution options" }));
-    const reopened = await screen.findByRole("dialog", { name: "Execution options" });
-    expect(within(reopened).getByRole("switch", { name: /Run in background/u })).toBeChecked();
-    expect(within(reopened).getByRole("textbox", { name: "Environment overrides" })).toHaveValue("LANG=C");
-    await user.click(within(reopened).getByRole("button", { name: "Done" }));
+    expect(screen.getByRole("switch", { name: /Capture output/u })).toBeChecked();
+    await user.click(screen.getByRole("switch", { name: /Run in background/u }));
+    expect(screen.getByRole("switch", { name: /Capture output/u })).not.toBeChecked();
+    await user.click(screen.getByRole("switch", { name: /Inherit environment/u }));
+    await user.type(screen.getByRole("textbox", { name: "Environment overrides" }), "LANG=C");
+    await user.clear(screen.getByRole("spinbutton", { name: "Timeout seconds" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Timeout seconds" }), "27");
+    await user.type(screen.getByRole("textbox", { name: "Remote stdout path" }), "/tmp/out.txt");
+    expect(screen.getByRole("switch", { name: /Run in background/u })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Environment overrides" })).toHaveValue("LANG=C");
     await user.click(screen.getByRole("button", { name: "Review" }));
 
     await waitFor(() => expect(onPrepare).toHaveBeenCalledTimes(1));
@@ -172,17 +168,31 @@ describe("compact process execution form", () => {
     const windowsTarget: SessionSummary = { ...linuxTarget, os: "windows", arch: "amd64" };
     const { onPrepare } = renderCompact(windowsTarget);
     expect(screen.getByRole("textbox", { name: "Executable path" })).toHaveValue("C:\\Windows\\System32\\cmd.exe");
-    await user.click(screen.getByRole("button", { name: "Execution options" }));
-    const modal = await screen.findByRole("dialog", { name: "Execution options" });
-    await user.click(within(modal).getByRole("switch", { name: /Use current token/u }));
-    await user.type(within(modal).getByRole("spinbutton", { name: "Parent process ID" }), "1234");
-    await user.click(within(modal).getByRole("button", { name: "Done" }));
+    await user.click(screen.getByRole("switch", { name: /Use current token/u }));
+    await user.type(screen.getByRole("spinbutton", { name: "Parent process ID" }), "1234");
     await user.click(screen.getByRole("button", { name: "Review" }));
 
     await waitFor(() => expect(onPrepare).toHaveBeenCalledTimes(1));
     expect(onPrepare).toHaveBeenCalledWith(expect.objectContaining({
       useToken: true,
       parentPid: 1234,
+    }));
+  });
+
+  it("accepts a quoted Windows executable path without sending quote characters to Sliver", async () => {
+    const user = userEvent.setup();
+    const { onPrepare } = renderCompact({ ...linuxTarget, os: "windows", arch: "amd64" });
+    const executable = screen.getByRole("textbox", { name: "Executable path" });
+    await user.clear(executable);
+    await user.type(executable, '"C:\\Windows\\System32\\tasklist.exe"');
+    await user.click(screen.getByRole("button", { name: "Review" }));
+
+    await waitFor(() => expect(onPrepare).toHaveBeenCalledTimes(1));
+    expect(onPrepare).toHaveBeenCalledWith(expect.objectContaining({
+      path: "C:\\Windows\\System32\\tasklist.exe",
+      args: [],
+      captureOutput: true,
+      background: false,
     }));
   });
 });

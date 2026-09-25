@@ -100,10 +100,13 @@ export function TargetExecutionWorkbench({
   const [result, setResult] = useState<ExecutionActionResult>();
   const [savingStream, setSavingStream] = useState<"stdout" | "stderr" | "combined">();
   const [addingToLoot, setAddingToLoot] = useState(false);
-  const [selectedProcessId, setSelectedProcessId] = useState<string>();
+  // null explicitly opens the new-execution composer; undefined defaults to the newest retained run.
+  const [selectedProcessId, setSelectedProcessId] = useState<string | null>();
   const [readState, setReadState] = useState<ReadState>({ status: "idle" });
   const identityRef = useRef(exactIdentity);
   identityRef.current = exactIdentity;
+  const selectionIdentityRef = useRef(selectionIdentity);
+  selectionIdentityRef.current = selectionIdentity;
   const previousSelectionIdentity = useRef<string | undefined>(undefined);
   const expectedTargetRef = useRef(expectedTarget);
   expectedTargetRef.current = expectedTarget;
@@ -179,7 +182,7 @@ export function TargetExecutionWorkbench({
     previousSelectionIdentity.current = selectionIdentity;
     catalogRequestSequence.current += 1;
     prepareRequestSequence.current += 1;
-    executeRequestSequence.current += 1;
+    if (selectionChanged) executeRequestSequence.current += 1;
     readRequestSequence.current += 1;
     resultRequestSequence.current += 1;
     saveRequestSequence.current += 1;
@@ -191,7 +194,7 @@ export function TargetExecutionWorkbench({
     setSelectedCapability(undefined);
     setIsPreparing(false);
     setPlan(undefined);
-    setIsExecuting(false);
+    if (selectionChanged) setIsExecuting(false);
     setSavingStream(undefined);
     setAddingToLoot(false);
     if (selectionChanged) {
@@ -306,38 +309,6 @@ export function TargetExecutionWorkbench({
     setSelectedCapability(capability);
   }, [catalogIsCurrent, clearPreparedPlan, runRead]);
 
-  const prepare = useCallback(async (draft: ExecutionActionDraft): Promise<void> => {
-    if (!catalogIsCurrent) return;
-    const expectedIdentity = exactIdentity;
-    const sequence = ++prepareRequestSequence.current;
-    if (planRef.current) clearPreparedPlan(false);
-    preparedProcessDraft.current = undefined;
-    setIsPreparing(true);
-    try {
-      const response = await window.sliver.prepareExecutionAction({ draft });
-      if (sequence !== prepareRequestSequence.current || expectedIdentity !== identityRef.current) {
-        if (response.ok && response.value) discardToken(response.value.token);
-        return;
-      }
-      if (!response.ok || !response.value) throw new Error(response.error ?? "Could not prepare execution action");
-      if (
-        response.value.operationId !== draft.operationId ||
-        !executionPlanMatchesTarget(response.value, expectedTargetRef.current, catalog?.backend)
-      ) {
-        discardToken(response.value.token);
-        throw new Error("The reviewed plan no longer matches this exact operation and target selection.");
-      }
-      planRef.current = response.value;
-      if (draft.operationId === "execution.process" && catalog?.target.mode === "session") {
-        preparedProcessDraft.current = { path: draft.path, args: [...draft.args] };
-      }
-      setSelectedCapability(undefined);
-      setPlan(response.value);
-    } finally {
-      if (sequence === prepareRequestSequence.current && expectedIdentity === identityRef.current) setIsPreparing(false);
-    }
-  }, [catalog?.backend, catalog?.target.mode, catalogIsCurrent, clearPreparedPlan, discardToken, exactIdentity]);
-
   const retainProcessResult = useCallback(async (
     historyKey: string,
     recordId: string,
@@ -357,7 +328,7 @@ export function TargetExecutionWorkbench({
         return { stream, response: { ok: false as const, error: errorMessage(error) } };
       }
     }));
-    if (exactIdentity !== identityRef.current) {
+    if (selectionIdentity !== selectionIdentityRef.current) {
       for (const read of reads) if (read.response.ok) read.response.value.data.fill(0);
       updateProcessExecution(historyKey, recordId, {
         outputError: "Captured output could not be copied after the selected target changed.",
@@ -382,13 +353,13 @@ export function TargetExecutionWorkbench({
       patch.stdout?.data.fill(0);
       patch.stderr?.data.fill(0);
     }
-  }, [exactIdentity]);
+  }, [selectionIdentity]);
 
-  const execute = useCallback(async (): Promise<void> => {
+  const execute = useCallback(async (directProcessPlan?: ExecutionActionPlan): Promise<void> => {
     if (!catalogIsCurrent) return;
-    const current = planRef.current;
+    const current = directProcessPlan ?? planRef.current;
     if (!current) return;
-    const expectedIdentity = exactIdentity;
+    const expectedIdentity = selectionIdentity;
     const sequence = ++executeRequestSequence.current;
     const historyKey = current.operationId === "execution.process" && catalog?.target.mode === "session"
       ? processHistoryKey
@@ -411,7 +382,7 @@ export function TargetExecutionWorkbench({
     setIsExecuting(true);
     try {
       const response = await window.sliver.executeExecutionPlan({ token: current.token });
-      if (sequence !== executeRequestSequence.current || expectedIdentity !== identityRef.current) {
+      if (sequence !== executeRequestSequence.current || expectedIdentity !== selectionIdentityRef.current) {
         if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
           state: "outcome-unknown",
           error: "The selected target changed before this result could be associated with it.",
@@ -455,17 +426,58 @@ export function TargetExecutionWorkbench({
       }
       restoreActionFocus();
     } catch (error) {
-      if (sequence === executeRequestSequence.current && expectedIdentity === identityRef.current) {
+      if (directProcessPlan) discardToken(current.token);
+      if (sequence === executeRequestSequence.current && expectedIdentity === selectionIdentityRef.current) {
         if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
-          state: "request-failed",
-          error: errorMessage(error),
+          state: directProcessPlan ? "outcome-unknown" : "request-failed",
+          error: directProcessPlan
+            ? `Could not confirm whether execution started: ${errorMessage(error)}`
+            : errorMessage(error),
         });
-        toast.danger("Execution failed", { description: errorMessage(error) });
+        if (directProcessPlan) toast.warning("Execution status unknown", { description: errorMessage(error) });
+        else toast.danger("Execution failed", { description: errorMessage(error) });
       }
     } finally {
-      if (sequence === executeRequestSequence.current && expectedIdentity === identityRef.current) setIsExecuting(false);
+      if (sequence === executeRequestSequence.current && expectedIdentity === selectionIdentityRef.current) setIsExecuting(false);
     }
-  }, [catalog?.target.mode, catalogIsCurrent, exactIdentity, processHistoryKey, restoreActionFocus, retainProcessResult]);
+  }, [catalog?.target.mode, catalogIsCurrent, discardToken, processHistoryKey, restoreActionFocus, retainProcessResult, selectionIdentity]);
+
+  const prepare = useCallback(async (draft: ExecutionActionDraft): Promise<void> => {
+    if (!catalogIsCurrent) return;
+    const expectedIdentity = exactIdentity;
+    const sequence = ++prepareRequestSequence.current;
+    if (planRef.current) clearPreparedPlan(false);
+    preparedProcessDraft.current = undefined;
+    setIsPreparing(true);
+    try {
+      const response = await window.sliver.prepareExecutionAction({ draft });
+      if (sequence !== prepareRequestSequence.current || expectedIdentity !== identityRef.current) {
+        if (response.ok && response.value) discardToken(response.value.token);
+        return;
+      }
+      if (!response.ok || !response.value) throw new Error(response.error ?? "Could not prepare execution action");
+      if (
+        response.value.operationId !== draft.operationId ||
+        !executionPlanMatchesTarget(response.value, expectedTargetRef.current, catalog?.backend)
+      ) {
+        discardToken(response.value.token);
+        throw new Error("The prepared plan no longer matches this exact operation and target selection.");
+      }
+      const isDirectSessionProcess = draft.operationId === "execution.process" && catalog?.target.mode === "session";
+      if (isDirectSessionProcess) {
+        preparedProcessDraft.current = { path: draft.path, args: [...draft.args] };
+      }
+      setSelectedCapability(undefined);
+      if (isDirectSessionProcess) {
+        await execute(response.value);
+      } else {
+        planRef.current = response.value;
+        setPlan(response.value);
+      }
+    } finally {
+      if (sequence === prepareRequestSequence.current && expectedIdentity === identityRef.current) setIsPreparing(false);
+    }
+  }, [catalog?.backend, catalog?.target.mode, catalogIsCurrent, clearPreparedPlan, discardToken, exactIdentity, execute]);
 
   const syncResult = useCallback(async (
     pending: ExecutionActionResult,
@@ -537,10 +549,10 @@ export function TargetExecutionWorkbench({
 
   const refreshProcessResult = useCallback(async (record: ProcessExecutionRecord): Promise<void> => {
     if (!processHistoryKey || !record.result) return;
-    const expectedIdentity = exactIdentity;
+    const expectedIdentity = selectionIdentity;
     try {
       const response = await window.sliver.getExecutionResult({ requestId: record.result.requestId });
-      if (expectedIdentity !== identityRef.current) return;
+      if (expectedIdentity !== selectionIdentityRef.current) return;
       if (!response.ok || !response.value) {
         toast.danger("Could not refresh process result", { description: response.error });
         return;
@@ -551,11 +563,11 @@ export function TargetExecutionWorkbench({
       }
       await retainProcessResult(processHistoryKey, record.id, response.value);
     } catch (error) {
-      if (expectedIdentity === identityRef.current) {
+      if (expectedIdentity === selectionIdentityRef.current) {
         toast.danger("Could not refresh process result", { description: errorMessage(error) });
       }
     }
-  }, [exactIdentity, processHistoryKey, retainProcessResult]);
+  }, [processHistoryKey, retainProcessResult, selectionIdentity]);
 
   const saveResult = useCallback(async (
     source: ExecutionActionResult,
@@ -633,7 +645,12 @@ export function TargetExecutionWorkbench({
       }}
     >
       {EXECUTION_CATEGORIES.map((candidate) => (
-        <Segment.Item id={candidate.id} key={candidate.id}>{candidate.label}</Segment.Item>
+        <Segment.Item id={candidate.id} key={candidate.id}>
+          <span className="inline-flex items-center gap-2">
+            <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={candidate.icon} />
+            {candidate.label}
+          </span>
+        </Segment.Item>
       ))}
     </Segment>
   );

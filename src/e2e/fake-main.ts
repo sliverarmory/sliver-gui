@@ -101,6 +101,12 @@ interface FakeMainState {
     state: string;
     description: string;
   }>;
+  processCalls: Array<{
+    sessionId: string;
+    options: Parameters<SliverClientAdapter["executeSession"]>[1];
+    timeoutSeconds: number | undefined;
+  }>;
+  processResponseHeld: boolean;
   m4Audit: {
     callCounts: Record<string, number>;
     artifactInputs: number;
@@ -139,6 +145,8 @@ interface FakeMainControl {
   completeTask(taskId: string, emitEvent?: boolean): void;
   holdNextConsoleExit(): void;
   releaseConsoleExitHold(): void;
+  holdNextProcessResponse(): void;
+  releaseProcessResponseHold(): void;
 }
 
 declare global {
@@ -178,6 +186,8 @@ const state: FakeMainState = {
   ]),
   openSessionRequests: [],
   tasks: [],
+  processCalls: [],
+  processResponseHeld: false,
   m4Audit: {
     callCounts: {},
     artifactInputs: 0,
@@ -200,6 +210,9 @@ globalThis.__SLIVER_GUI_E2E_STATE__ = state;
 globalThis.__SLIVER_GUI_PROTOCOL_E2E_HANDLER__ = createAppProtocolHandler;
 let holdNextConsoleExit = false;
 let heldConsoleExit: (() => void) | undefined;
+let holdNextProcessResponse = false;
+let heldProcessResponse: (() => void) | undefined;
+let advanceSessionCheckinOnNextRead = false;
 const consoleClientRootDirectory = requiredArgument("--console-client-root-directory=");
 const sshIdentityDirectoryArgument = process.argv.find((argument) => (
   argument.startsWith("--ssh-identity-directory=")
@@ -867,6 +880,19 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       heldConsoleExit = undefined;
       if (release) queueMicrotask(release);
     },
+    holdNextProcessResponse() {
+      if (!registryLayoutFixture) throw new Error("Process response holds require the Windows fixture");
+      if (holdNextProcessResponse || heldProcessResponse) throw new Error("A fake process response is already held");
+      holdNextProcessResponse = true;
+      advanceSessionCheckinOnNextRead = true;
+    },
+    releaseProcessResponseHold() {
+      holdNextProcessResponse = false;
+      advanceSessionCheckinOnNextRead = false;
+      const release = heldProcessResponse;
+      heldProcessResponse = undefined;
+      if (release) queueMicrotask(release);
+    },
   };
 
   const record = (method: string): void => {
@@ -1183,6 +1209,13 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     },
     async getSessions() {
       record("getSessions");
+      if (registryLayoutFixture && advanceSessionCheckinOnNextRead) {
+        advanceSessionCheckinOnNextRead = false;
+        sessions = sessions.map((session) => ({
+          ...session,
+          LastCheckin: String(BigInt(session.LastCheckin) + 1n),
+        }));
+      }
       return clientpb.Sessions.create({ Sessions: sessions.map(cloneSession) });
     },
     async getPivotGraph() {
@@ -1787,9 +1820,24 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async registryWriteSession() { return unsupported("registryWriteSession"); },
     async registryCreateKeySession() { return unsupported("registryCreateKeySession"); },
     async registryDeleteKeySession() { return unsupported("registryDeleteKeySession"); },
-    async executeSession(sessionId, options) {
+    async executeSession(sessionId, options, timeoutSeconds) {
       recordM4("executeSession");
       requireSession(sessionId);
+      if (registryLayoutFixture) {
+        testState.processCalls.push({
+          sessionId,
+          options: { ...options, args: [...(options.args ?? [])], env: { ...options.env } },
+          timeoutSeconds,
+        });
+        if (holdNextProcessResponse) {
+          holdNextProcessResponse = false;
+          await new Promise<void>((resolve) => {
+            heldProcessResponse = resolve;
+            testState.processResponseHeld = true;
+          });
+          testState.processResponseHeld = false;
+        }
+      }
       return sliverpb.Execute.create({
         Status: 0,
         Stdout: options.background || options.output === false
