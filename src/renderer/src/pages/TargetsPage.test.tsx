@@ -1547,6 +1547,106 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(selectTarget).toHaveBeenCalledWith(target501Ref));
   });
 
+  it.each(["session", "beacon"] as const)(
+    "keeps %s search rows visible across a domain refresh without using stale target references",
+    async (mode) => {
+      const user = userEvent.setup();
+      const target = mode === "session" ? session : beacon;
+      const initialRef = mode === "session" ? sessionRef : beaconRef;
+      const refreshedRef = { ...initialRef, domainRevision: initialRef.domainRevision + 1 };
+      const refreshedTarget = { ...target, name: `${target.name}-updated` };
+      const refreshedSearch = deferred<Awaited<ReturnType<SliverDesktopAPI["listTargets"]>>>();
+      const page = { limit: 100, total: 1, truncated: false };
+      const listTargets = vi.fn()
+        .mockResolvedValueOnce({ ok: true, value: { items: [{ target, ref: initialRef }], page } })
+        .mockImplementationOnce(() => refreshedSearch.promise);
+      const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: targetSnapshot(mode) });
+      installAPI({ listTargets, selectTarget });
+      const initial = targetSnapshot();
+      const rendered = render(<TargetsPage mode={mode} snapshot={initial} onSnapshot={vi.fn()} />);
+
+      await user.type(screen.getByRole("searchbox", { name: `Filter ${mode}s` }), target.name);
+      await waitFor(() => expect(listTargets).toHaveBeenCalledOnce());
+      expect(await screen.findByRole("row", { name: new RegExp(target.name) })).toBeInTheDocument();
+
+      const refreshed = targetSnapshot();
+      if (mode === "session") {
+        refreshed.domains.sessions = { ...refreshed.domains.sessions, revision: refreshedRef.domainRevision };
+      } else {
+        refreshed.domains.beacons = { ...refreshed.domains.beacons, revision: refreshedRef.domainRevision };
+      }
+      refreshed.targetContext.selectableTargets = [
+        mode === "session" ? refreshedRef : sessionRef,
+        mode === "beacon" ? refreshedRef : beaconRef,
+      ];
+      rendered.rerender(<TargetsPage mode={mode} snapshot={refreshed} onSnapshot={vi.fn()} />);
+
+      const staleRow = screen.getByRole("row", { name: new RegExp(target.name) });
+      expect(staleRow).toBeInTheDocument();
+      await waitFor(() => expect(listTargets).toHaveBeenCalledTimes(2));
+      expect(staleRow).toBeInTheDocument();
+      if (mode === "session") {
+        expect(screen.getByRole("button", { name: `Interact with ${target.name}` })).toBeDisabled();
+      }
+      await user.click(staleRow);
+      expect(selectTarget).not.toHaveBeenCalled();
+      fireEvent.contextMenu(staleRow);
+      expect(screen.queryByRole("menuitem", { name: "Interact" })).not.toBeInTheDocument();
+
+      await act(async () => {
+        refreshedSearch.resolve({ ok: true, value: { items: [{ target: refreshedTarget, ref: refreshedRef }], page } });
+        await refreshedSearch.promise;
+      });
+      if (mode === "session") {
+        expect(screen.getByRole("button", { name: `Interact with ${refreshedTarget.name}` })).toBeEnabled();
+      }
+      await user.click(await screen.findByRole("row", { name: new RegExp(refreshedTarget.name) }));
+      await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(refreshedRef));
+    },
+  );
+
+  it.each(["query", "backend"] as const)(
+    "clears settled search rows when the %s identity changes",
+    async (change) => {
+      const user = userEvent.setup();
+      const oldTarget = { ...session, name: "payments-old" };
+      const newTarget = { ...session, id: "session-new", name: "payments-new" };
+      const newRef = { ...sessionRef, id: newTarget.id };
+      const nextSearch = deferred<Awaited<ReturnType<SliverDesktopAPI["listTargets"]>>>();
+      const page = { limit: 100, total: 1, truncated: false };
+      const listTargets = vi.fn()
+        .mockResolvedValueOnce({ ok: true, value: { items: [{ target: oldTarget, ref: sessionRef }], page } })
+        .mockImplementationOnce(() => nextSearch.promise);
+      installAPI({ listTargets });
+      const initial = targetSnapshot();
+      initial.connection.incarnation = 1;
+      const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={vi.fn()} />);
+      const search = screen.getByRole("searchbox", { name: "Filter sessions" });
+
+      await user.type(search, "payments");
+      expect(await screen.findByRole("row", { name: /payments-old/i })).toBeInTheDocument();
+
+      if (change === "query") {
+        await user.clear(search);
+        await user.type(search, "pay");
+      } else {
+        const reconnected = targetSnapshot();
+        reconnected.connection.incarnation = 2;
+        rendered.rerender(<TargetsPage mode="session" snapshot={reconnected} onSnapshot={vi.fn()} />);
+      }
+      expect(screen.queryByRole("row", { name: /payments-old/i })).not.toBeInTheDocument();
+      await waitFor(() => expect(listTargets).toHaveBeenCalledTimes(2));
+      expect(screen.getByText("Searching sessions")).toBeInTheDocument();
+
+      await act(async () => {
+        nextSearch.resolve({ ok: true, value: { items: [{ target: newTarget, ref: newRef }], page } });
+        await nextSearch.promise;
+      });
+      expect(await screen.findByRole("row", { name: /payments-new/i })).toBeInTheDocument();
+      expect(screen.queryByRole("row", { name: /payments-old/i })).not.toBeInTheDocument();
+    },
+  );
+
   it("quarantines search results from an earlier connection incarnation", async () => {
     const user = userEvent.setup();
     const staleSessionSearch = deferred<Awaited<ReturnType<SliverDesktopAPI["listTargets"]>>>();

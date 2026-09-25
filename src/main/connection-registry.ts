@@ -6528,8 +6528,10 @@ export class ConnectionRegistry {
       if (context.poolKey !== poolKey) continue;
       const pool = this.pools.get(poolKey);
       if (!pool || pool.epoch !== epoch) continue;
-      context.snapshot = this.snapshotForWindow(context, snapshot);
-      this.pushSnapshot(contentsId, context.snapshot);
+      const previous = context.snapshot;
+      const next = this.snapshotForWindow(context, snapshot);
+      context.snapshot = next;
+      if (!sameRendererSnapshot(previous, next)) this.pushSnapshot(contentsId, next);
     }
   }
 
@@ -7836,6 +7838,57 @@ function invalidatedDomainsForEvent(eventType: string): DomainName[] {
 
 function emptyServiceInventory(): DomainCollection<InfrastructureServiceSummary> {
   return { status: "idle", revision: 0, items: [], page: { limit: MAX_DOMAIN_ITEMS, total: 0, truncated: false } };
+}
+
+function omitSnapshotKeys<T extends object>(value: T, keys: readonly (keyof T)[]): Partial<T> {
+  const comparable: Partial<T> = { ...value };
+  for (const key of keys) delete comparable[key];
+  return comparable;
+}
+
+function rendererSnapshotState(snapshot: SliverSnapshot): unknown {
+  const domain = <T>(value: DomainCollection<T>, preserveRevision = false): Partial<DomainCollection<T>> =>
+    omitSnapshotKeys(value, preserveRevision ? ["updatedAt"] : ["updatedAt", "revision"]);
+
+  return {
+    ...omitSnapshotKeys(snapshot, ["lastUpdated"]),
+    domains: {
+      ...snapshot.domains,
+      jobs: domain(snapshot.domains.jobs),
+      builds: domain(snapshot.domains.builds),
+      profiles: domain(snapshot.domains.profiles),
+      compiler: domain(snapshot.domains.compiler),
+      sessions: domain(snapshot.domains.sessions, true),
+      beacons: domain(snapshot.domains.beacons, true),
+      operators: domain(snapshot.domains.operators),
+    },
+    infrastructureServices: snapshot.infrastructureServices && {
+      ...snapshot.infrastructureServices,
+      builders: domain(snapshot.infrastructureServices.builders),
+      crackstations: domain(snapshot.infrastructureServices.crackstations),
+    },
+    pivotTopology: snapshot.pivotTopology && omitSnapshotKeys(snapshot.pivotTopology, ["updatedAt", "revision"]),
+  };
+}
+
+function sameRendererSnapshot(previous: SliverSnapshot, next: SliverSnapshot): boolean {
+  // A bounded non-target inventory may hide changed entries beyond its first
+  // page. Until these domains track full-catalog revisions, forward every
+  // refresh while any of them is truncated.
+  const boundedDomains = [
+    next.domains.jobs,
+    next.domains.builds,
+    next.domains.profiles,
+    next.domains.compiler,
+    next.domains.operators,
+    next.infrastructureServices?.builders,
+    next.infrastructureServices?.crackstations,
+  ];
+  if (boundedDomains.some((domain) => domain?.page.truncated) || next.pivotTopology?.truncated) return false;
+  // Poll timestamps and revisions for display-only inventories change even when
+  // the renderer-visible data does not. Target revisions remain significant:
+  // they also track changes outside the bounded page and bind target cursors.
+  return isDeepStrictEqual(rendererSnapshotState(previous), rendererSnapshotState(next));
 }
 
 function domainWithStatus<T>(

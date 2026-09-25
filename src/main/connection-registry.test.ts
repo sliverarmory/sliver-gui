@@ -1118,13 +1118,7 @@ describe("connection registry with an injected Sliver client", () => {
     expect(client.implantProfiles).toHaveBeenCalledTimes(2);
     expect(registry.snapshot(1).domains.jobs).toMatchObject({ status: "ready", items: [{ id: 7 }] });
     expect(registry.snapshot(1).domains.profiles).toMatchObject({ status: "empty", items: [] });
-    const pendingSnapshots = send.mock.calls
-      .filter(([channel]) => channel === IPC.snapshotChanged)
-      .map(([, snapshot]) => snapshot as SliverSnapshot);
-    expect(pendingSnapshots.length).toBeGreaterThan(0);
-    expect(pendingSnapshots.every((snapshot) =>
-      snapshot.domains.jobs.status === "ready" && snapshot.domains.profiles.status === "empty"
-    )).toBe(true);
+    expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(0);
 
     pendingJobs.resolve([job(8, 8000)]);
     pendingProfiles.resolve(clientpb.ImplantProfiles.create({ Profiles: [] }));
@@ -1139,6 +1133,66 @@ describe("connection registry with an injected Sliver client", () => {
       error: "periodic jobs unavailable",
       items: [{ id: 8, port: 8000 }],
     });
+    expect(send.mock.calls.some(([channel, snapshot]) =>
+      channel === IPC.snapshotChanged && (snapshot as SliverSnapshot).domains.jobs.status === "error"
+    )).toBe(true);
+  });
+
+  it("does not deliver unchanged periodic snapshots but preserves inventory and hidden target changes", async () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000)];
+    client.sessionState.Sessions = Array.from({ length: 501 }, (_, index) =>
+      session(`session_${String(index).padStart(4, "0")}`, `session-${index}`),
+    );
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const initial = registry.snapshot(1);
+    const initialCursor = initial.domains.sessions.page.nextCursor;
+    expect(initialCursor).toMatch(/^target:v1:/u);
+    send.mockClear();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(client.jobs).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.filter(([channel]) => channel === IPC.snapshotChanged)).toHaveLength(0);
+    expect(registry.snapshot(1).lastUpdated).not.toBe(initial.lastUpdated);
+
+    client.jobState = [job(8, 8000)];
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(send.mock.calls.some(([channel, snapshot]) =>
+      channel === IPC.snapshotChanged && (snapshot as SliverSnapshot).jobs.some((item) => item.id === 8)
+    )).toBe(true);
+    send.mockClear();
+
+    client.sessionState.Sessions[500]!.Name = "changed-outside-the-bounded-page";
+    await vi.advanceTimersByTimeAsync(30_000);
+    const changed = registry.snapshot(1);
+    expect(changed.domains.sessions.revision).toBe(initial.domains.sessions.revision + 1);
+    expect(changed.domains.sessions.page.nextCursor).not.toBe(initialCursor);
+    expect(send.mock.calls.some(([channel, snapshot]) =>
+      channel === IPC.snapshotChanged &&
+      (snapshot as SliverSnapshot).domains.sessions.revision === changed.domains.sessions.revision
+    )).toBe(true);
+  });
+
+  it("continues delivering polls for truncated non-target inventories", async () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    client.jobState = Array.from({ length: 501 }, (_, index) => job(index + 1, 7000 + index));
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    expect(registry.snapshot(1).domains.jobs.page.truncated).toBe(true);
+    send.mockClear();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(send.mock.calls.some(([channel]) => channel === IPC.snapshotChanged)).toBe(true);
   });
 
   it("marks an event-invalidated domain loading even when a periodic poll is in flight", async () => {

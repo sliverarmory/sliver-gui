@@ -235,6 +235,49 @@ function installAPI(executionCatalog: ExecutionCatalog) {
 }
 
 describe("TargetExecutionWorkbench", () => {
+  it("keeps the execution pane visible while a revised reference is validated", async () => {
+    const user = userEvent.setup();
+    const revisedRef = { ...targetRef, domainRevision: targetRef.domainRevision + 1 };
+    const revert = capability("privilege.revert", { platforms: ["linux"] });
+    const process = capability("execution.process", { platforms: ["linux"] });
+    const api = installAPI(catalog([process, revert]));
+    const refreshedCatalog = deferred<{ ok: true; value: ExecutionCatalog }>();
+    api.listExecutionCatalog
+      .mockResolvedValueOnce({ ok: true, value: catalog([process, revert]) })
+      .mockReturnValueOnce(refreshedCatalog.promise);
+    api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan("privilege.revert") });
+
+    const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-a" />);
+    const operations = await screen.findByRole("region", { name: "Execution operations" });
+    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Open: Revert identity" }));
+    await user.click(screen.getByRole("button", { name: "Review" }));
+    await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
+
+    rerender(<TargetExecutionWorkbench expectedTarget={revisedRef} targetIdentity="target-a" />);
+    await waitFor(() => expect(api.listExecutionCatalog).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.discardExecutionPlan).toHaveBeenCalledWith({ token: "plan-privilege.revert" }));
+    expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Execution operations" })).toBe(operations);
+    expect(screen.getByRole("radio", { name: "Identity" })).toBeChecked();
+    expect(screen.queryByRole("region", { name: "Loading execution workbench" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Refreshing execution capabilities");
+    await user.click(screen.getByRole("radio", { name: "Process" }));
+    expect(screen.getByRole("button", { name: "Review command" })).toBeDisabled();
+    await user.click(screen.getByRole("radio", { name: "Identity" }));
+
+    await act(async () => {
+      refreshedCatalog.resolve({ ok: true, value: catalog([process, revert], target, revisedRef) });
+      await refreshedCatalog.promise;
+    });
+    expect(screen.getByRole("region", { name: "Execution operations" })).toBe(operations);
+    expect(screen.getByRole("radio", { name: "Identity" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeEnabled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
   it("uses the main catalog as authority, preserves unavailable reasons, and omits structural mismatches", async () => {
     const user = userEvent.setup();
     const api = installAPI(catalog([

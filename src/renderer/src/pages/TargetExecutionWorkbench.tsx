@@ -87,8 +87,11 @@ export function TargetExecutionWorkbench({
   expectedTarget,
   targetIdentity,
 }: TargetExecutionWorkbenchProps): React.JSX.Element {
+  const selectionIdentity = targetSelectionIdentity(targetIdentity, expectedTarget);
   const exactIdentity = targetExecutionIdentity(targetIdentity, expectedTarget);
   const [catalogState, setCatalogState] = useState<CatalogState>({ status: "loading" });
+  const catalogIsCurrent = catalogState.status === "ready" &&
+    targetRefsEqual(catalogState.value.targetRef, expectedTarget);
   const [category, setCategory] = useState<ExecutionCategoryId>("process");
   const [selectedCapability, setSelectedCapability] = useState<ExecutionCapability>();
   const [isPreparing, setIsPreparing] = useState(false);
@@ -101,6 +104,7 @@ export function TargetExecutionWorkbench({
   const [readState, setReadState] = useState<ReadState>({ status: "idle" });
   const identityRef = useRef(exactIdentity);
   identityRef.current = exactIdentity;
+  const previousSelectionIdentity = useRef<string | undefined>(undefined);
   const expectedTargetRef = useRef(expectedTarget);
   expectedTargetRef.current = expectedTarget;
   const planRef = useRef<ExecutionActionPlan | undefined>(undefined);
@@ -139,10 +143,10 @@ export function TargetExecutionWorkbench({
     if (restoreFocus) restoreActionFocus();
   }, [discardToken, restoreActionFocus]);
 
-  const loadCatalog = useCallback(async (): Promise<void> => {
+  const loadCatalog = useCallback(async (preserveCurrent = false): Promise<void> => {
     const expectedIdentity = exactIdentity;
     const sequence = ++catalogRequestSequence.current;
-    setCatalogState({ status: "loading" });
+    if (!preserveCurrent) setCatalogState({ status: "loading" });
     try {
       const response = await window.sliver.listExecutionCatalog();
       if (sequence !== catalogRequestSequence.current || expectedIdentity !== identityRef.current) return;
@@ -171,6 +175,8 @@ export function TargetExecutionWorkbench({
   }, [exactIdentity]);
 
   useEffect(() => {
+    const selectionChanged = previousSelectionIdentity.current !== selectionIdentity;
+    previousSelectionIdentity.current = selectionIdentity;
     catalogRequestSequence.current += 1;
     prepareRequestSequence.current += 1;
     executeRequestSequence.current += 1;
@@ -182,20 +188,27 @@ export function TargetExecutionWorkbench({
     planRef.current = undefined;
     preparedProcessDraft.current = undefined;
     if (stalePlan) discardToken(stalePlan.token);
-    setCategory("process");
     setSelectedCapability(undefined);
     setIsPreparing(false);
     setPlan(undefined);
     setIsExecuting(false);
-    resultRef.current = undefined;
-    setResult(undefined);
     setSavingStream(undefined);
     setAddingToLoot(false);
-    setSelectedProcessId(undefined);
-    readStateRef.current = { status: "idle" };
-    setReadState({ status: "idle" });
-    void loadCatalog();
-  }, [discardToken, exactIdentity, loadCatalog]);
+    if (selectionChanged) {
+      setCategory("process");
+      resultRef.current = undefined;
+      setResult(undefined);
+      setSelectedProcessId(undefined);
+      readStateRef.current = { status: "idle" };
+      setReadState({ status: "idle" });
+    } else if (readStateRef.current.status === "loading") {
+      readStateRef.current = { status: "idle" };
+      setReadState({ status: "idle" });
+    }
+    // A new domain revision invalidates exact action references, but its
+    // settled catalog can stay visible until main validates the new reference.
+    void loadCatalog(!selectionChanged);
+  }, [discardToken, exactIdentity, loadCatalog, selectionIdentity]);
 
   useEffect(() => () => {
     const current = planRef.current;
@@ -225,6 +238,7 @@ export function TargetExecutionWorkbench({
     taskId?: string,
     background = false,
   ): Promise<void> => {
+    if (!catalogIsCurrent && !background) return;
     const expectedIdentity = exactIdentity;
     const sequence = ++readRequestSequence.current;
     const append = cursor !== undefined;
@@ -273,10 +287,10 @@ export function TargetExecutionWorkbench({
         setReadState({ status: "error", operationId, error: errorMessage(error) });
       }
     }
-  }, [exactIdentity]);
+  }, [catalogIsCurrent, exactIdentity]);
 
   const beginAction = useCallback((capability: ExecutionCapability): void => {
-    if (!capability.available) return;
+    if (!catalogIsCurrent || !capability.available) return;
     if (planRef.current) clearPreparedPlan(false);
     lastAction.current = capability.operationId;
     resultRequestSequence.current += 1;
@@ -290,9 +304,10 @@ export function TargetExecutionWorkbench({
     readRequestSequence.current += 1;
     setReadState({ status: "idle" });
     setSelectedCapability(capability);
-  }, [clearPreparedPlan, runRead]);
+  }, [catalogIsCurrent, clearPreparedPlan, runRead]);
 
   const prepare = useCallback(async (draft: ExecutionActionDraft): Promise<void> => {
+    if (!catalogIsCurrent) return;
     const expectedIdentity = exactIdentity;
     const sequence = ++prepareRequestSequence.current;
     if (planRef.current) clearPreparedPlan(false);
@@ -321,7 +336,7 @@ export function TargetExecutionWorkbench({
     } finally {
       if (sequence === prepareRequestSequence.current && expectedIdentity === identityRef.current) setIsPreparing(false);
     }
-  }, [catalog?.backend, catalog?.target.mode, clearPreparedPlan, discardToken, exactIdentity]);
+  }, [catalog?.backend, catalog?.target.mode, catalogIsCurrent, clearPreparedPlan, discardToken, exactIdentity]);
 
   const retainProcessResult = useCallback(async (
     historyKey: string,
@@ -370,6 +385,7 @@ export function TargetExecutionWorkbench({
   }, [exactIdentity]);
 
   const execute = useCallback(async (): Promise<void> => {
+    if (!catalogIsCurrent) return;
     const current = planRef.current;
     if (!current) return;
     const expectedIdentity = exactIdentity;
@@ -449,7 +465,7 @@ export function TargetExecutionWorkbench({
     } finally {
       if (sequence === executeRequestSequence.current && expectedIdentity === identityRef.current) setIsExecuting(false);
     }
-  }, [catalog?.target.mode, exactIdentity, processHistoryKey, restoreActionFocus, retainProcessResult]);
+  }, [catalog?.target.mode, catalogIsCurrent, exactIdentity, processHistoryKey, restoreActionFocus, retainProcessResult]);
 
   const syncResult = useCallback(async (
     pending: ExecutionActionResult,
@@ -594,7 +610,10 @@ export function TargetExecutionWorkbench({
     }
   }, [exactIdentity]);
 
-  if (catalogState.status === "loading") {
+  if (
+    catalogState.status === "loading" ||
+    (previousSelectionIdentity.current !== undefined && previousSelectionIdentity.current !== selectionIdentity)
+  ) {
     return <WorkbenchLoading />;
   }
   if (catalogState.status === "error") {
@@ -626,6 +645,9 @@ export function TargetExecutionWorkbench({
         aria-label={isSession ? "Execution operations" : undefined}
         aria-labelledby={isSession ? undefined : "execution-workbench-heading"}
       >
+        {!catalogIsCurrent ? (
+          <p className="mb-4 text-xs text-muted" role="status">Refreshing execution capabilities for the latest target inventory…</p>
+        ) : null}
         {!isSession ? (
           <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
@@ -657,6 +679,7 @@ export function TargetExecutionWorkbench({
             addingToLoot={addingToLoot}
             isExecuting={isExecuting}
             isPreparing={isPreparing}
+            isRefreshing={!catalogIsCurrent}
             savingStream={savingStream === "combined" ? undefined : savingStream}
             selectedId={selectedProcessId}
             target={catalogState.value.target}
@@ -688,6 +711,7 @@ export function TargetExecutionWorkbench({
                     else actionButtons.current.delete(capability.operationId);
                   }}
                   capability={capability}
+                  isRefreshing={!catalogIsCurrent}
                   key={capability.operationId}
                   onPress={() => beginAction(capability)}
                 />
@@ -713,7 +737,7 @@ export function TargetExecutionWorkbench({
       </section>
 
       <ExecutionConfigurationSheet
-        capability={selectedCapability}
+        capability={catalogIsCurrent ? selectedCapability : undefined}
         isPreparing={isPreparing}
         target={catalogState.value.target}
         onCancel={() => {
@@ -726,7 +750,7 @@ export function TargetExecutionWorkbench({
       />
       <ExecutionReviewDialog
         isExecuting={isExecuting}
-        plan={plan}
+        plan={catalogIsCurrent ? plan : undefined}
         onCancel={() => {
           if (!isExecuting) clearPreparedPlan(true);
         }}
@@ -739,10 +763,12 @@ export function TargetExecutionWorkbench({
 function ExecutionActionCard({
   buttonRef,
   capability,
+  isRefreshing,
   onPress,
 }: {
   buttonRef: (node: HTMLButtonElement | null) => void;
   capability: ExecutionCapability;
+  isRefreshing: boolean;
   onPress: () => void;
 }): React.JSX.Element {
   const copy = executionActionPresentation(capability.operationId);
@@ -750,7 +776,7 @@ function ExecutionActionCard({
     <Button
       ref={buttonRef}
       aria-label={`${capability.available ? "Open" : "Unavailable"}: ${copy.label}`}
-      isDisabled={!capability.available}
+      isDisabled={isRefreshing || !capability.available}
       size="sm"
       variant="tertiary"
       onPress={onPress}
@@ -1084,6 +1110,16 @@ function targetExecutionIdentity(routeIdentity: string, target: TargetRef): stri
     target.id,
     target.backendEpoch,
     target.domainRevision,
+    target.fingerprint,
+  ]);
+}
+
+function targetSelectionIdentity(routeIdentity: string, target: TargetRef): string {
+  return JSON.stringify([
+    routeIdentity,
+    target.mode,
+    target.id,
+    target.backendEpoch,
     target.fingerprint,
   ]);
 }

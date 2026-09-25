@@ -20,6 +20,7 @@ interface ProcessExecutionViewProps {
   target: TargetSummary;
   isPreparing: boolean;
   isExecuting: boolean;
+  isRefreshing: boolean;
   history: readonly ProcessExecutionRecord[];
   selectedId: string | undefined;
   savingStream: OutputStream | undefined;
@@ -39,6 +40,7 @@ export function ProcessExecutionView({
   target,
   isPreparing,
   isExecuting,
+  isRefreshing,
   history,
   selectedId,
   savingStream,
@@ -107,7 +109,7 @@ export function ProcessExecutionView({
                 className="w-full sm:w-auto"
                 form={PROCESS_FORM_ID}
                 isPending={isPreparing}
-                isDisabled={isExecuting}
+                isDisabled={isExecuting || isRefreshing}
                 type="submit"
                 variant="primary"
               >

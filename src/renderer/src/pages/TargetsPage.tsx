@@ -124,6 +124,10 @@ interface TargetInventoryState {
   beaconPage: PageSummary;
 }
 
+interface TargetSearchState extends TargetInventoryState {
+  contextIdentity: string;
+}
+
 interface ExecutionSheetTarget {
   ref: TargetRef;
   backendIncarnation: string;
@@ -185,11 +189,14 @@ export function TargetsPage({
   const [executionSheetTarget, setExecutionSheetTarget] = useState<ExecutionSheetTarget>();
   const [showDedicatedExecution, setShowDedicatedExecution] = useState(false);
   const [renameSessionTarget, setRenameSessionTarget] = useState<ExecutionSheetTarget>();
+  const backendIncarnation = targetBackendIncarnation(snapshot);
   const targetInventoryIdentity = targetCatalogIdentity(snapshot, mode);
   const normalizedTargetQuery = normalizeTargetCatalogQuery(query);
-  const targetSearchIdentity = `${targetInventoryIdentity}\0${mode}\0${normalizedTargetQuery}`;
-  const [targetInventory, setTargetInventory] = useState<TargetInventoryState>(() => seedTargetInventory(snapshot, mode));
-  const [targetSearch, setTargetSearch] = useState<TargetInventoryState>();
+  const targetSearchContextIdentity = `${backendIncarnation}\0${mode}\0${normalizedTargetQuery}`;
+  const targetSearchIdentity = `${targetSearchContextIdentity}\0${targetInventoryIdentity}`;
+  const seededTargetInventory = useMemo(() => seedTargetInventory(snapshot, mode), [targetInventoryIdentity]);
+  const [targetInventory, setTargetInventory] = useState<TargetInventoryState>(seededTargetInventory);
+  const [targetSearch, setTargetSearch] = useState<TargetSearchState>();
   const [targetSearchError, setTargetSearchError] = useState<string>();
   const [loadingTargetModes, setLoadingTargetModes] = useState<ReadonlySet<TargetMode>>(new Set());
   const [searchingTargetModes, setSearchingTargetModes] = useState<ReadonlySet<TargetMode>>(new Set());
@@ -207,17 +214,22 @@ export function TargetsPage({
   const targetSearchIdentityRef = useRef(targetSearchIdentity);
   targetSearchIdentityRef.current = targetSearchIdentity;
 
+  const searchResultsAreCurrent = targetSearch?.identity === targetSearchIdentity;
+  const targetSearchIsStale = Boolean(normalizedTargetQuery) && !searchResultsAreCurrent;
+  const currentTargetInventory = targetInventory.identity === targetInventoryIdentity
+    ? targetInventory
+    : seededTargetInventory;
   const presentedTargetInventory = useMemo(
     () => normalizedTargetQuery
-      ? targetSearch?.identity === targetSearchIdentity
-        ? targetSearch
+      ? targetSearch?.contextIdentity === targetSearchContextIdentity
+        ? searchResultsAreCurrent ? targetSearch : { ...targetSearch, refs: {} }
         : emptyTargetInventory(targetSearchIdentity)
-      : targetInventory,
-    [normalizedTargetQuery, targetInventory, targetSearch, targetSearchIdentity],
+      : currentTargetInventory,
+    [currentTargetInventory, normalizedTargetQuery, searchResultsAreCurrent, targetSearch, targetSearchContextIdentity, targetSearchIdentity],
   );
   const relevantSearchModes = targetModesForFilter(mode);
   const isSearchingTargets = Boolean(normalizedTargetQuery) && (
-    targetSearch?.identity !== targetSearchIdentity ||
+    !searchResultsAreCurrent ||
     relevantSearchModes.some((targetMode) => searchingTargetModes.has(targetMode))
   );
 
@@ -244,7 +256,6 @@ export function TargetsPage({
   selectedOperationIdRef.current = selectedOperation?.requestId;
   const selectedTaskIdRef = useRef(selectedTask?.taskId);
   selectedTaskIdRef.current = selectedTask?.taskId;
-  const backendIncarnation = targetBackendIncarnation(snapshot);
   const backendIncarnationRef = useRef(backendIncarnation);
   backendIncarnationRef.current = backendIncarnation;
   const activeExecutionIdentity = exactTargetRefIdentity(activeRef);
@@ -276,7 +287,7 @@ export function TargetsPage({
   const pageLabel = mode === "session" ? "Sessions" : "Beacons";
   const pageLabelLower = mode === "session" ? "sessions" : "beacons";
   const pageIcon = mode === "session" ? faComputer : faSatellite;
-  const pageTotal = mode === "session" ? targetInventory.sessionPage.total : targetInventory.beaconPage.total;
+  const pageTotal = mode === "session" ? currentTargetInventory.sessionPage.total : currentTargetInventory.beaconPage.total;
 
   useEffect(() => () => {
     targetSelectionRequestSequence.current += 1;
@@ -566,8 +577,8 @@ export function TargetsPage({
     targetInventoryPageRequestSequence.current.session += 1;
     targetInventoryPageRequestSequence.current.beacon += 1;
     setLoadingTargetModes(new Set());
-    setTargetInventory(seedTargetInventory(snapshot, mode));
-  }, [targetInventoryIdentity]);
+    setTargetInventory(seededTargetInventory);
+  }, [seededTargetInventory]);
 
   useEffect(() => {
     setSearchingTargetModes(new Set());
@@ -584,7 +595,9 @@ export function TargetsPage({
       mode: targetMode,
       sequence: targetSearchPageRequestSequence.current[targetMode],
     }));
-    setTargetSearch(emptyTargetInventory(targetSearchIdentity));
+    setTargetSearch((current) => current?.contextIdentity === targetSearchContextIdentity
+      ? current
+      : { ...emptyTargetInventory(targetSearchIdentity), contextIdentity: targetSearchContextIdentity });
     setSearchingTargetModes(new Set(searchModes));
     const timer = window.setTimeout(() => {
       for (const request of requests) {
@@ -602,13 +615,15 @@ export function TargetsPage({
             return;
           }
           setTargetSearch((current) => {
-            if (current?.identity !== targetSearchIdentity) return current;
-            const refs = { ...current.refs };
+            const next = current?.identity === targetSearchIdentity
+              ? current
+              : { ...emptyTargetInventory(targetSearchIdentity), contextIdentity: targetSearchContextIdentity };
+            const refs = { ...next.refs };
             for (const entry of result.value.items) refs[targetRowKey(entry.target)] = entry.ref;
             const items = result.value.items.map((entry) => entry.target);
             return request.mode === "session"
-              ? { ...current, sessions: items, refs, sessionPage: result.value.page }
-              : { ...current, beacons: items, refs, beaconPage: result.value.page };
+              ? { ...next, sessions: items, refs, sessionPage: result.value.page }
+              : { ...next, beacons: items, refs, beaconPage: result.value.page };
           });
         }).catch((error: unknown) => {
           if (
@@ -630,7 +645,7 @@ export function TargetsPage({
       }
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [mode, normalizedTargetQuery, targetSearchIdentity]);
+  }, [mode, normalizedTargetQuery, targetSearchContextIdentity, targetSearchIdentity]);
 
   useEffect(() => {
     targetSelectionRequestSequence.current += 1;
@@ -1025,6 +1040,7 @@ export function TargetsPage({
       cell: (target: TargetSummary) => (
         <Button
           aria-label={`Interact with ${target.name || target.hostname || target.id}`}
+          isDisabled={isSelecting || targetSearchIsStale}
           size="sm"
           variant="secondary"
           onPress={() => void selectTarget(target)}
@@ -1033,7 +1049,7 @@ export function TargetsPage({
         </Button>
       ),
     }]),
-  ], [mode, selectTarget]);
+  ], [isSelecting, mode, selectTarget, targetSearchIsStale]);
 
   if (!dedicatedTargetIsCurrent) {
     return (
@@ -1154,13 +1170,17 @@ export function TargetsPage({
           )}
           <TargetTableContextMenu
             key={backendIncarnation}
-            disabled={isSelecting || isPreparingAction || isExecutingAction}
+            disabled={isSelecting || isPreparingAction || isExecutingAction || targetSearchIsStale}
             targets={filteredTargets}
             targetRefs={presentedTargetInventory.refs}
             activeTarget={activeRef}
             capabilities={snapshot.targetContext.capabilities}
             onAction={(ref, actionId) => {
-              if (backendIncarnation === backendIncarnationRef.current) void runTargetRowAction(ref, actionId);
+              if (
+                backendIncarnation === backendIncarnationRef.current &&
+                targetInventoryIdentity === targetInventoryIdentityRef.current &&
+                (!normalizedTargetQuery || targetSearchIdentity === targetSearchIdentityRef.current && searchResultsAreCurrent)
+              ) void runTargetRowAction(ref, actionId);
             }}
           >
             <DataGrid
@@ -1168,7 +1188,9 @@ export function TargetsPage({
               columns={targetColumns}
               contentClassName={mode === "session" ? "min-w-[850px]" : "min-w-[980px]"}
               data={filteredTargets}
-              disabledKeys={isSelecting ? filteredTargets.map(targetRowKey) : []}
+              disabledKeys={isSelecting || targetSearchIsStale
+                ? filteredTargets.map(targetRowKey)
+                : []}
               getRowId={targetRowKey}
               selectedKeys={selectedKeys}
               selectionBehavior="replace"
@@ -1215,7 +1237,7 @@ export function TargetsPage({
             sessionPage={presentedTargetInventory.sessionPage}
             beaconPage={presentedTargetInventory.beaconPage}
             loadingModes={normalizedTargetQuery ? searchingTargetModes : loadingTargetModes}
-            disabled={targetDomainStatus(snapshot, mode) !== "ready"}
+            disabled={targetDomainStatus(snapshot, mode) !== "ready" || targetSearchIsStale}
             onLoadMore={(targetMode, cursor) => {
               if (normalizedTargetQuery) {
                 void loadMoreSearchTargets(
