@@ -60,9 +60,11 @@ import {
   SESSION_EDITOR_MAX_BYTES,
 } from "../shared/session-contracts.js";
 import {
+  parseAddExecutionOutputToLootInput,
   parseExecuteExecutionPlanInput,
   parseExecutionResultRequest,
   parsePrepareExecutionActionInput,
+  parseReadExecutionOutputInput,
   parseRunExecutionReadInput,
   parseSaveExecutionResultInput,
 } from "../shared/execution-contracts.js";
@@ -268,6 +270,8 @@ export type IpcConnectionRegistry = Pick<
   | "executeExecutionPlan"
   | "discardExecutionPlan"
   | "getExecutionResult"
+  | "readExecutionOutput"
+  | "addExecutionOutputToLoot"
   | "saveExecutionResult"
   | "attachStream"
 >;
@@ -798,6 +802,12 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.getExecutionResult, rendererUrl, parseExecutionResultRequestArguments, ({ contentsId }, input) =>
     registry.getExecutionResult(contentsId, input),
+  );
+  handleTrusted(IPC.readExecutionOutput, rendererUrl, parseReadExecutionOutputArguments, ({ contentsId }, input) =>
+    registry.readExecutionOutput(contentsId, input),
+  );
+  handleTrusted(IPC.addExecutionOutputToLoot, rendererUrl, parseAddExecutionOutputToLootArguments, ({ contentsId }, input) =>
+    registry.addExecutionOutputToLoot(contentsId, input),
   );
   handleTrusted(IPC.saveExecutionResult, rendererUrl, parseSaveExecutionResultArguments, ({ sender }, input) =>
     registry.saveExecutionResult(sender, input),
@@ -1427,6 +1437,20 @@ function parseSaveExecutionResultArguments(
 ): [input: ReturnType<typeof parseSaveExecutionResultInput>] {
   requireArgumentCount(args, 1, "save execution result input");
   return [parseSaveExecutionResultInput(args[0])];
+}
+
+function parseReadExecutionOutputArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseReadExecutionOutputInput>] {
+  requireArgumentCount(args, 1, "read execution output input");
+  return [parseReadExecutionOutputInput(args[0])];
+}
+
+function parseAddExecutionOutputToLootArguments(
+  args: readonly unknown[],
+): [input: ReturnType<typeof parseAddExecutionOutputToLootInput>] {
+  requireArgumentCount(args, 1, "add execution output to loot input");
+  return [parseAddExecutionOutputToLootInput(args[0])];
 }
 
 function parseStartListenerArguments(args: readonly unknown[]): [input: StartListenerRequest] {

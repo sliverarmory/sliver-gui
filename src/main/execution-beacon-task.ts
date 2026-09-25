@@ -65,6 +65,8 @@ export interface DecodeExecutionBeaconTaskInput {
   readonly response: Uint8Array;
   /** Required for read operations and forbidden for action operations. */
   readonly readInput?: RunExecutionReadInput;
+  /** Main-owned process draft fact; only captured foreground executions have a final exit code. */
+  readonly processWaited?: boolean;
 }
 
 export type DecodedExecutionBeaconTask =
@@ -129,6 +131,7 @@ function decodeBoundResponse(input: DecodeExecutionBeaconTaskInput): DecodedExec
       if (pid === undefined) throw new ExecutionBeaconTaskDecodeError("invalid-response");
       return action(operationId, {
         pid,
+        ...(input.processWaited ? { exitCode: decoded.Status } : {}),
         stdout: decoded.Stdout,
         stderr: decoded.Stderr,
       });
@@ -215,7 +218,7 @@ function decodeBoundResponse(input: DecodeExecutionBeaconTaskInput): DecodedExec
 
 function action(
   operationId: ExecutionOperationId,
-  values: { pid?: number; stdout?: Uint8Array | string; stderr?: Uint8Array | string } = {},
+  values: { pid?: number; exitCode?: number; stdout?: Uint8Array | string; stderr?: Uint8Array | string } = {},
 ): DecodedExecutionBeaconTask {
   const stdout = values.stdout === undefined || byteLength(values.stdout) === 0
     ? undefined
@@ -227,6 +230,7 @@ function action(
     kind: "action",
     value: Object.freeze({
       ...(values.pid === undefined ? {} : { pid: values.pid }),
+      ...(values.exitCode === undefined ? {} : { exitCode: values.exitCode }),
       ...(stdout === undefined ? {} : { stdout: stdout.data, stdoutTruncated: stdout.truncated }),
       ...(stderr === undefined ? {} : { stderr: stderr.data, stderrTruncated: stderr.truncated }),
       summary: executionOperationDescriptor(operationId).completedMessage,

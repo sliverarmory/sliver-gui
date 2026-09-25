@@ -152,6 +152,8 @@ const invokeArguments = {
   executeExecutionPlan: [{ token: "execution_plan_1" }],
   discardExecutionPlan: [{ token: "execution_plan_1" }],
   getExecutionResult: [{ requestId: "execution_request_1" }],
+  readExecutionOutput: [{ requestId: "execution_request_1", stream: "stdout" }],
+  addExecutionOutputToLoot: [{ requestId: "execution_request_1", stream: "stdout", name: "Saved output" }],
   saveExecutionResult: [{ requestId: "execution_request_1", stream: "combined" }],
 } satisfies InvokeArgumentsByMethod;
 

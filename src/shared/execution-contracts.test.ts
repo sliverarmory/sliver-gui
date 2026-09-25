@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   EXECUTION_OPERATION_IDS,
+  parseAddExecutionOutputToLootInput,
   parseExecuteExecutionPlanInput,
   parseExecutionActionDraft,
   parsePrepareExecutionActionInput,
+  parseReadExecutionOutputInput,
   parseRunExecutionReadInput,
   parseSaveExecutionResultInput,
 } from "./execution-contracts.js";
@@ -165,7 +167,22 @@ describe("execution contracts", () => {
       requestId: "request_1",
       stream: "stderr",
     });
+    expect(parseReadExecutionOutputInput({ requestId: "request_1", stream: "combined" })).toEqual({
+      requestId: "request_1",
+      stream: "combined",
+    });
+    expect(parseAddExecutionOutputToLootInput({ requestId: "request_1", stream: "stdout", name: "  Report  " })).toEqual({
+      requestId: "request_1",
+      stream: "stdout",
+      name: "Report",
+    });
+    expect(parseAddExecutionOutputToLootInput({ requestId: "request_1", stream: "stderr", name: "" }).name).toBe("");
     expect(() => parseExecuteExecutionPlanInput({ token: "../escape" })).toThrow(/unsupported/u);
     expect(() => parseSaveExecutionResultInput({ requestId: "request_1", stream: "all" })).toThrow(/stdout/u);
+    expect(() => parseReadExecutionOutputInput({ requestId: "request_1", stream: "all" })).toThrow(/stdout/u);
+    expect(() => parseReadExecutionOutputInput({ requestId: "request_1", stream: "stdout", targetId: "other" })).toThrow(/unexpected/u);
+    expect(() => parseAddExecutionOutputToLootInput({ requestId: "request_1", stream: "stdout", name: "\u001b[31m" })).toThrow(/control/u);
+    expect(() => parseAddExecutionOutputToLootInput({ requestId: "request_1", stream: "stdout", name: "x".repeat(257) })).toThrow(/256/u);
+    expect(() => parseAddExecutionOutputToLootInput({ requestId: "request_1", stream: "stdout", name: "", path: "/tmp/file" })).toThrow(/unexpected/u);
   });
 });

@@ -387,6 +387,8 @@ export interface ExecutionActionResult {
   message: string;
   taskId?: string;
   pid?: number;
+  /** Available only when a process was waited for and its exit status was returned. */
+  exitCode?: number;
   output?: ExecutionOutputMetadata[];
 }
 
@@ -443,6 +445,20 @@ export interface ExecutionResultRequest {
 
 export interface SaveExecutionResultInput extends ExecutionResultRequest {
   stream: "stdout" | "stderr" | "combined";
+}
+
+export interface ReadExecutionOutputInput extends ExecutionResultRequest {
+  stream: "stdout" | "stderr" | "combined";
+}
+
+export interface AddExecutionOutputToLootInput extends ReadExecutionOutputInput {
+  /** Empty uses a generated name, matching the console's optional --name. */
+  name: string;
+}
+
+export interface ExecutionOutputReadResult {
+  data: Uint8Array;
+  truncated: boolean;
 }
 
 export interface SaveExecutionResultResult {
@@ -510,7 +526,32 @@ export function parseExecutionResultRequest(value: unknown): ExecutionResultRequ
 }
 
 export function parseSaveExecutionResultInput(value: unknown): SaveExecutionResultInput {
-  const record = plainRecord(value, "save execution result input");
+  return parseExecutionOutputStreamInput(value, "save execution result input");
+}
+
+export function parseReadExecutionOutputInput(value: unknown): ReadExecutionOutputInput {
+  return parseExecutionOutputStreamInput(value, "read execution output input");
+}
+
+export function parseAddExecutionOutputToLootInput(value: unknown): AddExecutionOutputToLootInput {
+  const record = plainRecord(value, "add execution output to loot input");
+  exactKeys(record, ["requestId", "stream", "name"]);
+  const output = parseExecutionOutputStreamInput(
+    { requestId: record["requestId"], stream: record["stream"] },
+    "add execution output to loot input",
+  );
+  const name = stringValue(record["name"], "name", EXECUTION_LIMITS.shortString, true).trim();
+  if (/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(name)) {
+    throw new TypeError("name contains unsupported control characters");
+  }
+  return { ...output, name };
+}
+
+function parseExecutionOutputStreamInput(
+  value: unknown,
+  label: string,
+): ReadExecutionOutputInput {
+  const record = plainRecord(value, label);
   exactKeys(record, ["requestId", "stream"]);
   const stream = record["stream"];
   if (stream !== "stdout" && stream !== "stderr" && stream !== "combined") {

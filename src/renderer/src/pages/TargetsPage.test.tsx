@@ -315,6 +315,8 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     getSnapshot: vi.fn().mockResolvedValue(disconnectedSnapshot()),
     getTargetOperation: vi.fn(failed),
     getExecutionResult: vi.fn(failed),
+    readExecutionOutput: vi.fn(failed),
+    addExecutionOutputToLoot: vi.fn(failed),
     importConfig: vi.fn(failed),
     listExecutionCatalog: vi.fn(failed),
     listLoot: vi.fn(failed),

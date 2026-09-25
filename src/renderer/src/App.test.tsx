@@ -146,6 +146,8 @@ function installSliverAPI(
     getSnapshot: vi.fn().mockResolvedValue(initialSnapshot),
     getTargetOperation: vi.fn(failedOperation),
     getExecutionResult: vi.fn(failedOperation),
+    readExecutionOutput: vi.fn(failedOperation),
+    addExecutionOutputToLoot: vi.fn(failedOperation),
     importConfig: vi.fn(failedOperation),
     listExecutionCatalog: vi.fn(failedOperation),
     listLoot: vi.fn(failedOperation),

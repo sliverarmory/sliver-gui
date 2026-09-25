@@ -1474,6 +1474,8 @@ describe("trusted Electron IPC boundary", () => {
     const executeExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "execute probe" }));
     const discardExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "discard probe" }));
     const getExecutionResult = vi.fn(async () => ({ ok: false as const, error: "result probe" }));
+    const readExecutionOutput = vi.fn(async () => ({ ok: false as const, error: "output probe" }));
+    const addExecutionOutputToLoot = vi.fn(async () => ({ ok: false as const, error: "loot probe" }));
     const saveExecutionResult = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
     registerIpcHandlers(
       registryMock({
@@ -1483,6 +1485,8 @@ describe("trusted Electron IPC boundary", () => {
         executeExecutionPlan,
         discardExecutionPlan,
         getExecutionResult,
+        readExecutionOutput,
+        addExecutionOutputToLoot,
         saveExecutionResult,
       }),
       vi.fn(),
@@ -1504,6 +1508,8 @@ describe("trusted Electron IPC boundary", () => {
     await electronMocks.handlers.get(IPC.executeExecutionPlan)?.(event, plan);
     await electronMocks.handlers.get(IPC.discardExecutionPlan)?.(event, plan);
     await electronMocks.handlers.get(IPC.getExecutionResult)?.(event, request);
+    await electronMocks.handlers.get(IPC.readExecutionOutput)?.(event, save);
+    await electronMocks.handlers.get(IPC.addExecutionOutputToLoot)?.(event, { ...save, name: "Report" });
     await electronMocks.handlers.get(IPC.saveExecutionResult)?.(event, save);
 
     expect(listExecutionCatalog).toHaveBeenCalledExactlyOnceWith(77);
@@ -1516,6 +1522,8 @@ describe("trusted Electron IPC boundary", () => {
     expect(executeExecutionPlan).toHaveBeenCalledExactlyOnceWith(77, plan);
     expect(discardExecutionPlan).toHaveBeenCalledExactlyOnceWith(77, plan);
     expect(getExecutionResult).toHaveBeenCalledExactlyOnceWith(77, request);
+    expect(readExecutionOutput).toHaveBeenCalledExactlyOnceWith(77, save);
+    expect(addExecutionOutputToLoot).toHaveBeenCalledExactlyOnceWith(77, { ...save, name: "Report" });
     expect(saveExecutionResult).toHaveBeenCalledExactlyOnceWith(sender, save);
   });
 
@@ -1659,6 +1667,8 @@ describe("trusted Electron IPC boundary", () => {
     const executeExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "execute probe" }));
     const discardExecutionPlan = vi.fn(async () => ({ ok: false as const, error: "discard probe" }));
     const getExecutionResult = vi.fn(async () => ({ ok: false as const, error: "result probe" }));
+    const readExecutionOutput = vi.fn(async () => ({ ok: false as const, error: "output probe" }));
+    const addExecutionOutputToLoot = vi.fn(async () => ({ ok: false as const, error: "loot probe" }));
     const saveExecutionResult = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
     registerIpcHandlers(
       registryMock({
@@ -1667,6 +1677,8 @@ describe("trusted Electron IPC boundary", () => {
         executeExecutionPlan,
         discardExecutionPlan,
         getExecutionResult,
+        readExecutionOutput,
+        addExecutionOutputToLoot,
         saveExecutionResult,
       }),
       vi.fn(),
@@ -1693,6 +1705,26 @@ describe("trusted Electron IPC boundary", () => {
       requestId: "execution_request_1",
       outputPath: "/tmp/secret",
     })).toThrow(/unexpected field: outputPath/i);
+    expect(() => electronMocks.handlers.get(IPC.readExecutionOutput)?.(trusted.event, {
+      requestId: "execution_request_1",
+      stream: "stdout",
+      targetId: "other",
+    })).toThrow(/unexpected field: targetId/i);
+    expect(() => electronMocks.handlers.get(IPC.readExecutionOutput)?.(untrusted.event, {
+      requestId: "execution_request_1",
+      stream: "stdout",
+    })).toThrow(/untrusted renderer/i);
+    expect(() => electronMocks.handlers.get(IPC.addExecutionOutputToLoot)?.(trusted.event, {
+      requestId: "execution_request_1",
+      stream: "stdout",
+      name: "report",
+      path: "/tmp/secret",
+    })).toThrow(/unexpected field: path/i);
+    expect(() => electronMocks.handlers.get(IPC.addExecutionOutputToLoot)?.(untrusted.event, {
+      requestId: "execution_request_1",
+      stream: "stdout",
+      name: "report",
+    })).toThrow(/untrusted renderer/i);
     expect(() => electronMocks.handlers.get(IPC.saveExecutionResult)?.(trusted.event, {
       requestId: "execution_request_1",
       stream: "combined",
@@ -1704,6 +1736,8 @@ describe("trusted Electron IPC boundary", () => {
     expect(executeExecutionPlan).not.toHaveBeenCalled();
     expect(discardExecutionPlan).not.toHaveBeenCalled();
     expect(getExecutionResult).not.toHaveBeenCalled();
+    expect(readExecutionOutput).not.toHaveBeenCalled();
+    expect(addExecutionOutputToLoot).not.toHaveBeenCalled();
     expect(saveExecutionResult).not.toHaveBeenCalled();
   });
 
@@ -2010,6 +2044,8 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     executeExecutionPlan: vi.fn(unavailable),
     discardExecutionPlan: vi.fn(unavailable),
     getExecutionResult: vi.fn(unavailable),
+    readExecutionOutput: vi.fn(unavailable),
+    addExecutionOutputToLoot: vi.fn(unavailable),
     saveExecutionResult: vi.fn(unavailable),
     attachStream: vi.fn(),
     ...overrides,

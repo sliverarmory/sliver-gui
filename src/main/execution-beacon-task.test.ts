@@ -276,6 +276,28 @@ describe("execution beacon task decoder", () => {
     expect(isZero(response)).toBe(true);
     raw.fill(0);
   });
+
+  it("includes a process exit code only when main confirms a captured foreground execution", () => {
+    for (const status of [0, 23]) {
+      for (const processWaited of [false, true]) {
+        const response = Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+          Status: status,
+          Pid: 404,
+        })).finish());
+        const decoded = decodeExecutionBeaconTask({
+          operationId: "execution.process",
+          description: "ExecuteReq",
+          response,
+          processWaited,
+        });
+        expect(decoded.kind).toBe("action");
+        if (decoded.kind === "action") {
+          expect(decoded.value.exitCode).toBe(processWaited ? status : undefined);
+        }
+        expect(isZero(response)).toBe(true);
+      }
+    }
+  });
 });
 
 interface ActionCase {

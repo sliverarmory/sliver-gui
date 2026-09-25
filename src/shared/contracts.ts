@@ -53,13 +53,16 @@ import type {
   ResolvedApplicationIcon,
 } from "./application-settings-contracts.js";
 import type {
+  AddExecutionOutputToLootInput,
   ExecuteExecutionPlanInput,
   ExecutionActionPlan,
   ExecutionActionResult,
   ExecutionCatalog,
+  ExecutionOutputReadResult,
   ExecutionReadResult,
   ExecutionResultRequest,
   PrepareExecutionActionInput,
+  ReadExecutionOutputInput,
   RunExecutionReadInput,
   SaveExecutionResultInput,
   SaveExecutionResultResult,
@@ -193,6 +196,8 @@ export const IPC_INVOKE = {
   executeExecutionPlan: "sliver:execution:execute-plan",
   discardExecutionPlan: "sliver:execution:discard-plan",
   getExecutionResult: "sliver:execution:result",
+  readExecutionOutput: "sliver:execution:read-output",
+  addExecutionOutputToLoot: "sliver:execution:loot-output",
   saveExecutionResult: "sliver:execution:save-result",
 } as const;
 
@@ -1074,6 +1079,14 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.getExecutionResult]: {
     args: [input: ExecutionResultRequest];
     result: OperationResult<ExecutionActionResult>;
+  };
+  [IPC.readExecutionOutput]: {
+    args: [input: ReadExecutionOutputInput];
+    result: OperationResult<ExecutionOutputReadResult>;
+  };
+  [IPC.addExecutionOutputToLoot]: {
+    args: [input: AddExecutionOutputToLootInput];
+    result: OperationResult<LootSummary>;
   };
   [IPC.saveExecutionResult]: {
     args: [input: SaveExecutionResultInput];

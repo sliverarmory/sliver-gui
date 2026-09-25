@@ -247,6 +247,12 @@ export function defaultHostProcess(platform: string): string {
   }
 }
 
+export function defaultProcessExecutable(platform: string): string {
+  return platform.trim().toLocaleLowerCase() === "windows"
+    ? "C:\\Windows\\System32\\cmd.exe"
+    : "/bin/sh";
+}
+
 export function defaultShellcodeArchitecture(architecture: string): "386" | "amd64" | "arm64" {
   const normalized = architecture.trim().toLocaleLowerCase();
   if (normalized === "386" || normalized === "x86") return "386";

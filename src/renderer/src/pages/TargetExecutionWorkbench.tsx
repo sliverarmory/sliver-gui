@@ -43,8 +43,17 @@ import type {
   ExecutionReadOperationId,
   ExecutionReadResult,
   ExecutionResultState,
+  ExecuteProcessDraft,
 } from "../../../shared/execution-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
+import { ProcessExecutionView } from "./ProcessExecutionView";
+import {
+  addProcessExecution,
+  clearProcessExecution,
+  updateProcessExecution,
+  useProcessExecutionHistory,
+  type ProcessExecutionRecord,
+} from "./process-execution-history";
 import { ExecutionActionForm } from "./target-execution-forms";
 import {
   EXECUTION_CATEGORIES,
@@ -87,6 +96,8 @@ export function TargetExecutionWorkbench({
   const [isExecuting, setIsExecuting] = useState(false);
   const [result, setResult] = useState<ExecutionActionResult>();
   const [savingStream, setSavingStream] = useState<"stdout" | "stderr" | "combined">();
+  const [addingToLoot, setAddingToLoot] = useState(false);
+  const [selectedProcessId, setSelectedProcessId] = useState<string>();
   const [readState, setReadState] = useState<ReadState>({ status: "idle" });
   const identityRef = useRef(exactIdentity);
   identityRef.current = exactIdentity;
@@ -104,8 +115,10 @@ export function TargetExecutionWorkbench({
   const readRequestSequence = useRef(0);
   const resultRequestSequence = useRef(0);
   const saveRequestSequence = useRef(0);
+  const lootRequestSequence = useRef(0);
   const actionButtons = useRef(new Map<ExecutionOperationId, HTMLButtonElement>());
   const lastAction = useRef<ExecutionOperationId | undefined>(undefined);
+  const preparedProcessDraft = useRef<Pick<ExecuteProcessDraft, "path" | "args"> | undefined>(undefined);
 
   const discardToken = useCallback((token: string): void => {
     void window.sliver.discardExecutionPlan({ token }).catch(() => undefined);
@@ -120,6 +133,7 @@ export function TargetExecutionWorkbench({
   const clearPreparedPlan = useCallback((restoreFocus: boolean): void => {
     const current = planRef.current;
     planRef.current = undefined;
+    preparedProcessDraft.current = undefined;
     setPlan(undefined);
     if (current) discardToken(current.token);
     if (restoreFocus) restoreActionFocus();
@@ -163,8 +177,10 @@ export function TargetExecutionWorkbench({
     readRequestSequence.current += 1;
     resultRequestSequence.current += 1;
     saveRequestSequence.current += 1;
+    lootRequestSequence.current += 1;
     const stalePlan = planRef.current;
     planRef.current = undefined;
+    preparedProcessDraft.current = undefined;
     if (stalePlan) discardToken(stalePlan.token);
     setCategory("process");
     setSelectedCapability(undefined);
@@ -174,6 +190,8 @@ export function TargetExecutionWorkbench({
     resultRef.current = undefined;
     setResult(undefined);
     setSavingStream(undefined);
+    setAddingToLoot(false);
+    setSelectedProcessId(undefined);
     readStateRef.current = { status: "idle" };
     setReadState({ status: "idle" });
     void loadCatalog();
@@ -192,6 +210,14 @@ export function TargetExecutionWorkbench({
   const categoryCapabilities = useMemo(() => capabilities.filter((capability) =>
     executionActionPresentation(capability.operationId).category === category), [capabilities, category]);
   const categoryCopy = executionCategoryPresentation(category);
+  const processHistoryKey = catalog ? JSON.stringify([
+    catalog.backend.configId,
+    catalog.backend.epoch,
+    catalog.target.mode,
+    catalog.target.id,
+    catalog.targetRef.fingerprint,
+  ]) : undefined;
+  const processHistory = useProcessExecutionHistory(processHistoryKey);
 
   const runRead = useCallback(async (
     operationId: ExecutionReadOperationId,
@@ -270,6 +296,7 @@ export function TargetExecutionWorkbench({
     const expectedIdentity = exactIdentity;
     const sequence = ++prepareRequestSequence.current;
     if (planRef.current) clearPreparedPlan(false);
+    preparedProcessDraft.current = undefined;
     setIsPreparing(true);
     try {
       const response = await window.sliver.prepareExecutionAction({ draft });
@@ -286,25 +313,102 @@ export function TargetExecutionWorkbench({
         throw new Error("The reviewed plan no longer matches this exact operation and target selection.");
       }
       planRef.current = response.value;
+      if (draft.operationId === "execution.process" && catalog?.target.mode === "session") {
+        preparedProcessDraft.current = { path: draft.path, args: [...draft.args] };
+      }
       setSelectedCapability(undefined);
       setPlan(response.value);
     } finally {
       if (sequence === prepareRequestSequence.current && expectedIdentity === identityRef.current) setIsPreparing(false);
     }
-  }, [catalog?.backend, clearPreparedPlan, discardToken, exactIdentity]);
+  }, [catalog?.backend, catalog?.target.mode, clearPreparedPlan, discardToken, exactIdentity]);
+
+  const retainProcessResult = useCallback(async (
+    historyKey: string,
+    recordId: string,
+    value: ExecutionActionResult,
+  ): Promise<void> => {
+    updateProcessExecution(historyKey, recordId, { state: value.state, result: value });
+    const streams = (["stdout", "stderr"] as const).filter((stream) =>
+      value.output?.some((item) => item.stream === stream));
+    if (streams.length === 0) return;
+    const reads = await Promise.all(streams.map(async (stream) => {
+      try {
+        return {
+          stream,
+          response: await window.sliver.readExecutionOutput({ requestId: value.requestId, stream }),
+        };
+      } catch (error) {
+        return { stream, response: { ok: false as const, error: errorMessage(error) } };
+      }
+    }));
+    if (exactIdentity !== identityRef.current) {
+      for (const read of reads) if (read.response.ok) read.response.value.data.fill(0);
+      updateProcessExecution(historyKey, recordId, {
+        outputError: "Captured output could not be copied after the selected target changed.",
+      });
+      return;
+    }
+    const patch: { stdout?: { data: Uint8Array; truncated: boolean }; stderr?: { data: Uint8Array; truncated: boolean }; outputError?: string } = {};
+    const failures: string[] = [];
+    for (const read of reads) {
+      if (!read.response.ok) {
+        failures.push(read.response.error ?? "Captured output is unavailable.");
+      } else if (read.stream === "stdout") {
+        patch.stdout = read.response.value;
+      } else {
+        patch.stderr = read.response.value;
+      }
+    }
+    if (failures.length > 0) patch.outputError = failures.join(" ");
+    try {
+      updateProcessExecution(historyKey, recordId, patch);
+    } finally {
+      patch.stdout?.data.fill(0);
+      patch.stderr?.data.fill(0);
+    }
+  }, [exactIdentity]);
 
   const execute = useCallback(async (): Promise<void> => {
     const current = planRef.current;
     if (!current) return;
     const expectedIdentity = exactIdentity;
     const sequence = ++executeRequestSequence.current;
+    const historyKey = current.operationId === "execution.process" && catalog?.target.mode === "session"
+      ? processHistoryKey
+      : undefined;
+    const processDraft = preparedProcessDraft.current;
+    const recordId = historyKey && processDraft
+      ? (globalThis.crypto?.randomUUID?.() ?? `process-${Date.now()}-${sequence}`)
+      : undefined;
+    preparedProcessDraft.current = undefined;
+    if (historyKey && recordId && processDraft) {
+      addProcessExecution(historyKey, {
+        id: recordId,
+        startedAt: new Date().toISOString(),
+        path: processDraft.path,
+        args: processDraft.args,
+        state: "running",
+      });
+      setSelectedProcessId(recordId);
+    }
     setIsExecuting(true);
     try {
       const response = await window.sliver.executeExecutionPlan({ token: current.token });
-      if (sequence !== executeRequestSequence.current || expectedIdentity !== identityRef.current) return;
+      if (sequence !== executeRequestSequence.current || expectedIdentity !== identityRef.current) {
+        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
+          state: "outcome-unknown",
+          error: "The selected target changed before this result could be associated with it.",
+        });
+        return;
+      }
       if (!response.ok || !response.value) {
         planRef.current = undefined;
         setPlan(undefined);
+        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
+          state: "request-failed",
+          error: response.error ?? "The execution request failed.",
+        });
         toast.danger("Execution failed", { description: response.error });
         restoreActionFocus();
         return;
@@ -312,24 +416,40 @@ export function TargetExecutionWorkbench({
       if (response.value.operationId !== current.operationId) {
         planRef.current = undefined;
         setPlan(undefined);
+        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
+          state: "request-failed",
+          error: "The result did not match the reviewed operation.",
+        });
         toast.danger("Execution result rejected", { description: "The result did not match the reviewed operation." });
         restoreActionFocus();
         return;
       }
       planRef.current = undefined;
       setPlan(undefined);
-      resultRef.current = response.value;
-      setResult(response.value);
-      toast.success(executionResultTitle(response.value.state), { description: response.value.message });
+      if (historyKey && recordId) {
+        await retainProcessResult(historyKey, recordId, response.value);
+      } else {
+        resultRef.current = response.value;
+        setResult(response.value);
+      }
+      if (historyKey && response.value.state === "completed" && response.value.exitCode !== undefined && response.value.exitCode !== 0) {
+        toast.warning(`Process exited with code ${response.value.exitCode}`, { description: response.value.message });
+      } else {
+        toast.success(executionResultTitle(response.value.state), { description: response.value.message });
+      }
       restoreActionFocus();
     } catch (error) {
       if (sequence === executeRequestSequence.current && expectedIdentity === identityRef.current) {
+        if (historyKey && recordId) updateProcessExecution(historyKey, recordId, {
+          state: "request-failed",
+          error: errorMessage(error),
+        });
         toast.danger("Execution failed", { description: errorMessage(error) });
       }
     } finally {
       if (sequence === executeRequestSequence.current && expectedIdentity === identityRef.current) setIsExecuting(false);
     }
-  }, [exactIdentity, restoreActionFocus]);
+  }, [catalog?.target.mode, exactIdentity, processHistoryKey, restoreActionFocus, retainProcessResult]);
 
   const syncResult = useCallback(async (
     pending: ExecutionActionResult,
@@ -399,13 +519,37 @@ export function TargetExecutionWorkbench({
     });
   }, [exactIdentity, runRead, syncResult]);
 
-  const saveResult = useCallback(async (stream: "stdout" | "stderr" | "combined"): Promise<void> => {
-    if (!result) return;
+  const refreshProcessResult = useCallback(async (record: ProcessExecutionRecord): Promise<void> => {
+    if (!processHistoryKey || !record.result) return;
+    const expectedIdentity = exactIdentity;
+    try {
+      const response = await window.sliver.getExecutionResult({ requestId: record.result.requestId });
+      if (expectedIdentity !== identityRef.current) return;
+      if (!response.ok || !response.value) {
+        toast.danger("Could not refresh process result", { description: response.error });
+        return;
+      }
+      if (response.value.requestId !== record.result.requestId || response.value.operationId !== "execution.process") {
+        toast.danger("Process result rejected", { description: "The returned result did not match this invocation." });
+        return;
+      }
+      await retainProcessResult(processHistoryKey, record.id, response.value);
+    } catch (error) {
+      if (expectedIdentity === identityRef.current) {
+        toast.danger("Could not refresh process result", { description: errorMessage(error) });
+      }
+    }
+  }, [exactIdentity, processHistoryKey, retainProcessResult]);
+
+  const saveResult = useCallback(async (
+    source: ExecutionActionResult,
+    stream: "stdout" | "stderr" | "combined",
+  ): Promise<void> => {
     const expectedIdentity = exactIdentity;
     const sequence = ++saveRequestSequence.current;
     setSavingStream(stream);
     try {
-      const response = await window.sliver.saveExecutionResult({ requestId: result.requestId, stream });
+      const response = await window.sliver.saveExecutionResult({ requestId: source.requestId, stream });
       if (sequence !== saveRequestSequence.current || expectedIdentity !== identityRef.current) return;
       if (!response.ok || !response.value) {
         toast.danger("Could not save output", { description: response.error });
@@ -419,7 +563,36 @@ export function TargetExecutionWorkbench({
     } finally {
       if (sequence === saveRequestSequence.current && expectedIdentity === identityRef.current) setSavingStream(undefined);
     }
-  }, [exactIdentity, result]);
+  }, [exactIdentity]);
+
+  const addProcessOutputToLoot = useCallback(async (
+    source: ExecutionActionResult,
+    stream: "stdout" | "stderr",
+    name: string,
+  ): Promise<void> => {
+    const expectedIdentity = exactIdentity;
+    const sequence = ++lootRequestSequence.current;
+    setAddingToLoot(true);
+    try {
+      const response = await window.sliver.addExecutionOutputToLoot({
+        requestId: source.requestId,
+        stream,
+        name,
+      });
+      if (sequence !== lootRequestSequence.current || expectedIdentity !== identityRef.current) return;
+      if (!response.ok || !response.value) {
+        toast.danger("Could not add output to Loot", { description: response.error });
+        return;
+      }
+      toast.success("Output added to Loot", { description: response.value.name });
+    } catch (error) {
+      if (sequence === lootRequestSequence.current && expectedIdentity === identityRef.current) {
+        toast.danger("Could not add output to Loot", { description: errorMessage(error) });
+      }
+    } finally {
+      if (sequence === lootRequestSequence.current && expectedIdentity === identityRef.current) setAddingToLoot(false);
+    }
+  }, [exactIdentity]);
 
   if (catalogState.status === "loading") {
     return <WorkbenchLoading />;
@@ -427,71 +600,116 @@ export function TargetExecutionWorkbench({
   if (catalogState.status === "error") {
     return <WorkbenchError error={catalogState.error} onRetry={() => void loadCatalog()} />;
   }
+  const isSession = catalogState.value.target.mode === "session";
+  const categoryTabs = (
+    <Segment
+      aria-label="Execution categories"
+      className={isSession ? "min-w-0 w-fit overflow-x-auto" : "mt-5 w-full overflow-x-auto sm:w-fit"}
+      selectedKey={category}
+      size="sm"
+      onSelectionChange={(key) => {
+        readRequestSequence.current += 1;
+        setCategory(String(key) as ExecutionCategoryId);
+        setReadState({ status: "idle" });
+      }}
+    >
+      {EXECUTION_CATEGORIES.map((candidate) => (
+        <Segment.Item id={candidate.id} key={candidate.id}>{candidate.label}</Segment.Item>
+      ))}
+    </Segment>
+  );
 
   return (
     <>
-      <section className="rounded-2xl bg-surface p-5 sm:p-6" aria-labelledby="execution-workbench-heading">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-foreground" id="execution-workbench-heading">Execution workbench</h2>
-            <p className="mt-1 max-w-3xl text-sm leading-6 text-muted">
-              Configure one typed operation, review the exact target and native files, then execute a short-lived main-owned plan.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Chip size="sm" variant="soft">{catalogState.value.target.os}/{catalogState.value.target.arch}</Chip>
-            <Chip color="success" size="sm" variant="soft">{catalogState.value.target.mode}</Chip>
-          </div>
-        </header>
-
-        <Segment
-          aria-label="Execution categories"
-          className="mt-5 w-full overflow-x-auto sm:w-fit"
-          selectedKey={category}
-          size="sm"
-          onSelectionChange={(key) => {
-            readRequestSequence.current += 1;
-            setCategory(String(key) as ExecutionCategoryId);
-            setReadState({ status: "idle" });
-          }}
-        >
-          {EXECUTION_CATEGORIES.map((candidate) => (
-            <Segment.Item id={candidate.id} key={candidate.id}>{candidate.label}</Segment.Item>
-          ))}
-        </Segment>
-
-        <ItemCardGroup className="mt-5" columns={2} layout="grid" variant="secondary">
-          <ItemCardGroup.Header className="col-span-full">
-            <ItemCardGroup.Title>{categoryCopy.label}</ItemCardGroup.Title>
-            <ItemCardGroup.Description>{categoryCopy.description}</ItemCardGroup.Description>
-          </ItemCardGroup.Header>
-          {categoryCapabilities.map((capability) => (
-            <ExecutionActionCard
-              buttonRef={(node) => {
-                if (node) actionButtons.current.set(capability.operationId, node);
-                else actionButtons.current.delete(capability.operationId);
-              }}
-              capability={capability}
-              key={capability.operationId}
-              onPress={() => beginAction(capability)}
-            />
-          ))}
-        </ItemCardGroup>
-        {categoryCapabilities.length === 0 ? <CategoryEmpty category={categoryCopy.label} /> : null}
-
-        <ExecutionReadPanel
-          state={readState}
-          onLoadMore={(operationId, cursor, taskId) => void runRead(operationId, cursor, taskId)}
-          onRetry={(operationId) => void runRead(operationId)}
-        />
-        {result ? (
-          <ExecutionResultPanel
-            result={result}
-            savingStream={savingStream}
-            onRetry={() => void syncResult(result, true)}
-            onSave={(stream) => void saveResult(stream)}
-          />
+      <section
+        className="rounded-2xl bg-surface p-5 sm:p-6"
+        aria-label={isSession ? "Execution operations" : undefined}
+        aria-labelledby={isSession ? undefined : "execution-workbench-heading"}
+      >
+        {!isSession ? (
+          <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground" id="execution-workbench-heading">Execution workbench</h2>
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-muted">
+                Configure one typed operation, review the exact target and native files, then execute a short-lived main-owned plan.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Chip size="sm" variant="soft">{catalogState.value.target.os}/{catalogState.value.target.arch}</Chip>
+              <Chip color="success" size="sm" variant="soft">{catalogState.value.target.mode}</Chip>
+            </div>
+          </header>
         ) : null}
+
+        {isSession ? (
+          <div className="flex items-center justify-between gap-4">
+            {categoryTabs}
+            <Chip className="shrink-0" size="sm" variant="soft">
+              {catalogState.value.target.os}/{catalogState.value.target.arch}
+            </Chip>
+          </div>
+        ) : categoryTabs}
+
+        {isSession && category === "process" ? (
+          <ProcessExecutionView
+            capability={categoryCapabilities.find((capability) => capability.operationId === "execution.process")}
+            history={processHistory}
+            addingToLoot={addingToLoot}
+            isExecuting={isExecuting}
+            isPreparing={isPreparing}
+            savingStream={savingStream === "combined" ? undefined : savingStream}
+            selectedId={selectedProcessId}
+            target={catalogState.value.target}
+            onClear={(id) => {
+              if (processHistoryKey) clearProcessExecution(processHistoryKey, id);
+              setSelectedProcessId(undefined);
+            }}
+            onClearAll={() => {
+              if (processHistoryKey) clearProcessExecution(processHistoryKey);
+              setSelectedProcessId(undefined);
+            }}
+            onAddToLoot={(source, stream, name) => void addProcessOutputToLoot(source, stream, name)}
+            onPrepare={prepare}
+            onRefresh={(record) => void refreshProcessResult(record)}
+            onSave={(source, stream) => void saveResult(source, stream)}
+            onSelect={setSelectedProcessId}
+          />
+        ) : (
+          <>
+            <ItemCardGroup className="mt-5" columns={2} layout="grid" variant="secondary">
+              <ItemCardGroup.Header className="col-span-full">
+                <ItemCardGroup.Title>{categoryCopy.label}</ItemCardGroup.Title>
+                <ItemCardGroup.Description>{categoryCopy.description}</ItemCardGroup.Description>
+              </ItemCardGroup.Header>
+              {categoryCapabilities.map((capability) => (
+                <ExecutionActionCard
+                  buttonRef={(node) => {
+                    if (node) actionButtons.current.set(capability.operationId, node);
+                    else actionButtons.current.delete(capability.operationId);
+                  }}
+                  capability={capability}
+                  key={capability.operationId}
+                  onPress={() => beginAction(capability)}
+                />
+              ))}
+            </ItemCardGroup>
+            {categoryCapabilities.length === 0 ? <CategoryEmpty category={categoryCopy.label} /> : null}
+
+            <ExecutionReadPanel
+              state={readState}
+              onLoadMore={(operationId, cursor, taskId) => void runRead(operationId, cursor, taskId)}
+              onRetry={(operationId) => void runRead(operationId)}
+            />
+            {result ? (
+              <ExecutionResultPanel
+                result={result}
+                savingStream={savingStream}
+                onRetry={() => void syncResult(result, true)}
+                onSave={(stream) => void saveResult(result, stream)}
+              />
+            ) : null}
+          </>
+        )}
       </section>
 
       <ExecutionConfigurationSheet

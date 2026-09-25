@@ -1095,6 +1095,78 @@ describe("connection registry with an injected Sliver client", () => {
     expect(snapshot.recentEvents[0]).toMatchObject({ type: "job-started", isError: true });
   });
 
+  it("keeps settled inventories visible during slow periodic reconciliation and publishes its result", async () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send });
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000)];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    expect(registry.snapshot(1).domains.jobs.status).toBe("ready");
+    expect(registry.snapshot(1).domains.profiles.status).toBe("empty");
+
+    const pendingJobs = deferred<clientpb.Job[]>();
+    const pendingProfiles = deferred<clientpb.ImplantProfiles>();
+    client.nextJobsPromise = pendingJobs.promise;
+    client.nextProfilesPromise = pendingProfiles.promise;
+    send.mockClear();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(client.jobs).toHaveBeenCalledTimes(2);
+    expect(client.implantProfiles).toHaveBeenCalledTimes(2);
+    expect(registry.snapshot(1).domains.jobs).toMatchObject({ status: "ready", items: [{ id: 7 }] });
+    expect(registry.snapshot(1).domains.profiles).toMatchObject({ status: "empty", items: [] });
+    const pendingSnapshots = send.mock.calls
+      .filter(([channel]) => channel === IPC.snapshotChanged)
+      .map(([, snapshot]) => snapshot as SliverSnapshot);
+    expect(pendingSnapshots.length).toBeGreaterThan(0);
+    expect(pendingSnapshots.every((snapshot) =>
+      snapshot.domains.jobs.status === "ready" && snapshot.domains.profiles.status === "empty"
+    )).toBe(true);
+
+    pendingJobs.resolve([job(8, 8000)]);
+    pendingProfiles.resolve(clientpb.ImplantProfiles.create({ Profiles: [] }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(registry.snapshot(1).domains.jobs).toMatchObject({ status: "ready", items: [{ id: 8, port: 8000 }] });
+    expect(registry.snapshot(1).domains.profiles.status).toBe("empty");
+
+    client.nextJobsError = new Error("periodic jobs unavailable");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(registry.snapshot(1).domains.jobs).toMatchObject({
+      status: "error",
+      error: "periodic jobs unavailable",
+      items: [{ id: 8, port: 8000 }],
+    });
+  });
+
+  it("marks an event-invalidated domain loading even when a periodic poll is in flight", async () => {
+    vi.useFakeTimers();
+    const client = new FakeSliverClient();
+    client.jobState = [job(7, 7000)];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    const pendingJobs = deferred<clientpb.Job[]>();
+    client.nextJobsPromise = pendingJobs.promise;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(registry.snapshot(1).domains.jobs.status).toBe("ready");
+
+    client.jobState = [job(8, 8000)];
+    client.events.next(clientpb.Event.create({ EventType: "job-started", Job: job(8, 8000) }));
+    await vi.advanceTimersByTimeAsync(101);
+    expect(registry.snapshot(1).domains.jobs.status).toBe("loading");
+
+    pendingJobs.resolve([job(7, 7000)]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.jobs).toHaveBeenCalledTimes(3);
+    expect(registry.snapshot(1).domains.jobs).toMatchObject({
+      status: "ready", items: [{ id: 8, port: 8000 }],
+    });
+  });
+
   it("reruns an in-flight domain refresh when an event invalidates its pending result", async () => {
     vi.useFakeTimers();
     const client = new FakeSliverClient();
@@ -6730,12 +6802,21 @@ describe("M3 session shell registry boundary", () => {
       sensitive: false,
     });
 
+    const processResponse = {
+      Status: 17,
+      Stdout: Buffer.from("m4-stdout"),
+      Stderr: Buffer.from("m4-stderr"),
+      Pid: 6_001,
+      Response: { Err: "" },
+    };
+    client.executeSession.mockResolvedValueOnce(processResponse);
     const executed = await registry.executeExecutionPlan(1, { token: prepared.value.token });
     if (!executed.ok) throw new Error(executed.error);
     expect(executed.value).toMatchObject({
       operationId: "execution.process",
       state: "completed",
       pid: 6_001,
+      exitCode: 17,
       output: expect.arrayContaining([
         expect.objectContaining({ stream: "stdout", size: 9 }),
         expect.objectContaining({ stream: "stderr", size: 9 }),
@@ -6753,6 +6834,44 @@ describe("M3 session shell registry boundary", () => {
       ok: true,
       value: executed.value,
     });
+    const outputInput = { requestId: executed.value.requestId, stream: "stdout" as const };
+    const firstRead = await registry.readExecutionOutput(1, outputInput);
+    expect(firstRead).toMatchObject({ ok: true, value: { truncated: false } });
+    if (!firstRead.ok) throw new Error(firstRead.error);
+    expect(Buffer.from(firstRead.value.data).toString()).toBe("m4-stdout");
+    firstRead.value.data.fill(0);
+    const secondRead = await registry.readExecutionOutput(1, outputInput);
+    if (!secondRead.ok) throw new Error(secondRead.error);
+    expect(Buffer.from(secondRead.value.data).toString()).toBe("m4-stdout");
+    expect(await registry.readExecutionOutput(1, { requestId: executed.value.requestId, stream: "combined" })).toMatchObject({
+      ok: true,
+      value: { data: Uint8Array.from(Buffer.from("m4-stdoutm4-stderr")), truncated: false },
+    });
+    const looted = await registry.addExecutionOutputToLoot(1, {
+      requestId: executed.value.requestId,
+      stream: "stdout",
+      name: "Operator report",
+    });
+    expect(looted).toMatchObject({
+      ok: true,
+      value: {
+        name: "Operator report",
+        fileType: "text",
+        originHostId: "session_m4-host",
+        sizeBytes: "9",
+      },
+    });
+    expect(client.lootState[0]?.File?.Data.toString()).toBe("m4-stdout");
+    expect(client.lootAdd.mock.calls[0]?.[0].File?.Name).toMatch(/^execute-stdout-.+\.txt$/u);
+    expect(client.lootAdd.mock.calls[0]?.[0].File?.Data.every((byte) => byte === 0)).toBe(true);
+    const unnamedLoot = await registry.addExecutionOutputToLoot(1, {
+      requestId: executed.value.requestId,
+      stream: "stderr",
+      name: "",
+    });
+    expect(unnamedLoot).toMatchObject({ ok: true, value: { fileType: "text", originHostId: "session_m4-host" } });
+    if (!unnamedLoot.ok) throw new Error(unnamedLoot.error);
+    expect(unnamedLoot.value.name).toBe(unnamedLoot.value.fileName);
     const destination = join(externalDirectory, "m4-stdout.bin");
     electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
     await expect(registry.saveExecutionResult(sender(1), {
@@ -6760,6 +6879,10 @@ describe("M3 session shell registry boundary", () => {
       stream: "stdout",
     })).resolves.toEqual({ ok: true, value: { saved: true, fileName: "m4-stdout.bin" } });
     await expect(readFile(destination, "utf8")).resolves.toBe("m4-stdout");
+    await registry.backgroundTarget(1);
+    await expect(registry.readExecutionOutput(1, outputInput)).resolves.toMatchObject({ ok: false });
+    await expect(registry.addExecutionOutputToLoot(1, { ...outputInput, name: "Stale" })).resolves.toMatchObject({ ok: false });
+    expect(client.lootAdd).toHaveBeenCalledTimes(2);
   });
 
   it("classifies exact target rejection separately from transport uncertainty without replay or backend text", async () => {
@@ -6907,6 +7030,7 @@ describe("M3 session shell registry boundary", () => {
       Description: "ExecuteReq",
       Request: Buffer.from("M4_FETCHED_REQUEST_SECRET"),
       Response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Status: 5,
         Stdout: Buffer.from("decoded-beacon-stdout"),
         Stderr: Buffer.from("decoded-beacon-stderr"),
         Pid: 7_331,
@@ -6924,6 +7048,7 @@ describe("M3 session shell registry boundary", () => {
         state: "completed",
         taskId,
         pid: 7_331,
+        exitCode: 5,
         message: "Process execution completed.",
         output: expect.arrayContaining([
           expect.objectContaining({ stream: "stdout", size: 21 }),
@@ -6937,6 +7062,10 @@ describe("M3 session shell registry boundary", () => {
 
     await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toEqual(completed);
     expect(client.fetchBeaconTask).toHaveBeenCalledOnce();
+    const beaconRead = await registry.readExecutionOutput(1, { requestId: submitted.requestId, stream: "stderr" });
+    expect(beaconRead).toMatchObject({ ok: true, value: { truncated: false } });
+    if (!beaconRead.ok) throw new Error(beaconRead.error);
+    expect(Buffer.from(beaconRead.value.data).toString()).toBe("decoded-beacon-stderr");
     const destination = join(externalDirectory, "decoded-beacon-stdout.txt");
     electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
     await expect(registry.saveExecutionResult(sender(1), {

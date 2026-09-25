@@ -891,7 +891,7 @@ describe("SessionWorkspacePage", () => {
 
     expect(api.listExecutionCatalog).not.toHaveBeenCalled();
     await user.click(screen.getByRole("tab", { name: "Execution" }));
-    expect(await screen.findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Execution operations" })).toBeInTheDocument();
     expect(api.listExecutionCatalog).toHaveBeenCalledOnce();
   });
 

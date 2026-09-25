@@ -218,6 +218,33 @@ describe("execution workbench action dispatcher", () => {
     result.stderr?.fill(0);
   });
 
+  it("preserves process exit status only for captured foreground executions", async () => {
+    for (const status of [0, 17]) {
+      const client = fakeClient({ overrides: { executeSession: async () => ({ Status: status, Pid: 42, Response: {} }) } });
+      const result = await dispatchExecutionAction({
+        client: client.client,
+        target: target(sessionSummary()),
+        draft: processDraft(),
+        artifacts: new Map(),
+      });
+      expect(result.exitCode).toBe(status);
+    }
+
+    for (const draft of [
+      { ...processDraft(), captureOutput: false },
+      { ...processDraft(), captureOutput: false, background: true },
+    ]) {
+      const client = fakeClient({ overrides: { executeSession: async () => ({ Status: 0, Pid: 42, Response: {} }) } });
+      const result = await dispatchExecutionAction({
+        client: client.client,
+        target: target(sessionSummary()),
+        draft,
+        artifacts: new Map(),
+      });
+      expect(result.exitCode).toBeUndefined();
+    }
+  });
+
   it("treats assembly AnyCPU as x86 plus x64, never arm64", async () => {
     for (const arch of ["386", "amd64"] as const) {
       const artifact = Buffer.from(`assembly-${arch}`);

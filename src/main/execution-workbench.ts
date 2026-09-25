@@ -77,6 +77,7 @@ export interface ExecutionWorkbenchTarget {
 export interface ExecutionWorkbenchActionResult {
   readonly taskId?: string;
   readonly pid?: number;
+  readonly exitCode?: number;
   /** A composite reached its primary effect but could not confirm cleanup. */
   readonly partial?: boolean;
   /** Caller-owned bounded copies. The caller must clear them after disposition. */
@@ -157,7 +158,7 @@ export async function dispatchExecutionAction(
     assertArchitectureCompatible(input.draft, input.target.summary, input.implantConfig);
     cloneAndValidateArtifacts(input.draft, input.artifacts, artifactCopies);
     const response = await dispatchAction(input, artifactCopies, credentialCopies, markDispatched);
-    return normalizeActionResponse(input.draft.operationId, response);
+    return normalizeActionResponse(input.draft, response);
   } finally {
     clearBuffers(artifactCopies.values());
     clearBuffers(credentialCopies);
@@ -518,20 +519,23 @@ function assertArchitectureCompatible(
   }
 }
 
-function normalizeActionResponse(operationId: ExecutionOperationId, value: unknown): ExecutionWorkbenchActionResult {
+function normalizeActionResponse(draft: ExecutionActionDraft, value: unknown): ExecutionWorkbenchActionResult {
   const record = unknownRecord(value);
   const responseBuffers = collectResponseBuffers(record);
   const resultBuffers: Buffer[] = [];
   try {
     assertRemoteAccepted(record);
-    const descriptor = executionOperationDescriptor(operationId);
+    const descriptor = executionOperationDescriptor(draft.operationId);
     const taskId = responseTaskId(record);
     if (taskId) {
       return Object.freeze({ taskId, summary: descriptor.submittedMessage });
     }
     const pid = safePositiveInteger(record?.["Pid"] ?? record?.["pid"]);
+    const exitCode = draft.operationId === "execution.process" && draft.captureOutput && !draft.background
+      ? safeExitCode(record?.["Status"] ?? record?.["status"])
+      : undefined;
     const partial = record?.["__executionPartial"] === true;
-    const streams = actionStreams(operationId, record);
+    const streams = actionStreams(draft.operationId, record);
     const stdout = streams.stdout === undefined ? undefined : boundedOutput(streams.stdout);
     const stderr = streams.stderr === undefined ? undefined : boundedOutput(streams.stderr);
     if (stdout) resultBuffers.push(stdout.data);
@@ -539,6 +543,7 @@ function normalizeActionResponse(operationId: ExecutionOperationId, value: unkno
     const result: ExecutionWorkbenchActionResult = Object.freeze({
       ...(taskId ? { taskId } : {}),
       ...(pid === undefined ? {} : { pid }),
+      ...(exitCode === undefined ? {} : { exitCode }),
       ...(partial ? { partial: true } : {}),
       ...(stdout === undefined ? {} : { stdout: stdout.data, stdoutTruncated: stdout.truncated }),
       ...(stderr === undefined ? {} : { stderr: stderr.data, stderrTruncated: stderr.truncated }),
@@ -948,6 +953,12 @@ function safePositiveInteger(value: unknown): number | undefined {
 
 function safeInteger(value: unknown): number | undefined {
   return Number.isSafeInteger(value) ? value as number : undefined;
+}
+
+function safeExitCode(value: unknown): number | undefined {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff
+    ? value as number
+    : undefined;
 }
 
 function safeDate(value: unknown): string | undefined {

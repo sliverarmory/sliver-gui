@@ -3449,15 +3449,10 @@ async function verifyM4SessionExecution(
   beaconRef: TargetRef,
 ): Promise<void> {
   await page.getByRole("tab", { name: "Execution", exact: true }).click();
-  await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
+  await page.getByRole("region", { name: "Execution operations", exact: true }).waitFor();
 
-  const childrenCalls = fakeMethodCount(await readFakeState(electronApplication), "executeChildrenSession");
-  await page.getByRole("button", { name: "Open: Background children", exact: true }).click();
-  const childrenGrid = page.getByRole("grid", { name: "Background child processes", exact: true });
-  await childrenGrid.waitFor();
-  await childrenGrid.getByText("/usr/bin/printf", { exact: true }).waitFor();
-  await childrenGrid.getByText("/usr/bin/sleep", { exact: true }).waitFor();
-  await waitForFakeMethodCount(electronApplication, "executeChildrenSession", childrenCalls + 1);
+  await page.getByRole("region", { name: "Run a process", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Open: Background children", exact: true }).count(), 0);
 
   await page.getByRole("radio", { name: "Remote", exact: true }).click();
   await page.getByRole("button", { name: "Open: SSH command", exact: true }).click();
@@ -3535,11 +3530,10 @@ async function verifyM4SessionExecution(
   // A reviewed plan is quarantined as soon as the main-owned exact target
   // changes, without dispatching the stale operation.
   await page.getByRole("radio", { name: "Process", exact: true }).click();
-  await page.getByRole("button", { name: "Open: Execute process", exact: true }).click();
-  const staleConfiguration = page.getByRole("dialog", { name: "Execute process", exact: true });
+  const staleConfiguration = page.getByRole("region", { name: "Run a process", exact: true });
   await staleConfiguration.getByLabel("Executable path").fill("/usr/bin/printf");
   await staleConfiguration.getByLabel("Arguments").fill("stale-m4-plan");
-  await staleConfiguration.getByRole("button", { name: "Review", exact: true }).click();
+  await staleConfiguration.getByRole("button", { name: "Review command", exact: true }).click();
   const staleReview = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
   await staleReview.waitFor();
   const executeCalls = fakeMethodCount(await readFakeState(electronApplication), "executeSession");

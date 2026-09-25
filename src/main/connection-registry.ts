@@ -135,6 +135,7 @@ import {
   type TerminalRuntimeAsset,
 } from "../shared/stream-contracts.js";
 import type {
+  AddExecutionOutputToLootInput,
   ExecuteExecutionPlanInput,
   ExecutionActionDraft,
   ExecutionActionPlan,
@@ -142,9 +143,11 @@ import type {
   ExecutionArtifactRole,
   ExecutionCatalog,
   ExecutionOperationId,
+  ExecutionOutputReadResult,
   ExecutionReadResult,
   ExecutionResultRequest,
   PrepareExecutionActionInput,
+  ReadExecutionOutputInput,
   RunExecutionReadInput,
   SaveExecutionResultInput,
   SaveExecutionResultResult,
@@ -264,6 +267,7 @@ import {
 } from "./execution-review.js";
 import {
   dispatchExecutionAction,
+  EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES,
   ExecutionRemoteRejectedError,
   ExecutionTargetRejectedError,
   ExecutionWorkbenchInputError,
@@ -529,6 +533,8 @@ interface InternalExecutionPlan {
 
 interface InternalExecutionResult {
   value: ExecutionActionResult;
+  /** Captured process execution waits for the subprocess and has a final Status. */
+  processWaited?: boolean;
   expiresAt: number;
   output: Partial<Record<"stdout" | "stderr" | "combined", InternalExecutionArtifact>>;
   poolKey: string;
@@ -2609,7 +2615,7 @@ export class ConnectionRegistry {
             message: descriptor.submittedMessage,
             taskId: action.taskId,
             ...(action.pid === undefined ? {} : { pid: action.pid }),
-          });
+          }, {}, capturedPlan.draft.operationId === "execution.process" && capturedPlan.draft.captureOutput && !capturedPlan.draft.background);
         }
 
         const terminalState = action.partial ? "partial" : "completed";
@@ -2636,11 +2642,13 @@ export class ConnectionRegistry {
                 ? "The remote service started and was removed. The uploaded executable remains at the reviewed remote directory."
                 : action.summary,
             ...(action.pid === undefined ? {} : { pid: action.pid }),
+            ...(action.exitCode === undefined ? {} : { exitCode: action.exitCode }),
           },
           {
             ...(action.stdout ? { stdout: { data: action.stdout, truncated: action.stdoutTruncated === true } } : {}),
             ...(action.stderr ? { stderr: { data: action.stderr, truncated: action.stderrTruncated === true } } : {}),
           },
+          capturedPlan.draft.operationId === "execution.process" && capturedPlan.draft.captureOutput && !capturedPlan.draft.background,
         );
       });
     } catch (error) {
@@ -2709,6 +2717,7 @@ export class ConnectionRegistry {
           taskId: result.value.taskId,
           operationId: result.value.operationId,
           expectedRequestId: input.requestId,
+          ...(result.processWaited ? { processWaited: true } : {}),
           assertCurrent,
         });
         try {
@@ -2762,6 +2771,7 @@ export class ConnectionRegistry {
                 message: action.summary,
                 taskId: result.value.taskId,
                 ...(action.pid === undefined ? {} : { pid: action.pid }),
+                ...(action.exitCode === undefined ? {} : { exitCode: action.exitCode }),
               },
               {
                 ...(action.stdout
@@ -2780,6 +2790,119 @@ export class ConnectionRegistry {
     } finally {
       admittedContext?.executionAdmissions.delete(admissionId);
       this.executionGlobalAdmissions.delete(admissionId);
+    }
+  }
+
+  async readExecutionOutput(
+    contentsId: number,
+    input: ReadExecutionOutputInput,
+  ): Promise<OperationResult<ExecutionOutputReadResult>> {
+    let data: Buffer | undefined;
+    try {
+      const context = this.requireWindow(contentsId);
+      const result = this.requireExecutionResult(context, input.requestId);
+      const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+      if (
+        this.windows.get(contentsId) !== context ||
+        !pool ||
+        !["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status) ||
+        this.pools.get(result.poolKey) !== pool ||
+        pool.epoch !== result.epoch ||
+        context.connectionAttempt !== result.connectionAttempt ||
+        !context.activeTarget ||
+        !sameTargetRefIdentity(context.activeTarget, result.target) ||
+        context.executionResults.get(input.requestId) !== result
+      ) throw new Error("The execution result no longer belongs to the active target");
+
+      const artifact = result.output[input.stream];
+      const output = result.value.output?.find((item) => item.stream === input.stream);
+      if (!artifact || !output || output.handle !== artifact.handle) {
+        throw new Error("The requested execution output is unavailable");
+      }
+      const maximumBytes = input.stream === "combined"
+        ? 2 * EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES
+        : EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES;
+      if (output.size > maximumBytes) throw new Error("The requested execution output is unavailable");
+      const retrieved = this.executionArtifacts.getResult(artifact.scope, artifact.handle);
+      data = retrieved.data;
+      if (data.byteLength !== output.size || data.byteLength > maximumBytes) {
+        throw new Error("The requested execution output is unavailable");
+      }
+      return { ok: true, value: { data: Uint8Array.from(data), truncated: output.truncated } };
+    } catch (error) {
+      return { ok: false, error: executionBoundaryError(error) };
+    } finally {
+      data?.fill(0);
+    }
+  }
+
+  async addExecutionOutputToLoot(
+    contentsId: number,
+    input: AddExecutionOutputToLootInput,
+  ): Promise<OperationResult<LootSummary>> {
+    let data: Buffer | undefined;
+    let loot: clientpb.Loot | undefined;
+    let response: clientpb.Loot | undefined;
+    try {
+      return await this.withExecutionPool(contentsId, async (pool, assertBinding) => {
+        const context = this.requireWindow(contentsId);
+        const result = this.requireExecutionResult(context, input.requestId);
+        const assertCurrent = (): void => {
+          assertBinding();
+          if (
+            this.windows.get(contentsId) !== context ||
+            this.pools.get(result.poolKey) !== pool ||
+            pool.epoch !== result.epoch ||
+            context.connectionAttempt !== result.connectionAttempt ||
+            !context.activeTarget ||
+            !sameTargetRefIdentity(context.activeTarget, result.target) ||
+            context.executionResults.get(input.requestId) !== result
+          ) throw new Error("The execution result no longer belongs to the active target");
+        };
+        assertCurrent();
+        const target = pool.targetStore.revalidateTargetRef(result.target, pool.epoch);
+        if (!target) throw new Error("The execution result is unavailable for the current target");
+        const artifact = result.output[input.stream];
+        const output = result.value.output?.find((item) => item.stream === input.stream);
+        if (!artifact || !output || output.handle !== artifact.handle) {
+          throw new Error("The requested execution output is unavailable");
+        }
+        const maximumBytes = input.stream === "combined"
+          ? 2 * EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES
+          : EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES;
+        if (output.size > maximumBytes) throw new Error("The requested execution output is unavailable");
+        data = this.executionArtifacts.getResult(artifact.scope, artifact.handle).data;
+        if (data.byteLength !== output.size || data.byteLength > maximumBytes) {
+          throw new Error("The requested execution output is unavailable");
+        }
+        const isText = isProbablyTextLoot(data);
+        const fileName = safeArtifactFileName(
+          `execute-${input.stream}-${input.requestId}.${isText ? "txt" : "bin"}`,
+        );
+        const requestedName = input.name.trim();
+        if (
+          requestedName.length > OPERATOR_DATA_LIMITS.nameCharacters ||
+          /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(requestedName)
+        ) throw new Error("Loot name is invalid");
+        loot = clientpb.Loot.create({
+          Name: requestedName || fileName,
+          OriginHostUUID: target.target.hostId,
+          FileType: isText ? clientpb.FileType.TEXT : clientpb.FileType.BINARY,
+          File: commonpb.File.create({ Name: fileName, Data: data }),
+        });
+        assertCurrent();
+        try {
+          response = await pool.client.lootAdd(loot);
+          assertCurrent();
+          return lootSummary(response);
+        } catch {
+          throw new Error("The loot submission may have completed; refresh loot before retrying");
+        }
+      });
+    } finally {
+      data?.fill(0);
+      loot?.File?.Data.fill(0);
+      response?.File?.Data.fill(0);
     }
   }
 
@@ -3661,8 +3784,10 @@ export class ConnectionRegistry {
     target: RevalidatedTarget,
     value: ExecutionActionResult,
     streams: Partial<Record<"stdout" | "stderr", { data: Buffer; truncated: boolean }>> = {},
+    processWaited?: boolean,
   ): ExecutionActionResult {
     this.pruneExecutionResults(context);
+    processWaited ??= context.executionResults.get(value.requestId)?.processWaited;
     if (context.executionResults.has(value.requestId)) {
       this.revokeExecutionResult(context, value.requestId);
     }
@@ -3746,6 +3871,7 @@ export class ConnectionRegistry {
     });
     const retained: InternalExecutionResult = {
       value: retainedValue,
+      ...(processWaited ? { processWaited } : {}),
       expiresAt,
       output,
       poolKey: pool.key,
@@ -3773,6 +3899,7 @@ export class ConnectionRegistry {
     taskId: string;
     operationId: ExecutionOperationId;
     expectedRequestId?: string;
+    processWaited?: boolean;
     readInput?: RunExecutionReadInput;
     assertCurrent: () => void;
   }): Promise<RefreshedExecutionBeaconTask> {
@@ -3784,6 +3911,7 @@ export class ConnectionRegistry {
       taskId,
       operationId,
       expectedRequestId,
+      processWaited,
       readInput,
       assertCurrent,
     } = input;
@@ -3857,6 +3985,7 @@ export class ConnectionRegistry {
         description: content.Description,
         response: content.Response,
         ...(readInput ? { readInput } : {}),
+        ...(processWaited ? { processWaited } : {}),
       });
       assertCurrent();
       await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "completed" });
@@ -6576,6 +6705,7 @@ class BackendPool {
   private connectPromise: Promise<void> | undefined;
   private readonly refreshPromises = new Map<DomainName, Promise<void>>();
   private readonly refreshReruns = new Set<DomainName>();
+  private readonly refreshRerunLoading = new Set<DomainName>();
   private reconcileTimer?: NodeJS.Timeout;
   private watchTimer?: NodeJS.Timeout;
   private invalidationTimer?: NodeJS.Timeout;
@@ -6818,7 +6948,7 @@ class BackendPool {
     await this.refreshAll().catch(() => undefined);
     this.assertCurrent();
     this.reconcileTimer = setInterval(
-      () => this.runBackgroundRefresh(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "builders", "crackstations"]),
+      () => this.runBackgroundRefresh(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "builders", "crackstations"], false),
       RECONCILE_INTERVAL_MS,
     );
     this.reconcileTimer.unref();
@@ -6844,10 +6974,10 @@ class BackendPool {
     return this.refreshDomains(["jobs", "builds", "profiles", "compiler", "sessions", "beacons", "operators", "pivots", "builders", "crackstations"]);
   }
 
-  async refreshDomains(domains: readonly DomainName[]): Promise<void> {
+  async refreshDomains(domains: readonly DomainName[], showLoading = true): Promise<void> {
     this.assertCurrent();
     const unique = [...new Set(domains)];
-    const results = await Promise.allSettled(unique.map((domain) => this.refreshDomain(domain)));
+    const results = await Promise.allSettled(unique.map((domain) => this.refreshDomain(domain, showLoading)));
     this.assertCurrent();
     // Optional display metadata retains its own error/health state without
     // invalidating successful authoritative inventories.
@@ -6865,36 +6995,45 @@ class BackendPool {
     this.setHealth(health.status, health.error);
   }
 
-  private refreshDomain(domain: DomainName): Promise<void> {
+  private refreshDomain(domain: DomainName, showLoading: boolean): Promise<void> {
     const existing = this.refreshPromises.get(domain);
     if (existing) {
       // This caller's authoritative read intent occurred after the in-flight
       // request began, so require one serialized rerun before resolving it.
       this.refreshReruns.add(domain);
+      if (showLoading) {
+        this.refreshRerunLoading.add(domain);
+        this.markDomainLoading(domain);
+      }
       return existing;
     }
-    const refresh = this.refreshDomainUntilClean(domain).finally(() => {
-      if (this.refreshPromises.get(domain) === refresh) this.refreshPromises.delete(domain);
+    const refresh = this.refreshDomainUntilClean(domain, showLoading).finally(() => {
+      if (this.refreshPromises.get(domain) === refresh) {
+        this.refreshPromises.delete(domain);
+        this.refreshRerunLoading.delete(domain);
+      }
     });
     this.refreshPromises.set(domain, refresh);
     return refresh;
   }
 
-  private async refreshDomainUntilClean(domain: DomainName): Promise<void> {
+  private async refreshDomainUntilClean(domain: DomainName, showLoading: boolean): Promise<void> {
     while (true) {
       this.refreshReruns.delete(domain);
       try {
-        await this.refreshDomainInternal(domain);
+        await this.refreshDomainInternal(domain, showLoading);
       } catch (error) {
         if (!this.refreshReruns.delete(domain)) throw error;
+        showLoading = this.refreshRerunLoading.delete(domain) || showLoading;
         continue;
       }
       if (!this.refreshReruns.delete(domain)) return;
+      showLoading = this.refreshRerunLoading.delete(domain) || showLoading;
     }
   }
 
-  private async refreshDomainInternal(domain: DomainName): Promise<void> {
-    this.markDomainLoading(domain);
+  private async refreshDomainInternal(domain: DomainName, showLoading: boolean): Promise<void> {
+    if (showLoading) this.markDomainLoading(domain);
     try {
       switch (domain) {
         case "builders":
@@ -7252,9 +7391,11 @@ class BackendPool {
     this.invalidationTimer.unref();
   }
 
-  private runBackgroundRefresh(domains: readonly DomainName[]): void {
+  private runBackgroundRefresh(domains: readonly DomainName[], showLoading = true): void {
     const inventories = domains.includes("sessions") ? [...domains, "pivots" as const] : domains;
-    void this.refreshDomains(inventories).catch(() => undefined);
+    // A scheduled poll does not invalidate its last settled inventory. Keep
+    // event-driven and explicit refreshes marked as loading for action gates.
+    void this.refreshDomains(inventories, showLoading).catch(() => undefined);
   }
 
   private markEventStreamFailure(error: unknown): void {
@@ -8110,7 +8251,7 @@ function resolvedExecutionOperationTarget(
 function executionBoundaryError(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   if (
-    /^(Select a target|The selected target|The selected session|The execution read|The execution review|The execution result|The requested execution output|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
+    /^(Select a target|The selected target|The selected session|The execution read|The execution review|The execution result|The requested execution output|The loot submission|Loot name is invalid|The current token identity|Too many execution|The global execution|This operation|Execution file selection|Could not open the native execution|Could not read the selected execution|Could not save the execution|The application window)/u.test(message)
   ) return boundedText(message, 512);
   return "The execution request failed at the protected main-process boundary";
 }
