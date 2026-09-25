@@ -314,7 +314,7 @@ describe("TargetExecutionWorkbench", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("The session selection changed");
     expect(screen.getByRole("region", { name: "Execution operations" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Run a process" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Execute a subprocess" })).toBeInTheDocument();
   });
 
   it("keeps the execution pane visible while a revised reference is validated", async () => {
@@ -347,7 +347,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.getByRole("button", { name: "Open: Revert identity" })).toBeDisabled();
     expect(screen.getByRole("status")).toHaveTextContent("Refreshing execution capabilities");
     await user.click(screen.getByRole("radio", { name: "Process" }));
-    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled();
     await user.click(screen.getByRole("radio", { name: "Identity" }));
 
     await act(async () => {
@@ -422,17 +422,18 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(history).getByRole("grid", { name: "Process execution history" })).toBeInTheDocument();
     expect(within(history).getAllByRole("row")).toHaveLength(1);
     expect(within(history).getByRole("row", { name: "New Execution" })).toHaveAttribute("aria-selected", "true");
-    const processForm = screen.getByRole("region", { name: "Run a process" });
-    expect(within(processWorkspace).getByRole("region", { name: "Run a process" })).toBe(processForm);
+    const processForm = screen.getByRole("region", { name: "Execute a subprocess" });
+    expect(within(processWorkspace).getByRole("region", { name: "Execute a subprocess" })).toBe(processForm);
     expect(history.compareDocumentPosition(processForm) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByLabelText("Execution details")).not.toBeInTheDocument();
     expect(within(processForm).getByRole("textbox", { name: "Executable path" })).toHaveValue("/bin/sh");
-    expect(within(processForm).getByRole("textbox", { name: "Arguments" })).toBeInTheDocument();
+    expect(within(processForm).getByRole("textbox", { name: "Arguments" }))
+      .toHaveAttribute("placeholder", "--flag 'value with spaces'");
     expect(within(processForm).queryByRole("button", { name: "Execution options" })).not.toBeInTheDocument();
     expect(within(processForm).getByRole("switch", { name: /Capture output/u })).toBeChecked();
-    const run = within(processForm).getByRole("button", { name: "Run" });
-    expect(run).toHaveAttribute("type", "submit");
-    expect(run.compareDocumentPosition(within(processForm).getByRole("textbox", { name: "Executable path" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const execute = within(processForm).getByRole("button", { name: "Execute" });
+    expect(execute).toHaveAttribute("type", "submit");
+    expect(execute.compareDocumentPosition(within(processForm).getByRole("textbox", { name: "Executable path" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Execution options" })).not.toBeInTheDocument();
     expect(screen.queryByText("Background tracking is disabled by this server.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Unavailable: Background children" })).not.toBeInTheDocument();
@@ -475,14 +476,15 @@ describe("TargetExecutionWorkbench", () => {
 
     render(<TargetExecutionWorkbench expectedTarget={windowsRef} targetIdentity="target-windows-all" />);
     await screen.findByRole("region", { name: "Execution operations" });
-    const processForm = screen.getByRole("region", { name: "Run a process" });
+    const processForm = screen.getByRole("region", { name: "Execute a subprocess" });
     expect(within(processForm).getByRole("textbox", { name: "Executable path" })).toHaveValue("C:\\Windows\\System32\\cmd.exe");
-    expect(within(processForm).getByRole("textbox", { name: "Arguments" })).toBeInTheDocument();
+    expect(within(processForm).getByRole("textbox", { name: "Arguments" }))
+      .toHaveAttribute("placeholder", "/d /c dir");
     expect(within(processForm).getByRole("switch", { name: /Capture output/u })).toBeChecked();
     expect(within(processForm).getByRole("switch", { name: /Use current token/u })).toBeInTheDocument();
     expect(within(processForm).getByRole("switch", { name: /Hide window/u })).toBeInTheDocument();
     expect(within(processForm).getByRole("spinbutton", { name: "Parent process ID" })).toBeInTheDocument();
-    expect(within(processForm).getByRole("button", { name: "Run" })).toHaveAttribute("type", "submit");
+    expect(within(processForm).getByRole("button", { name: "Execute" })).toHaveAttribute("type", "submit");
     expect(screen.queryByRole("dialog", { name: "Execution options" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open: Migrate process" })).not.toBeInTheDocument();
     for (const group of actionGroups) {
@@ -503,11 +505,11 @@ describe("TargetExecutionWorkbench", () => {
     api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan("execution.process") });
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-linux-process" />);
-    const form = await screen.findByRole("region", { name: "Run a process" });
+    const form = await screen.findByRole("region", { name: "Execute a subprocess" });
     expect(within(form).getByRole("switch", { name: /Capture output/u })).toBeChecked();
     expect(within(form).getByRole("spinbutton", { name: "Timeout seconds" })).toBeInTheDocument();
     expect(within(form).queryByRole("spinbutton", { name: "Parent process ID" })).not.toBeInTheDocument();
-    await user.click(within(form).getByRole("button", { name: "Run" }));
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
 
     await waitFor(() => expect(api.prepareExecutionAction).toHaveBeenCalledOnce());
     expect(api.prepareExecutionAction.mock.calls[0]?.[0].draft).not.toHaveProperty("parentPid");
@@ -522,7 +524,7 @@ describe("TargetExecutionWorkbench", () => {
     api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan("execution.process") });
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-process-options" />);
-    const form = await screen.findByRole("region", { name: "Run a process" });
+    const form = await screen.findByRole("region", { name: "Execute a subprocess" });
     const executable = within(form).getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
     await user.type(executable, "/usr/bin/env");
@@ -541,7 +543,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(form).getByRole("textbox", { name: "Environment overrides" })).toHaveValue("MODE=trace");
     expect(within(form).getByRole("spinbutton", { name: "Timeout seconds" })).toHaveValue(15);
     expect(screen.queryByRole("dialog", { name: "Execution options" })).not.toBeInTheDocument();
-    await user.click(within(form).getByRole("button", { name: "Run" }));
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
 
     await waitFor(() => expect(api.prepareExecutionAction).toHaveBeenCalledOnce());
     expect(api.prepareExecutionAction.mock.calls[0]?.[0].draft).toMatchObject({
@@ -566,8 +568,8 @@ describe("TargetExecutionWorkbench", () => {
     api.prepareExecutionAction.mockResolvedValue({ ok: true, value: mismatched });
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-rejected-process" />);
-    const form = await screen.findByRole("region", { name: "Run a process" });
-    await user.click(within(form).getByRole("button", { name: "Run" }));
+    const form = await screen.findByRole("region", { name: "Execute a subprocess" });
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
 
     expect(await within(form).findByRole("alert")).toHaveTextContent("no longer matches this exact operation and target selection");
     await waitFor(() => expect(api.discardExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: mismatched.token }));
@@ -596,11 +598,11 @@ describe("TargetExecutionWorkbench", () => {
     api.executeExecutionPlan.mockReturnValue(pendingExecution.promise);
 
     const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="windows-process-revision" />);
-    const form = await screen.findByRole("region", { name: "Run a process" });
+    const form = await screen.findByRole("region", { name: "Execute a subprocess" });
     const executable = within(form).getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
     await user.type(executable, "C:\\Windows\\System32\\tasklist.exe");
-    await user.click(within(form).getByRole("button", { name: "Run" }));
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: "plan-execution.process" }));
     expect(api.prepareExecutionAction.mock.calls[0]?.[0].draft).toMatchObject({ path: "C:\\Windows\\System32\\tasklist.exe" });
     act(() => api.publishProcessHistory([processRecord("windows-tasklist", "C:\\Windows\\System32\\tasklist.exe")]));
@@ -648,8 +650,8 @@ describe("TargetExecutionWorkbench", () => {
     api.executeExecutionPlan.mockReturnValue(pendingExecution.promise);
 
     const { rerender } = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-before-change" />);
-    const form = await screen.findByRole("region", { name: "Run a process" });
-    await user.click(within(form).getByRole("button", { name: "Run" }));
+    const form = await screen.findByRole("region", { name: "Execute a subprocess" });
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: "plan-execution.process" }));
     act(() => api.publishProcessHistory([processRecord("late-original-target", "/bin/sh")]));
     await waitFor(() => expect(screen.getByRole("navigation", { name: "Process execution history" })).toHaveTextContent("/bin/sh"));
@@ -680,7 +682,7 @@ describe("TargetExecutionWorkbench", () => {
       .mockResolvedValueOnce({ ok: true, value: completedProcessResult("process-second", 102, 0, secondOutput) });
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-history" />);
-    let processForm = await screen.findByRole("region", { name: "Run a process" });
+    let processForm = await screen.findByRole("region", { name: "Execute a subprocess" });
     const history = screen.getByRole("navigation", { name: "Process execution history" });
     expect(within(history).getAllByRole("row")).toHaveLength(1);
     expect(within(history).getByRole("row", { name: "New Execution" })).toHaveAttribute("aria-selected", "true");
@@ -689,14 +691,14 @@ describe("TargetExecutionWorkbench", () => {
     let executable = within(processForm).getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
     await user.type(executable, "/usr/bin/first");
-    await user.click(within(processForm).getByRole("button", { name: "Run" }));
+    await user.click(within(processForm).getByRole("button", { name: "Execute" }));
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledTimes(1));
     act(() => api.publishProcessHistory([processRecord(
       "process-first", "/usr/bin/first", completedProcessResult("process-first", 101, 7, firstOutput), firstOutput,
     )]));
     expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("first process output");
-    expect(screen.queryByRole("region", { name: "Run a process" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Execute a subprocess" })).not.toBeInTheDocument();
     expect(within(history).getAllByRole("row")).toHaveLength(2);
     expect(within(history).getAllByRole("row")[0]).toHaveTextContent("New Execution");
     expect(within(history).getAllByRole("row")[1]).toHaveTextContent("/usr/bin/first");
@@ -706,7 +708,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(details).getByText("101")).toBeInTheDocument();
 
     await user.click(within(history).getByRole("row", { name: "New Execution" }));
-    processForm = screen.getByRole("region", { name: "Run a process" });
+    processForm = screen.getByRole("region", { name: "Execute a subprocess" });
     expect(within(history).getByRole("row", { name: "New Execution" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByLabelText("Execution output transcript")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Execution details")).not.toBeInTheDocument();
@@ -714,7 +716,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(executable).toHaveValue("/bin/sh");
     await user.clear(executable);
     await user.type(executable, "/usr/bin/second");
-    await user.click(within(processForm).getByRole("button", { name: "Run" }));
+    await user.click(within(processForm).getByRole("button", { name: "Execute" }));
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledTimes(2));
     act(() => api.publishProcessHistory([
@@ -722,7 +724,7 @@ describe("TargetExecutionWorkbench", () => {
       processRecord("process-first", "/usr/bin/first", completedProcessResult("process-first", 101, 7, firstOutput), firstOutput),
     ]));
     expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("second process output");
-    expect(screen.queryByRole("region", { name: "Run a process" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Execute a subprocess" })).not.toBeInTheDocument();
     expect(within(history).getAllByRole("row")).toHaveLength(3);
     expect(within(history).getAllByRole("row")[0]).toHaveTextContent("New Execution");
     expect(within(history).getAllByRole("row")[1]).toHaveTextContent("/usr/bin/second");
@@ -745,7 +747,7 @@ describe("TargetExecutionWorkbench", () => {
     await user.click(screen.getByRole("button", { name: "Clear history" }));
     await waitFor(() => expect(within(history).getAllByRole("row")).toHaveLength(1));
     expect(within(history).getByRole("row", { name: "New Execution" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("region", { name: "Run a process" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Execute a subprocess" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Execution output transcript")).not.toBeInTheDocument();
     expect(api.executeExecutionPlan).toHaveBeenNthCalledWith(1, { token: "process-plan-first" });
     expect(api.executeExecutionPlan).toHaveBeenNthCalledWith(2, { token: "process-plan-second" });
@@ -766,8 +768,8 @@ describe("TargetExecutionWorkbench", () => {
     api.executeExecutionPlan.mockResolvedValue({ ok: true, value: result });
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-streams" />);
-    const form = await screen.findByRole("region", { name: "Run a process" });
-    await user.click(within(form).getByRole("button", { name: "Run" }));
+    const form = await screen.findByRole("region", { name: "Execute a subprocess" });
+    await user.click(within(form).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledOnce());
     act(() => api.publishProcessHistory([processRecord("process-streams", "/bin/sh", result, stdout, stderr)]));
 
@@ -796,11 +798,11 @@ describe("TargetExecutionWorkbench", () => {
     });
 
     const mounted = render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-remount" />);
-    const processForm = await screen.findByRole("region", { name: "Run a process" });
+    const processForm = await screen.findByRole("region", { name: "Execute a subprocess" });
     const executable = within(processForm).getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
     await user.type(executable, "/usr/bin/retained");
-    await user.click(within(processForm).getByRole("button", { name: "Run" }));
+    await user.click(within(processForm).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledOnce());
     act(() => api.publishProcessHistory([processRecord(
       "process-remount", "/usr/bin/retained", completedProcessResult("process-remount", 515, 3, "retained output"), "retained output",
@@ -813,7 +815,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(within(history).getAllByRole("row")).toHaveLength(2);
     expect(within(history).getAllByRole("row")[0]).toHaveTextContent("New Execution");
     expect(within(history).getByRole("row", { name: /\/usr\/bin\/retained/u })).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByRole("region", { name: "Run a process" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Execute a subprocess" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("retained output");
     expect(within(screen.getByLabelText("Execution details")).getByText("3")).toBeInTheDocument();
     expect(api.readExecutionOutput).not.toHaveBeenCalled();
@@ -841,11 +843,11 @@ describe("TargetExecutionWorkbench", () => {
     });
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-loot" />);
-    const processForm = await screen.findByRole("region", { name: "Run a process" });
+    const processForm = await screen.findByRole("region", { name: "Execute a subprocess" });
     const executable = within(processForm).getByRole("textbox", { name: "Executable path" });
     await user.clear(executable);
     await user.type(executable, "/usr/bin/printf");
-    await user.click(within(processForm).getByRole("button", { name: "Run" }));
+    await user.click(within(processForm).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(api.executeExecutionPlan).toHaveBeenCalledOnce());
     act(() => api.publishProcessHistory([processRecord(
       "process-loot", "/usr/bin/printf", completedProcessResult("process-loot", 616, 0, "captured output"), "captured output",

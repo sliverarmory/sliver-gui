@@ -82,7 +82,7 @@ test("built Electron Process view captures tasklist from an exact live Windows s
     stage = "select exact session in the GUI";
     await openAuthorizedSession(page, session);
     await page.getByRole("tab", { name: "Execution", exact: true }).click();
-    const form = page.getByRole("region", { name: "Run a process", exact: true });
+    const form = page.getByRole("region", { name: "Execute a subprocess", exact: true });
     const processView = page.getByRole("region", {
       name: "Process execution history and output",
       exact: true,
@@ -101,7 +101,7 @@ test("built Electron Process view captures tasklist from an exact live Windows s
     const current = selectAuthorizedSession((await client.getSessions(30)).Sessions);
     assert.equal(current.id, session.id);
     assert.equal((await rendererSnapshot(page)).targetContext.activeTarget?.id, session.id);
-    await form.getByRole("button", { name: "Run", exact: true }).click();
+    await form.getByRole("button", { name: "Execute", exact: true }).click();
     assert.equal(await page.getByRole("alertdialog", { name: "Execute this reviewed action?" }).count(), 0);
 
     stage = "verify completed Process result and captured stdout";

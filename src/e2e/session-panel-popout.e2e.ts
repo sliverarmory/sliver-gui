@@ -121,7 +121,7 @@ test("Execution history and captured output sync between the session and its pop
 
     const sourceHistory = source.getByRole("navigation", { name: "Process execution history", exact: true });
     const sourceOutput = source.getByRole("region", { name: "Process execution history and output", exact: true });
-    const sourceForm = source.getByRole("region", { name: "Run a process", exact: true });
+    const sourceForm = source.getByRole("region", { name: "Execute a subprocess", exact: true });
     await sourceForm.waitFor();
     await runProcess(sourceForm, "/usr/bin/printf", "first-run");
     await sourceOutput.getByRole("heading", { name: "/usr/bin/printf first-run", exact: true }).waitFor();
@@ -145,7 +145,7 @@ test("Execution history and captured output sync between the session and its pop
       "the pop-out must include the execution that completed before it opened");
 
     await popOutHistory.getByRole("row", { name: "New Execution", exact: true }).click();
-    const popOutForm = popOut.getByRole("region", { name: "Run a process", exact: true });
+    const popOutForm = popOut.getByRole("region", { name: "Execute a subprocess", exact: true });
     await popOutForm.waitFor();
     await runProcess(popOutForm, "/usr/bin/id", "second-run");
     await popOutOutput.getByRole("heading", { name: "/usr/bin/id second-run", exact: true }).waitFor();
@@ -257,7 +257,7 @@ async function snapshot(page: Page): Promise<Awaited<ReturnType<SliverDesktopAPI
 async function runProcess(form: ReturnType<Page["getByRole"]>, path: string, args: string): Promise<void> {
   await form.getByLabel("Executable path").fill(path);
   await form.getByRole("textbox", { name: "Arguments", exact: true }).fill(args);
-  await form.getByRole("button", { name: "Run", exact: true }).click();
+  await form.getByRole("button", { name: "Execute", exact: true }).click();
 }
 
 async function assertProcessResult(page: Page, output: ReturnType<Page["getByRole"]>): Promise<void> {

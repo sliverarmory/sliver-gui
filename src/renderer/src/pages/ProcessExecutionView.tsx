@@ -180,9 +180,9 @@ export function ProcessExecutionView({
 
       <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 sm:p-5">
         {showingNew ? (
-          <section aria-label="Run a process" className="min-w-0">
+          <section aria-label="Execute a subprocess" className="min-w-0">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <h3 className="text-base font-semibold text-foreground">Run a process</h3>
+              <h3 className="text-base font-semibold text-foreground">Execute a subprocess</h3>
               {capability?.available ? (
                 <Button
                   form={PROCESS_FORM_ID}
@@ -192,7 +192,7 @@ export function ProcessExecutionView({
                   variant="primary"
                 >
                   <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />
-                  Run
+                  Execute
                 </Button>
               ) : null}
             </div>

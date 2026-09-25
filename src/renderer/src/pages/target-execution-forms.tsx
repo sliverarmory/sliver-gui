@@ -103,7 +103,12 @@ export function ExecutionActionForm({
             <>
               <div className="grid items-start gap-3 md:grid-cols-2">
                 <TextInput defaultValue={defaultProcessExecutable(target.os)} fontFamily={processFontFamily} label="Executable path" maxLength={EXECUTION_LIMITS.path} name="path" required />
-                <TextInput fontFamily={processFontFamily} label="Arguments" name="args" placeholder="--flag 'value with spaces'" />
+                <TextInput
+                  fontFamily={processFontFamily}
+                  label="Arguments"
+                  name="args"
+                  placeholder={target.os.trim().toLocaleLowerCase() === "windows" ? "/d /c dir" : "--flag 'value with spaces'"}
+                />
               </div>
               <ProcessOptionsFields options={processOptions} platform={target.os} setOptions={setProcessOptions} />
             </>

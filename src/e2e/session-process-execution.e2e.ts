@@ -65,7 +65,7 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
     await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
     await page.getByRole("tab", { name: "Execution", exact: true }).click();
 
-    const form = page.getByRole("region", { name: "Run a process", exact: true });
+    const form = page.getByRole("region", { name: "Execute a subprocess", exact: true });
     const outputPanel = page.getByRole("region", { name: "Process execution history and output", exact: true });
     const history = page.getByRole("navigation", { name: "Process execution history", exact: true });
     const newExecution = history.getByRole("row", { name: "New Execution", exact: true });
@@ -80,11 +80,11 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
     assert.equal(await argumentsField.count(), 1);
     assert.equal(await argumentsField.evaluate((element) => element.tagName), "INPUT",
       "process arguments must use a single-line text field");
-    const run = form.getByRole("button", { name: "Run", exact: true });
-    const runBounds = await run.boundingBox();
+    const execute = form.getByRole("button", { name: "Execute", exact: true });
+    const executeBounds = await execute.boundingBox();
     const pathBounds = await form.getByRole("textbox", { name: "Executable path" }).boundingBox();
-    assert.ok(runBounds && pathBounds && runBounds.y + runBounds.height <= pathBounds.y + 2,
-      "Run must appear above the command fields");
+    assert.ok(executeBounds && pathBounds && executeBounds.y + executeBounds.height <= pathBounds.y + 2,
+      "Execute must appear above the command fields");
     assert.equal(await form.getByRole("switch", { name: /Capture output/u }).isChecked(), true,
       "the session Process form must capture output by default");
     assert.equal(await form.getByRole("switch", { name: /Run in background/u }).count(), 1,
@@ -102,7 +102,7 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
 
     await form.getByLabel("Executable path").fill("/usr/bin/printf");
     await argumentsField.fill('"unfinished');
-    await run.click();
+    await execute.click();
     assert.match(await form.getByRole("alert").innerText(), /quote/iu);
     assert.equal(await page.getByRole("alertdialog", { name: "Execute this reviewed action?" }).count(), 0,
       "malformed arguments must stop direct execution");
@@ -226,7 +226,7 @@ test("Windows session Process retains tasklist output across an in-flight sessio
     await page.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
     await page.getByRole("tab", { name: "Execution", exact: true }).click();
 
-    const form = page.getByRole("region", { name: "Run a process", exact: true });
+    const form = page.getByRole("region", { name: "Execute a subprocess", exact: true });
     const history = page.getByRole("navigation", { name: "Process execution history", exact: true });
     const outputPanel = page.getByRole("region", { name: "Process execution history and output", exact: true });
     await form.waitFor();
@@ -399,9 +399,9 @@ async function assertEmbeddedProcessViewport(
 async function runProcess(form: Locator, page: Page, path: string, args: string): Promise<void> {
   await form.getByLabel("Executable path").fill(path);
   await form.getByLabel("Arguments").fill(args);
-  await form.getByRole("button", { name: "Run", exact: true }).click();
+  await form.getByRole("button", { name: "Execute", exact: true }).click();
   assert.equal(await page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true }).count(), 0,
-    "Run must dispatch without a confirmation dialog");
+    "Execute must dispatch without a confirmation dialog");
 }
 
 async function waitForProcessResponseHold(application: ElectronApplication): Promise<void> {

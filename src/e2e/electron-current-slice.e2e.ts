@@ -3451,7 +3451,7 @@ async function verifyM4SessionExecution(
   await page.getByRole("tab", { name: "Execution", exact: true }).click();
   await page.getByRole("region", { name: "Execution operations", exact: true }).waitFor();
 
-  await page.getByRole("region", { name: "Run a process", exact: true }).waitFor();
+  await page.getByRole("region", { name: "Execute a subprocess", exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Open: Background children", exact: true }).count(), 0);
 
   await page.getByRole("radio", { name: "Remote", exact: true }).click();
@@ -3530,7 +3530,7 @@ async function verifyM4SessionExecution(
   // A reviewed plan is quarantined as soon as the main-owned exact target
   // changes, without dispatching the stale operation.
   await page.getByRole("radio", { name: "Process", exact: true }).click();
-  const staleConfiguration = page.getByRole("region", { name: "Run a process", exact: true });
+  const staleConfiguration = page.getByRole("region", { name: "Execute a subprocess", exact: true });
   await staleConfiguration.getByLabel("Executable path").fill("/usr/bin/printf");
   await staleConfiguration.getByLabel("Arguments").fill("stale-m4-plan");
   await staleConfiguration.getByRole("button", { name: "Review command", exact: true }).click();
