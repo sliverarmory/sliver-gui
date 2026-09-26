@@ -525,7 +525,9 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                     <Autocomplete.ClearButton />
                     <Autocomplete.Indicator />
                   </Autocomplete.Trigger>
-                  <Description>{catalog.commands.length} BOFs for {target.os}/{target.arch}. Type to search or browse.</Description>
+                  <Description>{command
+                    ? command.description || command.packageName
+                    : `${catalog.commands.length} BOFs for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
                   <Autocomplete.Popover>
                     <Autocomplete.Filter filter={contains}>
                       <SearchField autoFocus aria-label="Search BOFs" variant="secondary">
@@ -557,10 +559,6 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                 {catalog.warnings.map((warning) => <p className="text-xs text-warning" key={warning}>{warning}</p>)}
                 {command ? (
                   <>
-                    <div className="rounded-xl bg-surface-secondary p-3">
-                      <p className="font-mono text-sm font-medium text-foreground">{command.commandName}</p>
-                      <p className="mt-1 text-xs text-muted">{command.description || command.packageName}</p>
-                    </div>
                     {!command.available ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">{command.reason ?? "This BOF is unavailable for the selected target."}</p> : null}
                     {command.arguments.length ? (
                       <section aria-label="BOF arguments" className="space-y-4">

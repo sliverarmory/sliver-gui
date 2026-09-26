@@ -219,7 +219,6 @@ export function DotNetExecutionView({
   const source: AssemblySource | undefined = file
     ? { kind: "file", token: file.token }
     : assembly ? { kind: "armory", id: assembly.id } : undefined;
-  const selectedName = file?.fileName ?? assembly?.commandName;
   const isDll = file?.isDll ?? assembly?.isDll ?? false;
   const canExecute = !!source && !!capability?.available && (file !== undefined || !!assembly?.available) && !isBusy;
   const joinedArgumentBytes = parsedArgumentBytes(argumentsText);
@@ -428,14 +427,17 @@ export function DotNetExecutionView({
             <Label>Armory assembly</Label>
             <Autocomplete.Trigger>
               <Autocomplete.Value>
-                {({ defaultChildren, isPlaceholder }) => isPlaceholder || !assembly
-                  ? defaultChildren
-                  : `${assembly.commandName} · ${assembly.packageName}`}
+                {({ defaultChildren }) => file?.fileName ??
+                  (assembly ? `${assembly.commandName} · ${assembly.packageName}` : defaultChildren)}
               </Autocomplete.Value>
               <Autocomplete.ClearButton />
               <Autocomplete.Indicator />
             </Autocomplete.Trigger>
-            <Description>{catalog?.assemblies.length ?? 0} assemblies for {target.os}/{target.arch}. Type to search or browse.</Description>
+            <Description>{file
+              ? `Local file · ${formatBytes(file.size)}`
+              : assembly
+                ? assembly.description || assembly.packageName
+                : `${catalog?.assemblies.length ?? 0} assemblies for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
             <Autocomplete.Popover>
               <Autocomplete.Filter filter={contains}>
                 <SearchField autoFocus aria-label="Search assemblies" variant="secondary">
@@ -460,19 +462,12 @@ export function DotNetExecutionView({
             </Autocomplete.Popover>
           </Autocomplete>
 
-          {selectedName ? (
-            <div className="rounded-xl bg-surface-secondary p-3">
-              <p className="break-all font-mono text-sm font-medium text-foreground">{selectedName}</p>
-              <p className="mt-1 text-xs text-muted">{file ? `Local file · ${formatBytes(file.size)}` : assembly?.description || assembly?.packageName}</p>
-              {assembly && !assembly.available ? <p className="mt-2 text-xs text-warning" role="alert">{assembly.reason ?? "This assembly is unavailable for the selected target."}</p> : null}
-            </div>
-          ) : null}
+          {assembly && !assembly.available ? <p className="text-xs text-warning" role="alert">{assembly.reason ?? "This assembly is unavailable for the selected target."}</p> : null}
           {catalog && catalog.assemblies.length === 0 && !file ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No Armory assemblies are installed for this target. Open a local assembly file or install one from Armory.</p> : null}
 
           <TextField fullWidth isDisabled={isBusy} variant="secondary" value={argumentsText} onChange={setArgumentsText}>
             <Label>Assembly arguments</Label>
             <Input placeholder="--flag 'value with spaces'" />
-            <Description>Quotes group arguments in the request. Sliver's default child-process loader joins them with spaces, so quoted boundaries may not survive on the target.</Description>
           </TextField>
           {!inProcess && joinedArgumentBytes !== undefined && joinedArgumentBytes > 256 ? (
             <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">

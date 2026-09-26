@@ -65,6 +65,9 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
     await workspace.getByText("History · 0", { exact: true }).waitFor();
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-dotnet-new-execution.png") });
     await selectInstalledAssembly(page, form, "args-demo");
+    await form.getByText("Deterministic .NET assembly arguments fixture", { exact: true }).waitFor();
+    assert.equal(await form.getByText("1 assemblies for windows/amd64. Type to search or browse.", { exact: true }).count(), 0);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-dotnet-selected-assembly.png") });
     await form.getByRole("textbox", { name: "Assembly arguments", exact: true })
       .fill('alpha "two words" --literal=\'x y\'');
     await executeAssembly(page, form);

@@ -139,7 +139,11 @@ describe(".NET execution view", () => {
     render(<DotNetExecutionView capability={capability} isExecuting={false} isPreparing={false} isRefreshing={false} target={target} targetRef={targetRef} onPrepare={onPrepare} />);
     await waitFor(() => expect(api.listDotNetAssemblies).toHaveBeenCalledOnce());
 
+    const form = screen.getByRole("region", { name: "Execute a .NET assembly" });
+    expect(form).toHaveTextContent("2 assemblies for windows/amd64. Type to search or browse.");
     await selectAssembly(user, "seatbelt");
+    expect(form).toHaveTextContent("Host survey");
+    expect(form).not.toHaveTextContent("2 assemblies for windows/amd64. Type to search or browse.");
     await user.type(screen.getByRole("textbox", { name: "Assembly arguments" }), "-group 'all users' --verbose");
     await user.click(screen.getByRole("button", { name: "Execute" }));
 
@@ -162,6 +166,9 @@ describe(".NET execution view", () => {
     await user.click(screen.getByRole("button", { name: "Open assembly file" }));
     await waitFor(() => expect(api.chooseDotNetAssemblyFile).toHaveBeenCalledOnce());
     expect(screen.getByText("Tool.dll")).toBeInTheDocument();
+    const form = screen.getByRole("region", { name: "Execute a .NET assembly" });
+    expect(form).toHaveTextContent("Local file · 256 B");
+    expect(form).not.toHaveTextContent("2 assemblies for windows/amd64. Type to search or browse.");
     await user.type(screen.getByRole("textbox", { name: "Assembly arguments" }), "-path \"C:\\Program Files\\Tool\"");
     await user.click(screen.getByRole("button", { name: "Execute" }));
     expect(onPrepare).not.toHaveBeenCalled();

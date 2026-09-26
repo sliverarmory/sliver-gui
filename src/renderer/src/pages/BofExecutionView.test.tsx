@@ -179,6 +179,20 @@ async function historyContextMenu(view: ApplicationContextMenuTestRender, comman
 }
 
 describe("BOF execution view", () => {
+  it("shows the selected BOF description beneath the autocomplete without a separate summary card", async () => {
+    const user = userEvent.setup();
+    installApi();
+    renderView();
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    expect(within(composer).getByText("3 BOFs for windows/amd64. Type to search or browse.")).toBeInTheDocument();
+
+    await chooseBof(user, composer, "directory", /sa-dir/iu);
+
+    expect(within(composer).getByText("List directory contents")).toBeInTheDocument();
+    expect(within(composer).queryByText("3 BOFs for windows/amd64. Type to search or browse.")).not.toBeInTheDocument();
+    expect(composer.querySelector(".bg-surface-secondary")).not.toBeInTheDocument();
+  });
+
   it("preserves the open autocomplete search through a routine target domain revision update", async () => {
     const user = userEvent.setup();
     const { api, setTarget } = installApi();
