@@ -5,7 +5,6 @@ import { secureWebPreferences } from "./security.js";
 const TRANSPARENT_WINDOW_COLOR = "#00000000";
 export const CLOUD_DEPLOYMENT_SESSION_PARTITION = "sliver-cloud-deployment";
 export const NETWORK_SESSION_PARTITION = "sliver-network";
-export const SCRIPT_TASK_MANAGER_SESSION_PARTITION = "sliver-script-task-manager";
 export const TEXT_EDITOR_SESSION_PARTITION = "sliver-text-editor";
 export const DARK_NATIVE_WINDOW_COLOR = "#09090b";
 export const LIGHT_NATIVE_WINDOW_COLOR = "#fafafa";
@@ -145,27 +144,6 @@ export function networkWindowOptions(
       ...secureWebPreferences(preload),
       partition: NETWORK_SESSION_PARTITION,
     },
-  };
-}
-
-/** Console-only companion; the source workspace retains every script runtime. */
-export function scriptTaskManagerWindowOptions(
-  preload: string,
-  platform: NodeJS.Platform = process.platform,
-  icon?: string,
-  dark = true,
-): BrowserWindowConstructorOptions {
-  return {
-    width: 1120,
-    height: 740,
-    minWidth: 680,
-    minHeight: 460,
-    show: false,
-    title: "Script Task Manager",
-    backgroundColor: nativeWindowBackgroundColor(dark),
-    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
-    ...(platform !== "darwin" && icon ? { icon } : {}),
-    webPreferences: { ...secureWebPreferences(preload), partition: SCRIPT_TASK_MANAGER_SESSION_PARTITION },
   };
 }
 

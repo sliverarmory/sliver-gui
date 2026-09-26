@@ -1,20 +1,3 @@
-declare module "monaco-editor/languages/definitions/javascript/javascript" {
-  import type { languages } from "monaco-editor/editor/editor.api";
-  export const conf: languages.LanguageConfiguration;
-  export const language: languages.IMonarchLanguage;
-}
-
-declare module "monaco-editor/languages/features/typescript/ts.worker" {
-  import type { TypeScriptWorker } from "monaco-editor/languages/features/typescript/register";
-  export function initialize(callback: (context: unknown) => TypeScriptWorker): void;
-  export function create(context: unknown, data: unknown): TypeScriptWorker;
-}
-
-declare module "monaco-editor/languages/features/typescript/tsWorker" {
-  import type { TypeScriptWorker } from "monaco-editor/languages/features/typescript/register";
-  export function create(context: unknown, data: unknown): TypeScriptWorker;
-}
-
 declare module "monaco-editor/editor/browser/coreCommands";
 declare module "monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching";
 declare module "monaco-editor/editor/contrib/clipboard/browser/clipboard";

@@ -29,16 +29,13 @@ available in `LICENSES/MIT.txt`, the retained package license, and the generated
 `dist/THIRD_PARTY_LICENSES.txt` shipped with native packages. Source:
 https://github.com/coder/ghostty-web
 
-The Script Editor bundles Monaco Editor 0.56.0, copyright Microsoft Corporation,
-and quickjs-emscripten 0.32.0 with its RELEASE_SYNC QuickJS WebAssembly runtime.
-These components are distributed under the MIT License. Their exact package
-integrities and the interpreter runtime digest are retained in
-`protocol/script-editor-provenance.json`, with license texts in the generated
-dependency inventory. Monaco's bundled stylesheet/markup insertion seams are
+The Text Editor bundles Monaco Editor 0.56.0, copyright Microsoft Corporation,
+distributed under the MIT License. Its exact package integrity is retained in
+`package-lock.json`, with license texts in the generated dependency inventory.
+Monaco's bundled stylesheet/markup insertion seams are
 adapted at build time for the application's strict CSP; those local adaptations
-are part of the corresponding Sliver GUI source. Upstream sources:
-https://github.com/microsoft/monaco-editor and
-https://github.com/justjake/quickjs-emscripten.
+are part of the corresponding Sliver GUI source. Upstream source:
+https://github.com/microsoft/monaco-editor.
 
 The application bundles `node-pty` version 1.1.0 to run the native Sliver
 client inside a main-process-owned pseudoterminal. Node-pty is copyright

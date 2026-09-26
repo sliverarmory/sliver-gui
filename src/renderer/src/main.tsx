@@ -13,7 +13,6 @@ import { ConsoleWindowApp } from "./ConsoleWindowApp";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
 import { NetworkWindowApp } from "./NetworkWindowApp";
-import { ScriptTaskManagerWindowApp } from "./ScriptTaskManagerWindowApp";
 import { TextEditorWindowApp } from "./TextEditorWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
@@ -45,11 +44,6 @@ function ApplicationRoot(): React.JSX.Element {
     return window.textEditor ? <ApplicationSettingsProvider api={window.textEditor}>
       <TextEditorWindowApp />
     </ApplicationSettingsProvider> : <TextEditorWindowApp />;
-  }
-  if (surface === "script-task-manager") {
-    return window.scriptTasks ? <ApplicationSettingsProvider api={window.scriptTasks}>
-      <ScriptTaskManagerWindowApp />
-    </ApplicationSettingsProvider> : <ScriptTaskManagerWindowApp />;
   }
   if (surface === "armory") {
     return window.armory ? (

@@ -42,9 +42,6 @@ const requiredBuilderPaths = [
   "node_modules/ghostty-web/LICENSE",
   "node_modules/ghostty-web/package.json",
   "node_modules/ghostty-web/ghostty-vt.wasm",
-  "node_modules/@jitl/quickjs-wasmfile-release-sync/LICENSE",
-  "node_modules/@jitl/quickjs-wasmfile-release-sync/package.json",
-  "node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm",
   "node_modules/node-pty/LICENSE",
   "node_modules/node-pty/package.json",
   "node_modules/node-pty/lib/**/*.js",
@@ -60,7 +57,6 @@ const requiredBuilderPaths = [
   "protocol/sliver-baseline.json",
   "protocol/sliver-script-provenance.json",
   "protocol/ghostty-web-provenance.json",
-  "protocol/script-editor-provenance.json",
   "protocol/terminal-fonts-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
@@ -78,10 +74,6 @@ const requiredAzureRuntimePackages = Object.freeze([
   "@azure/msal-node",
 ]);
 const requiredPackagedFiles = [
-  "node_modules/@jitl/quickjs-wasmfile-release-sync/LICENSE",
-  "node_modules/@jitl/quickjs-wasmfile-release-sync/package.json",
-  "node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm",
-  "protocol/script-editor-provenance.json",
   "LICENSE",
   "LICENSES/Apache-2.0.txt",
   "LICENSES/GPL-3.0-or-later.txt",
@@ -107,7 +99,6 @@ const requiredPackagedFiles = [
   "dist/preload/network.cjs",
   "dist/preload/armory.cjs",
   "dist/preload/ssh.cjs",
-  "dist/preload/script-task-manager.cjs",
   "dist/preload/text-editor.cjs",
   "dist/renderer/index.html",
   "node_modules/sliver-script/LICENSE",
@@ -306,8 +297,6 @@ for (const requiredText of [
   "Copyright 2025 NextUI Inc.",
   `react@${exactDirectDependencyVersion("react")}`,
   `ghostty-web@${exactDirectDependencyVersion("ghostty-web")}`,
-  `quickjs-emscripten@${exactDirectDependencyVersion("quickjs-emscripten")}`,
-  "@jitl/quickjs-wasmfile-release-sync@0.32.0",
   `monaco-editor@${exactDirectDependencyVersion("monaco-editor")}`,
   `node-pty@${exactDirectDependencyVersion("node-pty")}`,
   `electron-updater@${exactDirectDependencyVersion("electron-updater")}`,
@@ -827,17 +816,8 @@ function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) 
   if (terminalRuntime.byteLength !== 423_045 || terminalRuntimeSha256 !== "d6f0326f1874ad2ce9f289e3a4a0c5f3507d4cb38d8747e4b287def470a0c60a") {
     throw new Error(`Packaged Ghostty runtime failed its integrity check: ${archivePath}`);
   }
-  const scriptRuntimePath = "node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm";
-  const scriptRuntimeEntry = entries.find(({ normalizedPath }) => normalizedPath === scriptRuntimePath);
-  if (!scriptRuntimeEntry) throw new Error("Packaged QuickJS runtime is missing");
-  const scriptRuntime = extractFile(archivePath, scriptRuntimeEntry.lookupPath, false);
-  if (scriptRuntime.byteLength !== 503134 || sha256(scriptRuntime) !== "105c3bed22d457e43e3d1c3c1c6959fda62a8fe06f0fc8a985303c3a2be72232") {
-    throw new Error("Packaged QuickJS runtime failed its integrity check");
-  }
-  for (const workerName of ["script.worker-", "editor.worker-", "script-language.worker-"]) {
-    if (!normalizedEntries.some((entry) => entry.startsWith("dist/renderer/assets/") && entry.includes(workerName) && entry.endsWith(".js"))) {
-      throw new Error(`Packaged Script Editor worker is missing: ${workerName}`);
-    }
+  if (!normalizedEntries.some((entry) => entry.startsWith("dist/renderer/assets/editor.worker-") && entry.endsWith(".js"))) {
+    throw new Error("Packaged Monaco editor worker is missing");
   }
   const nativePtyPrefixes = ["node_modules/node-pty/build/Release/"];
   for (const nativePrefix of nativePtyPrefixes) {

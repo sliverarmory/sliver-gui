@@ -17,7 +17,6 @@ import {
 } from "../shared/application-context-menu-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
 import { LOOT_DROPPED_ADD_IPC_CHANNEL } from "../shared/operator-data-contracts.js";
-import { SCRIPT_TASK_IPC, type ScriptTaskManagerAPI } from "../shared/script-task-manager-contracts.js";
 import type { ApplicationZoomAPI } from "../shared/application-zoom-contracts.js";
 
 type InvokeArgumentsByMethod = {
@@ -25,16 +24,6 @@ type InvokeArgumentsByMethod = {
 };
 
 const invokeArguments = {
-  listScripts: [],
-  readScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2" }],
-  createScript: [{ name: "Test", source: "console.log(1)" }],
-  saveScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2", source: "console.log(1)", expectedRevision: "a".repeat(64) }],
-  renameScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2", name: "Renamed", expectedRevision: "a".repeat(64) }],
-  deleteScript: [{ id: "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2", expectedRevision: "a".repeat(64) }],
-  exportScript: [{ name: "Test", source: "console.log(1)" }],
-  importScript: [],
-  getScriptRuntime: [],
-  setScriptEditorDirty: [true],
   chooseConfig: [],
   importConfig: [{ displayName: "local test" }],
   listSavedConfigs: [],
@@ -242,34 +231,6 @@ vi.stubGlobal("document", {
 await import("./index.js");
 
 describe("sandboxed preload bridge", () => {
-  it("buffers native host/edit requests until subscribers mount and consumes only the latest valid selection", async () => {
-    const api = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => name === "scriptTasks")![1] as unknown as ScriptTaskManagerAPI;
-    const hostEvent = electronMocks.on.mock.calls.find(([channel]) => channel === SCRIPT_TASK_IPC.hostRequested)![1] as (...args: unknown[]) => void;
-    const editEvent = electronMocks.on.mock.calls.find(([channel]) => channel === SCRIPT_TASK_IPC.editRequested)![1] as (...args: unknown[]) => void;
-    const id = "123e4567-e89b-42d3-a456-426614174000";
-    hostEvent({}, "discard payload"); hostEvent({}); hostEvent({});
-    editEvent({}, "123e4567-e89b-42d3-a456-426614174001"); editEvent({}, id);
-    editEvent({}, "../source.js"); editEvent({}, id, "extra");
-    const host = vi.fn(); const edit = vi.fn();
-    const stopHost = api.onHostRequested(host); const stopEdit = api.onEditRequested(edit);
-    await Promise.resolve();
-    expect(host).toHaveBeenCalledExactlyOnceWith(); expect(edit).toHaveBeenCalledExactlyOnceWith(id);
-    stopHost(); stopEdit();
-    const next = vi.fn(); const stopNext = api.onEditRequested(next);
-    await Promise.resolve(); expect(next).not.toHaveBeenCalled(); stopNext();
-  });
-  it("exposes script invalidation without leaking the Electron event and unsubscribes cleanly", () => {
-    const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
-    const listener = vi.fn();
-    const unsubscribe = api.onScriptsChanged(listener);
-    const registration = electronMocks.on.mock.calls.findLast(([channel]) => channel === IPC.scriptsChanged)!;
-    const handler = registration[1] as (...args: unknown[]) => void;
-    handler({ privateElectronEvent: true }, "ignored payload");
-    expect(listener).toHaveBeenCalledExactlyOnceWith();
-    unsubscribe();
-    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.scriptsChanged, handler);
-  });
-
   it("accepts only payload-free saved-config invalidations and unsubscribes cleanly", () => {
     const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
     const listener = vi.fn();
@@ -285,7 +246,9 @@ describe("sandboxed preload bridge", () => {
   });
 
   it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
-    expect(electronMocks.exposeInMainWorld).toHaveBeenCalledTimes(4);
+    expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toEqual([
+      "sliver", "applicationZoom", "applicationContextMenu",
+    ]);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];
     expect(call).toBeDefined();
     if (!call) throw new Error("Expected the preload API to be exposed");
@@ -577,7 +540,6 @@ describe("sandboxed preload bridge", () => {
   });
 
   it.each([
-    ["onScriptEditorRequested", IPC.scriptEditorRequested],
     ["onCommandPaletteRequested", IPC.commandPaletteRequested],
     ["onConsoleNewTabRequested", IPC.consoleNewTabRequested],
     ["onConsoleCloseTabRequested", IPC.consoleCloseTabRequested],

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
-import { escapeScriptOutput } from "../../../shared/script-runtime-protocol";
+import { escapeTerminalOutput } from "../../../shared/terminal-output";
 import type { TerminalRuntimeAsset } from "../../../shared/stream-contracts";
 import { useApplicationSettings } from "./ApplicationSettingsProvider";
 import { applicationTerminalAppearance } from "./application-terminal-appearance";
@@ -45,7 +45,7 @@ export function ExecutionOutputTerminal({
   }), [settings]);
   const transcript = useMemo(() => {
     const prefix = bytes.subarray(0, ACCESSIBLE_TRANSCRIPT_BYTES);
-    const text = escapeScriptOutput(new TextDecoder().decode(prefix));
+    const text = escapeTerminalOutput(new TextDecoder().decode(prefix));
     return bytes.byteLength > ACCESSIBLE_TRANSCRIPT_BYTES
       ? `${text}\n[Accessible transcript limited to the first 64 KiB.]`
       : text;

@@ -20,7 +20,6 @@ import "monaco-editor/languages/definitions/register.all";
 import "monaco-editor/languages/features/typescript/register";
 
 import { registerJsonLanguage } from "./json-language";
-import { attachScriptDiagnostics, registerScriptLanguage } from "./script-language";
 
 // ?worker emits local, packaged worker assets. No CDN, blob URL, source string,
 // or user-controlled worker URL is used by the editor or language services.
@@ -32,7 +31,6 @@ globalThis.MonacoEnvironment = {
   ),
 };
 
-registerScriptLanguage(monaco);
 registerJsonLanguage(monaco);
 
-export { monaco, attachScriptDiagnostics };
+export { monaco };

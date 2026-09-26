@@ -37,10 +37,6 @@ import {
 } from "../shared/stream-contracts.js";
 import type { TargetRef } from "../shared/target-contracts.js";
 import {
-  SCRIPT_TASK_IPC, parseScriptTaskCommand, parseScriptTaskSnapshot,
-  type ScriptTaskManagerAPI,
-} from "../shared/script-task-manager-contracts.js";
-import {
   CONSOLE_PROTOCOL_VERSION,
   parseConsoleAttachRequest,
   parseConsoleTabShortcutIndex,
@@ -185,12 +181,6 @@ const api: SliverDesktopAPI = {
     const request = parseSessionDroppedUploadIpcRequest({ sourcePath, input: parsedInput });
     return ipcRenderer.invoke(SESSION_DROPPED_UPLOAD_IPC_CHANNEL, request);
   },
-  onScriptsChanged: (listener) => {
-    const handler = (): void => listener();
-    ipcRenderer.on(IPC.scriptsChanged, handler);
-    return () => ipcRenderer.removeListener(IPC.scriptsChanged, handler);
-  },
-  onScriptEditorRequested: (listener) => onFixedEvent(IPC.scriptEditorRequested, listener),
   onSavedConfigsChanged: (listener) => onFixedEvent(IPC.savedConfigsChanged, listener),
   openStream,
   openConsoleStream,
@@ -465,75 +455,3 @@ function onFixedEvent(channel: string, listener: () => void): () => void {
   ipcRenderer.on(channel, handler);
   return () => ipcRenderer.removeListener(channel, handler);
 }
-
-// Native menu requests may arrive before React has mounted the script host.
-// Keep only the latest edit and one payload-free host request in this document.
-const scriptHostListeners = new Set<() => void>();
-const scriptEditListeners = new Set<(id: string) => void>();
-let scriptHostPending = false;
-let scriptEditPending: string | undefined;
-ipcRenderer.on(SCRIPT_TASK_IPC.hostRequested, (_event, ...args: unknown[]) => {
-  if (args.length !== 0) return;
-  scriptHostPending = scriptHostListeners.size === 0;
-  for (const listener of scriptHostListeners) listener();
-});
-ipcRenderer.on(SCRIPT_TASK_IPC.editRequested, (_event, ...args: unknown[]) => {
-  if (args.length !== 1 || typeof args[0] !== "string" || !UUID_V4_PATTERN.test(args[0])) return;
-  scriptEditPending = scriptEditListeners.size === 0 ? args[0] : undefined;
-  for (const listener of scriptEditListeners) listener(args[0]);
-});
-const scriptTaskApi: ScriptTaskManagerAPI = {
-  open: () => ipcRenderer.invoke(SCRIPT_TASK_IPC.open),
-  getState: () => ipcRenderer.invoke(SCRIPT_TASK_IPC.getState),
-  publish: (snapshot) => ipcRenderer.invoke(SCRIPT_TASK_IPC.publish, parseScriptTaskSnapshot(snapshot)),
-  command: (command) => ipcRenderer.invoke(SCRIPT_TASK_IPC.command, parseScriptTaskCommand(command)),
-  ownerReady: () => ipcRenderer.invoke(SCRIPT_TASK_IPC.ownerReady),
-  onChanged: (listener) => {
-    if (typeof listener !== "function") throw new TypeError("Script task listener must be a function");
-    const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]): void => {
-      if (args.length !== 1) return;
-      try { listener(parseScriptTaskSnapshot(args[0])); } catch { /* Drop malformed data. */ }
-    };
-    ipcRenderer.on(SCRIPT_TASK_IPC.changed, handler);
-    return () => ipcRenderer.removeListener(SCRIPT_TASK_IPC.changed, handler);
-  },
-  onCommand: (listener) => {
-    if (typeof listener !== "function") throw new TypeError("Script command listener must be a function");
-    const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]): void => {
-      if (args.length !== 1) return;
-      try { listener(parseScriptTaskCommand(args[0])); } catch { /* Drop malformed data. */ }
-    };
-    ipcRenderer.on(SCRIPT_TASK_IPC.commandRequested, handler);
-    return () => ipcRenderer.removeListener(SCRIPT_TASK_IPC.commandRequested, handler);
-  },
-  onHostRequested: (listener) => {
-    if (typeof listener !== "function") throw new TypeError("Script host listener must be a function");
-    scriptHostListeners.add(listener);
-    queueMicrotask(() => {
-      if (scriptHostPending && scriptHostListeners.has(listener)) { scriptHostPending = false; listener(); }
-    });
-    return () => { scriptHostListeners.delete(listener); };
-  },
-  onEditRequested: (listener) => {
-    if (typeof listener !== "function") throw new TypeError("Script edit listener must be a function");
-    scriptEditListeners.add(listener);
-    queueMicrotask(() => {
-      if (scriptEditPending && scriptEditListeners.has(listener)) {
-        const id = scriptEditPending; scriptEditPending = undefined; listener(id);
-      }
-    });
-    return () => { scriptEditListeners.delete(listener); };
-  },
-  getTerminalRuntime: () => ipcRenderer.invoke(SCRIPT_TASK_IPC.getTerminalRuntime),
-  getApplicationSettings: () => ipcRenderer.invoke(SCRIPT_TASK_IPC.getApplicationSettings),
-  onApplicationSettingsChanged: (listener) => {
-    if (typeof listener !== "function") throw new TypeError("Script settings listener must be a function");
-    const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]): void => {
-      if (args.length !== 1) return;
-      try { listener(parseApplicationSettingsState(args[0])); } catch { /* Drop malformed settings. */ }
-    };
-    ipcRenderer.on(IPC.applicationSettingsChanged, handler);
-    return () => ipcRenderer.removeListener(IPC.applicationSettingsChanged, handler);
-  },
-};
-contextBridge.exposeInMainWorld("scriptTasks", Object.freeze(scriptTaskApi));

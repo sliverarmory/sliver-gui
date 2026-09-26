@@ -5,7 +5,6 @@ import type { ApplicationZoomAPI } from "../../shared/application-zoom-contracts
 import type { SliverDesktopAPI } from "../../shared/contracts";
 import type { SshWindowAPI } from "../../shared/ssh-contracts";
 import type { NetworkForwardingAPI } from "../../shared/network-forwarding-contracts";
-import type { ScriptTaskManagerAPI } from "../../shared/script-task-manager-contracts";
 import type { TextEditorAPI } from "../../shared/text-editor-contracts";
 
 declare global {
@@ -14,7 +13,6 @@ declare global {
     applicationZoom: ApplicationZoomAPI;
     cloudDeployment?: CloudDeploymentAPI;
     network?: NetworkForwardingAPI;
-    scriptTasks?: ScriptTaskManagerAPI;
     textEditor?: TextEditorAPI;
     armory?: ArmoryAPI;
     sliver: SliverDesktopAPI;

@@ -10,7 +10,6 @@ import {
   type ResolvedApplicationIcon,
 } from "../../shared/application-settings-contracts";
 import { CONSOLE_WINDOW_OPEN_REQUEST_ERROR } from "../../shared/console-contracts";
-import type { ScriptTaskManagerAPI } from "../../shared/script-task-manager-contracts";
 import type {
   OperationResult,
   SavedConfigSummary,
@@ -50,7 +49,6 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
-  Reflect.deleteProperty(window, "scriptTasks");
 });
 
 function deferred<T>() {
@@ -87,20 +85,8 @@ function installSliverAPI(
 ): SliverDesktopAPI {
   const failedOperation = async () => ({ ok: false as const, error: "Not implemented by this test" });
   const api: SliverDesktopAPI = {
-    listScripts: vi.fn(async () => ({ ok: true as const, value: { scripts: [], warnings: [] } })),
-    readScript: vi.fn(failedOperation),
-    createScript: vi.fn(failedOperation),
-    exportScript: vi.fn(failedOperation),
-    importScript: vi.fn(failedOperation),
-    saveScript: vi.fn(failedOperation),
-    renameScript: vi.fn(failedOperation),
-    deleteScript: vi.fn(failedOperation),
-    getScriptRuntime: vi.fn(failedOperation),
-    setScriptEditorDirty: vi.fn(async () => ({ ok: true as const })),
     addDroppedLoot: vi.fn(failedOperation),
     uploadDroppedSessionFile: vi.fn(failedOperation),
-    onScriptsChanged: vi.fn(() => vi.fn()),
-    onScriptEditorRequested: vi.fn(() => vi.fn()),
     onSavedConfigsChanged: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),
@@ -247,87 +233,6 @@ function installSliverAPI(
 }
 
 describe("App startup", () => {
-  it("mounts the task owner in the background and reveals native Edit requests", async () => {
-    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
-    let host!: () => void;
-    let edit!: (id: string) => void;
-    const unsubscribeHost = vi.fn();
-    const unsubscribeEdit = vi.fn();
-    const tasks = {
-      onHostRequested: vi.fn((listener: typeof host) => { host = listener; return unsubscribeHost; }),
-      onEditRequested: vi.fn((listener: typeof edit) => { edit = listener; return unsubscribeEdit; }),
-      onCommand: vi.fn(() => vi.fn()),
-      ownerReady: vi.fn(async () => ({ ok: true as const })),
-      publish: vi.fn(async () => ({ ok: true as const })),
-    };
-    Object.defineProperty(window, "scriptTasks", { configurable: true, value: tasks as unknown as ScriptTaskManagerAPI });
-    const view = render(<App />);
-    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
-    act(() => host());
-    await waitFor(() => expect(api.listScripts).toHaveBeenCalledOnce());
-    expect(screen.queryByRole("heading", { name: "Script Editor" })).not.toBeInTheDocument();
-    await waitFor(() => expect(tasks.ownerReady).toHaveBeenCalledOnce());
-    act(() => edit("09cf16dd-3f93-48c1-8abc-03c07a530a72"));
-    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
-    expect(api.listScripts).toHaveBeenCalledOnce();
-    await userEvent.click(screen.getByRole("row", { name: "Overview" }));
-    await userEvent.click(screen.getByRole("button", { name: "Open command palette" }));
-    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
-    act(() => edit("09cf16dd-3f93-48c1-8abc-03c07a530a72"));
-    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
-    view.unmount();
-    expect(unsubscribeHost).toHaveBeenCalledOnce();
-    expect(unsubscribeEdit).toHaveBeenCalledOnce();
-  });
-  it("reveals Script Editor on Keep Editing and dismisses blocking overlays on repeated requests", async () => {
-    const user = userEvent.setup();
-    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
-    let revealScriptEditor!: () => void;
-    const unsubscribe = vi.fn();
-    vi.mocked(api.onScriptEditorRequested).mockImplementation((listener) => {
-      revealScriptEditor = listener;
-      return unsubscribe;
-    });
-    const view = render(<App />);
-    expect(await screen.findByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
-    act(() => revealScriptEditor());
-    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
-    expect(screen.getByRole("row", { name: "Script Editor" })).toHaveAttribute("data-current", "true");
-
-    await user.click(screen.getByRole("row", { name: "Overview" }));
-    await user.click(screen.getByRole("button", { name: "Open command palette" }));
-    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
-    act(() => revealScriptEditor());
-    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument());
-    expect(api.listScripts).toHaveBeenCalledOnce();
-    view.unmount();
-    expect(unsubscribe).toHaveBeenCalledOnce();
-  });
-
-  it("opens Script Editor offline from the palette and preserves its page across back and forward", async () => {
-    const user = userEvent.setup();
-    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
-    render(<App />);
-    await user.click(await screen.findByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByRole("button", { name: "Open command palette" }));
-    const scripts = await screen.findByRole("menuitem", { name: /^Script Editor/u });
-    expect(scripts).not.toHaveAttribute("aria-disabled", "true");
-    await user.click(scripts);
-    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
-    expect(screen.getByRole("row", { name: "Script Editor" })).toHaveAttribute("data-current", "true");
-    expect(api.listScripts).toHaveBeenCalledOnce();
-    const navigation = within(screen.getByRole("navigation", { name: "Window navigation" }));
-    await user.click(navigation.getByRole("button", { name: "Go back" }));
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Script Editor" })).not.toBeInTheDocument();
-    await user.click(navigation.getByRole("button", { name: "Go forward" }));
-    expect(await screen.findByRole("heading", { name: "Script Editor" })).toBeInTheDocument();
-    expect(api.listScripts).toHaveBeenCalledOnce();
-  });
-
   it("shares history between keyboard shortcuts and palette commands with matching boundaries", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
@@ -1386,16 +1291,11 @@ describe("Sidebar navigation", () => {
       "Operational navigation",
       "Interact navigation",
       "Data navigation",
-      "Automations navigation",
     ]);
     const overview = within(menus[0]!).getByRole("row", { name: "Overview" });
     expect(overview).not.toHaveAttribute("aria-disabled", "true");
     await user.click(overview);
     expect(onViewChange).toHaveBeenCalledExactlyOnceWith("overview");
-    const scripts = within(menus[4]!).getByRole("row", { name: "Script Editor" });
-    expect(scripts).not.toHaveAttribute("aria-disabled", "true");
-    await user.click(scripts);
-    expect(onViewChange).toHaveBeenLastCalledWith("script-editor");
   });
 
   it("opens the loot and credential stores from the shared Data navigation", async () => {
@@ -2007,8 +1907,6 @@ describe("Sidebar navigation", () => {
       const infrastructure = await screen.findByRole("treegrid", { name: "Operational navigation" });
       const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
       const data = await screen.findByRole("treegrid", { name: "Data navigation" });
-      const automations = await screen.findByRole("treegrid", { name: "Automations navigation" });
-      expect(within(automations).getByRole("row", { name: "Script Editor" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();

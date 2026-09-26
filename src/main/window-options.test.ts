@@ -7,8 +7,6 @@ import {
   armoryWindowOptions,
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
   NETWORK_SESSION_PARTITION,
-  SCRIPT_TASK_MANAGER_SESSION_PARTITION,
-  scriptTaskManagerWindowOptions,
   cloudDeploymentWindowOptions,
   consoleWindowOptions,
   interactionWindowOptions,
@@ -41,16 +39,6 @@ describe("standalone text editor window", () => {
 });
 
 describe("main window transparency", () => {
-  it.each(["darwin", "linux", "win32"] as const)("isolates the console-only Script Task Manager on %s", (platform) => {
-    const options = scriptTaskManagerWindowOptions("/script-task-manager.cjs", platform);
-    expect(options).toMatchObject({
-      title: "Script Task Manager", show: false,
-      webPreferences: { preload: "/script-task-manager.cjs", partition: SCRIPT_TASK_MANAGER_SESSION_PARTITION,
-        nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
-        contextIsolation: true, sandbox: true, webSecurity: true, webviewTag: false },
-    });
-    expect(options).not.toHaveProperty("parent");
-  });
   it.each(["darwin", "linux", "win32"] as const)(
     "uses a transparent native surface on %s without weakening renderer isolation",
     (platform) => {

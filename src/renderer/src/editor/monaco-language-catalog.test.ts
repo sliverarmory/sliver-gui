@@ -18,11 +18,10 @@ const definitions = [
   { id: "pascal", extensions: [".pp"], aliases: ["Pascal"] },
   { id: "ruby", extensions: [".rb", ".pp"], filenames: ["Gemfile"], aliases: ["Ruby"] },
   { id: "broken", aliases: ["Broken"], firstLine: "[" },
-  { id: "sliver-script", extensions: [".js"], aliases: ["Sliver Script"] },
 ] as const;
 
 describe("Monaco language catalog", () => {
-  it("uses Monaco labels and extensions, preserves the Bash product label, and excludes the app dialect", () => {
+  it("uses Monaco labels and extensions and preserves the Bash product label", () => {
     const catalog = monacoLanguageOptions(definitions);
 
     expect(catalog.map(({ id, label }) => [id, label])).toEqual([

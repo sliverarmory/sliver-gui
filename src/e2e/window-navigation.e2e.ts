@@ -50,6 +50,11 @@ test("window navigation supports pointer, keyboard and palette actions without d
     await page.keyboard.press("Escape");
     await configurations.waitFor({ state: "hidden" });
     await expectView(page, "Overview");
+    assert.equal(await page.getByRole("row", { name: "Script Editor", exact: true }).count(), 0);
+    assert.equal(await page.getByLabel("Automations navigation", { exact: true }).count(), 0);
+    assert.equal(await application.evaluate(({ Menu }) =>
+      Menu.getApplicationMenu()?.items.some((item) => item.label === "Scripts") ?? false), false);
+    assert.equal(await page.evaluate(() => "scriptTasks" in globalThis), false);
 
     const navigation = page.getByRole("navigation", { name: "Window navigation" });
     const back = navigation.getByRole("button", { name: "Go back", exact: true });

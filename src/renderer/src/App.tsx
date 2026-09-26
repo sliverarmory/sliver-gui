@@ -11,7 +11,6 @@ import {
   faBoxesStacked,
   faCamera,
   faCloudArrowUp,
-  faCode,
   faComputer,
   faEllipsisVertical,
   faGear,
@@ -66,14 +65,13 @@ import { CredentialsPage } from "./pages/CredentialsPage";
 import { OperationsPage } from "./pages/OperationsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { ScriptEditorPage } from "./pages/ScriptEditorPage";
 import {
   SessionWorkspacePage,
   type SessionWorkspaceRoute,
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings" | "script-editor";
+type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
 
 const sidebarIcons = {
   dark: sliverDarkIcon,
@@ -114,16 +112,11 @@ const dataNavItems = [
   { id: "credentials" as const, label: "Credentials", description: "Browse collected credentials.", icon: faKey },
 ];
 
-const automationNavItems = [
-  { id: "script-editor" as const, label: "Script Editor", description: "Write and run local JavaScript scripts.", icon: faCode },
-];
-
 type NavigationItem =
   | typeof overviewNavItem
   | (typeof infrastructureNavItems)[number]
   | (typeof interactNavItems)[number]
-  | (typeof dataNavItems)[number]
-  | (typeof automationNavItems)[number];
+  | (typeof dataNavItems)[number];
 
 function SidebarNavigationItem({
   count,
@@ -205,15 +198,9 @@ export function App() {
     setCredentialCountRefreshSequence((current) => current + 1);
   }, []);
   const isViewAvailable = useCallback((entry: ViewId) =>
-    entry === "overview" || entry === "settings" || entry === "script-editor" || connected, [connected]);
+    entry === "overview" || entry === "settings" || connected, [connected]);
   const { current: view, navigate: setView, goBack, goForward, canGoBack, canGoForward } =
     useNavigationHistory<ViewId>("overview", isViewAvailable);
-  const [scriptEditorVisited, setScriptEditorVisited] = useState(false);
-  const [scriptEditorRevealRequest, setScriptEditorRevealRequest] = useState(0);
-  const [scriptEditorEditRequest, setScriptEditorEditRequest] = useState<{ id: string; request: number }>();
-  useEffect(() => {
-    if (view === "script-editor") setScriptEditorVisited(true);
-  }, [view]);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
@@ -544,31 +531,10 @@ export function App() {
     });
   }, [compatibilityKey]);
   const changeView = useCallback((nextView: ViewId) => {
-    if (nextView === "script-editor") setIsConfigSelectorOpen(false);
     setSessionWorkspaceRoute(undefined);
     setBeaconWorkspaceRoute(undefined);
     setView(nextView);
   }, [setView]);
-  useEffect(() => window.sliver.onScriptEditorRequested(() => {
-    setIsCommandPaletteOpen(false);
-    setIsConfigSelectorOpen(false);
-    setCompatibilityNoticeOpen(false);
-    changeView("script-editor");
-    setScriptEditorRevealRequest((current) => current + 1);
-  }), [changeView, setCompatibilityNoticeOpen]);
-  useEffect(() => {
-    const api = window.scriptTasks;
-    if (!api) return;
-    const unsubscribeHost = api.onHostRequested(() => setScriptEditorVisited(true));
-    const unsubscribeEdit = api.onEditRequested((id) => {
-      setIsCommandPaletteOpen(false);
-      setIsConfigSelectorOpen(false);
-      setCompatibilityNoticeOpen(false);
-      changeView("script-editor");
-      setScriptEditorEditRequest((current) => ({ id, request: (current?.request ?? 0) + 1 }));
-    });
-    return () => { unsubscribeHost(); unsubscribeEdit(); };
-  }, [changeView, setCompatibilityNoticeOpen]);
   const navigateBack = useCallback(() => {
     if (!canGoBack) return;
     setSessionWorkspaceRoute(undefined);
@@ -688,7 +654,6 @@ export function App() {
     ...infrastructureNavItems,
     ...interactNavItems,
     ...dataNavItems,
-    ...automationNavItems,
   ].map((item): AppCommandPaletteCommand => ({
     id: `navigate-${item.id}`,
     group: "Navigate",
@@ -925,11 +890,10 @@ export function App() {
           </div>
         </header>
         <div
-          className={view === "script-editor" ? "app-content app-content--scripts" : view === "overview" ? "app-content app-content--overview" : view === "generate" && connected
+          className={view === "overview" ? "app-content app-content--overview" : view === "generate" && connected
             ? "app-content app-content--generate"
             : "app-content"}
         >
-          {scriptEditorVisited || view === "script-editor" ? <ScriptEditorPage active={view === "script-editor"} revealUnsavedRequest={scriptEditorRevealRequest} {...(scriptEditorEditRequest ? { editRequest: scriptEditorEditRequest } : {})} /> : null}
           {view === "overview" ? <OverviewPage snapshot={snapshot} onSnapshot={setSnapshot} onNavigate={changeView}
             onOpenSession={openSessionWorkspace} onOpenBeacon={openBeaconWorkspace} /> : view === "settings" ? (
             <SettingsPage
@@ -1216,20 +1180,6 @@ export function NavigationContent({
                 item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}
-                onAction={() => navigate(item.id)}
-              />
-            ))}
-          </Sidebar.Menu>
-        </Sidebar.Group>
-        <Sidebar.Group>
-          <Sidebar.GroupLabel>Automations</Sidebar.GroupLabel>
-          <Sidebar.Menu aria-label="Automations navigation" showGuideLines={false}>
-            {automationNavItems.map((item) => (
-              <SidebarNavigationItem
-                key={item.id}
-                item={item}
-                isCurrent={view === item.id}
-                isDisabled={false}
                 onAction={() => navigate(item.id)}
               />
             ))}

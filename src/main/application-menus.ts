@@ -17,7 +17,6 @@ import type { CloudDeploymentStatus, CloudProvider } from "../shared/cloud-deplo
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import type { SliverReleaseTarget } from "../shared/release-contracts.js";
 import type { NetworkTabId } from "../shared/network-forwarding-contracts.js";
-import type { ScriptSummary } from "../shared/script-contracts.js";
 
 export type ReleaseMenuCatalog =
   | { readonly status: "loading" }
@@ -36,8 +35,6 @@ export interface ApplicationMenuActions {
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
   readonly openArmory: (tab: ArmoryTabId) => void;
   readonly openNetwork: (tab: NetworkTabId, sourceWindow?: BaseWindow) => void;
-  readonly openScriptTaskManager: (sourceWindow?: BaseWindow) => void;
-  readonly editScript: (id: string, sourceWindow?: BaseWindow) => void;
   readonly openDocumentation: () => void;
   readonly showAboutPanel: () => void;
   readonly downloadRelease: (target: SliverReleaseTarget) => void;
@@ -162,7 +159,6 @@ export function buildApplicationMenuTemplate(
   networkEnabled = false,
   crackstationReleaseCatalog: ReleaseMenuCatalog = { status: "loading" },
   settings: ApplicationSettingsValues = DEFAULT_APPLICATION_SETTINGS_VALUES,
-  scripts: readonly Pick<ScriptSummary, "id" | "name">[] = [],
 ): MenuItemConstructorOptions[] {
   const accelerator = (action: KeyboardShortcutAction): string =>
     keyboardShortcutToAccelerator(resolveKeyboardShortcut(action, settings, platform === "darwin"));
@@ -311,23 +307,6 @@ export function buildApplicationMenuTemplate(
           label: "SOCKS5 Proxy",
           enabled: networkEnabled,
           click: (_item, sourceWindow) => actions.openNetwork("socks5", sourceWindow),
-        },
-      ],
-    },
-    {
-      label: "Scripts",
-      submenu: [
-        { id: "scripts.task-manager", label: "Task Manager", click: (_item, sourceWindow) => actions.openScriptTaskManager(sourceWindow) },
-        {
-          id: "scripts.edit", label: "Edit",
-          submenu: scripts.length > 0
-            ? scripts.map((script) => ({
-              id: `scripts.edit.${script.id}`,
-              // Electron treats ampersands as mnemonic markers on Windows/Linux.
-              label: platform === "darwin" ? script.name : script.name.replaceAll("&", "&&"),
-              click: (_item, sourceWindow) => actions.editScript(script.id, sourceWindow),
-            }))
-            : [{ label: "No saved scripts", enabled: false }],
         },
       ],
     },

@@ -1,5 +1,3 @@
-import { SCRIPT_LANGUAGE_ID } from "./script-language-config";
-
 export interface MonacoLanguageDefinition {
   readonly id: string;
   readonly extensions?: readonly string[];
@@ -26,14 +24,12 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
 
 /**
  * Converts Monaco's registered extension points into immutable, renderer-safe
- * selector data. The application-only script dialect is intentionally kept out
- * of the general text editor's syntax list.
+ * selector data for the text editor's syntax list.
  */
 export function monacoLanguageOptions(
   definitions: readonly MonacoLanguageDefinition[],
 ): readonly MonacoLanguageOption[] {
   const entries = definitions
-    .filter((definition) => definition.id !== SCRIPT_LANGUAGE_ID)
     .map((definition) => Object.freeze({
       id: definition.id,
       label: LABEL_OVERRIDES[definition.id] ?? definition.aliases?.[0] ?? definition.id,
@@ -98,7 +94,6 @@ export function detectMonacoLanguage(
   let extensionMatch: { readonly entry: MonacoLanguageDefinition; readonly length: number } | undefined;
 
   for (const entry of definitions) {
-    if (entry.id === SCRIPT_LANGUAGE_ID) continue;
     if (entry.filenames?.some((candidate) => candidate.toLowerCase() === normalizedFilename)) {
       filenameMatch = entry;
     }
@@ -117,7 +112,6 @@ export function detectMonacoLanguage(
     const normalizedFirstLine = firstLine.startsWith("\uFEFF") ? firstLine.slice(1) : firstLine;
     for (let index = definitions.length - 1; index >= 0; index -= 1) {
       const entry = definitions[index];
-      if (entry?.id === SCRIPT_LANGUAGE_ID) continue;
       if (!entry?.firstLine) continue;
       try {
         if (new RegExp(entry.firstLine).test(normalizedFirstLine)) return entry.id;

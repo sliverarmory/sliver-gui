@@ -2,11 +2,9 @@ import type { editor, IDisposable, KeyCode, Selection } from "monaco-editor/edit
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 
 import { isKeyboardShortcut } from "../../../shared/keyboard-shortcuts";
-import { SCRIPT_LANGUAGE_ID } from "../editor/script-language-config";
 import { preferredMonacoExtension } from "../editor/monaco-language-catalog";
 
 type MonacoRuntime = typeof import("../editor/monaco-runtime");
-export type CodeEditorProfile = "default" | "script";
 
 export interface CodeEditorContextMenuState {
   readonly canUndo: boolean;
@@ -71,11 +69,9 @@ export interface CodeEditorProps {
   /** Stable in-memory identity; changing it preserves the prior model's undo/view state. */
   modelKey: string;
   language?: string;
-  profile?: CodeEditorProfile;
   readOnly?: boolean;
   ariaLabel?: string;
   onSave?: () => void;
-  onRun?: () => void;
   editorHandleRef?: Ref<CodeEditorHandle>;
   wordWrap?: boolean;
   minimap?: boolean;
@@ -101,7 +97,6 @@ export interface CodeEditorProps {
 interface CachedModel {
   model: editor.ITextModel;
   viewState: editor.ICodeEditorViewState | null;
-  diagnostics?: IDisposable;
 }
 
 let editorSequence = 0;
@@ -109,11 +104,11 @@ let editorSequence = 0;
 /**
  * Reusable local Monaco wrapper. Models live for this component's mounted
  * lifetime, preserving undo/selection/scroll when switching modelKey. Unmount
- * disposes every model, listener, observer, editor and script-analysis worker.
+ * disposes every model, listener, observer and editor.
  */
 export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   const {
-    value, modelKey, language = "javascript", profile = "default", readOnly = false,
+    value, modelKey, language = "javascript", readOnly = false,
     ariaLabel = "Code editor", theme = "dark", className = "", wordWrap = false,
     minimap = false, fontSize = 13,
     fontFamily = '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
@@ -132,7 +127,6 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   if (ownerId.current === null) ownerId.current = String(++editorSequence);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const hasRunAction = Boolean(props.onRun);
   const keybindings = props.keybindings;
 
   useImperativeHandle(props.editorHandleRef, () => {
@@ -289,7 +283,6 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       editorRef.current?.dispose();
       editorRef.current = null;
       for (const entry of models.current.values()) {
-        entry.diagnostics?.dispose();
         entry.model.dispose();
       }
       models.current.clear();
@@ -297,19 +290,6 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       runtimeRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    const instance = editorRef.current;
-    const runtime = runtimeRef.current;
-    if (!ready || !hasRunAction || !instance || !runtime) return;
-    const action = instance.addAction({
-      id: "application.editor.run",
-      label: "Run",
-      keybindings: [runtime.monaco.KeyMod.CtrlCmd | runtime.monaco.KeyCode.Enter],
-      run: () => { currentProps.current.onRun?.(); },
-    });
-    return () => action.dispose();
-  }, [hasRunAction, ready]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -336,27 +316,23 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
     const runtime = runtimeRef.current;
     const instance = editorRef.current;
     if (!ready || !runtime || !instance) return;
-    const resolvedLanguage = profile === "script" ? SCRIPT_LANGUAGE_ID : language;
     // Language selection must not replace the document's undo/selection state.
-    // The script profile retains separate diagnostics and a separate model.
-    const identity = JSON.stringify([modelKey, profile]);
+    const identity = modelKey;
     if (selectedModel.current !== identity) {
       const previous = selectedModel.current === null ? undefined : models.current.get(selectedModel.current);
       if (previous) previous.viewState = instance.saveViewState();
       let entry = models.current.get(identity);
       if (!entry) {
-        const extension = profile === "script" ? "js" :
-          preferredMonacoExtension(language, runtime.monaco.languages.getLanguages()) ?? editorExtension(language);
+        const extension = preferredMonacoExtension(language, runtime.monaco.languages.getLanguages()) ?? editorExtension(language);
         const uri = runtime.monaco.Uri.parse(
           `inmemory://editor-${ownerId.current}/${encodeURIComponent(identity)}.${extension}`,
         );
-        const model = runtime.monaco.editor.createModel(value, resolvedLanguage, uri);
+        const model = runtime.monaco.editor.createModel(value, language, uri);
         model.updateOptions({
           tabSize: currentProps.current.tabSize ?? 2,
           insertSpaces: currentProps.current.insertSpaces ?? true,
         });
         entry = { model, viewState: null };
-        if (profile === "script") entry.diagnostics = runtime.attachScriptDiagnostics(runtime.monaco, model);
         models.current.set(identity, entry);
       }
       synchronizing.current = true;
@@ -371,7 +347,7 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       }
     }
     const model = instance.getModel();
-    if (model && model.getLanguageId() !== resolvedLanguage) runtime.monaco.editor.setModelLanguage(model, resolvedLanguage);
+    if (model && model.getLanguageId() !== language) runtime.monaco.editor.setModelLanguage(model, language);
     if (model && model.getValue() !== value) {
       synchronizing.current = true;
       try {
@@ -383,7 +359,7 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
         synchronizing.current = false;
       }
     }
-  }, [ready, modelKey, language, profile, value]);
+  }, [ready, modelKey, language, value]);
 
   useEffect(() => {
     if (!ready) return;
@@ -407,7 +383,7 @@ export function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   }, [ready]);
 
   return (
-    <div className={`relative h-full min-h-0 min-w-0 w-full overflow-hidden ${className}`} data-code-editor={profile}>
+    <div className={`relative h-full min-h-0 min-w-0 w-full overflow-hidden ${className}`} data-code-editor="default">
       <div className="absolute inset-0 min-h-0 min-w-0 overflow-hidden" ref={container} />
       {!ready && !error && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted" role="status">Loading editor…</div>}
       {error && <div className="absolute inset-0 flex items-center justify-center p-4 text-sm text-danger" role="alert">{error}</div>}

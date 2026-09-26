@@ -23,9 +23,6 @@ files:
   - node_modules/ghostty-web/LICENSE
   - node_modules/ghostty-web/package.json
   - node_modules/ghostty-web/ghostty-vt.wasm
-  - node_modules/@jitl/quickjs-wasmfile-release-sync/LICENSE
-  - node_modules/@jitl/quickjs-wasmfile-release-sync/package.json
-  - node_modules/@jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm
   - node_modules/node-pty/LICENSE
   - node_modules/node-pty/package.json
   - node_modules/node-pty/lib/**/*.js
@@ -49,7 +46,6 @@ files:
   - protocol/sliver-baseline.json
   - protocol/sliver-script-provenance.json
   - protocol/ghostty-web-provenance.json
-  - protocol/script-editor-provenance.json
   - protocol/terminal-fonts-provenance.json
   - docs/operator-parity.generated.json
   - docs/operator-parity.annotations.json

@@ -20,8 +20,6 @@ Font Awesome.
   Azure account integration.
 - A Cloud Deployment DNS manager for Route 53 and Azure DNS, with zone and
   all-zones record views and record editing.
-- A Monaco Script Editor with a local script library, an isolated JavaScript
-  runtime, and a script task manager.
 - Configurable keyboard shortcuts, application appearance, and update controls.
 
 The GUI does not implement every upstream command or option. Operator
@@ -167,7 +165,6 @@ validation and review flows. Do not weaken these boundaries for development.
 - [Contributor guidelines](AGENTS.md)
 - [Overview topology](docs/overview-topology.md)
 - [Armory package management](docs/armory.md)
-- [Script Editor](docs/script-editor.md)
 - [Standalone Text Editor](docs/text-editor.md)
 - [AWS authentication](docs/aws-login.md) and [Azure authentication](docs/azure-login.md)
 - [Cloud DNS management](docs/cloud-dns.md)
