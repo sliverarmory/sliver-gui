@@ -1756,7 +1756,7 @@ describe("Sidebar navigation", () => {
     expect(await screen.findByRole("heading", { name: "Live sessions" })).toBeInTheDocument();
   });
 
-  it("opens a selected beacon in the dedicated async task workspace and returns to the catalog", async () => {
+  it("opens a beacon's Interact button in its dedicated async task workspace and returns to the table", async () => {
     const user = userEvent.setup();
     const beacon: BeaconSummary = {
       mode: "beacon",
@@ -1840,15 +1840,24 @@ describe("Sidebar navigation", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
     const interact = screen.getByRole("treegrid", { name: "Interact navigation" });
     await user.click(within(interact).getByRole("row", { name: "Beacons" }));
-    await user.click(await screen.findByRole("row", { name: /warehouse/i }));
+    const beaconsTable = await screen.findByRole("grid", { name: "Sliver beacons" });
+    const inventoryFrame = beaconsTable.closest('[aria-labelledby="target-inventory-heading"]')!.parentElement!;
+    expect(within(inventoryFrame).queryByRole("complementary")).not.toBeInTheDocument();
+    await user.click(within(beaconsTable).getByRole("button", { name: "Interact with warehouse" }));
 
     expect(await screen.findByRole("heading", { name: "Async task workspace" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
+    expect(api.selectTarget).toHaveBeenCalledWith(ref);
     expect(screen.queryByRole("grid", { name: "Sliver beacons" })).not.toBeInTheDocument();
     expect(within(interact).getByRole("row", { name: "Beacons" })).toHaveAttribute("data-current", "true");
 
     await user.click(screen.getByRole("button", { name: "Back to live beacons" }));
     expect(await screen.findByRole("heading", { name: "Live beacons" })).toBeInTheDocument();
+    const restoredTable = screen.getByRole("grid", { name: "Sliver beacons" });
+    expect(within(restoredTable).getByRole("button", { name: "Interact with warehouse" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
+    const restoredInventoryFrame = restoredTable.closest('[aria-labelledby="target-inventory-heading"]')!.parentElement!;
+    expect(within(restoredInventoryFrame).queryByRole("complementary")).not.toBeInTheDocument();
   });
 
   it("keeps the Interact section actionable in the mobile sheet", async () => {

@@ -14,7 +14,6 @@ import {
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
-import { Sheet } from "@heroui-pro/react";
 import { ScrollShadow } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -76,6 +75,7 @@ import { useApplicationContextMenuScope } from "../components/ApplicationContext
 import { RenameSessionModal } from "../components/RenameSessionModal";
 import { sessionContextMenuActions, type SessionContextActionId } from "../components/session-context-menu-actions";
 import {
+  beaconCheckinTiming,
   beaconTaskCountLabel,
   capabilityFor,
   filterTargets,
@@ -128,7 +128,7 @@ interface TargetSearchState extends TargetInventoryState {
   contextIdentity: string;
 }
 
-interface ExecutionSheetTarget {
+interface SelectedTargetIdentity {
   ref: TargetRef;
   backendIncarnation: string;
 }
@@ -167,6 +167,7 @@ export function TargetsPage({
   expectedTarget,
 }: TargetsPageProps): React.JSX.Element {
   const [query, setQuery] = useState("");
+  const [checkinNow, setCheckinNow] = useState(Date.now);
   const [isSelecting, setIsSelecting] = useState(false);
   const [isChangingWatch, setIsChangingWatch] = useState(false);
   const [isOpeningInteractionWindow, setIsOpeningInteractionWindow] = useState(false);
@@ -186,9 +187,8 @@ export function TargetsPage({
   const [actionResult, setActionResult] = useState<TargetActionExecutionResult>();
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
-  const [executionSheetTarget, setExecutionSheetTarget] = useState<ExecutionSheetTarget>();
   const [showDedicatedExecution, setShowDedicatedExecution] = useState(false);
-  const [renameSessionTarget, setRenameSessionTarget] = useState<ExecutionSheetTarget>();
+  const [renameSessionTarget, setRenameSessionTarget] = useState<SelectedTargetIdentity>();
   const backendIncarnation = targetBackendIncarnation(snapshot);
   const targetInventoryIdentity = targetCatalogIdentity(snapshot, mode);
   const normalizedTargetQuery = normalizeTargetCatalogQuery(query);
@@ -258,7 +258,6 @@ export function TargetsPage({
   selectedTaskIdRef.current = selectedTask?.taskId;
   const backendIncarnationRef = useRef(backendIncarnation);
   backendIncarnationRef.current = backendIncarnation;
-  const activeExecutionIdentity = exactTargetRefIdentity(activeRef);
   const renameSessionIsCurrent = presentation === "catalog" &&
     mode === "session" &&
     snapshot.targetContext.status === "selected" &&
@@ -267,13 +266,6 @@ export function TargetsPage({
     active.id === activeRef.id &&
     renameSessionTarget?.backendIncarnation === backendIncarnation &&
     targetRefIdentity(renameSessionTarget.ref) === activeIdentity;
-  const executionSheetIsCurrent = presentation === "catalog" &&
-    mode === "beacon" &&
-    active?.mode === "beacon" &&
-    activeRef?.mode === "beacon" &&
-    active.id === activeRef.id &&
-    executionSheetTarget?.backendIncarnation === backendIncarnation &&
-    exactTargetRefIdentity(executionSheetTarget.ref) === activeExecutionIdentity;
   const taskReadCapability = capabilityFor(snapshot.targetContext.capabilities, "beacon.tasks.read");
   const dedicatedTargetIsCurrent = presentation !== "dedicated" || (
     mode === "beacon" &&
@@ -288,6 +280,14 @@ export function TargetsPage({
   const pageLabelLower = mode === "session" ? "sessions" : "beacons";
   const pageIcon = mode === "session" ? faComputer : faSatellite;
   const pageTotal = mode === "session" ? currentTargetInventory.sessionPage.total : currentTargetInventory.beaconPage.total;
+  const hasVisibleBeacons = mode === "beacon" && filteredTargets.length > 0;
+
+  useEffect(() => {
+    if (presentation !== "catalog" || !hasVisibleBeacons) return;
+    setCheckinNow(Date.now());
+    const timer = window.setInterval(() => setCheckinNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [hasVisibleBeacons, presentation]);
 
   useEffect(() => () => {
     targetSelectionRequestSequence.current += 1;
@@ -716,10 +716,6 @@ export function TargetsPage({
   }, [selectTaskDetail, selectedTask, tasks]);
 
   useEffect(() => {
-    if (executionSheetTarget && !executionSheetIsCurrent) setExecutionSheetTarget(undefined);
-  }, [executionSheetIsCurrent, executionSheetTarget]);
-
-  useEffect(() => {
     if (renameSessionTarget && !renameSessionIsCurrent) setRenameSessionTarget(undefined);
   }, [renameSessionIsCurrent, renameSessionTarget]);
 
@@ -818,90 +814,13 @@ export function TargetsPage({
       toast.warning("Target changed", { description: "Return to the live inventory and select it again." });
       return;
     }
-    const expectedIncarnation = backendIncarnationRef.current;
-    const requestSequence = ++targetSelectionRequestSequence.current;
-    setIsSelecting(true);
-    try {
-      const result = await window.sliver.selectTarget(ref);
-      if (
-        requestSequence !== targetSelectionRequestSequence.current ||
-        expectedIncarnation !== backendIncarnationRef.current
-      ) return;
-      if (!result.ok || !result.value) {
-        toast.danger("Could not select target", { description: result.error });
-        return;
-      }
-      onSnapshot(result.value);
-
-      if (target.mode === "session" && onOpenSession) {
-        const selectedRef = result.value.targetContext.activeTarget;
-        const selectedSummary = result.value.targetContext.activeTargetSummary;
-        if (
-          selectedRef?.mode !== "session" ||
-          selectedRef.id !== ref.id ||
-          selectedRef.backendEpoch !== ref.backendEpoch ||
-          selectedRef.fingerprint !== ref.fingerprint ||
-          selectedSummary?.mode !== "session" ||
-          selectedSummary.id !== ref.id
-        ) {
-          toast.warning("Session changed", {
-            description: "The server did not confirm the selected session. Return to the live inventory and select it again.",
-          });
-          return;
-        }
-        onOpenSession(selectedSummary, selectedRef);
-      }
-      if (target.mode === "beacon" && onOpenBeacon) {
-        const selectedRef = result.value.targetContext.activeTarget;
-        const selectedSummary = result.value.targetContext.activeTargetSummary;
-        if (
-          selectedRef?.mode !== "beacon" ||
-          selectedRef.id !== ref.id ||
-          selectedRef.backendEpoch !== ref.backendEpoch ||
-          selectedRef.fingerprint !== ref.fingerprint ||
-          selectedSummary?.mode !== "beacon" ||
-          selectedSummary.id !== ref.id
-        ) {
-          toast.warning("Beacon changed", {
-            description: "The server did not confirm the selected beacon. Return to the live inventory and select it again.",
-          });
-          return;
-        }
-        onOpenBeacon(selectedSummary, selectedRef);
-      }
-    } catch (error) {
-      if (
-        requestSequence === targetSelectionRequestSequence.current &&
-        expectedIncarnation === backendIncarnationRef.current
-      ) toast.danger("Could not select target", { description: errorMessage(error) });
-    } finally {
-      if (
-        requestSequence === targetSelectionRequestSequence.current &&
-        expectedIncarnation === backendIncarnationRef.current
-      ) setIsSelecting(false);
-    }
-  }, [onOpenBeacon, onOpenSession, onSnapshot, presentedTargetInventory.refs]);
+    await runTargetRowAction(ref, "target.interact");
+  }, [presentedTargetInventory.refs, runTargetRowAction]);
 
   const selectTargetByKey = useCallback((key: Key) => {
     const target = allTargets.find((candidate) => targetRowKey(candidate) === String(key));
     if (target) void selectTarget(target);
   }, [allTargets, selectTarget]);
-
-  const backgroundTarget = useCallback(async () => {
-    setIsSelecting(true);
-    try {
-      const result = await window.sliver.backgroundTarget();
-      if (!result.ok || !result.value) {
-        toast.danger("Could not background target", { description: result.error });
-        return;
-      }
-      onSnapshot(result.value);
-    } catch (error) {
-      toast.danger("Could not background target", { description: errorMessage(error) });
-    } finally {
-      setIsSelecting(false);
-    }
-  }, [onSnapshot]);
 
   const setBeaconWatch = useCallback(async (enabled: boolean) => {
     setIsChangingWatch(true);
@@ -1012,31 +931,69 @@ export function TargetsPage({
       header: "Status",
       allowsSorting: true,
       minWidth: 114,
-      sortFn: (left, right) => targetStatus(left).label.localeCompare(targetStatus(right).label),
+      sortFn: (left, right) => targetStatus(left, checkinNow).label.localeCompare(targetStatus(right, checkinNow).label),
       cell: (target) => {
-        const status = targetStatus(target);
+        const status = targetStatus(target, checkinNow);
         return <Chip color={status.color} size="sm" variant="soft">{status.label}</Chip>;
       },
     },
-    {
+    ...(mode === "beacon" ? [
+      {
+        id: "last-checkin",
+        header: "Last check-in",
+        minWidth: 168,
+        cell: (target: TargetSummary) => (
+          <span className="text-xs tabular-nums text-muted">{formatTimestamp(target.lastCheckinAt)}</span>
+        ),
+      },
+      {
+        id: "next-checkin",
+        header: "Next check-in",
+        minWidth: 190,
+        cell: (target: TargetSummary) => {
+          if (target.mode !== "beacon") return null;
+          const timing = beaconCheckinTiming(target, checkinNow);
+          return (
+            <div className="text-xs tabular-nums">
+              <p className={timing.status.color === "warning" ? "text-warning" : "text-foreground"}>
+                {timing.countdown}
+              </p>
+              {timing.countdown !== "Not reported" ? (
+                <p className="mt-0.5 text-[11px] text-muted">{formatTimestamp(target.nextCheckinAt)}</p>
+              ) : null}
+            </div>
+          );
+        },
+      },
+      {
+        id: "interval",
+        header: "Interval / jitter",
+        minWidth: 132,
+        cell: (target: TargetSummary) => target.mode === "beacon" ? (
+          <span className="text-xs tabular-nums text-muted">{formatDuration(target.intervalMs)} / {formatDuration(target.jitterMs)}</span>
+        ) : null,
+      },
+      {
+        id: "tasks",
+        header: "Tasks",
+        minWidth: 130,
+        cell: (target: TargetSummary) => target.mode === "beacon"
+          ? <span className="text-xs tabular-nums text-muted">{beaconTaskCountLabel(target)}</span>
+          : null,
+      },
+    ] : [{
       id: "timing",
       header: "Timing",
       minWidth: 210,
-      cell: (target) => (
+      cell: (target: TargetSummary) => (
         <span className="text-xs tabular-nums text-muted">{targetTimingLabel(target)}</span>
       ),
-    },
-    ...(mode === "beacon" ? [{
-      id: "tasks",
-      header: "Tasks",
-      minWidth: 130,
-      cell: (target: TargetSummary) => target.mode === "beacon"
-        ? <span className="text-xs tabular-nums text-muted">{beaconTaskCountLabel(target)}</span>
-        : null,
-    }] : [{
+    }]),
+    {
       id: "interact",
       header: "",
       minWidth: 124,
+      ...(mode === "beacon" ? { pinned: "end" as const, width: 124 } : {}),
       cell: (target: TargetSummary) => (
         <Button
           aria-label={`Interact with ${target.name || target.hostname || target.id}`}
@@ -1048,8 +1005,8 @@ export function TargetsPage({
           Interact <FontAwesomeIcon aria-hidden icon={faArrowRight} />
         </Button>
       ),
-    }]),
-  ], [isSelecting, mode, selectTarget, targetSearchIsStale]);
+    },
+  ], [checkinNow, isSelecting, mode, selectTarget, targetSearchIsStale]);
 
   if (!dedicatedTargetIsCurrent) {
     return (
@@ -1076,7 +1033,7 @@ export function TargetsPage({
     );
   }
 
-  const targetDetail = mode === "beacon" ? (
+  const targetDetail = mode === "beacon" && presentation === "dedicated" ? (
     <TargetDetail
       active={active}
       mode={mode}
@@ -1089,11 +1046,7 @@ export function TargetsPage({
       unavailableReason={snapshot.targetContext.activeTarget?.mode === mode
         ? snapshot.targetContext.unavailableReason
         : undefined}
-      onBackground={presentation === "catalog" ? () => void backgroundTarget() : undefined}
-      onOpenExecution={presentation === "catalog" && activeRef?.mode === "beacon" && active?.id === activeRef.id
-        ? () => setExecutionSheetTarget({ ref: activeRef, backendIncarnation })
-        : undefined}
-      onPopOut={presentation === "catalog" || onBack ? () => void openInteractionWindow() : undefined}
+      onPopOut={onBack ? () => void openInteractionWindow() : undefined}
       onPrepareAction={(action) => void prepareAction(action)}
       onWatchChange={(enabled) => void setBeaconWatch(enabled)}
       onOperationSubmitted={(operation) => {
@@ -1129,7 +1082,7 @@ export function TargetsPage({
         </div>
       </header> : null}
 
-      {presentation === "catalog" ? <div className={mode === "session" ? "min-h-0" : "grid min-h-0 gap-4 2xl:grid-cols-[minmax(0,1fr)_390px]"}>
+      {presentation === "catalog" ? <div className="min-h-0">
         <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="target-inventory-heading">
           <div className="flex flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex min-w-0 items-center gap-3">
@@ -1185,8 +1138,9 @@ export function TargetsPage({
           >
             <DataGrid
               aria-label={`Sliver ${pageLabelLower}`}
+              {...(mode === "beacon" ? { className: "beacons-inventory-grid" } : {})}
               columns={targetColumns}
-              contentClassName={mode === "session" ? "min-w-[850px]" : "min-w-[980px]"}
+              contentClassName={mode === "session" ? "min-w-[850px]" : "min-w-[1380px]"}
               data={filteredTargets}
               disabledKeys={isSelecting || targetSearchIsStale
                 ? filteredTargets.map(targetRowKey)
@@ -1252,8 +1206,6 @@ export function TargetsPage({
             }}
           />
         </section>
-
-        {targetDetail}
       </div> : isDedicatedBeacon ? (
         <>
           <header className="page-heading">
@@ -1372,15 +1324,6 @@ export function TargetsPage({
         />
       ) : null}
 
-      <BeaconExecutionSheet
-        expectedTarget={executionSheetIsCurrent ? executionSheetTarget?.ref : undefined}
-        isOpen={executionSheetIsCurrent}
-        targetIdentity={`beacon-catalog:${backendIncarnation}:${activeExecutionIdentity ?? "no-target"}`}
-        onOpenChange={(open) => {
-          if (!open) setExecutionSheetTarget(undefined);
-        }}
-      />
-
       <OperationDetailModal
         isCurrent={() => Boolean(
           selectedOperation &&
@@ -1441,8 +1384,6 @@ function TargetDetail({
   isOpeningInteractionWindow,
   watchEnabled,
   unavailableReason,
-  onBackground,
-  onOpenExecution,
   onPopOut,
   onPrepareAction,
   onWatchChange,
@@ -1458,8 +1399,6 @@ function TargetDetail({
   isOpeningInteractionWindow: boolean;
   watchEnabled: boolean;
   unavailableReason: string | undefined;
-  onBackground: (() => void) | undefined;
-  onOpenExecution: (() => void) | undefined;
   onPopOut: (() => void) | undefined;
   onPrepareAction: (action: DestructiveTargetActionId) => void;
   onWatchChange: (enabled: boolean) => void;
@@ -1513,14 +1452,6 @@ function TargetDetail({
                 <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} />
               </Button>
               <Tooltip.Content>Pop out interaction into a new window</Tooltip.Content>
-            </Tooltip>
-          ) : null}
-          {onBackground ? (
-            <Tooltip delay={250}>
-              <Button aria-label="Background target" isDisabled={isBusy} isIconOnly size="sm" variant="ghost" onPress={onBackground}>
-                <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
-              </Button>
-              <Tooltip.Content>Background target</Tooltip.Content>
             </Tooltip>
           ) : null}
         </div>
@@ -1590,19 +1521,6 @@ function TargetDetail({
         ) : null}
       </div>
 
-      {onOpenExecution ? (
-        <div className="flex items-center justify-between gap-3 border-t border-separator px-4 py-4">
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-foreground">Execution</p>
-            <p className="mt-1 text-[11px] leading-relaxed text-muted">Configure typed process, payload, remote, and identity actions.</p>
-          </div>
-          <Button className="shrink-0" size="sm" variant="secondary" onPress={onOpenExecution}>
-            <FontAwesomeIcon aria-hidden icon={faBolt} />
-            Execution
-          </Button>
-        </div>
-      ) : null}
-
       {active.mode === "session" ? (
         <div className="border-t border-separator px-4 py-4">
           <OperationComposer
@@ -1635,39 +1553,6 @@ function TargetDetail({
         })}
       </div>
     </aside>
-  );
-}
-
-function BeaconExecutionSheet({
-  expectedTarget,
-  isOpen,
-  targetIdentity,
-  onOpenChange,
-}: {
-  expectedTarget: TargetRef | undefined;
-  isOpen: boolean;
-  targetIdentity: string;
-  onOpenChange: (open: boolean) => void;
-}): React.JSX.Element {
-  return (
-    <Sheet isOpen={isOpen && expectedTarget !== undefined} placement="right" onOpenChange={onOpenChange}>
-      <Sheet.Backdrop variant="blur">
-        <Sheet.Content className="h-full w-full max-w-5xl">
-          <Sheet.Dialog className="h-full">
-            <Sheet.CloseTrigger />
-            <Sheet.Header>
-              <Sheet.Heading>Beacon execution</Sheet.Heading>
-              <p className="mt-1 text-sm text-muted">Actions remain pinned to the exact selected beacon and backend incarnation.</p>
-            </Sheet.Header>
-            <Sheet.Body className="min-h-0 overflow-auto bg-default p-4 sm:p-6">
-              {isOpen && expectedTarget ? (
-                <TargetExecutionWorkbench expectedTarget={expectedTarget} targetIdentity={targetIdentity} />
-              ) : null}
-            </Sheet.Body>
-          </Sheet.Dialog>
-        </Sheet.Content>
-      </Sheet.Backdrop>
-    </Sheet>
   );
 }
 
@@ -2852,12 +2737,6 @@ function targetBackendIncarnation(snapshot: SliverSnapshot): string {
 function targetRefIdentity(target: TargetRef | null | undefined): string | undefined {
   return target
     ? `${target.backendEpoch}:${target.mode}:${target.id}:${target.fingerprint}`
-    : undefined;
-}
-
-function exactTargetRefIdentity(target: TargetRef | null | undefined): string | undefined {
-  return target
-    ? `${target.backendEpoch}:${target.mode}:${target.id}:${target.domainRevision}:${target.fingerprint}`
     : undefined;
 }
 

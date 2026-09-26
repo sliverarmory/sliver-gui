@@ -20,6 +20,7 @@ import type {
 } from "../../../shared/execution-contracts";
 import { SessionWorkspacePage } from "./SessionWorkspacePage";
 import { TargetsPage } from "./TargetsPage";
+import { formatTimestamp } from "./target-page-model";
 import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 
 beforeAll(() => {
@@ -41,6 +42,8 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 const session: SessionSummary = {
@@ -423,21 +426,169 @@ function sessionWorkspace(snapshot: SliverSnapshot, onSnapshot = vi.fn()): React
 }
 
 describe("TargetsPage", () => {
+  it.each(["none", "beacon"] as const)("keeps the beacon catalog full width with %s selected and no detail sidebar", (active) => {
+    installAPI();
+    render(<TargetsPage mode="beacon" snapshot={targetSnapshot(active)} onSnapshot={vi.fn()} />);
+
+    const grid = screen.getByRole("grid", { name: "Sliver beacons" });
+    expect(within(grid).getByRole("button", { name: "Interact with warehouse" })).toBeInTheDocument();
+    expect(within(grid).getByRole("columnheader", { name: "Last check-in" })).toBeInTheDocument();
+    expect(within(grid).getByRole("columnheader", { name: "Next check-in" })).toBeInTheDocument();
+    expect(within(grid).getByRole("columnheader", { name: "Interval / jitter" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "warehouse" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Select a beacon")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Capabilities" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pop out interaction" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Execution" })).not.toBeInTheDocument();
+  });
+
+  it("opens the exact beacon through its named Interact button after authoritative confirmation", async () => {
+    const user = userEvent.setup();
+    const selected = targetSnapshot("beacon");
+    const confirmedBeacon = { ...beacon, name: "confirmed-warehouse" };
+    selected.targetContext.activeTargetSummary = confirmedBeacon;
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: selected });
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    installAPI({ selectTarget });
+    render(<TargetsPage mode="beacon" snapshot={targetSnapshot()} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+
+    await user.click(screen.getByRole("button", { name: "Interact with warehouse" }));
+
+    expect(selectTarget).toHaveBeenCalledExactlyOnceWith(beaconRef);
+    expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(selected);
+    expect(onOpenBeacon).toHaveBeenCalledExactlyOnceWith(confirmedBeacon, beaconRef);
+  });
+
+  it.each(["mode", "ID", "fingerprint", "incarnation"])("rejects a beacon Interact confirmation with a changed %s", async (changed) => {
+    const user = userEvent.setup();
+    const selected = targetSnapshot("beacon");
+    if (changed === "mode") selected.targetContext = targetSnapshot("session").targetContext;
+    if (changed === "ID") {
+      selected.targetContext.activeTarget = { ...beaconRef, id: "different-beacon" };
+      selected.targetContext.activeTargetSummary = { ...beacon, id: "different-beacon" };
+    }
+    if (changed === "fingerprint") selected.targetContext.activeTarget = { ...beaconRef, fingerprint: "f".repeat(64) };
+    if (changed === "incarnation") selected.connection.incarnation = 1;
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: selected });
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    installAPI({ selectTarget });
+    render(<TargetsPage mode="beacon" snapshot={targetSnapshot()} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+
+    await user.click(screen.getByRole("button", { name: "Interact with warehouse" }));
+
+    expect(selectTarget).toHaveBeenCalledExactlyOnceWith(beaconRef);
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("updates check-in countdowns and overdue status locally, resets on check-in, and releases its timer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
+    const nowMs = Date.parse("2026-08-09T20:02:00.000Z");
+    vi.setSystemTime(nowMs);
+    const snapshot = targetSnapshot();
+    const imminentBeacon: BeaconSummary = { ...beacon, nextCheckinAt: new Date(nowMs + 2_000).toISOString() };
+    snapshot.beacons = [imminentBeacon];
+    snapshot.domains.beacons.items = [imminentBeacon];
+    const api = installAPI();
+    const { rerender, unmount } = render(<TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    await act(async () => {});
+    const grid = screen.getByRole("grid", { name: "Sliver beacons" });
+    expect(within(grid).getByText("In 2s")).toBeInTheDocument();
+    expect(within(grid).getByText("On time")).toBeInTheDocument();
+    expect(within(grid).getByText(formatTimestamp(beacon.lastCheckinAt))).toBeInTheDocument();
+    expect(within(grid).getByText("8 s / 0 ms")).toBeInTheDocument();
+    const timerIndex = setInterval.mock.calls.findIndex((call) => call[1] === 1_000);
+    expect(timerIndex).toBeGreaterThanOrEqual(0);
+    const tick = setInterval.mock.calls[timerIndex]?.[0];
+    if (typeof tick !== "function") throw new Error("Check-in countdown interval was not installed");
+    const timer = setInterval.mock.results[timerIndex]?.value;
+    expect(setInterval.mock.calls.filter((call) => call[1] === 1_000)).toHaveLength(1);
+    const operationLoads = vi.mocked(api.listTargetOperations).mock.calls.length;
+
+    await act(async () => { vi.setSystemTime(nowMs + 1_000); tick(); });
+    expect(within(grid).getByText("In 1s")).toBeInTheDocument();
+    await act(async () => { vi.setSystemTime(nowMs + 2_000); tick(); });
+    expect(within(grid).getByText("Due now")).toBeInTheDocument();
+    expect(within(grid).getByText("On time")).toBeInTheDocument();
+    await act(async () => { vi.setSystemTime(nowMs + 3_000); tick(); });
+    expect(within(grid).getByText("Overdue by 1s")).toBeInTheDocument();
+    expect(within(grid).getByText("Overdue")).toBeInTheDocument();
+
+    const checkedInBeacon: BeaconSummary = {
+      ...imminentBeacon,
+      lastCheckinAt: new Date(nowMs + 3_000).toISOString(),
+      nextCheckinAt: new Date(nowMs + 33_000).toISOString(),
+    };
+    const updated: SliverSnapshot = {
+      ...snapshot,
+      beacons: [checkedInBeacon],
+      domains: {
+        ...snapshot.domains,
+        beacons: { ...snapshot.domains.beacons, revision: 5, items: [checkedInBeacon] },
+      },
+    };
+    rerender(<TargetsPage mode="beacon" snapshot={updated} onSnapshot={vi.fn()} />);
+    expect(within(grid).getByText("In 30s")).toBeInTheDocument();
+    expect(within(grid).getByText("On time")).toBeInTheDocument();
+    expect(within(grid).queryByText("Overdue")).not.toBeInTheDocument();
+    expect(vi.mocked(api.listTargetOperations).mock.calls.length).toBe(operationLoads);
+    expect(api.listBeaconTasks).not.toHaveBeenCalled();
+    expect(api.listTargets).not.toHaveBeenCalled();
+    expect(api.refresh).not.toHaveBeenCalled();
+    expect(api.getSnapshot).not.toHaveBeenCalled();
+    expect(api.setBeaconWatch).not.toHaveBeenCalled();
+    unmount();
+    expect(clearInterval).toHaveBeenCalledWith(timer);
+  });
+
+  it("shows neutral timing for a beacon without an expected check-in and skips catalog timers for sessions", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
+    const snapshot = targetSnapshot();
+    const unknownBeacon = { ...beacon };
+    delete unknownBeacon.nextCheckinAt;
+    snapshot.beacons = [unknownBeacon];
+    snapshot.domains.beacons.items = [unknownBeacon];
+    installAPI();
+    const { rerender } = render(<TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    await act(async () => {});
+    const row = screen.getByRole("row", { name: /warehouse/i });
+    expect(within(row).getByText("Unknown")).toBeInTheDocument();
+    expect(within(row).getByText("Not reported")).toBeInTheDocument();
+    const timerIndex = setInterval.mock.calls.findIndex((call) => call[1] === 1_000);
+    expect(timerIndex).toBeGreaterThanOrEqual(0);
+    const timer = setInterval.mock.results[timerIndex]?.value;
+    rerender(<TargetsPage mode="session" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    expect(clearInterval).toHaveBeenCalledWith(timer);
+    expect(setInterval.mock.calls.filter((call) => call[1] === 1_000)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Interact with payments" })).toBeInTheDocument();
+  });
+
   it("pops out a catalog beacon interaction and keeps the dedicated surface focused", async () => {
     const user = userEvent.setup();
     const openInteractionWindow = vi.fn().mockResolvedValue({ ok: true });
     const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: beaconExecutionCatalog() });
-    installAPI({ listExecutionCatalog, openInteractionWindow });
     const snapshot = targetSnapshot("beacon");
-    const { rerender } = render(
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: snapshot });
+    installAPI({ listExecutionCatalog, openInteractionWindow, selectTarget });
+    const rendered = render(
       <TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Pop out interaction" }));
-    expect(openInteractionWindow).toHaveBeenCalledOnce();
-    expect(openInteractionWindow).toHaveBeenCalledWith();
+    fireEvent.contextMenu(screen.getByRole("row", { name: /warehouse/i }));
+    rendered.contextMenu.emit();
+    const menu = await screen.findByRole("menu", { name: "Application context menu" });
+    await user.click(within(menu).getByRole("menuitem", { name: "Interact in new window" }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(beaconRef));
+    await waitFor(() => expect(openInteractionWindow).toHaveBeenCalledExactlyOnceWith());
 
-    rerender(
+    rendered.rerender(
       <TargetsPage
         expectedTarget={beaconRef}
         mode="beacon"
@@ -466,7 +617,7 @@ describe("TargetsPage", () => {
     expect(listExecutionCatalog).toHaveBeenCalledOnce();
   });
 
-  it("opens beacon execution in a controlled right sheet and tears down its plan on exact-target change", async () => {
+  it("opens dedicated advanced execution and discards its reviewed plan on exact-target quarantine", async () => {
     const user = userEvent.setup();
     const reviewedPlan = beaconExecutionPlan();
     const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: beaconExecutionCatalog() });
@@ -474,15 +625,13 @@ describe("TargetsPage", () => {
     const discardExecutionPlan = vi.fn().mockResolvedValue({ ok: true });
     installAPI({ discardExecutionPlan, listExecutionCatalog, prepareExecutionAction });
     const { rerender } = render(
-      <TargetsPage mode="beacon" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />,
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Execution" }));
-    const sheet = await screen.findByRole("dialog", { name: "Beacon execution" });
-    expect(within(sheet).getByText("Actions remain pinned to the exact selected beacon and backend incarnation.")).toBeInTheDocument();
-    expect(await within(sheet).findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
-    await user.click(within(sheet).getByRole("radio", { name: "Identity" }));
-    await user.click(within(sheet).getByRole("button", { name: "Open: Revert identity" }));
+    await user.click(screen.getByRole("button", { name: "Show advanced execution" }));
+    expect(await screen.findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "Identity" }));
+    await user.click(screen.getByRole("button", { name: "Open: Revert identity" }));
     await user.click(screen.getByRole("button", { name: "Review" }));
     await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
     expect(prepareExecutionAction).toHaveBeenCalledWith({
@@ -493,9 +642,10 @@ describe("TargetsPage", () => {
     const replacementRef: TargetRef = { ...beaconRef, fingerprint: "e".repeat(64) };
     replacement.targetContext.activeTarget = replacementRef;
     replacement.targetContext.selectableTargets = [sessionRef, replacementRef];
-    rerender(<TargetsPage mode="beacon" snapshot={replacement} onSnapshot={vi.fn()} />);
+    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={replacement} onSnapshot={vi.fn()} />);
 
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Beacon execution" })).not.toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "Beacon interaction unavailable" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
     await waitFor(() => expect(discardExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: reviewedPlan.token }));
     expect(listExecutionCatalog).toHaveBeenCalledOnce();
@@ -2014,10 +2164,7 @@ describe("TargetsPage", () => {
       refresh: vi.fn().mockResolvedValue({ ok: true, value: snapshot }),
     });
 
-    render(<TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />);
-
-    await user.click(screen.getByRole("switch", { name: "Watch active beacon" }));
-    expect(setBeaconWatch).toHaveBeenCalledWith({ enabled: true });
+    const { rerender } = render(<TargetsPage mode="beacon" snapshot={snapshot} onSnapshot={vi.fn()} />);
 
     const taskRow = await screen.findByRole("row", { name: /task-1/i });
     await user.click(taskRow);
@@ -2026,6 +2173,10 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(cancelBeaconTask).toHaveBeenCalledWith({ taskId: "task-1" }));
     await user.click(within(taskDialog).getByText("Close"));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Ping" })).not.toBeInTheDocument());
+
+    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    await user.click(screen.getByRole("switch", { name: "Watch active beacon" }));
+    expect(setBeaconWatch).toHaveBeenCalledWith({ enabled: true });
 
     await user.click(screen.getByRole("button", { name: "Remove beacon" }));
     const review = await screen.findByRole("dialog", { name: "Review remove beacon" });

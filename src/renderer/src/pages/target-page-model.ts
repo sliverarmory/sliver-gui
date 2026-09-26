@@ -101,18 +101,57 @@ export function filterTargets(
   });
 }
 
-export function targetStatus(target: TargetSummary): {
+interface TargetStatus {
   label: string;
   color: "success" | "danger" | "warning" | "default";
-} {
+}
+
+export interface BeaconCheckinTiming {
+  status: TargetStatus;
+  countdown: string;
+}
+
+export function targetStatus(target: TargetSummary, nowMs?: number): TargetStatus {
   if (target.mode === "session") {
     return target.liveness === "active"
       ? { label: "Active", color: "success" }
       : { label: "Dead", color: "danger" };
   }
+  if (nowMs !== undefined) return beaconCheckinTiming(target, nowMs).status;
   if (target.checkinStatus === "on-time") return { label: "On time", color: "success" };
   if (target.checkinStatus === "overdue") return { label: "Overdue", color: "warning" };
   return { label: "Unknown", color: "default" };
+}
+
+export function beaconCheckinTiming(beacon: BeaconSummary, nowMs: number): BeaconCheckinTiming {
+  const nextCheckinMs = beacon.nextCheckinAt ? Date.parse(beacon.nextCheckinAt) : Number.NaN;
+  if (!Number.isFinite(nextCheckinMs) || !Number.isFinite(nowMs) || Number.isNaN(new Date(nowMs).valueOf())) {
+    return { status: { label: "Unknown", color: "default" }, countdown: "Not reported" };
+  }
+  const remainingMs = nextCheckinMs - nowMs;
+  if (remainingMs < 0) {
+    return {
+      status: { label: "Overdue", color: "warning" },
+      countdown: `Overdue by ${formatCountdownDuration(-remainingMs)}`,
+    };
+  }
+  return {
+    status: { label: "On time", color: "success" },
+    countdown: remainingMs === 0 ? "Due now" : `In ${formatCountdownDuration(remainingMs)}`,
+  };
+}
+
+function formatCountdownDuration(milliseconds: number): string {
+  const totalSeconds = Math.ceil(milliseconds / 1_000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3_600) % 24;
+  const days = Math.floor(totalSeconds / 86_400);
+  const padded = (value: number): string => String(value).padStart(2, "0");
+  if (days > 0) return `${days}d ${padded(hours)}h ${padded(minutes)}m ${padded(seconds)}s`;
+  if (totalSeconds >= 3_600) return `${hours}h ${padded(minutes)}m ${padded(seconds)}s`;
+  if (totalSeconds >= 60) return `${minutes}m ${padded(seconds)}s`;
+  return `${seconds}s`;
 }
 
 export function targetTimingLabel(target: TargetSummary): string {

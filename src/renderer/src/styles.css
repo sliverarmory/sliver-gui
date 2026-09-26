@@ -124,6 +124,20 @@
 }
 
 @layer components {
+  .beacons-inventory-grid.table-root--secondary .table__row {
+    --beacon-row-background: var(--color-surface);
+  }
+
+  .beacons-inventory-grid.table-root--secondary[data-slot="data-grid"] .table__row > .table__cell {
+    background-color: var(--beacon-row-background);
+  }
+
+  @media (hover: hover) {
+    .beacons-inventory-grid.table-root--secondary .table__row:is(:hover, [data-hovered="true"]) {
+      --beacon-row-background: color-mix(in oklab, var(--color-default) 50%, var(--color-surface));
+    }
+  }
+
   .firewall-rules-grid.table-root--secondary .table__row:has([data-firewall-rule-accent="success"]) > .table__cell {
     background-color: color-mix(in srgb, var(--color-success-soft) 82%, transparent);
   }
