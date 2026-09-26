@@ -6,18 +6,20 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-test("Managed Shells fills the session viewport as the window resizes", { timeout: 120_000 }, async () => {
+test("Session content fills wide windows and Managed Shells resizes with the viewport", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-shell-layout-e2e-"));
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
   const managedConfigDirectory = join(temporaryRoot, "managed-configs");
   const userDataDirectory = join(temporaryRoot, "user-data");
   const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  const screenshotDirectory = join(repositoryRoot, "artifacts", "e2e", "session-width");
   await Promise.all([
     mkdir(savedConfigDirectory, { recursive: true }),
     mkdir(managedConfigDirectory, { recursive: true }),
     mkdir(userDataDirectory, { recursive: true }),
     mkdir(consoleClientRootDirectory, { recursive: true }),
+    mkdir(screenshotDirectory, { recursive: true }),
   ]);
   await writeFile(
     join(savedConfigDirectory, "shell-layout-e2e-operator.cfg"),
@@ -63,6 +65,22 @@ test("Managed Shells fills the session viewport as the window resizes", { timeou
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     const filesBrowser = page.getByRole("region", { name: "File browser", exact: true });
     await filesBrowser.waitFor();
+    await nativeWindow.evaluate((window) => window.setSize(2000, 950));
+    await page.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, 2000);
+    await assertSessionWidth(page, filesBrowser, "embedded Files at 2000px");
+    await page.getByRole("tab", { name: "Execution", exact: true }).click();
+    const execution = page.getByRole("region", { name: "Execution operations", exact: true });
+    await execution.waitFor();
+    await assertSessionWidth(page, execution, "embedded Execution at 2000px");
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-wide.png") });
+    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    await filesBrowser.waitFor();
+    await nativeWindow.evaluate((window) => window.setSize(1440, 950));
+    await page.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, 1440);
     const desktopFilesBottomGap = await bottomGap(sessionPage, filesBrowser);
     await nativeWindow.evaluate((window) => window.setSize(1024, 768));
     await page.waitForFunction((expectedWidth) => (
@@ -95,12 +113,92 @@ test("Managed Shells fills the session viewport as the window resizes", { timeou
     ).innerWidth === expectedWidth, 1024);
     const secondHeight = await assertFixedShellLayout(sessionPage, shellPanel, inventory, terminalSurface, terminal, compactFilesBottomGap, "1024×768");
     assert.ok(firstHeight - secondHeight > 50, `Managed Shells must shrink with the window; before=${firstHeight}, after=${secondHeight}`);
+    await nativeWindow.evaluate((window) => window.setSize(2000, 950));
+    await page.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, 2000);
+    await assertSessionWidth(page, shellPanel, "embedded Shell at 2000px");
+    await assertFixedShellLayout(sessionPage, shellPanel, inventory, terminalSurface, terminal, desktopFilesBottomGap, "2000×950");
+
+    const [dedicated] = await Promise.all([
+      application.waitForEvent("window", { timeout: 15_000 }),
+      page.getByRole("button", { name: "Pop out interaction", exact: true }).click(),
+    ]);
+    dedicated.setDefaultTimeout(20_000);
+    dedicated.on("pageerror", (error) => rendererErrors.push(error.message));
+    await dedicated.getByRole("main", { name: "Dedicated interaction window", exact: true }).waitFor();
+    await dedicated.getByRole("heading", { name: "m1-session", exact: true }).waitFor();
+    const dedicatedWindow = await application.browserWindow(dedicated);
+    await dedicatedWindow.evaluate((window) => window.setSize(2000, 950));
+    await dedicated.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, 2000);
+    for (const { tab, region } of [
+      { tab: "Files", region: "File browser" },
+      { tab: "Execution", region: "Execution operations" },
+      { tab: "Shell", region: "Managed Shells" },
+    ]) {
+      await dedicated.getByRole("tab", { name: tab, exact: true }).click();
+      const panel = dedicated.getByRole("region", { name: region, exact: true });
+      await panel.waitFor();
+      await assertSessionWidth(dedicated, panel, `dedicated ${tab} at 2000px`);
+      if (tab === "Execution") {
+        await dedicated.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-dedicated-wide.png") });
+      }
+    }
+    await dedicated.close();
     assert.deepEqual(rendererErrors, []);
   } finally {
     await application?.close().catch(() => undefined);
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function assertSessionWidth(page: Page, panel: Locator, label: string): Promise<void> {
+  const layout = await page.locator(".session-workspace").evaluate((workspace) => {
+    const view = workspace.ownerDocument.defaultView!;
+    const measure = (element: typeof workspace) => {
+      const bounds = element.getBoundingClientRect();
+      const style = view.getComputedStyle(element);
+      return {
+        left: bounds.left,
+        width: bounds.width,
+        contentLeft: bounds.left + element.clientLeft + Number.parseFloat(style.paddingLeft),
+        contentWidth: element.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight),
+      };
+    };
+    const viewport = workspace.parentElement!;
+    const content = workspace.querySelector(".session-workspace__panel-content, .session-workspace__viewport")!;
+    return {
+      viewport: measure(viewport),
+      workspace: measure(workspace),
+      frames: [
+        ".session-workspace__trail-frame",
+        ".session-workspace__summary-frame",
+        ".session-workspace__tabs-frame",
+      ].map((selector) => ({ selector, ...measure(workspace.querySelector(selector)!) })),
+      content: measure(content),
+      tabPanel: measure(workspace.querySelector(`.session-workspace__${workspace.getAttribute("data-selected-panel")}-panel`)!),
+    };
+  });
+  assert.ok(layout.viewport.contentWidth > 1440, `${label} must exercise a viewport wider than the previous cap`);
+  assert.ok(Math.abs(layout.workspace.left - layout.viewport.contentLeft) <= 1 &&
+    Math.abs(layout.workspace.width - layout.viewport.contentWidth) <= 1,
+  `${label} workspace must fill its available width: ${JSON.stringify(layout)}`);
+  for (const frame of [...layout.frames, { selector: "session panel content", ...layout.content }]) {
+    assert.ok(Math.abs(frame.left - layout.workspace.contentLeft) <= 1 &&
+      Math.abs(frame.width - layout.workspace.contentWidth) <= 1,
+    `${label} ${frame.selector} must fill the workspace without side gaps: ${JSON.stringify(frame)}`);
+  }
+  assert.ok(Math.abs(layout.tabPanel.left - layout.content.contentLeft) <= 1 &&
+    Math.abs(layout.tabPanel.width - layout.content.contentWidth) <= 1,
+  `${label} tab panel must fill the content width: ${JSON.stringify(layout.tabPanel)}`);
+  const bounds = await panel.boundingBox();
+  assert.ok(bounds, `${label} panel must be measurable`);
+  assert.ok(Math.abs(bounds.x - layout.tabPanel.contentLeft) <= 1 &&
+    Math.abs(bounds.width - layout.tabPanel.contentWidth) <= 1,
+  `${label} panel must fill the tab panel width inside its padding: ${JSON.stringify({ bounds, tabPanel: layout.tabPanel })}`);
+}
 
 async function assertFixedShellLayout(
   sessionPage: Locator,

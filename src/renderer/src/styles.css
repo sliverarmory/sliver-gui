@@ -274,6 +274,7 @@
   .session-workspace[data-presentation="dedicated"] {
     height: 100%;
     min-height: 0;
+    max-width: none;
 
     > :not(.session-workspace__tabs) {
       flex: none;
@@ -858,7 +859,7 @@
     .session-workspace__panel-content
   ) {
   width: 100%;
-  max-width: calc(1440px + 2.5rem);
+  max-width: none;
   margin-inline: auto;
   padding-inline: var(--session-workspace-gutter);
 }
