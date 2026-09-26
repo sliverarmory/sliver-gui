@@ -6991,6 +6991,7 @@ describe("M3 session shell registry boundary", () => {
       error: "The stream is unavailable for the current window, backend, target, or renderer",
     });
     expect(client.startShellSession).not.toHaveBeenCalled();
+    expect(client.setEnvSession).not.toHaveBeenCalled();
 
     const crossWindowPort = new FakeMessagePort();
     expect(() => registry.attachStream(2, 202, "document-b", {
@@ -7078,11 +7079,132 @@ describe("M3 session shell registry boundary", () => {
       rows: 24,
       cols: 80,
     }, 30);
+    expect(client.setEnvSession).not.toHaveBeenCalled();
+    expect(shell.write).not.toHaveBeenCalled();
     await registry.actOnSessionShell(1, 303, "windows-document", {
       resourceId: opened.plan.resourceId,
       action: "close",
     });
   });
+
+  it.each([
+    { os: "linux", requestPty: true, path: undefined },
+    { os: "linux", requestPty: false, path: "/bin/sh" },
+    { os: "darwin", requestPty: true, path: undefined },
+    { os: "darwin", requestPty: false, path: "/bin/zsh" },
+  ])("sets TERM before opening a $os shell with PTY=$requestPty", async ({ os, requestPty, path }) => {
+    const client = new FakeSliverClient();
+    const targetSession = session("session_term", "terminal-interactive");
+    targetSession.OS = os;
+    client.sessionState.Sessions = [targetSession];
+    const environmentGate = deferred<sliverpb.SetEnv>();
+    client.setEnvSession.mockImplementationOnce(() => environmentGate.promise);
+    const shell = new FakeShellSession();
+    client.nextShellSession = shell;
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets[0];
+    if (!target) throw new Error("Expected session ref");
+    await registry.selectTarget(1, target);
+
+    const opened = await startRegistryShell(registry, 1, 304, "term-document", {
+      requestPty,
+      ...(path === undefined ? {} : { path }),
+      rows: 41,
+      columns: 119,
+    });
+    await vi.waitFor(() => expect(client.setEnvSession).toHaveBeenCalledOnce());
+    expect(client.setEnvSession).toHaveBeenCalledWith("session_term", "TERM", "xterm-256color", 30);
+    expect(client.startShellSession).not.toHaveBeenCalled();
+    expect(opened.port.last("opened")).toBeUndefined();
+
+    environmentGate.resolve(sliverpb.SetEnv.create({}));
+    await vi.waitFor(() => expect(opened.port.last("opened")).toBeDefined());
+    expect(client.startShellSession).toHaveBeenCalledOnce();
+    expect(client.startShellSession).toHaveBeenCalledWith("session_term", {
+      path: path ?? "/bin/bash",
+      pty: requestPty,
+      rows: requestPty ? 41 : 24,
+      cols: requestPty ? 119 : 80,
+    }, 30);
+    expect(shell.write).not.toHaveBeenCalled();
+    await registry.actOnSessionShell(1, 304, "term-document", {
+      resourceId: opened.plan.resourceId,
+      action: "close",
+    });
+  });
+
+  it.each(["rpc-rejection", "target-rejection"] as const)(
+    "does not start a shell when TERM setup fails with %s",
+    async (failure) => {
+      const client = new FakeSliverClient();
+      client.sessionState.Sessions = [session("session_term_failure", "terminal-interactive")];
+      const sensitiveError = "token=TOP-SECRET password=HUNTER2 path=/Users/operator/private-shell";
+      if (failure === "rpc-rejection") {
+        client.setEnvSession.mockRejectedValueOnce(new Error(sensitiveError));
+      } else {
+        client.setEnvSession.mockResolvedValueOnce(sliverpb.SetEnv.create({ Response: { Err: sensitiveError } }));
+      }
+      const registry = createRegistry(() => client.adapter);
+      registry.registerWindow(1);
+      await connectSaved(registry, 1);
+      const target = registry.snapshot(1).targetContext.selectableTargets[0];
+      if (!target) throw new Error("Expected session ref");
+      await registry.selectTarget(1, target);
+
+      const started = await startRegistryShell(registry, 1, 305, "term-failure-document", { requestPty: true });
+      await vi.waitFor(() => expect(started.port.last("closed")).toMatchObject({
+        reason: "transport-error",
+        disposition: "closed",
+      }));
+      expect(client.setEnvSession).toHaveBeenCalledWith("session_term_failure", "TERM", "xterm-256color", 30);
+      expect(client.startShellSession).not.toHaveBeenCalled();
+      expect(started.port.last("opened")).toBeUndefined();
+      expect(JSON.stringify(started.port.frames)).not.toMatch(/TOP-SECRET|HUNTER2|private-shell/u);
+      await vi.waitFor(async () => {
+        await expect(registry.listSessionShells(1, 305, "term-failure-document", {})).resolves.toMatchObject({
+          ok: true,
+          value: { resources: [] },
+        });
+      });
+    },
+  );
+
+  it.each(["cancel", "target-loss"] as const)(
+    "does not start a shell after %s while TERM setup is in flight",
+    async (transition) => {
+      const client = new FakeSliverClient();
+      client.sessionState.Sessions = [session("session_term_pending", "terminal-interactive")];
+      const environmentGate = deferred<sliverpb.SetEnv>();
+      client.setEnvSession.mockImplementationOnce(() => environmentGate.promise);
+      const registry = createRegistry(() => client.adapter);
+      registry.registerWindow(1);
+      await connectSaved(registry, 1);
+      const target = registry.snapshot(1).targetContext.selectableTargets[0];
+      if (!target) throw new Error("Expected session ref");
+      await registry.selectTarget(1, target);
+
+      const started = await startRegistryShell(registry, 1, 306, "term-pending-document", { requestPty: true });
+      await vi.waitFor(() => expect(client.setEnvSession).toHaveBeenCalledOnce());
+      expect(client.startShellSession).not.toHaveBeenCalled();
+      if (transition === "cancel") {
+        await expect(registry.backgroundTarget(1)).resolves.toMatchObject({ ok: true });
+      } else {
+        client.sessionState.Sessions = [];
+        await expect(registry.refresh(1)).resolves.toMatchObject({ ok: true });
+      }
+      expect(started.port.last("closed")).toMatchObject({
+        reason: transition === "cancel" ? "target-rebound" : "target-disappeared",
+        disposition: "closed",
+      });
+
+      environmentGate.resolve(sliverpb.SetEnv.create({}));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(client.startShellSession).not.toHaveBeenCalled();
+      expect(started.port.last("opened")).toBeUndefined();
+    },
+  );
 
   it("streams shell output beyond the main queue reservation as the renderer returns credit", async () => {
     const client = new FakeSliverClient();
@@ -9271,6 +9393,18 @@ async function openRegistryShell(
   rendererFrameToken: string,
   input: PrepareSessionShellInput,
 ): Promise<{ plan: SessionShellPlan; port: FakeMessagePort }> {
+  const started = await startRegistryShell(registry, contentsId, rendererProcessId, rendererFrameToken, input);
+  await vi.waitFor(() => expect(started.port.last("opened")).toBeDefined());
+  return started;
+}
+
+async function startRegistryShell(
+  registry: ConnectionRegistry,
+  contentsId: number,
+  rendererProcessId: number,
+  rendererFrameToken: string,
+  input: PrepareSessionShellInput,
+): Promise<{ plan: SessionShellPlan; port: FakeMessagePort }> {
   const prepared = await registry.prepareSessionShell(
     contentsId,
     rendererProcessId,
@@ -9291,7 +9425,6 @@ async function openRegistryShell(
     streamId: ready.streamId,
     receiveCreditBytes: 64 * 1_024,
   });
-  await vi.waitFor(() => expect(port.last("opened")).toBeDefined());
   return { plan: prepared.value, port };
 }
 

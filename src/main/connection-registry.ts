@@ -4281,8 +4281,16 @@ export class ConnectionRegistry {
           return current;
         };
         const start: StartMainStreamEndpoint = async ({ signal, emitOutputWithBackpressure, remoteClose }) => {
-          const current = assertExactSession();
+          let current = assertExactSession();
           if (signal.aborted) throw new Error("The shell request was canceled before dispatch");
+          if (selected.platform !== "windows") {
+            // ShellReq has no environment field; the shell inherits the session's
+            // environment, including when its startup files run.
+            const response = await pool.client.setEnvSession(current.target.id, "TERM", "xterm-256color", 30);
+            if (response.Response?.Err?.trim()) throw new Error("The target rejected the shell terminal environment");
+            current = assertExactSession();
+            if (signal.aborted) throw new Error("The shell request was canceled before dispatch");
+          }
           const handle = await pool.client.startShellSession(
             current.target.id,
             {
