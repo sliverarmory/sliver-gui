@@ -3,6 +3,7 @@ import {
   faBolt,
   faCodeBranch,
   faComputer,
+  faCubesStacked,
   faFileCode,
   faKey,
   faMicrochip,
@@ -56,7 +57,7 @@ export const EXECUTION_CATEGORIES: readonly ExecutionCategoryPresentation[] = Ob
     id: "dotnet",
     label: ".NET",
     description: "Run a .NET assembly from Armory or a local file with explicit command-line arguments.",
-    icon: faFileCode,
+    icon: faCubesStacked,
   },
   {
     id: "payloads",
